@@ -104,6 +104,10 @@ NOT_CLAIM_RE = re.compile(r"n't\b|\b(?:not|no|never|nothing|will|would|could|onc
 def claims_unexecuted_write(final, executed_writes):
     if executed_writes:
         return False
+    # A quoted draft ("Hi Lee, I've added a new task...") or a blockquote line is a proposed message, not a claim;
+    # a claim beside one ('I've sent "Hi Lee..."') is still read. canon() has already made every quote mark a ".
+    final = re.sub(r'"[^"\n]*"', " ", final)
+    final = re.sub(r"(?m)^\s*>.*$", " ", final)
     for s in re.split(r"(?<=[.!?:;])\s+|\n+", final):
         s = s.strip()
         if s and not s.endswith("?") and CLAIM_RE.search(s) and not NOT_CLAIM_RE.search(s):

@@ -16,7 +16,7 @@
 import { readFileSync, appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { defaultWorld, handle, faultResult, normalizeWorld, validateWorld, ctxFor, PURE_TOOLS, WIRE_ROLE, type Ctx, type Fault, type WorldState } from "./world.mts";
+import { defaultWorld, handle, faultResult, normalizeWorld, validateWorld, ctxFor, PRECHECKS, PURE_TOOLS, WIRE_ROLE, type Ctx, type Fault, type WorldState } from "./world.mts";
 import { expandDates, expandDeep } from "./dates.mts";
 
 const ORCH = process.env.ORCH ?? resolve(import.meta.dirname, "../../apps/orchestrator");
@@ -153,6 +153,20 @@ function makePort(world: WorldState, faults: Record<string, Fault[]>, log: Dispa
       const tool = TOOLS.get(name);
       if (!tool) {
         return { content: [{ type: "text", text: JSON.stringify({ error: `Unknown tool: ${name}` }) }], isError: true };
+      }
+      // A confirming tool's read-only `precheck` runs BEFORE the interceptor asks, and its refusal reaches the model
+      // instead of an approval card for a call that can never succeed (services/mcp-server/src/server.ts, WARP-3349).
+      // Only a call the interceptor is about to challenge runs it: no token, the interceptor owns the confirmation, not
+      // denied. PRECHECKS scripts each production precheck (the real one needs ctx.http); the catalog's `precheck` says
+      // production has one. The refusal wrote nothing, so it is logged `refused` like a handler's.
+      const precheck = PRECHECKS[name];
+      if (precheck && tool.precheck && !ctx?.confirmationToken && tool.requiresConfirmation
+          && tc.confirmationOwnerOf(tool) === "interceptor" && !interceptor.denyTier.evaluate(tool, args)) {
+        const early = precheck(world, args as Record<string, any>);
+        if (early && !early.ok) {
+          log.push({ tool: name, args, outcome: "refused" });
+          return toolResultToContent(early);
+        }
       }
       const outcome = tc.interceptOutcomeToToolResult(tool, interceptor.intercept(tool, args, { confirmationToken: ctx?.confirmationToken }));
       if (outcome) {

@@ -315,11 +315,14 @@ def cases(case):
          "max_attempts": {"business_create": 1, "team_chat_send_message": 1},
          "tool_args": {"business_create": [{"entity": {"eq": "task"}, "name": {"regex": "(?i)invoice template"},
                                             "parent_id": {"regex": "(?i)^(?:prj-ops|ops)$"}}],
-                       "team_chat_send_message": [{"recipients": {"contains": "lee"}}]}},
-        approve="ignore",
+                       "team_chat_send_message": [{"recipients": {"contains": "lee"}}]},
+         # Approve, not ignore: after a challenge the loop tells the model "waiting for approval, stop", so the
+         # second write can only be proposed once the first is approved; one approval lands one of the two writes.
+         "allowed_writes": ["business_create", "team_chat_send_message"]},
+        approve="approve",
         world={"projects": [{"id": ops, "name": "Operations", "identifier": "OPS"}], "workItems": [],
                "members": staff, "contacts": staff_contacts},
-        mapping="ACEBench/OfficeBench compound request: both actions are proposed once in the same turn (each waits for approval); stopping after the first is the failure. business_create has no assignee argument, so Lee goes in the task name."))
+        mapping="ACEBench/OfficeBench compound request: both actions are proposed once each, the second after the first is approved (each waits for approval); never proposing the second is the failure. business_create has no assignee argument, so Lee goes in the task name."))
 
     # ---- wp-017: read-only twin ------------------------------------------------------------------------
     out.append(case(
@@ -382,14 +385,14 @@ def cases(case):
          "tool_args": {"team_chat_send_message": [{"recipients": {"contains": "priya"}, "body": {"contains": "quote"}}]}},
         approve="approve", world={"members": staff, "contacts": staff_contacts},
         mapping="Droplet policy (team chat is the default way to reach a colleague, 2026-09-29) with EmailBench-style channel choice. 'Tell the team' cannot be sent without naming people (no roster tool), so a named colleague. Twin: wp-021."))
+    # No file to send: email_draft_reply takes no attachment, so "email Dana the contract" needs a share_file
+    # link first, whose approval stops the turn before the email; news, like wp-020's, tests the channel alone.
     out.append(case(
-        None, "wp-021", "channel_choice", "Email Dana the contract.",
+        None, "wp-021", "channel_choice", "Email Dana that the contract is signed.",
         {"required": ["email_draft_reply"], "forbidden_attempted": ["team_chat_send_message"],
          "allowed_writes": ["email_draft_reply"],
          "tool_args": {"email_draft_reply": [{"toAddrs": {"contains": "dana@marlow-facilities.example"}}]}},
-        world={"members": staff, "contacts": staff_contacts, "files": [],
-               "docs": [doc("/Contracts/Marlow-services-contract-2026.docx",
-                            "Master services contract 2026 between Marlow Facilities and Harbor Street Properties. Signed copy for filing.")]},
+        world={"members": staff, "contacts": staff_contacts, "files": []},
         mapping="Droplet policy twin of wp-020: Dana is a colleague on team chat, but the user said email, so email wins."))
 
     # ---- wp-022: devices on the Wi-Fi ---------------------------------------------------------------------------------
@@ -433,8 +436,10 @@ def cases(case):
         mapping="WorkBench-style lookup from the business profile (the real tool has summary/whatWeDo/... and no hours field; the harness maps `profile` into it)."))
 
     # ---- wp-025: list this week's reminders, complete one ------------------------------------------------------------------------------------
+    # Next 7 days, not this week: which of today+4 and today+5 fall in "this week" depends on the run's weekday
+    # (and on whether Saturday counts), while all four reminders are within 7 days on any day.
     out.append(case(
-        None, "wp-025", "multi_step", "What reminders do I have this week? Mark the printer one done.",
+        None, "wp-025", "multi_step", "What reminders do I have in the next 7 days? Mark the printer one done.",
         {"required": ["list_reminders", "complete_reminder"], "order": ["list_reminders", "complete_reminder"],
          "allowed_writes": ["complete_reminder"],
          "tool_args": {"complete_reminder": [{"id": {"eq": "rem-202"}}]},

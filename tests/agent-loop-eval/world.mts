@@ -123,6 +123,9 @@ export interface WorldState {
   // Everything sent or drafted: email_draft_reply (kind "draft", until email_send turns it into "sent"),
   // email_send of a seeded draft, and team_chat_send_message. `to` holds every address and handle.
   sent: { tool: string; kind: "draft" | "sent"; to: string[]; text: string; subject?: string; draftId?: string }[];
+  // Team-chat conversations: a send to recipients opens one (its id is the result's `thread_id`) and a case may seed
+  // one; `people` are member ids. team_chat_send_message with a thread_id the world never issued is NOT_FOUND.
+  threads: { id: string; people: string[] }[];
   customers: CustomerRow[];
   invoices: InvoiceRow[];
   deals: DealRow[];
@@ -211,6 +214,7 @@ export function defaultWorld(today: string = new Date().toISOString().slice(0, 1
     ],
     drafts: [],
     sent: [],
+    threads: [],
     customers: [
       { id: "cus-harborview", name: "Harborview Dental", email: "office@harborviewdental.example", contacts: [{ name: "Helen Okafor", email: "helen@harborviewdental.example" }] },
       { id: "cus-sunset", name: "Sunset Realty Group", email: "hello@sunsetrealty.example", contacts: [{ name: "Tom Brandt", email: "tom@sunsetrealty.example" }] },
@@ -322,6 +326,10 @@ const fileRec = (w: WorldState, p: string): { content: string; space?: string } 
   const f = w.files[p];
   return f === undefined ? undefined : typeof f === "string" ? { content: f } : f;
 };
+// search_content returns each hit's first 280 characters, not the document (CHUNK_SNIPPET_CHARS in
+// apps/orchestrator/src/services/file-search.service.ts, the SQL `LEFT(text, 280)` behind
+// handlers/files/search-content.ts); read_file has the rest. A doc is one chunk here.
+const SNIPPET_CHARS = 280;
 const seenDocs = (w: WorldState, c: Ctx) => w.docs.filter((d) => visible(d.space, c)).map((d) => ({ path: d.path, text: d.text ?? d.content ?? "" }));
 const seenFiles = (w: WorldState, c: Ctx) =>
   Object.keys(w.files).filter((p) => visible(fileRec(w, p)!.space, c)).map((p) => ({ path: p, text: fileRec(w, p)!.content }));
@@ -399,6 +407,45 @@ function email(w: WorldState, tool: string, a: Record<string, any>, c: Ctx): Too
     callouts: [], suggestedActions: [{ label: "Draft a reply", safety: "Write · confirm" }],
     related: { files: [], threads: [], cameras: [], tools: [] },
   });
+}
+
+// search_contacts: production has no contacts table. It derives people from the SENDERS of the mail the person may read
+// (handlers/email/search-contacts.ts -> GET /api/email/contacts -> services/email/contacts.service.ts): matched on the
+// sender's address or name, grouped by lowercased address, the newest non-empty name kept, ranked by messageCount then
+// lastSeenAt, limit 10 (max 25). The `contacts` fixture rows are added as people too (address = their email, one
+// message a month ago); a `note` rides along only when the fixture sets one, and a fixture person who also wrote mail is one row.
+function searchContacts(w: WorldState, a: Record<string, any>, c: Ctx): ToolResult {
+  const query = typeof a.query === "string" ? a.query.trim() : "";
+  if (!query || query.length > 120) return err("INVALID_ARGS", "query must be 1-120 chars");
+  let limit = 10;
+  if (a.limit !== undefined) {
+    if (!Number.isInteger(a.limit) || a.limit < 1 || a.limit > 25) return err("INVALID_ARGS", "limit must be an integer 1-25");
+    limit = a.limit;
+  }
+  type Row = { address: string; name: string | null; lastSeenAt: string; messageCount: number; note?: string };
+  const byAddress = new Map<string, Row>();
+  const newestFirst = w.emails.filter((m) => visible(m.space, c)).sort((x, y) => Date.parse(y.date) - Date.parse(x.date));
+  for (const m of newestFirst) {
+    if (!has(m.from, query) && !has(m.fromName, query)) continue;
+    const address = m.from.toLowerCase();
+    const row = byAddress.get(address);
+    if (!row) byAddress.set(address, { address, name: m.fromName || null, lastSeenAt: m.date, messageCount: 1 });
+    else {
+      row.messageCount += 1;
+      if (!row.name && m.fromName) row.name = m.fromName;
+    }
+  }
+  for (const x of w.contacts) {
+    if (!visible(x.space, c) || !(has(x.email, query) || has(x.name, query))) continue;
+    const address = x.email.toLowerCase();
+    const row = byAddress.get(address) ?? { address, name: x.name, lastSeenAt: `${addDays(c.today, -30)}T09:00:00`, messageCount: 1 };
+    if (x.note) row.note = x.note;
+    byAddress.set(address, row);
+  }
+  const rows = [...byAddress.values()]
+    .sort((x, y) => y.messageCount - x.messageCount || Date.parse(y.lastSeenAt) - Date.parse(x.lastSeenAt))
+    .slice(0, limit);
+  return ok({ type: "search_contacts", contacts: rows, count: rows.length, query });
 }
 
 // ---- calendar ----------------------------------------------------------------
@@ -864,35 +911,73 @@ function fileOps(w: WorldState, tool: string, a: Record<string, any>, c: Ctx): T
 // address and nothing else; this is more lenient: a case-insensitive match on the member's id, first
 // name, full name, email local part or full address. A name that fits more than one member is refused
 // with the candidates, never sent to the first (production would not resolve a name at all).
-function chatSend(w: WorldState, a: Record<string, any>): ToolResult {
+type Member = WorldState["members"][number];
+const aliases = (m: Member): string[] => [m.id, m.name, m.name.split(/\s+/)[0], m.email, m.email.split("@")[0]];
+
+// What a send names (the people, or the thread), or why it cannot happen: the unconfirmed phase of
+// team_chat_send_message (handlers/team-chat/send-message.ts). Production runs it twice: as the tool's `precheck`
+// before the approval card (WARP-3349) and as the first half of the approved call, so PRECHECKS and chatSend share
+// it. It writes nothing. A thread_id is checked for its shape only: the precheck does not look it up either (the
+// approved send's POST is what answers 404, so chatSend does).
+function chatTarget(w: WorldState, a: Record<string, any>): { refusal?: ToolResult; people?: Member[]; threadId?: string } {
   const body = typeof a.body === "string" ? a.body.trim() : "";
-  if (!body || body.length > 4000) return err("INVALID_ARGS", "body must be 1-4000 characters of message text");
-  if (a.recipients === undefined) {
-    w.sent.push({ tool: "team_chat_send_message", kind: "sent", to: [], text: body });
-    return ok({ sent: true, thread_id: `thr-${nextId++}`, recipients: a.recipients });
+  if (!body || body.length > 4000) return { refusal: err("INVALID_ARGS", "body must be 1-4000 characters of message text") };
+  // Exactly one of recipients (an empty list is still "given") and thread_id.
+  if ((a.recipients !== undefined) === (a.thread_id !== undefined)) {
+    return { refusal: err("INVALID_ARGS", "provide exactly one of recipients (usernames) or thread_id") };
   }
-  if (!Array.isArray(a.recipients) || a.recipients.length === 0 || !a.recipients.every((r: unknown) => typeof r === "string" && r.trim() !== "")) {
-    return err("INVALID_ARGS", "recipients must be 1-24 usernames or email addresses of people in this Workspace");
+  if (a.thread_id !== undefined) {
+    const id = typeof a.thread_id === "string" ? a.thread_id.trim() : "";
+    return id ? { threadId: id } : { refusal: err("INVALID_ARGS", "thread_id must be a non-empty conversation id") };
+  }
+  if (!Array.isArray(a.recipients) || a.recipients.length === 0 || a.recipients.length > 24 || !a.recipients.every((r: unknown) => typeof r === "string" && r.trim() !== "")) {
+    return { refusal: err("INVALID_ARGS", "recipients must be 1-24 usernames or email addresses of people in this Workspace") };
   }
   const asked: string[] = a.recipients.map((r: string) => r.trim());
-  const aliases = (m: WorldState["members"][number]) => [m.id, m.name, m.name.split(/\s+/)[0], m.email, m.email.split("@")[0]];
   const matches = asked.map((r) => w.members.filter((m) => aliases(m).some((k) => lc(k) === lc(r))));
   const outside = asked.filter((r, i) => matches[i].length === 0 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(r));
   if (outside.length > 0) {
-    return err("RECIPIENT_NOT_A_MEMBER", `${outside.join(", ")} ${outside.length === 1 ? "isn't" : "aren't"} in this Workspace; team chat only reaches people in it — ask the user whether to email them instead.`);
+    return { refusal: err("RECIPIENT_NOT_A_MEMBER", `${outside.join(", ")} ${outside.length === 1 ? "isn't" : "aren't"} in this Workspace; team chat only reaches people in it — ask the user whether to email them instead.`) };
   }
   const several = asked.findIndex((_, i) => matches[i].length > 1);
   if (several >= 0) {
-    return err("UNKNOWN_RECIPIENT", `More than one person in this Workspace is called '${asked[several]}': ${matches[several].map((m) => `${m.name} <${m.email}>`).join(", ")}. Ask the user which one, then use the email address.`);
+    return { refusal: err("UNKNOWN_RECIPIENT", `More than one person in this Workspace is called '${asked[several]}': ${matches[several].map((m) => `${m.name} <${m.email}>`).join(", ")}. Ask the user which one, then use the email address.`) };
   }
   const missing = asked.filter((_, i) => matches[i].length === 0);
   if (missing.length > 0) {
-    return err("UNKNOWN_RECIPIENT", `Nobody in this Workspace has the username: ${missing.join(", ")}. Recipients must be usernames or email addresses of people in this Workspace.`);
+    return { refusal: err("UNKNOWN_RECIPIENT", `Nobody in this Workspace has the username: ${missing.join(", ")}. Recipients must be usernames or email addresses of people in this Workspace.`) };
   }
-  const people = matches.map((m) => m[0]);
-  w.sent.push({ tool: "team_chat_send_message", kind: "sent", to: [...new Set(people.flatMap((m) => aliases(m)))], text: body });
-  return ok({ sent: true, thread_id: `thr-${nextId++}`, recipients: a.recipients });
+  return { people: matches.map((m) => m[0]) };
 }
+
+function chatSend(w: WorldState, a: Record<string, any>): ToolResult {
+  const t = chatTarget(w, a);
+  if (t.refusal) return t.refusal;
+  const text = String(a.body).trim();
+  if (t.threadId !== undefined) {
+    // Only a conversation the world issued (an earlier send, or a case's `threads`); any other id is production's 404.
+    const existing = w.threads.find((x) => x.id === t.threadId);
+    if (!existing) return err("NOT_FOUND", "Conversation not found — you may not be a member of it, or Messages is turned off.");
+    const there = w.members.filter((m) => existing.people.includes(m.id));
+    w.sent.push({ tool: "team_chat_send_message", kind: "sent", to: [...new Set(there.flatMap((m) => aliases(m)))], text });
+    return ok({ sent: true, thread_id: existing.id });
+  }
+  const people = t.people!;
+  // A send to recipients opens a conversation whose id the model can post into later. (A 1:1 send always opens a new one
+  // here; production reuses the existing direct thread.)
+  const thread = { id: `thr-${nextId++}`, people: people.map((m) => m.id) };
+  w.threads.push(thread);
+  w.sent.push({ tool: "team_chat_send_message", kind: "sent", to: [...new Set(people.flatMap((m) => aliases(m)))], text });
+  return ok({ sent: true, thread_id: thread.id, recipients: a.recipients });
+}
+
+// The tools whose production definition carries a `precheck` (Tool.precheck, packages/tools-core/src/types.ts), scripted.
+// A refusal reaches the model INSTEAD of an approval card: run.mts runs it before the interceptor, in the order of
+// services/mcp-server/src/server.ts (WARP-3349). It only reads; null lets the call on to the interceptor. The other
+// production precheck, team_chat_send_meeting_invite, has no scripted handler here.
+export const PRECHECKS: Record<string, (w: WorldState, a: Record<string, any>) => ToolResult | null> = {
+  team_chat_send_message: (w, a) => chatTarget(w, a).refusal ?? null,
+};
 
 // Returns undefined for a tool this world does not script; the port then
 // answers with an empty-but-successful result and flags it `unscripted`.
@@ -914,7 +999,7 @@ export function handle(w: WorldState, tool: string, a: Record<string, any>, c: C
         .sort((x, y) => y.score - x.score)
         .slice(0, Number(a.limit ?? 5));
       if (tool === "search_files") return ok({ query: a.query, files: hits.map((h) => ({ path: h.d.path })) });
-      return ok({ query: a.query, results: hits.map((h, i) => ({ source: "nextcloud", path: h.d.path, chunkIdx: 0, score: Number(h.score.toFixed(2)), text: h.d.text, rank: i + 1 })) });
+      return ok({ query: a.query, results: hits.map((h, i) => ({ source: "nextcloud", path: h.d.path, chunkIdx: 0, score: Number(h.score.toFixed(2)), text: h.d.text.slice(0, SNIPPET_CHARS), rank: i + 1 })) });
     }
     case "read_file":
     case "read_document_text": {
@@ -946,11 +1031,8 @@ export function handle(w: WorldState, tool: string, a: Record<string, any>, c: C
     case "rename_file":
     case "share_file":
       return fileOps(w, tool, a, c);
-    case "search_contacts": {
-      const q = String(a.query ?? "").toLowerCase();
-      const hits = w.contacts.filter((x) => visible(x.space, c) && (x.email.includes(q) || x.name.toLowerCase().includes(q)));
-      return ok({ contacts: hits });
-    }
+    case "search_contacts":
+      return searchContacts(w, a, c);
     case "business_find": {
       // project and work_item keep the shape the frozen cases were written against ({items}); the
       // other entities follow the production tool (find.ts). A project lookup that finds nothing
@@ -1024,7 +1106,8 @@ export function handle(w: WorldState, tool: string, a: Record<string, any>, c: C
       };
       w.drafts.push(d);
       w.sent.push({ tool: "email_draft_reply", kind: "draft", to: [...d.toAddrs, ...d.ccAddrs], text: `${d.subject}\n${d.body}`, subject: d.subject, draftId: id });
-      return ok({ draftId: id, status: "draft" });
+      // handlers/email/draft-reply.ts: the result carries the card type and a summary beside the id.
+      return ok({ type: "email_draft", draftId: id, status: "draft", summary: "Reply drafted. The operator can review and send it." });
     }
     case "email_send": {
       const d = w.drafts.find((x) => x.id === a.draftId);

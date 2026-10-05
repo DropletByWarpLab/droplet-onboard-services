@@ -295,7 +295,9 @@ def cases(case):
 
     # 015 -- nothing to find ------------------------------------------------------------------
     add("rob-015", "grounding", "Find our notes from the Zephyr kickoff meeting.",
-        {"required": [SEARCH], "max_attempts": {"search_content|search_files": 3},
+        # 4, not 3: content and file names are two indexes, so a narrow and a broad query in each is a
+        # competent sweep, and the loop's own guard allows 3 empty searches per tool (llm-agent MAX_EMPTY_SEARCHES).
+        {"required": [SEARCH], "max_attempts": {"search_content|search_files": 4},
          "final_grounded": True, "final_regex": [NOT_FOUND]},
         world={"docs": [doc("Parking policy", "/Docs/Facilities/parking.md", "Visitor parking is limited to two hours."),
                         doc("Wi-Fi setup guide", "/Docs/IT/wifi.md", "Connect to the staff network with your directory login.")],
@@ -305,7 +307,8 @@ def cases(case):
     # 016 -- one timeout, then fine ---------------------------------------------------------------
     add("rob-016", "error_recovery", "What's on my calendar tomorrow?",
         {"min_calls": {"list_events|search_calendar_events": 2}, "max_attempts": {"list_events|search_calendar_events": 3},
-         "final_contains": [["standup"], ["dentist"]]},
+         # "Team stand-up" (gpt-oss writes U+2011, canon() makes it "-") names the same event.
+         "final_contains": [["standup", "stand-up", "stand up"], ["dentist"]]},
         faults={"list_events": ["timeout"], "search_calendar_events": ["timeout"]},
         world={"events": [{"id": "evt-1", "title": "Team standup", "start": iso(1, "09:30"), "end": iso(1, "09:45"), "attendees": []},
                           {"id": "evt-2", "title": "Dentist", "start": iso(1, "14:00"), "end": iso(1, "15:00"), "attendees": []}]},

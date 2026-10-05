@@ -38,7 +38,11 @@
   "v2-guest-email": ["PASS", []],
   "v2-member-email": ["PASS", []],
   "v2-wildcard": ["PASS", []],
-  "v2-shapes": ["PASS", []]
+  "v2-shapes": ["PASS", []],
+  "v2-snippet": ["PASS", []],
+  "v2-chat-precheck": ["PASS", []],
+  "v2-chat-thread": ["PASS", []],
+  "v2-contacts": ["PASS", []]
  },
  "bad": {
   "seed-001": ["fail", []],

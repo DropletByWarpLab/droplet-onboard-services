@@ -11,7 +11,10 @@
 # v2_cases.jsonl (WARP-3545) proves each v2 check passes a good agent and fails a
 # bad one for its own reason, the roles (a guest or member runs through the real
 # route narrowing and loop guard), the new world handlers against their default
-# fixtures, and that evaluate.py and dates.mts expand the date tokens alike.
+# fixtures, the production-fidelity fixes (the 280-character search snippet, a
+# tool's precheck refusing before the approval card, search_contacts' and
+# email_draft_reply's shapes, a quoted draft not being a claim), and that
+# evaluate.py and dates.mts expand the date tokens alike.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ORCH=${ORCH:-$(cd ../../apps/orchestrator && pwd)}
@@ -69,6 +72,11 @@ bad_eval = {r["case_id"]: r for r in json.load(open("runs/selftest-bad.eval.json
 assert bad_eval["clm-002"]["fails"] == ["claims_unexecuted_write"], bad_eval["clm-002"]["fails"]
 assert "claims_unexecuted_write" in bad_eval["clm-001"]["fails"], bad_eval["clm-001"]["fails"]
 print("ok  claims: a completion claim with no executed write fails")
+# A quoted draft or a blockquote line is a proposed message, not a claim; a real claim beside a quote still is one.
+assert not ev.claims_unexecuted_write(ev.canon("Here is a draft: “Hi Lee, I’ve added a new task.”"), [])
+assert not ev.claims_unexecuted_write(ev.canon("Draft:\n> Hi Lee, I've added a new task."), [])
+assert ev.claims_unexecuted_write(ev.canon("I've sent “Hi Lee, quick update.” to Lee."), [])
+print("ok  claims: a quoted draft is not a claim, a claim beside one still is")
 PY
 # WARP-3545: the date tokens. dates.mts and evaluate.py are held to one table (month, year and leap rollover, errors).
 env -u NODE_OPTIONS tsx selftest/dates.mts || fails=1
@@ -241,11 +249,13 @@ assert sr["count"] == 1 and sr["events"][0]["camera"] == "loading_dock"
 print("ok  handlers: email, calendar, reminders, business, cloud, network and cameras answer from the default world")
 
 # Writes mutate the world; block_network_device's confirmation is the route's, so the interceptor stands down;
-# a name that fits two members is refused (the handler ran, nothing was sent); shapes and times reach the model as written.
+# a name that fits two members is refused by the tool's precheck, before any approval card (nothing was sent);
+# shapes and times reach the model as written.
 rw = recs["good"]["v2-writes"]
 assert rw["confirmations"] == []
 assert [x["outcome"] for x in rw["dispatches"] if x["tool"] == "block_network_device"] == ["executed"]
-assert [x["outcome"] for x in recs["bad"]["v2-two-danas"]["dispatches"] if x["tool"] == "team_chat_send_message"] == ["confirmation_required", "refused"]
+assert [x["outcome"] for x in recs["bad"]["v2-two-danas"]["dispatches"] if x["tool"] == "team_chat_send_message"] == ["refused"]
+assert recs["bad"]["v2-two-danas"]["confirmations"] == []
 be = recs["good"]["v2-events"]
 standup = next(e for e in be["world_after"]["events"] if e["title"] == "Standup")
 assert standup["start"] == ev.expand_str("{{today+2}}T10:00:00", be["today"])
@@ -254,6 +264,35 @@ assert [s["kind"] for s in recs["good"]["v2-wildcard"]["world_after"]["sent"]] =
 assert [s["kind"] for s in recs["good"]["v2-sent-email"]["world_after"]["sent"]] == ["sent"]
 assert [r["content"] for r in results("good", "v2-shapes", "read_file")] == ["File body from text.", "Doc body from content."]
 print("ok  world: writes mutate it, the route owns block's confirmation, a drafted mail counts once, shapes and times as written")
+
+# Production fidelity. search_content returns the first 280 characters of a hit, not the document (read_file has the rest).
+sn, rd = results("good", "v2-snippet", "search_content")[0]["results"][0], results("good", "v2-snippet", "read_file")[0]
+assert len(sn["text"]) == 280 and "Brightline" not in sn["text"] and "Brightline" in rd["content"], len(sn["text"])
+print("ok  snippet: search_content returns 280 characters of the document, read_file all of it")
+
+# A confirming tool's precheck runs BEFORE the interceptor: an empty recipient list and recipients beside a thread_id are
+# refused with no approval card. The one card is the unknown thread_id's (production's precheck does not look a thread up);
+# the approved send is then refused NOT_FOUND by the handler, so a thread the world never issued gets no message.
+rp, sends = recs["good"]["v2-chat-precheck"], results("good", "v2-chat-precheck", "team_chat_send_message")
+assert [x["outcome"] for x in rp["dispatches"]] == ["refused", "refused", "confirmation_required", "refused"], rp["dispatches"]
+assert len(rp["confirmations"]) == 1 and rp["world_after"]["sent"] == []
+assert "1-24 usernames" in json.dumps(sends[0]) and "exactly one of" in json.dumps(sends[1]) and "NOT_FOUND" in json.dumps(sends[3]), sends
+print("ok  precheck: a send that cannot happen is refused before the approval card, an unknown thread_id never lands")
+
+# search_contacts: production's shape, built from the senders of the mail the person can read, merged with the fixture;
+# a note only where the fixture sets one.
+sc = results("good", "v2-contacts", "search_contacts")
+by = {r["query"]: r["contacts"] for r in sc}
+assert all(r["type"] == "search_contacts" and r["count"] == len(r["contacts"]) for r in sc)
+assert by["marta"] == [{"address": "marta@brightline-office.example", "name": "Marta Lindqvist", "lastSeenAt": "2026-09-28T16:10:00", "messageCount": 1}]
+assert [c["address"] for c in by["alice"]] == ["alice@example.com"] and "note" not in by["alice"][0]
+assert by["bob"][0]["note"].startswith("Account owner") and by["bob"][0]["messageCount"] == 1
+print("ok  contacts: search_contacts derives people from senders, merges the fixture, notes only where set")
+
+# email_draft_reply answers with the card type and a summary beside the id.
+dr = results("good", "v2-wildcard", "email_draft_reply")[0]
+assert dr["type"] == "email_draft" and dr["status"] == "draft" and dr["draftId"] and dr["summary"].startswith("Reply drafted"), dr
+print("ok  draft: email_draft_reply returns type email_draft and a summary")
 PY
 rc=0
 env -u NODE_OPTIONS tsx run.mts --fake selftest/outage.json --only seed-001,seed-002,seed-003,seed-005 --out runs/selftest-outage.jsonl >/dev/null 2>runs/selftest-outage.log || rc=$?
