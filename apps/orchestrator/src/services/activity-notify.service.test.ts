@@ -21,6 +21,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { PrismaClient } from "@prisma/client";
+import { grants } from "../__tests__/helpers/support-routes.js";
 
 const { publishMock, recordMock } = vi.hoisted(() => ({
   publishMock: vi.fn(() => ({ channels: ["toast"], errors: [] as string[] })),
@@ -103,7 +104,7 @@ interface CrmRow {
 function makeStub(seed: {
   pm?: PmRow[];
   assignees?: Array<{ workItemId: string; userId: string }>;
-  users?: Array<{ id: string; username: string; role?: string }>;
+  users?: Array<{ id: string; username: string; role?: string; directoryStatus?: string }>;
   crm?: CrmRow[];
   stages?: Array<{ id: string; name: string; kind: "OPEN" | "WON" | "LOST" }>;
 }) {
@@ -181,7 +182,8 @@ function makeStub(seed: {
     pmState: { findMany: vi.fn(async () => [{ id: "s-done", name: "Done" }]) },
     user: {
       findMany: vi.fn(async (args: any) =>
-        users.filter((u) => args.where.id.in.includes(u.id)),
+        users.filter((u) => args.where.id.in.includes(u.id) &&
+          (!args.where.directoryStatus || (u.directoryStatus ?? "ACTIVE") === args.where.directoryStatus)),
       ),
     },
     notificationLog: { updateMany: vi.fn(async () => ({ count: 0 })) },
@@ -190,10 +192,13 @@ function makeStub(seed: {
   return stub as unknown as PrismaClient & typeof stub;
 }
 
-const opts = { now: () => NOW };
+const resolveAccess = vi.fn(async (_userId: string) => grants([["support", "view"]]));
+const opts = { now: () => NOW, resolveAccess };
 
 beforeEach(() => {
   vi.clearAllMocks();
+  resolveAccess.mockReset();
+  resolveAccess.mockResolvedValue(grants([["support", "view"]]));
   logged.length = 0;
   publishMock.mockReturnValue({ channels: ["toast"], errors: [] });
   // The REAL recipient check, as recordNotification runs it: a refusal inside
@@ -621,6 +626,44 @@ describe("WARP-3528 — service-desk tickets", () => {
     const res = await runActivityNotifySweep(prisma, opts);
     expect(recordMock).not.toHaveBeenCalled();
     expect(res.pmSkipped).toBe(1);
+    expect(prisma.pm[0].notifyStatus).toBe("not_needed");
+  });
+
+  it("does not disclose a settled ticket assignment after the person's Support grant is revoked or the module is off", async () => {
+    resolveAccess.mockResolvedValue(grants([["projects", "manage"]]));
+    const prisma = makeStub({
+      pm: [ticketRow({ id: "a1", verb: "assigned", newValue: bob.id })],
+      users: [bob],
+    });
+    const res = await runActivityNotifySweep(prisma, opts);
+    expect(resolveAccess).toHaveBeenCalledWith(bob.id);
+    expect(recordMock).not.toHaveBeenCalled();
+    expect(publishMock).not.toHaveBeenCalled();
+    expect(prisma.pm[0].notifyStatus).toBe("not_needed");
+    expect(res.pmSkipped).toBe(1);
+  });
+
+  it("leaves the assignment pending for retry when current access cannot be verified", async () => {
+    resolveAccess.mockRejectedValue(new Error("access snapshot unavailable"));
+    const prisma = makeStub({
+      pm: [ticketRow({ id: "a1", verb: "assigned", newValue: bob.id })],
+      users: [bob],
+    });
+    await expect(runActivityNotifySweep(prisma, opts)).rejects.toThrow("access snapshot unavailable");
+    expect(recordMock).not.toHaveBeenCalled();
+    expect(publishMock).not.toHaveBeenCalled();
+    expect(prisma.pm[0].notifyStatus).toBe("pending");
+  });
+
+  it("does not tell a deactivated agent about a ticket they were assigned before deactivation", async () => {
+    const prisma = makeStub({
+      pm: [ticketRow({ id: "a1", verb: "assigned", newValue: bob.id })],
+      users: [{ ...bob, directoryStatus: "DEACTIVATED" }],
+    });
+    await runActivityNotifySweep(prisma, opts);
+    expect(recordMock).not.toHaveBeenCalled();
+    expect(publishMock).not.toHaveBeenCalled();
+    expect(resolveAccess).not.toHaveBeenCalled();
     expect(prisma.pm[0].notifyStatus).toBe("not_needed");
   });
 

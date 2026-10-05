@@ -485,11 +485,40 @@ function pointerDisagreement(
 }
 
 /**
+ * WARP-3504 — observers of every completed check (the 15-minute poll and
+ * check-now alike), for the box telemetry sender. Best-effort by contract: an
+ * observer that throws is swallowed.
+ */
+const checkObservers = new Set<(result: CheckForUpdateResult) => void>();
+
+/** Subscribe to every future check outcome. Returns an unsubscribe. */
+export function onUpdateCheck(observer: (result: CheckForUpdateResult) => void): () => void {
+  checkObservers.add(observer);
+  return () => {
+    checkObservers.delete(observer);
+  };
+}
+
+/**
  * One poll tick. Never throws for expected failure shapes — every exit
  * is a typed outcome plus a structured `update.*` log event, so the
  * cron wrapper's error path is reserved for genuine bugs.
  */
 export async function checkForUpdate(
+  opts: CheckForUpdateOptions,
+): Promise<CheckForUpdateResult> {
+  const result = await runCheck(opts);
+  for (const observe of checkObservers) {
+    try {
+      observe(result);
+    } catch {
+      // Observers are best-effort by contract.
+    }
+  }
+  return result;
+}
+
+async function runCheck(
   opts: CheckForUpdateOptions,
 ): Promise<CheckForUpdateResult> {
   const log = opts.logger ?? defaultLog;

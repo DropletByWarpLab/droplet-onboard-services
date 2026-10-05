@@ -116,7 +116,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Run the guard tests
         run: bash tests/jira-ticket-status.test.sh
 
@@ -137,7 +137,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Transition to In Review
         env:
           # env indirection — a PR title is attacker-controlled input and must
@@ -178,7 +178,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Transition to Done
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}

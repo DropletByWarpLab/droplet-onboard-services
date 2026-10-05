@@ -80,11 +80,14 @@ const probes: Probe[] = [
   { route: "DELETE /api/pm/relations/:relationId", kind: "desk", method: "delete", url: (i) => `/api/pm/relations/${i.relationId}` },
   // ── mobile router ────────────────────────────────────────────────────────
   { route: "GET /api/mobile/pm/work-items/:id", kind: "desk", method: "get", url: (i) => `/api/mobile/pm/work-items/${i.deskItemId}?workspace=${i.workspaceSlug}&project_id=${i.deskId}` },
+  // ── schedule router: stage's Timeline and My Work need the same boundary ──
+  { route: "GET /api/pm/projects/:id/timeline", kind: "desk", method: "get", url: (i) => `/api/pm/projects/${i.deskId}/timeline?from=2026-10-01&to=2026-10-31` },
   // ── collections: nothing of a desk may appear ────────────────────────────
   { route: "GET /api/pm/projects", kind: "collection", method: "get", url: () => "/api/pm/projects?archived=1" },
   { route: "GET /api/pm/summary", kind: "collection", method: "get", url: (i) => `/api/pm/summary?workspace=${i.workspaceSlug}` },
   { route: "GET /api/pm/work-items", kind: "collection", method: "get", url: () => "/api/pm/work-items?q=warp3528i" },
   { route: "GET /api/pm/assigned-to-me", kind: "collection", method: "get", url: () => "/api/pm/assigned-to-me" },
+  { route: "GET /api/pm/my-work", kind: "collection", method: "get", url: () => "/api/pm/my-work?section=assigned&today=2026-10-03" },
   { route: "GET /api/mobile/pm/projects", kind: "collection", method: "get", url: (i) => `/api/mobile/pm/projects?workspace=${i.workspaceSlug}` },
   { route: "GET /api/mobile/pm/work-items", kind: "collection", method: "get", url: (i) => `/api/mobile/pm/work-items?workspace=${i.workspaceSlug}&project_id=${i.pmProjectId}` },
   // ── controls: nothing to do with a desk ──────────────────────────────────
@@ -117,19 +120,22 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
     );
     prisma = new RealPrismaClient();
     await prisma.$connect();
-    const [{ createPmNativeRouter }, { createPmRelationsRouter }, { createPmMobileRouter }] =
+    const [{ createPmNativeRouter }, { createPmRelationsRouter }, { createPmMobileRouter }, { createPmScheduleRouter }] =
       await Promise.all([
         import("../routes/pm/native.js"),
         import("../routes/pm/relations.js"),
         import("../routes/mobile/pm.js"),
+        import("../routes/pm/schedule.js"),
       ]);
     const native = createPmNativeRouter(prisma);
     const relations = createPmRelationsRouter(prisma);
     const mobile = createPmMobileRouter(prisma);
+    const schedule = createPmScheduleRouter(prisma);
     routers = [
       { router: native, prefix: "/api" },
       { router: relations, prefix: "/api" },
       { router: mobile, prefix: "" },
+      { router: schedule, prefix: "/api" },
     ];
     const app = express();
     app.use(express.json());
@@ -140,6 +146,7 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
     app.use("/api", native);
     app.use("/api", relations);
     app.use(mobile);
+    app.use("/api", schedule);
     app.use(
       (err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
         res.status(500).json({ error: "unhandled", message: err.message });
@@ -183,6 +190,8 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
         sequenceId: 1,
         name: `${P}plain item`,
         stateId: project.states[0]!.id,
+        createdById: owner,
+        dueDate: new Date("2026-10-02T00:00:00.000Z"),
         assignees: { create: [{ userId: owner }] },
       },
     });
@@ -212,6 +221,8 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
         name: "warp3528i-TICKET-SUBJECT",
         descriptionHtml: "<p>warp3528i-TICKET-BODY</p>",
         stateId: desk.states[0]!.id,
+        createdById: owner,
+        dueDate: new Date("2026-10-02T00:00:00.000Z"),
         assignees: { create: [{ userId: owner }] },
         labels: { create: [{ labelId: desk.labels[0]!.id }] },
       },
@@ -276,7 +287,7 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
       )
       .sort();
 
-  it("classifies EVERY route the three PM routers mount — a new route fails here until it is decided", () => {
+  it("classifies EVERY route the four PM routers mount — a new route fails here until it is decided", () => {
     expect(mountedRoutes()).toEqual(probes.map((p) => p.route).sort());
   });
 
@@ -317,6 +328,17 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
     expect(res.body.work_items.map((w: { id: string }) => w.id)).toEqual([ids.pmItemId]);
   });
 
+  it("My Work excludes an assigned, authored and overdue ticket from every list and count", async () => {
+    for (const section of ["assigned", "created", "overdue", "due_this_week"]) {
+      const res = await request(server).get(`/api/pm/my-work?section=${section}&today=2026-10-03`);
+      expect(res.status).toBe(200);
+      expect(res.body.counts).toEqual({ assigned: 1, created: 1, overdue: 1, dueThisWeek: 0 });
+      expect(res.body.items.map((w: { id: string }) => w.id)).toEqual(section === "due_this_week" ? [] : [ids.pmItemId]);
+      expect(JSON.stringify(res.body)).not.toContain(ids.deskId);
+      expect(JSON.stringify(res.body)).not.toContain(ids.deskItemId);
+    }
+  });
+
   it("finds the project item by search and not the ticket that shares its prefix", async () => {
     const res = await send(probes.find((p) => p.route === "GET /api/pm/work-items")!);
     expect(res.body.work_items.map((w: { id: string }) => w.id)).toEqual([ids.pmItemId]);
@@ -336,6 +358,7 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
       ["get", `/api/pm/projects/${ids.pmProjectId}/states`],
       ["get", `/api/pm/projects/${ids.pmProjectId}/labels`],
       ["get", `/api/pm/projects/${ids.pmProjectId}/work-items`],
+      ["get", `/api/pm/projects/${ids.pmProjectId}/timeline?from=2026-10-01&to=2026-10-31`],
       ["get", `/api/pm/work-items/${ids.pmItemId}`],
       ["get", `/api/pm/work-items/${ids.pmItemId}/comments`],
       ["get", `/api/pm/work-items/${ids.pmItemId}/activity`],

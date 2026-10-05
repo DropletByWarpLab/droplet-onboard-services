@@ -113,6 +113,7 @@ import {
 import { createLogger } from "../lib/logger.js";
 import { isUserIdShaped } from "@droplet/auth-policy";
 import { isServiceDesk } from "./pm/pm.service.js";
+import { resolveEffectiveAccess } from "./effective-access.service.js";
 
 const logger = createLogger("activity-notify");
 
@@ -197,6 +198,8 @@ export interface ActivityNotifySweepResult {
 
 export interface ActivityNotifyOpts {
   departmentWatchers?: DepartmentWatchersResolver;
+  /** Fresh recipient access, including the box module toggle and person grant. */
+  resolveAccess?: typeof resolveEffectiveAccess;
   /** Injectable clock — the settle window is the one thing worth pinning
    *  deterministically in tests. */
   now?: () => number;
@@ -425,6 +428,7 @@ async function sweepPm(
   cutoff: Date,
   now: Date,
   resolveWatchers: DepartmentWatchersResolver,
+  resolveAccess: typeof resolveEffectiveAccess,
 ): Promise<SweepCounts> {
   // Ordered by createdAt so a backlog drains FIFO. The
   // [notifyStatus, createdAt] index makes the `pending` prefix selective even
@@ -444,7 +448,7 @@ async function sweepPm(
     now,
     resolveWatchers,
   );
-  const tickets = await sweepTickets(prisma, rows.filter(isTicket), now);
+  const tickets = await sweepTickets(prisma, rows.filter(isTicket), now, resolveAccess);
   return {
     notified: items.notified + tickets.notified,
     skipped: items.skipped + tickets.skipped,
@@ -608,8 +612,9 @@ async function sweepProjectItems(
  * Only `assigned` tells anyone, and only the user the row names (`newValue` is
  * that assignee's User.id) -- not the item's current assignees, not a department
  * watcher. A ticket's recipients are therefore never looked up; the one user
- * lookup is for the named assignees, and it reads the role so a guest is skipped
- * (WARP-3365) the way the CRM sweep skips one. Everything undeliverable, and
+ * lookup is for the named assignees. Their current staff role and effective
+ * Support grant are checked at delivery: an assignment may settle after an
+ * owner revoked the grant or disabled the module. Everything undeliverable, and
  * every other verb, takes the explicit `not_needed` terminal.
  *
  * Its own coalescing unit and its own claim: one NotificationLog row per
@@ -620,6 +625,7 @@ async function sweepTickets(
   prisma: PrismaClient,
   rows: SweepRow[],
   now: Date,
+  resolveAccess: typeof resolveEffectiveAccess,
 ): Promise<SweepCounts> {
   if (rows.length === 0) return { notified: 0, skipped: 0, logs: 0 };
 
@@ -641,17 +647,25 @@ async function sweepTickets(
     perUser.size === 0
       ? []
       : await prisma.user.findMany({
-          where: { id: { in: [...perUser.keys()] } },
+          where: { id: { in: [...perUser.keys()] }, directoryStatus: "ACTIVE" },
           select: { id: true, username: true, role: true },
         });
   const usernames = new Map(users.map((u) => [u.id, u.username] as const));
-  const guestIds = new Set(users.filter((u) => u.role === "guest").map((u) => u.id));
+  const staffIds = new Set(users.filter((u) => ["owner", "admin", "family"].includes(u.role)).map((u) => u.id));
 
   const outgoing: Outgoing[] = [];
   const sendIds: string[] = [];
   for (const [userId, list] of perUser) {
     const username = deliverableUsername("pmActivity", userId, usernames);
-    if (!username || guestIds.has(userId)) {
+    if (!username || !staffIds.has(userId)) {
+      for (const r of list) skipIds.push(r.id);
+      continue;
+    }
+    // A failed resolver propagates to cron-runtime's retry/canary path. Do not
+    // claim, publish, or permanently skip a private assignment on an unreadable
+    // access snapshot.
+    const access = await resolveAccess(userId);
+    if (!access?.features.some((f) => f.moduleId === "support")) {
       for (const r of list) skipIds.push(r.id);
       continue;
     }
@@ -812,7 +826,7 @@ export async function runActivityNotifySweep(
   const cutoff = new Date(nowMs - SETTLE_MS);
   const resolveWatchers = opts.departmentWatchers ?? noDepartmentWatchers;
 
-  const pm = await sweepPm(prisma, cutoff, now, resolveWatchers);
+  const pm = await sweepPm(prisma, cutoff, now, resolveWatchers, opts.resolveAccess ?? resolveEffectiveAccess);
   const crm = await sweepCrm(prisma, cutoff, now);
 
   return {

@@ -188,6 +188,7 @@ describe("every tucked destination has a way back in (WARP-2967)", () => {
         "/models",
         "/routines",
         "/settings/coding-tools",
+        "/settings/telemetry",
         "/tools",
         "/trust",
         "/users",

@@ -36,6 +36,7 @@ vi.unmock("@prisma/client");
 vi.mock("../services/mqtt.service.js", () => ({ publish: vi.fn() }));
 
 import { runActivityNotifySweep, SETTLE_MS } from "../services/activity-notify.service.js";
+import { grants } from "./helpers/support-routes.js";
 
 const RUN =
   process.env.RUN_PG_INTEGRATION === "1" &&
@@ -177,8 +178,11 @@ describe.skipIf(!RUN)("activity notify sweep — real Postgres (WARP-2587)", () 
       data: { workItemId: ticket.id, actorId: assigneeId, verb: "commented", createdAt: settled() },
     });
 
-    await runActivityNotifySweep(prisma);
-    await runActivityNotifySweep(prisma);
+    // The DB claim is real; this permission seam supplies the same known
+    // current Support grant the DB-less revocation/retry tests exercise.
+    const resolveAccess = async () => grants([["support", "view"]]);
+    await runActivityNotifySweep(prisma, { resolveAccess });
+    await runActivityNotifySweep(prisma, { resolveAccess });
 
     const logs = await prisma.notificationLog.findMany({ where: { username: OURS } });
     expect(logs.map((l) => [l.username, l.kind, l.title, l.body, l.url])).toEqual([

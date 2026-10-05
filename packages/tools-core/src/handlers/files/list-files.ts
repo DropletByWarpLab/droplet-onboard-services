@@ -48,7 +48,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     return {
       ok: false,
       status: "error",
-      error: { code: "LIST_FAILED", message: `nextcloud returned ${res.status}` },
+      error: { code: "LIST_FAILED", message: `the File Store returned ${res.status}` },
     };
   }
   if (isFilesDegraded(res)) return filesUnavailable();

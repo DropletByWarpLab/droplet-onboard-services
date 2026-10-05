@@ -35,7 +35,7 @@ describe("search_files", () => {
 
   // WARP-1012 — regression. The files API route (`GET /api/files/search`)
   // requires the search term in `q`, NOT `query`; sending `query=` made the
-  // route 400 before auth was even consulted ("nextcloud returned 400" in
+  // route 400 before auth was even consulted ("the File Store returned 400" in
   // the live repro). And the `_service:mcp` principal must assert the acting
   // user via X-Nextcloud-User — the route hard-rejects (401) without it.
   it("calls the files API /search with q, limit, and BOTH per-user headers", async () => {
@@ -74,7 +74,7 @@ describe("search_files", () => {
     expect(r.ok).toBe(false);
     if (!r.ok) {
       expect(r.error.code).toBe("SEARCH_FAILED");
-      expect(r.error.message).toBe("nextcloud returned 400");
+      expect(r.error.message).toBe("the File Store returned 400");
     }
   });
 });
