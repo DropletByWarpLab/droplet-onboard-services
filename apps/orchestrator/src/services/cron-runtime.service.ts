@@ -146,12 +146,18 @@ export interface CronScheduleOpts {
   immediate?: boolean;
 }
 
+/** A scheduled interval's guarded entry point for an early run. */
+export interface CronJobHandle {
+  /** Runs through the same lock, overlap and failure-accounting path as a tick. */
+  runNow(): void;
+}
+
 export interface CronRuntime {
   scheduleInterval(
     ms: number,
     handler: () => void | Promise<void>,
     opts?: CronScheduleOpts,
-  ): void;
+  ): CronJobHandle;
   scheduleCron(
     spec: string,
     handler: () => void | Promise<void>,
@@ -287,6 +293,7 @@ export function createCronRuntime(
       const run = guarded(handler, opts);
       intervals.push(setInterval(run, ms));
       if (opts?.immediate) run();
+      return { runNow: run };
     },
     scheduleCron(spec, handler, opts) {
       const task = cron.schedule(spec, guarded(handler, opts));
