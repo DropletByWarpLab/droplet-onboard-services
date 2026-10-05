@@ -31,6 +31,7 @@ import {
   disconnect,
   getConnectionView,
   getAccessToken,
+  markNeedsReconnect,
   purgeM365ForUser,
   M365AppRequiredError,
   M365NotConnectedError,
@@ -53,6 +54,11 @@ const sha256 = (v: string) => createHash("sha256").update(v).digest("hex");
 /** Minimal in-memory stand-in for prisma.m365Connection. */
 function fakePrisma(seed: Record<string, unknown> | null = null) {
   let row: Record<string, unknown> | null = seed ? { ...seed } : null;
+  const person = { username: "sam", directoryStatus: "ACTIVE", deletionStatus: "NONE" };
+  const matches = (where: any) => Object.entries(where ?? {}).every(([key, value]: [string, any]) => {
+    if (key === "user") return Object.entries(value.is).every(([field, expected]) => person[field as keyof typeof person] === expected);
+    return row?.[key] === value;
+  });
   // WARP-3059 — the person's delta cursors, so a purge shows as rows gone
   // rather than only as a call made.
   let cursors: Array<{ id: string; userId: string; resourceId: string }> = [];
@@ -60,11 +66,16 @@ function fakePrisma(seed: Record<string, unknown> | null = null) {
   // and a reconnect as somebody else must remove those too, and the evaluating
   // tables make "gone" a thing the tests can see.
   const cloud = makeFakeCloudFileDb();
-  return {
+  const db = {
     __row: () => row,
+    __person: () => person,
+    user: { findFirst: vi.fn(async ({ where }: any) => Object.entries(where).every(([field, value]) => field === "id" || person[field as keyof typeof person] === value) ? { ...person } : null) },
+    cloudOAuthApp: { findUnique: vi.fn(async () => null) },
     __cloud: cloud,
     cloudFileItem: cloud.cloudFileItem,
     cloudFileSource: cloud.cloudFileSource,
+    calendarSource: { findFirst: vi.fn(async () => null) },
+    $transaction: async <T>(work: (tx: unknown) => Promise<T>): Promise<T> => work(db),
     __cursors: () => cursors,
     __addCursors: (...resourceIds: string[]) => {
       for (const resourceId of resourceIds) {
@@ -76,8 +87,7 @@ function fakePrisma(seed: Record<string, unknown> | null = null) {
       // so a fake that ignored the key would pass a lookup that should miss.
       findUnique: vi.fn(async ({ where }: any) => {
         if (!row) return null;
-        const matches = Object.entries(where ?? {}).every(([k, v]) => (row as any)[k] === v);
-        return matches ? { ...row } : null;
+        return matches(where) ? { ...row } : null;
       }),
       upsert: vi.fn(async ({ create, update }: any) => {
         row = row ? { ...row, ...update } : { id: "row-1", userId: USER, ...create };
@@ -92,10 +102,7 @@ function fakePrisma(seed: Record<string, unknown> | null = null) {
       // fake must honour it rather than always writing.
       updateMany: vi.fn(async ({ where, data }: any) => {
         if (!row) return { count: 0 };
-        const matches = Object.entries(where).every(
-          ([k, v]) => (row as any)[k] === v,
-        );
-        if (!matches) return { count: 0 };
+        if (!matches(where)) return { count: 0 };
         row = { ...row, ...data };
         return { count: 1 };
       }),
@@ -116,6 +123,7 @@ function fakePrisma(seed: Record<string, unknown> | null = null) {
       }),
     },
   };
+  return db;
 }
 
 function authResult(over: Partial<EntraAuthResult> = {}): EntraAuthResult {
@@ -550,6 +558,51 @@ describe("purgeM365ForUser", () => {
 });
 
 describe("getAccessToken", () => {
+  it("an old Graph refusal cannot downgrade a newly consented grant", async () => {
+    const prisma = await connectedAsAWithCursors();
+    let generation: any;
+    await getAccessToken(prisma as never, fakeEntra(), USER, new Date(), (current) => { generation = current; });
+    await connectAs(prisma, A);
+    const newer = structuredClone(prisma.__row());
+    await markNeedsReconnect(prisma as never, USER, "Old Graph request failed", generation);
+    expect(prisma.__row()).toEqual(newer);
+  });
+
+  it.each(["disconnect", "same-account-reconnect", "different-account-reconnect", "calendar-off"])("a late successful refresh cannot overwrite %s or return its bearer", async (action) => {
+    const prisma = await connectedAsAWithCursors();
+    if (action === "calendar-off") Object.assign(prisma.__row()!, { calendarEnabled: true, calendarSourceId: "s1", calendarSyncState: "CONNECTED" });
+    let release!: (result: EntraAuthResult) => void;
+    const entra = fakeEntra({ acquireSilent: vi.fn(() => new Promise<EntraAuthResult>((resolve) => { release = resolve; })) });
+    const pending = getAccessToken(prisma as never, entra, USER).catch((error: unknown) => error);
+    await vi.waitFor(() => expect(entra.acquireSilent).toHaveBeenCalledTimes(1));
+    if (action === "calendar-off") Object.assign(prisma.__row()!, { calendarEnabled: false, calendarSourceId: null, calendarSyncState: "DISCONNECTED" });
+    else {
+      await disconnect(prisma as never, USER);
+      if (action !== "disconnect") await connectAs(prisma, action === "same-account-reconnect" ? A : B);
+    }
+    const current = structuredClone(prisma.__row());
+    release(authResult({ accessToken: "STALE_SECRET_BEARER" }));
+    const error = await pending;
+    expect(error).toBeInstanceOf(Error);
+    expect(String(error)).not.toContain("STALE_SECRET_BEARER");
+    expect(prisma.__row()).toEqual(current);
+  });
+
+  it.each(["same-account-reconnect", "calendar-off"])("a failed old refresh cannot downgrade %s", async (action) => {
+    const prisma = await connectedAsAWithCursors();
+    if (action === "calendar-off") Object.assign(prisma.__row()!, { calendarEnabled: true, calendarSourceId: "s1", calendarSyncState: "CONNECTED" });
+    let reject!: (error: unknown) => void;
+    const entra = fakeEntra({ acquireSilent: vi.fn(() => new Promise<EntraAuthResult>((_resolve, fail) => { reject = fail; })) });
+    const pending = getAccessToken(prisma as never, entra, USER).catch((error: unknown) => error);
+    await vi.waitFor(() => expect(entra.acquireSilent).toHaveBeenCalledTimes(1));
+    if (action === "calendar-off") Object.assign(prisma.__row()!, { calendarEnabled: false, calendarSourceId: null, calendarSyncState: "DISCONNECTED" });
+    else { await disconnect(prisma as never, USER); await connectAs(prisma, A); }
+    const current = structuredClone(prisma.__row());
+    reject({ errorCode: "invalid_grant", errorMessage: "expired" });
+    await pending;
+    expect(prisma.__row()).toEqual(current);
+  });
+
   it("refuses when no account is linked", async () => {
     const prisma = fakePrisma(null);
     await expect(getAccessToken(prisma as never, fakeEntra(), USER)).rejects.toBeInstanceOf(
@@ -859,6 +912,62 @@ describe("beginAuthCodeConnect (WARP-2704)", () => {
 });
 
 describe("completeAuthCodeConnect (WARP-2704)", () => {
+  it.each(["success", "failure"])("an old device-code %s cannot settle a newer browser flow", async (outcome) => {
+    const prisma = fakePrisma(null);
+    let release!: (result: EntraAuthResult) => void;
+    let reject!: (error: unknown) => void;
+    const old = fakeEntra({ acquireByDeviceCode: vi.fn(async (_app, { onCode }) => {
+      onCode({ userCode: "OLD", verificationUri: "https://microsoft.com/devicelogin", expiresAt: new Date(Date.now() + 60_000), message: "old" });
+      return new Promise<EntraAuthResult>((resolve, fail) => { release = resolve; reject = fail; });
+    }) });
+    await beginDeviceCodeConnect(prisma as never, old, USER, { app: APP });
+    const oldFlow = prisma.__row()!.pendingFlowEnc;
+    await disconnect(prisma as never, USER);
+    const next = await started(prisma);
+    const current = structuredClone(prisma.__row());
+    if (outcome === "success") release(authResult());
+    else reject({ errorCode: "invalid_grant", errorMessage: "expired old poll" });
+    await vi.waitFor(() => expect(prisma.m365Connection.updateMany.mock.calls.some(([args]) => args.where.pendingFlowEnc === oldFlow)).toBe(true));
+    expect(prisma.__row()).toEqual(current);
+    expect(await completeAuthCodeConnect(prisma as never, next.entra, { state: next.state, browserState: next.state, code: "new" })).toBe("connected");
+  });
+
+  it.each(["success", "failure"])("an old exchange %s cannot overwrite or cancel a newer pending flow", async (outcome) => {
+    const prisma = fakePrisma(null);
+    let release!: (result: EntraAuthResult) => void;
+    let reject!: (error: unknown) => void;
+    const old = await started(prisma, fakeEntra({ acquireByAuthorizationCode: vi.fn(() => new Promise<EntraAuthResult>((resolve, fail) => { release = resolve; reject = fail; })) }));
+    const completion = completeAuthCodeConnect(prisma as never, old.entra, { state: old.state, browserState: old.state, code: "old" });
+    await vi.waitFor(() => expect(old.entra.acquireByAuthorizationCode).toHaveBeenCalledTimes(1));
+    await disconnect(prisma as never, USER);
+    const next = await started(prisma);
+    const current = structuredClone(prisma.__row());
+    if (outcome === "success") release(authResult());
+    else reject({ errorCode: "invalid_grant", errorMessage: "expired old exchange" });
+    await completion;
+    expect(prisma.__row()).toEqual(current);
+    expect(await completeAuthCodeConnect(prisma as never, next.entra, { state: next.state, browserState: next.state, code: "new" })).toBe("connected");
+  });
+
+  it("a callback cannot retain a grant for a deactivated person", async () => {
+    const prisma = fakePrisma(null);
+    const begun = await started(prisma);
+    prisma.__person().directoryStatus = "DEACTIVATED";
+    expect(await completeAuthCodeConnect(prisma as never, begun.entra, { state: begun.state, browserState: begun.state, code: "c" })).toBe("cancelled");
+    expect(prisma.__row()!.tokenCacheEnc).toBeNull();
+  });
+
+  it("calendar OFF during the exchange remains OFF after the same-account callback", async () => {
+    const prisma = await connectedAsAWithCursors();
+    Object.assign(prisma.__row()!, { calendarEnabled: true, calendarSourceId: "calendar-a", calendarSyncState: "CONNECTED" });
+    const begun = await started(prisma, fakeEntra({ acquireByAuthorizationCode: vi.fn(async () => {
+      Object.assign(prisma.__row()!, { calendarEnabled: false, calendarSourceId: null, calendarSyncState: "DISCONNECTED" });
+      return authResult(A);
+    }) }));
+    expect(await completeAuthCodeConnect(prisma as never, begun.entra, { state: begun.state, browserState: begun.state, code: "c" })).toBe("connected");
+    expect(prisma.__row()).toMatchObject({ calendarEnabled: false, calendarSourceId: null, calendarSyncState: "DISCONNECTED" });
+  });
+
   it("connects when the callback carries the state this browser started with", async () => {
     const prisma = fakePrisma(null);
     const { state, entra } = await started(prisma);
@@ -1279,6 +1388,34 @@ function grantDied(prisma: ReturnType<typeof fakePrisma>) {
 }
 
 describe("a reconnect as someone else starts their sync from nothing (#2347 review)", () => {
+  it("requires explicit disconnect before switching an identity with copied calendar events", async () => {
+    const prisma = await connectedAsAWithCursors();
+    Object.assign(prisma.__row()!, { calendarEnabled: true, calendarSourceId: "a-calendar", calendarSyncState: "CONNECTED" });
+    prisma.m365DeltaCursor.deleteMany.mockClear();
+    grantDied(prisma);
+
+    expect(await connectAs(prisma, B)).toBe("different_account");
+
+    expect(prisma.__row()).toMatchObject({ state: "ERROR", calendarEnabled: true,
+      calendarSourceId: "a-calendar", calendarSyncState: "NEEDS_RECONNECT", tokenCacheEnc: null,
+      lastError: "Your copied Outlook calendar was kept. Disconnect Outlook before linking a different Microsoft account." });
+    expect(prisma.__cursors().map((cursor) => cursor.resourceId)).toEqual(["inbox-of-a", "archive-of-a"]);
+    expect(prisma.m365DeltaCursor.deleteMany).not.toHaveBeenCalled();
+    expect(prisma.__row()!.pendingStateHash).toBeNull();
+    expect(JSON.stringify(prisma.__row()!.lastError)).not.toContain(B.accountUpn);
+  });
+
+  it("preserves calendar opt-in and its source when the same identity reconnects", async () => {
+    const prisma = await connectedAsAWithCursors();
+    Object.assign(prisma.__row()!, { calendarEnabled: true, calendarSourceId: "a-calendar", calendarSyncState: "CONNECTED" });
+    grantDied(prisma);
+
+    expect(await connectAs(prisma, A)).toBe("connected");
+    expect(prisma.__row()).toMatchObject({ state: "CONNECTED", calendarEnabled: true,
+      calendarSourceId: "a-calendar", calendarSyncState: "WAITING" });
+    expect(prisma.__cursors().map((cursor) => cursor.resourceId)).toEqual(["inbox-of-a", "archive-of-a"]);
+  });
+
   it("purges the cursors when the sign-in that completes is a different mailbox", async () => {
     const prisma = await connectedAsAWithCursors();
     grantDied(prisma);

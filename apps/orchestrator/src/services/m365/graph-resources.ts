@@ -138,6 +138,19 @@ export const CALENDAR_WINDOW = {
   forwardMs: 365 * 24 * 60 * 60 * 1000,
 } as const;
 
+/** The stable primary-calendar window that owns a delta cursor. Never a provider token. */
+export function calendarWindowResourceId(start: Date, end: Date): string {
+  return `${start.toISOString()}|${end.toISOString()}`;
+}
+
+function calendarWindowBounds(resourceId: string): [Date, Date] | null {
+  const pieces = resourceId.split("|");
+  if (pieces.length !== 2) return null;
+  const start = new Date(pieces[0]!);
+  const end = new Date(pieces[1]!);
+  return Number.isFinite(start.getTime()) && Number.isFinite(end.getTime()) && end > start ? [start, end] : null;
+}
+
 /**
  * Page size requested via `Prefer: odata.maxpagesize`.
  *
@@ -145,7 +158,7 @@ export const CALENDAR_WINDOW = {
  * instead. Modest on purpose: a large page is a larger unit of work to lose
  * when a run fails partway, and the run restarts from the beginning.
  */
-export const PREFERRED_PAGE_SIZE = 100;
+export { GRAPH_PREFERRED_PAGE_SIZE as PREFERRED_PAGE_SIZE } from "./graph-client.js";
 
 /**
  * How a workload's cursors come to exist (WARP-3538).
@@ -240,9 +253,10 @@ export const GRAPH_RESOURCES: Readonly<Record<M365Workload, GraphResourceSpec>> 
     // The window is REQUIRED and is a trap — see the header. It is also encoded
     // into the cursor's resourceId by the discovery step, so a rolled window
     // produces a visibly different cursor rather than silently invalidating one.
-    initialPath: (_resourceId, now) => {
-      const start = new Date(now.getTime() - CALENDAR_WINDOW.backMs);
-      const end = new Date(now.getTime() + CALENDAR_WINDOW.forwardMs);
+    initialPath: (resourceId, now) => {
+      const [start, end] = calendarWindowBounds(resourceId) ?? [
+        new Date(now.getTime() - CALENDAR_WINDOW.backMs), new Date(now.getTime() + CALENDAR_WINDOW.forwardMs),
+      ];
       return (
         `/me/calendarView/delta` +
         `?startDateTime=${encodeURIComponent(iso(start))}` +

@@ -20,7 +20,7 @@ import { PasskeysSection } from "@/components/settings/PasskeysSection";
 import { FeaturesCard } from "@/components/settings/FeaturesCard";
 import { PersonalityCard } from "@/components/settings/PersonalityCard";
 import { EmailAccountCard } from "@/components/settings/EmailAccountCard";
-import { Microsoft365Card } from "@/components/settings/Microsoft365Card";
+import { ConnectedAccounts } from "@/components/settings/ConnectedAccounts";
 import { EmailChannelSection } from "@/components/settings/EmailChannelSection";
 import { DangerZoneSection } from "@/components/settings/DangerZoneSection";
 import { PersonalDriveCard } from "@/components/settings/PersonalDriveCard";
@@ -503,10 +503,9 @@ export default function SettingsPage() {
             through. Two halves of mail that people confuse constantly, so they
             sit together and each says which it is. */}
         <EmailAccountCard />
-        {/* WARP-3056 — each person's own Microsoft 365 (mail, calendar,
-            contacts, OneDrive), beside the mailboxes Droplet reads. Renders
-            for owner/admin/family; the callback lands here with ?m365=. */}
-        <Microsoft365Card />
+        {/* WARP-3788 — each person approves their own provider account;
+            administrator registrations are configured once below the cards. */}
+        <ConnectedAccounts />
         <EmailChannelSection />
 
         {/* Device Info */}

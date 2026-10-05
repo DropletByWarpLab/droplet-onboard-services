@@ -21,8 +21,9 @@
  *
  * No token, code or state. The browser goes to the `authorizeUrl` the box
  * returns (built server-side with PKCE); Microsoft sends it back to
- * `/api/m365/callback`, which redirects here with `?m365=<outcome>`. The ids
- * typed below are the app registration's, which are not secrets.
+ * `/api/m365/callback`, which redirects here with `?m365=<outcome>`.
+ * Shared administrator setup is resolved on the server. Previously saved
+ * personal app registrations remain usable behind advanced settings.
  *
  * 🔴 No hostname literals in this file — the `egress-gate` CI check reads
  * string literals in source and denies anything host-shaped. Microsoft's URL
@@ -39,10 +40,12 @@
  */
 
 import { useCallback, useEffect, useState, type JSX } from "react";
+import { Mail } from "lucide-react";
 
 import { authFetch, useAuth } from "@/lib/auth";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Microsoft365Files, SYNC_POLL_MS, type M365SharePointView } from "./Microsoft365Files";
+import { Microsoft365Calendar, type MicrosoftCalendarView } from "./Microsoft365Calendar";
 
 type M365State = "DISCONNECTED" | "PENDING_CONSENT" | "CONNECTED" | "NEEDS_RECONNECT" | "ERROR";
 
@@ -58,9 +61,12 @@ export interface M365ConnectionView {
   lastError: string | null;
   /** The exact URL the owner registers on their app. */
   redirectUri: string;
+  /** Shared administrator setup or a previously saved personal registration. */
+  configured?: boolean;
   /** The person's own SharePoint switch and whether Microsoft has approved it.
    *  Absent only from an orchestrator older than this card (a box mid-update). */
   sharePoint?: M365SharePointView;
+  calendar?: MicrosoftCalendarView;
 }
 
 /** The outcomes `/api/m365/callback` can land here with. A closed set: the
@@ -71,6 +77,7 @@ const OUTCOMES = {
   cancelled: { tone: "info", text: "Sign-in was cancelled. Nothing was connected." },
   expired: { tone: "error", text: "That sign-in took too long and expired. Start it again below." },
   failed: { tone: "error", text: "Microsoft 365 could not be connected." },
+  different_account: { tone: "error", text: "To connect a different Microsoft account, disconnect the current one first. Your existing local calendar copies were kept." },
   invalid: {
     tone: "error",
     text: "That sign-in did not start in this browser, so Droplet ignored it. Start it again below.",
@@ -94,16 +101,16 @@ export const SETUP_GUIDE_HREF = "/help/integrations/microsoft-365";
 export function hintForError(lastError: string | null): string | null {
   if (!lastError) return null;
   if (lastError.includes("AADSTS50011")) {
-    return "The redirect URI below is not on your app registration yet. Add it exactly as shown.";
+    return "Ask your Droplet administrator to check the redirect URI in Account connection setup.";
   }
   if (lastError.includes("AADSTS7000218") || lastError.includes("AADSTS9002327")) {
     return "The redirect URI is registered under the wrong platform. Register it under “Mobile and desktop applications”.";
   }
   if (lastError.includes("AADSTS700016")) {
-    return "Microsoft cannot find that Application (client) ID in your organisation. Check it against the app registration's Overview page.";
+    return "Ask your Droplet administrator to check the Application (client) ID in Account connection setup.";
   }
   if (lastError.includes("AADSTS50194") || lastError.includes("AADSTS90002") || lastError.includes("AADSTS900023")) {
-    return "Check the Directory (tenant) ID against the app registration's Overview page.";
+    return "Ask your Droplet administrator to check the Directory (tenant) ID in Account connection setup.";
   }
   if (lastError.includes("AADSTS90094")) {
     return "Your organisation needs an administrator to approve Droplet. Ask your Microsoft admin to grant admin consent on the app registration.";
@@ -151,12 +158,14 @@ function takeOutcome(): Outcome | null {
 export function Microsoft365Card({
   navigate = (url: string) => window.location.assign(url),
   syncPollMs = SYNC_POLL_MS,
+  calendarPollMs = 5_000,
 }: {
   /** Where the browser goes to sign in. Injected so tests can observe it. */
   navigate?: (url: string) => void;
   /** How often the files block re-reads while something is still being read for
    *  the first time. Injected so tests need not wait half a minute. */
   syncPollMs?: number;
+  calendarPollMs?: number;
 } = {}): JSX.Element | null {
   const { user } = useAuth();
   const role = user?.role;
@@ -172,7 +181,7 @@ export function Microsoft365Card({
    *  card above it, a list that could not be read is not an emergency on a
    *  settings page, and the sign-in reports its own failures. */
   const [loadFailed, setLoadFailed] = useState(false);
-  const [copied, setCopied] = useState(false);
+  const [loading, setLoading] = useState(false);
   const [confirmingDisconnect, setConfirmingDisconnect] = useState(false);
   /** A failed disconnect. Said inside the dialog, which stays open over the
    *  card so the person can retry; the card's own error line would be hidden
@@ -180,6 +189,7 @@ export function Microsoft365Card({
   const [disconnectError, setDisconnectError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
+    setLoading(true);
     try {
       const res = await authFetch("/api/m365/connection");
       if (!res.ok) {
@@ -187,6 +197,7 @@ export function Microsoft365Card({
         return;
       }
       const next = (await res.json()) as M365ConnectionView;
+      if (!next || !["DISCONNECTED", "PENDING_CONSENT", "CONNECTED", "NEEDS_RECONNECT", "ERROR"].includes(next.state)) throw new Error("invalid connection view");
       setLoadFailed(false);
       setView(next);
       // Pre-fill from the stored app so reconnecting is one click; never
@@ -197,6 +208,8 @@ export function Microsoft365Card({
       }
     } catch {
       setLoadFailed(true);
+    } finally {
+      setLoading(false);
     }
   }, []);
 
@@ -206,24 +219,35 @@ export function Microsoft365Card({
     void load();
   }, [allowed, load]);
 
+  useEffect(() => {
+    if (!allowed || view?.calendar?.state !== "WAITING") return;
+    const timer = window.setInterval(() => void load(), calendarPollMs);
+    return () => window.clearInterval(timer);
+  }, [allowed, view?.calendar?.state, load, calendarPollMs]);
+
   if (!allowed) return null;
 
-  const signIn = async () => {
+  const signIn = async (usePersonalRegistration = false) => {
+    if (busy || !view) return;
     setBusy(true);
     setError(null);
     setOutcome(null);
     try {
+      if (new URL(view.redirectUri).origin !== window.location.origin) {
+        navigate(new URL("/settings", view.redirectUri).toString());
+        return;
+      }
       const res = await authFetch("/api/m365/connect", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ clientId: clientId.trim(), tenantId: tenantId.trim() }),
+        body: JSON.stringify(usePersonalRegistration ? { clientId: clientId.trim(), tenantId: tenantId.trim() } : {}),
       });
       const body = (await res.json().catch(() => ({}))) as { authorizeUrl?: string; message?: string };
       if (res.ok && body.authorizeUrl) {
         navigate(body.authorizeUrl);
         return; // leaving the page; keep the button busy
       }
-      setError(body.message ?? "Droplet could not start the Microsoft sign-in. Try again.");
+      setError("Droplet could not start the Microsoft sign-in. Try again, or ask your Droplet administrator to check Account connection setup.");
     } catch {
       setError("Droplet could not reach itself to start the sign-in. Check your connection and try again.");
     }
@@ -251,33 +275,27 @@ export function Microsoft365Card({
     setDisconnectError(null);
   };
 
-  const copyRedirect = async () => {
-    if (!view) return;
-    try {
-      await navigator.clipboard.writeText(view.redirectUri);
-      setCopied(true);
-    } catch {
-      // The field is selectable; copying by hand still works.
-    }
-  };
-
   const connected = view?.state === "CONNECTED";
+  const configured = view?.configured ?? Boolean(view?.app);
   const hint = hintForError(view?.lastError ?? null);
   const since = formatDate(view?.connectedAt ?? null);
   const note = outcome ? OUTCOMES[outcome] : null;
+  const opensRegisteredAddress = (() => {
+    try { return Boolean(view && new URL(view.redirectUri).origin !== window.location.origin); }
+    catch { return false; }
+  })();
 
   return (
     <section className="card space-y-4" id="microsoft-365" aria-labelledby="microsoft-365-title">
-      <h2 className="type-title-3" id="microsoft-365-title">
-        Microsoft 365
-      </h2>
+      <div className="flex items-center gap-3">
+        <span className="ri brand" aria-hidden="true"><Mail size={20} /></span>
+        <h3 className="type-title-3" id="microsoft-365-title">Outlook / Microsoft 365</h3>
+      </div>
       <p className="type-caption-1">
-        Connect your own Microsoft 365 account and Droplet reads your mail, calendar, contacts and
-        the list of your OneDrive files as you, and never more than you can see. This is the one
-        connection that goes over the internet to Microsoft, and only after you sign in.{" "}
-        <a href={SETUP_GUIDE_HREF} className="underline">
-          How your Microsoft admin sets it up
-        </a>
+        Connect your work or school Microsoft account. Approve access on Microsoft&apos;s website,
+        then return here. Choose whether to show your Outlook calendar in Droplet after connecting.
+        Droplet also checks mail and contacts and keeps OneDrive file lists.
+        Outlook messages do not yet appear in Droplet&apos;s local inbox.
       </p>
 
       {note && (
@@ -296,11 +314,14 @@ export function Microsoft365Card({
         </p>
       )}
 
-      {loadFailed && !view && (
-        <p className="type-caption-1" data-testid="m365-load-failed">
-          Droplet could not read your Microsoft 365 connection. Reload the page to try again.
-        </p>
+      {loadFailed && (
+        <div className="space-y-2" data-testid="m365-load-failed">
+          <p className="type-caption-1">Droplet could not read your Microsoft 365 connection.</p>
+          <button type="button" className="btn" disabled={loading} onClick={() => void load()}>{loading ? "Checking…" : "Retry"}</button>
+        </div>
       )}
+      {!view && !loadFailed && <p className="type-caption-1" role="status">Checking connection…</p>}
+      {opensRegisteredAddress && <p className="type-caption-1">Account linking opens Droplet&apos;s registered address. You may need to sign in to Droplet there.</p>}
 
       {view && (
         <div className="space-y-1" data-testid="m365-state">
@@ -308,8 +329,8 @@ export function Microsoft365Card({
             {stateLabel(view)}
             {connected && since ? ` · since ${since}` : ""}
           </p>
-          {(view.state === "NEEDS_RECONNECT" || view.state === "ERROR") && view.lastError && (
-            <p className="type-caption-1">{view.lastError}</p>
+          {(view.state === "NEEDS_RECONNECT" || view.state === "ERROR") && (
+            <p className="type-caption-1">Reconnect to let Droplet continue reading your account.</p>
           )}
           {(view.state === "NEEDS_RECONNECT" || view.state === "ERROR") && hint && (
             <p className="type-caption-1" data-testid="m365-hint">
@@ -319,11 +340,13 @@ export function Microsoft365Card({
         </div>
       )}
 
-      {view && connected && (
+      {view && (connected || view.accountUpn || view.calendar?.enabled) && (
         <button className="btn" disabled={busy} onClick={() => setConfirmingDisconnect(true)}>
           Disconnect
         </button>
       )}
+
+      {view?.calendar && (connected || view.calendar.enabled) && <Microsoft365Calendar view={view.calendar} accountAddress={view.accountUpn} connected={connected} onChanged={load} onReconnect={() => void signIn()} signInBusy={busy} />}
 
       {view && connected && (
         <Microsoft365Files
@@ -337,10 +360,18 @@ export function Microsoft365Card({
       )}
 
       {view && !connected && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div className="space-y-3">
+          {!configured && <p className="type-caption-1">Ask your Droplet administrator to enable Microsoft account connections.</p>}
+          <button className="btn primary type-subheadline" disabled={busy || loading || !configured || loadFailed} onClick={() => void signIn()}>
+            {busy ? "Opening Microsoft…" : view.state === "NEEDS_RECONNECT" || view.state === "ERROR" ? "Reconnect Outlook" : "Connect Outlook"}
+          </button>
+          {view.app && <details className="type-caption-1">
+            <summary className="cursor-pointer py-2">Advanced personal app settings</summary>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-3">
           <label className="flex flex-col gap-1.5">
             Application (client) ID
             <input
+              className="dp-input"
               value={clientId}
               onChange={(e) => setClientId(e.target.value)}
               spellCheck={false}
@@ -350,34 +381,22 @@ export function Microsoft365Card({
           <label className="flex flex-col gap-1.5">
             Directory (tenant) ID
             <input
+              className="dp-input"
               value={tenantId}
               onChange={(e) => setTenantId(e.target.value)}
               spellCheck={false}
               autoComplete="off"
             />
           </label>
-          <label className="flex flex-col gap-1.5 sm:col-span-2">
-            Redirect URI for your app registration
-            <span className="flex items-center gap-2">
-              <input value={view.redirectUri} readOnly className="flex-1" onFocus={(e) => e.target.select()} />
-              <button className="btn" type="button" onClick={() => void copyRedirect()}>
-                {copied ? "Copied" : "Copy"}
-              </button>
-            </span>
-          </label>
           <p className="type-caption-1 px-0.5 sm:col-span-2">
-            Register it under “Mobile and desktop applications” on a single-tenant app. Both IDs are
-            on the app registration&apos;s Overview page. Neither is a secret.
+            Your saved personal registration still works. Administrator setup lets everyone connect
+            without entering these settings. <a href={SETUP_GUIDE_HREF} className="underline">Microsoft setup guide</a>
           </p>
           <div className="flex items-center gap-2 pt-1 sm:col-span-2">
-            <button className="btn primary type-subheadline" disabled={busy} onClick={() => void signIn()}>
-              {busy
-                ? "Opening Microsoft…"
-                : view.state === "NEEDS_RECONNECT" || view.state === "ERROR"
-                  ? "Sign in again"
-                  : "Sign in with Microsoft"}
-            </button>
+            <button className="btn" disabled={busy || !clientId.trim() || !tenantId.trim()} onClick={() => void signIn(true)}>Connect using these settings</button>
           </div>
+            </div>
+          </details>}
         </div>
       )}
 
@@ -392,7 +411,7 @@ export function Microsoft365Card({
         title="Disconnect Microsoft 365?"
         description={
           "Droplet will forget the key Microsoft gave it for this account and stop reading its mail, " +
-          "calendar, contacts and files. Nothing in your Microsoft 365 account changes. To revoke it " +
+          "calendar, contacts and files, and delete the calendar events copied locally. Nothing in your Microsoft 365 account changes. To revoke it " +
           "on Microsoft's side too, ask your Microsoft admin to remove Droplet's permissions."
         }
         confirmedIdentifier={view?.accountUpn ?? undefined}

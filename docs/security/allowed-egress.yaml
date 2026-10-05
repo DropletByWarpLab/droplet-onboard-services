@@ -633,6 +633,76 @@ entries:
     # preauthenticated download host, and nothing here follows that redirect.
     code_refs: [apps/orchestrator/src/services/m365/graph-client.ts, apps/orchestrator/src/services/m365/graph-resources.ts, apps/orchestrator/src/services/m365/m365-sync.service.ts, apps/orchestrator/src/services/m365/delta-cursor.service.ts, apps/orchestrator/src/services/m365/sync-policy.ts]
 
+  - id: google-mail-oauth
+    kind: egress
+    service: orchestrator
+    destination:
+      hosts: [oauth2.googleapis.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: none
+    purpose: >-
+      WARP-3788 customer-owned Google Web OAuth client: code exchange, per-person
+      refresh and best-effort revocation. Protocol credentials only, encrypted
+      on the appliance and never logged. No public inbound or cloud relay.
+    ticket: WARP-3788
+    added: 2026-10-05
+    review_by: 2027-10-05
+    code_refs: [apps/orchestrator/src/services/google/google-client.ts]
+
+  - id: google-account-calendar-api
+    kind: egress
+    service: orchestrator
+    destination:
+      hosts: [www.googleapis.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      Verified Google email identity and read-only primary Calendar event
+      snapshots after explicit per-person browser consent. Calendar-only
+      connections request no mail access. Gmail IMAP/SMTP is separate.
+    ticket: WARP-3788
+    added: 2026-10-05
+    review_by: 2027-10-05
+    code_refs: [apps/orchestrator/src/services/google/google-client.ts, apps/orchestrator/src/services/google/google-calendar-client.ts]
+
+  - id: google-mail-imap-smtp
+    kind: egress
+    service: email-indexer
+    destination:
+      hosts: [imap.gmail.com, smtp.gmail.com]
+      ports: [993, 465]
+      protocol: tls
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      Gmail mailbox transport after per-person OAuth approval: existing local
+      mail ingest over IMAP and human-approved outgoing mail over SMTP using
+      XOAUTH2. Sends retain the existing outbound_email gate and draft claim.
+    ticket: WARP-3788
+    added: 2026-10-05
+    review_by: 2027-10-05
+    code_refs: [apps/orchestrator/src/services/google/google-auth.service.ts]
+
+  - id: ref-google-mail-scope
+    kind: reference
+    service: orchestrator
+    destination:
+      hosts: [mail.google.com]
+    phase: runtime
+    data_class: none
+    purpose: >-
+      Gmail IMAP/SMTP permission identifier in the Google consent request,
+      never a destination the orchestrator dials. Google requires this full-mail
+      scope for XOAUTH2; the person approves it on Google's own screen.
+    ticket: WARP-3788
+    added: 2026-10-05
+    review_by: 2027-10-05
+    code_refs: [apps/orchestrator/src/services/google/scopes.ts]
+
   - id: m365-entra-login
     kind: egress
     service: orchestrator

@@ -2467,6 +2467,8 @@ model CalendarEvent {
   sourceId     String? // FK to CalendarSource.id (when source="external")
   externalUid  String? // iCalendar UID — used as idempotency key on re-sync
   externalEtag String? // CalDAV ETag for change detection
+  /// WARP-3788: explicit mark for paginated cloud calendar enumeration sweeps.
+  externalSeenRun String?
   /// WARP-3266 — explicit, never derived from externalUid's shape:
   /// "none" — a one-off event (every local row);
   /// "occurrence" — one instance of a subscribed recurring series, expanded
@@ -2509,6 +2511,12 @@ model CalendarSource {
   allowPrivateHost Boolean   @default(false)
   lastSyncAt       DateTime?
   lastSyncError    String?
+  /// WARP-3788: durable mark/window for Microsoft full-enumeration checkpoints.
+  externalSyncRun  String?
+  externalWindowStart DateTime?
+  externalWindowEnd DateTime?
+  googleConnection GoogleConnection? @relation("GoogleCalendar")
+  microsoftConnection M365Connection? @relation("MicrosoftCalendar")
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
 
@@ -3160,6 +3168,7 @@ model DeviceIntentState {
 // affordance without a schema migration when mirroring lands.
 model User {
   id                 String              @id @default(uuid())
+  googleConnection   GoogleConnection?
   // Login handle. Unique across the directory. For Nextcloud-mirror
   // rows this matches the OCS user id so `req.user.username` from the
   // auth middleware resolves directly to this row.
@@ -4218,7 +4227,9 @@ model EmailAccount {
   smtpPort    Int             @default(465)
   smtpTls     Boolean         @default(true)
   username    String
-  passwordEnc String
+  passwordEnc String?
+  authMode    MailboxAuthMode @default(PASSWORD)
+  googleConnection GoogleConnection?
   imapStatus  EmailImapStatus @default(paused)
   lastIdleAt  DateTime?
   lastErrorAt DateTime?
@@ -8953,6 +8964,11 @@ model M365Connection {
   userId String @unique
 
   state M365ConnectionState @default(DISCONNECTED)
+  /// The person's explicit opt-in to a read-only local calendar copy.
+  calendarEnabled Boolean @default(false)
+  calendarSyncState CloudCalendarSyncState @default(DISCONNECTED)
+  calendarSourceId String? @unique
+  calendarSource CalendarSource? @relation("MicrosoftCalendar", fields: [calendarSourceId], references: [id], onDelete: SetNull)
 
   /// Entra's stable account identifier (MSAL `homeAccountId`). Selects the
   /// right account out of the cache when refreshing.
@@ -10448,4 +10464,67 @@ enum BriefingPhotoStatus {
 enum BriefingTrigger {
   scheduler
   user
+}
+
+// WARP-3788: explicit authentication mode; a missing password never selects OAuth.
+enum MailboxAuthMode {
+  PASSWORD
+  GOOGLE_OAUTH
+}
+
+enum CloudOAuthProvider {
+  GOOGLE
+  MICROSOFT
+}
+
+/// A customer's OAuth app configured once on their own Droplet. No fleet credentials.
+model CloudOAuthApp {
+  provider        CloudOAuthProvider @id
+  clientId        String
+  tenantId        String?
+  clientSecretEnc String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+enum GoogleConnectionState {
+  DISCONNECTED
+  PENDING_CONSENT
+  CONNECTED
+  NEEDS_RECONNECT
+  ERROR
+}
+
+enum CloudCalendarSyncState {
+  DISCONNECTED
+  WAITING
+  CONNECTED
+  NEEDS_RECONNECT
+  ERROR
+}
+
+/// Per-person Google mail/calendar grant. Ciphertexts are bound to person and purpose.
+/// Removing mail can preserve Calendar; deleting a person purges grants and local copies.
+model GoogleConnection {
+  id               String @id @default(uuid())
+  userId           String @unique
+  user             User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  state            GoogleConnectionState @default(DISCONNECTED)
+  mailEnabled      Boolean @default(true)
+  calendarEnabled  Boolean @default(false)
+  calendarSyncState CloudCalendarSyncState @default(DISCONNECTED)
+  calendarSourceId String? @unique
+  calendarSource CalendarSource? @relation("GoogleCalendar", fields: [calendarSourceId], references: [id], onDelete: SetNull)
+  accountAddress   String?
+  emailAccountId   String? @unique
+  emailAccount     EmailAccount? @relation(fields: [emailAccountId], references: [id], onDelete: SetNull)
+  tokenEnc         String?
+  pendingStateHash  String? @unique
+  pendingFlowEnc   String?
+  pendingExpiresAt DateTime?
+  connectedAt      DateTime?
+  lastRefreshOkAt  DateTime?
+  lastError        String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 }

@@ -47,10 +47,11 @@
  * not implemented** (WARP-2028) — writing mail there would ship a lie about how
  * the data is protected.
  *
- * Today the shipped caller lands exactly two workloads, `files` (OneDrive) and
- * `sharepoint` (one cursor per document library), as METADATA into the
+ * The shipped caller lands `files` (OneDrive) and `sharepoint` (one cursor per
+ * document library) as METADATA into the
  * provider-agnostic cloud-file store with its names encrypted
- * (`drive-landing.service.ts`, WARP-3538). Every other workload is still
+ * (`drive-landing.service.ts`, WARP-3538), and explicitly enabled `calendar`
+ * events into the person's external calendar source. Every other workload is still
  * counted and discarded: this runs its cursors, proves the transport, and
  * advances `lastSyncedAt` — the column the hub renders as "last synced" and
  * which, before WARP-2218, was only ever written by `connect()`.
@@ -75,6 +76,7 @@ import {
   M365NotConnectedError,
   markNeedsReconnect,
   type EntraClient,
+  type M365GrantGeneration,
 } from "./m365-auth.service.js";
 import {
   classifySyncFailure,
@@ -113,6 +115,7 @@ import {
 } from "./graph-resources.js";
 import { ensureSource, findSourceId, upsertSource } from "../cloud-files/cloud-file-store.service.js";
 import { pruneSharePointLibraries, purgeSharePointDataForUser } from "./drive-data.service.js";
+import { ensureMicrosoftCalendarCursor, recordMicrosoftCalendarFailure } from "./calendar-landing.service.js";
 
 /**
  * How many pages one cursor may walk in a single tick.
@@ -203,6 +206,8 @@ export interface M365SyncDeps {
   initialUrlFor: (workload: string, resourceId: string) => string | null;
   handlePage?: PageHandler;
   now?: () => Date;
+  /** Workspace capability only gates calendar; other Microsoft workloads keep running. */
+  calendarModuleEnabled?: boolean;
 }
 
 /**
@@ -226,6 +231,18 @@ export async function syncCursor(
     completed: false,
   };
 
+  if (cursor.workload === "calendar") {
+    if (deps.calendarModuleEnabled === false) return { ...base, error: "Calendar capability is disabled." };
+    const connection = await deps.prisma.m365Connection.findUnique({ where: { userId: cursor.userId },
+      select: { state: true, calendarEnabled: true, calendarSourceId: true, grantedScopes: true } });
+    if (connection?.state !== "CONNECTED" || connection.calendarEnabled !== true || !connection.calendarSourceId) return { ...base, error: "Outlook calendar import is off." };
+    if (!grantCovers((connection.grantedScopes ?? "").split(/\s+/).filter(Boolean), GRAPH_RESOURCES.calendar.leastPrivilegeScope)) return { ...base, error: "Outlook calendar permission needs reconnecting." };
+  }
+  if (cursor.cursorLinkHash !== undefined) {
+    const connection = await deps.prisma.m365Connection.findUnique({ where: { userId: cursor.userId }, select: { state: true, cursorLinkHash: true } });
+    if (connection?.state !== "CONNECTED" || connection.cursorLinkHash !== cursor.cursorLinkHash) return { ...base, error: "The Microsoft connection changed." };
+  }
+
   // A checkpoint from a run the page budget cut short takes precedence: the
   // pages before it were handled, and starting over would re-read them.
   let url: string | null = cursor.resumeLink ?? cursor.deltaLink;
@@ -247,8 +264,9 @@ export async function syncCursor(
   }
 
   let accessToken: string;
+  let generation: M365GrantGeneration | undefined;
   try {
-    accessToken = await getAccessToken(deps.prisma, deps.entra, cursor.userId, now());
+    accessToken = await getAccessToken(deps.prisma, deps.entra, cursor.userId, now(), (current) => { generation = current; });
   } catch (err) {
     if (err instanceof M365NotConnectedError) {
       // A dead or missing grant. `classifySyncFailure` maps this to AUTH,
@@ -284,6 +302,7 @@ export async function syncCursor(
     };
   }
 
+  if (generation && cursor.cursorLinkHash !== undefined && generation.cursorLinkHash !== cursor.cursorLinkHash) return { ...base, error: "The Microsoft connection changed." };
   let items = 0;
   let pages = 0;
 
@@ -307,6 +326,7 @@ export async function syncCursor(
       // throttled request still spends the tenant's budget.
       const retryAfter = err instanceof GraphRequestError ? err.retryAfterHeader : null;
       await recordFailure(deps.prisma, cursor.id, shaped, retryAfter, now());
+      if (cursor.workload === "calendar") await recordMicrosoftCalendarFailure(deps.prisma, cursor.userId, classifySyncFailure(shaped) === "AUTH", generation);
       // 🔴 A 403 on a SHAREPOINT cursor is not a dead grant. Losing access to one
       // library — a site's permissions changed, the library was locked or
       // deleted, a policy applies to that one site — answers 403 for that
@@ -329,6 +349,7 @@ export async function syncCursor(
           deps.prisma,
           cursor.userId,
           "Microsoft rejected the sync's access to this account.",
+          ...(generation ? [generation] as const : [] as const),
         );
       }
       return {
@@ -360,6 +381,7 @@ export async function syncCursor(
           null,
           now(),
         );
+        if (cursor.workload === "calendar") await recordMicrosoftCalendarFailure(deps.prisma, cursor.userId, false, generation);
         return {
           ...base,
           items,
@@ -415,7 +437,8 @@ export async function runSyncTick(
   limit = 25,
 ): Promise<SyncTickResult> {
   const now = deps.now ?? (() => new Date());
-  const due = await claimDueCursors(deps.prisma, limit, now());
+  const due = (await claimDueCursors(deps.prisma, limit, now(), deps.calendarModuleEnabled === false))
+    .filter((cursor) => deps.calendarModuleEnabled !== false || cursor.workload !== "calendar");
 
   const results: CursorSyncResult[] = [];
   for (const cursor of due) {
@@ -540,8 +563,8 @@ export async function discoverResources(
   // Microsoft granted this time, which may be narrower than last time.
   const connection = (await deps.prisma.m365Connection.findUnique({
     where: { userId },
-    select: { grantedScopes: true, sharePointEnabled: true },
-  })) as { grantedScopes: string | null; sharePointEnabled?: boolean } | null;
+    select: { grantedScopes: true, sharePointEnabled: true, calendarEnabled: true },
+  })) as { grantedScopes: string | null; sharePointEnabled?: boolean; calendarEnabled?: boolean } | null;
   const granted = (connection?.grantedScopes ?? "").split(" ").filter(Boolean);
   // `=== true`, not truthiness: an absent or malformed flag is OFF. Explicit
   // state, never inferred (WARP-3538).
@@ -555,6 +578,16 @@ export async function discoverResources(
 
   for (const workload of M365_WORKLOADS) {
     const spec = GRAPH_RESOURCES[workload];
+
+    if (workload === "calendar") {
+      if (deps.calendarModuleEnabled === false || connection?.calendarEnabled !== true) { disabled.push(workload); continue; }
+      if (!grantCovers(granted, spec.leastPrivilegeScope)) { notGranted.push(workload); continue; }
+      try {
+        if (await ensureMicrosoftCalendarCursor(deps.prisma, userId, now())) registered += 1;
+        else disabled.push(workload);
+      } catch { skipped.push(workload); }
+      continue;
+    }
 
     // SharePoint: the person's choice first, then the grant, then a walk of its
     // own. `continue` after every arm, so it can never fall into the folder

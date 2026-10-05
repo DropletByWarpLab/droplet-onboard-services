@@ -164,6 +164,63 @@ beforeEach(() => {
   getAccessTokenMock.mockResolvedValue("tok");
 });
 
+describe("calendar sync requires an enabled capability, explicit opt-in and consent", () => {
+  it("never replays an old identity's cursor against a replacement Microsoft account", async () => {
+    const prisma = fakePrisma([row()]);
+    Object.assign(prisma.m365Connection, { findUnique: vi.fn(async () => ({ state: "CONNECTED", cursorLinkHash: "new-account" })) });
+    const settings = deps(prisma);
+    const result = await syncCursor(settings, due({ cursorLinkHash: "old-account" }));
+    expect(result).toMatchObject({ completed: false, pages: 0 });
+    expect(getAccessTokenMock).not.toHaveBeenCalled();
+    expect(settings.client.getPage).not.toHaveBeenCalled();
+    expect(markNeedsReconnectMock).not.toHaveBeenCalled();
+  });
+  it("passes the acquired grant generation to a Graph auth-failure update", async () => {
+    const prisma = fakePrisma([row()]);
+    const generation = { tokenCacheEnc: "encrypted-cache-marker", cursorLinkHash: "account" };
+    getAccessTokenMock.mockImplementationOnce(async (_prisma, _entra, _user, _now, onGrant) => { onGrant(generation); return "tok"; });
+    const settings = deps(prisma, { client: { getPage: vi.fn(async () => { throw new GraphRequestError({ statusCode: 401, message: "denied" }); }) } as never });
+    await syncCursor(settings, due());
+    expect(markNeedsReconnectMock).toHaveBeenCalledWith(prisma, USER, expect.any(String), generation);
+  });
+
+  it("does not acquire a token or call Graph when the calendar capability is disabled", async () => {
+    const prisma = fakePrisma([row({ workload: "calendar" })]);
+    const settings = deps(prisma, { calendarModuleEnabled: false });
+    expect(await syncCursor(settings, due({ workload: "calendar" }))).toMatchObject({ completed: false, pages: 0 });
+    expect(getAccessTokenMock).not.toHaveBeenCalled();
+    expect(settings.client.getPage).not.toHaveBeenCalled();
+    expect(prisma.m365DeltaCursor.updateMany).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { state: "CONNECTED", calendarEnabled: false, calendarSourceId: "s1", grantedScopes: "Calendars.Read" },
+    { state: "NEEDS_RECONNECT", calendarEnabled: true, calendarSourceId: "s1", grantedScopes: "Calendars.Read" },
+    { state: "CONNECTED", calendarEnabled: true, calendarSourceId: null, grantedScopes: "Calendars.Read" },
+    { state: "CONNECTED", calendarEnabled: true, calendarSourceId: "s1", grantedScopes: "Mail.Read" },
+  ])("does not call Graph for ineligible calendar connection %j", async (connection) => {
+    const prisma = fakePrisma([row({ workload: "calendar" })]);
+    Object.assign(prisma.m365Connection, { findUnique: vi.fn(async () => connection) });
+    const settings = deps(prisma);
+    expect(await syncCursor(settings, due({ workload: "calendar" }))).toMatchObject({ completed: false, pages: 0 });
+    expect(getAccessTokenMock).not.toHaveBeenCalled();
+    expect(settings.client.getPage).not.toHaveBeenCalled();
+  });
+
+  it("keeps other Microsoft workloads running while skipping calendar cursors", async () => {
+    const prisma = fakePrisma([row({ id: "calendar", workload: "calendar" }), row({ id: "mail", state: "IDLE" })]);
+    const settings = deps(prisma, { calendarModuleEnabled: false });
+    const result = await runSyncTick(settings);
+    expect(result).toMatchObject({ cursorsClaimed: 1, cursorsCompleted: 1 });
+    expect(result.results.map((cursor) => cursor.workload)).toEqual(["mail"]);
+    expect(settings.client.getPage).toHaveBeenCalledTimes(1);
+    expect(prisma.m365DeltaCursor.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ workload: { not: "calendar" } }),
+    }));
+    expect(prisma.__rows().find((cursor) => cursor.id === "calendar")?.deltaLink).toBe(DELTA);
+  });
+});
+
 describe("syncCursor — a page handler that throws", () => {
   it("parks the cursor in BACKOFF with its delta link intact, never FAILED", async () => {
     const prisma = fakePrisma([row()]);
@@ -451,14 +508,14 @@ describe("discoverResources — only what the grant covers (WARP-3059)", () => {
     );
 
     expect(found.notGranted).toEqual(["todo"]);
-    // SharePoint is the person's choice (WARP-3538): off by default, so neither
+    // Calendar and SharePoint are the person's choices: off by default, so neither
     // a refusal nor a break — its own word.
-    expect(found.disabled).toEqual(["sharepoint"]);
+    expect(found.disabled).toEqual(["calendar", "sharepoint"]);
     expect(found.skipped).toEqual([]); // nothing index.ts would log as a fault
     const urls = vi.mocked(client.getPage).mock.calls.map((c) => String(c[0]));
     expect(urls.some((u) => u.includes("/todo/"))).toBe(false);
-    // The singletons still register.
-    expect(prisma.upserts.map((u) => u.workload).sort()).toEqual(["calendar", "files"]);
+    // OneDrive still registers while calendar import is off.
+    expect(prisma.upserts.map((u) => u.workload).sort()).toEqual(["files"]);
   });
 
   it("attempts nothing for a grant it cannot read", async () => {
@@ -470,8 +527,8 @@ describe("discoverResources — only what the grant covers (WARP-3059)", () => {
       { prisma: prisma as never, client, entra: {} as never, initialUrlFor: () => null, now: () => NOW },
       USER,
     );
-    expect(found.notGranted).toEqual(["mail", "calendar", "contacts", "files", "todo"]);
-    expect(found.disabled).toEqual(["sharepoint"]);
+    expect(found.notGranted).toEqual(["mail", "contacts", "files", "todo"]);
+    expect(found.disabled).toEqual(["calendar", "sharepoint"]);
     expect(client.getPage).not.toHaveBeenCalled();
   });
 });
@@ -672,14 +729,12 @@ describe("a grant that covers no workload says so (#2347 review)", () => {
     expect(grantCoversNoWorkload(found)).toBe(false);
   });
 
-  it("judges a person who has not opted in to SharePoint on the OTHER workloads only (WARP-3538)", async () => {
-    // Five of the six workloads not granted, and the sixth — SharePoint — is the
-    // person's own off switch, not a refusal. Before `disabled` existed this was
-    // 5 !== 6 and read as "something is covered", so a grant that covered
-    // nothing was never warned about for anyone who had not opted in.
+  it("judges a person who has not opted in to calendar or SharePoint on the other workloads only", async () => {
+    // A person's off switches are not refusals. Excluding those workloads keeps
+    // a grant that covers nothing from being mistaken for a usable grant.
     const found = await discover("offline_access User.Read openid profile");
-    expect(found.notGranted).toEqual(["mail", "calendar", "contacts", "files", "todo"]);
-    expect(found.disabled).toEqual(["sharepoint"]);
+    expect(found.notGranted).toEqual(["mail", "contacts", "files", "todo"]);
+    expect(found.disabled).toEqual(["calendar", "sharepoint"]);
     expect(grantCoversNoWorkload(found)).toBe(true);
   });
 
@@ -707,14 +762,17 @@ describe("a grant that covers no workload says so (#2347 review)", () => {
     expect(grantCoversNoWorkload(await discover(null))).toBe(false);
   });
 
-  it("index.ts wires the drive landing handler into the sync tick (WARP-3538)", () => {
+  it("index.ts wires drive and calendar landing handlers into the sync tick", () => {
     // Without `handlePage` the engine reads every OneDrive and SharePoint page and
     // discards it: the card says "synced", the file search is empty, and nothing
     // fails. The same source pin as below — index.ts opens sockets on import.
     const index = readFileSync(resolve(__dirname, "../../index.ts"), "utf8");
     const deps = index.slice(index.indexOf("const m365Deps: M365SyncDeps = {"), index.indexOf("const m365TickMs"));
     expect(deps.length).toBeGreaterThan(0);
-    expect(deps).toMatch(/handlePage:\s*createDriveLandingHandler\(/);
+    expect(index).toMatch(/const driveLanding\s*=\s*createDriveLandingHandler\(/);
+    expect(index).toMatch(/const calendarLanding\s*=\s*createMicrosoftCalendarPageHandler\(/);
+    expect(deps).toMatch(/await driveLanding\(cursor, page, run\)/);
+    expect(deps).toMatch(/await calendarLanding\(cursor, page, run\)/);
   });
 
   it("the scheduler logs it: index.ts is the only caller, and the unit lane cannot run it", () => {

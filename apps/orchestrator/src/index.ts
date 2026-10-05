@@ -204,6 +204,9 @@ import { GraphClient } from "./services/m365/graph-client.js";
 import { initialUrlFor } from "./services/m365/graph-resources.js";
 import { createEntraClient } from "./services/m365/entra-client.js";
 import { createDriveLandingHandler } from "./services/m365/drive-landing.service.js";
+import { createMicrosoftCalendarPageHandler } from "./services/m365/calendar-landing.service.js";
+import { syncGoogleCalendars } from "./services/google/google-calendar-sync.service.js";
+import { getEffectiveModuleIds } from "./services/modules.service.js";
 
 /**
  * Product version for the Graph `User-Agent` Microsoft asks integrators to
@@ -2167,17 +2170,23 @@ async function main() {
   // `lockKey` for the same reason as the ERP legs: without it a multi-instance
   // box double-polls Microsoft and spends the tenant's throttling budget twice.
   {
+    const driveLanding = createDriveLandingHandler(prisma);
+    const calendarLanding = createMicrosoftCalendarPageHandler(prisma);
     const m365Deps: M365SyncDeps = {
       prisma: prisma as never,
       client: new GraphClient({ version: ORCHESTRATOR_M365_UA_VERSION }),
       entra: createEntraClient(),
       initialUrlFor,
       // WARP-3538 (ADR-041 §4) — what the engine does with a page. OneDrive and
-      // SharePoint pages land as encrypted METADATA in the cloud-file store; every
-      // other workload is still counted and discarded. Without this the engine
+      // SharePoint pages land as encrypted METADATA in the cloud-file store;
+      // opt-in calendar pages land in the existing read-only CalendarEvent store.
+      // Mail and contacts remain transport checks. Without this the engine
       // reads every drive page and throws it away: the card says "synced", the
       // file search is empty, and nothing fails.
-      handlePage: createDriveLandingHandler(prisma),
+      handlePage: async (cursor, page, run) => {
+        await driveLanding(cursor, page, run);
+        await calendarLanding(cursor, page, run);
+      },
     };
 
     // Read at BOOT, never at module import — `docker restart` does not re-read
@@ -2187,6 +2196,8 @@ async function main() {
     cronRuntime.scheduleInterval(
       jitteredPeriodMs(m365TickMs, `${config.DROPLET_DEVICE_ID}:m365`),
       async () => {
+        // A disabled Calendar module stops its cloud reads as well as its UI.
+        m365Deps.calendarModuleEnabled = (await getEffectiveModuleIds(prisma, config)).has("calendar");
         // Only CONNECTED grants. A NEEDS_RECONNECT row has a dead refresh
         // token, and enumerating it every tick would hammer Entra to produce
         // the same failure the person already has to act on.
@@ -2231,6 +2242,13 @@ async function main() {
       { lockKey: "droplet:m365-delta-sync" },
     );
   }
+
+  // WARP-3788: bounded snapshots of opted-in Google primary calendars.
+  // The existing cron runtime serializes ticks across appliance instances.
+  cronRuntime.scheduleInterval(5 * 60 * 1000, async () => {
+    if (!(await getEffectiveModuleIds(prisma, config)).has("calendar")) return;
+    await syncGoogleCalendars(prisma);
+  }, { lockKey: "droplet:google-calendar-sync" });
 
   // WARP-3193 QUAL-7 — pollers that used to own a setInterval (two of them at
   // module scope, started by a bare import; two from createApp, so every test

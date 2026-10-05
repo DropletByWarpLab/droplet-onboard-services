@@ -57,7 +57,7 @@ async def list_accounts() -> list[AccountConfig]:
     rows = await _pool.fetch(
         """
         SELECT id, address, "imapHost", "imapPort", "imapTls",
-               username, "passwordEnc"
+               username, "passwordEnc", "authMode"
         FROM "EmailAccount"
         """,
     )
@@ -70,6 +70,7 @@ async def list_accounts() -> list[AccountConfig]:
             imap_tls=r["imapTls"],
             username=r["username"],
             password_enc=r["passwordEnc"],
+            auth_mode=r["authMode"],
         )
         for r in rows
     ]
@@ -88,7 +89,7 @@ async def list_queued_drafts() -> list[DraftToSend]:
                d."messageId", d."autoSubmitted",
                a."address" AS from_addr,
                a."smtpHost", a."smtpPort", a."smtpTls",
-               a."username", a."passwordEnc"
+               a."username", a."passwordEnc", a."authMode"
         FROM "EmailDraft" d
         JOIN "EmailAccount" a ON a.id = d."accountId"
         WHERE d.status = 'queued'
@@ -152,6 +153,7 @@ async def list_queued_drafts() -> list[DraftToSend]:
                 smtp_tls=r["smtpTls"],
                 username=r["username"],
                 password_enc=r["passwordEnc"],
+                auth_mode=r["authMode"],
                 to_addrs=list(r["toAddrs"] or []),
                 cc_addrs=list(r["ccAddrs"]) if r["ccAddrs"] else None,
                 bcc_addrs=list(r["bccAddrs"]) if r["bccAddrs"] else None,

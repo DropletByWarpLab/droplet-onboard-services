@@ -203,7 +203,17 @@ trust, PM secrets) are summarized in [`CLAUDE.md`](../CLAUDE.md).
 | `WHISPER_CPUS` | (WARP-3126) Wyoming Whisper STT CPU ceiling (default `4.0`, was `2.0`). Transcription runs on every voice turn, just before the LLM call, so this quota decides the STT stage's latency. Keep it equal to `WHISPER_CPU_THREADS` (WARP-1434). Lower both together on a CPU-tight host, because Frigate and the inference runtime share the cores. STT is CPU-only |
 | `WHISPER_CPU_THREADS` | (WARP-3126) Whisper's CTranslate2 `--cpu-threads` (default `4`, was `2`). Must equal `WHISPER_CPUS` (WARP-1434): more threads than cores only adds context-switch churn, and fewer leaves part of the quota idle |
 | (other `*_MEM_LIMIT` / `*_CPUS`) | Per-service overrides for every container. See [`ADR-021-container-resource-limits.md`](ADR-021-container-resource-limits.md) for the full list and RAM budget. |
-| `M365_AUTHORITY_HOST` | Entra login host for the **Microsoft 365 cloud connector** ([ADR-041](ADR-041-cloud-connector-class.md)) (default `https://login.microsoftonline.com`, correct for every commercial tenant). There is **no `M365_CLIENT_ID`** (removed by WARP-2705): each person connects through their organisation's own single-tenant Entra app, whose client and tenant ids are stored on their `M365Connection` row, and signs in by authorization code + PKCE (WARP-2704) with Microsoft redirecting back to `/api/m365/callback` on the box's own origin. A knob only so a national cloud could be targeted without a code change — not supported today, and any replacement host must first be registered in [`docs/security/allowed-egress.yaml`](security/allowed-egress.yaml) or egress is denied by default. |
+| `M365_AUTHORITY_HOST` | Entra login host for the **Microsoft 365 cloud connector** ([ADR-041](ADR-041-cloud-connector-class.md)) (default `https://login.microsoftonline.com`, correct for every commercial tenant). There is **no `M365_CLIENT_ID`** (removed by WARP-2705): the owner saves their organisation's single-tenant app in Account connection setup (WARP-3788), while existing per-person registrations take precedence. Each person's app IDs and grant are stored on their `M365Connection` row. Sign-in uses authorization code + PKCE, returning to `/api/m365/callback` on the appliance. A replacement authority host is not supported today and must first be registered in [`docs/security/allowed-egress.yaml`](security/allowed-egress.yaml), or egress is denied by default. |
+
+Account linking (WARP-3788) has no new environment credentials. An owner or
+administrator saves the customer-owned Google OAuth client and Microsoft
+single-tenant app in **Settings → Connected accounts → Account connection
+setup**. Provider configuration lives in `CloudOAuthApp`; the Google client
+secret is encrypted. Each user's Google grant or Microsoft app and token cache
+remain on their own connection row. The browser returns to the appliance over
+LAN/VPN. Google requires the provisioned HTTPS device hostname, not `.local` or
+a raw IP address. See [Google setup](integrations/google-mail.md) and
+[Microsoft setup](integrations/microsoft-365.md).
 
 ## FIPS 140-3 policy
 

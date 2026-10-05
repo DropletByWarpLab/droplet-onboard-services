@@ -58,8 +58,10 @@ function authResult(overrides: Partial<EntraAuthResult> = {}): EntraAuthResult {
 /** Minimal structural Prisma stub — no mock database, just recorded calls. */
 function stubPrisma(row: Record<string, unknown> | null) {
   let current = row;
-  return {
+  const db = {
     _row: () => current,
+    user: { findFirst: vi.fn(async () => ({ id: USER_ID, directoryStatus: "ACTIVE", deletionStatus: "NONE" })) },
+    $transaction: async <T>(work: (tx: unknown) => Promise<T>): Promise<T> => work(db),
     m365Connection: {
       findUnique: vi.fn(async () => current),
       upsert: vi.fn(async ({ update }: { update: Record<string, unknown> }) => {
@@ -82,6 +84,7 @@ function stubPrisma(row: Record<string, unknown> | null) {
     cloudFileItem: { deleteMany: vi.fn(async () => ({ count: 0 })) },
     cloudFileSource: { deleteMany: vi.fn(async () => ({ count: 0 })) },
   };
+  return db;
 }
 
 function rows(what: string) {
