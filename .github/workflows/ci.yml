@@ -1282,6 +1282,7 @@ jobs:
           if git diff --name-only "origin/${{ github.base_ref }}...HEAD" -- \
                ':(glob)**/package-lock.json' ':(glob)**/requirements*' \
                .trivyignore .github/trivy-db-version .github/workflows/ci.yml \
+               .github/workflows/publish-release.yml \
                | grep -q .; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
@@ -1300,6 +1301,9 @@ jobs:
         env:
           TRIVY_DB_REPOSITORY: ghcr.io/aquasecurity/trivy-db@${{ steps.trivydb.outputs.ref }}
           TRIVY_SKIP_VERSION_CHECK: "true"
+          # Trivy's pip default recognizes only requirements.txt. Include the
+          # exact pins and transitive packages in our runtime/dev hash locks.
+          TRIVY_FILE_PATTERNS: 'pip:requirements[^/]*\.lock$'
         with:
           scan-type: fs
           scan-ref: .

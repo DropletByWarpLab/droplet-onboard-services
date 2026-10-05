@@ -217,6 +217,8 @@ jobs:
         env:
           TRIVY_DB_REPOSITORY: ghcr.io/aquasecurity/trivy-db@${{ steps.trivydb.outputs.ref }}
           TRIVY_SKIP_VERSION_CHECK: "true"
+          # Match the PR gate: hash locks contain the shipped Python resolution.
+          TRIVY_FILE_PATTERNS: 'pip:requirements[^/]*\.lock$'
         with:
           scan-type: fs
           scan-ref: .

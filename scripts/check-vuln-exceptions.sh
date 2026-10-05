@@ -95,7 +95,7 @@ if [ "${1:-}" = "--selfcheck" ]; then
     printf '# Snapshot pinned: %s (schema v2)\nsha256:x\n' "$3" > "$d/pin"
   }
   expect() { # $1=ok|bad $2=label
-    if (TRIVYIGNORE="$d/ti" OSV_TOML="$d/osv" TRIVY_PIN="$d/pin" CHECK_TODAY=2026-10-04 run_checks >/dev/null 2>&1); then got=ok; else got=bad; fi
+    if (TRIVYIGNORE="$d/ti" OSV_TOML="$d/osv" TRIVY_PIN="$d/pin" TODAY=2026-10-04 run_checks >/dev/null 2>&1); then got=ok; else got=bad; fi
     [ "$got" = "$1" ] || { echo "self-test FAILED: $2 (wanted $1)" >&2; exit 1; }
   }
   G_OSV='[[IgnoredVulns]]
