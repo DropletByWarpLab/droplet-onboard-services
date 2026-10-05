@@ -51,6 +51,7 @@ function makeFake() {
   ];
   const items: Row[] = [];
   const activity: Row[] = [];
+  const watchers: Row[] = [];
   const calls: string[] = [];
   const counts = { total: 0 };
   const lastFindMany: { args?: Row } = {};
@@ -157,9 +158,21 @@ function makeFake() {
         return {};
       },
     },
+    pmWorkItemWatcher: {
+      createMany: async ({ data }: { data: Row[] }) => {
+        let count = 0;
+        for (const row of data) {
+          if (!watchers.some((w) => w.workItemId === row.workItemId && w.userId === row.userId)) {
+            watchers.push({ ...row });
+            count += 1;
+          }
+        }
+        return { count };
+      },
+    },
   };
 
-  const seam = createTransactionSeam({ client: () => self, stores: { items, activity } });
+  const seam = createTransactionSeam({ client: () => self, stores: { items, activity, watchers } });
   self.$transaction = seam.$transaction;
 
   return { prisma: self as never, items, activity, calls, addItem, project, counts, lastFindMany, lastCreate };
