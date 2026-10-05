@@ -13,7 +13,7 @@ import { EXTENSION_TOKEN_PREFIX } from "../services/extension-token.js";
 import { resolveExtensionPrincipal } from "../services/extension-principal.js";
 import {
   PM_API_PUBLIC_PREFIX,
-  resolveBoundPmApiTokenPrincipal,
+  resolveBoundPmApiPrincipal,
   recordBoundPmApiTokenUse,
   tokenAreaForPath,
   type PmApiTokenScope,
@@ -348,7 +348,7 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
       });
       return;
     }
-    void resolveBoundPmApiTokenPrincipal(headerToken)
+    void resolveBoundPmApiPrincipal(headerToken)
       .then((result) => {
         if (!result.ok) {
           res

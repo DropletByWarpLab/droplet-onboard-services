@@ -10,7 +10,7 @@
  * DOES reach authMiddleware.
  *
  * What a token is, in one sentence: its holder, with fewer permissions.
- *   - `resolvePmApiTokenPrincipal` resolves it to the holder's CURRENT row (role
+ *   - `resolvePmApiPrincipal` resolves it to the holder's CURRENT row (role
  *     and directory status read at this request), so every role, module and
  *     feature gate downstream runs exactly as it does for the holder's own
  *     session, and a token can never exceed what the holder may do today;
@@ -358,7 +358,7 @@ const INVALID: PmApiTokenAuth = { ok: false, code: "TOKEN_INVALID" };
  * compares hashes and a timing difference tells an attacker about a hash, not
  * about the token; the equality is then confirmed in constant time anyway.
  */
-export async function resolvePmApiTokenPrincipal(
+export async function resolvePmApiPrincipal(
   prisma: PrismaClient,
   presented: unknown,
   now = new Date(),
@@ -519,10 +519,10 @@ export function bindPmApiTokenPrisma(prisma: PrismaClient | null): void {
   boundPrisma = prisma;
 }
 
-/** `resolvePmApiTokenPrincipal` over the bound client; unbound refuses. */
-export async function resolveBoundPmApiTokenPrincipal(presented: unknown): Promise<PmApiTokenAuth> {
+/** `resolvePmApiPrincipal` over the bound client; unbound refuses. */
+export async function resolveBoundPmApiPrincipal(presented: unknown): Promise<PmApiTokenAuth> {
   if (!boundPrisma) return INVALID;
-  return resolvePmApiTokenPrincipal(boundPrisma, presented);
+  return resolvePmApiPrincipal(boundPrisma, presented);
 }
 
 /** `recordPmApiTokenUse` over the bound client; never throws, never waits for the caller. */
@@ -533,7 +533,7 @@ export function recordBoundPmApiTokenUse(tokenId: string): void {
 
 /**
  * Revoke every token `userId` holds that is not already revoked. Best-effort;
- * never throws — `resolvePmApiTokenPrincipal` refuses a deactivated holder (and a
+ * never throws — `resolvePmApiPrincipal` refuses a deactivated holder (and a
  * holder whose role changed) on its own, so a revoke that did not land here
  * still cannot be used.
  */
