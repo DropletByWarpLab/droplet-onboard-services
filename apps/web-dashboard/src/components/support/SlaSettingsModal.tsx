@@ -38,7 +38,7 @@ function SlaSettingsForm({ desk, agents, initial, calendars, onCalendarChanged, 
   const [calendar, setCalendar] = useState<BusinessCalendar | "new" | null>(null);
   const { departments } = useDepartments();
   const save = async () => {
-    if (busy) return;
+    if (busy || !initial.canManage) return;
     setBusy(true); setError(null); setSaved(false);
     try { const value = await slaActions.saveDesk(desk.id, { policy, assignment }); onSaved(value); setSaved(true); }
     catch (e) { setError(translateError(e, "support")); }

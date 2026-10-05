@@ -551,6 +551,11 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
   // words of the front desk: ticket, customer, status, assignee — never
   // requester, work item or compare-and-set.
   support: {
+    invalid_sla_configuration: "Check the targets, business hours, people and macro variables, then try again.",
+    calendar_not_found: "That business calendar is no longer available. Choose another one.",
+    calendar_in_use: "This calendar is used by a service level policy. Choose another calendar in that policy first.",
+    macro_not_found: "That macro is no longer available, or you cannot change it. Refresh the list.",
+    invalid_report_range: "Choose valid dates no more than 366 days apart.",
     // Emitted by BOTH the box-wide module gate and the per-person grant check
     // (identical bodies by design), so it names neither as the reason.
     module_disabled:

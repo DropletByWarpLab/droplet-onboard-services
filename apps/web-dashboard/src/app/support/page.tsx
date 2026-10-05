@@ -123,7 +123,7 @@ function SupportWorkspace(): JSX.Element {
           <PmIcon name="plus" size={14} /> New ticket
         </button>
       )}
-      {manage && scopedDesk && (
+      {scopedDesk && (
         <button className="btn" type="button" onClick={() => setModal("sla")}>Service levels</button>
       )}
       {manage && scopedDesk && (
