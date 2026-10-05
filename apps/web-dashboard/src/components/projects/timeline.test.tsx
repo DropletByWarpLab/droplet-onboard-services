@@ -85,10 +85,9 @@ const REFS: PmTimelineRefs = {
   workItems: {},
 };
 
-const DIRECTORY = [
-  { id: "ada", userId: "u1", username: "ada", displayName: "Ada Lovelace" },
-  { id: "bea", userId: "u2", username: "bea", displayName: "Bea Bell" },
-  { id: "ghost", userId: null, username: "ghost", displayName: "No Local Row" },
+const PEOPLE = [
+  { id: "u1", displayName: "Ada Lovelace", avatarUrl: null },
+  { id: "u2", displayName: "Bea Bell", avatarUrl: null },
 ];
 
 let timeline: PmTimelineEntry[] = [];
@@ -100,7 +99,7 @@ function serve() {
     if (url.includes("/timeline")) {
       return ok({ timeline, refs: REFS, nextCursor: null, total: timeline.length });
     }
-    if (url.endsWith("/users")) return ok({ users: DIRECTORY });
+    if (url.endsWith("/people")) return ok({ people: PEOPLE });
     return ok(method === "POST" ? { comment: comment("new") } : {});
   };
 }
@@ -290,7 +289,7 @@ describe("ActivitySection — states", () => {
   });
 
   it("shows a skeleton — not the empty copy — while the thread is loading", async () => {
-    h.handler = (url) => (url.includes("/timeline") ? new Promise(() => undefined) : ok({ users: [] }));
+    h.handler = (url) => (url.includes("/timeline") ? new Promise(() => undefined) : ok({ people: [] }));
     const { container } = renderSection();
 
     await waitFor(() => expect(container.querySelector(".pm-skel")).not.toBeNull());
@@ -300,7 +299,7 @@ describe("ActivitySection — states", () => {
   });
 
   it("explains a failed load and offers Try again, which reads it again", async () => {
-    h.handler = (url) => (url.includes("/timeline") ? fail(500) : ok({ users: [] }));
+    h.handler = (url) => (url.includes("/timeline") ? fail(500) : ok({ people: [] }));
     renderSection();
 
     expect(
@@ -323,7 +322,7 @@ describe("ActivitySection — states", () => {
     h.handler = (url) =>
       url.includes("/timeline")
         ? ok({ timeline: [activityEntry(`a${++n}`)], refs: REFS, nextCursor: `c${n}`, total: 37 })
-        : ok({ users: [] });
+        : ok({ people: [] });
     renderSection();
 
     expect(await screen.findByText("Showing the first 20 of 37 entries.")).toBeInTheDocument();
@@ -350,11 +349,12 @@ describe("ActivitySection — composer", () => {
 
   it("offers the people in the directory who have a local account as @mention candidates", async () => {
     renderSection();
+    await waitFor(() => expect(h.calls.some((call) => call.url.endsWith("/people"))).toBe(true));
     await waitFor(() => expect(composer()).toHaveAttribute("data-mention-candidates", "u1=Ada Lovelace,u2=Bea Bell"));
   });
 
   it("tells the editor the people are unavailable when the directory cannot be read", async () => {
-    h.handler = (url) => (url.endsWith("/users") ? fail(403, "forbidden") : ok({ timeline: [], refs: REFS, nextCursor: null, total: 0 }));
+    h.handler = (url) => (url.endsWith("/people") ? fail(403, "forbidden") : ok({ timeline: [], refs: REFS, nextCursor: null, total: 0 }));
     renderSection();
     await screen.findByText("No activity yet.");
     expect(composer()).toHaveAttribute("data-mention-candidates", "unavailable");
@@ -389,7 +389,7 @@ describe("ActivitySection — composer", () => {
         ? new Promise((r) => (finish = r))
         : url.includes("/timeline")
           ? ok({ timeline: [], refs: REFS, nextCursor: null, total: 0 })
-          : ok({ users: [] });
+          : ok({ people: [] });
     renderSection();
     await screen.findByText("No activity yet.");
     fireEvent.change(composer(), { target: { value: "once" } });
@@ -423,7 +423,7 @@ describe("ActivitySection — composer", () => {
         ? fail(500)
         : url.includes("/timeline")
           ? ok({ timeline: [], refs: REFS, nextCursor: null, total: 0 })
-          : ok({ users: [] });
+          : ok({ people: [] });
     renderSection();
     await screen.findByText("No activity yet.");
     fireEvent.change(composer(), { target: { value: "do not lose me" } });

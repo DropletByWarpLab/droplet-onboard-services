@@ -1401,7 +1401,7 @@ describe.skipIf(!RUN)("PM collaboration — comments, mentions, reactions, watch
         const third = await say(cara, item.id, para("3"));
         const countOf = async () => (await pm.getWorkItem(prisma, item.id)).commentCount;
         const listedCount = async () =>
-          (await pm.listWorkItems(prisma, project.id)).find((i) => i.id === item.id)?.commentCount;
+          (await pm.listWorkItems(prisma, project.id)).items.find((i) => i.id === item.id)?.commentCount;
 
         expect(await countOf()).toBe(3);
         await collab.deleteComment(prisma, actor(ann), first.id);
@@ -1434,9 +1434,10 @@ describe.skipIf(!RUN)("PM collaboration — comments, mentions, reactions, watch
 
         const listed = await pm.listComments(prisma, item.id);
 
-        expect(listed.map((c) => c.id)).toEqual([c1.id, c2.id, c3.id]);
-        expect(listed[0]).toMatchObject({ commentHtml: para("one"), deleted: false, editedAt: null, reactions: [], mentions: [] });
-        expect(listed[1]).toMatchObject({
+        expect(listed.items.map((c) => c.id)).toEqual([c1.id, c2.id, c3.id]);
+        expect(listed).toMatchObject({ total: 3, nextCursor: null });
+        expect(listed.items[0]).toMatchObject({ commentHtml: para("one"), deleted: false, editedAt: null, reactions: [], mentions: [] });
+        expect(listed.items[1]).toMatchObject({
           authorId: ben.id,
           commentHtml: "",
           deleted: true,
@@ -1444,9 +1445,9 @@ describe.skipIf(!RUN)("PM collaboration — comments, mentions, reactions, watch
           mentions: [],
           reactions: [],
         });
-        expect(listed[1].deletedAt).not.toBeNull();
-        expect(listed[2].mentions).toEqual([cara.id]);
-        expect(listed[2].reactions.map(({ emoji, count, userIds }) => ({ emoji, count, userIds: sorted(userIds) }))).toEqual([
+        expect(listed.items[1].deletedAt).not.toBeNull();
+        expect(listed.items[2].mentions).toEqual([cara.id]);
+        expect(listed.items[2].reactions.map(({ emoji, count, userIds }) => ({ emoji, count, userIds: sorted(userIds) }))).toEqual([
           { emoji: THUMBS_UP, count: 1, userIds: [ben.id] },
           { emoji: ROCKET, count: 2, userIds: sorted([ben.id, dan.id]) },
         ]);
@@ -1458,7 +1459,7 @@ describe.skipIf(!RUN)("PM collaboration — comments, mentions, reactions, watch
         const dead = await seedComment(item.id, 1, { deleted: true });
         await prisma.pmCommentReaction.create({ data: { commentId: dead.id, userId: ben.id, emoji: THUMBS_UP } });
         await prisma.pmCommentMention.create({ data: { commentId: dead.id, userId: cara.id } });
-        const [listed] = await pm.listComments(prisma, item.id);
+        const [listed] = (await pm.listComments(prisma, item.id)).items;
         expect(listed).toMatchObject({ deleted: true, commentHtml: "", mentions: [], reactions: [] });
       });
 
@@ -1583,7 +1584,7 @@ describe.skipIf(!RUN)("PM collaboration — comments, mentions, reactions, watch
         expect((await react(ben, e)).created).toBe(true);
       }
       expect(sorted((await reactionRows(comment.id)).map((r) => r.emoji))).toEqual(sorted(PM_REACTION_EMOJI));
-      const [listed] = await pm.listComments(prisma, item.id);
+      const [listed] = (await pm.listComments(prisma, item.id)).items;
       expect(listed.reactions.map((r) => r.emoji)).toEqual([...PM_REACTION_EMOJI]);
     });
 

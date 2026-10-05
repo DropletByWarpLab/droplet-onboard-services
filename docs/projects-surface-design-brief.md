@@ -588,7 +588,12 @@ The persona is the **non-technical owner/admin of a small business who owns the 
 | No comments | "No comments yet." |
 | No sub-issues | "No sub-issues yet." |
 | Cross-project sub-issue blocked | "Sub-issues stay in the same project." |
-| Delete-project confirm | "Delete this project? This removes its work items and can't be undone." |
+| Delete-project confirm (owner/admin, archived projects only; the identifier is typed) | "Delete this project? This removes its work items and can't be undone." |
+| Archive-project confirm (quiet, reversible) | "It leaves your project list and its work items stay put. You can restore it any time from Archived." |
+| Archived project banner | "This project is archived. It's hidden from your project list." |
+| Archived filter, nothing archived | "No archived projects." (heading) · "A project you archive shows up here." (body) |
+| Work items still loading | "Showing {n} of {total} work items — loading the rest…" · on failure "Showing {n} of {total} work items. Couldn't load the rest." |
+| Person who is no longer on the box | "Former member" (while the people list loads: "Team member") |
 
 Note on attribution: the assistant's pending-write chip says exactly **"Write · confirm to apply"** — the same string the human-facing Write tier uses, because it *is* the Write tier. There is no separate "Added by AI · confirm to apply" string; the AI authorship is conveyed by the "AI" tag on the actor, and the action's safety is conveyed by the one canonical Write chip. Keep these two signals distinct (who did it = "AI"; what tier = "Write · confirm to apply") and never merge them into a second chip string.
 

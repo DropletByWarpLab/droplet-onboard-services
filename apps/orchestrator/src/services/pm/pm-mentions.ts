@@ -26,6 +26,7 @@
  */
 import type { Prisma, PrismaClient } from "@prisma/client";
 import { extractMentionIds, sanitizePmHtml } from "./sanitize-html.js";
+import { nudgeOutbox } from "./pm-outbox.js";
 import { filterItemReaders } from "./pm-readers.js";
 import { autoWatch } from "./pm-watchers.js";
 
@@ -123,6 +124,9 @@ export async function recordMentions(
           newValue: userId,
         })),
       });
+      // The notification row shares the caller's transaction. Wake the single
+      // outbox runtime only after commit through its deferred nudge seam.
+      nudgeOutbox();
     }
     await autoWatch(
       tx,

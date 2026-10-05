@@ -131,8 +131,11 @@ export function ActivitySection({
   onChanged: () => void;
 }): JSX.Element {
   const { entries, refs, total, truncated, isLoading, error, mutate } = useTimeline(itemId);
-  const { users } = usePeople();
-  const mentionCandidates = useMemo(() => mentionCandidatesFrom(users), [users]);
+  const { people } = usePeople();
+  const mentionCandidates = useMemo(
+    () => mentionCandidatesFrom(people?.map((person) => ({ userId: person.id, displayName: person.displayName }))),
+    [people],
+  );
   const [filter, setFilter] = useState<ActivityFilter>("all");
 
   const refresh = async () => {

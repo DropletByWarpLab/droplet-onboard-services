@@ -921,7 +921,7 @@ describe("business_timeline", () => {
 
   it("merges a work item's activity and comments, newest first", async () => {
     get.mockImplementation(async (url: string) =>
-      url.endsWith("/activity")
+      url.includes("/activity")
         ? res(true, 200, {
             activity: [
               { id: "a1", verb: "created", field: null, oldValue: null, newValue: null, createdAt: "2026-08-01T00:00:00.000Z" },
@@ -947,7 +947,7 @@ describe("business_timeline", () => {
     // row. Mutation: drop the `verb === "commented"` skip → two entries, one
     // of them empty.
     get.mockImplementation(async (url: string) =>
-      url.endsWith("/activity")
+      url.includes("/activity")
         ? res(true, 200, {
             activity: [
               { id: "a9", verb: "commented", field: null, oldValue: null, newValue: null, createdAt: "2026-08-02T00:00:00.000Z" },
@@ -990,7 +990,7 @@ describe("business_timeline", () => {
 
   it("caps the MERGED feed, not each source", async () => {
     get.mockImplementation(async (url: string) =>
-      url.endsWith("/activity")
+      url.includes("/activity")
         ? res(true, 200, {
             activity: Array.from({ length: 5 }, (_, i) => ({
               id: `a${i}`,
@@ -1017,6 +1017,64 @@ describe("business_timeline", () => {
     const out = await businessTimeline.handler({ entity: "project", id: "p1" }, ctx);
     expect(out.ok).toBe(false);
     expect(get).not.toHaveBeenCalled();
+  });
+
+  // WARP-3371 — the PM feeds page, OLDEST first (default 100, max 500). This tool
+  // answers "what happened lately", so the page it needs is the LAST one: reading
+  // only the first would hand the model the oldest hundred as the timeline.
+  describe("a work item's feeds longer than one page", () => {
+    const row = (id: string, at: string) => ({
+      id,
+      verb: "changed",
+      field: "state",
+      oldValue: "a",
+      newValue: "b",
+      createdAt: at,
+    });
+
+    it("reads every page, so the NEWEST entries (on the last page) are not lost", async () => {
+      get.mockImplementation(async (url: string) => {
+        if (url.includes("/comments")) return res(true, 200, { comments: [], nextCursor: null, total: 0 });
+        return url.includes("cursor=c2")
+          ? res(true, 200, { activity: [row("newest", "2026-09-30T00:00:00.000Z")], nextCursor: null, total: 3 })
+          : res(true, 200, {
+              activity: [row("old1", "2026-01-01T00:00:00.000Z"), row("old2", "2026-01-02T00:00:00.000Z")],
+              nextCursor: "c2",
+              total: 3,
+            });
+      });
+      const out = await businessTimeline.handler({ entity: "work_item", id: "w1", limit: 2 }, ctx);
+      const feed = (expectOk(out).data as { timeline: Array<{ id: string }> }).timeline;
+      expect(feed.map((e) => e.id)).toEqual(["newest", "old2"]);
+
+      const urls = get.mock.calls.map((c) => c[0] as string);
+      expect(urls).toContain("/api/pm/work-items/w1/activity?limit=500");
+      expect(urls).toContain("/api/pm/work-items/w1/activity?limit=500&cursor=c2");
+      expect(urls).toContain("/api/pm/work-items/w1/comments?limit=500");
+    });
+
+    it("a response with no nextCursor is one page — an older orchestrator is read exactly as before", async () => {
+      get.mockImplementation(async (url: string) =>
+        url.includes("/activity")
+          ? res(true, 200, { activity: [row("a1", "2026-08-01T00:00:00.000Z")] })
+          : res(true, 200, { comments: [] }),
+      );
+      const out = await businessTimeline.handler({ entity: "work_item", id: "w1" }, ctx);
+      expect((expectOk(out).data as { timeline: unknown[] }).timeline).toHaveLength(1);
+      expect(get).toHaveBeenCalledTimes(2); // one request per feed
+    });
+
+    it("a feed that never ends cannot hold the call open: at most 10 pages per feed", async () => {
+      get.mockImplementation(async (url: string) =>
+        url.includes("/activity")
+          ? res(true, 200, { activity: [row(`a-${get.mock.calls.length}`, "2026-08-01T00:00:00.000Z")], nextCursor: "again" })
+          : res(true, 200, { comments: [], nextCursor: null }),
+      );
+      const out = await businessTimeline.handler({ entity: "work_item", id: "w1" }, ctx);
+      expect(out.ok).toBe(true);
+      const activityReads = get.mock.calls.filter((c) => (c[0] as string).includes("/activity")).length;
+      expect(activityReads).toBe(10);
+    });
   });
 });
 

@@ -42,6 +42,8 @@ vi.mock("@/lib/auth", () => ({
       return json({ timeline: [], refs: { states: {}, labels: {}, workItems: {} }, nextCursor: null, total: 0 });
     }
     if (url.endsWith("/watchers")) return json({ watchers: [] });
+    if (url.includes("/comments")) return json({ comments: [], nextCursor: null, total: 0 });
+    if (url.includes("/activity")) return json({ activity: [], nextCursor: null, total: 0 });
     if (url.includes("/work-items?parent=")) return json({ work_items: [] });
     if (url.endsWith("/labels")) return json({ labels: PROJECT_LABELS });
     if (url.match(/\/work-items\/[^/]+$/) && method === "PATCH") {

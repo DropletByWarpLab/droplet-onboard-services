@@ -6,8 +6,10 @@ its config via the REST API.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import re
+from urllib.parse import urlparse
 
 import httpx
 
@@ -24,6 +26,41 @@ logger = logging.getLogger(__name__)
 # ``objects`` default) keeps idle cameras in the frame — the surface is
 # "show me everything", not "show me detections".
 BIRDSEYE_CONFIG: dict = {"enabled": True, "mode": "continuous"}
+
+
+def camera_input_hosts(config: dict) -> set[str]:
+    """IP address of every stream a Frigate config pulls from (WARP-3508).
+
+    Reads ``cameras.<name>.ffmpeg.inputs[].path`` — the one place an adoption
+    leaves a camera's address, whether it was this service's, the orchestrator's
+    manual add, or a hand-edited config.yml — and keeps each URL's host when it is
+    an IP address. A host name can never equal a candidate's IP, and a device path
+    or an ``ffmpeg:`` source has no host at all, so those are skipped.
+
+    Tolerant of any shape: this is Frigate's config, not ours, and a reconcile
+    must never fail over something it did not expect.
+    """
+    hosts: set[str] = set()
+    cameras = config.get("cameras") if isinstance(config, dict) else None
+    if not isinstance(cameras, dict):
+        return hosts
+    for camera in cameras.values():
+        ffmpeg = camera.get("ffmpeg") if isinstance(camera, dict) else None
+        inputs = ffmpeg.get("inputs") if isinstance(ffmpeg, dict) else None
+        if not isinstance(inputs, list):
+            continue
+        for entry in inputs:
+            path = entry.get("path") if isinstance(entry, dict) else None
+            if not isinstance(path, str):
+                continue
+            try:
+                host = urlparse(path).hostname
+                if host:
+                    hosts.add(str(ipaddress.ip_address(host)))
+            except ValueError:
+                # Not a URL we can read (urlparse), or a host name rather than an IP.
+                continue
+    return hosts
 
 
 class FrigateClient:
@@ -46,6 +83,10 @@ class FrigateClient:
         resp = await self._client.get("/api/config")
         resp.raise_for_status()
         return resp.json()
+
+    async def get_camera_input_hosts(self) -> set[str]:
+        """IP of every camera stream Frigate is configured to pull (see ``camera_input_hosts``)."""
+        return camera_input_hosts(await self.get_config())
 
     async def ensure_birdseye(self) -> bool:
         """Converge Frigate's ``birdseye`` section on the managed config.

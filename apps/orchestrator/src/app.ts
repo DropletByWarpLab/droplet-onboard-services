@@ -59,6 +59,7 @@ import { createPmMobileRouter } from "./routes/mobile/pm.js";
 import { createPmNativeRouter } from "./routes/pm/native.js";
 import { createPmRelationsRouter } from "./routes/pm/relations.js";
 import { createPmCollaborationRouter } from "./routes/pm/collaboration.js";
+import { createPmWebhooksRouter } from "./routes/pm/webhooks.js";
 import { createPmOpenApiRouter } from "./routes/pm/openapi.js";
 import { createSupportRouter } from "./routes/support/support.routes.js";
 import { createPmScheduleRouter } from "./routes/pm/schedule.js";
@@ -603,6 +604,10 @@ export function createApp(
   // from the native router's, so neither shadows the other, and it sits after the
   // module gates and the MCP acting-user gate like every PM router.
   app.use("/api", createPmCollaborationRouter(prisma));
+  // WARP-3532 (ADR-069 §9) — work webhooks and chat-app notifications. Owner
+  // and admin only. `/pm/webhooks` is a literal second segment and no PM router
+  // above owns a `/pm/:param`, so neither shadows the other.
+  app.use("/api", createPmWebhooksRouter(prisma));
   // WARP-3528 (ADR-069) — the service desk. Its own disjoint prefix
   // (`/api/support`), so neither PM router shadows it, and its own `support`
   // module: `mountModuleGates` above already guards the prefix from the registry
