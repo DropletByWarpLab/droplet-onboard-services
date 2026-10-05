@@ -108,6 +108,9 @@ const VERB_EVENT: Record<PmActivityVerb | "deleted", WorkItemEvent | null> = {
   relation_added: "work_item.updated",
   relation_removed: "work_item.updated",
   deleted: null,
+  time_logged: "work_item.updated",
+  time_log_updated: "work_item.updated",
+  time_log_removed: "work_item.updated",
 };
 
 export function eventForVerb(verb: PmActivityVerb | "deleted"): WorkItemEvent | null {

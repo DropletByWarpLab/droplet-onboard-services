@@ -21,6 +21,7 @@ import { useActivity, useComments, useSubIssues, useProjectLabels, pmActions } f
 import { usePresence } from "./usePresence";
 import { CycleField, ModulesField } from "./planning-pickers";
 import type { PmWorkItem } from "./types";
+import { TimeSection } from "./time/TimeSection";
 import { escapeHtml } from "@/lib/escape-html";
 import { formatRelativeTime } from "@/lib/relative-time";
 import { translateError } from "@/lib/friendly-errors";
@@ -411,6 +412,8 @@ function DetailBody({
           <div style={{ fontSize: 13, color: "var(--text-4)" }}>No sub-issues yet.</div>
         )}
       </div>
+
+      <TimeSection item={item} />
 
       <div>
         <div className="pm-sect" style={{ marginBottom: 12 }}>

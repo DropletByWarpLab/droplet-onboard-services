@@ -26,6 +26,8 @@ const audit = vi.hoisted(() => ({
   recordActivityInTx: vi.fn(async (_tx: unknown, _row: unknown) => ({})),
 }));
 vi.mock("../../services/activity.singleton.js", () => audit);
+const outbox = vi.hoisted(() => ({ nudgeOutbox: vi.fn() }));
+vi.mock("../../services/pm/pm-outbox.js", () => outbox);
 
 // ── In-memory Prisma fake ────────────────────────────────────────────────────
 // Only the methods the service uses, with just enough relation resolution.
@@ -165,7 +167,18 @@ function makeFake(hooks: Hooks = {}) {
   };
 
   const prisma: Record<string, unknown> = {
-    $transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(prisma),
+    $transaction: async (fn: (tx: unknown) => Promise<unknown>) => {
+      // The delete race writes its tombstone before the final item delete.
+      // Model transaction rollback for that row so this fake distinguishes a
+      // committed event from work that was rolled back with a P2025.
+      const activityBefore = [...db.activity];
+      try {
+        return await fn(prisma);
+      } catch (error) {
+        db.activity = activityBefore;
+        throw error;
+      }
+    },
 
     // WARP-3372 — `where` / `orderBy` are interpreted, so the roster's filter
     // (ACTIVE humans only) is what is under test, not a stub that ignores it.
@@ -460,6 +473,8 @@ function makeFake(hooks: Hooks = {}) {
     },
 
     pmWorkItemAssignee: {
+      findMany: async ({ where }: { where: Row }) =>
+        db.assignees.filter((a) => matchesWhere(a, where, db.assignees)),
       // WARP-3369 — the per-item guard's lookup: "is this item (or, for the
       // state list, an item in this project) assigned to this user".
       findFirst: async ({ where }: { where: Row }) =>
@@ -913,10 +928,14 @@ describe("native PM routes — Prisma race → typed HTTP mapping", () => {
     const wi = await request(makeApp(fake.prisma, OWNER))
       .post(`/api/pm/projects/${proj.body.project.id}/work-items`)
       .send({ name: "Doomed" });
+    const activityBeforeDelete = [...fake.db.activity];
+    outbox.nudgeOutbox.mockClear();
     fake.hooks["pmWorkItem.delete"] = "P2025";
     const res = await request(makeApp(fake.prisma, OWNER)).delete(`/api/pm/work-items/${wi.body.work_item.id}`);
     expect(res.status).toBe(404);
     expect(res.body.error).toBe("work_item_not_found");
+    expect(fake.db.activity).toEqual(activityBeforeDelete);
+    expect(outbox.nudgeOutbox).not.toHaveBeenCalled();
   });
 
   it("deleteState concurrent-delete race → P2025 → 404", async () => {

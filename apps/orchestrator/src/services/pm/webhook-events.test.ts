@@ -70,6 +70,7 @@ describe("eventForVerb", () => {
       "priority_changed", "due_date_changed", "title_changed", "description_changed",
       "label_added", "label_removed", "restored", "cycle_added", "cycle_removed",
       "parent_removed", "module_added", "module_removed", "relation_added", "relation_removed",
+      "time_logged", "time_log_updated", "time_log_removed",
     ]) {
       expect(eventForVerb(verb as never), verb).toBe("work_item.updated");
     }

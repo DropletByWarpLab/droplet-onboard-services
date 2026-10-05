@@ -12,12 +12,14 @@ vi.mock("../config.js", () => ({
   config: { AUTH_ENABLED: false, agentMaxIter: { defaultIter: 5, capIter: 10 } },
 }));
 
-const { recordActivityMock } = vi.hoisted(() => ({
+const { recordActivityMock, intakeMock } = vi.hoisted(() => ({
   recordActivityMock: vi.fn().mockResolvedValue(null),
+  intakeMock: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock("../services/activity.singleton.js", () => ({
   recordActivity: recordActivityMock,
 }));
+vi.mock("../services/support/email-intake.service.js", () => ({ intakeEmailMessage: intakeMock }));
 
 import { createEmailRouter, type EmailGate } from "../routes/email.js";
 import type { AuthUser } from "../middleware/auth.js";
@@ -53,6 +55,7 @@ interface MessageRow {
   bodyText: string | null;
   bodyHtml: string | null;
   receivedAt: Date;
+  headers?: unknown;
 }
 
 interface DraftRow {
@@ -85,13 +88,15 @@ function createPrismaMock(opts: {
   const drafts = new Map<string, DraftRow>(
     (opts.drafts ?? []).map((d) => [d.id, d]),
   );
+  const commentUpdates: Array<Record<string, unknown>> = [];
   let nextId = 1;
   const accountExists = opts.accountExists ?? true;
 
-  return {
+  const prisma: any = {
     threads,
     messages,
     drafts,
+    commentUpdates,
     emailAccount: {
       findUnique: vi.fn(
         async ({ where }: { where: { id: string } }) => {
@@ -215,7 +220,11 @@ function createPrismaMock(opts: {
         },
       ),
     },
+    pmTicketEmailLink: { findUnique: vi.fn(async () => ({ commentId: "cm-1" })) },
+    pmComment: { updateMany: vi.fn(async ({ data }: { data: Record<string, unknown> }) => { commentUpdates.push(data); return { count: 1 }; }) },
   };
+  prisma.$transaction = vi.fn(async (callback: (tx: any) => Promise<unknown>) => callback(prisma));
+  return prisma;
 }
 
 function mkUser(role: AuthUser["role"], username = "indexer"): AuthUser {
@@ -238,6 +247,7 @@ function buildApp(
 
 beforeEach(() => {
   recordActivityMock.mockClear();
+  intakeMock.mockReset().mockResolvedValue(undefined);
   vi.clearAllMocks();
 });
 
@@ -253,6 +263,15 @@ describe("WARP-465 follow-up — POST /api/email/:accountId/messages-ingest", ()
       bodyText: "Body",
       receivedAt: "2026-05-27T10:00:00.000Z",
       threadKey: "id-1@example.com",
+      headers: {
+        references: ["root@example.com"],
+        autoSubmitted: null,
+        precedence: null,
+        xAutoreply: null,
+        xAutorespond: null,
+        returnPath: "ops@carrier.com",
+        reportType: null,
+      },
     };
   }
 
@@ -264,7 +283,27 @@ describe("WARP-465 follow-up — POST /api/email/:accountId/messages-ingest", ()
     expect(res.status).toBe(201);
     expect(res.body.duplicate).toBe(false);
     expect(prisma.messages).toHaveLength(1);
+    expect(prisma.messages[0]!.headers).toEqual(ingestBody().headers);
     expect([...prisma.threads.values()][0].messageCount).toBe(1);
+    expect(intakeMock).toHaveBeenCalledWith(expect.anything(), "a1", "id-1@example.com");
+  });
+
+  it("accepts older indexers without headers, but rejects malformed header facts", async () => {
+    const oldPayload = ingestBody();
+    delete (oldPayload as { headers?: unknown }).headers;
+    const oldPrisma = createPrismaMock();
+    const oldRes = await request(buildApp(oldPrisma, mkUser("service")))
+      .post("/api/email/a1/messages-ingest")
+      .send(oldPayload);
+    expect(oldRes.status).toBe(201);
+    expect(oldPrisma.messages[0]!.headers).toBeUndefined();
+
+    const badPrisma = createPrismaMock();
+    const badRes = await request(buildApp(badPrisma, mkUser("service")))
+      .post("/api/email/a1/messages-ingest")
+      .send({ ...ingestBody(), headers: { autoSubmitted: "no" } });
+    expect(badRes.status).toBe(400);
+    expect(badPrisma.messages).toHaveLength(0);
   });
 
   it("redelivery is idempotent (returns duplicate=true)", async () => {
@@ -277,6 +316,7 @@ describe("WARP-465 follow-up — POST /api/email/:accountId/messages-ingest", ()
     ).send(ingestBody());
     expect(second.status).toBe(200);
     expect(second.body.duplicate).toBe(true);
+    expect(intakeMock).toHaveBeenCalledTimes(2);
     expect(prisma.messages).toHaveLength(1);
     // Answered before the thread upsert: a re-delivery can't rewind the
     // thread's lastMessageAt or snippet (WARP-3267).
@@ -350,6 +390,7 @@ describe("WARP-465 follow-up — PATCH /api/email/drafts/:id/status", () => {
     expect(res.status).toBe(200);
     expect(prisma.drafts.get("d1")?.status).toBe("sent");
     expect(prisma.drafts.get("d1")?.sentAt).not.toBeNull();
+    expect(prisma.commentUpdates).toEqual([{ deliveryStatus: "SENT", deliveryFailure: null }]);
   });
 
   it("flips queued → failed with error populated", async () => {

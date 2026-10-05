@@ -60,6 +60,7 @@ import { createPmNativeRouter } from "./native.js";
 import { createPmRelationsRouter } from "./relations.js";
 import { createPmPresenceRouter } from "./presence.js";
 import { createPmPlanningRouter } from "./planning.js";
+import { createPmTimeRouter } from "./time.js";
 import { createPmWebhooksRouter } from "./webhooks.js";
 import { createPmScheduleRouter } from "./schedule.js";
 import { createPmOpenApiRouter } from "./openapi.js";
@@ -175,6 +176,12 @@ const PM_ROUTER_MOUNTS: readonly PmRouterMount[] = [
     base: "/api",
     file: "routes/pm/presence.ts",
     router: createPmPresenceRouter(PRISMA),
+  },
+  {
+    factory: "createPmTimeRouter",
+    base: "/api",
+    file: "routes/pm/time.ts",
+    router: createPmTimeRouter(PRISMA),
   },
   {
     factory: "createPmWebhooksRouter",
