@@ -322,7 +322,10 @@ export async function bulkUpdateWorkItems(
   try {
     return await prisma.$transaction(async (tx) => {
       const found = await tx.pmWorkItem.findMany({
-        where: { id: { in: ids } },
+        // WS-12 stores tickets as PmWorkItems in SERVICE_DESK projects. The PM
+        // bulk endpoint must apply the same parent-kind boundary as every other
+        // /api/pm reader before planning, so ticket ids behave like missing IDs.
+        where: { id: { in: ids }, project: { kind: "PROJECT" } },
         select: {
           id: true,
           projectId: true,
@@ -424,7 +427,7 @@ export async function bulkUpdateWorkItems(
       await writeActivity(tx, plan.activity);
 
       const rows = await tx.pmWorkItem.findMany({
-        where: { id: { in: ids } },
+        where: { id: { in: ids }, project: { kind: "PROJECT" } },
         include: {
           ...WORK_ITEM_INCLUDE,
           project: { select: { identifier: true, department: { select: DEPARTMENT_SELECT } } },

@@ -6,7 +6,7 @@
  *
  *   p     the project's identifier (`INBOX`), not its id — links stay readable
  *         and survive a re-created project with the same key
- *   view  the tab: board | list | cycles | modules | views | …
+ *   view  the tab: board | list | calendar | timeline | my-work | views | …
  *   item  the open work item's key; opens the drawer
  *   v     the active saved view — a row id, or a built-in slug (`mine`)
  *   f     the compact filter (`pm-filter.ts`); present only when the filter is
@@ -34,7 +34,7 @@ const PARAM_ORDER = ["p", "view", "item", "v", "f"] as const;
 
 const WORK_ITEM_KEY_RE = /^([A-Za-z0-9]{1,10})-(\d{1,9})$/;
 const IDENTIFIER_RE = /^[A-Za-z0-9]{1,10}$/;
-const VIEW_TAB_RE = /^[a-z]{1,16}$/;
+const VIEW_TAB_RE = /^(?:[a-z]{1,16}|my-work)$/;
 const VIEW_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
 /** `INBOX-42` → `{identifier: "INBOX", sequenceId: 42}`; `null` for anything else.

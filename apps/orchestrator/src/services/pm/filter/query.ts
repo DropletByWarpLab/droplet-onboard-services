@@ -13,9 +13,9 @@
  * `projectId` set: that project, archived or not (looking at an archived project
  * is allowed — it is how Restore is reached). `projectId` absent: the whole
  * workspace, minus items of ARCHIVED projects, which is what the index and the
- * summary already mean by "the work". WS-12 adds a `kind` to projects and this
- * is the ONE place its `kind = PROJECT` predicate belongs (`scopeWhere`); a
- * service-desk row must never reach a `/api/pm` read.
+ * summary already mean by "the work". The `kind = PROJECT` scope applies to
+ * rows, counts and groups alike; a service-desk row must never reach a
+ * `/api/pm` read.
  *
  * ── archived ITEMS ──────────────────────────────────────────────────────────
  *
@@ -278,14 +278,14 @@ export async function queryWorkItems(
   const workspaceSlug = req.workspace ?? HOME_WORKSPACE_SLUG;
 
   if (projectScoped) {
-    const exists = await prisma.pmProject.findUnique({ where: { id: projectId }, select: { id: true } });
+    const exists = await prisma.pmProject.findFirst({ where: { id: projectId, kind: "PROJECT" }, select: { id: true } });
     if (!exists) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
   }
   const tz = await resolveQueryTimezone(prisma, req.tz);
 
   const scopeWhere: Where = projectScoped
-    ? { projectId }
-    : { project: { is: { isArchived: false, workspace: { slug: workspaceSlug } } } };
+    ? { projectId, project: { is: { kind: "PROJECT" } } }
+    : { project: { is: { kind: "PROJECT", isArchived: false, workspace: { slug: workspaceSlug } } } };
 
   const requested: PmFilter = req.filter ?? { and: [] };
   const sort = req.sort ?? defaultSort(projectScoped);
@@ -372,6 +372,7 @@ export async function findWorkItemByKey(
     where: {
       identifier: { equals: parsed.identifier, mode: "insensitive" },
       workspace: { slug: workspaceSlug },
+      kind: "PROJECT",
     },
     include: { department: { select: DEPARTMENT_SELECT } },
   });

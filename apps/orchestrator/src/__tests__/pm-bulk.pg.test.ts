@@ -294,14 +294,38 @@ describe.skipIf(!RUN)("PM bulk edit (WARP-3537)", () => {
       expect(await feed(ids)).toHaveLength(0);
     }
 
-    it("404 work_item_not_found: an id that is not a work item sinks the batch, and is named", async () => {
+  it("404 work_item_not_found: an id that is not a work item sinks the batch, and is named", async () => {
       const ids = await mk(p1, 2);
       const before = await rowsOf(ids);
       const err = await refusal(bulk([ids[0], "no-such-id", ids[1]], { priority: "high" }));
       expect(err.code).toBe("work_item_not_found");
       expect(err.ids).toEqual(["no-such-id"]);
-      await untouched(ids, before);
+    await untouched(ids, before);
+  });
+
+  it("treats a service-desk ticket id as missing before planning or writing", async () => {
+    const workspace = await prisma.pmWorkspace.findUniqueOrThrow({ where: { slug: `${PREFIX}ws` } });
+    const desk = await prisma.pmProject.create({
+      data: { workspaceId: workspace.id, name: `${PREFIX}desk`, identifier: "W6BD", kind: "SERVICE_DESK" },
     });
+    const ticketItem = await prisma.pmWorkItem.create({
+      data: { projectId: desk.id, sequenceId: 1, name: `${PREFIX}ticket` },
+    });
+    await prisma.pmTicket.create({
+      data: {
+        workItemId: ticketItem.id,
+        requesterKind: "USER",
+        requesterUserId: `${PREFIX}requester`,
+        requesterName: `${PREFIX}requester`,
+        channel: "INTERNAL",
+      } as never,
+    });
+
+    const err = await refusal(bulk([ticketItem.id], { priority: "high" }));
+    expect(err.code).toBe("work_item_not_found");
+    expect(err.ids).toEqual([ticketItem.id]);
+    expect((await prisma.pmWorkItem.findUniqueOrThrow({ where: { id: ticketItem.id } })).priority).toBe("none");
+  });
 
     it("422 invalid_state: a state from another project sinks the batch, and names the items it does not fit", async () => {
       const a = await mk(p1, 2);

@@ -198,9 +198,14 @@ export async function listViews(
   const where: Prisma.PmSavedViewWhereInput = {
     workspace: { slug: opts.workspace ?? HOME_WORKSPACE_SLUG },
     OR: actor ? [{ scope: "SHARED" }, { scope: "PERSONAL", ownerId: actor.userId }] : [{ scope: "SHARED" }],
+    AND: [{ OR: [{ projectId: null }, { project: { is: { kind: "PROJECT" } } }] }],
   };
   if (opts.project === "none") where.projectId = null;
-  else if (opts.project !== undefined) where.projectId = opts.project;
+  else if (opts.project !== undefined) {
+    const project = await prisma.pmProject.findFirst({ where: { id: opts.project, kind: "PROJECT" }, select: { id: true } });
+    if (!project) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
+    where.projectId = opts.project;
+  }
 
   const rows = await prisma.pmSavedView.findMany({
     where,
@@ -239,8 +244,8 @@ export async function createView(
   let workspaceId: string;
   let leadId: string | null = null;
   if (projectId) {
-    const project = await prisma.pmProject.findUnique({
-      where: { id: projectId },
+    const project = await prisma.pmProject.findFirst({
+      where: { id: projectId, kind: "PROJECT" },
       select: { workspaceId: true, leadId: true },
     });
     if (!project) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
@@ -316,9 +321,10 @@ async function loadVisible(
     throw new Error(PM_VIEW_ERRORS.VIEW_NOT_FOUND);
   }
   let leadId: string | null = null;
-  if (row.scope === "SHARED" && row.projectId) {
-    const project = await prisma.pmProject.findUnique({ where: { id: row.projectId }, select: { leadId: true } });
-    leadId = project?.leadId ?? null;
+  if (row.projectId) {
+    const project = await prisma.pmProject.findFirst({ where: { id: row.projectId, kind: "PROJECT" }, select: { leadId: true } });
+    if (!project) throw new Error(PM_VIEW_ERRORS.VIEW_NOT_FOUND);
+    leadId = project.leadId;
   }
   return { row, leadId };
 }

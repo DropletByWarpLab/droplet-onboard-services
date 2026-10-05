@@ -9,10 +9,9 @@
  * WARP-3522 — the page's state is the URL. Project, tab, saved view, filter and
  * the open drawer are all read from `?p=&view=&item=&v=&f=` and every change is
  * a navigation (`useProjectsUrl`), so a link opens exactly this screen and Back /
- * Forward walk it. And the page no longer filters what it holds: the board and
- * the list read through `POST /api/pm/work-items/query`, which runs the filter
- * (the shared DSL) on the server — the same filter a saved view stores and the
- * assistant will send.
+ * Forward walk it. The filter runs through `POST /api/pm/work-items/query` on
+ * the server; layouts consume its rows or admitted IDs — the same filter a
+ * saved view stores and the assistant will send.
  */
 
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type JSX } from "react";
@@ -110,7 +109,7 @@ function tabOfLayout(layout: PmViewLayout): ProjectView {
 }
 
 /** Brief §3.9, verbatim for one; counted for several. */
-export function staleNoticeText(count: number): string {
+function staleNoticeText(count: number): string {
   return count === 1
     ? "One filter was removed because it no longer exists."
     : `${count} filters were removed because they no longer exist.`;
@@ -376,6 +375,7 @@ function ProjectsWorkspace(): JSX.Element {
   };
   const openWorkspace = () => go({ p: null, view: "workspace", v: null, f: null, item: null }, "push");
   const openViewsIndex = () => go({ p: null, view: "views", v: null, f: null, item: null }, "push");
+  const openMyWork = () => go({ p: null, view: "my-work", v: null, f: null, item: null }, "push");
   const switchTab = (next: ProjectView) => go({ view: next === "board" ? null : next }, "push");
   const pickView = (id: string) => {
     setNotice(null);
@@ -391,6 +391,23 @@ function ProjectsWorkspace(): JSX.Element {
     );
   };
 
+  // The server query supplies the admitted IDs; schedule views never apply a
+  // second client filter. Include each row in the revision so a different
+  // result with the same size and newest timestamp still refreshes Timeline.
+  const visibleIds = useMemo(
+    () => (filterActive ? new Set(allItems.map((i) => i.id)) : null),
+    [allItems, filterActive],
+  );
+  const itemsRevision = useMemo(
+    () => JSON.stringify(allItems.map((i) => [i.id, i.updatedAt])),
+    [allItems],
+  );
+  const refreshAfterSchedule = async () => {
+    await query.refresh();
+    void mutateProjects();
+    void mutateSummary();
+  };
+
   const refreshAll = async () => {
     void mutateProjects();
     void mutateSummary();
@@ -399,16 +416,6 @@ function ProjectsWorkspace(): JSX.Element {
     await query.refresh();
   };
 
-  // Timeline fetches the date-window itself; use the board query's complete
-  // filtered result to keep its rows consistent with the active URL filter.
-  const visibleIds = useMemo(
-    () => (filterActive ? new Set(allItems.map((item) => item.id)) : null),
-    [allItems, filterActive],
-  );
-  const itemsRevision = useMemo(
-    () => `${allItems.length}:${allItems.reduce((latest, item) => item.updatedAt > latest ? item.updatedAt : latest, "")}`,
-    [allItems],
-  );
   const edits = useTableEdits({
     optimistic,
     refresh: query.refresh,
@@ -575,14 +582,14 @@ function ProjectsWorkspace(): JSX.Element {
   const headerSub =
     mode === "index"
       ? `${summary?.activeProjects ?? projects?.filter((p) => !p.archived).length ?? 0} projects · ${summary?.itemsOpen ?? 0} items open`
-      : mode === "project"
+      : mode === "my-work"
+        ? "Your open work across every project"
+        : mode === "project"
         ? project
           ? `${project.openCount} open · ${project.doneCount} done`
           : undefined
       : mode === "workspace" && total !== undefined
           ? `${total} ${total === 1 ? "item" : "items"}`
-          : mode === "my-work"
-            ? "Your open work across every project"
           : undefined;
 
   const refreshButton = (
@@ -601,7 +608,7 @@ function ProjectsWorkspace(): JSX.Element {
         <button className="btn" type="button" onClick={openViewsIndex}>
           <PmIcon name="filter" size={14} /> Views
         </button>
-        <button className="btn" type="button" onClick={() => go({ p: null, view: "my-work", v: null, f: null, item: null }, "push")}>
+        <button className="btn" type="button" onClick={openMyWork}>
           <PmIcon name="user" size={14} /> My work
         </button>
         {refreshButton}
@@ -765,7 +772,7 @@ function ProjectsWorkspace(): JSX.Element {
             domain={boardDomain}
             readOnly={readOnly}
             onOpen={(item) => openItem(item.key)}
-            onChanged={refreshAll}
+            onChanged={refreshAfterSchedule}
             onNewItem={() => setModal("newitem")}
           />
         )}
@@ -777,7 +784,7 @@ function ProjectsWorkspace(): JSX.Element {
             domain={boardDomain}
             readOnly={readOnly}
             onOpen={(item) => openItem(item.key)}
-            onChanged={refreshAll}
+            onChanged={refreshAfterSchedule}
             onNewItem={() => setModal("newitem")}
           />
         )}
