@@ -5814,7 +5814,6 @@ model PmProject {
   /// empty for a PROJECT (a trigger holds that).
   supportChannels PmSupportChannel[]
   /// WARP-3532 — webhooks scoped to this project (cascade with it).
-  webhooks   PmWebhook[]
   /// WARP-3535 — the code repositories whose pull requests, commits and branches
   /// are matched against this project's work-item keys. The mapping row goes
   /// with the project; the repository registration does not.
