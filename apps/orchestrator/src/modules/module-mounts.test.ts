@@ -178,6 +178,7 @@ const PM_ROUTES = [
   ["get", "/api/pm/workspaces"],
   ["get", "/api/pm/workspaces/default"],
   ["get", "/api/pm/summary"],
+  ["get", "/api/pm/insights"],
   ["patch", "/api/pm/states/s1"],
   ["patch", "/api/pm/labels/l1"],
   // WARP-3521 planning routes mount below /api too; every route must follow

@@ -104,7 +104,6 @@ legacy-token components/erp/PatientPeek.tsx
 legacy-token components/erp/PatientSearch.tsx
 legacy-token components/erp/SyncFooter.tsx
 legacy-token components/erp/WriteConfirmModal.tsx
-legacy-token components/events/ReviewCard.tsx
 legacy-token components/FileManager/FileListSimple.tsx
 legacy-token components/FileManager/SearchBar.tsx
 legacy-token components/FileManager/SpaceSwitcher.tsx
@@ -146,7 +145,6 @@ accent-alpha components/home/widgets.tsx
 accent-alpha components/integrations/SafetyChip.tsx
 accent-alpha components/settings/BusinessProfileCard.tsx
 accent-alpha components/Sidebar.tsx
-accent-alpha components/Toast.tsx
 
 # ── white-on-accent ──
 white-on-accent app/cameras/[name]/page.tsx

@@ -7,7 +7,7 @@
  *
  * WARP-3513 adds the recovery-key operations for the bay drives every Prepare now
  * encrypts (storage decision record ADR-070, section 8.5). The one-time reveal is the first
- * Tier-2 storage action: it erases nothing, but it hands out the secret that unlocks
+ * Tier-2 secret-revealing action: it erases nothing, but it hands out the secret that unlocks
  * the drive's data without the TPM, so it is owner-only and needs one confirmation
  * round-trip. "Regenerate recovery key" replaces that secret (the old key stops
  * working), so it is Tier 3. The AI is hard-blocked from both like from every other
@@ -45,13 +45,18 @@ export const STORAGE_TIER_3_OPERATIONS = new Set([
   // old one wiped, so the key the owner holds stops working. Owner-only, AI-blocked,
   // single-use confirm token.
   RECOVERY_KEY_REGENERATE_OPERATION,
+  "recordings_old_footage_delete",
 ]);
 
 /**
- * WARP-3513: non-destructive but secret-revealing storage operations. Tier 2:
- * owner-only, one confirmation round-trip, still AI-blocked.
+ * Non-destructive storage operations. Tier 2 requires one confirmation and
+ * remains AI-blocked: recovery-key reveal is owner-only; recording allocation
+ * is available to owner/admin.
  */
-export const STORAGE_TIER_2_OPERATIONS = new Set<string>([RECOVERY_KEY_REVEAL_OPERATION]);
+export const STORAGE_TIER_2_OPERATIONS = new Set<string>([
+  RECOVERY_KEY_REVEAL_OPERATION,
+  "recordings_set",
+]);
 
 /**
  * The reason shown when a confirmation token is presented to an endpoint that
@@ -74,7 +79,14 @@ export const STORAGE_MAX_PENDING_CONFIRMATIONS = 200;
  * Tier-2 operation is an unknown (Tier 3, refused) one.
  */
 export function classifyStorageCommand(operation: string): TierClassification {
-  if (STORAGE_TIER_2_OPERATIONS.has(operation)) {
+  if (operation === "recordings_set") {
+    return {
+      tier: 2,
+      requiresConfirmation: true,
+      reason: "Changes where camera recordings are stored and requires owner/admin confirmation",
+    };
+  }
+  if (operation === RECOVERY_KEY_REVEAL_OPERATION) {
     return {
       tier: 2,
       requiresConfirmation: true,
