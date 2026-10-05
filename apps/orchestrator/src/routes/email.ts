@@ -8,6 +8,8 @@
  *   GET    /api/email/contacts?query=&limit=         — WARP-3102: senders
  *                                                      of the mail you read
  *   POST   /api/email/:accountId/drafts              — create draft
+ *   GET    /api/email/:accountId/drafts              — saved drafts/outbox, paged
+ *   GET    /api/email/:accountId/drafts/:draftId     — scoped saved draft
  *   PATCH  /api/email/drafts/:id                     — edit draft
  *   POST   /api/email/drafts/:id/send                — queue send
  *   PATCH  /api/email/accounts/:id/status            — WARP-2957: the indexer
@@ -185,6 +187,41 @@ async function assertAccountAccessible(
 
 const FILTERS = ["inbox", "triaged", "archived", "droplet"] as const;
 type Filter = (typeof FILTERS)[number];
+
+// Keyset pages bind their cursor to the mailbox and bucket. IDs break ties so
+// threads with the same timestamp never disappear between pages. The cursor
+// carries no message content and never replaces assertAccountAccessible.
+const emailCursorSchema = z.object({
+  version: z.literal(1), kind: z.enum(["threads", "drafts"]),
+  accountId: z.string().min(1).max(160), bucket: z.string().min(1).max(32),
+  at: z.string().datetime(), id: z.string().min(1).max(160),
+}).strict();
+type EmailCursor = z.infer<typeof emailCursorSchema>;
+function readEmailCursor(raw: unknown, accountId: string, kind: EmailCursor["kind"], bucket: string): EmailCursor | null {
+  if (raw === undefined) return null;
+  if (typeof raw !== "string" || raw.length > 1024 || !/^[A-Za-z0-9_-]+$/.test(raw)) throw new Error("invalid_email_cursor");
+  try {
+    const cursor = emailCursorSchema.parse(JSON.parse(Buffer.from(raw, "base64url").toString("utf8")));
+    if (cursor.accountId !== accountId || cursor.kind !== kind || cursor.bucket !== bucket) throw new Error("invalid_email_cursor");
+    return cursor;
+  } catch { throw new Error("invalid_email_cursor"); }
+}
+function writeEmailCursor(accountId: string, kind: EmailCursor["kind"], bucket: string, at: Date, id: string): string {
+  return Buffer.from(JSON.stringify({ version: 1, kind, accountId, bucket, at: at.toISOString(), id })).toString("base64url");
+}
+
+// Lists omit the body; detail adds it. Explicit projection keeps future schema
+// fields out of the wire contract and never includes mailbox credentials or bytes.
+const DRAFT_READ_FIELDS = {
+  id: true, accountId: true, threadId: true, toAddrs: true, ccAddrs: true, bccAddrs: true,
+  subject: true, draftedByDroplet: true, attachmentIds: true, status: true,
+  sentAt: true, claimedAt: true, error: true, createdAt: true, updatedAt: true,
+} as const;
+const draftsQuerySchema = z.object({
+  status: z.enum(["draft", "queued", "sending", "sent", "failed", "all"]).default("draft"),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  cursor: z.string().max(1024).optional(),
+});
 
 const addressSchema = z.string().email().max(254);
 
@@ -646,23 +683,37 @@ export function createEmailRouter(
           Math.min(100, Number.parseInt(String(req.query.limit ?? "20"), 10) || 20),
         );
 
+        let cursor: EmailCursor | null;
+        try { cursor = readEmailCursor(req.query.cursor, req.params.accountId, "threads", filter); }
+        catch { res.status(400).json({ error: "invalid_email_cursor" }); return; }
+
         const where: {
           accountId: string;
           triageStatus?: "inbox" | "triaged" | "archived";
           draftedByDroplet?: boolean;
+          OR?: Array<Record<string, unknown>>;
         } = { accountId: req.params.accountId };
         if (filter === "droplet") {
           where.draftedByDroplet = true;
         } else {
           where.triageStatus = filter;
         }
+        if (cursor) {
+          where.OR = [
+            { lastMessageAt: { lt: new Date(cursor.at) } },
+            { lastMessageAt: new Date(cursor.at), id: { lt: cursor.id } },
+          ];
+        }
 
         const rows = (await prisma.emailThread.findMany({
           where: where as any,
-          orderBy: { lastMessageAt: "desc" },
-          take: limit,
+          orderBy: [{ lastMessageAt: "desc" }, { id: "desc" }],
+          take: limit + 1,
         })) as unknown as ThreadRow[];
-        res.json({ filter, threads: rows });
+        const page = rows.slice(0, limit);
+        const last = page[page.length - 1];
+        res.json({ filter, threads: page, nextCursor: rows.length > limit && last
+          ? writeEmailCursor(req.params.accountId, "threads", filter, last.lastMessageAt, last.id) : null });
       } catch (err) {
         next(err);
       }
@@ -817,6 +868,59 @@ export function createEmailRouter(
       } catch (err) {
         next(err);
       }
+    },
+  );
+
+  router.get(
+    "/email/:accountId/drafts",
+    requireRole("owner", "admin", "family"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const account = await assertAccountAccessible(prisma, req, req.params.accountId);
+        if (!account) { res.status(404).json({ error: "Account not found" }); return; }
+        const parsed = draftsQuerySchema.safeParse(req.query);
+        if (!parsed.success) { res.status(400).json({ error: "invalid_request", details: parsed.error.flatten() }); return; }
+        const { status, limit } = parsed.data;
+        let cursor: EmailCursor | null;
+        try { cursor = readEmailCursor(parsed.data.cursor, req.params.accountId, "drafts", status); }
+        catch { res.status(400).json({ error: "invalid_email_cursor" }); return; }
+        const rows = await prisma.emailDraft.findMany({
+          where: {
+            accountId: req.params.accountId,
+            ...(status === "all" ? {} : { status }),
+            ...(cursor ? { OR: [
+              { updatedAt: { lt: new Date(cursor.at) } },
+              { updatedAt: new Date(cursor.at), id: { lt: cursor.id } },
+            ] } : {}),
+          },
+          select: DRAFT_READ_FIELDS,
+          orderBy: [{ updatedAt: "desc" }, { id: "desc" }], take: limit + 1,
+        });
+        const page = rows.slice(0, limit); const last = page[page.length - 1];
+        res.json({ status, drafts: page, nextCursor: rows.length > limit && last
+          ? writeEmailCursor(req.params.accountId, "drafts", status, last.updatedAt, last.id) : null });
+      } catch (err) { next(err); }
+    },
+  );
+
+  router.get(
+    "/email/:accountId/drafts/:draftId",
+    requireRole("owner", "admin", "family"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const account = await assertAccountAccessible(prisma, req, req.params.accountId);
+        if (!account) { res.status(404).json({ error: "Draft not found" }); return; }
+        const draft = await prisma.emailDraft.findFirst({
+          where: { id: req.params.draftId, accountId: req.params.accountId },
+          select: { ...DRAFT_READ_FIELDS, body: true },
+        });
+        if (!draft) { res.status(404).json({ error: "Draft not found" }); return; }
+        const attachments = draft.attachmentIds.length === 0 ? [] : await prisma.emailAttachment.findMany({
+          where: { accountId: req.params.accountId, id: { in: draft.attachmentIds } },
+          select: { ...ATTACHMENT_META, emailMessageId: true }, orderBy: { partIndex: "asc" },
+        });
+        res.json({ ...draft, attachments });
+      } catch (err) { next(err); }
     },
   );
 
