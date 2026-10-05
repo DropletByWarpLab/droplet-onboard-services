@@ -58,7 +58,7 @@ describe("setup progress persistence before provider consent", () => {
   });
 
   it.each([
-    { name: "workspace", path: "/api/setup/org", method: "POST", body: { name: "Fixture workspace", slug: "fixture" }, save: () => postOrg({ name: "Fixture workspace", slug: "fixture" }) },
+    { name: "workspace", path: "/api/setup/org", method: "POST", body: { name: "Fixture workspace", slug: "fixture", tz: "UTC" }, save: () => postOrg({ name: "Fixture workspace", slug: "fixture", tz: "UTC" }) },
     { name: "completion", path: "/api/setup/state", method: "PATCH", body: { appliance: "ready" }, save: patchSetupReady },
     { name: "tour", path: "/api/setup/state", method: "PATCH", body: { user_tour_completed: true }, save: patchTourCompleted },
   ])("renews the session before the $name write", async ({ path, method, body, save }) => {
