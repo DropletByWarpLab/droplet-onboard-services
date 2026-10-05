@@ -126,6 +126,7 @@ export async function fanOutActivity(
   // Detached deletion activities and private tickets have no Projects event.
   if (row.workItemId === null) return 0;
   const event = eventForVerb(row.verb);
+  if (event === null) return 0;
   const candidates = await subscribedTo(prisma, event);
   if (candidates.length === 0) return 0;
 
