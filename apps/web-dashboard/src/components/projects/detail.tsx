@@ -16,6 +16,8 @@ import {
 } from "./bits";
 import { useActivity, useComments, useSubIssues, pmActions } from "./usePm";
 import { editActions } from "./useEditing";
+import { CycleField, ModulesField } from "./planning-pickers";
+import { PropRow } from "./detail/PropRow";
 import type { PmWorkItem } from "./types";
 import { escapeHtml } from "@/lib/escape-html";
 import { formatRelativeTime } from "@/lib/relative-time";
@@ -202,7 +204,14 @@ function DetailBody({
         }
       />
 
-      <PropertiesPanel edit={edit} readOnly={readOnly} onChanged={onChanged} />
+      <PropertiesPanel edit={edit} readOnly={readOnly} onChanged={onChanged}>
+        <PropRow icon="target" label="Cycle">
+          <CycleField item={item} readOnly={readOnly} onChanged={onChanged} />
+        </PropRow>
+        <PropRow icon="layers" label="Modules">
+          <ModulesField item={item} readOnly={readOnly} onChanged={onChanged} />
+        </PropRow>
+      </PropertiesPanel>
 
       <RelationsPanel item={item} readOnly={readOnly} onChanged={() => void mutateActivity()} />
 

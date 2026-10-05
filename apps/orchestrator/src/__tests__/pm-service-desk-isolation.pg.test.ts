@@ -39,6 +39,8 @@ interface Ids {
   deskLabelId: string;
   deskItemId: string;
   deskPropertyId: string;
+  deskCycleId: string;
+  deskModuleId: string;
   relationId: string;
   ownerId: string;
 }
@@ -90,6 +92,27 @@ const probes: Probe[] = [
   { route: "DELETE /api/pm/properties/:id", kind: "desk", method: "delete", url: (i) => `/api/pm/properties/${i.deskPropertyId}` },
   { route: "PUT /api/pm/work-items/:id/properties/:propertyId", kind: "desk", method: "put", url: (i) => `/api/pm/work-items/${i.deskItemId}/properties/${i.deskPropertyId}`, body: { value: { text: "Changed" } } },
   { route: "DELETE /api/pm/work-items/:id/properties/:propertyId", kind: "desk", method: "delete", url: (i) => `/api/pm/work-items/${i.deskItemId}/properties/${i.deskPropertyId}` },
+  // ── cycles and modules are project data, never service-desk data ──────────
+  { route: "GET /api/pm/projects/:id/cycles", kind: "desk", method: "get", url: (i) => `/api/pm/projects/${i.deskId}/cycles` },
+  { route: "POST /api/pm/projects/:id/cycles", kind: "desk", method: "post", url: (i) => `/api/pm/projects/${i.deskId}/cycles`, body: { name: "Extra" } },
+  { route: "GET /api/pm/projects/:id/backlog", kind: "desk", method: "get", url: (i) => `/api/pm/projects/${i.deskId}/backlog` },
+  { route: "GET /api/pm/cycles/:id", kind: "desk", method: "get", url: (i) => `/api/pm/cycles/${i.deskCycleId}` },
+  { route: "PATCH /api/pm/cycles/:id", kind: "desk", method: "patch", url: (i) => `/api/pm/cycles/${i.deskCycleId}`, body: { name: "Renamed" } },
+  { route: "DELETE /api/pm/cycles/:id", kind: "desk", method: "delete", url: (i) => `/api/pm/cycles/${i.deskCycleId}` },
+  { route: "POST /api/pm/cycles/:id/start", kind: "desk", method: "post", url: (i) => `/api/pm/cycles/${i.deskCycleId}/start` },
+  { route: "POST /api/pm/cycles/:id/complete", kind: "desk", method: "post", url: (i) => `/api/pm/cycles/${i.deskCycleId}/complete`, body: { moveIncompleteTo: "backlog" } },
+  { route: "GET /api/pm/cycles/:id/burndown", kind: "desk", method: "get", url: (i) => `/api/pm/cycles/${i.deskCycleId}/burndown` },
+  { route: "GET /api/pm/cycles/:id/work-items", kind: "desk", method: "get", url: (i) => `/api/pm/cycles/${i.deskCycleId}/work-items` },
+  { route: "GET /api/pm/projects/:id/modules", kind: "desk", method: "get", url: (i) => `/api/pm/projects/${i.deskId}/modules` },
+  { route: "POST /api/pm/projects/:id/modules", kind: "desk", method: "post", url: (i) => `/api/pm/projects/${i.deskId}/modules`, body: { name: "Extra" } },
+  { route: "GET /api/pm/modules/:id", kind: "desk", method: "get", url: (i) => `/api/pm/modules/${i.deskModuleId}` },
+  { route: "PATCH /api/pm/modules/:id", kind: "desk", method: "patch", url: (i) => `/api/pm/modules/${i.deskModuleId}`, body: { name: "Renamed" } },
+  { route: "DELETE /api/pm/modules/:id", kind: "desk", method: "delete", url: (i) => `/api/pm/modules/${i.deskModuleId}` },
+  { route: "GET /api/pm/modules/:id/work-items", kind: "desk", method: "get", url: (i) => `/api/pm/modules/${i.deskModuleId}/work-items` },
+  { route: "POST /api/pm/modules/:id/work-items", kind: "desk", method: "post", url: (i) => `/api/pm/modules/${i.deskModuleId}/work-items`, body: { work_item_ids: ["DESK_ITEM"] } },
+  { route: "DELETE /api/pm/modules/:id/work-items", kind: "desk", method: "delete", url: (i) => `/api/pm/modules/${i.deskModuleId}/work-items`, body: { work_item_ids: ["DESK_ITEM"] } },
+  { route: "DELETE /api/pm/modules/:id/work-items/:workItemId", kind: "desk", method: "delete", url: (i) => `/api/pm/modules/${i.deskModuleId}/work-items/${i.deskItemId}` },
+  { route: "GET /api/pm/work-items/:id/modules", kind: "desk", method: "get", url: (i) => `/api/pm/work-items/${i.deskItemId}/modules` },
   // ── mobile router ────────────────────────────────────────────────────────
   { route: "GET /api/mobile/pm/work-items/:id", kind: "desk", method: "get", url: (i) => `/api/mobile/pm/work-items/${i.deskItemId}?workspace=${i.workspaceSlug}&project_id=${i.deskId}` },
   // ── schedule router: stage's Timeline and My Work need the same boundary ──
@@ -133,25 +156,28 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
     );
     prisma = new RealPrismaClient();
     await prisma.$connect();
-    const [{ createPmNativeRouter }, { createPmRelationsRouter }, { createPmMobileRouter }, { createPmScheduleRouter }, { createPmFieldsRouter }] =
+    const [{ createPmNativeRouter }, { createPmRelationsRouter }, { createPmMobileRouter }, { createPmScheduleRouter }, { createPmFieldsRouter }, { createPmPlanningRouter }] =
       await Promise.all([
         import("../routes/pm/native.js"),
         import("../routes/pm/relations.js"),
         import("../routes/mobile/pm.js"),
         import("../routes/pm/schedule.js"),
         import("../routes/pm/fields.js"),
+        import("../routes/pm/planning.js"),
       ]);
     const native = createPmNativeRouter(prisma);
     const relations = createPmRelationsRouter(prisma);
     const mobile = createPmMobileRouter(prisma);
     const schedule = createPmScheduleRouter(prisma);
     const fields = createPmFieldsRouter(prisma);
+    const planning = createPmPlanningRouter(prisma);
     routers = [
       { router: native, prefix: "/api" },
       { router: relations, prefix: "/api" },
       { router: mobile, prefix: "" },
       { router: schedule, prefix: "/api" },
       { router: fields, prefix: "/api" },
+      { router: planning, prefix: "/api" },
     ];
     const app = express();
     app.use(express.json());
@@ -164,6 +190,7 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
     app.use(mobile);
     app.use("/api", schedule);
     app.use("/api", fields);
+    app.use("/api", planning);
     app.use(
       (err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
         res.status(500).json({ error: "unhandled", message: err.message });
@@ -267,6 +294,12 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
     await prisma.pmWorkItemPropertyValue.create({
       data: { workItemId: deskItem.id, propertyId: deskProperty.id, value: { text: "Private" } },
     });
+    const deskCycle = await prisma.pmCycle.create({
+      data: { projectId: desk.id, name: "Private", startDate: new Date("2026-10-01"), endDate: new Date("2026-10-15") },
+    });
+    const deskModule = await prisma.pmModule.create({ data: { projectId: desk.id, name: "Private" } });
+    await prisma.pmWorkItem.update({ where: { id: deskItem.id }, data: { cycleId: deskCycle.id } });
+    await prisma.pmModuleWorkItem.create({ data: { workItemId: deskItem.id, moduleId: deskModule.id } });
 
     // The escalation link, as the support service writes it: one symmetric row,
     // smaller id first.
@@ -285,6 +318,8 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
       deskLabelId: desk.labels[0]!.id,
       deskItemId: deskItem.id,
       deskPropertyId: deskProperty.id,
+      deskCycleId: deskCycle.id,
+      deskModuleId: deskModule.id,
       relationId: relation.id,
       ownerId: owner,
     };
@@ -332,6 +367,12 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
         where: { workItemId_propertyId: { workItemId: ids.deskItemId, propertyId: ids.deskPropertyId } },
         select: { value: true },
       })).toEqual({ value: { text: "Private" } });
+      expect(await prisma.pmCycle.findUnique({ where: { id: ids.deskCycleId }, select: { name: true, status: true } }))
+        .toEqual({ name: "Private", status: "draft" });
+      expect(await prisma.pmModule.findUnique({ where: { id: ids.deskModuleId }, select: { name: true } }))
+        .toEqual({ name: "Private" });
+      expect(await prisma.pmModuleWorkItem.count({ where: { moduleId: ids.deskModuleId, workItemId: ids.deskItemId } }))
+        .toBe(1);
     },
   );
 

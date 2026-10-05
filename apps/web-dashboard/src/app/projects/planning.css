@@ -1,0 +1,74 @@
+/* Planning surfaces — cycles (sprints) and modules (milestones), WARP-3521.
+ *
+ * Shared primitives only (progress bar, screen-reader-only text, the cycle
+ * chip's name truncation). View-specific layout lives beside each view
+ * (cycles.css, modules.css). Everything is scoped under `.pm-scope` and binds to
+ * the aliases projects.css already maps onto the dashboard tokens — no hex
+ * literals and no new tokens (design brief §2).
+ */
+
+/* The track and fill of a progress bar. The fill is the accent; a finished
+ * thing (a completed cycle) turns it to the ok colour. 8px tall is a bar you can
+ * see without making it the loudest thing on a card. */
+.pm-scope .pm-progress {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--bg-sunken);
+  overflow: hidden;
+}
+.pm-scope .pm-progress .fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width 240ms var(--ease);
+}
+.pm-scope .pm-progress .fill.ok {
+  background: var(--ok);
+}
+
+/* Visually hidden, still read by a screen reader: the data table that is the
+ * accessible equivalent of the burndown chart (brief §5.5). */
+.pm-scope .pm-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* A panel heading that focus is handed to when the row that had it is gone
+ * (focus-after-removal.ts). tabindex="-1": reachable by script, not by Tab. */
+.pm-scope .pm-focus-target {
+  border-radius: 6px;
+}
+.pm-scope .pm-focus-target:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+/* A long cycle name must not stretch a board card. */
+.pm-scope .pm-cycle-tag-name {
+  max-width: 14ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The state chip had no muted variant for a status that is neither started nor
+ * finished (a module that is in the backlog or paused). Text-muted on the sunken
+ * fill, the same pair the base chip already uses. */
+.pm-scope .pm-statechip.backlog {
+  background: var(--bg-sunken);
+  color: var(--text-2);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pm-scope .pm-progress .fill {
+    transition: none !important;
+  }
+}

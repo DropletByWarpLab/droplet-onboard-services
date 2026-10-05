@@ -702,6 +702,31 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "This project's chain of blockers is too long to check, so the link wasn't added.",
     concurrent_mutation:
       "Someone changed this at the same moment, so nothing was applied. Try again.",
+    // WARP-3521 — cycles (sprints) and modules (milestones). Each says what
+    // happened and what to do, in the owner's words: cycle, module, start, end,
+    // item — never state machine, constraint or conflict.
+    cycle_not_found:
+      "We couldn't find that cycle anymore. It may have been deleted.",
+    invalid_cycle:
+      "That cycle isn't available for this item. Refresh and try again.",
+    cycle_completed:
+      "That cycle is finished, so it can't take new work. Pick another cycle.",
+    cycle_already_active:
+      "Another cycle is already running. Complete it before you start this one.",
+    cycle_not_draft:
+      "That cycle has already started. Refresh and try again.",
+    cycle_not_active:
+      "That cycle isn't running. Refresh and try again.",
+    cycle_dates_required:
+      "Set a start date and an end date first.",
+    invalid_dates:
+      "Check the dates — the end can't come before the start, and a cycle can run for at most a year.",
+    module_not_found:
+      "We couldn't find that module anymore. It may have been deleted.",
+    invalid_work_item:
+      "That item belongs to a different project, so it can't go in this module.",
+    lead_is_guest:
+      "A guest can't lead a module or a project. Pick someone on your team.",
     identifier_taken:
       "That project ID is already in use. Pick a different one.",
     // WARP-3371 — the work-item API now refuses what it used to swallow. Each
