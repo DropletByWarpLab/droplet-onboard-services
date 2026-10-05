@@ -79,6 +79,7 @@ new_repo() {
 run_deploy() { # [ts]
   PATH="$BIN:$PATH" DROPLET_HOST_INTEGRATION_REPO_ROOT="$WORK/repo" \
     DROPLET_DEPLOY_BACKUP_DIR="$WORK/backups" DROPLET_DEPLOY_SUDOERS="$WORK/sudoers" \
+    DROPLET_DEPLOY_REAPPLY_LIB="$REAPPLY" \
     DROPLET_DEPLOY_TS="${1:-20260101T000000Z}" DROPLET_DEPLOY_REQUIRED_UNITS="droplet.service" \
     HU_BIN="$WORK/hu" DROPLET_HOST_UNITS_BIN="$WORK/hu" bash "$DEPLOY" 2>&1
 }
@@ -169,6 +170,7 @@ echo "--- backup location (encrypted /data) ---"
 run_deploy_auto() {
   PATH="$BIN:$PATH" DROPLET_HOST_INTEGRATION_REPO_ROOT="$WORK/repo" \
     DROPLET_DATA_MOUNT="$WORK/data" DROPLET_DEPLOY_SUDOERS="$WORK/sudoers" \
+    DROPLET_DEPLOY_REAPPLY_LIB="$REAPPLY" \
     DROPLET_DEPLOY_TS=20260101T000000Z DROPLET_DEPLOY_REQUIRED_UNITS="droplet.service" \
     HU_BIN="$WORK/hu" DROPLET_HOST_UNITS_BIN="$WORK/hu" bash "$DEPLOY" 2>&1
 }
@@ -189,6 +191,35 @@ new_repo; mkdir -p "$WORK/data"; echo dirt > "$WORK/repo/untracked"
 out="$(run_deploy_auto)"; printf '%s\n' "$out" > "$WORK/out.txt"
 check "not relocated: backups go to /var/lib/droplet/deploy-backups" bash -c \
   "grep -q 'backups: /var/lib/droplet/deploy-backups (not relocated' '$WORK/out.txt' && [ ! -d '$WORK/data/droplet' ]"
+
+echo "--- recovery escrow exclusion ---"
+new_repo
+mkdir -p "$WORK/data/droplet/env" "$WORK/data/droplet/secrets/bay-recovery"
+mv "$WORK/repo/.env.real" "$WORK/data/droplet/env/.env"
+mv "$WORK/repo/data/secrets/k" "$WORK/data/droplet/secrets/audit.key"
+rm "$WORK/repo/.env"; rmdir "$WORK/repo/data/secrets"
+ln -s "$WORK/data/droplet/env/.env" "$WORK/repo/.env"
+ln -s "$WORK/data/droplet/secrets" "$WORK/repo/data/secrets"
+echo recovery-only > "$WORK/data/droplet/secrets/bay-recovery/drive.key"
+# Simulate root-only custody without requiring root; archive membership is
+# checked too, so even a root-run test cannot silently back up the escrow.
+chmod 000 "$WORK/data/droplet/secrets/bay-recovery"
+out="$(run_deploy_auto)"; rc=$?
+bk="$WORK/data/droplet/deploy-backups/20260101T000000Z"
+check "relocated backup excludes escrow, keeps .env and audit key, preserves custody mode" bash -c \
+  "[ $rc -eq 0 ] && [ \"\$(tar -xOf '$bk/secrets.tar' .env)\" = SECRET=hunter2 ] \
+   && [ \"\$(tar -xOf '$bk/secrets.tar' data/secrets/audit.key)\" = K ] \
+   && ! tar -tf '$bk/secrets.tar' | grep -q bay-recovery \
+   && [ \"\$(stat -c %a '$WORK/data/droplet/secrets/bay-recovery')\" = 0 ]"
+chmod 700 "$WORK/data/droplet/secrets/bay-recovery"
+
+new_repo
+mkdir -p "$WORK/repo/data/secrets/other-recovery"
+ln -s "$WORK/missing-secret" "$WORK/repo/data/secrets/other-recovery/unreadable"
+out="$(run_deploy)"; rc=$?; printf '%s\n' "$out" > "$WORK/out.txt"
+check "unreadable non-escrow secret still fails the backup before setup" bash -c \
+  "[ $rc -eq 1 ] && grep -q 'secrets tar failed' '$WORK/out.txt' \
+   && ! grep -q 'setup.sh --skip-docker' '$WORK/calls.log' && [ ! -e '$WORK/sudoers' ]"
 
 echo ""
 if [ "$FAILURES" -eq 0 ]; then printf "  \033[32mAll %d tests passed\033[0m\n\n" "$TESTS"; exit 0; fi

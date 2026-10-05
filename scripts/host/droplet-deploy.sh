@@ -118,10 +118,6 @@ runuser -u droplet -- docker compose -f "$REPO/docker/docker-compose.yml" exec -
   | gzip --best > "$BK/db.sql.gz" || die "db dump failed"
 [ -s "$BK/db.sql.gz" ] || die "db dump failed"
 
-# NO -h: symlinks are stored as links and never read. Root dereferencing a
-# droplet-planted link (data/secrets/x -> /etc/shadow) would be an arbitrary
-# file read. .env alone may legitimately be a link (relocated onto /data), so
-# it is resolved and must land inside the checkout; its target is archived too.
 paths=()
 for p in .env data/secrets docker/secrets docker/certs "$REPO"/docker/mosquitto.*; do
   p="${p#"$REPO"/}"
@@ -132,7 +128,10 @@ done
 # followed, but droplet can only read what droplet can already read. A
 # droplet-planted link to a root-only file therefore fails with "permission
 # denied" instead of leaking. Root only owns the output file (umask 077).
-runuser -u droplet -- tar -chf - -C "$REPO" "${paths[@]}" > "$BK/secrets.tar" \
+# The bay recovery escrow is deliberately root-only and never backed up
+# (ADR-070): its directory/tombstones remain after the one-time reveal. Exclude
+# only that subtree; every other unreadable secret must still fail the backup.
+runuser -u droplet -- tar -chf - -C "$REPO" --exclude=data/secrets/bay-recovery "${paths[@]}" > "$BK/secrets.tar" \
   || die "secrets tar failed: a file under ${paths[*]} is not readable by droplet (e.g. a root-owned dir Docker created under data/secrets); chown it to droplet, setup.sh as droplet would hit it too"
 chmod 0600 "$BK/db.sql.gz" "$BK/secrets.tar"
 log "backup written to $BK (${#paths[@]} paths + db dump)"
