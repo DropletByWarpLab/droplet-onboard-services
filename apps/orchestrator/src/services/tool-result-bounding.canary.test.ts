@@ -102,6 +102,7 @@ const NOT_A_CURSOR: Record<string, string> = {
   nextResponsePausedMs: "support/sla-clock.service.ts — the accumulated paused duration at the customer-response clock's start, in milliseconds",
   nextResponseDueAt: "support/sla-clock.service.ts — the customer-response promise's deadline, a timestamp or null",
   nextResponse: "support/sla-engine.ts — a metric name in the finite firstResponse/nextResponse/resolution deadline map",
+  nextSyncAt: "pm/pm-development.service.ts — the code-host poller's scheduled retry timestamp, never a pagination position",
 };
 
 function tsFilesUnder(dir: string): string[] {

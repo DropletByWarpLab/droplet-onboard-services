@@ -34,6 +34,12 @@ MQTT_BROKER = os.environ.get("MQTT_BROKER", "mqtt://localhost:1883")
 # Where Nextcloud stores user files (read-only bind mount from nextcloud-data volume)
 NEXTCLOUD_DATA_ROOT = os.environ.get("NEXTCLOUD_DATA_ROOT", "/data/nextcloud/data")
 
+# The SMB volume is an external local mount in Nextcloud, outside its data
+# directory. Keep its index identity separate from every personal corpus.
+DROPLET_SHARE_ROOT = os.environ.get("DROPLET_SHARE_ROOT", "/data/droplet-share")
+DROPLET_SHARE_STORAGE_ID = "local::/droplet-share/"
+DROPLET_SHARE_USER_ID = "__droplet_share__"
+
 # ai-gateway gRPC endpoint for embedding
 AI_GATEWAY_GRPC_URL = os.environ.get("AI_GATEWAY_GRPC_URL", "localhost:50051")
 

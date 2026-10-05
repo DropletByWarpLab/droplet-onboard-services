@@ -31,8 +31,9 @@ describe("eventForVerb", () => {
   const verbs = schemaVerbs();
 
   it("reads the whole verb enum (guards the parser, so the rows below are not vacuous)", () => {
-    expect(verbs.length).toBeGreaterThanOrEqual(21);
+    expect(verbs.length).toBeGreaterThanOrEqual(22);
     expect(verbs).toContain("relation_removed");
+    expect(verbs).toContain("external_link_added");
   });
 
   it.each(verbs)("maps %s to exactly one subscribable work_item event", (verb) => {
@@ -58,9 +59,11 @@ describe("eventForVerb", () => {
 
   it("sends every field-level verb through `updated`", () => {
     for (const verb of [
-      "priority_changed", "due_date_changed", "title_changed", "description_changed",
+      "priority_changed", "due_date_changed", "start_date_changed", "type_changed", "estimate_changed", "property_changed", "title_changed", "description_changed",
       "label_added", "label_removed", "restored", "cycle_added", "cycle_removed",
       "parent_removed", "module_added", "module_removed", "relation_added", "relation_removed",
+      "attachment_added", "attachment_removed",
+      "external_link_added",
       "time_logged", "time_log_updated", "time_log_removed",
     ]) {
       expect(eventForVerb(verb as never), verb).toBe("work_item.updated");

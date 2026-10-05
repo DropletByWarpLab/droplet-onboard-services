@@ -58,6 +58,16 @@ import {
   type RestVendorProfile,
   type WatermarkFormat,
 } from "./profile.js";
+import {
+  isSafeRepoRef,
+  mapFeedRow,
+  parseRateLimit,
+  sortKeyOf,
+  type DevelopmentFeedRequest,
+  type DevelopmentFeedResult,
+  type DevelopmentItem,
+  type RateLimitSnapshot,
+} from "./development.js";
 import type { IntrospectedTable } from "../schema-map.js";
 
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
@@ -157,9 +167,51 @@ export class RestRateLimitedError extends RestVendorError {
     detail: string,
     /** The raw `Retry-After` header value (seconds or HTTP-date), if sent. */
     readonly retryAfter?: string,
+    /**
+     * WARP-3535 — when the allowance refills, from the profile's own rate-limit
+     * header (GitHub's primary limit sends `x-ratelimit-reset` and NO
+     * `Retry-After`, so without this the caller can only guess). Absent for a
+     * profile that declares no development spec, and when the host sent none.
+     */
+    readonly resetAt?: Date,
   ) {
     super(provider, status, detail ? `rate limited: ${detail}` : "rate limited");
     this.name = "RestRateLimitedError";
+  }
+}
+
+/**
+ * WARP-3535 — the vendor answered 401 or 403 and it was not a rate limit.
+ *
+ * A `ConnectorBlockedError` (so every `instanceof ConnectorBlockedError` path
+ * and every message still holds) that carries WHICH status, because the two
+ * mean different things to a caller that reads more than one repository: a 401
+ * is the credential, which fails every request; a 403 is a permission, and one
+ * repository's missing "Pull requests: Read-only" must not read as a revoked
+ * token. The shared classification read both as "rejected the credential" and
+ * that is still what the message says.
+ */
+export class RestCredentialRejectedError extends ConnectorBlockedError {
+  constructor(
+    operation: string,
+    readonly status: 401 | 403,
+  ) {
+    super(`${operation} (the vendor rejected the credential (${status}))`, REST_TRACK_REMEDIATION);
+    this.name = "RestCredentialRejectedError";
+  }
+}
+
+/**
+ * WARP-3535 — no answer came back: DNS, refused, TLS, the connector's own
+ * timeout, or the transport refusing the dial. A `ConnectorBlockedError` like
+ * the one it replaces, so nothing that catches that class changes; a class of
+ * its own so a caller can tell "wait and retry" from "paste a new key" without
+ * comparing the remediation string.
+ */
+export class RestUnreachableError extends ConnectorBlockedError {
+  constructor(operation: string) {
+    super(operation, REST_TRACK_UNREACHABLE_REMEDIATION);
+    this.name = "RestUnreachableError";
   }
 }
 
@@ -551,7 +603,14 @@ export class RestProfileConnector implements Connector {
      * every header-watermarked vendor and reports it as an incremental read.
      */
     extraHeaders: Readonly<Record<string, string>> = {},
-  ): Promise<{ body: unknown; headers: Headers }> {
+    /**
+     * WARP-3535 — `conditional: true` says this request carries `If-None-Match`,
+     * which makes a 304 the ANSWER ("nothing changed") instead of a redirect to
+     * refuse. Only a caller that asked a conditional question may be told no
+     * this way; for every other request a 3xx is still refused exactly as before.
+     */
+    opts: { readonly conditional?: boolean } = {},
+  ): Promise<{ body: unknown; headers: Headers; notModified?: true }> {
     // (1) and (2): the destination is settled before the credential exists.
     const origin = assertSafeRestBaseUrl(this.provider, this.profile.baseUrl, this.hostConfigValue);
     const target = assertSafeFollowUrl(this.provider, origin, url);
@@ -620,9 +679,18 @@ export class RestProfileConnector implements Connector {
         : error instanceof Error
           ? error.message
           : String(error);
-      throw new ConnectorBlockedError(`${op} (${detail})`, REST_TRACK_UNREACHABLE_REMEDIATION);
+      throw new RestUnreachableError(`${op} (${detail})`);
     } finally {
       clearTimeout(timer);
+    }
+
+    // WARP-3535 — a 304 to a request that asked "has this changed?". The body is
+    // empty by definition; the headers (ETag, the rate-limit allowance) are the
+    // answer. Placed BEFORE the redirect refusal below, and only for a
+    // conditional request, so nothing else gains a way past that refusal.
+    if (response.status === 304 && opts.conditional === true) {
+      await response.body?.cancel?.().catch(() => undefined);
+      return { body: undefined, headers: response.headers, notModified: true };
     }
 
     // 🔴 The second half of the redirect guard, and it is not redundant.
@@ -676,7 +744,7 @@ export class RestProfileConnector implements Connector {
       // value. If they have not, the same one goes out once more and the same
       // 401 comes back — which is the honest outcome, not a loop.
       this.credentials = null;
-      throw this.blocked(op, `the vendor rejected the credential (${response.status})`);
+      throw new RestCredentialRejectedError(op, response.status as 401 | 403);
     }
     if (response.status === 429 || response.status === 403) {
       // A 403 reaching this line IS rate-limited (the branch above took every
@@ -690,6 +758,9 @@ export class RestProfileConnector implements Connector {
         response.status,
         vendorErrorCode(detail),
         response.headers.get("retry-after") ?? undefined,
+        this.profile.development
+          ? (parseRateLimit(response.headers, this.profile.development.rateLimit)?.resetAt ?? undefined)
+          : undefined,
       );
     }
     if (!response.ok) {
@@ -960,6 +1031,108 @@ export class RestProfileConnector implements Connector {
       projectCanonicalRow(spec.dataset, (column) => readField(row, spec.fieldMap[column])),
     );
     return applyRestReadOrder(applyRestReadFilter(projected, semantics.filter, params), semantics.orderBy);
+  }
+
+  /**
+   * WARP-3535 — read one development feed: repositories, a repository's pull /
+   * merge requests, its recent commits or its branches. The development panel's
+   * only way to talk to a code host.
+   *
+   * Goes through the SAME `request()` as every dataset read, so nothing it does
+   * is a second door: the exact-host guard and `redirect: "error"` run before the
+   * credential exists, a `Link` URL the host hands back is re-guarded against
+   * this connection's own origin, and pacing and the 401 / 403 / 429 verdicts are
+   * the shared ones. Over that it adds two things a code host's lists need:
+   *
+   *  - a CONDITIONAL first page. `If-None-Match` with the last pass's ETag turns
+   *    "nothing changed" into a 304, which neither host counts against the
+   *    owner's allowance. A tag is retained only when that response has no
+   *    next page: a first-page validator cannot prove later pages unchanged.
+   *  - an early stop. GitHub's `/pulls` has no `since` and ignores parameters it
+   *    does not know, so a newest-first feed is walked until a page reaches the
+   *    caller's cutoff and the rest is never requested.
+   *
+   * A repository reference is validated BEFORE any request is built: a refused
+   * one costs zero fetch calls, like every other guard on this track.
+   */
+  async readDevelopment(req: DevelopmentFeedRequest): Promise<DevelopmentFeedResult> {
+    const dev = this.profile.development;
+    if (!dev) throw new DatasetNotServedError(this.provider, `development:${req.feed}`, ["development"]);
+    const spec = dev[req.feed];
+
+    let path = spec.path;
+    if (path.includes("{repo}")) {
+      if (req.repo === undefined || !isSafeRepoRef(req.repo, dev.repoRef.pattern)) {
+        throw new UnsafeBaseUrlError(
+          this.provider,
+          "the repository reference is not one this host can have, so no request was built",
+        );
+      }
+      path = path.replace("{repo}", req.repo);
+    }
+    const first = new URL(this.origin + path);
+    for (const [key, value] of Object.entries(spec.query ?? {})) first.searchParams.set(key, value);
+
+    const op = `read development ${req.feed}`;
+    const ctx = { webHosts: dev.webHosts, repoRefPattern: dev.repoRef.pattern, repoWebUrl: req.repoWebUrl };
+    const items: DevelopmentItem[] = [];
+    let skipped = 0;
+    let etag: string | null = null;
+    let rateLimit: RateLimitSnapshot | null = null;
+    let truncated = false;
+    let url = first.toString();
+
+    for (let page = 0; ; page += 1) {
+      const conditional = page === 0 && typeof req.etag === "string" && req.etag !== "";
+      const res = await this.request(
+        op,
+        url,
+        conditional ? { "If-None-Match": req.etag as string } : {},
+        { conditional },
+      );
+      rateLimit = parseRateLimit(res.headers, dev.rateLimit) ?? rateLimit;
+      if (res.notModified) {
+        this.lastReadAt = this.now();
+        return { status: "not_modified", items: [], etag: req.etag ?? null, truncated: false, skipped: 0, rateLimit };
+      }
+      const next = spec.single === true ? "" : (nextLinkFrom(res.headers.get("link")) ?? "");
+      // Check before the cutoff can stop this walk. Even an unvisited next
+      // page makes the first response's validator unsafe for the whole feed.
+      if (page === 0) etag = next === "" ? res.headers.get("etag") : null;
+
+      const rows = spec.single === true ? [res.body] : res.body;
+      if (!Array.isArray(rows)) {
+        throw new RestPaginationContractError(this.provider, `${req.feed}: the response is not an array`);
+      }
+      let reachedCutoff = false;
+      for (const row of rows) {
+        const item = mapFeedRow(req.feed, spec, row, ctx);
+        if (!item) {
+          skipped += 1;
+          continue;
+        }
+        const key = sortKeyOf(item);
+        // Not `break`: the feed is DECLARED newest-first, but a host that quietly
+        // ignored its sort would turn a break into silently missing rows. Older
+        // rows are dropped and the walk ends after this page; a newer row that
+        // turns up late is still kept.
+        if (spec.newestFirst === true && req.cutoff && key && key < req.cutoff) {
+          reachedCutoff = true;
+          continue;
+        }
+        items.push(item);
+      }
+      if (reachedCutoff) break;
+
+      if (next === "") break;
+      if (page + 1 >= spec.maxPages) {
+        truncated = true;
+        break;
+      }
+      url = next;
+    }
+    this.lastReadAt = this.now();
+    return { status: "ok", items, etag, truncated, skipped, rateLimit };
   }
 
   /**

@@ -975,6 +975,15 @@ sed -e 's|^\(  sudo systemctl enable\) \(droplet-host-integration.service\).*$|\
 mutate_delivery "an installer that starts the re-apply unit --now (recursion) is caught" \
   "$WRAPPER" "$REAPPLY_UNIT" "$SETUP" "$MUT5/single-box-now.sh" "recurses into the installer"
 
+# WARP-3740: focused re-apply must not wipe the presence-policy DNS config.
+# This bounded harness executes only the DNS install block against tmp files.
+if out="$(bash "$SCRIPT_DIR/host-dns-reapply.test.sh" 2>&1)"; then
+  pass "focused re-apply preserves runtime DNS config while first/full setup installs the template"
+else
+  fail "focused re-apply DNS preservation regression"
+  printf '%s\n' "$out" | sed 's/^/      /'
+fi
+
 # =============================================================================
 echo ""
 if [ "$FAILURES" -eq 0 ]; then

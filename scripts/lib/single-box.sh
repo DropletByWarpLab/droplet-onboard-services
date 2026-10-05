@@ -290,14 +290,15 @@ EOF
   sudo install -d -m 0755 /etc/droplet
 
   # --- /etc/droplet-host-net/ -----------------------------------------
-  # NOTE: this install is unconditional, so it OVERWRITES the live conf on
-  # every setup run. Anything a box needs beyond the static baseline has to be
-  # re-generated afterwards, not hand-edited here — see droplet-relay-dns
-  # below, and setup_local_dns() (scripts/lib/local-dns.sh), which runs later
-  # in the same pass and re-applies both managed blocks.
+  # Full setup replaces the baseline, then setup_local_dns() regenerates its
+  # managed host-record/listener blocks. Focused host re-apply exits before that
+  # step: preserve the existing presence-policy conf, including runtime blocks.
+  # A first install still needs the template in either mode.
   sudo install -d -m 0755 /etc/droplet-host-net
-  sudo install -m 0644 "$host_src/etc-droplet-host-net/lan-dhcp.conf" \
-    /etc/droplet-host-net/lan-dhcp.conf
+  if [ "${REAPPLY_HOST_INTEGRATION:-false}" != "true" ] || [ ! -f /etc/droplet-host-net/lan-dhcp.conf ]; then
+    sudo install -m 0644 "$host_src/etc-droplet-host-net/lan-dhcp.conf" \
+      /etc/droplet-host-net/lan-dhcp.conf
+  fi
 
   # --- relay DNS origin (WARP-2189) ---------------------------------------
   # The template above names ONE listen-address (the .20.1 LAN leg) and
@@ -470,6 +471,13 @@ EOF
     sudo install -m 0644 "$host_src/etc-default/droplet-watchdog" \
       /etc/default/droplet-watchdog
   fi
+  # The oneshot does not inherit setup.sh's environment. Give it a pointer to
+  # the deployment so router_auth can read the TLS flag and host-admin bundle.
+  # Backfill existing tuning files without replacing any operator setting.
+  if ! sudo grep -q '^[[:space:]]*DROPLET_ENV_FILE[[:space:]]*=' /etc/default/droplet-watchdog; then
+    printf '\nDROPLET_ENV_FILE="%s/.env"\n' "$REPO_ROOT" \
+      | sudo tee -a /etc/default/droplet-watchdog >/dev/null
+  fi
   # Migration: the standalone WARP-869 timer is superseded — the unified
   # watchdog invokes the same helper, and two independent schedulers could
   # race a PCI remove/rescan. The helper script itself stays installed.
@@ -538,6 +546,18 @@ EOF
   sudo install -m 0644 "$host_src/etc-systemd-system/droplet-host-integration.service" \
     /etc/systemd/system/droplet-host-integration.service
   log_success "Installed /usr/local/sbin/droplet-reapply-host-integration (+ boot re-apply unit)"
+
+  # --- WARP-3841 on-demand deploy (epic WARP-3834) ----------------------------
+  # droplet-deploy.service is the repo-tracked root deploy (backup, setup.sh as
+  # droplet, host hook, gate). Deliberately NOT enabled (no [Install]): the
+  # `droplet` user starts it through the polkit rule below, start verb only.
+  sudo install -m 0755 "$host_src/droplet-deploy.sh" \
+    /usr/local/sbin/droplet-deploy
+  sudo install -m 0644 "$host_src/etc-systemd-system/droplet-deploy.service" \
+    /etc/systemd/system/droplet-deploy.service
+  sudo install -m 0644 "$host_src/50-droplet-deploy.rules" \
+    /etc/polkit-1/rules.d/50-droplet-deploy.rules
+  log_success "Installed /usr/local/sbin/droplet-deploy (+ on-demand unit, polkit start rule)"
 
   # --- XVF3800 DSP control tool (xvf_host) for voice_dsp self-heal (WARP-1408) -
   # Both the host watchdog (droplet-watchdog.sh) and voice-io's POST
@@ -1394,13 +1414,13 @@ EOF
   case "$docs_engine" in
     onlyoffice)
       upsert_env DOCS_ENGINE        onlyoffice
-      upsert_env DOCS_ENGINE_IMAGE  "onlyoffice/documentserver:8.2"
+      upsert_env DOCS_ENGINE_IMAGE  "onlyoffice/documentserver:8.2@sha256:fb1c76177e578918f0d7ad51eda5006d728b9f2f071f93d18054c1f91edec78b"
       upsert_env DOCS_INTERNAL_URL  http://docserver
       log_info "Document engine: onlyoffice (OEM-licensed SKU posture — AGPLv3 CE otherwise)"
       ;;
     *)
       upsert_env DOCS_ENGINE        collabora
-      upsert_env DOCS_ENGINE_IMAGE  "collabora/code:26.04.2.4.1"
+      upsert_env DOCS_ENGINE_IMAGE  "collabora/code:26.04.2.4.1@sha256:1f864ce3f0c49e867787b6dd303bd6ba989542d3023f6809df558eafd04c1b97"
       upsert_env DOCS_INTERNAL_URL  "http://docserver:9980/docs"
       log_info "Document engine: collabora (Collabora CODE — LibreOffice, no licensing fee)"
       ;;

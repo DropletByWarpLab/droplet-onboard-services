@@ -1233,7 +1233,7 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
         help:
           "In GitHub: your profile photo → Settings → Developer settings → Personal access tokens → " +
           "Fine-grained tokens → Generate new token. Pick the repositories to include and grant " +
-          "Issues: Read-only (Pull requests: Read-only too if pull requests should appear). " +
+          "Issues: Read-only, Pull requests: Read-only, and Contents: Read-only for development links. " +
           "Any plan works, including Free.",
       },
     ],
@@ -1254,7 +1254,7 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
       name: "GitHub",
       category: "Project management",
       description:
-        "Issues and pull requests across every repository your token can see — read from GitHub.",
+        "Issues and pull requests, plus linked development activity from repositories you choose — read from GitHub.",
       availability: "available",
       setupGuideHref: "/help/integrations/github",
       order: 14,
@@ -1308,7 +1308,7 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
       id: "gitlab",
       name: "GitLab",
       category: "Project management",
-      description: "Issues across every project you can see — their state, assignee and timing — read from gitlab.com.",
+      description: "Issues and linked development activity from projects you choose — read from gitlab.com.",
       availability: "available",
       setupGuideHref: "/help/integrations/gitlab",
       order: 15,

@@ -831,6 +831,18 @@ export function createToolsRouter(
           res.status(404).json({ error: "Spec not found" });
           return;
         }
+        // Optional for existing clients, required by native review: dispatch
+        // the same steps the person inspected. Use the loaded snapshot below,
+        // so a concurrent later edit cannot substitute different targets.
+        const version = z.number().int().positive().safeParse(req.body?.expectedVersion);
+        if (req.body?.expectedVersion !== undefined && !version.success) {
+          res.status(400).json({ error: "invalid_expected_version" });
+          return;
+        }
+        if (version.success && version.data !== spec.version) {
+          res.status(409).json({ error: "routine_changed", detail: "Refresh and review this routine before running it." });
+          return;
+        }
         // Drafts and suggested specs CANNOT run-now from the dashboard's
         // Live tab — the operator must publish a draft (status=live) or
         // accept a suggestion first. This keeps the Live tab the only

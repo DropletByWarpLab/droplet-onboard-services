@@ -1,6 +1,6 @@
 // Static config + small pure helpers for the Projects surface.
 
-import type { Priority, StateGroup, PmWorkItem, Person } from "./types";
+import type { Priority, StateGroup, PmWorkItem, Person, WorkItemType, PropertyType } from "./types";
 import { dateOnly, formatDayMonth, isBeforeToday } from "./date-only";
 
 export interface PriorityMeta {
@@ -19,6 +19,65 @@ export const PRIORITY: Record<Priority, PriorityMeta> = {
 };
 
 export const PRIORITY_ORDER: Priority[] = ["urgent", "high", "medium", "low", "none"];
+
+// ── Work-item kind + estimate (WARP-3520) ───────────────────────────────────
+
+export interface WorkItemTypeMeta {
+  label: string;
+  /** PmIcon name. */
+  icon: string;
+  /** CSS var — bug / incident read at a glance, every other kind stays quiet. */
+  color: string;
+}
+
+export const WORK_ITEM_TYPES: Record<WorkItemType, WorkItemTypeMeta> = {
+  task: { label: "Task", icon: "task", color: "var(--text-3)" },
+  bug: { label: "Bug", icon: "bug", color: "var(--err)" },
+  feature: { label: "Feature", icon: "spark", color: "var(--text-3)" },
+  improvement: { label: "Improvement", icon: "improve", color: "var(--text-3)" },
+  question: { label: "Question", icon: "help", color: "var(--text-3)" },
+  incident: { label: "Incident", icon: "siren", color: "var(--warn)" },
+};
+
+export const WORK_ITEM_TYPE_ORDER: WorkItemType[] = [
+  "task",
+  "bug",
+  "feature",
+  "improvement",
+  "question",
+  "incident",
+];
+
+/** Estimate bounds — mirror the orchestrator's `PmWorkItem_estimate_range` CHECK. */
+export const ESTIMATE_MIN = 0;
+export const ESTIMATE_MAX = 1000;
+
+/** 5 → "5 pts", 1 → "1 pt", 0.5 → "0.5 pts". Null/undefined → null. */
+export function fmtEstimate(n: number | null | undefined): string | null {
+  if (n === null || n === undefined || !Number.isFinite(n)) return null;
+  return `${n} ${n === 1 ? "pt" : "pts"}`;
+}
+
+/** Custom-field type metadata for the settings Fields tab. */
+export const PROPERTY_TYPES: Record<PropertyType, { label: string; icon: string }> = {
+  text: { label: "Text", icon: "text" },
+  number: { label: "Number", icon: "hash" },
+  date: { label: "Date", icon: "cal" },
+  boolean: { label: "Yes / no", icon: "toggle" },
+  select: { label: "Select", icon: "list" },
+  multi_select: { label: "Multi-select", icon: "checks" },
+  member: { label: "Person", icon: "user" },
+};
+
+export const PROPERTY_TYPE_ORDER: PropertyType[] = [
+  "text",
+  "number",
+  "date",
+  "boolean",
+  "select",
+  "multi_select",
+  "member",
+];
 
 /** Left-edge accent on a card: only urgent/high get a colored rail. */
 export function cardAccent(p: Priority): string {

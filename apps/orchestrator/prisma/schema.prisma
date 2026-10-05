@@ -5813,6 +5813,12 @@ model PmProject {
   /// WARP-3529 — the channels a SERVICE_DESK takes requests through. Always
   /// empty for a PROJECT (a trigger holds that).
   supportChannels PmSupportChannel[]
+  /// WARP-3532 — webhooks scoped to this project (cascade with it).
+  webhooks   PmWebhook[]
+  /// WARP-3535 — the code repositories whose pull requests, commits and branches
+  /// are matched against this project's work-item keys. The mapping row goes
+  /// with the project; the repository registration does not.
+  devRepositories PmDevRepositoryProject[]
 
   /// WARP-2117 — the deals this project delivers. A won deal becomes a job;
   /// the link is on the deal so deleting the project leaves the commercial
@@ -5906,6 +5912,12 @@ model PmState {
   updatedAt DateTime     @default(now()) @updatedAt
   workItems PmWorkItem[]
 
+  /// WARP-3535 — the rules that move work into this state when a pull request is
+  /// opened or merged. SetNull on the rule side: deleting a state switches the
+  /// rule off, it never deletes the repository mapping.
+  devOnOpenedRules PmDevRepositoryProject[] @relation("PmDevOnOpened")
+  devOnMergedRules PmDevRepositoryProject[] @relation("PmDevOnMerged")
+
   @@unique([projectId, name])
   @@index([projectId, sortOrder])
 }
@@ -5933,6 +5945,19 @@ enum PmPriority {
   medium
   low
   none
+}
+
+/// WARP-3520 — what KIND of work an item is. An explicit enum column, never
+/// inferred from a label called "bug" (a label cannot be filtered, counted or
+/// defaulted by the engine, and one customer's "bug" is another's "defect").
+/// `task` is the default so every existing row keeps its meaning.
+enum PmWorkItemType {
+  task
+  bug
+  feature
+  improvement
+  question
+  incident
 }
 
 /// The work item (Plane "issue"). `sequenceId` + project.identifier forms the
@@ -5973,6 +5998,8 @@ model PmWorkItem {
   stateId         String?
   state           PmState?     @relation(fields: [stateId], references: [id], onDelete: SetNull)
   priority        PmPriority   @default(none)
+  /// WARP-3520 — see `PmWorkItemType`.
+  type            PmWorkItemType @default(task)
   parentId        String?
   parent          PmWorkItem?  @relation("PmSubIssues", fields: [parentId], references: [id], onDelete: SetNull)
   children        PmWorkItem[] @relation("PmSubIssues")
@@ -6030,6 +6057,10 @@ model PmWorkItem {
   activity       PmActivity[]
   modules        PmModuleWorkItem[]
   propertyValues PmWorkItemPropertyValue[]
+  /// WARP-3535 — pull requests, commits and branches from GitHub / GitLab whose
+  /// text names this item's key. Cascade: a link is a pointer with no meaning
+  /// once its item is gone.
+  externalLinks  PmExternalLink[]
 
   /// WARP-2117 — CRM timeline entries that POINT AT this work item (the task
   /// raised off a customer conversation).
@@ -6218,6 +6249,10 @@ model PmComment {
   deliveryFailure PmDeliveryFailure?
   createdAt   DateTime            @default(now())
   updatedAt   DateTime            @default(now()) @updatedAt
+  /// WARP-1505 — files attached through this comment. Cascade: a comment that
+  /// goes takes its attachment ROWS with it, so every path that can delete a
+  /// comment is also a path that must unlink the blobs (pm-attachments.service).
+  attachments PmAttachment[]
 
   /// The emails this comment is — the one it arrived as, or each attempt to send it.
   emailLinks PmTicketEmailLink[]
@@ -6322,7 +6357,8 @@ model PmModuleWorkItem {
 }
 
 /// Custom field definition on a project. `options` holds the choice list for
-/// select / multi_select types (array of {id,name,color}); null for scalars.
+/// select / multi_select types (array of {id,label,color}; WARP-3520 settled
+/// the key as `label`, matching the dashboard); null for every other type.
 enum PmPropertyType {
   text
   number
@@ -6349,8 +6385,12 @@ model PmCustomProperty {
   @@index([projectId, sortOrder])
 }
 
-/// A custom-field value on a work item. `value` is type-tagged JSON, e.g.
-/// {"text":"…"} | {"number":3} | {"optionIds":[…]} | {"userIds":[…]}.
+/// A custom-field value on a work item. `value` is type-tagged JSON, one shape
+/// per `PmPropertyType` (validated by pm-properties.service.ts, never trusted
+/// from the client): text → {"text":"…"}, number → {"number":3},
+/// date → {"date":"YYYY-MM-DD"}, boolean → {"boolean":true},
+/// select / multi_select → {"optionIds":[…]} (exactly one id for select),
+/// member → {"userIds":[…]} (exactly one id).
 model PmWorkItemPropertyValue {
   id         String           @id @default(uuid())
   workItemId String
@@ -6369,21 +6409,63 @@ model PmWorkItemPropertyValue {
   @@index([propertyId])
 }
 
-/// File attached to a work item. Bytes live on the orchestrator-managed
-/// `pm-attachments` volume keyed by the opaque `storageKey` (never a public
-/// path); served only via the authenticated GET /api/pm/attachments/:id route.
+/// Lifecycle of one attachment (WARP-1505). An explicit column, never derived
+/// from whether a file exists or a digest is empty ("No guessing" — CLAUDE.md).
+///
+///   UPLOADING ──► READY                (bytes on disk, digest recorded)
+///   UPLOADING ──► FAILED               (refused or aborted; bytes not kept)
+///   READY     ──► DELETED              (owner removed it; invisible at once)
+///   FAILED | DELETED | stale UPLOADING ──► row gone, blob unlinked (the sweep)
+///
+/// Only READY rows are ever listed or served. FAILED and DELETED are the
+/// sweep's work queue: a crash between "the user's intent is recorded" and
+/// "the blob is gone" leaves a row the next sweep finishes, never a file with
+/// no row that nothing will ever look at again.
+enum PmAttachmentStatus {
+  UPLOADING
+  READY
+  FAILED
+  DELETED
+}
+
+/// File attached to a work item, or to one of its comments (`commentId`).
+/// Bytes live on the orchestrator-managed `pm-attachments` volume (ADR-026) keyed
+/// by the opaque `storageKey` — never by the user's file name, which is display
+/// metadata only — and are served solely by the authenticated
+/// GET /api/pm/attachments/:id route (WARP-1505).
+///
+/// INVARIANT the schema language cannot express: a READY row carries a real
+/// SHA-256 (`PmAttachment_ready_has_sha256`, a CHECK in the WS-3 migration).
+/// UPLOADING / FAILED / DELETED rows carry the empty string, because the digest
+/// does not exist until the last byte has streamed.
 model PmAttachment {
-  id           String     @id @default(uuid())
+  id           String             @id @default(uuid())
   workItemId   String
-  workItem     PmWorkItem @relation(fields: [workItemId], references: [id], onDelete: Cascade)
+  workItem     PmWorkItem         @relation(fields: [workItemId], references: [id], onDelete: Cascade)
+  /// Set when the file was attached through a comment; null = attached to the
+  /// work item itself. Always a comment of `workItemId` (the service checks).
+  commentId    String?
+  comment      PmComment?         @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  /// Display name only, already stripped of path parts and control/bidi
+  /// characters by the upload path. Never used to build a filesystem path.
   fileName     String
+  /// The type the SERVER verified (magic bytes agree with extension and the
+  /// client's claim), not what the client said. `application/octet-stream`
+  /// when nothing could be verified or the type is active content.
   mimeType     String
   sizeBytes    BigInt
-  storageKey   String     @unique
+  /// Lowercase hex SHA-256 of exactly the stored bytes; "" until READY.
+  sha256       String
+  storageKey   String             @unique
+  status       PmAttachmentStatus @default(UPLOADING)
   uploadedById String?
-  createdAt    DateTime   @default(now())
+  createdAt    DateTime           @default(now())
 
   @@index([workItemId])
+  /// WARP-845 — the commentId FK cascades, so it is indexed.
+  @@index([commentId])
+  /// The sweep's scan: "UPLOADING older than the cutoff, FAILED, DELETED".
+  @@index([status, createdAt])
 }
 
 /// WARP-3526 (ADR-069 WS-10) — one logged span of work on a work item.
@@ -6460,6 +6542,18 @@ enum PmActivityVerb {
   unassigned
   priority_changed
   due_date_changed
+  /// WARP-3520 — the other half of the date pair. `startDate` used to fall into
+  /// the generic `updated`/`fields` row; it now names itself, as `dueDate` does.
+  start_date_changed
+  /// WARP-3520 — an item's KIND (`PmWorkItemType`) changed.
+  type_changed
+  /// WARP-3520 — story-point estimate set, changed or cleared.
+  estimate_changed
+  /// WARP-3520 — a custom-field value (`PmWorkItemPropertyValue`) was set,
+  /// changed or cleared, or removed because its field/option was deleted.
+  /// `field` is the property NAME at the time, so the history stays readable
+  /// after a rename or delete.
+  property_changed
   title_changed
   description_changed
   label_added
@@ -6498,6 +6592,18 @@ enum PmActivityVerb {
   /// changes it made are their own rows (state_changed, updated/priority,
   /// assigned, label_added), written in the same transaction.
   macro_applied
+  /// WARP-1505: a file landed on the work item (or on one of its comments).
+  /// `newValue` is the display file name. Never notifies (not in the
+  /// activity-notify allowlist) — it is history, not an interruption.
+  attachment_added
+  /// WARP-1505: a file was removed by its uploader or an owner/admin.
+  /// `oldValue` is the display file name.
+  attachment_removed
+  /// WARP-3535 (ADR-069 §9): a pull request, commit or branch from GitHub or
+  /// GitLab was linked to the item because its text names the item's key.
+  /// Written once per new link, never for an update to an existing one; `field`
+  /// carries the provider and `newValue` a one-line description.
+  external_link_added
   /// WARP-3526 (ADR-069 WS-10): a worklog was written — by hand, or by stopping
   /// a timer. `newValue` is the minutes. A timer START writes no row: a running
   /// timer is one person's transient state, not a change to the item.
@@ -6687,6 +6793,175 @@ model PmWebhookDelivery {
   @@index([webhookId, createdAt(sort: Desc)])
 }
 
+// ── WARP-3535 (ADR-069 §9): the GitHub / GitLab development panel ────────────
+//
+// The box is not internet-reachable by design, so nothing is pushed to it: it
+// dials the code host on an interval (cron-runtime, every five minutes), asks
+// only for what changed (ETag), and matches work-item keys in branch names,
+// titles, bodies and commit messages. Every dial passes the `work_integrations`
+// off-LAN switch and the pinned SSRF guard (services/pm/pm-dev-egress.ts). The
+// credential is the one the Integrations page already holds
+// (`IntegrationConnection.providerTokensEnc`); nothing here stores a copy.
+
+/// Which code host. Uppercase, like every Work Suite wire enum.
+enum PmExternalProvider {
+  GITHUB
+  GITLAB
+}
+
+/// What a link points at.
+enum PmExternalLinkKind {
+  PULL_REQUEST
+  COMMIT
+  BRANCH
+}
+
+/// How the thing a link points at is doing. A pull request moves through all
+/// four; a commit on the default branch is MERGED; a branch is OPEN while it
+/// exists and CLOSED once it is gone (`PmExternalLink_state_matches_kind`).
+enum PmExternalLinkState {
+  OPEN
+  MERGED
+  CLOSED
+  DRAFT
+}
+
+/// Where ONE repository's sync stands. Explicit, never derived from
+/// `lastSyncedAt` or `lastError` (CLAUDE.md "no guessing"). A condition that
+/// belongs to the whole provider (the egress switch, the credential, the rate
+/// limit) is written to every repository of that provider, so a reader never
+/// has to combine two tables to answer "why is this not syncing".
+///   PENDING          registered, never synced.
+///   OK               the last pass completed, with changes or an all-304 answer.
+///   RATE_LIMITED     the code host asked us to wait; `nextSyncAt` is when.
+///   EGRESS_BLOCKED   the owner's `work_integrations` switch is off.
+///   NEEDS_RECONNECT  the credential is missing or was refused. Retried only
+///                    once the stored credential changes (`credentialSeal`).
+///   INACCESSIBLE     the token can no longer see this repository.
+///   ERROR            a transient failure; retried with backoff.
+///   DISCONNECTED     the integration was disconnected; sync is stopped.
+enum PmDevSyncStatus {
+  PENDING
+  OK
+  RATE_LIMITED
+  EGRESS_BLOCKED
+  NEEDS_RECONNECT
+  INACCESSIBLE
+  ERROR
+  DISCONNECTED
+}
+
+/// A repository an owner or admin chose to sync, plus everything the sweep must
+/// remember about it between ticks. `apiRef` is what the code host's API calls
+/// it in a URL path; the service validates it against the provider profile's
+/// pattern and `PmDevRepository_apiRef_safe` is the floor under that, so a path
+/// is never built from text that could walk out of `/repos/<owner>/<repo>`.
+model PmDevRepository {
+  id                  String             @id @default(uuid())
+  provider            PmExternalProvider
+  /// The host's own id, as text. Stable across a rename or a transfer, which
+  /// `apiRef` and `fullName` are not.
+  externalId          String
+  apiRef              String
+  fullName            String
+  webUrl              String
+  defaultBranch       String?
+  status              PmDevSyncStatus    @default(PENDING)
+  /// The last pass that completed. Audit timestamp pinned to `status` by
+  /// `PmDevRepository_ok_has_sync_time`.
+  lastSyncedAt        DateTime?
+  lastAttemptAt       DateTime?
+  /// The earliest the sweep may look at this repository again: the next tick
+  /// normally, the rate limit's reset or an exponential backoff otherwise.
+  nextSyncAt          DateTime           @default(now())
+  /// A fixed sentence from `DEV_SYNC_ERRORS`, never a response body, a URL or a
+  /// token (the delivery log's rule).
+  lastError           String?
+  consecutiveFailures Int                @default(0)
+  /// Which stored credential `status` refers to: the first 16 hex of the sha256
+  /// of `IntegrationConnection.providerTokensEnc`, which changes whenever the
+  /// owner pastes a new token. A NEEDS_RECONNECT repository is retried only
+  /// when this no longer matches, so a refused token is never re-sent every
+  /// five minutes.
+  credentialSeal      String?
+  /// One ETag per list the sweep polls, each for the FIRST page only: a page
+  /// that did not change is a 304, which the code host does not count against
+  /// the rate limit, and the later pages are fetched only when it did.
+  openPrsEtag         String?
+  recentPrsEtag       String?
+  commitsEtag         String?
+  branchesEtag        String?
+  createdById         String?
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @default(now()) @updatedAt
+
+  projects PmDevRepositoryProject[]
+  links    PmExternalLink[]
+
+  @@unique([provider, externalId])
+  /// The sweep's "what is due" read.
+  @@index([nextSyncAt])
+}
+
+/// Repository → project mapping: the work-item keys of these projects are
+/// looked for in this repository's text. The two optional states are the
+/// per-project automation: "a pull request is opened → move the item to X",
+/// "merged → move it to Y". Null is "no rule".
+model PmDevRepositoryProject {
+  repositoryId    String
+  repository      PmDevRepository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  projectId       String
+  project         PmProject       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  onOpenedStateId String?
+  onOpenedState   PmState?        @relation("PmDevOnOpened", fields: [onOpenedStateId], references: [id], onDelete: SetNull)
+  onMergedStateId String?
+  onMergedState   PmState?        @relation("PmDevOnMerged", fields: [onMergedStateId], references: [id], onDelete: SetNull)
+  createdAt       DateTime        @default(now())
+
+  @@id([repositoryId, projectId])
+  /// WARP-845: an unindexed ON DELETE CASCADE / SET NULL FK makes the parent
+  /// delete a sequential scan of this table.
+  @@index([projectId])
+  @@index([onOpenedStateId])
+  @@index([onMergedStateId])
+}
+
+/// A pull request, commit or branch whose text names a work item's key.
+/// `(provider, kind, externalId, workItemId)` is unique, so a replayed sweep
+/// creates nothing twice. `externalId` is the host's global id for a pull
+/// request (GitHub `id`, GitLab `id` — never the per-project `number`), the full
+/// sha for a commit, and `<repository externalId>:<name>` for a branch, because a
+/// branch name is only unique inside its repository.
+model PmExternalLink {
+  id                String              @id @default(uuid())
+  workItemId        String
+  workItem          PmWorkItem          @relation(fields: [workItemId], references: [id], onDelete: Cascade)
+  repositoryId      String
+  repository        PmDevRepository     @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  provider          PmExternalProvider
+  kind              PmExternalLinkKind
+  externalId        String
+  url               String
+  title             String
+  state             PmExternalLinkState
+  author            String?
+  /// The branch a pull request comes from, the branch's own name, or a
+  /// commit's short sha — what a person looks for when they go to find it.
+  ref               String?
+  /// `#42` / `!42`. Null for a commit or a branch.
+  number            Int?
+  /// When it last changed ON THE CODE HOST — what the panel sorts by. `updatedAt`
+  /// below is this row's own.
+  externalUpdatedAt DateTime
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @default(now()) @updatedAt
+
+  @@unique([provider, kind, externalId, workItemId])
+  /// The drawer's read: this item's links, newest first.
+  @@index([workItemId, externalUpdatedAt(sort: Desc)])
+  /// WARP-845: the ON DELETE CASCADE scan index.
+  @@index([repositoryId])
+}
 /// WARP-3522 — who may see a saved view. PERSONAL is the owner's alone — no role,
 /// not even owner/admin, lists another person's. SHARED is every Projects reader's,
 /// and writable by owner/admin (and the project lead for a project view).
