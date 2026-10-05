@@ -172,6 +172,9 @@ network. Host-published ports and host-network services are called out.
   with `PATCH {archived}` (members may, audited) and deleted for good only by owner/admin,
   archived-only, with its identifier retyped and its audit row written in the delete's
   transaction — WARP-3370),
+  `support/` (the service desk — `/api/support/*`, ADR-069: tickets are work items in
+  `PmProject.kind = SERVICE_DESK` projects, behind the `support` module gate; `/api/pm/*`
+  and `/api/mobile/pm/*` answer 404 for a desk and everything under it),
   `activity` (signed audit log), `agent-runs` (durable background runs, owner/admin),
   `settings*`, `aps` (coverage-extender onboarding),
   `admin-*` (owner/admin-gated dashboards).

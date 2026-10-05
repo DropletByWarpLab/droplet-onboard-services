@@ -479,6 +479,43 @@ export const ACCESS_FEATURES: AccessFeatureDef[] = [
     ],
   },
   {
+    // WARP-3528 (ADR-069 §1). Value-identical ladder to the server's
+    // access-catalog entry; only the copy lives here. `view` is a REFUSAL below
+    // the member floor, as Customers and Projects above: a ticket is a
+    // customer's own words, so an external guest holds none of it. No
+    // `requires`: /support is its own surface, and a front desk runs it with
+    // Projects off.
+    moduleId: "support",
+    label: "Support",
+    description: "Customer requests, replies and internal notes",
+    levels: [
+      {
+        value: "view",
+        label: "View",
+        grants: "See tickets and conversations",
+        minTier: FAMILY,
+        dropNoun: "See tickets",
+        dropVerb: "see tickets",
+      },
+      {
+        value: "act",
+        label: "Work",
+        grants: "Reply, add notes and move tickets",
+        minTier: FAMILY,
+        dropNoun: "Work on tickets",
+        dropVerb: "reply to tickets",
+      },
+      {
+        value: "manage",
+        label: "Manage",
+        grants: "Set up and archive service desks",
+        minTier: ADMIN,
+        dropNoun: "Manage service desks",
+        dropVerb: "set up service desks",
+      },
+    ],
+  },
+  {
     // WARP-2018/2032.
     moduleId: "contacts",
     label: "Contacts",

@@ -51,29 +51,29 @@ const inputSchema = {
   properties: {
     camera: {
       type: "string",
-      description: "Camera name from list_cameras (e.g. front_door).",
+      description: "Camera name from list_cameras.",
     },
     zones: {
       type: "array",
       description:
-        "COMPLETE replacement set of detection zones for this camera (existing zones not listed here are removed). Each zone is a polygon in normalized coordinates.",
+        "COMPLETE replacement of detection zones; omitted zones are removed. Each zone is a normalized polygon.",
       items: {
         type: "object",
         properties: {
           name: {
             type: "string",
-            description: "Zone name — letters, digits, underscore, hyphen (max 40 chars).",
+            description: "Zone name: letters, digits, underscore, hyphen; max 40 chars.",
           },
           coordinates: {
             ...coordinatePairs,
             description:
-              "Polygon vertices as [x, y] pairs normalized to 0..1 (top-left origin), at least 3 points.",
+              "At least 3 [x,y] vertices in 0..1, top-left origin.",
           },
           objects: {
             type: "array",
             items: { type: "string" },
             description:
-              "Optional object labels this zone applies to (e.g. person, car). Omit or leave empty for all tracked labels.",
+              "Object labels, e.g. person or car. Omitted or empty means all tracked labels.",
           },
         },
         required: ["name", "coordinates"],
@@ -83,14 +83,14 @@ const inputSchema = {
     motion_masks: {
       type: "array",
       description:
-        "Optional COMPLETE replacement set of motion masks (areas ignored by motion detection, e.g. a busy street or timestamp overlay). Omit to leave existing masks untouched; pass [] to remove them all.",
+        "COMPLETE replacement of motion masks (ignored areas). Omit to keep existing masks; [] removes all.",
       items: {
         type: "object",
         properties: {
           coordinates: {
             ...coordinatePairs,
             description:
-              "Mask polygon vertices as [x, y] pairs normalized to 0..1, at least 3 points.",
+              "At least 3 [x,y] vertices normalized to 0..1.",
           },
         },
         required: ["coordinates"],
@@ -100,7 +100,7 @@ const inputSchema = {
     confirmed: {
       type: "boolean",
       description:
-        "Set true ONLY after the user has explicitly approved this exact zone change (including the brief NVR restart) in this conversation. Omit (or set false) on the first call — the tool will reply confirmation_required with a summary to relay to the user.",
+        "True ONLY after explicit approval of this exact change and NVR restart in this conversation. First omit or use false; relay confirmation_required to the user.",
     },
   },
   required: ["camera", "zones"],
@@ -273,7 +273,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "set_detection_zones",
   description:
-    "Define or replace a camera's motion-detection zones (and optionally its motion masks). Zones are polygons in normalized [0,1] coordinates that scope detection and alerts to areas like a driveway or porch; the list you pass wholesale-replaces the camera's existing zones. WARNING: saving restarts the NVR (Frigate) — ALL cameras briefly stop recording and detecting for about 5-15 seconds. Two-step: the first call returns confirmation_required summarizing the zones and the restart — relay it to the user, and only after they explicitly approve, re-issue the SAME call with confirmed: true.",
+    "Replace a camera's detection zones with normalized [0,1] polygons; optionally replace motion masks. WARNING: saving restarts Frigate; ALL cameras stop recording/detecting for 5-15 seconds. First relay confirmation_required (zones and restart) to the user. Only after explicit approval, repeat the SAME call with confirmed: true.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

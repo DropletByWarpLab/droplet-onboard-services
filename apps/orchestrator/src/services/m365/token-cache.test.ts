@@ -19,8 +19,11 @@ import {
   __setColumnCryptoKeyForTest,
   decryptColumn,
   deriveEmailColumnKey,
+  deriveM365TokenCacheKey,
+  encryptColumn,
   isEncryptedColumn,
 } from "../column-crypto.service.js";
+import { M365_BASE_SCOPES } from "./scopes.js";
 import {
   sealPendingFlow,
   sealTokenCache,
@@ -87,6 +90,7 @@ describe("sealPendingFlow / unsealPendingFlow (WARP-2704)", () => {
     codeVerifier: "pkce-verifier-that-must-not-sit-in-the-clear-0123456789",
     nonce: "nonce-1",
     redirectUri: "https://droplet-ai.local/api/m365/callback",
+    scopes: ["offline_access", "Mail.ReadWrite", "Sites.Read.All"],
   };
 
   it("round-trips the in-flight sign-in for its owner", () => {
@@ -117,5 +121,41 @@ describe("sealPendingFlow / unsealPendingFlow (WARP-2704)", () => {
     // Defence in depth: a verifier that is not a string must not reach MSAL.
     const sealed = sealPendingFlow("user-1", { ...FLOW, codeVerifier: 7 } as never);
     expect(() => unsealPendingFlow("user-1", sealed)).toThrow();
+  });
+
+  describe("the scopes the authorize leg asked for travel with the flow (WARP-3538)", () => {
+    // The person can flip the SharePoint switch in another tab while they are on
+    // Microsoft's page, so the callback must redeem with the scopes it was ISSUED
+    // for, not whatever the row says by then.
+    const sealRaw = (payload: unknown) =>
+      encryptColumn(deriveM365TokenCacheKey(), JSON.stringify(payload), "user-1:m365-pending-auth-code");
+    const { scopes: _omitted, ...LEGACY } = FLOW;
+
+    it("round-trips them exactly", () => {
+      expect(unsealPendingFlow("user-1", sealPendingFlow("user-1", FLOW)).scopes).toEqual(FLOW.scopes);
+    });
+
+    it("a flow sealed by the build BEFORE this one (no scopes) is redeemed with the base set, which is what it asked for", () => {
+      // It may still be inside its 15-minute window when the box updates: the
+      // person is on Microsoft's page and would otherwise see a sign-in that can
+      // no longer be completed. (Mutation: drop the fallback and this throws.)
+      expect(unsealPendingFlow("user-1", sealRaw(LEGACY))).toEqual({ ...LEGACY, scopes: [...M365_BASE_SCOPES] });
+    });
+
+    it("hands back a copy of the fallback, so redeeming cannot edit the shared base set", () => {
+      const a = unsealPendingFlow("user-1", sealRaw(LEGACY)).scopes;
+      a.push("Sites.Read.All");
+      expect(unsealPendingFlow("user-1", sealRaw(LEGACY)).scopes).toEqual([...M365_BASE_SCOPES]);
+    });
+
+    it.each([
+      ["null", null],
+      ["a string", "Mail.ReadWrite"],
+      ["an empty list", []],
+      ["a list with a non-string", ["Mail.ReadWrite", 7]],
+      ["a list with an empty scope", ["Mail.ReadWrite", ""]],
+    ])("refuses a flow whose scopes are %s — present but malformed is not the same as absent", (_label, scopes) => {
+      expect(() => unsealPendingFlow("user-1", sealRaw({ ...LEGACY, scopes }))).toThrow();
+    });
   });
 });

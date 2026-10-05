@@ -137,6 +137,15 @@ describe("getProjectTimeline", () => {
     expect(prisma.pmWorkItem.findMany).not.toHaveBeenCalled();
   });
 
+  it("answers for a service desk exactly as for an unknown project, before reading its schedule", async () => {
+    const { prisma, db } = makeStub({ project: { id: "desk", kind: "SERVICE_DESK", identifier: "SUP", department: null } });
+    await expect(getProjectTimeline(db, "desk", range)).rejects.toThrow("project_not_found");
+    expect(prisma.pmWorkItem.findMany).not.toHaveBeenCalled();
+    expect(prisma.pmWorkItem.count).not.toHaveBeenCalled();
+    expect(prisma.pmModule.findMany).not.toHaveBeenCalled();
+    expect(prisma.pmWorkItemRelation.findMany).not.toHaveBeenCalled();
+  });
+
   it("windows by UTC calendar day: from at midnight, to as an exclusive midnight after the last day", async () => {
     const { prisma, db } = makeStub();
     await getProjectTimeline(db, "p1", range);
@@ -277,13 +286,16 @@ describe("getMyWork", () => {
     return (prisma.pmWorkItem.count.mock.calls as unknown as Array<[{ where: Where }]>).map((c) => c[0].where);
   }
 
-  it("every section is limited to live items of live projects that are still open", async () => {
+  it("every section and count is limited to live items of live PROJECT containers that are still open", async () => {
     for (const section of ["assigned", "created", "overdue", "due_this_week"] as const) {
       const { prisma, db } = makeStub();
       await getMyWork(db, "u1", { section, today });
       const [base, open] = listArgs(prisma).where.AND;
-      expect(base).toEqual({ isArchived: false, project: { isArchived: false } });
+      expect(base).toEqual({ isArchived: false, project: { isArchived: false, kind: "PROJECT" } });
       expect(open).toEqual({ OR: [{ stateId: null }, { state: { group: { in: ["backlog", "unstarted", "started"] } } }] });
+      for (const where of countWheres(prisma)) {
+        expect(where.AND[0]).toEqual(base);
+      }
     }
   });
 

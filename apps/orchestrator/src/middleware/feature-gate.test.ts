@@ -286,12 +286,12 @@ describe("requireFeatureAccess — the meta marker", () => {
   });
 });
 
-// The view gate over a REAL resolved answer (not a stubbed one): for crm and
-// money `view` is floored at family and is a refusal, so a guest never reaches
+// The view gate over a REAL resolved answer (not a stubbed one): for crm,
+// money and support `view` is floored at family and is a refusal, so a guest never reaches
 // the routes' own 403, while a family person narrowed to View still gets the
 // reads and is refused the acts.
 describe("requireFeatureAccess — a family floor on a resolved answer (WARP-3365)", () => {
-  function resolved(role: AuthUser["role"], grants: Array<{ moduleId: "crm" | "money"; level: "view" | "act" | "manage" }> | null) {
+  function resolved(role: AuthUser["role"], grants: Array<{ moduleId: "crm" | "money" | "support"; level: "view" | "act" | "manage" }> | null) {
     const access = computeEffectiveAccess({
       user: {
         id: "u-1",
@@ -320,7 +320,7 @@ describe("requireFeatureAccess — a family floor on a resolved answer (WARP-336
     return vi.fn(async () => access);
   }
   const statusAt = async (
-    moduleId: "crm" | "money",
+    moduleId: "crm" | "money" | "support",
     role: AuthUser["role"],
     grants: Parameters<typeof resolved>[1],
     level: "view" | "act" | "manage",
@@ -350,5 +350,20 @@ describe("requireFeatureAccess — a family floor on a resolved answer (WARP-336
     expect(await statusAt("money", "family", null, "manage")).toBe(404);
     expect(await statusAt("money", "admin", null, "manage")).toBe(200);
     expect(await statusAt("money", "owner", null, "manage")).toBe(200);
+  });
+
+  // WARP-3528 — the service desk's ladder is not crm's (all family) or money's
+  // (view, then admin): `act` is a family rung and `manage` is admin work.
+  it("support: a guest is refused with or without a stored grant; a member acts but does not manage; admin and owner manage", async () => {
+    expect(await statusAt("support", "guest", null, "view")).toBe(404);
+    expect(await statusAt("support", "guest", [{ moduleId: "support", level: "view" }], "view")).toBe(404);
+    expect(await statusAt("support", "family", null, "view")).toBe(200);
+    expect(await statusAt("support", "family", null, "act")).toBe(200);
+    expect(await statusAt("support", "family", null, "manage")).toBe(404);
+    expect(await statusAt("support", "admin", null, "manage")).toBe(200);
+    expect(await statusAt("support", "owner", null, "manage")).toBe(200);
+    const narrowed = [{ moduleId: "support" as const, level: "view" as const }];
+    expect(await statusAt("support", "family", narrowed, "view")).toBe(200);
+    expect(await statusAt("support", "family", narrowed, "act")).toBe(404);
   });
 });

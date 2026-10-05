@@ -279,11 +279,11 @@ describe("a guest to whom the item is NOT assigned: the same 404 on all five, ex
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ work_items: [], nextCursor: null, total: 0 });
     expect(findMany).toHaveBeenCalledTimes(1);
-    expect(findMany.mock.calls[0][0].where).toEqual({ isArchived: false, assignees: { some: { userId: "u-guest" } } });
+    expect(findMany.mock.calls[0][0].where).toEqual({ isArchived: false, assignees: { some: { userId: "u-guest" } }, project: { kind: "PROJECT" } });
     // WARP-3371 — the `total` is counted over the SAME caller-pinned filter, so
     // the count can never reveal how many items someone else was assigned.
     expect(count).toHaveBeenCalledTimes(1);
-    expect(count.mock.calls[0][0].where).toEqual({ isArchived: false, assignees: { some: { userId: "u-guest" } } });
+    expect(count.mock.calls[0][0].where).toEqual({ isArchived: false, assignees: { some: { userId: "u-guest" } }, project: { kind: "PROJECT" } });
   });
 
   it("asks for the item by the guest's id: the item routes by workItemId, the state list by the project", async () => {

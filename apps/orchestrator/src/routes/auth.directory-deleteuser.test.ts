@@ -335,6 +335,10 @@ function createPrismaMock(seed: any[] = []) {
   self.m365DeltaCursor = {
     deleteMany: vi.fn(async () => ({ count: 0 })),
   };
+  // WARP-3538 — and the file names landed from their Microsoft 365 (OneDrive and
+  // SharePoint metadata, ADR-041 §4). Same reason for real delegates.
+  self.cloudFileItem = { deleteMany: vi.fn(async () => ({ count: 0 })) };
+  self.cloudFileSource = { deleteMany: vi.fn(async () => ({ count: 0 })) };
   self._m365Rows = m365Rows;
   self._users = users;
   // WARP-3193 SEC-AUTH-6 — the username-keyed private tables. Seeded with one
@@ -699,6 +703,10 @@ describe("purgeDueDeletions — the nightly job (WARP-3113)", () => {
     expect(nc.ncDeleteUser).toHaveBeenCalledWith(SERVICE_NC_TOKEN, "alice");
     expect(purgeUserDataMock).toHaveBeenCalledWith(prisma, "u-alice");
     expect(prisma.m365Connection.deleteMany).toHaveBeenCalledWith({ where: { userId: "u-alice" } });
+    // WARP-3538 — the leaver's landed file names go with them, scoped to the one
+    // person and to Microsoft 365 (another cloud's files are that cloud's to remove).
+    expect(prisma.cloudFileItem.deleteMany).toHaveBeenCalledWith({ where: { userId: "u-alice", provider: "M365" } });
+    expect(prisma.cloudFileSource.deleteMany).toHaveBeenCalledWith({ where: { userId: "u-alice", provider: "M365" } });
     expect(prisma._users).toHaveLength(0);
     expect(revokeAllSessionsMock).toHaveBeenCalledWith("u-alice");
     expect(denylistUserMock).toHaveBeenCalledWith("u-alice", expect.any(Number));

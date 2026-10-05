@@ -431,7 +431,7 @@ describe("setProjectArchived archival signal sync (WARP-884)", () => {
     const { project, changed } = await setProjectArchived(prisma, "p1", true);
 
     // compare-and-set: only a project that is NOT yet archived is moved
-    expect(persisted!.where).toEqual({ id: "p1", isArchived: false });
+    expect(persisted!.where).toEqual({ id: "p1", kind: "PROJECT", isArchived: false });
     expect(persisted!.data.isArchived).toBe(true);
     expect(persisted!.data.archivedAt).toBeInstanceOf(Date);
     expect(project.archived).toBe(true);
@@ -457,7 +457,7 @@ describe("setProjectArchived archival signal sync (WARP-884)", () => {
 
     const { project, changed } = await setProjectArchived(prisma, "p1", false);
 
-    expect(persisted!.where).toEqual({ id: "p1", isArchived: true });
+    expect(persisted!.where).toEqual({ id: "p1", kind: "PROJECT", isArchived: true });
     expect(persisted!.data.isArchived).toBe(false);
     expect(persisted!.data.archivedAt).toBeNull();
     expect(project.archived).toBe(false);

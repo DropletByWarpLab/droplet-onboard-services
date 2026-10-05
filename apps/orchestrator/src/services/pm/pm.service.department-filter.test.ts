@@ -173,7 +173,7 @@ describe("searchWorkItems — the department filter", () => {
     // does the workspace filter. They must not clobber each other.
     const { prisma, seen } = makePrisma();
     await searchWorkItems(prisma, { q: "", departmentId: DEPT, workspaceSlug: "main" });
-    expect(seen.workItem?.project).toEqual({ workspace: { slug: "main" } });
+    expect(seen.workItem?.project).toEqual({ kind: "PROJECT", workspace: { slug: "main" } });
     expect(seen.workItem?.AND).toBeDefined();
   });
 });
