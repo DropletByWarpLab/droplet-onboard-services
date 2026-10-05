@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.12-slim@sha256:02108f5d322dd89f1c9e552442c25acb0543dfdbc455693a5599624f20d9155d
 
 # Build context is the monorepo root (see docker-compose.yml). All COPY
 # paths are relative to the repo root. WARP-229.
@@ -24,11 +24,11 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       openssl ca-certificates
 
 WORKDIR /app
-COPY services/camera-discovery/requirements.txt .
+COPY services/camera-discovery/requirements.lock .
 # WARP-1065: persistent pip wheel/http cache (replaces --no-cache-dir; the
 # cache lives in the mount, not the image).
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements.txt && \
+    pip install --require-hashes --no-deps -r requirements.lock && \
     apt-get purge -y --auto-remove gcc libc-dev python3-dev
 COPY services/camera-discovery/ .
 

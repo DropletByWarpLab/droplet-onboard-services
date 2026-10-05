@@ -39,7 +39,9 @@ autoinstall:
   # operator sets a real password on first login; SSH key auth is the intended
   # path (see ssh: below). NOTE: this is NOT a secret — it grants no access.
   identity:
-    hostname: droplet
+    # `droplet-sys` is the name the edge router pins to 192.168.9.10 (ADR-057,
+    # droplet-edge.conf FABRIC_ROLE_PINS) — WARP-3840. Keep the two in step.
+    hostname: droplet-sys
     username: droplet
     # `!` = locked account password (crypt sentinel). NOT a real credential.
     password: "!"

@@ -41,9 +41,17 @@ log_info() {
   _log_to_file "INFO  $*"
 }
 
+# WARP-3835: count warnings so the final banner can say "Complete with N
+# warnings" and list them. ponytail: a log_warn inside $(...) or a pipe runs in
+# a subshell and is not counted; the warning is still printed and logged.
+LOG_WARN_COUNT=0
+LOG_WARN_LIST=""
+
 log_warn() {
   printf "${_YELLOW}warn${_RESET}  %s\n" "$*" >&2
   _log_to_file "WARN  $*"
+  LOG_WARN_COUNT=$((LOG_WARN_COUNT + 1))
+  LOG_WARN_LIST="${LOG_WARN_LIST}${*%%$'\n'*}"$'\n'
 }
 
 log_error() {

@@ -1,0 +1,23 @@
+# WARP-3841 — on-demand root deploy (backup, setup.sh, host hook, gate).
+# Started by the `droplet` user through polkit (scripts/host/50-droplet-deploy.rules,
+# start verb only). NO argv, NO [Install]: it never runs unless someone starts it,
+# exactly like droplet-host-units.service.
+# SECURITY (WARP-2888): this unit, its polkit start grant and the temporary NOPASSWD
+# window are privilege-neutral ONLY while `droplet` is already root-equivalent via
+# the docker group (ADR-020 §D6: the trust boundary is "who can become droplet").
+# droplet-deploy dies unless `id -nG droplet` has docker; once WARP-2888 removes
+# that membership this unit must be redesigned before it may run.
+[Unit]
+Description=Droplet deploy (backup, setup.sh, host hook, verify)
+Documentation=https://github.com/DropletByWarpLab/droplet-onboard-services/blob/main/scripts/host/README.md
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/local/sbin/droplet-deploy
+# The script removes its temporary sudoers grant on every exit it controls; this
+# `+` (runs as root whatever User=) covers a killed or timed-out run.
+ExecStopPost=+/bin/rm -f /etc/sudoers.d/droplet-deploy
+TimeoutStartSec=45min
+StandardInput=null

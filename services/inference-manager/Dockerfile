@@ -1,9 +1,9 @@
-FROM python:3.12-slim
+FROM python:3.12-slim@sha256:02108f5d322dd89f1c9e552442c25acb0543dfdbc455693a5599624f20d9155d
 
 # Install uv as a static binary — used to enforce hash-locked dep installs
 # from `requirements.lock`. Pinned to a specific release so the install
 # step itself is reproducible. See WARP-285 + scripts/refresh-lockfile.sh.
-COPY --from=ghcr.io/astral-sh/uv:0.4.27 /uv /uvx /usr/local/bin/
+COPY --from=ghcr.io/astral-sh/uv:0.4.27@sha256:a6d964deccd6f2d88dcf133427101ed92e5ba2f0562a5f1a5a84417f4579333d /uv /uvx /usr/local/bin/
 
 WORKDIR /app
 

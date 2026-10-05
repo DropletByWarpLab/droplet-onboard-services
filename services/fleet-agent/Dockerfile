@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.12-slim@sha256:02108f5d322dd89f1c9e552442c25acb0543dfdbc455693a5599624f20d9155d
 
 # Build context is the monorepo root (see docker-compose.yml). All COPY
 # paths are relative to the repo root — mirrors camera-discovery.
@@ -32,8 +32,8 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY services/fleet-agent/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY services/fleet-agent/requirements.lock .
+RUN pip install --no-cache-dir --require-hashes --no-deps -r requirements.lock
 # Ships the update-poll trust anchor too (services/fleet-agent/cosign.pub,
 # WARP-1025) — the placeholder fails closed until the key ceremony stamps
 # the real key over BOTH copies (scripts/README.md "OTA release signing").

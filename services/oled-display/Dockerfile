@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.12-slim@sha256:02108f5d322dd89f1c9e552442c25acb0543dfdbc455693a5599624f20d9155d
 
 # Build context is the monorepo root (see docker-compose.yml). All COPY
 # paths are relative to the repo root. WARP-229.
@@ -15,8 +15,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY services/oled-display/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY services/oled-display/requirements.lock .
+RUN pip install --no-cache-dir --require-hashes --no-deps -r requirements.lock
 COPY services/oled-display/ .
 
 # WARP-229: ship the FIPS-provider OpenSSL config + shared self-test
