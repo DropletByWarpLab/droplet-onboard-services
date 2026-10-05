@@ -1526,6 +1526,9 @@ services:
       dockerfile: services/file-indexer/Dockerfile
     volumes:
       - nextcloud-data:/data/nextcloud:ro
+      # External SMB files use a separate corpus; search checks current
+      # Nextcloud access before returning their text to a caller.
+      - droplet-share:/data/droplet-share:ro
       - ../proto:/app/proto:ro
       # WARP-203: brain-memory shared volume — chat-attached files are
       # written here by the orchestrator and read by file-indexer to
@@ -1549,6 +1552,7 @@ services:
       - DATABASE_URL=postgresql://droplet:${POSTGRES_PASSWORD}@db:5432/droplet?sslmode=${PG_SSLMODE:-require}
       - MQTT_BROKER=${MQTT_BROKER:-mqtts://broker:8883}
       - NEXTCLOUD_DATA_ROOT=/data/nextcloud/data
+      - DROPLET_SHARE_ROOT=/data/droplet-share
       - AI_GATEWAY_GRPC_URL=ai-gateway:50051
       # WARP-1140: shared "Household" groupfolder — display-path prefix for
       # chunks indexed from __groupfolders/. Must match the orchestrator's

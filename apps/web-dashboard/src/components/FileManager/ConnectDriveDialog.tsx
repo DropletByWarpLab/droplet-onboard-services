@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import { Check, Copy as CopyIcon, Eye, EyeOff, HardDrive } from "lucide-react";
 import { Dialog } from "@/components/Dialog";
 import { authFetch } from "@/lib/auth";
@@ -100,6 +101,11 @@ export function ConnectDriveDialog({ open, onClose, showSharedDrive = false }: C
         Your Droplet files can appear directly in Windows Explorer and macOS
         Finder — files you drop there also show up here.
       </p>
+      <p className="text-sm opacity-70 mb-4">
+        Connecting a drive here doesn&apos;t share your computer&apos;s C: or D:
+        drive with Droplet. Upload those files, or set up a separate shared
+        folder connection from your computer.
+      </p>
 
       <PersonalDrive open={open} />
 
@@ -122,6 +128,20 @@ export function ConnectDriveDialog({ open, onClose, showSharedDrive = false }: C
 
       {showSharedDrive && info && info.enabled && (
         <div className="space-y-4">
+          <section>
+            <p className="text-sm opacity-70 mb-2">
+              This connection opens only the shared Droplet folder. Files copied
+              here from Explorer or Finder are in My Files → Droplet.
+              Use Your drive above for your other folders and attached drives.
+            </p>
+            <Link
+              href="/files?path=%2FDroplet"
+              onClick={onClose}
+              className="btn ghost"
+            >
+              Open shared folder in Files
+            </Link>
+          </section>
           <section>
             <h3 className="text-sm font-semibold mb-1">Windows</h3>
             <ol className="text-sm opacity-80 list-decimal ml-4 space-y-0.5">
@@ -284,8 +304,8 @@ function PersonalDrive({ open }: { open: boolean }) {
     <section>
       <h3 className="text-sm font-semibold mb-1">Your drive</h3>
       <p className="text-sm opacity-70 mb-2">
-        Your own files, with your own access — nobody else&apos;s password is
-        involved.
+        All of My Files that your account can access, including registered
+        attached drives and permitted shared folders, using your own login.
       </p>
       <div className="flex gap-2 mb-2" role="group" aria-label="Computer type">
         {(["macos", "windows"] as const).map((p) => (

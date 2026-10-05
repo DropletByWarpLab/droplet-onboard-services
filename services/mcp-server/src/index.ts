@@ -3,6 +3,7 @@ import Redis from "ioredis";
 
 import { PrismaClient } from "@prisma/client";
 import type { HttpClient } from "@droplet/tools-core";
+import { SHARED_DRIVE_INDEX_USER } from "@droplet/tools-core";
 import { assertFipsAtBootOrExit } from "@droplet/fips-selftest";
 import { createServer } from "./server.js";
 import { internalBaseUrl, internalFetch } from "./internal-tls.js";
@@ -16,6 +17,7 @@ import { readDocumentText, searchHybrid } from "./file-search.service.js";
 import { resolveChunkOwnerIds } from "./chunk-owner.js";
 import { createMatterController } from "./matter.controller.js";
 import { createModuleVerdictSource } from "./module-verdict.js";
+import { authorizeMcpSharedDriveHits } from "./shared-drive-access.js";
 
 // WARP-229: FIPS 140-3 boot self-test. Same gating as the orchestrator
 // — `DROPLET_FIPS_REQUIRED` env, default-on in production. The
@@ -268,7 +270,7 @@ async function main(): Promise<void> {
     // (vector, lexical, RRF, rerank) to `searchHybrid`. If Redis is
     // unconfigured we still serve hybrid results without the rerank
     // cache (every call hits ai-gateway).
-    searchHybrid: async ({ userId, query, limit, _enhancement }) => {
+    searchHybrid: async ({ userId, ncToken, query, limit, _enhancement }) => {
       const vectors = await embeddingClient.embed([query]);
       const vector = vectors[0];
       if (!vector || vector.length === 0) {
@@ -281,13 +283,14 @@ async function main(): Promise<void> {
       // search_content spans both corpora — dual-shape reads (see
       // chunk-owner.ts for the decision record).
       const ownerIds = await resolveChunkOwnerIds(prisma, userId);
+      if (ncToken) ownerIds.push(SHARED_DRIVE_INDEX_USER);
       // WARP-437: thread orchestrator-injected enhancement into the
       // searchHybrid pipeline. `queryEnhancement` carries the precomputed
       // HyDE vector / paraphrase vectors / soft filename filter;
       // `minSimilarity` / `perArmK` / `rerank.candidates` are per-call
       // overrides for adaptive routing (factual, analytical, conversational,
       // navigational presets — see llm-agent.service.ts:presetForClass).
-      return searchHybrid(prisma, {
+      const hits = await searchHybrid(prisma, {
         userId: ownerIds[0],
         additionalUserIds:
           ownerIds.length > 1 ? ownerIds.slice(1) : undefined,
@@ -321,6 +324,7 @@ async function main(): Promise<void> {
           candidates: _enhancement?.searchOverrides?.rerankCandidates,
         },
       });
+      return authorizeMcpSharedDriveHits(createHttpClient("nextcloud"), userId, ncToken, hits);
     },
     // Ordered whole-document read backing `read_document_text`. No
     // embedding step — this arm addresses a document by path, not by
@@ -329,7 +333,7 @@ async function main(): Promise<void> {
     // keyed by User.id UUID while its Nextcloud twin is keyed by
     // username, so a single-shape predicate here would report a
     // perfectly well-indexed file as NOT_INDEXED.
-    readDocumentText: async ({ userId, path, startChunk, maxChars }) => {
+    readDocumentText: async ({ userId, ncToken, path, startChunk, maxChars }) => {
       const ownerIds = await resolveChunkOwnerIds(prisma, userId);
       return readDocumentText(prisma, {
         userId: ownerIds[0],
@@ -337,6 +341,9 @@ async function main(): Promise<void> {
         path,
         startChunk,
         maxChars,
+        authorizeSharedDrive: ncToken ? async (file) =>
+          (await authorizeMcpSharedDriveHits(createHttpClient("nextcloud"), userId, ncToken, [file])).length === 1
+          : undefined,
       });
     },
   };

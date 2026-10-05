@@ -86,6 +86,21 @@ describe("ConnectDriveDialog shared drive", () => {
     expect(screen.getByLabelText("Username")).toHaveTextContent("droplet");
   });
 
+  it("links to the same shared folder in Files and closes the dialog on navigation", async () => {
+    mockInfo(INFO);
+    const onClose = vi.fn();
+    render(<ConnectDriveDialog open onClose={onClose} showSharedDrive />);
+    const link = await screen.findByRole("link", { name: "Open shared folder in Files" });
+    expect(link).toHaveAttribute("href", "/files?path=%2FDroplet");
+    expect(screen.getByText(/opens only the shared Droplet folder/)).toHaveTextContent(
+      "My Files → Droplet",
+    );
+    // next/link is a plain anchor in the test harness; jsdom cannot navigate.
+    link.addEventListener("click", (event) => event.preventDefault());
+    fireEvent.click(link);
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
   it("masks the password until the reveal toggle is pressed", async () => {
     mockInfo(INFO);
     render(<ConnectDriveDialog open onClose={() => {}} showSharedDrive />);
@@ -145,6 +160,7 @@ describe("ConnectDriveDialog showSharedDrive gate", () => {
     render(<ConnectDriveDialog open onClose={() => {}} />);
     expect(authFetchMock).not.toHaveBeenCalledWith("/api/storage/network-drive");
     expect(screen.queryByText("Shared Droplet folder")).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Open shared folder in Files" })).not.toBeInTheDocument();
     expect(screen.getByText("Your drive")).toBeInTheDocument();
   });
 });
@@ -229,6 +245,10 @@ describe("ConnectDriveDialog personal drive", () => {
     render(<ConnectDriveDialog open onClose={() => {}} />);
     await createButton();
     expect(authFetchMock).toHaveBeenCalledWith("/api/settings/workspace");
+    expect(screen.getByText(/All of My Files that your account can access/)).toHaveTextContent(
+      "registered attached drives and permitted shared folders",
+    );
+    expect(screen.getByText(/doesn't share your computer's C: or D:/)).toBeInTheDocument();
   });
 
   it("does not read the setting while closed", () => {

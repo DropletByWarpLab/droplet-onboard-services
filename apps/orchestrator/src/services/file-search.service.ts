@@ -157,6 +157,8 @@ export type ScoreKind = "logit" | "similarity";
 
 export interface SearchHit {
   source: FileContentSource;
+  /** Shared-volume identity; callers must check current Nextcloud access. */
+  externalFileId?: number;
   path: string;
   chunkIdx: number;
   pageNumber: number | null;
@@ -278,6 +280,7 @@ function buildUserIdPredicate(
 
 interface RawSearchRow {
   source: FileContentSource;
+  externalFileId?: number | null;
   path: string;
   chunkIdx: number;
   pageNumber: number | null;
@@ -440,6 +443,7 @@ export async function searchByVector(
 
   const sql = `
     SELECT source,
+           CASE WHEN "userId" = '__droplet_share__' THEN "ncFileId" END AS "externalFileId",
            path,
            "chunkIdx",
            "pageNumber",
@@ -475,6 +479,7 @@ export async function searchByVector(
     .filter((r) => Number.isFinite(r.score) && r.score >= params.minSimilarity)
     .map((r) => ({
       source: r.source,
+      ...(r.externalFileId != null ? { externalFileId: r.externalFileId } : {}),
       path: r.path,
       chunkIdx: r.chunkIdx,
       pageNumber: r.pageNumber,
@@ -569,6 +574,7 @@ export async function searchByLexical(
   args.push(params.limit);
 
   const sql = `SELECT
+       CASE WHEN "userId" = '__droplet_share__' THEN "ncFileId" END AS "externalFileId",
        source, path, "chunkIdx", "pageNumber", "brainItemId", metadata,
        ${SNIPPET_SQL},
        ts_rank_cd("text_tsv", websearch_to_tsquery('english', $${queryParam}), 32) AS score
@@ -579,6 +585,7 @@ export async function searchByLexical(
   const rows = await prisma.$queryRawUnsafe<RawSearchRow[]>(sql, ...args);
   const hits = rows.map((r) => ({
     source: r.source,
+    ...(r.externalFileId != null ? { externalFileId: r.externalFileId } : {}),
     path: r.path,
     chunkIdx: r.chunkIdx,
     pageNumber: r.pageNumber,
