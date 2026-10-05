@@ -146,7 +146,7 @@ EXPECTED_KEYS = {
     "expect_confirmation", "max_calls", "max_attempts", "min_calls", "no_repeat_calls", "no_attempt_after_decision", "world",
 }
 WORLD_KEYS = {
-    "work_items_titled", "memory_contains", "runs_status", "events_titled", "event_start", "sent_to", "sent_text_contains",
+    "work_items_titled", "memory_contains", "runs_status", "events_titled", "events_absent", "event_start", "sent_to", "sent_text_contains",
     "files_exist", "files_absent", "reminders_done", "devices_blocked",
 }
 
@@ -460,6 +460,9 @@ def evaluate(case, run, write_tools):
         fails.append(f"world memory lacks {w['memory_contains']}")
     # WARP-3545. Event times are ISO (UTC) strings, so a start is matched by prefix: "2026-10-06" or "2026-10-06T14:00".
     events = after.get("events", [])
+    for eid in w.get("events_absent", []):
+        if any(e["id"] == eid for e in events):
+            fails.append(f"world event still exists {eid}")
     for title, n in w.get("events_titled", {}).items():
         got = sum(1 for e in events if norm(e["title"]) == norm(title))
         if got != n:

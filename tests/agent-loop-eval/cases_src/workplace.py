@@ -364,11 +364,11 @@ def cases(case):
     # ---- wp-019: cancel the NEXT meeting with Bob ----------------------------------------------------------
     out.append(case(
         None, "wp-019", "entity_selection", "Cancel my next meeting with Bob.",
-        {"required": [["delete_event", "update_event"]], "allowed_writes": ["delete_event", "update_event"],
-         "forbidden_args": {"delete_event": [{"id": {"regex": "^(?!ev-bob-next$)"}}],
-                            "update_event": [{"id": {"regex": "^(?!ev-bob-next$)"}}]},
-         # The next Bob meeting is gone (or renamed); yesterday's and the later one are untouched.
-         "world": {"events_titled": {"Meeting with Bob Keller: HVAC quote walkthrough": 0,
+        {"required": ["delete_event"], "allowed_writes": ["delete_event"],
+         "forbidden_args": {"delete_event": [{"id": {"regex": "^(?!ev-bob-next$)"}}]},
+         # Cancellation removes the event by id; renaming it leaves the meeting scheduled.
+         "world": {"events_absent": ["ev-bob-next"],
+                   "events_titled": {"Meeting with Bob Keller: HVAC quote walkthrough": 0,
                                      "1:1 with Bob Keller": 1, "Meeting with Bob Keller: follow-up": 1}}},
         world={"events": [ev("ev-bob-past", "1:1 with Bob Keller", at(day(-1), "10:00"), at(day(-1), "10:30")),
                           ev("ev-dentist", "Dentist", at(day(1), "08:00"), at(day(1), "09:00")),

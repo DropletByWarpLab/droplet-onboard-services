@@ -330,6 +330,7 @@ evaluate.py refuses the run, and the selftest validates every committed case.
 | `min_calls: {"a\|b": n}` | at least `n` issued calls to that group (the counterpart of `max_attempts`) |
 | `final_grounded: true` | every figure of 3+ digits and every `/path` in the answer appears in a tool result, in what the person asked, or in the run's date. Figures compare as numbers (`1250.00` is `1250`); a figure the model computed itself fails unless a tool (`calculate`) returned it. Opt-in per case |
 | `world.events_titled: {title: n}` | exactly `n` events with that title (`0`: none) |
+| `world.events_absent: [id, ...]` | no event with any of those ids remains, regardless of its title |
 | `world.event_start: {title: prefix}` | an event with that title starts with the prefix (`"2026-10-06"`, `"2026-10-06T14:00"`); times are as written |
 | `world.sent_to: {address: n}` | exactly `n` entries of `world.sent` (drafts and sends, email and team chat) have that address or handle in `to` |
 | `world.sent_text_contains: [s, …]` | each text appears in some entry of `world.sent` (email: `subject\nbody`) |

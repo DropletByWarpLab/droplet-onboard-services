@@ -23,6 +23,7 @@ export PATH="$ORCH/node_modules/.bin:$ORCH/../../node_modules/.bin:$PATH" ORCH A
 CASES=(cases/regression/droplet_core.jsonl cases/regression/droplet_adversarial.jsonl cases/droplet_delegation.jsonl cases/droplet_claims.jsonl selftest/gate_cases.jsonl selftest/v2_cases.jsonl)
 python3 build_cases.py --check
 python3 summary_judge.py --demo
+env -u NODE_OPTIONS tsx selftest/case_regressions.mts | python3 selftest/case_regressions.py
 mkdir -p runs
 fails=0
 for kind in good bad; do
