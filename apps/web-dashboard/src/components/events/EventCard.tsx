@@ -105,6 +105,7 @@ export function EventCard({ event, cameraName, onClick }: Props) {
       </div>
 
       <div className="p-3">
+        {event.outsideBusinessHours === true && <span className="badge warn mb-1.5">Outside business hours</span>}
         <div className="flex items-center justify-between">
           <span className="type-subheadline font-medium capitalize truncate text-[color:var(--text)]">
             {event.label}

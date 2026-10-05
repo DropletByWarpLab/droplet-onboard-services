@@ -139,6 +139,7 @@ export function ReviewCard({ review, cameraName, onClick }: Props) {
       </div>
 
       <div className="p-3">
+        {review.outsideBusinessHours === true && <span className="badge warn mb-1.5">Outside business hours</span>}
         <div className="flex items-center justify-between gap-2">
           <span className="type-subheadline font-medium truncate text-[color:var(--text)]">
             {review.objects.length > 0

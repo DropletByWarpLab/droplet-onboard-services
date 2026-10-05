@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { ExternalLink, RefreshCw, X } from "lucide-react";
 import { prettifyCameraKey } from "@/lib/camera-display";
 import type { ReviewItem } from "@/lib/types";
 import { useToast } from "@/components/Toast";
 import { Dialog } from "@/components/Dialog";
+import { HlsPlayer } from "@/components/recordings/HlsPlayer";
 import { ThumbImage } from "./ThumbImage";
 
 interface Props {
@@ -29,21 +30,54 @@ const MARK_VIEWED_FAILED = "We couldn't mark that as viewed. Try again in a mome
 
 /**
  * Inline player for a Frigate review item. Plays the cluster preview
- * mp4 when Frigate has rendered one; falls back to the cluster
- * thumbnail otherwise. Calls `onMarkViewed` on mount so the unreviewed
+ * mp4 when Frigate has rendered one; falls back to the same activity's
+ * recordings, then its thumbnail. Calls `onMarkViewed` on mount so the unreviewed
  * accent ring drops off without operator action — viewing == triaging
  * in this UX.
  *
- * WARP-3509: a review that is still in progress shows its thumbnail and an
- * "In progress" notice instead of a video pointed at a clip that does not exist
- * yet; a clip that fails to load falls back the same way, with an alert and a
- * Retry; and a failed mark-viewed is a toast, not silence — it never blocks the
- * clip.
+ * A review that is still in progress plays recordings with an "In progress"
+ * notice instead of requesting a preview that does not exist yet. If both
+ * media paths fail, the thumbnail, alert and Retry remain available. A failed
+ * mark-viewed is a toast and never blocks playback.
  *
  * WARP-3509: built on the shared <Dialog>, like the event modal, so the ARIA
  * (role, aria-modal, label), the focus trap, the scroll lock and Escape come
  * from there rather than from a hand-rolled overlay that had none of them.
  */
+function ReviewPlayback({ review, cameraDisplay }: { review: ReviewItem; cameraDisplay: string }) {
+  const inProgress = review.endTime === null;
+  const [playback, setPlayback] = useState<"preview" | "recording" | "failed">(!inProgress && review.previewUrl ? "preview" : "recording");
+  const [attempt, setAttempt] = useState(0);
+  const before = useMemo(() => review.endTime ?? Math.floor(Date.now() / 1000), [review.endTime, attempt]);
+  const recordingUrl = `/api/cameras/${encodeURIComponent(review.camera)}/playback.m3u8?after=${review.startTime}&before=${Math.max(review.startTime + 1, before)}`;
+  const handleRecordingError = useCallback(() => setPlayback("failed"), []);
+  const startedAt = new Date(review.startTime * 1000);
+  const date = `${startedAt.getFullYear()}-${String(startedAt.getMonth() + 1).padStart(2, "0")}-${String(startedAt.getDate()).padStart(2, "0")}`;
+  const retry = () => {
+    setAttempt((n) => n + 1);
+    setPlayback(!inProgress && review.previewUrl ? "preview" : "recording");
+  };
+  return (
+    <div className="rounded-lg overflow-hidden" style={{ background: "var(--inset)" }}>
+      {playback === "recording" ? (
+        <HlsPlayer key={attempt} src={recordingUrl} onError={handleRecordingError} className="w-full max-h-[60vh]" muted />
+      ) : playback === "preview" && !inProgress && review.previewUrl ? (
+        <video key={attempt} src={review.previewUrl} controls autoPlay muted className="w-full max-h-[60vh]" onError={() => setPlayback("recording")} />
+      ) : (
+        <ThumbImage src={review.thumbnailUrl} alt={`${review.severity} on ${cameraDisplay}`} className="w-full max-h-[60vh] object-contain" placeholderClassName="w-full aspect-video" iconSize={40} retryKey={review.endTime} />
+      )}
+      {inProgress && <p role="status" className="px-3 py-2 type-footnote" style={{ color: "var(--text-muted)" }}>{IN_PROGRESS_NOTICE}</p>}
+      {playback === "failed" && (
+        <div className="flex flex-wrap items-center justify-between gap-3 px-3 py-2">
+          <p role="alert" className="type-footnote text-[color:var(--danger-ink)]">{PREVIEW_FAILED_NOTICE}</p>
+          <button type="button" className="btn ghost sm" onClick={retry}><RefreshCw size={12} /> Retry</button>
+          <Link className="btn ghost sm" href={`/cameras/${encodeURIComponent(review.camera)}/recordings?date=${date}`}>Browse recordings</Link>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function ReviewClipModal({ review, cameraName, onClose, onMarkViewed }: Props) {
   const headingId = useId();
   const { toast } = useToast();
@@ -51,10 +85,6 @@ export function ReviewClipModal({ review, cameraName, onClose, onMarkViewed }: P
   // Track whether we've already fired the mark-viewed callback for this
   // review id. Switching to a different review re-arms it.
   const markedFor = useRef<string | null>(null);
-
-  // The review whose clip failed to load. Keyed on the id, so moving the modal
-  // to a different review gets a fresh attempt without an effect to reset it.
-  const [clipFailedFor, setClipFailedFor] = useState<string | null>(null);
 
   useEffect(() => {
     if (!onMarkViewed) return;
@@ -70,10 +100,6 @@ export function ReviewClipModal({ review, cameraName, onClose, onMarkViewed }: P
 
   const cameraDisplay = cameraName || prettifyCameraKey(review.camera);
   const startedAt = new Date(review.startTime * 1000);
-
-  const inProgress = review.endTime === null;
-  const clipFailed = clipFailedFor === review.id;
-  const clipUrl = !inProgress && !clipFailed ? review.previewUrl : null;
 
   return (
     // `flush`: sectioned layout — the header divider owns its padding, like the
@@ -99,47 +125,7 @@ export function ReviewClipModal({ review, cameraName, onClose, onMarkViewed }: P
       </div>
 
       <div className="p-4 space-y-3">
-        <div className="rounded-lg overflow-hidden" style={{ background: "var(--inset)" }}>
-          {clipUrl ? (
-            <video
-              key={review.id}
-              src={clipUrl}
-              controls
-              autoPlay
-              muted
-              className="w-full max-h-[60vh]"
-              onError={() => setClipFailedFor(review.id)}
-            />
-          ) : (
-            <ThumbImage
-              src={review.thumbnailUrl}
-              alt={`${review.severity} on ${cameraDisplay}`}
-              className="w-full max-h-[60vh] object-contain"
-              placeholderClassName="w-full aspect-video"
-              iconSize={40}
-              retryKey={review.endTime}
-            />
-          )}
-          {inProgress && (
-            <p role="status" className="px-3 py-2 type-footnote" style={{ color: "var(--text-muted)" }}>
-              {IN_PROGRESS_NOTICE}
-            </p>
-          )}
-          {!inProgress && clipFailed && (
-            <div className="flex items-center justify-between gap-3 px-3 py-2">
-              {/* The clip the person was waiting on failed: an alert, in the
-                  error ink (--danger-ink clears 4.5:1 in both themes), with a
-                  control to try it again. */}
-              <p role="alert" className="type-footnote text-[color:var(--danger-ink)]">
-                {PREVIEW_FAILED_NOTICE}
-              </p>
-              <button type="button" className="btn ghost sm" onClick={() => setClipFailedFor(null)}>
-                <RefreshCw size={12} />
-                Retry
-              </button>
-            </div>
-          )}
-        </div>
+        <ReviewPlayback key={review.id} review={review} cameraDisplay={cameraDisplay} />
 
         {/* Details + actions. The details ask for 16rem before anything may sit
             beside them, as in the event modal. */}

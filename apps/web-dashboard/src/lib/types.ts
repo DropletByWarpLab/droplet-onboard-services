@@ -2405,6 +2405,8 @@ export interface DetectionEvent {
 /** Richer event payload returned by GET /api/cameras/events for the
  *  dedicated Events page. Mirrors EventDetail in the orchestrator. */
 export interface EventDetail extends DetectionEvent {
+  /** null until a business-hours schedule has been saved. */
+  outsideBusinessHours?: boolean | null;
   subLabel: string | null;
   subLabelScore: number | null;
   zones: string[];
@@ -2422,6 +2424,7 @@ export interface EventDetail extends DetectionEvent {
  *  /api/cameras/events query string by `fetchEvents`. All fields
  *  optional; the rail starts empty (= "anything"). */
 export interface EventFilter {
+  businessHours?: "outside" | "inside";
   cameras?: string[];
   labels?: string[];
   /** [0, 1] */
@@ -2438,6 +2441,8 @@ export interface EventFilter {
 
 export interface FilteredEventsResult {
   events: EventDetail[];
+  scanLimitReached?: boolean;
+  searchLimitReached?: boolean;
   /** start_time of the oldest event returned, or null if no more pages. */
   nextCursor: number | null;
 }
@@ -2452,6 +2457,7 @@ export type ReviewSeverity = "alert" | "detection" | "significant_motion";
  * triage unit on the Events page's "Alerts" + "Detections" tabs.
  */
 export interface ReviewItem {
+  outsideBusinessHours?: boolean | null;
   id: string;
   camera: string;
   startTime: number;
@@ -2467,6 +2473,7 @@ export interface ReviewItem {
 }
 
 export interface ReviewFilter {
+  businessHours?: "outside" | "inside";
   cameras?: string[];
   severity?: ReviewSeverity[];
   before?: number;
@@ -2478,7 +2485,49 @@ export interface ReviewFilter {
 
 export interface FilteredReviewsResult {
   reviews: ReviewItem[];
+  scanLimitReached?: boolean;
   nextCursor: number | null;
+}
+
+export type BusinessDay = "monday" | "tuesday" | "wednesday" | "thursday" | "friday" | "saturday" | "sunday";
+
+export interface CameraBusinessHours {
+  configured: boolean;
+  timezone: string;
+  /** null means closed. A close before open continues into the next day. */
+  days: Record<BusinessDay, { open: string; close: string } | null>;
+}
+
+/** Raw movement in retained recordings; independent of object reviews. */
+export interface MotionActivity {
+  id: string;
+  camera: string;
+  startTime: number;
+  endTime: number;
+  motion: number;
+  outsideBusinessHours: boolean | null;
+  playbackUrl: string;
+}
+
+export interface MotionFilter {
+  cameras?: string[];
+  after: number;
+  before: number;
+  businessHours?: "outside" | "inside";
+  limit?: number;
+  cursor?: number;
+}
+
+export interface MotionActivityResult {
+  activity: MotionActivity[];
+  nextCursor: number | null;
+  scanLimitReached?: boolean;
+  coverage: {
+    after: number;
+    before: number;
+    partial: boolean;
+    cameras: Array<{ camera: string; recordedSeconds: number | null; hasGaps: boolean; available: boolean }>;
+  };
 }
 
 // --- Recordings + timeline (Phase 3) ---

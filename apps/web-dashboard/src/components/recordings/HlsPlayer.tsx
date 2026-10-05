@@ -7,6 +7,10 @@ interface Props {
   src: string;
   onTimeUpdate?: (currentTime: number) => void;
   onError?: (message: string) => void;
+  onReady?: () => void;
+  onPlayingChange?: (playing: boolean) => void;
+  onEnded?: () => void;
+  playbackRate?: number;
   className?: string;
   autoPlay?: boolean;
   muted?: boolean;
@@ -63,6 +67,10 @@ export const HlsPlayer = forwardRef<HlsPlayerHandle, Props>(function HlsPlayer(
     src,
     onTimeUpdate,
     onError,
+    onReady,
+    onPlayingChange,
+    onEnded,
+    playbackRate = 1,
     className,
     autoPlay = true,
     muted = false,
@@ -74,12 +82,21 @@ export const HlsPlayer = forwardRef<HlsPlayerHandle, Props>(function HlsPlayer(
   // Keep the Hls instance ref-stable across renders so cleanup hits
   // the right object on src change.
   const hlsRef = useRef<{ destroy: () => void } | null>(null);
+  const errorRef = useRef(onError);
+  errorRef.current = onError;
+  const queuedSeek = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (videoRef.current) videoRef.current.playbackRate = playbackRate;
+  }, [playbackRate]);
 
   useImperativeHandle(
     ref,
     () => ({
       seek: (t: number) => {
-        if (videoRef.current) videoRef.current.currentTime = t;
+        const video = videoRef.current;
+        if (!video || video.readyState === 0) queuedSeek.current = t;
+        else video.currentTime = t;
       },
       pause: () => {
         videoRef.current?.pause();
@@ -106,13 +123,14 @@ export const HlsPlayer = forwardRef<HlsPlayerHandle, Props>(function HlsPlayer(
         const code = video.error?.code;
         if (code === MEDIA_ERR_ABORTED) return;
         // WARP-294: translate, never echo the element's own message.
-        onError?.(
+        errorRef.current?.(
           translateError({ code: (code && NATIVE_MEDIA_ERROR[code]) || "mediaError" }, "media"),
         );
       };
       video.addEventListener("error", handleNativeError);
       video.src = src;
       return () => {
+        queuedSeek.current = null;
         // Listener first: clearing the source below must not be reported
         // as a failure of the playlist we are leaving.
         video.removeEventListener("error", handleNativeError);
@@ -133,7 +151,7 @@ export const HlsPlayer = forwardRef<HlsPlayerHandle, Props>(function HlsPlayer(
           // WARP-294: route through translateError so the recordings
           // page receives the same friendly copy idiom for every
           // failure mode (no raw enum, no engineer-speak).
-          onError?.(translateError({ code: "UNSUPPORTED" }, "media"));
+          errorRef.current?.(translateError({ code: "UNSUPPORTED" }, "media"));
           return;
         }
         const hls = new Hls({
@@ -155,7 +173,7 @@ export const HlsPlayer = forwardRef<HlsPlayerHandle, Props>(function HlsPlayer(
             // manifestLoadError, …). Translate them to plain copy via
             // the media domain before bubbling up to the parent's
             // setPlayerError.
-            onError?.(
+            errorRef.current?.(
               translateError({ code: data.details ?? data.type }, "media"),
             );
           }
@@ -165,13 +183,14 @@ export const HlsPlayer = forwardRef<HlsPlayerHandle, Props>(function HlsPlayer(
           // WARP-294: never echo err.message — dynamic-import failures
           // and Hls instance constructor errors can surface unhelpful
           // strings like "Failed to fetch".
-          onError?.(translateError(err, "media"));
+          errorRef.current?.(translateError(err, "media"));
         }
       }
     })();
 
     return () => {
       cancelled = true;
+      queuedSeek.current = null;
       if (hlsRef.current) {
         hlsRef.current.destroy();
         hlsRef.current = null;
@@ -179,7 +198,7 @@ export const HlsPlayer = forwardRef<HlsPlayerHandle, Props>(function HlsPlayer(
       video.removeAttribute("src");
       video.load();
     };
-  }, [src, onError]);
+  }, [src]);
 
   return (
     <video
@@ -189,6 +208,17 @@ export const HlsPlayer = forwardRef<HlsPlayerHandle, Props>(function HlsPlayer(
       autoPlay={autoPlay}
       muted={muted}
       onTimeUpdate={(e) => onTimeUpdate?.(e.currentTarget.currentTime)}
+      onLoadedMetadata={(e) => {
+        e.currentTarget.playbackRate = playbackRate;
+        if (queuedSeek.current !== null) {
+          e.currentTarget.currentTime = queuedSeek.current;
+          queuedSeek.current = null;
+        }
+        onReady?.();
+      }}
+      onPlay={() => onPlayingChange?.(true)}
+      onPause={() => onPlayingChange?.(false)}
+      onEnded={() => { onPlayingChange?.(false); onEnded?.(); }}
       // No native `src` here — we set it imperatively above so we
       // can switch between native HLS and hls.js.
     />

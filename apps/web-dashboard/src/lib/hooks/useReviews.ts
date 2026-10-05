@@ -15,7 +15,7 @@ import type { FilteredReviewsResult, ReviewFilter, ReviewItem } from "@/lib/type
  * operator a "what's new since I looked away" window without burning
  * bandwidth.
  */
-export function useReviews(filter: ReviewFilter) {
+export function useReviews(filter: ReviewFilter, scheduleKey?: string) {
   const baseFilter = useMemo<ReviewFilter>(() => {
     const { before: _before, ...rest } = filter;
     return rest;
@@ -23,16 +23,16 @@ export function useReviews(filter: ReviewFilter) {
 
   const getKey = useCallback(
     (pageIndex: number, previousPageData: FilteredReviewsResult | null) => {
-      if (pageIndex === 0) return ["reviews", JSON.stringify(baseFilter), null] as const;
+      if (pageIndex === 0) return ["reviews", JSON.stringify(baseFilter), null, scheduleKey] as const;
       if (previousPageData && previousPageData.nextCursor === null) return null;
       const cursor = previousPageData?.nextCursor ?? null;
-      return ["reviews", JSON.stringify(baseFilter), cursor] as const;
+      return ["reviews", JSON.stringify(baseFilter), cursor, scheduleKey] as const;
     },
-    [baseFilter],
+    [baseFilter, scheduleKey],
   );
 
   const fetcher = useCallback(
-    ([, , cursor]: readonly [string, string, number | null]) =>
+    ([, , cursor]: readonly [string, string, number | null, string | undefined]) =>
       fetchReviewsFiltered({ ...baseFilter, before: cursor ?? undefined }),
     [baseFilter],
   );
@@ -86,6 +86,7 @@ export function useReviews(filter: ReviewFilter) {
     isLoadingMore,
     error,
     hasMore,
+    scanLimitReached: lastPage?.scanLimitReached === true,
     loadMore,
     markViewed,
     refresh: () => mutate(),

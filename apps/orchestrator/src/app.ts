@@ -91,6 +91,8 @@ import { createOffLanNetworkRouter } from "./routes/off-lan-network.js";
 import { createEgressAuditRouter } from "./routes/egress-audit.js";
 import { createWebRouter } from "./routes/web.js";
 import { createCamerasRouter, createCameraSharePublicRouter } from "./routes/cameras.js";
+import { createCameraBusinessHoursRouter } from "./routes/camera-business-hours.js";
+import { createCameraMotionRouter } from "./routes/camera-motion.js";
 import { createSignedSegmentRouter } from "./services/segment-url-signing.service.js";
 import { createSwitchRouter } from "./routes/switch.js";
 import { createDisplayRouter } from "./routes/display.js";
@@ -721,6 +723,8 @@ export function createApp(
   // `ambient_data` off-LAN channel, Redis-cached, audited per request;
   // proxies the services/web-fetch allowlisted fetcher.
   app.use("/api", createWebRouter(prisma));
+  app.use("/api", createCameraBusinessHoursRouter(prisma));
+  app.use("/api", createCameraMotionRouter(prisma));
   app.use("/api", createCamerasRouter(prisma));
   app.use("/api", createSwitchRouter(prisma));
   app.use("/api", createDisplayRouter(prisma));
