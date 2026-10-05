@@ -17,6 +17,11 @@ const MODULES = [
   "../services/network-safety.service.js",
   "../services/storage-safety.service.js",
   "../services/safety-tier.service.js",
+  // WARP-3532 — the outbox framework and the webhook worker register on
+  // cron-runtime from index.ts; importing them must leave nothing behind.
+  "../services/pm/pm-outbox.js",
+  "../services/pm/webhook-fanout.js",
+  "../services/pm/webhook-delivery.service.js",
 ] as const;
 
 afterEach(() => {

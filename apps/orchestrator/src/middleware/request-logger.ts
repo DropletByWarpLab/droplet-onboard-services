@@ -62,6 +62,10 @@ export function createRequestLogger(opts: {
         // that a future serializer or a `req.log.info({ req/res })` call might
         // emit, so a token can never ride out of the box in a log bundle.
         "req.body.token",
+        // WARP-3532: chat-app webhook URLs carry posting credentials in their
+        // path. The current request serializer omits bodies, but keep this
+        // secret out if a future handler logs a parsed request object.
+        "req.body.url",
         // AC2 defense-in-depth: a client that passes the redeem token as a
         // query param (?token=…) lands it under `req.query.token`, which the
         // default pino req serializer DOES emit — redact it alongside the body

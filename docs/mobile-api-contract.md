@@ -1293,7 +1293,8 @@ Source: `apps/orchestrator/src/services/ws-bridge.service.ts`.
 > Backed by the native PM module owned by the orchestrator
 > ([ADR-026](ADR-026-native-pm-supersedes-plane.md), superseding the embedded
 > Plane stack). The mobile read contract below is unchanged — only the backend
-> behind it changed.
+> behind it changed. WARP-3371 only ever *adds* fields (`next_cursor`, `total`)
+> and an optional `cursor`/`limit` pair to the work-items list.
 
 V1 = read-only on mobile. The orchestrator serves PM from its own Postgres
 (`Pm*` Prisma models) via the native `/api/pm/*` routes and transforms the
@@ -1355,15 +1356,27 @@ Paginated list of projects under a workspace.
 }
 ```
 
-### `GET /api/mobile/pm/work-items?workspace=<slug>&project_id=<id>&state=<id>&assignee=<id>&per_page=<n>`
+### `GET /api/mobile/pm/work-items?workspace=<slug>&project_id=<id>&state=<id>&assignee=<id>&limit=<n>&cursor=<c>`
 
-Paginated list of work items (issues/tickets).
+Paginated list of work items (issues/tickets). Ordered by the board order
+(`sortOrder`, then `id`), which is stable across pages.
 
 **Query params:**
 - `workspace` (required), `project_id` (required).
 - `state` (optional) — filter by state. Accepts either the native `PmState` id (UUID) **or**, for backwards compatibility, the legacy Plane state name/slug (e.g. `in_progress` / `In Progress`), which is resolved to the matching state server-side (WARP-888). An unrecognised value yields an empty list rather than an error.
 - `assignee` (optional) — filter by assignee id.
-- `per_page` (optional) — 1..100, default 50.
+- `limit` (optional) — 1..100, **default 50**. `per_page` is the older name for
+  the same parameter and is still accepted; `limit` wins if both are sent.
+  A non-numeric or out-of-range value is clamped into `1..100` (it is not an
+  error), exactly as before.
+- `cursor` (optional, WARP-3371) — the `next_cursor` of the previous response.
+  Opaque: never parse or build one. A cursor the list did not issue answers
+  `400 { "code": "PM_INVALID_CURSOR" }`.
+
+A client that sends neither `limit`/`per_page` nor `cursor` gets the first 50
+items — the pre-cursor behaviour, byte for byte in `work_items` — plus the two
+additive fields below, which it may ignore. To read **every** item, repeat the
+request with `cursor=<next_cursor>` until `next_cursor` is `null`.
 
 **Response:**
 ```json
@@ -1378,9 +1391,15 @@ Paginated list of work items (issues/tickets).
       "created_at": "<iso8601>",
       "updated_at": "<iso8601>"
     }
-  ]
+  ],
+  "next_cursor": "<opaque>" | null,
+  "total": 0
 }
 ```
+
+`next_cursor` is `null` on the last page. `total` is the exact number of work
+items matching the filters — the size of the whole set, never of this page — so a
+client can say "50 of 250" instead of silently stopping at the first page.
 
 ### `GET /api/mobile/pm/work-items/{id}?workspace=<slug>&project_id=<id>`
 
