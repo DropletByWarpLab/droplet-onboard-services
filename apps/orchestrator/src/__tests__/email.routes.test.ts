@@ -68,6 +68,14 @@ function createPrismaMock(opts: {
   accounts?: AccountRow[];
   threads?: ThreadRow[];
   drafts?: DraftRow[];
+  ticketLinks?: Array<{ emailDraftId: string; commentId: string | null }>;
+  comments?: Array<{
+    id: string;
+    visibility: "INTERNAL" | "PUBLIC";
+    deliveryStatus: string;
+    deliveryFailure: string | null;
+  }>;
+  failCommentSync?: boolean;
 } = {}) {
   const accounts = new Map<string, AccountRow>(
     (opts.accounts ?? []).map((a) => [a.id, a]),
@@ -78,12 +86,18 @@ function createPrismaMock(opts: {
   const drafts = new Map<string, DraftRow>(
     (opts.drafts ?? []).map((d) => [d.id, d]),
   );
+  const ticketLinks = new Map(
+    (opts.ticketLinks ?? []).map((link) => [link.emailDraftId, link]),
+  );
+  const comments = new Map((opts.comments ?? []).map((comment) => [comment.id, comment]));
   let nextId = 1;
 
-  return {
+  const prisma = {
     accounts,
     threads,
     drafts,
+    ticketLinks,
+    comments,
     emailAccount: {
       findMany: vi.fn(async () => [...accounts.values()].sort(
         (a, b) => a.address.localeCompare(b.address),
@@ -222,7 +236,43 @@ function createPrismaMock(opts: {
         },
       ),
     },
+    pmTicketEmailLink: {
+      findUnique: vi.fn(async ({ where }: { where: { emailDraftId: string } }) =>
+        ticketLinks.get(where.emailDraftId) ?? null,
+      ),
+    },
+    pmComment: {
+      updateMany: vi.fn(
+        async ({
+          where,
+          data,
+        }: {
+          where: { id: string; visibility: "PUBLIC" };
+          data: { deliveryStatus: string; deliveryFailure: string | null };
+        }) => {
+          if (opts.failCommentSync) throw new Error("comment sync failed");
+          const comment = comments.get(where.id);
+          if (!comment || comment.visibility !== where.visibility) return { count: 0 };
+          comments.set(comment.id, { ...comment, ...data });
+          return { count: 1 };
+        },
+      ),
+    },
+    $transaction: vi.fn(async <T>(work: (tx: unknown) => Promise<T>): Promise<T> => {
+      const draftsBefore = new Map(drafts);
+      const commentsBefore = new Map(comments);
+      try {
+        return await work(prisma);
+      } catch (error) {
+        drafts.clear();
+        for (const [id, row] of draftsBefore) drafts.set(id, row);
+        comments.clear();
+        for (const [id, row] of commentsBefore) comments.set(id, row);
+        throw error;
+      }
+    }),
   };
+  return prisma;
 }
 
 const ALLOW_GATE: EmailGate = {
@@ -436,7 +486,11 @@ describe("WARP-465 — POST /api/email/:accountId/drafts", () => {
 });
 
 describe("WARP-890 — idempotent outbound (claim + reconcile)", () => {
-  function withDraft(status: DraftRow["status"], claimedAt: Date | null = null) {
+  function withDraft(
+    status: DraftRow["status"],
+    claimedAt: Date | null = null,
+    opts: { linkComment?: boolean; commentVisibility?: "INTERNAL" | "PUBLIC"; failCommentSync?: boolean } = {},
+  ) {
     return createPrismaMock({
       accounts: [
         {
@@ -472,6 +526,18 @@ describe("WARP-890 — idempotent outbound (claim + reconcile)", () => {
           updatedAt: new Date(),
         },
       ],
+      ticketLinks: opts.linkComment ? [{ emailDraftId: "d1", commentId: "c1" }] : [],
+      comments: opts.linkComment
+        ? [
+          {
+              id: "c1",
+              visibility: opts.commentVisibility ?? "PUBLIC",
+              deliveryStatus: "PENDING",
+              deliveryFailure: null,
+            },
+          ]
+        : [],
+      failCommentSync: opts.failCommentSync,
     });
   }
 
@@ -514,6 +580,50 @@ describe("WARP-890 — idempotent outbound (claim + reconcile)", () => {
       .send({ status: "sent" });
     expect(res.status).toBe(200);
     expect(prisma.drafts.get("d1")?.status).toBe("sent");
+  });
+
+  it.each([
+    { status: "sent" as const, deliveryStatus: "SENT", deliveryFailure: null },
+    { status: "failed" as const, deliveryStatus: "FAILED", deliveryFailure: "SEND_FAILED" },
+  ])("syncs a linked public ticket comment when the email becomes $status", async ({
+    status,
+    deliveryStatus,
+    deliveryFailure,
+  }) => {
+    const prisma = withDraft("sending", null, { linkComment: true });
+    const res = await request(buildApp(prisma, ALLOW_GATE, mkUser("service")))
+      .patch("/api/email/drafts/d1/status")
+      .send({ status });
+
+    expect(res.status).toBe(200);
+    expect(prisma.drafts.get("d1")?.status).toBe(status);
+    expect(prisma.comments.get("c1")).toMatchObject({ deliveryStatus, deliveryFailure });
+    expect(prisma.pmTicketEmailLink.findUnique).toHaveBeenCalledWith({
+      where: { emailDraftId: "d1" },
+      select: { commentId: true },
+    });
+  });
+
+  it("does not update an INTERNAL comment through a ticket email link", async () => {
+    const prisma = withDraft("sending", null, { linkComment: true, commentVisibility: "INTERNAL" });
+    const res = await request(buildApp(prisma, ALLOW_GATE, mkUser("service")))
+      .patch("/api/email/drafts/d1/status")
+      .send({ status: "sent" });
+
+    expect(res.status).toBe(200);
+    expect(prisma.drafts.get("d1")?.status).toBe("sent");
+    expect(prisma.comments.get("c1")).toMatchObject({ deliveryStatus: "PENDING", deliveryFailure: null });
+  });
+
+  it("rolls back the draft status if linked-comment synchronization fails", async () => {
+    const prisma = withDraft("sending", null, { linkComment: true, failCommentSync: true });
+    const res = await request(buildApp(prisma, ALLOW_GATE, mkUser("service")))
+      .patch("/api/email/drafts/d1/status")
+      .send({ status: "sent" });
+
+    expect(res.status).toBe(500);
+    expect(prisma.drafts.get("d1")?.status).toBe("sending");
+    expect(prisma.comments.get("c1")).toMatchObject({ deliveryStatus: "PENDING", deliveryFailure: null });
   });
 
   it("reconcile fails out a sending draft claimed before the grace window", async () => {

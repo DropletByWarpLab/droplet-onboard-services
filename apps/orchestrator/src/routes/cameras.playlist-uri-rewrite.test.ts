@@ -73,8 +73,6 @@ vi.mock("../services/frigate.client.js", async () => {
     tagEventAsFace: vi.fn(),
     openBirdseyeStream: vi.fn(),
     openMjpegStream: vi.fn(),
-    enableDetection: vi.fn(),
-    disableDetection: vi.fn(),
     deleteCamera: vi.fn(),
     deleteEvent: vi.fn(),
     addCamera: vi.fn(),
@@ -144,6 +142,21 @@ function fetchPlaylist(before: number, after: number) {
 describe("WARP-3122: recordings playlist rewrite", () => {
   const before = () => nowSec() - 3600;
   const after = () => before() - 3600;
+
+  it.each([
+    "https://outside.invalid/evil.m3u8",
+    "//outside.invalid/evil.m3u8",
+    "/vod/other_camera/start/1/end/2/index.m3u8",
+    "../other_camera/index.m3u8",
+    "%2e%2e/other_camera/index.m3u8",
+    "file:///private/config.m3u8",
+  ])("refuses unsafe master variant %s before requesting it", async (variant) => {
+    fetchHlsPlaylist.mockResolvedValue(`#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000\n${variant}\n`);
+    const res = await fetchPlaylist(before(), after());
+    expect(res.status).toBe(502);
+    expect(res.body.error).toMatch(/sub-playlist/);
+    expect(fetchHlsPlaylist).toHaveBeenCalledTimes(1);
+  });
 
   it("refuses a playlist carrying an absolute segment URL instead of forwarding it", async () => {
     fetchHlsPlaylist.mockResolvedValue(

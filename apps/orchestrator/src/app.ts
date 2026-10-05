@@ -59,6 +59,8 @@ import { createPmMobileRouter } from "./routes/mobile/pm.js";
 import { createPmNativeRouter } from "./routes/pm/native.js";
 import { createPmRelationsRouter } from "./routes/pm/relations.js";
 import { createPmImportExportRouter } from "./routes/pm/import-export.js";
+import { createPmPlanningRouter } from "./routes/pm/planning.js";
+import { createPmTimeRouter } from "./routes/pm/time.js";
 import { createPmWebhooksRouter } from "./routes/pm/webhooks.js";
 import { createPmOpenApiRouter } from "./routes/pm/openapi.js";
 import { createSupportRouter } from "./routes/support/support.routes.js";
@@ -603,6 +605,19 @@ export function createApp(
   // paths are `/pm/projects/:id/{import,export.*}` and `/pm/import-jobs/*`,
   // disjoint from native.ts, so neither shadows the other.
   app.use("/api", createPmImportExportRouter(prisma));
+  // WARP-3521 (ADR-069 WS-5) — cycles (sprints) and modules (milestones). Its own
+  // router on the same prefix, for the same reason as relations: the paths are
+  // disjoint from the native router's (`/pm/cycles/*`, `/pm/modules/*`,
+  // `/pm/projects/:id/{cycles,modules,backlog}`, `/pm/work-items/:id/modules`).
+  // Every path starts `/pm/`, so the `projects` module gate and the guest tier
+  // floor already cover it.
+  app.use("/api", createPmPlanningRouter(prisma));
+  // WARP-3526 (ADR-069 WS-10) — worklogs, the running timer, the weekly
+  // timesheet and the time report. Its own router, disjoint paths
+  // (`/pm/worklogs`, `/pm/timer`, `/pm/timesheet`, `/pm/time/...`, plus
+  // `/pm/work-items/:id/worklogs`), and the same `/api/pm` module gates as the
+  // routers above — no guest share, no MCP write principal; see its header.
+  app.use("/api", createPmTimeRouter(prisma));
   // WARP-3532 (ADR-069 §9) — work webhooks and chat-app notifications. Owner
   // and admin only. `/pm/webhooks` is a literal second segment and no PM router
   // above owns a `/pm/:param`, so neither shadows the other.

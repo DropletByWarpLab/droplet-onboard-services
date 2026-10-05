@@ -1,0 +1,55 @@
+[Unit]
+Description=Droplet NVR storage apply (root executor: recordings slice + target record, WARP-3514)
+Documentation=https://warp-lab.atlassian.net/browse/WARP-3514
+# WARP-3514 / ADR-070: the camera-recordings slice. The device-bridge sandbox
+# (User=droplet + ProtectSystem=strict + NoNewPrivileges) can neither reach the
+# block devices nor set the ext4 project quota, so the bridge spools the
+# request into its StateDirectory (/var/lib/droplet-bridge/nvr-spool/
+# request.json) and starts THIS unit via polkit (50-droplet-device-bridge.rules
+# — start verb, this unit only, user droplet only). ExecStart consumes that one
+# request as root, re-validates it (the spool is droplet-writable, so the
+# request is untrusted input — WARP-843), runs the repo-tracked
+# droplet-set-nvr-media.sh writer and writes nvr-spool/result.json for the
+# bridge to read back.
+#
+# Deliberately NO [Install] section: this unit is never enabled and never runs
+# at boot — it only ever runs on demand, one request at a time (systemd
+# serializes starts of the same unit).
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/droplet-nvr-storage-apply.sh
+# The writer finds <repo>/.env (where NVR_MEDIA_SOURCE is recorded) and
+# scripts/lib/secrets.sh through REPO_ROOT. The installer substitutes this
+# checkout's path for the placeholder, exactly as it does for
+# droplet-device-bridge.service. No EnvironmentFile on purpose: a
+# droplet-writable EnvironmentFile on a root unit is the WARP-843 LPE, and the
+# writer READS the repo .env itself rather than having it loaded as environment.
+Environment=REPO_ROOT=@REPO_ROOT@
+# Known-good PATH so findmnt/lsblk/chattr/python3 resolve the same under
+# systemd as in a shell.
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# The bridge blocks on `systemctl start` for up to 125 s. Keep this just under
+# it so systemd fails the unit — and the bridge gets a real answer — before the
+# bridge's own timeout fires. The work itself is short (a quota set and a few
+# small writes); `chattr -R` over an already-populated nvr/ is the slow case.
+TimeoutStartSec=110
+
+# --- Hardening ---
+# Root is required against real block devices and the bay mounts under /mnt,
+# and the writer rewrites <repo>/.env, which lives under /home. That rules out
+# the filesystem-view sandboxes: ProtectHome would hide /home, so the .env
+# write (and the symlink-preserving upsert into /data) fails; ProtectSystem
+# would make /var/lib/droplet-nvr, the spool and the dynamically-mounted bay
+# read-only; PrivateDevices would hide the block devices the quota ioctl must
+# open. None of the three is set. The orthogonal reductions cost nothing: this
+# unit never needs the network, kernel tunables/modules/logs, the cgroup tree
+# or realtime scheduling.
+PrivateNetwork=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=true
+RestrictRealtime=true
