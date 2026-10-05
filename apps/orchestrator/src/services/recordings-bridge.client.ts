@@ -5,7 +5,8 @@
  * The bridge runs on the HOST: it is the only thing that can read the drive
  * topology, set an ext4 project quota or move footage, and the orchestrator
  * (a container, no docker socket — ADR-023) reaches it over `host.docker.internal`
- * with the shared `X-Droplet-Auth` secret, exactly like `routes/storage.ts`.
+ * with the read or destructive-route `X-Droplet-Auth` credential, exactly like
+ * `routes/storage.ts`.
  *
  * Errors are keyed on the bridge's MACHINE `code`, never on message text
  * (WARP-834): 409 → `busy`, 422 → `host_refused` (with the writer's code, e.g.
@@ -14,7 +15,7 @@
  * guess — a guessed "ok" here would start a destructive move on the wrong facts.
  */
 import { config } from "../config.js";
-import { isBridgeConnectionError } from "../lib/bridge-errors.js";
+import { bridgeAdminToken, bridgeAuthToken, isBridgeConnectionError } from "../lib/bridge-errors.js";
 import {
   RecordingsError,
   type NvrApplyMode,
@@ -45,11 +46,6 @@ export interface RecordingsBridge {
 const READ_TIMEOUT_MS = 10_000;
 const START_TIMEOUT_MS = 30_000;
 const APPLY_TIMEOUT_MS = 130_000;
-
-/** Same precedence as `routes/storage.ts`, read PER CALL so a token injected after boot is seen. */
-function bridgeAuthToken(): string {
-  return (process.env.BRIDGE_AUTH_TOKEN || process.env.SERVICE_TOKEN_DISPLAY || "").trim();
-}
 
 // ── narrowing helpers ────────────────────────────────────────────────────────
 type Obj = Record<string, unknown>;
@@ -124,7 +120,7 @@ interface CallOptions {
 
 /** One authenticated call. Returns the parsed JSON body of a 2xx; maps every other outcome to a typed error. */
 async function call(method: "GET" | "POST", path: string, opts: CallOptions): Promise<unknown> {
-  const token = bridgeAuthToken();
+  const token = method === "POST" ? bridgeAdminToken() : bridgeAuthToken();
   if (!token) {
     // Fail closed: with no bridge secret we cannot safely invoke a host action.
     throw new RecordingsError("bridge_unavailable", "the device-bridge auth token is not configured");

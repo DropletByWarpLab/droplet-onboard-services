@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import {
   HardDrive,
@@ -15,6 +15,9 @@ import {
   X,
   FolderOpen,
   Cpu,
+  KeyRound,
+  Lock,
+  LockOpen,
 } from "lucide-react";
 import { useDrives } from "@/lib/hooks/useDrives";
 import { usePools } from "@/lib/hooks/usePools";
@@ -23,6 +26,7 @@ import {
   confirmStorageCommand,
   ejectDrive,
   reclaimDrive,
+  regenerateRecoveryKey,
   requestFormatPool,
   rescanDrives,
   updateDriveLabel,
@@ -36,7 +40,8 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 // DestructiveConfirm the Settings Danger zone puts in front of a reformat.
 // One primitive for every type-to-confirm destructive flow, never a fork.
 import { DestructiveConfirm } from "@/components/settings/DestructiveConfirm";
-import { translateError } from "@/lib/friendly-errors";
+import { TPM_REQUIRED_MESSAGE, isTpmRequired, translateError } from "@/lib/friendly-errors";
+import { RECORDING_STORAGE_HREF } from "@/lib/recording-storage";
 import type {
   DataStorageTotals,
   DiskInfo,
@@ -58,6 +63,19 @@ import {
   reclaimPoolImpact,
   worstPoolAlarm,
 } from "./pool-display";
+// WARP-3515 / ADR-070: encryption state, the recordings drive, the Prepare drive
+// gate, and the one-time recovery key.
+import {
+  canPrepareDrive,
+  driveEncryptionState,
+  isEncryptionReported,
+  isRecordingsDrive,
+  pickPreparedDrive,
+  recordingsReservedBytes,
+  resolveNewDriveId,
+  type DriveEncryptionState,
+} from "./drive-encryption";
+import { RecoveryKeyDialog } from "./RecoveryKeyDialog";
 // WARP-1337: the display-name chain (override → displayName → label →
 // GUID-guarded mount tail) lives in ONE shared helper now, used by this panel
 // and VolumesPanel alike — the private per-panel copies drifted (VolumesPanel's
@@ -199,6 +217,104 @@ function busLabel(bus?: string): string {
   }
 }
 
+/** WARP-3515 — what a Prepare acts on: a MOUNTED plain drive, or an unmounted
+ *  disk the box has not adopted yet. */
+interface PrepareTarget {
+  /** Customer-facing name: the typed confirm phrase and every line of copy. */
+  name: string;
+  sizeBytes: number;
+  /** The WHOLE-disk kernel name the host script acts on ("sdb"). */
+  diskName: string;
+  serial?: string;
+  /** What seeds the post-wipe filesystem label (WARP-1337). */
+  labelSource?: string | null;
+}
+
+/** Calm copy for a failed Prepare. The orchestrator forwards the host script's
+ *  refusal text, which can name devices and mkfs internals — never shown. */
+function friendlyPrepareError(err: unknown): string {
+  const raw = err instanceof Error ? err.message.toLowerCase() : "";
+  // eslint-disable-next-line no-console
+  console.error("[drives-panel:prepare]", err);
+  // ADR-070: Prepare seals the drive's key to the TPM; a box without one refuses
+  // (409 tpm_required) before it wipes anything.
+  if (isTpmRequired(err)) return TPM_REQUIRED_MESSAGE;
+  if (/system disk|never adoptable|os\/boot|backs the os|boot disk/.test(raw)) {
+    return "That's the Droplet's system disk — it can't be erased or prepared.";
+  }
+  if (/recording/.test(raw)) {
+    return "This drive is storing your camera recordings, so it can't be erased. Choose another recording drive first.";
+  }
+  if (/busy|in use|mounted|unmount|close open files|open file/.test(raw)) {
+    return "That drive is in use right now — close anything using it, then try again.";
+  }
+  return "We couldn't prepare that drive right now. Try again in a moment.";
+}
+
+/** The encryption chip. Only ever a claim the orchestrator made: an unreported
+ *  drive renders nothing at all. */
+function EncryptionBadge({ state }: { state: DriveEncryptionState }) {
+  if (state === "encrypted") {
+    return (
+      <Badge kind="ok">
+        <Lock size={11} aria-hidden="true" />
+        Encrypted
+      </Badge>
+    );
+  }
+  if (state === "needs_preparing") {
+    return (
+      <Badge kind="warn">
+        <LockOpen size={11} aria-hidden="true" />
+        Needs preparing — will be encrypted
+      </Badge>
+    );
+  }
+  if (state === "unknown") return <Badge kind="muted">Encryption unknown</Badge>;
+  return null;
+}
+
+/** "Used for: Camera recordings · 120 GB reserved" — on the active recordings
+ *  drive only. */
+function UsageBadge({ drive }: { drive: Pick<DriveInfo, "usage"> }) {
+  if (!isRecordingsDrive(drive)) return null;
+  const reserved = recordingsReservedBytes(drive);
+  return (
+    <Badge kind="info">
+      Used for: Camera recordings
+      {reserved ? ` · ${formatBytes(reserved)} reserved` : ""}
+    </Badge>
+  );
+}
+
+/** Why the recordings drive cannot be ejected or erased — also the accessible
+ *  description of the disabled Eject. Links to where it IS changed. */
+function RecordingsLock({ id, canChange }: { id: string; canChange: boolean }) {
+  return (
+    <p id={id} className="mt-2" style={{ fontSize: "12px", color: "var(--text-muted)" }}>
+      Camera recordings are stored on this drive, so it can&rsquo;t be ejected or
+      erased.
+      {/* The Recording storage card is owner/admin only (a family account gets a
+          403 and no card), so a link to it would be a dead end for anyone else. */}
+      {canChange && (
+        <>
+          {" "}
+          To use a different drive,{" "}
+          <Link
+            href={RECORDING_STORAGE_HREF}
+            // Lifted above the card's stretched title link, like every control here.
+            className="relative underline focus-visible:outline-none focus-visible:ring-2"
+            style={{ color: "var(--brand)", borderRadius: "var(--radius-input)" }}
+          >
+            change it in Recording storage
+          </Link>
+          .
+        </>
+      )}
+    </p>
+  );
+}
+
 export function DrivesPanel() {
   const { drives, disks, totals, systemDisk, isLoading, bridgeError, refresh } =
     useDrives();
@@ -211,6 +327,25 @@ export function DrivesPanel() {
   // don't see a control that would 403. Mirrors isAdmin() in storage.ts.
   const { user } = useAuth();
   const isAdmin = user?.role === "owner" || user?.role === "admin";
+  // WARP-3515: the recovery key is handed to the OWNER only (the route is
+  // owner-only); an admin can still prepare a drive, and is told who to ask.
+  const isOwner = user?.role === "owner";
+  // WARP-3513 lands separately from this dashboard: until the orchestrator
+  // reports `encryption` / `preparation` on a drive, we make no claim about
+  // encryption and offer nothing that depends on it.
+  const encryptionAware = isEncryptionReported(drives);
+  // The freshest list, for lookups that run after an await (finding the drive a
+  // Prepare just created) without re-subscribing to the hook.
+  const drivesRef = useRef(drives);
+  drivesRef.current = drives;
+  // Stops a lookup that is still polling when the panel goes away.
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
   const [rescanning, setRescanning] = useState(false);
   const [ejectTarget, setEjectTarget] = useState<DriveInfo | null>(null);
   const [ejecting, setEjecting] = useState<string | null>(null);
@@ -241,6 +376,24 @@ export function DrivesPanel() {
     disk: DiskInfo;
   } | null>(null);
   const [reclaimBusy, setReclaimBusy] = useState<string | null>(null);
+
+  // WARP-3515 — Prepare drive: erase a PLAIN drive and set it up encrypted
+  // (ADR-070). Same two-step confirm-token flow as reclaim, and the same
+  // typed-name friction in front of it: the token is minted on the click, the
+  // owner types the drive's name, and only then does the confirm execute.
+  const [preparePending, setPreparePending] = useState<{
+    token: { confirmationToken: string; service: string; resourceId: string };
+    target: PrepareTarget;
+  } | null>(null);
+  const [prepareBusy, setPrepareBusy] = useState<string | null>(null);
+
+  // WARP-3515 — the one-time recovery key. `resolve` finds the drive's id when
+  // the owner asks for the key (right after a Prepare, the drive list can lag
+  // the host by a few seconds).
+  const [keyPrompt, setKeyPrompt] = useState<{
+    name: string;
+    resolve: () => Promise<string | null>;
+  } | null>(null);
 
   // Focus restore for the destructive confirms (WCAG 2.4.3, UX review). The
   // row CTA is DISABLED while the confirm-token request is in flight, which
@@ -306,8 +459,14 @@ export function DrivesPanel() {
   // mount). Same member derivation as StorageStep's reclaimDisks and the
   // Danger zone's reformat, so all three destructive flows agree.
   function takenNamesExcluding(disk: DiskInfo): string[] {
+    return takenNamesExcludingDisk(disk.name);
+  }
+
+  // WARP-3515: the same snapshot, keyed by a whole-disk name, so Prepare drive
+  // (which starts from a MOUNTED drive, not a DiskInfo) shares it.
+  function takenNamesExcludingDisk(diskName: string): string[] {
     return takenVolumeNames(
-      drives.filter((d) => (d.parent_disk || wholeDiskName(d.device)) !== disk.name),
+      drives.filter((d) => (d.parent_disk || wholeDiskName(d.device)) !== diskName),
     );
   }
 
@@ -354,12 +513,14 @@ export function DrivesPanel() {
   async function doAdopt() {
     const p = adoptPending;
     if (!p) return;
+    const known = knownUuids();
     try {
       await confirmStorageCommand(p.token);
       setAdoptPending(null);
       toast(`${diskTitle(p.disk)} erased and added to your Droplet`, "success");
       refresh();
       refreshPools();
+      void offerRecoveryKey({ name: diskTitle(p.disk), diskName: p.disk.name, known });
     } catch (err) {
       setAdoptPending(null);
       toast(friendlyAdoptError(err), "error");
@@ -383,7 +544,7 @@ export function DrivesPanel() {
         pool,
       });
     } catch (err) {
-      toast(translateError(err, "files"), "error");
+      toast(isTpmRequired(err) ? TPM_REQUIRED_MESSAGE : translateError(err, "files"), "error");
     } finally {
       setFormatBusy(null);
     }
@@ -392,6 +553,7 @@ export function DrivesPanel() {
   async function doFormat() {
     const p = formatPending;
     if (!p) return;
+    const known = knownUuids();
     try {
       await confirmStorageCommand(p.token);
       setFormatPending(null);
@@ -400,9 +562,10 @@ export function DrivesPanel() {
       toast(`${poolName(p.pool)} formatted and mounted — ready to use`, "success");
       refresh();
       refreshPools();
+      void offerRecoveryKey({ name: poolName(p.pool), poolDevice: p.pool.device, known });
     } catch (err) {
       setFormatPending(null);
-      toast(translateError(err, "files"), "error");
+      toast(isTpmRequired(err) ? TPM_REQUIRED_MESSAGE : translateError(err, "files"), "error");
     }
   }
 
@@ -448,15 +611,122 @@ export function DrivesPanel() {
   async function doReclaim() {
     const p = reclaimPending;
     if (!p) return;
+    const known = knownUuids();
     try {
       await confirmStorageCommand(p.token);
       setReclaimPending(null);
       toast(`${diskTitle(p.disk)} reclaimed and added to your Droplet`, "success");
       refresh();
       refreshPools();
+      void offerRecoveryKey({ name: diskTitle(p.disk), diskName: p.disk.name, known });
     } catch (err) {
       setReclaimPending(null);
       toast(friendlyAdoptError(err), "error");
+    }
+  }
+
+  // ── WARP-3515: Prepare drive + the one-time recovery key ─────────────────
+
+  /** The uuids on screen right now: the "before" picture a Prepare is compared
+   *  against to find the drive it created. */
+  function knownUuids(): Set<string> {
+    return new Set(drivesRef.current.map((d) => d.uuid).filter(Boolean));
+  }
+
+  /**
+   * Hand the OWNER the one-time recovery key after something created an
+   * encrypted drive (a Prepare, a pool format, a reclaim).
+   *
+   * When the orchestrator already reports encryption we KNOW the new drive is
+   * LUKS2, so the dialog opens at once and finds the drive's id when the owner
+   * asks for the key. When it has not told us (an empty bay on an orchestrator
+   * that has never listed an encrypted drive) we cannot know the host encrypted
+   * it, so look quietly first and only open the dialog if an encrypted drive
+   * actually appeared — never promise a key that does not exist.
+   */
+  async function offerRecoveryKey(q: {
+    name: string;
+    diskName?: string;
+    poolDevice?: string;
+    known: Set<string>;
+  }) {
+    if (!isOwner) return;
+    const resolve = () =>
+      resolveNewDriveId({
+        refresh: () =>
+          Promise.resolve(refresh()) as Promise<{ drives?: DriveInfo[] } | undefined>,
+        pick: (ds) =>
+          pickPreparedDrive(ds, {
+            diskName: q.diskName,
+            poolDevice: q.poolDevice,
+            knownUuids: q.known,
+          }),
+        current: () => drivesRef.current,
+        isCancelled: () => !alive.current,
+      });
+    if (encryptionAware) {
+      setKeyPrompt({ name: q.name, resolve });
+      return;
+    }
+    const id = await resolve();
+    if (id && alive.current) setKeyPrompt({ name: q.name, resolve: async () => id });
+  }
+
+  async function handleStartPrepare(target: PrepareTarget) {
+    destructiveTriggerRef.current =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setPrepareBusy(target.diskName);
+    try {
+      // WARP-1337: seed the post-wipe FS label from the name the owner already
+      // sees, uniquified against the OTHER volumes (the wipe erases this disk's
+      // own, so they cannot collide).
+      const label = uniqueFsLabel(
+        sanitizeFsLabel(target.labelSource ?? target.name),
+        takenNamesExcludingDisk(target.diskName),
+        target.serial,
+      );
+      const token = await adoptDrive({
+        device: target.diskName,
+        wipeMethod: "quick",
+        ...(label ? { label } : {}),
+        confirmPhrase: buildConfirmPhrase([target.diskName]),
+      });
+      setPreparePending({
+        token: {
+          confirmationToken: token.confirmationToken,
+          service: token.service,
+          resourceId: token.resourceId,
+        },
+        target,
+      });
+    } catch (err) {
+      toast(friendlyPrepareError(err), "error");
+    } finally {
+      setPrepareBusy(null);
+    }
+  }
+
+  async function doPrepare() {
+    const p = preparePending;
+    if (!p) return;
+    const known = knownUuids();
+    try {
+      await confirmStorageCommand(p.token);
+      setPreparePending(null);
+      toast(
+        isOwner
+          ? `${p.target.name} prepared — it's now encrypted.`
+          : `${p.target.name} prepared and encrypted. The owner can view its recovery key from this page.`,
+        "success",
+      );
+      refresh();
+      refreshPools();
+      void offerRecoveryKey({ name: p.target.name, diskName: p.target.diskName, known });
+    } catch (err) {
+      // Same contract as adopt / reclaim: a used confirm token is not retryable,
+      // so close and say so rather than leaving a dialog that cannot succeed.
+      setPreparePending(null);
+      toast(friendlyPrepareError(err), "error");
     }
   }
 
@@ -685,16 +955,41 @@ export function DrivesPanel() {
             role="list"
             aria-label="Mounted drives"
           >
-            {standaloneDrives.map((d) => (
-              <DriveCard
-                key={d.uuid || d.mount || d.device}
-                drive={d}
-                isAdmin={isAdmin}
-                ejecting={ejecting === d.uuid}
-                onEject={() => setEjectTarget(d)}
-                onRenamed={() => refresh()}
-              />
-            ))}
+            {standaloneDrives.map((d) => {
+              // WARP-3515: the whole disk a Prepare would act on. A mounted LUKS
+              // volume is a mapper node (no recognisable name), so the bridge's
+              // `parent_disk` leads; a plain partition falls back to its path.
+              const wholeDisk = d.parent_disk || wholeDiskName(d.device);
+              return (
+                <DriveCard
+                  key={d.uuid || d.mount || d.device}
+                  drive={d}
+                  isAdmin={isAdmin}
+                  isOwner={isOwner}
+                  ejecting={ejecting === d.uuid}
+                  canPrepare={isAdmin && canPrepareDrive(d, wholeDisk)}
+                  preparing={prepareBusy === wholeDisk}
+                  onEject={() => setEjectTarget(d)}
+                  onRenamed={() => refresh()}
+                  onPrepare={() =>
+                    handleStartPrepare({
+                      name: driveName(d),
+                      sizeBytes: d.size_bytes,
+                      diskName: wholeDisk,
+                      labelSource: d.displayName || d.label,
+                    })
+                  }
+                  onShowRecoveryKey={() => {
+                    destructiveTriggerRef.current =
+                      document.activeElement instanceof HTMLElement
+                        ? document.activeElement
+                        : null;
+                    // The id is the drive's own — nothing to look up.
+                    setKeyPrompt({ name: driveName(d), resolve: async () => d.uuid || null });
+                  }}
+                />
+              );
+            })}
           </div>
         )}
       </div>
@@ -746,9 +1041,25 @@ export function DrivesPanel() {
                 disk={disk}
                 isAdmin={isAdmin}
                 busy={
-                  adoptBusy === disk.name || reclaimBusy === disk.name
+                  adoptBusy === disk.name ||
+                  reclaimBusy === disk.name ||
+                  prepareBusy === disk.name
                 }
-                onAdopt={() => handleStartAdopt(disk)}
+                prepareWording={encryptionAware}
+                // Once the orchestrator reports encryption, adopting a disk is a
+                // Prepare: the same erase, now ending in an encrypted drive, behind
+                // the typed-name friction. Otherwise the legacy one-click flow.
+                onAdopt={() =>
+                  encryptionAware
+                    ? handleStartPrepare({
+                        name: diskTitle(disk),
+                        sizeBytes: disk.size_bytes,
+                        diskName: disk.name,
+                        serial: disk.serial,
+                        labelSource: disk.model,
+                      })
+                    : handleStartAdopt(disk)
+                }
                 onReclaim={() => handleStartReclaim(disk)}
               />
             ))}
@@ -790,7 +1101,11 @@ export function DrivesPanel() {
         onConfirm={doFormat}
         onCancel={() => setFormatPending(null)}
         title="Format this storage pool?"
-        description="This permanently erases anything on the pool and sets it up as storage for your Droplet. This can't be undone."
+        description={
+          encryptionAware
+            ? "This permanently erases anything on the pool and sets it up as encrypted storage for your Droplet. This can't be undone."
+            : "This permanently erases anything on the pool and sets it up as storage for your Droplet. This can't be undone."
+        }
         confirmLabel="Format & mount"
         confirmedIdentifier={
           formatPending
@@ -837,6 +1152,49 @@ export function DrivesPanel() {
             </p>
           ) : undefined
         }
+        triggerRef={destructiveTriggerRef}
+      />
+
+      {/* WARP-3515 — Prepare drive: erase + set up encrypted (ADR-070). The same
+          typed-name DestructiveConfirm as Reclaim, in front of the same
+          confirm-token flow; the accessory says what the owner gets afterwards. */}
+      <DestructiveConfirm
+        open={preparePending !== null}
+        onConfirm={doPrepare}
+        onCancel={() => setPreparePending(null)}
+        title="Prepare this drive?"
+        consequence={
+          preparePending
+            ? `This permanently erases everything on ${preparePending.target.name} and sets it up encrypted. This can't be undone — back up anything you want to keep first.`
+            : ""
+        }
+        affectedSummary={
+          preparePending
+            ? `${preparePending.target.name} · ${formatBytes(preparePending.target.sizeBytes)} · ${preparePending.target.diskName}`
+            : ""
+        }
+        confirmPhrase={preparePending ? preparePending.target.name : ""}
+        confirmLabel="Prepare drive"
+        progressMessage="Preparing the drive — this can take a few minutes. Keep this open until it finishes."
+        accessory={
+          <p className="type-footnote" style={{ color: "var(--text)" }}>
+            Afterwards, the owner gets a one-time recovery key to keep somewhere
+            safe. It unlocks the drive if this Droplet can&rsquo;t.
+          </p>
+        }
+        triggerRef={destructiveTriggerRef}
+      />
+
+      {/* WARP-3515 — the one-time recovery key. Shown once, never dismissed by
+          accident (see RecoveryKeyDialog). */}
+      <RecoveryKeyDialog
+        open={keyPrompt !== null}
+        driveName={keyPrompt?.name ?? ""}
+        resolveDriveId={keyPrompt?.resolve ?? (async () => null)}
+        // A key that was missed (or expired after 7 days) can be replaced — tier 3,
+        // owner only. Only an owner is ever shown this dialog.
+        onRegenerate={isOwner ? (id) => regenerateRecoveryKey(id) : undefined}
+        onClose={() => setKeyPrompt(null)}
         triggerRef={destructiveTriggerRef}
       />
     </div>
@@ -1029,12 +1387,17 @@ function AvailableDiskCard({
   disk,
   isAdmin,
   busy,
+  prepareWording = false,
   onAdopt,
   onReclaim,
 }: {
   disk: DiskInfo;
   isAdmin: boolean;
   busy: boolean;
+  /** WARP-3515: the orchestrator reports encryption, so adopting a disk now
+   *  means "prepare" — erase it and set it up encrypted. Legacy wording
+   *  ("Erase & adopt") stays for an orchestrator that does not. */
+  prepareWording?: boolean;
   onAdopt: () => void;
   onReclaim: () => void;
 }) {
@@ -1056,9 +1419,13 @@ function AvailableDiskCard({
           // it removes the drive from the pool AND erases everything on it.
           "Part of your storage pool. Reclaiming removes it from the pool and erases everything on it, so it can be used on its own."
         : "Part of your storage pool — manage it from the pool above."
-      : disk.state === "foreign"
-        ? "Holds files from another system. Erase it to add its space to your Droplet."
-        : "Empty and ready to be added to your Droplet.";
+      : prepareWording
+        ? disk.state === "foreign"
+          ? "Holds files from another system. Prepare it to erase it and set it up encrypted for your Droplet."
+          : "Empty and ready to prepare — Droplet sets it up encrypted."
+        : disk.state === "foreign"
+          ? "Holds files from another system. Erase it to add its space to your Droplet."
+          : "Empty and ready to be added to your Droplet.";
   return (
     <div role="listitem" className="card">
       <div className="flex items-start gap-3">
@@ -1106,7 +1473,13 @@ function AvailableDiskCard({
           >
             {/* WARP-1915: the label names both halves of the destructive
                 action — mirrors "Erase & adopt"; never a bare "Reclaim". */}
-            {busy ? "Working…" : reclaimable ? "Reclaim & erase" : "Erase & adopt"}
+            {busy
+              ? "Working…"
+              : reclaimable
+                ? "Reclaim & erase"
+                : prepareWording
+                  ? "Prepare drive"
+                  : "Erase & adopt"}
           </button>
         </div>
       )}
@@ -1125,15 +1498,28 @@ function AvailableDiskCard({
 function DriveCard({
   drive: d,
   isAdmin,
+  isOwner = false,
   ejecting,
+  canPrepare = false,
+  preparing = false,
   onEject,
   onRenamed,
+  onPrepare,
+  onShowRecoveryKey,
 }: {
   drive: DriveInfo;
   isAdmin: boolean;
+  /** WARP-3515: the recovery key is the owner's alone. */
+  isOwner?: boolean;
   ejecting: boolean;
+  /** WARP-3515: offer Prepare drive (the parent has already applied the role
+   *  and eligibility gates — canPrepareDrive + isAdmin). */
+  canPrepare?: boolean;
+  preparing?: boolean;
   onEject: () => void;
   onRenamed: () => void;
+  onPrepare?: () => void;
+  onShowRecoveryKey?: () => void;
 }) {
   const { toast } = useToast();
   const [editing, setEditing] = useState(false);
@@ -1158,6 +1544,18 @@ function DriveCard({
   const name = driveName(d, optimisticName);
   const trimmed = draft.trim();
   const valid = trimmed.length >= 1 && trimmed.length <= DRIVE_NAME_MAX;
+
+  // WARP-3515 — what the orchestrator says about this drive. Every one of these
+  // is false/"unreported" on an orchestrator that predates WARP-3513.
+  const enc = driveEncryptionState(d);
+  const recordings = isRecordingsDrive(d);
+  const system = d.isSystemDisk === true;
+  const lockId = useId();
+  // The install disk never gets an action; the recordings drive keeps Eject on
+  // screen but locked, with the reason attached to it.
+  const canEject = !!d.removable && d.mounted && !system;
+  // The key can only be asked for by id, and only an encrypted drive has one.
+  const showKey = isOwner && enc === "encrypted" && !!d.uuid && !system;
 
   function beginEdit() {
     // Seed the field with the current friendly name (without the raw fallbacks
@@ -1316,6 +1714,17 @@ function DriveCard({
         <Meter pct={p} kind={meterKind(p)} />
       </div>
 
+      {/* WARP-3515 / ADR-070 — encryption and what the drive is FOR. Claims only
+          when the orchestrator made them: an unreported drive shows no chip. */}
+      {(enc !== "unreported" || recordings || system) && (
+        <div className="mt-3 flex items-center gap-2 flex-wrap">
+          <EncryptionBadge state={enc} />
+          <UsageBadge drive={d} />
+          {system && <Badge kind="muted">System drive</Badge>}
+        </div>
+      )}
+      {recordings && <RecordingsLock id={lockId} canChange={isAdmin} />}
+
       {/* Hardware facts — friendly only. The raw /dev/sdX path is deliberately
           never surfaced (home-user persona, ADR-002); the bus label above is
           the only hardware identifier we show. */}
@@ -1337,23 +1746,66 @@ function DriveCard({
         </p>
       )}
 
-      {d.removable && d.mounted && (
+      {/* WARP-3515 — a plain drive is erased and set up encrypted by Prepare
+          drive: tier 3, the same confirm-token + typed-name friction as Reclaim.
+          Every control in this card carries `relative` (the stretched-link
+          rule above). */}
+      {canPrepare && (
+        <div className="mt-4 pt-3" style={{ borderTop: "1px solid var(--card-bd)" }}>
+          <p style={{ fontSize: "12px", color: "var(--text-muted)" }}>
+            This drive isn&rsquo;t encrypted yet. Preparing erases everything on it
+            and sets it up encrypted, so Droplet can use it for camera recordings.
+            Back up anything you want to keep first.
+          </p>
+          <div className="mt-3 flex justify-end">
+            <button
+              onClick={onPrepare}
+              disabled={preparing}
+              className="relative btn danger sm flex-none whitespace-nowrap"
+            >
+              {preparing ? "Working…" : "Prepare drive"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {(canEject || showKey) && (
         <div
-          className="mt-4 pt-3 flex justify-end"
+          className="mt-4 pt-3 flex items-center justify-end gap-2 flex-wrap"
           style={{ borderTop: "1px solid var(--card-bd)" }}
         >
-          <button
-            onClick={onEject}
-            disabled={ejecting}
-            // `relative` lifts the control above the stretched title link's
-            // inset overlay (WARP-1338) — same treatment as Rename. Without
-            // it the positioned overlay paints over this static button and
-            // clicking Eject silently navigates to /files instead (UX
-            // review finding).
-            className="relative btn ghost sm disabled:opacity-60"
-          >
-            {ejecting ? "Ejecting…" : "Eject"}
-          </button>
+          {showKey && (
+            <button
+              onClick={onShowRecoveryKey}
+              aria-label={`Recovery key for ${name}`}
+              className="relative btn ghost sm"
+            >
+              <KeyRound size={14} aria-hidden="true" />
+              Recovery key
+            </button>
+          )}
+          {canEject && (
+            <button
+              // The recordings drive keeps its Eject on screen but locked:
+              // aria-disabled (not `disabled`) so it stays focusable and the
+              // reason below is announced as its description.
+              onClick={() => {
+                if (recordings) return;
+                onEject();
+              }}
+              disabled={ejecting}
+              aria-disabled={recordings || undefined}
+              aria-describedby={recordings ? lockId : undefined}
+              // `relative` lifts the control above the stretched title link's
+              // inset overlay (WARP-1338) — same treatment as Rename. Without
+              // it the positioned overlay paints over this static button and
+              // clicking Eject silently navigates to /files instead (UX
+              // review finding).
+              className="relative btn ghost sm disabled:opacity-60"
+            >
+              {ejecting ? "Ejecting…" : "Eject"}
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -1656,6 +2108,11 @@ function PoolCard({
         <HwTag upper={false}>
           {memberCount} {memberCount === 1 ? "drive" : "drives"}
         </HwTag>
+        {/* WARP-3515: a pool must be LUKS too (over md) — say so, and say when the
+            filesystem on it is where camera recordings go. Only what the
+            orchestrator reported for the mounted filesystem. */}
+        {backingDrive && <EncryptionBadge state={driveEncryptionState(backingDrive)} />}
+        {backingDrive && <UsageBadge drive={backingDrive} />}
       </div>
 
       {pool.notes && (

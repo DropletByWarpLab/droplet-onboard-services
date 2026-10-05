@@ -1000,3 +1000,23 @@ export function translateError(err: unknown, domain: ErrorDomain): string {
   }
   return FALLBACK[domain];
 }
+
+// ─── WARP-3515: a Droplet with no TPM cannot encrypt a drive ──────────────────
+
+/**
+ * ADR-070 / WARP-3512: Prepare (and a pool create or format, which must be LUKS
+ * too) seals the drive's unlock key to the TPM2. A box without one refuses with
+ * `409 tpm_required` and wipes nothing. The refusal can come back as the typed
+ * `code`, as the whole error text, or as prose, and on the request that mints a
+ * confirm token or on the confirm that executes it — so every drive flow asks
+ * this one question and shows this one sentence.
+ */
+export const TPM_REQUIRED_MESSAGE =
+  "This Droplet has no security chip (TPM); drives can't be encrypted.";
+
+export function isTpmRequired(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const { code, message } = err as { code?: unknown; message?: unknown };
+  if (code === "tpm_required") return true;
+  return typeof message === "string" && /\btpm_required\b|\btpm2?\b/i.test(message);
+}

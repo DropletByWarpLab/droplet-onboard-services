@@ -1073,6 +1073,57 @@ Differences that are not contract issues: iOS handles the 404 in both shapes (th
 and Android's `parkedCallMayHaveRun` (the `unknownOutcome` re-park case) is Android
 copy that the iOS card may not carry.
 
+### Recording storage — dashboard consumption (WARP-3515)
+
+> **Dashboard only.** The native clients do not consume these routes. The endpoint
+> specification is ADR-070 (`docs/ADR-070-camera-recording-storage.md`) and the
+> WARP-3514 / WARP-3513 PRs; this note records only what the web dashboard
+> *relies on*, so a change to any of it is visible to whoever reads this file.
+
+What the dashboard calls: `GET`/`PUT /api/storage/recordings`,
+`POST /api/storage/recordings/old-footage/delete`,
+`POST /api/storage/drives/:id/recovery-key/reveal`,
+`POST /api/storage/drives/:id/recovery-key/regenerate`, and the extended drive object
+(`encryption`, `preparation`, `usage`, `isSystemDisk`) on `GET /api/storage/drives`.
+`:id` is the drive's filesystem UUID, as on every other `/storage/drives/:uuid/*` route.
+
+- **Tier handshake.** Every write answers `202` with a single-use token
+  (`status: "confirmation_required"`, `confirmationToken`, `service`, `resourceId`). The
+  dashboard has already collected the owner's consent in a dialog (a click for tier 2, a
+  typed phrase for tier 3) and completes the handshake itself with
+  `POST /api/storage/command/confirm {confirmationToken, service, resourceId}`. The
+  one-time recovery key arrives on that confirm (`{ recoveryKey }`); a reveal that answers
+  `200 { recoveryKey }` directly is accepted too. The reveal is never retried and never
+  cached.
+- **Absence is not an error.** `404` on `GET /api/storage/recordings` → "not available on
+  this Droplet yet"; `403` (a family account: the route and its writes are owner + admin
+  only) → the card is hidden, and the dashboard does not issue the request for that role.
+  A drive object without the new fields makes no claim about encryption; the Prepare drive
+  and Recovery key actions are not offered for it.
+- **Status the card renders.** The `status` string is folded with `warnings` and
+  `migration.state` by the orchestrator's own precedence: `missing` > `migrating` >
+  `degraded` > `on_system_disk` > `pending` > `active` > `no_eligible_drive`. An unknown
+  status renders neutrally; unknown warning codes render their `message`.
+- **Retention estimate.** The additive `retentionKnown` boolean is omitted by older
+  servers. When it is `false`, `needBytes`, `retentionDays`, and each camera's `needBytes`
+  are numeric `0` unknown sentinels, not zero required storage or zero-day retention.
+  The dashboard says the recording-space estimate is unavailable while waiting for
+  Frigate retention. Measured usage, reserved/free capacity, and `daysStored` remain
+  unchanged. When omitted, older-server behavior is preserved.
+- **Refusals the dashboard recognises.** `409 tpm_required` on Prepare / pool format / pool
+  create (matched on `code`, or the text) → "This Droplet has no security chip (TPM);
+  drives can't be encrypted." `409` on `{ mode: "full" }` with a files-present reason
+  (`files_not_empty`, or prose about files) → Whole drive is locked for that drive with the
+  reason shown. `410` on reveal → "already shown or expired" with a Tier-3 "Generate a new
+  recovery key".
+
+**To confirm with WARP-3513 / WARP-3514** (assumed by the dashboard, not spelled out in the
+contract): the path `…/recovery-key/regenerate`; that `PUT /api/storage/recordings` and the
+old-footage delete confirm through `/api/storage/command/confirm`; the code name for the
+files-present refusal; and the values `oldFootage.location` takes besides `system_disk`
+(anything else is shown as "the previous recording drive"). Each lives in one function in
+`apps/web-dashboard/src/lib/api.ts` or `lib/recording-storage.ts`.
+
 ## Error shape
 
 > **Corrected 2026-06-28 (XR-03), narrowed 2026-09-29 (WARP-2975).** Earlier drafts
