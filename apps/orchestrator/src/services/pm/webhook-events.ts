@@ -78,7 +78,7 @@ export const WORK_EVENT_CATALOG: ReadonlyArray<{
     name: "work_item.updated",
     label: "Changed",
     description:
-      "Anything else changes: title, description, priority, due date, labels, someone taken off, relations.",
+      "Anything else changes: title, description, priority, due date, labels, someone taken off, relations, linked pull requests and commits.",
   },
   { name: "work_item.archived", label: "Archived", description: "A work item is archived." },
 ];
@@ -93,6 +93,10 @@ const VERB_EVENT: Record<PmActivityVerb, WorkItemEvent> = {
   unassigned: "work_item.updated",
   priority_changed: "work_item.updated",
   due_date_changed: "work_item.updated",
+  start_date_changed: "work_item.updated",
+  type_changed: "work_item.updated",
+  estimate_changed: "work_item.updated",
+  property_changed: "work_item.updated",
   title_changed: "work_item.updated",
   description_changed: "work_item.updated",
   label_added: "work_item.updated",
@@ -105,6 +109,13 @@ const VERB_EVENT: Record<PmActivityVerb, WorkItemEvent> = {
   module_removed: "work_item.updated",
   relation_added: "work_item.updated",
   relation_removed: "work_item.updated",
+  // WARP-3535 — a pull request, commit or branch was linked. Its `changes` entry
+  // carries only the provider and `<kind>:<ref>` (`pull_request:#42`), never the
+  // title or URL: those are the code host's text, not the work item's.
+  external_link_added: "work_item.updated",
+  time_logged: "work_item.updated",
+  time_log_updated: "work_item.updated",
+  time_log_removed: "work_item.updated",
 };
 
 export function eventForVerb(verb: PmActivityVerb): WorkItemEvent {

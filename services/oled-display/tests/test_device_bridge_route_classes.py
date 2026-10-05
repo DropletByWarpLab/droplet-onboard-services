@@ -8,6 +8,7 @@ table that classifies every route as open / read / write / destructive.
 from __future__ import annotations
 
 import importlib.util
+import ast
 import re
 from pathlib import Path
 
@@ -46,11 +47,19 @@ def _ok(bridge, method, path, token):
 def test_every_route_in_the_handlers_has_a_class(monkeypatch):
     """Fails when a route literal is added to Handler without a ROUTE_CLASSES row."""
     bridge = _load(monkeypatch)
-    src = _BRIDGE_PATH.read_text()
+    src = _BRIDGE_PATH.read_text(encoding="utf-8")
     start = src.index("class Handler(")
     literals = set(re.findall(r'(?:path|self\.path) == "(/[^"]*)"', src[start:]))
     if re.search(r'startswith\("/drives/"\)', src[start:]):
         literals.add("/drives/{uuid}/eject")
+    # NVR POST routes dispatch through a helper rather than Handler literals.
+    # Inspect its real dictionary keys so those routes join the same inventory.
+    dispatcher = next(node for node in ast.parse(src).body
+                      if isinstance(node, ast.FunctionDef) and node.name == "_nvr_post_handler")
+    dispatched = {key.value for node in ast.walk(dispatcher) if isinstance(node, ast.Dict)
+                  for key in node.keys if isinstance(key, ast.Constant) and isinstance(key.value, str)}
+    assert dispatched and all(bridge._nvr_post_handler(path) is not None for path in dispatched)
+    literals.update(dispatched)
     classified = {p for (_m, p) in bridge.ROUTE_CLASSES}
     assert literals - classified == set(), (
         "route(s) served without a ROUTE_CLASSES entry: %s" % sorted(literals - classified))
@@ -83,6 +92,27 @@ def test_panel_routes_accept_both_tokens(monkeypatch, route):
     assert _ok(bridge, *route, ADMIN) is True
     assert _ok(bridge, *route, "wrong") is False
     assert _ok(bridge, *route, "") is False
+
+
+@pytest.mark.parametrize("path", ["/host/nvr-storage", "/host/nvr-storage/migrate"])
+def test_nvr_status_reads_accept_panel_and_admin_but_require_a_token(monkeypatch, path):
+    bridge = _load(monkeypatch)
+    assert bridge.ROUTE_CLASSES[("GET", path)] == "read"
+    assert _ok(bridge, "GET", path, PANEL) is True
+    assert _ok(bridge, "GET", path, ADMIN) is True
+    assert _ok(bridge, "GET", path, "wrong") is False
+    assert _ok(bridge, "GET", path, "") is False
+
+
+@pytest.mark.parametrize("path", ["/host/nvr-storage", "/host/nvr-storage/resize",
+                                  "/host/nvr-storage/migrate", "/host/nvr-storage/old/delete"])
+def test_nvr_storage_mutations_accept_only_the_admin_token(monkeypatch, path):
+    bridge = _load(monkeypatch)
+    assert bridge.ROUTE_CLASSES[("POST", path)] == "destructive"
+    assert _ok(bridge, "POST", path, PANEL) is False
+    assert _ok(bridge, "POST", path, ADMIN) is True
+    assert _ok(bridge, "POST", path, "wrong") is False
+    assert _ok(bridge, "POST", path, "") is False
 
 
 def test_unlisted_route_and_unknown_method_are_destructive(monkeypatch):
@@ -122,7 +152,7 @@ def test_display_token_equal_to_admin_token_refuses_to_start(monkeypatch):
 
 
 def test_compose_gives_the_display_container_no_admin_token():
-    compose = (Path(__file__).resolve().parents[3] / "docker" / "docker-compose.yml").read_text()
+    compose = (Path(__file__).resolve().parents[3] / "docker" / "docker-compose.yml").read_text(encoding="utf-8")
     block = compose[compose.index("\n  oled-display:") + 1:]
     nxt = re.search(r"\n  [a-z0-9-]+:\n", block)
     block = block[:nxt.start()] if nxt else block

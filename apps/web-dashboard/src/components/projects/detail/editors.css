@@ -1,0 +1,27 @@
+/* WARP-3520 -- styles for the drawer's editors: the title field, the in-place
+ * pickers (people, items) and the relations rows. Scoped under `.pm-scope` and
+ * built only from the tokens projects.css already defines; shared primitives
+ * (.pm-valbtn, .pm-input.sm, .pm-field-error, .pm-sr) are in ../editing.css. */
+.pm-scope .pm-title-btn { font-weight: inherit; padding: 2px 8px; margin: 0 -8px; width: calc(100% + 16px); }
+.pm-scope .pm-title-input { font-size: 18px; font-weight: 600; height: 40px; }
+
+/* in-place picker panel: people, items, link kind */
+.pm-scope .pm-picker {
+  display: flex; flex-direction: column; gap: 8px; padding: 10px; max-width: 100%;
+  background: var(--bg-tint); border: 1px solid var(--border); border-radius: 10px;
+}
+.pm-scope .pm-picker-list { display: flex; flex-direction: column; gap: 2px; max-height: 220px; overflow-y: auto; }
+.pm-scope .pm-picker-item {
+  display: flex; align-items: center; gap: 8px; width: 100%; min-height: 30px; padding: 4px 8px;
+  border-radius: 6px; font-size: 13px; color: var(--text); background: transparent; border: none;
+  cursor: pointer; text-align: left; font-family: inherit;
+}
+.pm-scope .pm-picker-item:hover { background: var(--bg-hover); }
+.pm-scope .pm-picker-item:focus-visible { outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent); }
+.pm-scope .pm-picker-item.on { background: rgba(99, 102, 241, 0.12); color: var(--accent); }
+.pm-scope .pm-picker-item:disabled { opacity: 0.5; cursor: not-allowed; }
+.pm-scope .pm-picker-note { font-size: 12px; color: var(--text-3); padding: 2px 4px; }
+
+/* relations */
+.pm-scope .pm-rel-row { display: flex; align-items: center; gap: 8px; padding: 5px 2px; border-bottom: 1px solid var(--border); min-height: 32px; }
+.pm-scope .pm-rel-row:last-child { border-bottom: none; }

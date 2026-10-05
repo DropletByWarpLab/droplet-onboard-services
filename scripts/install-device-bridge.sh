@@ -7,13 +7,16 @@
 #   /etc/systemd/system/droplet-device-bridge.service
 #   /etc/systemd/system/droplet-wifi-rotate.service
 #   /etc/systemd/system/droplet-wifi-rotate.timer
+#   /etc/systemd/system/droplet-nvr-*.service|.timer   (camera-recordings
+#                                              allocation: two on-demand root
+#                                              units + the boot guard — WARP-3514)
 #   /etc/systemd/system/droplet-bay-recovery-expiry.{service,timer}   (WARP-3513)
 #   /etc/droplet/device-bridge.env            (0600, root:root)
 #
 # Populates BRIDGE_AUTH_TOKEN, OPENWRT_PASS, ROUTING_SERVICE_TOKEN, and
 # (single-box) DROPLET_AP_MODE from the repo .env if they aren't already set in
 # the target env file, and ensures the host python3 can import qrcode for the
-# pairing-QR render.
+# pairing-QR render (and rsync is present for the recordings migration).
 # Idempotent — safe to re-run after a git pull.
 #
 # Usage:
@@ -45,6 +48,11 @@ for unit in droplet-device-bridge.service \
             droplet-wifi-rotate.timer \
             droplet-shutdown-screen.service \
             droplet-storage-pool-apply.service \
+            droplet-nvr-storage-apply.service \
+            droplet-nvr-migrate.service \
+            droplet-nvr-guard.service \
+            droplet-nvr-guard-release.service \
+            droplet-nvr-guard-release.timer \
             droplet-bay-recovery-expiry.service \
             droplet-bay-recovery-expiry.timer \
             droplet-panel-claim.service \
@@ -65,6 +73,18 @@ for unit in droplet-device-bridge.service \
   chmod 0644 "$dst"
   log "installed $dst"
 done
+
+# The recordings topology lock must exist before the bridge enters its
+# ProtectSystem=strict mount namespace. systemd-tmpfiles provisions a root-owned
+# directory and a root:droplet lock inode; the bridge gets access to the file,
+# never write access to its parent directory.
+TMPFILES_SRC="$REPO_ROOT/scripts/host/etc-tmpfiles.d/droplet.conf"
+if [[ ! -f "$TMPFILES_SRC" ]]; then
+  log "missing source: $TMPFILES_SRC"
+  exit 1
+fi
+install -m 0644 "$TMPFILES_SRC" /etc/tmpfiles.d/droplet.conf
+systemd-tmpfiles --create /etc/tmpfiles.d/droplet.conf
 
 # --- 1b) Install the shutdown-screen host script ---
 # droplet-shutdown-screen.service's ExecStop runs this on teardown to push
@@ -207,10 +227,14 @@ log "installed $WIFI_WD_DST"
 
 # --- 1d-bis) Polkit rules for the sandboxed bridge writes ---
 # The bridge unit runs as User=droplet inside ProtectSystem=strict +
-# NoNewPrivileges. The rules file carries ONE narrowly-scoped grant for the
-# droplet user (a D-Bus ask to PID 1, no escalation):
+# NoNewPrivileges. The rules file carries a few narrowly-scoped grants for the
+# droplet user (a D-Bus ask to PID 1, no escalation), all START verb only:
 #   - start droplet-storage-pool-apply.service (ADR-019 follow-up — the root
-#     oneshot that consumes the spooled pool request; start verb only).
+#     oneshot that consumes the spooled pool request).
+#   - start droplet-nvr-storage-apply.service and droplet-nvr-migrate.service
+#     (WARP-3514 — the two on-demand root oneshots behind the camera-recordings
+#     allocation; installed in step 1 + 1f, deliberately never enabled). The
+#     boot-guard units get NO grant: the bridge must not be able to disarm them.
 # The former droplet-openwrt-attach.service restart grant (WARP-808 / PR #551)
 # is GONE: since WARP-843 the Wi-Fi write scripts never call systemctl when
 # unprivileged — the root droplet-openwrt-attach.path unit re-applies the
@@ -336,6 +360,43 @@ fi
 install -m 0755 "$SET_NVR_MEDIA_SCRIPT_SRC" "$SET_NVR_MEDIA_SCRIPT_DST"
 log "installed $SET_NVR_MEDIA_SCRIPT_DST"
 
+# --- 1f) Camera-recordings allocation host scripts (WARP-3514, ADR-070) ------
+# Recordings are allocated automatically on an encrypted bay drive — an ext4
+# project-quota slice, not a repartition — and moved there by a root job. The
+# privileged halves live on the host (root + real block devices; the bridge
+# sandbox can do none of it) per architecture-guard rule 20, repo-tracked and
+# installed here (never hand-placed) so factory-reset removes them cleanly:
+#   droplet-nvr-quota.py          project-quota set/get through quotactl(2) —
+#                                 the host has no `quota` package and none is
+#                                 installed for it
+#   droplet-nvr-storage-apply.sh  ExecStart of droplet-nvr-storage-apply.service:
+#                                 consumes the bridge's spooled apply/resize
+#                                 request, runs droplet-set-nvr-media.sh as root
+#   droplet-nvr-migrate.sh        ExecStart of droplet-nvr-migrate.service: moves
+#                                 (or, owner-confirmed, deletes) the old footage
+#   droplet-nvr-guard.sh          the boot guard: arm / release / disarm / status
+# (droplet-set-nvr-media.sh, the writer they all lean on, is installed above.)
+for nvr_script in droplet-nvr-quota.py droplet-nvr-storage-apply.sh \
+                  droplet-nvr-migrate.sh droplet-nvr-guard.sh \
+                  droplet-storage-topology-lock.sh; do
+  nvr_src="$REPO_ROOT/scripts/host/$nvr_script"
+  if [[ ! -f "$nvr_src" ]]; then
+    log "missing source: $nvr_src"
+    exit 1
+  fi
+  install -m 0755 "$nvr_src" "/usr/local/sbin/$nvr_script"
+  log "installed /usr/local/sbin/$nvr_script"
+done
+install -m 0755 "$REPO_ROOT/scripts/host/droplet-recordings-drive-check.py" \
+  /usr/local/sbin/droplet-recordings-drive-check.py
+log "installed /usr/local/sbin/droplet-recordings-drive-check.py"
+# Root-only state: the previous-source record the migration's old-footage delete
+# acts on, and the boot guard's state. NEVER droplet-readable or -writable —
+# these files decide what root deletes (WARP-843 invariant), unlike the bridge's
+# own spool under /var/lib/droplet-bridge. Re-asserted 0700 on every run.
+install -d -m 0700 /var/lib/droplet-nvr
+log "ensured /var/lib/droplet-nvr (0700, root-only)"
+
 # --- 2) Ensure the env file exists and contains the needed secrets ---
 install -d -m 0755 "$ENV_DIR"
 if [[ ! -f "$ENV_FILE" ]]; then
@@ -438,9 +499,19 @@ if [[ -f "$REPO_ENV" ]]; then
     log "SERVICE_TOKEN_BRIDGE not in $REPO_ENV yet; run setup.sh, then re-run this script (destructive bridge routes stay closed until then)"
   fi
 
-  if [[ -n "${OPENWRT_PASSWORD:-}" ]]; then
-    set_env_if_blank "OPENWRT_PASS" "$OPENWRT_PASSWORD"
-  fi
+  # WARP-3839: on a box behind an EXTERNAL edge router (same case as
+  # sync_openwrt_password_secret in scripts/lib/secrets.sh) OPENWRT_PASSWORD is
+  # the box-owned bundled-container password, wrong for that router, and the
+  # bridge's use of OPENWRT_PASS is disabled for this setup (device-bridge.py).
+  # Do not make a third copy of a credential that is wrong here.
+  case "${OPENWRT_HOST:-}" in
+    ''|127.0.0.1|localhost|::1)
+      if [[ -n "${OPENWRT_PASSWORD:-}" ]]; then
+        set_env_if_blank "OPENWRT_PASS" "$OPENWRT_PASSWORD"
+      fi
+      ;;
+    *) log "external router (OPENWRT_HOST=$OPENWRT_HOST): not copying OPENWRT_PASSWORD into OPENWRT_PASS (WARP-3839)" ;;
+  esac
 
   # WARP-985: the public-FQDN write-back (droplet-set-public-fqdn.sh, exec'd
   # by the bridge's POST /host/public-fqdn) registers split-horizon DNS via the
@@ -568,11 +639,37 @@ else
   fi
 fi
 
-# --- 2c) Provision the ext4 project-quota tools (WARP-3513) ---
+# --- 2c) rsync for the recordings migration (WARP-3514) ---
+# droplet-nvr-migrate.sh copies the existing footage to the new drive with
+# `rsync -aHAX` — path-preserving, so Frigate's database rows stay valid — and
+# verifies the copy with an rsync dry-run. Ubuntu server images normally ship
+# rsync; a minimal image may not. Best-effort, same posture as python3-qrcode
+# above: a package index that is briefly unreachable must NOT abort the bridge
+# install under `set -e`, and the migration job reports `rsync_missing` itself
+# (before touching anything) if rsync is still absent when it runs.
+if command -v rsync >/dev/null 2>&1; then
+  log "rsync: already installed"
+else
+  log "rsync: installing it for the recordings migration"
+  if ! DEBIAN_FRONTEND=noninteractive apt-get install -y rsync; then
+    # Stale index on a fresh box — refresh once, then retry.
+    apt-get update -y >/dev/null 2>&1 || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -y rsync || true
+  fi
+  if command -v rsync >/dev/null 2>&1; then
+    log "rsync: installed"
+  else
+    log "WARNING: rsync is still missing — a recordings migration will report"
+    log "  rsync_missing until it is installed. Remediate on the host with:"
+    log "    sudo apt-get install -y rsync"
+  fi
+fi
+
+# --- 2d) Provision the ext4 project-quota tools (WARP-3513) ---
 # Every drive Droplet prepares is ext4 made with `-O quota,project` and mounted
-# prjquota: the camera-recording allocation (WARP-3514) caps the recordings
-# folder with a per-directory byte limit, set and reported with setquota /
-# repquota from the `quota` package. mkfs, chattr and mount need nothing beyond
+# prjquota. The camera-recording allocator uses droplet-nvr-quota.py and
+# quotactl(2); setquota / repquota from the `quota` package also let an operator
+# inspect and manage those limits on the host. mkfs, chattr and mount need nothing beyond
 # e2fsprogs, so preparing and mounting a drive does NOT depend on this: like the
 # qrcode step above it is best-effort and must not abort the install if the
 # package index is briefly unreachable.
@@ -588,8 +685,8 @@ else
   if command -v setquota >/dev/null 2>&1; then
     log "quota: installed"
   else
-    log "WARNING: setquota still not installed - drives still mount prjquota, but"
-    log "  per-directory byte limits cannot be set until it is. Remediate on the host with:"
+    log "WARNING: setquota still not installed - the allocator uses quotactl, but"
+    log "  the optional operator quota utilities are missing. Remediate on the host with:"
     log "    sudo apt-get install -y quota"
   fi
 fi
@@ -655,6 +752,45 @@ if [[ -d /sys/class/vtconsole ]] && compgen -G "/dev/fb[0-9]*" >/dev/null 2>&1; 
 else
   log "rack panel: no framebuffer on this box — panel units installed but not enabled"
 fi
+
+# --- 4a-ter) Camera-recordings boot guard + release timer (WARP-3514) --------
+# The bay drive is automounted AFTER docker.service, so on a reboot Frigate can
+# start before the bay is there and silently fill the OS disk through its
+# bind-mount source directory. droplet-nvr-guard.service (Before=docker) closes
+# that: while the bay is absent it leaves an immutable EMPTY placeholder at the
+# recordings path, so Frigate gets EPERM instead of recording onto the OS disk;
+# droplet-nvr-guard-release.timer notices the bay arriving and restarts Frigate
+# onto it. A box whose recordings are not on a bay drive (the named volume, any
+# other path) is a no-op for `arm`.
+#
+# `enable` makes the guard arm on every boot from the next one; the one-off
+# `arm` below covers a box that is already up, so it is protected without
+# waiting for a reboot. None of this is allowed to fail the whole bridge
+# install — the bridge itself is already up — but a guard that could not be
+# wired up is said loudly, never swallowed.
+#
+# droplet-nvr-storage-apply.service and droplet-nvr-migrate.service are
+# deliberately NOT enabled: like droplet-storage-pool-apply.service they run
+# only when the bridge starts them (polkit, start verb only).
+if systemctl enable droplet-nvr-guard.service; then
+  log "nvr guard: enabled (arms before docker on every boot)"
+else
+  log "WARNING: could not enable droplet-nvr-guard.service — Frigate is NOT"
+  log "  protected from recording onto the OS disk if the bay mounts late."
+  log "  Inspect 'systemctl status droplet-nvr-guard.service'."
+fi
+if systemctl enable --now droplet-nvr-guard-release.timer; then
+  log "nvr guard: release timer enabled"
+else
+  log "WARNING: could not enable droplet-nvr-guard-release.timer — Frigate will"
+  log "  not be restarted onto a late-mounted bay automatically."
+fi
+# REPO_ROOT is handed over explicitly: the installed copy lives in
+# /usr/local/sbin and finds the repo .env through it. `|| log`: arm exits 0 on
+# every state it understands, so a non-zero here means something is wrong with
+# the guard itself — surfaced, but never fatal.
+REPO_ROOT="$REPO_ROOT" /usr/local/sbin/droplet-nvr-guard.sh arm \
+  || log "WARNING: droplet-nvr-guard.sh arm failed — see its output above"
 
 # --- 4b) WARP-1002 migration: standalone Wi-Fi watchdog timer superseded ---
 # The WARP-869 helper is now scheduled by the unified droplet-watchdog.timer

@@ -8,6 +8,8 @@
  *   GET    /api/email/contacts?query=&limit=         — WARP-3102: senders
  *                                                      of the mail you read
  *   POST   /api/email/:accountId/drafts              — create draft
+ *   GET    /api/email/:accountId/drafts              — saved drafts/outbox, paged
+ *   GET    /api/email/:accountId/drafts/:draftId     — scoped saved draft
  *   PATCH  /api/email/drafts/:id                     — edit draft
  *   POST   /api/email/drafts/:id/send                — queue send
  *   PATCH  /api/email/accounts/:id/status            — WARP-2957: the indexer
@@ -46,13 +48,15 @@
 import { createHash } from "node:crypto";
 import express, { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
-import type { PrismaClient } from "@prisma/client";
+import type { Prisma, PrismaClient } from "@prisma/client";
 import { recordAccessDenied, requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import { resolveAssertedUser } from "../services/asserted-user.service.js";
 import { reconcileStaleSending } from "../services/email-reconcile.service.js";
 import { deriveContacts } from "../services/email/contacts.service.js";
+import { EMAIL_HEADERS_SCHEMA } from "../services/support/email-headers.js";
+import { intakeEmailMessage } from "../services/support/email-intake.service.js";
 import {
   connectMailbox,
   disconnectMailbox,
@@ -185,6 +189,41 @@ async function assertAccountAccessible(
 
 const FILTERS = ["inbox", "triaged", "archived", "droplet"] as const;
 type Filter = (typeof FILTERS)[number];
+
+// Keyset pages bind their cursor to the mailbox and bucket. IDs break ties so
+// threads with the same timestamp never disappear between pages. The cursor
+// carries no message content and never replaces assertAccountAccessible.
+const emailCursorSchema = z.object({
+  version: z.literal(1), kind: z.enum(["threads", "drafts"]),
+  accountId: z.string().min(1).max(160), bucket: z.string().min(1).max(32),
+  at: z.string().datetime(), id: z.string().min(1).max(160),
+}).strict();
+type EmailCursor = z.infer<typeof emailCursorSchema>;
+function readEmailCursor(raw: unknown, accountId: string, kind: EmailCursor["kind"], bucket: string): EmailCursor | null {
+  if (raw === undefined) return null;
+  if (typeof raw !== "string" || raw.length > 1024 || !/^[A-Za-z0-9_-]+$/.test(raw)) throw new Error("invalid_email_cursor");
+  try {
+    const cursor = emailCursorSchema.parse(JSON.parse(Buffer.from(raw, "base64url").toString("utf8")));
+    if (cursor.accountId !== accountId || cursor.kind !== kind || cursor.bucket !== bucket) throw new Error("invalid_email_cursor");
+    return cursor;
+  } catch { throw new Error("invalid_email_cursor"); }
+}
+function writeEmailCursor(accountId: string, kind: EmailCursor["kind"], bucket: string, at: Date, id: string): string {
+  return Buffer.from(JSON.stringify({ version: 1, kind, accountId, bucket, at: at.toISOString(), id })).toString("base64url");
+}
+
+// Lists omit the body; detail adds it. Explicit projection keeps future schema
+// fields out of the wire contract and never includes mailbox credentials or bytes.
+const DRAFT_READ_FIELDS = {
+  id: true, accountId: true, threadId: true, toAddrs: true, ccAddrs: true, bccAddrs: true,
+  subject: true, draftedByDroplet: true, attachmentIds: true, status: true,
+  sentAt: true, claimedAt: true, error: true, createdAt: true, updatedAt: true,
+} as const;
+const draftsQuerySchema = z.object({
+  status: z.enum(["draft", "queued", "sending", "sent", "failed", "all"]).default("draft"),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  cursor: z.string().max(1024).optional(),
+});
 
 const addressSchema = z.string().email().max(254);
 
@@ -646,23 +685,37 @@ export function createEmailRouter(
           Math.min(100, Number.parseInt(String(req.query.limit ?? "20"), 10) || 20),
         );
 
+        let cursor: EmailCursor | null;
+        try { cursor = readEmailCursor(req.query.cursor, req.params.accountId, "threads", filter); }
+        catch { res.status(400).json({ error: "invalid_email_cursor" }); return; }
+
         const where: {
           accountId: string;
           triageStatus?: "inbox" | "triaged" | "archived";
           draftedByDroplet?: boolean;
+          OR?: Array<Record<string, unknown>>;
         } = { accountId: req.params.accountId };
         if (filter === "droplet") {
           where.draftedByDroplet = true;
         } else {
           where.triageStatus = filter;
         }
+        if (cursor) {
+          where.OR = [
+            { lastMessageAt: { lt: new Date(cursor.at) } },
+            { lastMessageAt: new Date(cursor.at), id: { lt: cursor.id } },
+          ];
+        }
 
         const rows = (await prisma.emailThread.findMany({
           where: where as any,
-          orderBy: { lastMessageAt: "desc" },
-          take: limit,
+          orderBy: [{ lastMessageAt: "desc" }, { id: "desc" }],
+          take: limit + 1,
         })) as unknown as ThreadRow[];
-        res.json({ filter, threads: rows });
+        const page = rows.slice(0, limit);
+        const last = page[page.length - 1];
+        res.json({ filter, threads: page, nextCursor: rows.length > limit && last
+          ? writeEmailCursor(req.params.accountId, "threads", filter, last.lastMessageAt, last.id) : null });
       } catch (err) {
         next(err);
       }
@@ -817,6 +870,59 @@ export function createEmailRouter(
       } catch (err) {
         next(err);
       }
+    },
+  );
+
+  router.get(
+    "/email/:accountId/drafts",
+    requireRole("owner", "admin", "family"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const account = await assertAccountAccessible(prisma, req, req.params.accountId);
+        if (!account) { res.status(404).json({ error: "Account not found" }); return; }
+        const parsed = draftsQuerySchema.safeParse(req.query);
+        if (!parsed.success) { res.status(400).json({ error: "invalid_request", details: parsed.error.flatten() }); return; }
+        const { status, limit } = parsed.data;
+        let cursor: EmailCursor | null;
+        try { cursor = readEmailCursor(parsed.data.cursor, req.params.accountId, "drafts", status); }
+        catch { res.status(400).json({ error: "invalid_email_cursor" }); return; }
+        const rows = await prisma.emailDraft.findMany({
+          where: {
+            accountId: req.params.accountId,
+            ...(status === "all" ? {} : { status }),
+            ...(cursor ? { OR: [
+              { updatedAt: { lt: new Date(cursor.at) } },
+              { updatedAt: new Date(cursor.at), id: { lt: cursor.id } },
+            ] } : {}),
+          },
+          select: DRAFT_READ_FIELDS,
+          orderBy: [{ updatedAt: "desc" }, { id: "desc" }], take: limit + 1,
+        });
+        const page = rows.slice(0, limit); const last = page[page.length - 1];
+        res.json({ status, drafts: page, nextCursor: rows.length > limit && last
+          ? writeEmailCursor(req.params.accountId, "drafts", status, last.updatedAt, last.id) : null });
+      } catch (err) { next(err); }
+    },
+  );
+
+  router.get(
+    "/email/:accountId/drafts/:draftId",
+    requireRole("owner", "admin", "family"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const account = await assertAccountAccessible(prisma, req, req.params.accountId);
+        if (!account) { res.status(404).json({ error: "Draft not found" }); return; }
+        const draft = await prisma.emailDraft.findFirst({
+          where: { id: req.params.draftId, accountId: req.params.accountId },
+          select: { ...DRAFT_READ_FIELDS, body: true },
+        });
+        if (!draft) { res.status(404).json({ error: "Draft not found" }); return; }
+        const attachments = draft.attachmentIds.length === 0 ? [] : await prisma.emailAttachment.findMany({
+          where: { accountId: req.params.accountId, id: { in: draft.attachmentIds } },
+          select: { ...ATTACHMENT_META, emailMessageId: true }, orderBy: { partIndex: "asc" },
+        });
+        res.json({ ...draft, attachments });
+      } catch (err) { next(err); }
     },
   );
 
@@ -1068,14 +1174,29 @@ export function createEmailRouter(
           });
           return;
         }
-        const updated = (await prisma.emailDraft.update({
-          where: { id: req.params.id },
-          data: {
-            status: parsed.data.status,
-            sentAt: parsed.data.status === "sent" ? new Date() : undefined,
-            error: parsed.data.status === "failed" ? (parsed.data.error ?? null) : null,
-          },
-        })) as unknown as DraftRow;
+        const updated = await prisma.$transaction(async (tx) => {
+          const saved = await tx.emailDraft.update({
+            where: { id: req.params.id },
+            data: {
+              status: parsed.data.status,
+              sentAt: parsed.data.status === "sent" ? new Date() : undefined,
+              error: parsed.data.status === "failed" ? (parsed.data.error ?? null) : null,
+            },
+          });
+          const ticketLink = await tx.pmTicketEmailLink.findUnique({
+            where: { emailDraftId: saved.id },
+            select: { commentId: true },
+          });
+          if (ticketLink?.commentId) {
+            await tx.pmComment.updateMany({
+              where: { id: ticketLink.commentId, visibility: "PUBLIC" },
+              data: parsed.data.status === "sent"
+                ? { deliveryStatus: "SENT", deliveryFailure: null }
+                : { deliveryStatus: "FAILED", deliveryFailure: "SEND_FAILED" },
+            });
+          }
+          return saved;
+        });
         res.json({ id: updated.id, status: updated.status });
       } catch (err) {
         next(err);
@@ -1138,7 +1259,7 @@ export function createEmailRouter(
   // POST /api/email/:accountId/messages-ingest
   // Body: { messageId, inReplyTo?, fromAddr, fromName?, toAddrs[],
   //          ccAddrs[]?, subject, bodyText?, bodyHtml?, receivedAt,
-  //          threadKey }
+  //          threadKey, headers? }
   //
   // The email-indexer service parses MIME, computes the threadKey
   // (root Message-ID or References chain), and POSTs each new
@@ -1161,6 +1282,10 @@ export function createEmailRouter(
     bodyHtml: z.string().max(2_000_000).nullable().optional(),
     receivedAt: z.string().datetime(),
     threadKey: z.string().min(1).max(998),
+    // WARP-3529 — authenticated service payload facts used for threading and
+    // loop protection. Optional only for an older indexer; absent means the
+    // desk cannot claim that automatic-mail headers were checked.
+    headers: EMAIL_HEADERS_SCHEMA.optional(),
     // WARP-3267 — `data` (base64) only when `status` is `stored`.
     attachments: z
       .array(
@@ -1272,6 +1397,11 @@ export function createEmailRouter(
           select: { threadId: true },
         })) as { threadId: string } | null;
         if (existing) {
+          // Covers a process crash after the mail row committed but before
+          // service-desk intake finished. The per-message ledger makes this a
+          // cheap no-op after a successful first pass.
+          try { await intakeEmailMessage(prisma, account.id, parsed.data.messageId); }
+          catch (err) { logger.warn({ err, accountId: account.id }, "service-desk email intake will need retry"); }
           res.json({ ok: true, threadId: existing.threadId, duplicate: true });
           return;
         }
@@ -1326,6 +1456,9 @@ export function createEmailRouter(
               bodyText: parsed.data.bodyText ?? null,
               bodyHtml: parsed.data.bodyHtml ?? null,
               receivedAt,
+              ...(parsed.data.headers
+                ? { headers: parsed.data.headers as Prisma.InputJsonValue }
+                : {}),
               // Created with the message, so a message is never stored
               // without the attachments it arrived with.
               ...(attachments.rows.length > 0
@@ -1337,6 +1470,11 @@ export function createEmailRouter(
             where: { id: thread.id },
             data: { messageCount: { increment: 1 } },
           });
+          // Intake is downstream of the committed EmailMessage. Failures are
+          // recorded in the desk ledger; they must not make the indexer replay
+          // a message that the mailbox already stored successfully.
+          try { await intakeEmailMessage(prisma, account.id, parsed.data.messageId); }
+          catch (err) { logger.warn({ err, accountId: account.id }, "service-desk email intake will need retry"); }
         } catch (err) {
           if ((err as { code?: string }).code === "P2002") {
             // Re-delivery of a message we've already stored. Idempotent

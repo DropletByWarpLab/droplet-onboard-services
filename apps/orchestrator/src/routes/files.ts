@@ -105,6 +105,7 @@ import { storedUploadName } from "../lib/upload-file-name.js";
 import { isPathUnderUser } from "../services/brain-memory.service.js";
 import {
   classifyFileContentId,
+  contentDispositionAttachment,
   inlinePreviewContentType,
   parseRangeHeader,
 } from "../lib/file-content.js";
@@ -1100,20 +1101,6 @@ function applyCitationContentHeaders(res: Response, filename: string): void {
   res.setHeader("Content-Disposition", contentDispositionAttachment(filename));
 }
 
-/**
- * An `attachment` Content-Disposition that survives a hostile filename.
- *
- * A bare `attachment; filename="${name}"` breaks on any name containing a
- * quote or backslash — the value stops being one quoted-string and the rest is
- * reparsed as disposition parameters. Node rejects CR/LF in a header value, so
- * response splitting is already off the table, but parameter smuggling is not.
- * The ASCII fallback is stripped to a conservative set, and the real name is
- * carried in RFC 5987 `filename*`, which every current browser prefers.
- */
-function contentDispositionAttachment(filename: string): string {
-  const ascii = filename.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
-  return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(filename)}`;
-}
 
 export function createFilesRouter(
   prisma: PrismaClient,
@@ -2490,14 +2477,10 @@ export function createFilesRouter(
         });
       }
 
-      // RFC 6266 quoted-string: strip the two characters that would break
-      // out of (or escape within) the quoted filename parameter.
-      const dispositionFilename = filename.replace(/[\\"]/g, "");
-
       if (serveInline) {
         // The filename matters on inline too: without it, saving from the
         // browser's viewer yields a file literally named "download".
-        res.setHeader("Content-Disposition", `inline; filename="${dispositionFilename}"`);
+        res.setHeader("Content-Disposition", contentDispositionAttachment(filename, "inline"));
         res.setHeader("Content-Type", inlineType);
         // Belt-and-braces for the safelist: `nosniff` stops a browser
         // re-interpreting safelisted bytes as markup, and the `sandbox` CSP
@@ -2517,7 +2500,7 @@ export function createFilesRouter(
           res.setHeader("Content-Security-Policy", "sandbox");
         }
       } else {
-        res.setHeader("Content-Disposition", `attachment; filename="${dispositionFilename}"`);
+        res.setHeader("Content-Disposition", contentDispositionAttachment(filename));
         res.setHeader(
           "Content-Type",
           ext === ".pdf" ? "application/pdf" : "application/octet-stream"

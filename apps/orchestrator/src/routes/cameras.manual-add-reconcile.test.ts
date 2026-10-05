@@ -64,8 +64,6 @@ vi.mock("../services/frigate.client.js", () => ({
   tagEventAsFace: vi.fn(),
   openBirdseyeStream: vi.fn(),
   openMjpegStream: vi.fn(),
-  enableDetection: vi.fn(),
-  disableDetection: vi.fn(),
   deleteCamera: vi.fn(),
   addCamera: (...a: unknown[]) => addCamera(...a),
   syncCamerasFromDb: (...a: unknown[]) => syncCamerasFromDb(...a),

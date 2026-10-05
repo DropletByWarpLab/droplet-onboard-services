@@ -174,4 +174,8 @@ main() {
   return 0
 }
 
-main "$@"
+# WARP-3841: droplet-deploy sources this file for resolve_checkout (one resolver,
+# not two). Run the heal only when executed, never when sourced.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  main "$@"
+fi

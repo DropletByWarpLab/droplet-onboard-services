@@ -136,6 +136,10 @@ run_wd() {
       DROPLET_WATCHDOG_HOST_UNITS_BIN="$WORK/bin/droplet-host-units" \
       DROPLET_WATCHDOG_RELAY_DNS_BIN="$WORK/bin/droplet-relay-dns" \
       DROPLET_WATCHDOG_APP_DOWNLOADS_AUDIT="$WORK/bin/app-downloads-audit" \
+      DROPLET_WATCHDOG_ROUTING_URL="http://127.0.0.1:1" \
+      DROPLET_ENV_FILE="$WORK/deployment/.env" \
+      DROPLET_INTERNAL_TLS= \
+      ROUTING_MODE=real \
       "$@" \
       bash "$WATCHDOG" 2>&1
 }
@@ -1178,6 +1182,235 @@ if [ "$(wd_field relay_dns status)" = "not_applicable" ]; then
   pass "relay_dns: reports not_applicable when disabled — never silently absent"
 else
   fail "relay_dns missing/wrong when disabled: $(wd_field relay_dns status)"
+fi
+
+# =============================================================================
+# Phase 10: router_auth (WARP-3838) — detect-only
+# =============================================================================
+echo "--- Phase 10: router_auth ---"
+
+RA='DROPLET_WATCHDOG_CHECKS=router_auth'
+
+# curl stub: logs each argument separately so certificate paths containing
+# spaces are checked too. When supplied, expected args must match before a
+# health response is returned (models an mTLS listener rejecting HTTP/no cert).
+mk_curl_stub() {
+  cat > "$WORK/bin/curl" <<EOF2
+#!/bin/sh
+printf 'curl %s\n' "\$*" >> "$WORK/curl.log"
+printf '%s\n' "\$@" > "$WORK/curl.args"
+if [ -f "$WORK/curl_expected_args" ] && ! cmp -s "$WORK/curl_expected_args" "$WORK/curl.args"; then
+  exit 35
+fi
+cat "$WORK/health_body" 2>/dev/null
+exit \$(cat "$WORK/curl_exit" 2>/dev/null || echo 0)
+EOF2
+  chmod +x "$WORK/bin/curl"
+}
+
+rm -f "$WORK/curl_expected_args"
+
+reset_work
+rm -f "$WORK/curl.log" "$WORK/health_body" "$WORK/curl_exit"
+mk_curl_stub
+printf '{"status":"ok","connected":true,"router_host":"192.168.9.1"}' > "$WORK/health_body"
+run_wd "$RA" >/dev/null || true
+if [ "$(wd_field router_auth status)" = "ok" ]; then
+  pass "router_auth: ok when routing /health says connected:true"
+else
+  fail "expected ok, got $(wd_field router_auth status)"
+fi
+printf '%s\n' -fsS --max-time 5 http://127.0.0.1:1/health > "$WORK/curl_expected_args"
+if cmp -s "$WORK/curl_expected_args" "$WORK/curl.args"; then
+  pass "router_auth: plain deployment keeps HTTP and sends no TLS arguments"
+else
+  fail "unexpected plain HTTP probe: $(cat "$WORK/curl.args")"
+fi
+rm -f "$WORK/curl_expected_args"
+
+reset_work
+rm -f "$WORK/curl.log" "$WORK/health_body" "$WORK/curl_exit"
+mk_curl_stub
+printf '{"status":"disconnected","connected":false,"router_host":"192.168.9.1","error":"Router rejected the droplet-ai credentials"}' > "$WORK/health_body"
+run_wd "$RA" >/dev/null || true
+if [ "$(wd_field router_auth status)" = "heal_failed" ]; then
+  pass "router_auth: heal_failed when routing cannot authenticate"
+else
+  fail "expected heal_failed, got $(wd_field router_auth status)"
+fi
+case "$(wd_field router_auth message)" in
+  *"rejected the droplet-ai credentials"*) pass "router_auth: the message carries the /health error text" ;;
+  *) fail "message lacks the health error: $(wd_field router_auth message)" ;;
+esac
+# Detect-only: the only thing it may ever run is the /health read.
+if grep -v '/health' "$WORK/curl.log" | grep -q .; then
+  fail "router_auth did something besides read /health: $(cat "$WORK/curl.log")"
+else
+  pass "router_auth is detect-only (only /health is read)"
+fi
+
+reset_work
+rm -f "$WORK/curl.log" "$WORK/health_body"
+mk_curl_stub
+echo 7 > "$WORK/curl_exit"
+run_wd "$RA" >/dev/null || true
+if [ "$(wd_field router_auth status)" = "not_applicable" ]; then
+  pass "router_auth: not_applicable when routing /health is unreachable"
+else
+  fail "expected not_applicable for unreachable routing, got $(wd_field router_auth status)"
+fi
+
+reset_work
+# HTTP failure and structurally invalid bodies must never ask for credentials.
+rm -f "$WORK/curl_expected_args"
+for invalid in '<html>server error</html>' '{broken' '{}' '{"connected":"false"}' '{"nested":{"connected":true}}' '[{"connected":false}]'; do
+  rm -rf "$WORK/state"; mkdir -p "$WORK/state"; rm -f "$WORK/curl_exit"
+  printf '%s' "$invalid" > "$WORK/health_body"
+  run_wd "$RA" DROPLET_WATCHDOG_ROUTING_MODE=real DROPLET_WATCHDOG_ROUTING_URL=http://127.0.0.1:1 >/dev/null
+  if [ "$(wd_field router_auth status)" = not_applicable ]; then
+    pass "router_auth: invalid health body yields no verdict: $invalid"
+  else
+    fail "invalid health body became a router verdict: $invalid"
+  fi
+done
+rm -rf "$WORK/state"; mkdir -p "$WORK/state"
+printf '{"connected":false,"error":"proxy failure"}' > "$WORK/health_body"
+echo 22 > "$WORK/curl_exit"
+run_wd "$RA" DROPLET_WATCHDOG_ROUTING_MODE=real DROPLET_WATCHDOG_ROUTING_URL=http://127.0.0.1:1 >/dev/null
+if [ "$(wd_field router_auth status)" = not_applicable ] && grep -qx -- -fsS "$WORK/curl.args"; then
+  pass "router_auth: HTTP 500 (curl 22) yields no verdict and HTTP failure is checked"
+else
+  fail "HTTP failure became a credential verdict or curl lacks --fail"
+fi
+
+rm -f "$WORK/curl.log" "$WORK/curl_exit"
+mk_curl_stub
+printf '{"status":"disconnected","connected":false,"error":"x"}' > "$WORK/health_body"
+run_wd "$RA" ROUTING_MODE=mock >/dev/null || true
+if [ "$(wd_field router_auth status)" = "not_applicable" ] && [ ! -f "$WORK/curl.log" ]; then
+  pass "router_auth: not_applicable (and no probe) when ROUTING_MODE is not real"
+else
+  fail "expected not_applicable without probing for ROUTING_MODE=mock, got $(wd_field router_auth status)"
+fi
+
+# The service receives a root-owned pointer to the deployment .env, not the
+# .env itself. Read the persisted flag without executing its other contents.
+reset_work
+rm -f "$WORK/curl.log" "$WORK/curl_exit"
+mk_curl_stub
+TLS_REPO="$WORK/deployment with spaces"
+TLS_BUNDLE="$TLS_REPO/data/secrets/service-tls/host-admin"
+mkdir -p "$TLS_REPO"
+printf 'DROPLET_INTERNAL_TLS="1"\r\nUNRELATED=$(touch "%s")\n' "$WORK/env_executed" > "$TLS_REPO/.env"
+printf '%s\n' -fsS --max-time 5 \
+  --cacert "$TLS_BUNDLE/ca.pem" --cert "$TLS_BUNDLE/cert.pem" --key "$TLS_BUNDLE/key.pem" \
+  https://router.test:9443/prefix/health > "$WORK/curl_expected_args"
+printf '{"status":"ok","connected":true}' > "$WORK/health_body"
+run_wd "$RA" "DROPLET_ENV_FILE=$TLS_REPO/.env" \
+  DROPLET_WATCHDOG_ROUTING_URL=http://router.test:9443/prefix/ >/dev/null || true
+if [ "$(wd_field router_auth status)" = "ok" ] && cmp -s "$WORK/curl_expected_args" "$WORK/curl.args"; then
+  pass "router_auth: persisted TLS flag uses HTTPS and the host-admin bundle, preserving host/port/path"
+else
+  fail "TLS healthy probe: status=$(wd_field router_auth status), args=$(cat "$WORK/curl.args")"
+fi
+if [ ! -e "$WORK/env_executed" ]; then
+  pass "router_auth: deployment .env is never sourced"
+else
+  fail "router_auth executed deployment .env contents"
+fi
+
+reset_work
+rm -f "$WORK/curl.log" "$WORK/curl_exit"
+mk_curl_stub
+printf '{"status":"disconnected","connected":false,"error":"Router rejected the droplet-ai credentials"}' > "$WORK/health_body"
+run_wd "$RA" "DROPLET_ENV_FILE=$TLS_REPO/.env" \
+  DROPLET_WATCHDOG_ROUTING_URL=http://router.test:9443/prefix/ >/dev/null || true
+if [ "$(wd_field router_auth status)" = "heal_failed" ] && cmp -s "$WORK/curl_expected_args" "$WORK/curl.args"; then
+  pass "router_auth: TLS auth failure is reported instead of not_applicable"
+else
+  fail "TLS auth-failed probe: status=$(wd_field router_auth status), args=$(cat "$WORK/curl.args")"
+fi
+case "$(wd_field router_auth message)" in
+  *"rejected the droplet-ai credentials"*) pass "router_auth: TLS failure preserves the actionable health error" ;;
+  *) fail "TLS message lacks the health error: $(wd_field router_auth message)" ;;
+esac
+if [ "$(wc -l < "$WORK/curl.log")" -eq 1 ] && grep -q '/health$' "$WORK/curl.log"; then
+  pass "router_auth: TLS failure remains detect-only (one health read)"
+else
+  fail "TLS failure ran unexpected requests: $(cat "$WORK/curl.log")"
+fi
+
+reset_work
+rm -f "$WORK/curl.log" "$WORK/curl_exit"
+mk_curl_stub
+printf '%s\n' -fsS --max-time 5 http://router.test:9080/health > "$WORK/curl_expected_args"
+printf '{"status":"ok","connected":true}' > "$WORK/health_body"
+run_wd "$RA" "DROPLET_ENV_FILE=$TLS_REPO/.env" DROPLET_INTERNAL_TLS=0 \
+  DROPLET_WATCHDOG_ROUTING_URL= ROUTING_SERVICE_URL=http://router.test:9080/ >/dev/null || true
+if [ "$(wd_field router_auth status)" = "ok" ] && cmp -s "$WORK/curl_expected_args" "$WORK/curl.args"; then
+  pass "router_auth: explicit TLS-off override keeps the configured plain routing URL"
+else
+  fail "TLS-off override probe: status=$(wd_field router_auth status), args=$(cat "$WORK/curl.args")"
+fi
+
+# Run the actual watchdog tuning-file installer block, remapping only its
+# /etc destination into the fixture tree. No root or systemd is involved.
+reset_work
+cat > "$WORK/bin/sudo" <<'EOF2'
+#!/usr/bin/env bash
+case "$1" in install|grep|tee) ;; *) exit 99 ;; esac
+args=("$@")
+for i in "${!args[@]}"; do
+  if [ "${args[$i]}" = /etc/default/droplet-watchdog ]; then
+    args[$i]="$WD_INSTALL_CONF"
+  fi
+done
+exec "${args[@]}"
+EOF2
+chmod +x "$WORK/bin/sudo"
+INSTALL_BLOCK="$(awk '
+  /^  if \[ ! -f \/etc\/default\/droplet-watchdog \]; then/ { printing=1 }
+  printing && /^  # Migration: the standalone WARP-869/ { exit }
+  printing { print }
+' "$REPO_ROOT_REAL/scripts/lib/single-box.sh" \
+  | sed 's|\[ ! -f /etc/default/droplet-watchdog \]|[ ! -f "$WD_INSTALL_CONF" ]|')"
+INSTALL_CONF="$WORK/watchdog-default"
+INSTALL_EXPECTED="$WORK/watchdog-default-expected"
+run_watchdog_install() {
+  env PATH="$WORK/bin:$PATH" REPO_ROOT="$TLS_REPO" \
+      WD_INSTALL_CONF="$INSTALL_CONF" TEST_HOST_SRC="$REPO_ROOT_REAL/scripts/host" \
+      bash -c 'host_src="$TEST_HOST_SRC"; '"$INSTALL_BLOCK"
+}
+if [ -n "$INSTALL_BLOCK" ] && run_watchdog_install >/dev/null 2>&1 \
+    && grep -qxF "DROPLET_ENV_FILE=\"$TLS_REPO/.env\"" "$INSTALL_CONF"; then
+  pass "router_auth install: new tuning file points at the deployment .env"
+else
+  fail "router_auth install: deployment env pointer was not installed"
+fi
+cp "$INSTALL_CONF" "$INSTALL_EXPECTED"
+if run_watchdog_install >/dev/null 2>&1 && cmp -s "$INSTALL_CONF" "$INSTALL_EXPECTED"; then
+  pass "router_auth install: re-run is idempotent"
+else
+  fail "router_auth install: re-run changed existing tuning"
+fi
+
+printf '# Existing operator tuning\nDROPLET_WATCHDOG_CHECKS="router_auth"\n' > "$INSTALL_CONF"
+cp "$INSTALL_CONF" "$INSTALL_EXPECTED"
+printf '\nDROPLET_ENV_FILE="%s/.env"\n' "$TLS_REPO" >> "$INSTALL_EXPECTED"
+if run_watchdog_install >/dev/null 2>&1 && cmp -s "$INSTALL_CONF" "$INSTALL_EXPECTED"; then
+  pass "router_auth install: existing tuning is preserved while the env pointer is backfilled"
+else
+  fail "router_auth install: legacy tuning was replaced or not migrated"
+fi
+
+# systemd accepts whitespace before a setting and around '='. Appending a
+# second key would override the operator's valid pointer on the next run.
+printf '  DROPLET_ENV_FILE = /operator/deployment/.env\nDROPLET_WATCHDOG_CHECKS="router_auth"\n' > "$INSTALL_CONF"
+cp "$INSTALL_CONF" "$INSTALL_EXPECTED"
+if run_watchdog_install >/dev/null 2>&1 && cmp -s "$INSTALL_CONF" "$INSTALL_EXPECTED"; then
+  pass "router_auth install: whitespace-padded operator env pointer is preserved"
+else
+  fail "router_auth install: whitespace-padded operator env pointer was overridden"
 fi
 
 # =============================================================================

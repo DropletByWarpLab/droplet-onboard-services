@@ -123,6 +123,131 @@ enum ArrayLevel {
   jbod
 }
 
+/// WARP-3514 / ADR-070 — what an allocation on a bay drive holds.
+///
+/// One value today. It is an enum rather than a free string so a second role
+/// (the dashboard's `usage.role` also knows `files`) is a reviewed schema
+/// change, not a typo that quietly creates a row nothing reads.
+enum StorageRole {
+  RECORDINGS
+}
+
+/// WARP-3514 — how the recordings slice is sized.
+///
+///   AUTO_RESERVED — an ext4 PROJECT QUOTA on `<mount>/nvr`, sized from the
+///                   measured per-camera bitrate and grown by the hourly
+///                   allocator. `reservedBytes` is the quota hard limit.
+///   FULL          — "whole drive": the quota equals the filesystem size, so
+///                   Frigate may use all of it. `reservedBytes` is that size.
+enum AllocationMode {
+  AUTO_RESERVED
+  FULL
+}
+
+/// WARP-3514 — where an allocation is in its life. EXPLICIT (handbook rule 10):
+/// never derived from "no migration row" / "quota is zero" style absence.
+///
+///   PENDING    row exists; the host has not yet confirmed the target + quota.
+///   MIGRATING  target applied; existing footage is being moved off the
+///              previous source (Frigate keeps recording to it until the flip).
+///   ACTIVE     Frigate records onto the slice.
+///   DEGRADED   recording, but something needs the owner (read-only, SMART
+///              failure, the slice cannot grow to the measured need, a failed
+///              migration awaiting retry).
+///   MISSING    the drive is not mounted; footage is NOT being written to the
+///              system disk (the boot guard sees to that).
+enum AllocationStatus {
+  PENDING
+  MIGRATING
+  ACTIVE
+  DEGRADED
+  MISSING
+}
+
+/// WARP-3514 / ADR-070 — the slice of an encrypted bay drive that holds camera
+/// recordings. Supersedes ADR-019 D2 ("nothing auto-assigns storage") FOR
+/// CAMERA RECORDINGS ONLY: Droplet measures the cameras, sizes the slice and
+/// allocates it without asking. Erasing a drive or deleting footage still needs
+/// the owner's explicit confirmation.
+///
+/// At most one RECORDINGS row exists at a time (the allocator enforces it; the
+/// DB only guarantees one row per filesystem). Switching the recordings drive
+/// replaces the row — the old filesystem is no longer the recordings target.
+///
+/// `fsUuid` is the FILESYSTEM uuid (the same key as `Drive.uuid` and the
+/// device-bridge's `uuid`), so the row survives a reboot or re-plug.
+model StorageAllocation {
+  id            String           @id @default(uuid())
+  fsUuid        String           @unique
+  role          StorageRole      @default(RECORDINGS)
+  mode          AllocationMode   @default(AUTO_RESERVED)
+  /// Quota hard limit in bytes (AUTO_RESERVED) or the filesystem size (FULL).
+  /// BIGINT: a multi-TB drive overflows INT4.
+  reservedBytes BigInt
+  status        AllocationStatus @default(PENDING)
+  /// Failed moves of footage onto this drive since it was last confirmed. Drives
+  /// the auto-retry schedule (1 h, 6 h, 24 h, then the row stays PENDING and the
+  /// owner is told); reset to 0 by a success or by the owner's explicit retry.
+  migrationFailures Int          @default(0)
+  /// When the most recent failed move ended: the retry clock. Null until one failed.
+  lastFailureAt DateTime?
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  @@index([role, status])
+}
+
+/// WARP-3514 — one hourly reading of a camera's recording rate, the input to
+/// the allocator's sizing (p95 over the last 72 h). Rows older than 14 days
+/// are pruned by the sampler itself.
+///
+/// `camera` is Frigate's camera name as a plain string, not a relation: a
+/// sample must outlive a camera that is deleted mid-window, and the sizer
+/// simply ignores names that are no longer configured.
+model CameraBitrateSample {
+  id        String   @id @default(uuid())
+  camera    String
+  sampledAt DateTime @default(now())
+  /// Frigate's measured rate in MiB/hour. Frigate reports MiB (not MB); the
+  /// column keeps the unit it was measured in so nothing downstream has to
+  /// remember a conversion.
+  mbPerHour Float
+
+  @@index([camera, sampledAt])
+  @@index([sampledAt])
+}
+
+/// WARP-3514 — the closed set of conditions the hourly recordings-health check
+/// can raise. Mirrors the API's `warnings[].code` (lower-case there).
+enum RecordingsAlertCode {
+  DRIVE_MISSING
+  READ_ONLY
+  ON_SYSTEM_DISK
+  NEAR_FULL
+  CANNOT_GROW
+  SMART_FAILED
+  NOT_ENCRYPTED
+}
+
+/// WARP-3514 — per-condition outage state, so the owner hears about an outage
+/// ONCE, not once per hourly tick.
+///
+/// Persisted (not in-process like camera-storage's near-full edge) because the
+/// conditions here — a missing drive, recordings on the OS disk — last for days
+/// and an orchestrator restart must not re-page the owner for each of them.
+/// `active` + `since` are explicit columns; "was it announced" is `notifiedAt`,
+/// never inferred from the absence of a NotificationLog row.
+model RecordingsAlertState {
+  code       RecordingsAlertCode @id
+  /// True while the condition currently holds.
+  active     Boolean             @default(false)
+  /// When the CURRENT outage began; null while healthy.
+  since      DateTime?
+  /// When owner/admin were told about the CURRENT outage; null = not yet.
+  notifiedAt DateTime?
+  updatedAt  DateTime            @updatedAt
+}
+
 /// WARP-304: per-user persistent chat sessions for the /chat page.
 /// `userId` is the Nextcloud username from the auth middleware. The dashboard
 /// only ever lists / reads sessions for the requesting user — owner/admin do
@@ -4103,6 +4228,8 @@ model EmailAccount {
   threads     EmailThread[]
   messages    EmailMessage[]
   drafts      EmailDraft[]
+  /// WARP-3529 — the service desk this mailbox is the front door of, if any.
+  supportChannel PmSupportChannel?
 
   @@index([userId, address])
 }
@@ -4131,6 +4258,10 @@ model EmailThread {
   updatedAt        DateTime          @updatedAt
   messages         EmailMessage[]
   drafts           EmailDraft[]
+  /// WARP-3529 — the tickets this conversation belongs to. More than one when a
+  /// reply to a final ticket opened a follow-up: the newest link is the thread's
+  /// current ticket.
+  ticketLinks      PmTicketEmailLink[]
 
   @@unique([accountId, threadKey])
   @@index([accountId, triageStatus, lastMessageAt(sort: Desc)])
@@ -4193,9 +4324,38 @@ model EmailMessage {
   /// WARP-3267 — the files this message carried.
   attachments EmailAttachment[]
 
+  /// WARP-3529 (ADR-069 §4) — what the sender's headers said about how the
+  /// message was sent: `{ references, autoSubmitted, precedence, xAutoreply,
+  /// xAutorespond, returnPath, reportType }`, validated at the ingest boundary
+  /// (routes/email.ts) and recorded as written. NULL only on a message stored
+  /// before this column existed or by an indexer that predates it — which the
+  /// desk reads as "could not be checked", never as "automatic mail is absent".
+  headers Json?
+
+  /// WARP-3529 — the service desk's ledger, the same shape as the filing arm's
+  /// `extract*` columns above and for the same reason: the durable row that
+  /// already says "new mail exists" carries its own claim, so the ingest route
+  /// needs NO change and cannot fail because a desk did. Every message starts
+  /// PENDING; only a mailbox bound to a desk channel is ever swept, and only
+  /// mail received after the channel was switched on (`PmSupportChannel.enabledAt`).
+  /// IGNORED and FAILED always carry a reason (a CHECK); nothing is skipped
+  /// without saying why.
+  deskIntakeStatus   PmEmailIntakeStatus  @default(PENDING)
+  deskIntakeReason   PmEmailIntakeReason?
+  deskIntakeAttempts Int                  @default(0)
+  /// When the message reached a terminal status. NULL exactly while PENDING.
+  deskIntakeAt       DateTime?
+
+  /// The ticket this message is part of, once the desk has taken it in.
+  ticketLink PmTicketEmailLink?
+
   @@unique([accountId, messageId])
   @@index([threadId, receivedAt(sort: Desc)])
   @@index([extractStatus, receivedAt])
+  /// The desk sweep's claim: one mailbox's pending mail, oldest first.
+  @@index([accountId, deskIntakeStatus, createdAt])
+  /// The per-sender rate window: one mailbox's recent mail.
+  @@index([accountId, createdAt])
 }
 
 /// WARP-3267 — one MIME part of an inbound message that is not its body.
@@ -4280,8 +4440,20 @@ model EmailDraft {
   /// WARP-3267 — stored `EmailAttachment` ids a forward carries. Checked on
   /// write to belong to this draft's mailbox; the indexer attaches them at send.
   attachmentIds    String[]         @default([])
+  /// WARP-3529 — the RFC 5322 Message-ID (no brackets) of the email this draft
+  /// becomes, chosen by the service desk when it queues the draft and sent by the
+  /// indexer exactly as stored, so the desk knows the id a customer's reply will
+  /// carry before anything is sent. NULL for a draft nothing chose one for (every
+  /// draft the mail screen and the assistant create); the indexer makes its own.
+  messageId        String?          @unique
+  /// WARP-3529 — an automatic acknowledgement rather than a person's reply: sent
+  /// as `Auto-Submitted: auto-replied` (RFC 3834).
+  autoSubmitted    Boolean          @default(false)
   createdAt        DateTime         @default(now())
   updatedAt        DateTime         @updatedAt
+
+  /// The service desk comment this draft is the delivery of, if it is one.
+  ticketLink PmTicketEmailLink?
 
   @@index([accountId, status, updatedAt(sort: Desc)])
 }
@@ -5571,6 +5743,8 @@ model PmWorkspace {
   createdAt DateTime    @default(now())
   updatedAt DateTime    @default(now()) @updatedAt
   projects  PmProject[]
+  /// WARP-3522 — saved views, project-scoped and cross-project.
+  savedViews PmSavedView[]
   /// WARP-3532 — the workspace's webhook destinations.
   webhooks  PmWebhook[]
 }
@@ -5627,8 +5801,20 @@ model PmProject {
   cycles     PmCycle[]
   modules    PmModule[]
   properties PmCustomProperty[]
+  /// WARP-3522 — views saved against this project (cross-project views have no project).
+  savedViews PmSavedView[]
+  /// WARP-3527 — the import runs filed against this project. Cascade: a job is
+  /// a record ABOUT the project, with no meaning once it is gone.
+  importJobs PmImportJob[]
+  /// WARP-3529 — the channels a SERVICE_DESK takes requests through. Always
+  /// empty for a PROJECT (a trigger holds that).
+  supportChannels PmSupportChannel[]
   /// WARP-3532 — webhooks scoped to this project (cascade with it).
   webhooks   PmWebhook[]
+  /// WARP-3535 — the code repositories whose pull requests, commits and branches
+  /// are matched against this project's work-item keys. The mapping row goes
+  /// with the project; the repository registration does not.
+  devRepositories PmDevRepositoryProject[]
 
   /// WARP-2117 — the deals this project delivers. A won deal becomes a job;
   /// the link is on the deal so deleting the project leaves the commercial
@@ -5705,9 +5891,23 @@ model PmState {
   /// can rename "Pending" without breaking its SLAs. Meaningful on service-desk
   /// states only; every project state carries the default and nothing reads it.
   slaClock  PmSlaClock   @default(RUNNING)
+  /// WARP-3529 (ADR-069 §4) — what a customer's email does to a ticket that sits
+  /// in this state: nothing, return it to work, or (the ticket being final) open
+  /// a follow-up. An explicit column for the same reason as `slaClock`: Solved and
+  /// Closed are both a completed state that stops the clock, and which of them
+  /// takes a reply back is the desk's rule, not something to read off a name a
+  /// desk may rename. Meaningful on service-desk states only; every project
+  /// state carries the default and nothing reads it.
+  onCustomerReply PmCustomerReplyEffect @default(NONE)
   createdAt DateTime     @default(now())
   updatedAt DateTime     @default(now()) @updatedAt
   workItems PmWorkItem[]
+
+  /// WARP-3535 — the rules that move work into this state when a pull request is
+  /// opened or merged. SetNull on the rule side: deleting a state switches the
+  /// rule off, it never deletes the repository mapping.
+  devOnOpenedRules PmDevRepositoryProject[] @relation("PmDevOnOpened")
+  devOnMergedRules PmDevRepositoryProject[] @relation("PmDevOnMerged")
 
   @@unique([projectId, name])
   @@index([projectId, sortOrder])
@@ -5738,6 +5938,19 @@ enum PmPriority {
   none
 }
 
+/// WARP-3520 — what KIND of work an item is. An explicit enum column, never
+/// inferred from a label called "bug" (a label cannot be filtered, counted or
+/// defaulted by the engine, and one customer's "bug" is another's "defect").
+/// `task` is the default so every existing row keeps its meaning.
+enum PmWorkItemType {
+  task
+  bug
+  feature
+  improvement
+  question
+  incident
+}
+
 /// The work item (Plane "issue"). `sequenceId` + project.identifier forms the
 /// human key (INBOX-42). `sortOrder` is a float so a kanban drag can insert
 /// between two cards without renumbering the column. Sub-issues via the
@@ -5763,12 +5976,31 @@ model PmWorkItem {
   sequenceId      Int
   name            String
   descriptionHtml String?
+  /// WARP-3522 — the plain-text projection of `descriptionHtml`: tags stripped,
+  /// entities decoded, whitespace collapsed. NEVER written by application code:
+  /// the `pmworkitem_description_text` trigger (migration 20261004060000)
+  /// recomputes it on every INSERT and on every UPDATE that sets
+  /// `descriptionHtml`, so every write path — this service's, another slice's,
+  /// a raw import — keeps it true. It exists so the filter DSL's `text`
+  /// condition searches what a person typed, not the markup around it (an
+  /// ILIKE over the raw HTML matches "class", "strong" and every href), and so
+  /// that search can use a trigram index. Null when there is no description.
+  descriptionText String?
   stateId         String?
   state           PmState?     @relation(fields: [stateId], references: [id], onDelete: SetNull)
   priority        PmPriority   @default(none)
+  /// WARP-3520 — see `PmWorkItemType`.
+  type            PmWorkItemType @default(task)
   parentId        String?
   parent          PmWorkItem?  @relation("PmSubIssues", fields: [parentId], references: [id], onDelete: SetNull)
   children        PmWorkItem[] @relation("PmSubIssues")
+  /// WARP-3521 — the cycle (sprint) this item is planned into, at most one.
+  /// SetNull so deleting a cycle never deletes work; `deleteCycle` audits that
+  /// SET NULL with one `cycle_removed` row per item before it runs. The cycle
+  /// MUST belong to the item's own project: the service refuses a cross-project
+  /// cycle (`invalid_cycle`) and the `pmworkitem_cycle_same_project` trigger in
+  /// the warp_3521_pm_cycles_modules migration backstops it (a CHECK cannot — it
+  /// may not contain a subquery; same reasoning as `pmworkitem_parent_same_project`).
   cycleId         String?
   cycle           PmCycle?     @relation(fields: [cycleId], references: [id], onDelete: SetNull)
   /// ADR-045 §5.3 — the department that owns THIS item, OVERRIDING its
@@ -5781,6 +6013,10 @@ model PmWorkItem {
   createdById     String?
   startDate       DateTime?
   dueDate         DateTime?
+  /// Size of the item, in points (WARP-3520 owns the field and its API; WARP-3521
+  /// reads it for cycle / module progress and the burndown). Declared in both
+  /// slices' migrations as `ADD COLUMN IF NOT EXISTS` so either lands first.
+  estimate        Float?
   sortOrder       Float        @default(0)
   /// Canonical "is done" signal (WARP-884) — explicit column, not derived
   /// from `completedAt IS NOT NULL`. Kept in sync with the state's group by
@@ -5791,6 +6027,17 @@ model PmWorkItem {
   /// Canonical "is archived" signal (WARP-884) — mirrors PmProject.isArchived.
   isArchived      Boolean      @default(false)
   archivedAt      DateTime?
+  /// WARP-3527 (ADR-069 WS-11) — provenance for an IMPORTED item: which tracker
+  /// it came from ("jira" | "asana" | "trello" | "linear" | "github" | "csv")
+  /// and its id THERE. Together with `projectId` this is the idempotency key —
+  /// a re-import finds the item and updates it instead of creating a twin.
+  ///
+  /// Both set or both NULL, pinned by the CHECK `PmWorkItem_external_both_or_neither`
+  /// in the migration (Prisma cannot express it). NULL is every natively-created
+  /// item; Postgres treats NULLs as distinct in a unique index, so the unique
+  /// below never constrains them.
+  externalSystem  String?
+  externalId      String?
   createdAt       DateTime     @default(now())
   updatedAt       DateTime     @default(now()) @updatedAt
 
@@ -5801,6 +6048,10 @@ model PmWorkItem {
   activity       PmActivity[]
   modules        PmModuleWorkItem[]
   propertyValues PmWorkItemPropertyValue[]
+  /// WARP-3535 — pull requests, commits and branches from GitHub / GitLab whose
+  /// text names this item's key. Cascade: a link is a pointer with no meaning
+  /// once its item is gone.
+  externalLinks  PmExternalLink[]
 
   /// WARP-2117 — CRM timeline entries that POINT AT this work item (the task
   /// raised off a customer conversation).
@@ -5824,12 +6075,18 @@ model PmWorkItem {
   /// pointer at a file that lives in /files and stays there.
   fileLinks EntityLink[]
 
+  /// WARP-3526 (ADR-069 WS-10) — time logged against this item, and the timers
+  /// currently running on it (at most one per person). Both cascade on delete.
+  worklogs PmWorklog[]
+  timers   PmTimer[]
   /// WARP-3528 (ADR-069 §1) — the desk-only columns of a ticket. Present
   /// exactly when the item lives in a SERVICE_DESK project (a trigger holds
   /// that); a project work item never has one.
   ticket PmTicket?
 
   @@unique([projectId, sequenceId])
+  /// WARP-3527 — the import idempotency key (see `externalSystem`).
+  @@unique([projectId, externalSystem, externalId])
   @@index([projectId, stateId, sortOrder])
   @@index([projectId, updatedAt(sort: Desc)])
   @@index([parentId])
@@ -5843,6 +6100,13 @@ model PmWorkItem {
   /// composite. Two columns only: the unfiltered board still orders off the
   /// state index.
   @@index([projectId, departmentId])
+  /// WARP-3522 — the filter DSL's `text` condition is `name ILIKE '%q%' OR
+  /// "descriptionText" ILIKE '%q%'`. A btree cannot serve a leading-wildcard
+  /// pattern at all; a trigram GIN index lets the planner answer each arm with
+  /// a bitmap scan. (A query shorter than three characters has no trigram and
+  /// falls back to a scan, which is correct and, at this table's size, cheap.)
+  @@index([name(ops: raw("gin_trgm_ops"))], type: Gin)
+  @@index([descriptionText(ops: raw("gin_trgm_ops"))], type: Gin)
 }
 
 /// Work-item ↔ assignee join. `userId` is a User.id.
@@ -5965,10 +6229,24 @@ model PmComment {
   /// source is removed or a connector is purged, and none of those paths may be
   /// blocked by — or silently eat — a customer's conversation.
   contactId   String?
+  /// WARP-3529 (ADR-069 §4) — whether the email of a PUBLIC reply reached the
+  /// mail server: NONE for a comment that is not an outgoing email (a note, a
+  /// customer's message, a reply recorded on a desk with no channel), PENDING
+  /// from the moment it is queued, SENT or FAILED once the mail service says so.
+  /// Explicit, never read off the draft's status at display time, and pinned by
+  /// a CHECK: only a PUBLIC comment from staff or the system ever leaves NONE,
+  /// and a failure always says why.
+  deliveryStatus  PmDeliveryStatus   @default(NONE)
+  deliveryFailure PmDeliveryFailure?
   createdAt   DateTime            @default(now())
   updatedAt   DateTime            @default(now()) @updatedAt
 
+  /// The emails this comment is — the one it arrived as, or each attempt to send it.
+  emailLinks PmTicketEmailLink[]
+
   @@index([workItemId, createdAt])
+  /// The delivery sweep's read: the comments still waiting on the mail service.
+  @@index([deliveryStatus, createdAt])
 }
 
 /// Cycle / sprint — a time-boxed set of work items.
@@ -5978,25 +6256,45 @@ enum PmCycleStatus {
   completed
 }
 
-/// INVARIANT: at most ONE active cycle per project. Enforced by a partial
-/// unique index — `UNIQUE ("projectId") WHERE "status" = 'active'` — in raw
-/// migration SQL (Prisma cannot express a WHERE-filtered unique index),
-/// mirroring `PmState_projectId_isDefault_key`. See the
-/// `PmCycle_projectId_active_key` index in the
-/// warp_884_885_pm_schema_hardening migration (WARP-885). No cycle write
-/// path exists yet (P2/P3) — this is DB-level hardening ahead of it.
+/// A cycle (sprint) — a time-boxed set of work items. Written by
+/// `pm-cycles.service.ts` (WARP-3521): create / edit / start / complete /
+/// delete, `completeCycle` being the one that moves work.
+///
+/// `startDate` / `endDate` are CALENDAR DATES, stored as midnight UTC like
+/// `PmWorkItem.dueDate` and read back as `YYYY-MM-DD`. `completedAt` is the
+/// instant `completeCycle` ran and `carriedOverCount` the number of unfinished
+/// items it moved out — both explicit columns written once, in the completion
+/// transaction, so a completed cycle can still say how much of its scope it
+/// finished (its attached items are all done by construction) and the burndown
+/// knows where to stop.
+///
+/// INVARIANTS THE SCHEMA LANGUAGE CANNOT EXPRESS — all in raw migration SQL and
+/// proven against a real Postgres in `pm-cycles-modules.pg.test.ts`:
+///
+///   * At most ONE active cycle per project — a partial unique index,
+///     `UNIQUE ("projectId") WHERE "status" = 'active'`
+///     (`PmCycle_projectId_active_key`; Prisma cannot express a WHERE-filtered
+///     unique index, mirroring `PmState_projectId_isDefault_key`). Created in
+///     warp_884_885_pm_schema_hardening and re-asserted idempotently in
+///     warp_3521_pm_cycles_modules. `startCycle` maps its P2002 onto
+///     `cycle_already_active`.
+///   * `PmCycle_dates_ordered` — CHECK: `endDate` is never before `startDate`.
+///   * `pmworkitem_cycle_same_project` — trigger on PmWorkItem: an item's cycle
+///     belongs to the item's project.
 model PmCycle {
-  id          String        @id @default(uuid())
-  projectId   String
-  project     PmProject     @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  name        String
-  description String?
-  startDate   DateTime?
-  endDate     DateTime?
-  status      PmCycleStatus @default(draft)
-  createdAt   DateTime      @default(now())
-  updatedAt   DateTime      @default(now()) @updatedAt
-  workItems   PmWorkItem[]
+  id               String        @id @default(uuid())
+  projectId        String
+  project          PmProject     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  name             String
+  description      String?
+  startDate        DateTime?
+  endDate          DateTime?
+  status           PmCycleStatus @default(draft)
+  completedAt      DateTime?
+  carriedOverCount Int           @default(0)
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @default(now()) @updatedAt
+  workItems        PmWorkItem[]
 
   @@index([projectId])
 }
@@ -6012,6 +6310,11 @@ enum PmModuleStatus {
   cancelled
 }
 
+/// Written by `pm-modules.service.ts` (WARP-3521). `startDate` / `targetDate`
+/// are calendar dates (midnight UTC), `PmModule_dates_ordered` CHECKs that the
+/// target is never before the start, and `pmmoduleworkitem_same_project` (a
+/// trigger on the join table) keeps a module's items inside its own project —
+/// both in raw migration SQL, proven in `pm-cycles-modules.pg.test.ts`.
 model PmModule {
   id          String             @id @default(uuid())
   projectId   String
@@ -6041,7 +6344,8 @@ model PmModuleWorkItem {
 }
 
 /// Custom field definition on a project. `options` holds the choice list for
-/// select / multi_select types (array of {id,name,color}); null for scalars.
+/// select / multi_select types (array of {id,label,color}; WARP-3520 settled
+/// the key as `label`, matching the dashboard); null for every other type.
 enum PmPropertyType {
   text
   number
@@ -6068,8 +6372,12 @@ model PmCustomProperty {
   @@index([projectId, sortOrder])
 }
 
-/// A custom-field value on a work item. `value` is type-tagged JSON, e.g.
-/// {"text":"…"} | {"number":3} | {"optionIds":[…]} | {"userIds":[…]}.
+/// A custom-field value on a work item. `value` is type-tagged JSON, one shape
+/// per `PmPropertyType` (validated by pm-properties.service.ts, never trusted
+/// from the client): text → {"text":"…"}, number → {"number":3},
+/// date → {"date":"YYYY-MM-DD"}, boolean → {"boolean":true},
+/// select / multi_select → {"optionIds":[…]} (exactly one id for select),
+/// member → {"userIds":[…]} (exactly one id).
 model PmWorkItemPropertyValue {
   id         String           @id @default(uuid())
   workItemId String
@@ -6105,6 +6413,71 @@ model PmAttachment {
   @@index([workItemId])
 }
 
+/// WARP-3526 (ADR-069 WS-10) — one logged span of work on a work item.
+///
+/// `userId` is the person who SPENT the time (a `User.id` string, like every
+/// other PM attribution column), which is not always the person who typed the
+/// entry: an owner or admin may log or correct time for someone else, and the
+/// `time_logged` activity row records who actually did it.
+///
+/// `startedAt` is when the work began. A timesheet or report attributes the
+/// whole entry to the calendar day (in the reader's zone) that `startedAt` falls
+/// on — an entry is never split across midnight.
+///
+/// INVARIANT THE SCHEMA LANGUAGE CANNOT EXPRESS, in raw migration SQL and proven
+/// against a real Postgres in pm-time.pg.test.ts:
+///   * `PmWorklog_minutes_range` — CHECK ("minutes" BETWEEN 1 AND 1440). One
+///     entry is at least a minute and at most a day; longer work is several
+///     entries. The service and the route validate the same bounds, so this is
+///     the backstop for any writer that bypasses them.
+///
+/// Cascade, not SetNull: an entry with no work item has nothing to be reported
+/// against. `deleteWorkItem` runs SERIALIZABLE and needs no extra audit here —
+/// the item's own activity feed goes with it.
+model PmWorklog {
+  id         String     @id @default(uuid())
+  workItemId String
+  workItem   PmWorkItem @relation(fields: [workItemId], references: [id], onDelete: Cascade)
+  userId     String
+  startedAt  DateTime
+  minutes    Int
+  /// Empty string means "no note" — not NULL, so there is exactly one way to
+  /// say it and clearing a note is an ordinary write.
+  note       String     @default("")
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @default(now()) @updatedAt
+
+  /// The drawer's entries, newest first.
+  @@index([workItemId, startedAt])
+  /// A person's week.
+  @@index([userId, startedAt])
+  /// A report over a window, any project, any person.
+  @@index([startedAt])
+}
+
+/// WARP-3526 — the one timer a person may have running.
+///
+/// The primary key IS the rule: `userId` is the whole key, so a second row for
+/// the same person is a unique violation no matter which writer attempts it.
+/// "Starting a second timer stops the first" is the service's job
+/// (pm-time.service.ts `startTimer`, serialised per person by an advisory lock);
+/// this table is what makes "one running timer per user" true even if it did
+/// not run. State is the presence of the row — there is no `status` to drift
+/// out of step with it. Stopping a timer deletes the row and writes a
+/// `PmWorklog` in the same transaction.
+///
+/// Cascade: a timer on a deleted work item (or on any item of a deleted
+/// project) disappears with it instead of pointing at nothing.
+model PmTimer {
+  userId     String     @id
+  workItemId String
+  workItem   PmWorkItem @relation(fields: [workItemId], references: [id], onDelete: Cascade)
+  startedAt  DateTime   @default(now())
+
+  /// WARP-845 — the ON DELETE CASCADE scan index.
+  @@index([workItemId])
+}
+
 enum PmActivityVerb {
   created
   updated
@@ -6114,6 +6487,18 @@ enum PmActivityVerb {
   unassigned
   priority_changed
   due_date_changed
+  /// WARP-3520 — the other half of the date pair. `startDate` used to fall into
+  /// the generic `updated`/`fields` row; it now names itself, as `dueDate` does.
+  start_date_changed
+  /// WARP-3520 — an item's KIND (`PmWorkItemType`) changed.
+  type_changed
+  /// WARP-3520 — story-point estimate set, changed or cleared.
+  estimate_changed
+  /// WARP-3520 — a custom-field value (`PmWorkItemPropertyValue`) was set,
+  /// changed or cleared, or removed because its field/option was deleted.
+  /// `field` is the property NAME at the time, so the history stays readable
+  /// after a rename or delete.
+  property_changed
   title_changed
   description_changed
   label_added
@@ -6139,6 +6524,25 @@ enum PmActivityVerb {
   /// mirroring what parent_removed does for orphaned sub-issues.
   relation_added
   relation_removed
+  /// WARP-3535 (ADR-069 §9): a pull request, commit or branch from GitHub or
+  /// GitLab was linked to the item because its text names the item's key.
+  /// Written once per new link, never for an update to an existing one; `field`
+  /// carries the provider and `newValue` a one-line description.
+  external_link_added
+  /// WARP-3526 (ADR-069 WS-10): a worklog was written — by hand, or by stopping
+  /// a timer. `newValue` is the minutes. A timer START writes no row: a running
+  /// timer is one person's transient state, not a change to the item.
+  ///
+  /// The three time verbs share one `field` encoding: `worklog` when a person
+  /// acts on their own entry, `worklog:<userId>` when an owner or admin acts on
+  /// SOMEBODY ELSE'S (the entry's owner after the colon; `actorId` stays who did
+  /// it). That is what tells "Sam removed 90m" from "Sam removed Mia's 90m".
+  time_logged
+  /// WARP-3526: a worklog's minutes, start or note changed. `oldValue` /
+  /// `newValue` are the minutes before and after.
+  time_log_updated
+  /// WARP-3526: a worklog was deleted. `oldValue` is the minutes it held.
+  time_log_removed
 }
 
 /// WARP-2587 (ADR-045 slice I) — the notification claim on an activity row.
@@ -6314,6 +6718,332 @@ model PmWebhookDelivery {
   @@index([webhookId, createdAt(sort: Desc)])
 }
 
+// ── WARP-3535 (ADR-069 §9): the GitHub / GitLab development panel ────────────
+//
+// The box is not internet-reachable by design, so nothing is pushed to it: it
+// dials the code host on an interval (cron-runtime, every five minutes), asks
+// only for what changed (ETag), and matches work-item keys in branch names,
+// titles, bodies and commit messages. Every dial passes the `work_integrations`
+// off-LAN switch and the pinned SSRF guard (services/pm/pm-dev-egress.ts). The
+// credential is the one the Integrations page already holds
+// (`IntegrationConnection.providerTokensEnc`); nothing here stores a copy.
+
+/// Which code host. Uppercase, like every Work Suite wire enum.
+enum PmExternalProvider {
+  GITHUB
+  GITLAB
+}
+
+/// What a link points at.
+enum PmExternalLinkKind {
+  PULL_REQUEST
+  COMMIT
+  BRANCH
+}
+
+/// How the thing a link points at is doing. A pull request moves through all
+/// four; a commit on the default branch is MERGED; a branch is OPEN while it
+/// exists and CLOSED once it is gone (`PmExternalLink_state_matches_kind`).
+enum PmExternalLinkState {
+  OPEN
+  MERGED
+  CLOSED
+  DRAFT
+}
+
+/// Where ONE repository's sync stands. Explicit, never derived from
+/// `lastSyncedAt` or `lastError` (CLAUDE.md "no guessing"). A condition that
+/// belongs to the whole provider (the egress switch, the credential, the rate
+/// limit) is written to every repository of that provider, so a reader never
+/// has to combine two tables to answer "why is this not syncing".
+///   PENDING          registered, never synced.
+///   OK               the last pass completed, with changes or an all-304 answer.
+///   RATE_LIMITED     the code host asked us to wait; `nextSyncAt` is when.
+///   EGRESS_BLOCKED   the owner's `work_integrations` switch is off.
+///   NEEDS_RECONNECT  the credential is missing or was refused. Retried only
+///                    once the stored credential changes (`credentialSeal`).
+///   INACCESSIBLE     the token can no longer see this repository.
+///   ERROR            a transient failure; retried with backoff.
+///   DISCONNECTED     the integration was disconnected; sync is stopped.
+enum PmDevSyncStatus {
+  PENDING
+  OK
+  RATE_LIMITED
+  EGRESS_BLOCKED
+  NEEDS_RECONNECT
+  INACCESSIBLE
+  ERROR
+  DISCONNECTED
+}
+
+/// A repository an owner or admin chose to sync, plus everything the sweep must
+/// remember about it between ticks. `apiRef` is what the code host's API calls
+/// it in a URL path; the service validates it against the provider profile's
+/// pattern and `PmDevRepository_apiRef_safe` is the floor under that, so a path
+/// is never built from text that could walk out of `/repos/<owner>/<repo>`.
+model PmDevRepository {
+  id                  String             @id @default(uuid())
+  provider            PmExternalProvider
+  /// The host's own id, as text. Stable across a rename or a transfer, which
+  /// `apiRef` and `fullName` are not.
+  externalId          String
+  apiRef              String
+  fullName            String
+  webUrl              String
+  defaultBranch       String?
+  status              PmDevSyncStatus    @default(PENDING)
+  /// The last pass that completed. Audit timestamp pinned to `status` by
+  /// `PmDevRepository_ok_has_sync_time`.
+  lastSyncedAt        DateTime?
+  lastAttemptAt       DateTime?
+  /// The earliest the sweep may look at this repository again: the next tick
+  /// normally, the rate limit's reset or an exponential backoff otherwise.
+  nextSyncAt          DateTime           @default(now())
+  /// A fixed sentence from `DEV_SYNC_ERRORS`, never a response body, a URL or a
+  /// token (the delivery log's rule).
+  lastError           String?
+  consecutiveFailures Int                @default(0)
+  /// Which stored credential `status` refers to: the first 16 hex of the sha256
+  /// of `IntegrationConnection.providerTokensEnc`, which changes whenever the
+  /// owner pastes a new token. A NEEDS_RECONNECT repository is retried only
+  /// when this no longer matches, so a refused token is never re-sent every
+  /// five minutes.
+  credentialSeal      String?
+  /// One ETag per list the sweep polls, each for the FIRST page only: a page
+  /// that did not change is a 304, which the code host does not count against
+  /// the rate limit, and the later pages are fetched only when it did.
+  openPrsEtag         String?
+  recentPrsEtag       String?
+  commitsEtag         String?
+  branchesEtag        String?
+  createdById         String?
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @default(now()) @updatedAt
+
+  projects PmDevRepositoryProject[]
+  links    PmExternalLink[]
+
+  @@unique([provider, externalId])
+  /// The sweep's "what is due" read.
+  @@index([nextSyncAt])
+}
+
+/// Repository → project mapping: the work-item keys of these projects are
+/// looked for in this repository's text. The two optional states are the
+/// per-project automation: "a pull request is opened → move the item to X",
+/// "merged → move it to Y". Null is "no rule".
+model PmDevRepositoryProject {
+  repositoryId    String
+  repository      PmDevRepository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  projectId       String
+  project         PmProject       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  onOpenedStateId String?
+  onOpenedState   PmState?        @relation("PmDevOnOpened", fields: [onOpenedStateId], references: [id], onDelete: SetNull)
+  onMergedStateId String?
+  onMergedState   PmState?        @relation("PmDevOnMerged", fields: [onMergedStateId], references: [id], onDelete: SetNull)
+  createdAt       DateTime        @default(now())
+
+  @@id([repositoryId, projectId])
+  /// WARP-845: an unindexed ON DELETE CASCADE / SET NULL FK makes the parent
+  /// delete a sequential scan of this table.
+  @@index([projectId])
+  @@index([onOpenedStateId])
+  @@index([onMergedStateId])
+}
+
+/// A pull request, commit or branch whose text names a work item's key.
+/// `(provider, kind, externalId, workItemId)` is unique, so a replayed sweep
+/// creates nothing twice. `externalId` is the host's global id for a pull
+/// request (GitHub `id`, GitLab `id` — never the per-project `number`), the full
+/// sha for a commit, and `<repository externalId>:<name>` for a branch, because a
+/// branch name is only unique inside its repository.
+model PmExternalLink {
+  id                String              @id @default(uuid())
+  workItemId        String
+  workItem          PmWorkItem          @relation(fields: [workItemId], references: [id], onDelete: Cascade)
+  repositoryId      String
+  repository        PmDevRepository     @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  provider          PmExternalProvider
+  kind              PmExternalLinkKind
+  externalId        String
+  url               String
+  title             String
+  state             PmExternalLinkState
+  author            String?
+  /// The branch a pull request comes from, the branch's own name, or a
+  /// commit's short sha — what a person looks for when they go to find it.
+  ref               String?
+  /// `#42` / `!42`. Null for a commit or a branch.
+  number            Int?
+  /// When it last changed ON THE CODE HOST — what the panel sorts by. `updatedAt`
+  /// below is this row's own.
+  externalUpdatedAt DateTime
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @default(now()) @updatedAt
+
+  @@unique([provider, kind, externalId, workItemId])
+  /// The drawer's read: this item's links, newest first.
+  @@index([workItemId, externalUpdatedAt(sort: Desc)])
+  /// WARP-845: the ON DELETE CASCADE scan index.
+  @@index([repositoryId])
+}
+/// WARP-3522 — who may see a saved view. PERSONAL is the owner's alone — no role,
+/// not even owner/admin, lists another person's. SHARED is every Projects reader's,
+/// and writable by owner/admin (and the project lead for a project view).
+enum PmViewScope {
+  PERSONAL
+  SHARED
+}
+
+/// WARP-3522 — the layout a saved view opens in. BOARD and LIST exist today;
+/// TABLE (WS-6b), CALENDAR and TIMELINE (WS-7) are accepted now so a view saved
+/// by the API or the assistant does not need a migration when they land, and a
+/// layout the dashboard cannot draw yet opens as the list.
+enum PmViewLayout {
+  BOARD
+  LIST
+  TABLE
+  CALENDAR
+  TIMELINE
+}
+
+/// WARP-3522 — a named, persisted answer to "which work items?" (ADR-069 s8).
+/// `filter` is the filter DSL (packages/shared-types/src/pm-filter.ts),
+/// validated on every write and re-validated on every read — it is data a person
+/// or the assistant typed, never trusted because it came from our own column.
+///
+/// `projectId` null = a cross-project view (the whole workspace, minus archived
+/// projects). `ownerId` is a User.id string, not an FK, like every PM
+/// attribution column: deleting a user must not be able to cascade away a SHARED
+/// view the whole team uses.
+///
+/// `groupBy` / `sortBy` / `columns` are carried now and drawn by WS-6b's table
+/// layout; `columns` is an ordered list of column ids whose vocabulary that
+/// slice owns.
+///
+/// INVARIANTS THE SCHEMA LANGUAGE CANNOT EXPRESS — all in raw migration SQL
+/// (20261004060000_warp_3522_pm_saved_views) and proven against a real Postgres
+/// in `pm-saved-view.pg.test.ts`:
+///   * `PmSavedView_name_length`   — CHECK the trimmed name is 1..60 characters.
+///   * `PmSavedView_filter_is_object` — CHECK `filter` is a JSON object.
+///   * `PmSavedView_name_scope_key` — UNIQUE per (workspace, project-or-none,
+///     scope, owner-if-personal, lower(name)): two shared views cannot both be
+///     called "Overdue", two of one person's personal views cannot, and two
+///     people's personal views can.
+model PmSavedView {
+  id          String       @id @default(uuid())
+  workspaceId String
+  workspace   PmWorkspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  projectId   String?
+  project     PmProject?   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  ownerId     String
+  scope       PmViewScope  @default(PERSONAL)
+  name        String
+  layout      PmViewLayout @default(BOARD)
+  filter      Json
+  groupBy     String?
+  sortBy      Json?
+  columns     Json?
+  sortOrder   Int          @default(0)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @default(now()) @updatedAt
+
+  /// The list endpoint's shape: one workspace, optionally one project, both scopes.
+  @@index([workspaceId, projectId, scope])
+  /// WARP-845 — the ON DELETE CASCADE scan when a project is deleted.
+  @@index([projectId])
+}
+
+/// WARP-3527 (ADR-069 WS-11) — which tracker's export a file is.
+///
+/// UPPERCASE, like PmRelationKind: wire enum, quoted in the dashboard's source
+/// picker and in the migration's partial index. `CSV` is the generic preset
+/// (any spreadsheet); the others carry a column preset (see
+/// `services/pm/import/presets.ts`).
+enum PmImportSource {
+  CSV
+  JIRA_CSV
+  ASANA_CSV
+  TRELLO_JSON
+  LINEAR_CSV
+  GITHUB_CSV
+}
+
+/// WARP-3527 — lifecycle of one import. An explicit enum, never derived from
+/// `finishedAt IS NULL` (CLAUDE.md "No guessing").
+///
+///   PREVIEWED ──run──► PENDING ──claim──► RUNNING ──► SUCCEEDED
+///        │                │                  │   └──► FAILED ──run (resume)──► PENDING
+///        └────────────────┴──────cancel──────┴──────► CANCELLED
+///
+/// PREVIEWED: the file is uploaded and parsed, the owner is looking at the
+/// mapping. PENDING: the owner pressed Run and no runner has claimed it yet
+/// (the `setImmediate` kick, or the cron tick if the process died between the
+/// two). RUNNING: a runner holds it and heartbeats. FAILED keeps the file so a
+/// resume picks up at `stats.cursor`.
+///
+enum PmImportJobStatus {
+  PENDING
+  PREVIEWED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
+/// INVARIANTS the schema language cannot express (migration SQL, proven by
+/// `pm-import-export.pg.test.ts`):
+///   * `PmImportJob_projectId_active_key` — UNIQUE ("projectId") WHERE status IN
+///     ('PENDING','RUNNING'). One import at a time per project, so two runs can
+///     never race the same sequence counter or each other's parent links.
+///   * `PmImportJob_finished_matches_status` — `finishedAt` is set exactly when
+///     the status is terminal (SUCCEEDED | FAILED | CANCELLED).
+model PmImportJob {
+  id          String            @id @default(uuid())
+  projectId   String
+  project     PmProject         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  source      PmImportSource
+  status      PmImportJobStatus @default(PREVIEWED)
+  /// The uploaded file's display name, for the summary. Never a path.
+  fileName    String
+  fileBytes   Int
+  /// sha256 of the upload. Namespaces the synthetic external id of a row that
+  /// carries no id column, so re-importing the SAME file is still idempotent.
+  fileSha256  String
+  /// The owner's choices (column bindings, status/priority/people overrides,
+  /// options). The auto-suggestions are NOT stored — they depend on the
+  /// project's states and users as they are when the job runs.
+  mapping     Json              @default("{}")
+  /// Progress while running, the summary once finished: counts, per-reason
+  /// skips, the first issues, unknown assignees, `cursor` for resume.
+  stats       Json              @default("{}")
+  error       String?
+  /// A User.id string, not an FK — the PM attribution convention.
+  createdById String
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @default(now()) @updatedAt
+  startedAt   DateTime?
+  /// Last proof of life from the runner; a RUNNING job whose heartbeat is
+  /// stale is presumed dead (process restart) and failed by the sweep.
+  heartbeatAt DateTime?
+  finishedAt  DateTime?
+  file        PmImportJobFile?
+
+  @@index([projectId, createdAt(sort: Desc)])
+  @@index([status, updatedAt])
+}
+
+/// WARP-3527 — the uploaded bytes, kept ONLY while the job can still use them
+/// (previewing, running, or failed-and-resumable). A separate 1:1 table so no
+/// status poll or job list ever drags a 10 MB blob over the wire by accident.
+/// Deleted when the job reaches SUCCEEDED / CANCELLED, and by the sweep for
+/// abandoned previews.
+model PmImportJobFile {
+  jobId String      @id
+  job   PmImportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  bytes Bytes
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Service desk (ADR-069, WARP-3528)
 //
@@ -6452,6 +7182,9 @@ model PmTicket {
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
 
+  /// WARP-3529 — the emails this ticket is made of.
+  emailLinks PmTicketEmailLink[]
+
   /// "Other tickets from this requester".
   @@index([requesterContactId])
   @@index([requesterUserId])
@@ -6459,6 +7192,205 @@ model PmTicket {
   @@index([companyId])
   /// The "solved recently" queue.
   @@index([solvedAt])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Service desk email channel (ADR-069 §4, WARP-3529)
+//
+// A desk binds one existing `EmailAccount`; the sync the box already runs is the
+// intake and the account's own send path is the delivery. Every enum below is
+// UPPERCASE like the rest of the desk's, and every state is a column a service
+// writes on purpose — nothing is derived from a NULL.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// What a channel is. One value today; the column is the seam for the channels
+/// ADR-069 §4 reserves (it ships no public web form).
+enum PmSupportChannelKind {
+  EMAIL
+}
+
+/// Whether a message of a ticket's email conversation came in or went out.
+enum PmEmailDirection {
+  INBOUND
+  OUTBOUND
+}
+
+/// See `PmComment.deliveryStatus`.
+enum PmDeliveryStatus {
+  NONE
+  PENDING
+  SENT
+  FAILED
+}
+
+/// Why a reply was not delivered. A closed list, never the mail server's own
+/// words (which can name hosts and addresses): the detail stays on the
+/// `EmailDraft` row for an administrator.
+enum PmDeliveryFailure {
+  /// The `outbound_email` off-LAN channel is off (ADR-012).
+  OUTBOUND_BLOCKED
+  /// The Email module is off, or not set up on this box, so nothing would send it.
+  EMAIL_UNAVAILABLE
+  /// The customer has no email address on record.
+  NO_RECIPIENT
+  /// The mail service tried to send it and failed.
+  SEND_FAILED
+}
+
+/// See `PmState.onCustomerReply`.
+enum PmCustomerReplyEffect {
+  /// The message is added and the status stays.
+  NONE
+  /// The ticket returns to the desk's working status. From a completed status
+  /// that is a reopen, allowed for `PmSupportChannel.reopenWindowDays` after it
+  /// was solved; after that the message opens a follow-up instead.
+  REOPEN
+  /// The ticket is final: the message opens a new ticket linked to it.
+  FOLLOW_UP
+}
+
+/// See `EmailMessage.deskIntakeStatus`.
+enum PmEmailIntakeStatus {
+  PENDING
+  DONE
+  IGNORED
+  FAILED
+}
+
+/// Why the desk did not turn a message into (part of) a ticket. The first eight
+/// are IGNORED — the loop-protection rules and two of their kin — and the last
+/// two are FAILED. A CHECK keeps each status to its own reasons.
+enum PmEmailIntakeReason {
+  /// `Auto-Submitted` was anything but `no` (RFC 3834).
+  AUTO_SUBMITTED
+  /// `Precedence: bulk | junk | list | auto_reply`.
+  PRECEDENCE_BULK
+  /// `X-Autoreply` or `X-Autorespond` was present.
+  AUTO_REPLY_HEADER
+  /// A delivery-status report, a null `Return-Path`, or a mailer-daemon sender.
+  BOUNCE
+  /// Sent from the address of a mailbox this box operates — its own outbound.
+  OWN_ADDRESS
+  /// The message is one this desk sent (its Message-ID is a stored outbound one).
+  OWN_MESSAGE
+  /// More than 20 messages in an hour from one sender.
+  RATE_LIMITED
+  /// The desk was archived when the message reached the front of the queue.
+  DESK_ARCHIVED
+  /// The desk raised an error on every attempt (see the log).
+  PROCESSING_ERROR
+  /// The channel's contact owner is no longer an active member, so no contact
+  /// could be created for a stranger. Fixed by choosing another owner.
+  CONTACT_OWNER_UNAVAILABLE
+}
+
+/// A desk's email front door: one mailbox, bound to one desk.
+///
+/// 🔴 `contactOwnerUserId` is explicit and NOT NULL. A `Contact` is owner-scoped
+/// (`Contact.userId`), so every stranger the intake turns into a contact has to
+/// be somebody's, chosen on purpose by an owner or admin when the channel is
+/// bound — the desk lead by default. It is a plain `User.id` like every PM
+/// reference to a person.
+///
+/// 🔴 `enabledAt` is the intake's floor: mail received before it is never made
+/// into a ticket (connecting a mailbox imports thirty days of history, and a box
+/// that answered all of it the moment somebody bound a desk would email a month
+/// of strangers). The service resets it each time `enabled` goes false -> true.
+///
+/// INVARIANTS THE SCHEMA LANGUAGE CANNOT EXPRESS, in raw migration SQL
+/// (20261004130000_warp_3529_service_desk_email) and proven in
+/// `support-email.pg.test.ts`:
+///   * `PmSupportChannel_reopen_window_range` — 0..365 days.
+///   * `pmsupportchannel_project_is_service_desk` — trigger: a channel only ever
+///     hangs off a SERVICE_DESK project.
+model PmSupportChannel {
+  id        String               @id @default(uuid())
+  projectId String
+  project   PmProject            @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  kind      PmSupportChannelKind @default(EMAIL)
+
+  /// One mailbox serves one desk. Cascade: a channel is meaningless without its
+  /// mailbox (disconnecting one is already a warned, cascading act).
+  emailAccountId String       @unique
+  emailAccount   EmailAccount @relation(fields: [emailAccountId], references: [id], onDelete: Cascade)
+
+  enabled   Boolean  @default(true)
+  enabledAt DateTime @default(now())
+
+  contactOwnerUserId String
+
+  /// Off by default: an acknowledgement is mail to a stranger.
+  autoAckEnabled  Boolean @default(false)
+  /// Plain text with `{{requester.firstName}}`, `{{ticket.key}}`,
+  /// `{{ticket.title}}` and `{{desk.name}}` — validated when saved (a name
+  /// outside that list is refused) and escaped when rendered.
+  autoAckTemplate String
+
+  /// How long after a ticket was solved a customer's reply reopens it rather
+  /// than opening a follow-up.
+  reopenWindowDays Int @default(14)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  /// One email channel per desk: with two mailboxes there would be no rule for
+  /// which one answers a ticket nobody emailed in, and a rule nobody wrote down
+  /// is a guess.
+  @@unique([projectId, kind])
+}
+
+/// One email of a ticket's conversation — the way a later message finds its
+/// ticket, and the way the conversation finds the files an email carried.
+///
+/// One row per message, in either direction:
+///   * INBOUND — a stored `EmailMessage` the desk took in (`emailMessageId`).
+///   * OUTBOUND — an email the desk sent or tried to send (`emailDraftId`):
+///     `messageIdHeader` is the id the orchestrator chose, known before it left,
+///     which is what makes a reply to a conversation the desk started matchable
+///     by header. A retry is a NEW row; the failed attempt's id stays findable,
+///     because the failure may have been the mail service's report and not the
+///     mail's.
+/// `emailThreadId` is the stored thread the message belongs to, once there is
+/// one (an outbound-first conversation has none until the customer answers). It
+/// is not unique: a thread holds many messages, and after a follow-up it belongs
+/// to the newer of two tickets.
+///
+/// `workItemId` references the TICKET row, not the work item: a link can only
+/// exist for a ticket, which is only ever in a SERVICE_DESK project.
+///
+/// INVARIANT in raw migration SQL: `PmTicketEmailLink_direction_matches_ref` — an
+/// inbound row never names a draft and an outbound row never names a message.
+model PmTicketEmailLink {
+  id         String   @id @default(uuid())
+  workItemId String
+  ticket     PmTicket @relation(fields: [workItemId], references: [workItemId], onDelete: Cascade)
+
+  direction PmEmailDirection
+  /// The RFC 5322 Message-ID of this email, no brackets.
+  messageIdHeader String
+
+  emailThreadId  String?
+  emailThread    EmailThread?  @relation(fields: [emailThreadId], references: [id], onDelete: SetNull)
+  emailMessageId String?       @unique
+  emailMessage   EmailMessage? @relation(fields: [emailMessageId], references: [id], onDelete: SetNull)
+  emailDraftId   String?       @unique
+  emailDraft     EmailDraft?   @relation(fields: [emailDraftId], references: [id], onDelete: SetNull)
+
+  /// The comment this email is: a customer's reply, a staff reply, or the
+  /// automatic acknowledgement. NULL for the message a ticket was opened from
+  /// (its body is the ticket's description).
+  commentId String?
+  comment   PmComment? @relation(fields: [commentId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+
+  @@unique([workItemId, messageIdHeader])
+  /// Header matching: "which ticket has this Message-ID".
+  @@index([messageIdHeader])
+  /// "The thread's current ticket" is its newest link.
+  @@index([emailThreadId, createdAt])
+  @@index([workItemId, createdAt])
+  @@index([commentId])
 }
 
 /// KAN-6 — internal, operator-invisible one-shot markers for data migrations

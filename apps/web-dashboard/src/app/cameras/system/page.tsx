@@ -1,12 +1,14 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import useSWR from "swr";
 import {
   Activity,
   AlertTriangle,
   ArrowLeft,
+  Bell,
   Cpu,
   HardDrive,
   Loader2,
@@ -20,8 +22,13 @@ import { fetchCameraSystemStatus, fetchCameraStorage, restartFrigate } from "@/l
 import type { CameraStorageSummary } from "@/lib/types";
 import { confirmCameraCommand } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+// WARP-3511: one byte formatter for every camera surface, so a camera's usage
+// reads the same on its tile, its rail and here. (Binary maths, binary labels —
+// the WARP-1960 rule this page used to carry as its own local function.)
+import { formatStorageBytes as fmtBytes } from "@/lib/camera-recording";
 import type { CameraSystemStatus } from "@/lib/types";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { RecordingStorageCard } from "@/components/cameras/RecordingStorageCard";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { Card, Kpi, Meter } from "@/components/shell/primitives";
 
@@ -62,6 +69,8 @@ export default function CameraSystemPage() {
   // The restart route is owner-only; nobody else sees the card.
   const { user } = useAuth();
   const isOwner = user?.role === "owner";
+  // WARP-3511: a camera's settings are owner/admin.
+  const canManage = user?.role === "owner" || user?.role === "admin";
   const [restarting, setRestarting] = useState(false);
   const [restartMsg, setRestartMsg] = useState<string | null>(null);
   // WARP-291: holds the tier-2 confirmation token + reason between the
@@ -151,6 +160,10 @@ export default function CameraSystemPage() {
         <ArrowLeft size={15} />
         Cameras
       </button>
+      <Link href="/cameras/notifications" className="btn ghost">
+        <Bell size={15} />
+        Notifications
+      </Link>
       <button
         onClick={() => mutate()}
         disabled={isLoading}
@@ -380,6 +393,19 @@ export default function CameraSystemPage() {
             </p>
           </Card>
 
+        </>
+      )}
+
+      {/* WARP-3515 — where recordings are kept, and the two choices that are the
+          owner's (auto-sized vs whole drive, which drive). It reads the
+          ORCHESTRATOR's allocation, not the camera engine's status, so it sits
+          outside the `data` gate above and below: a missing recording drive is
+          exactly when the engine is likely to be unreachable too. It sits with
+          the other storage cards, ahead of the volumes it sits on. */}
+      <RecordingStorageCard style={{ marginBottom: 16 }} />
+
+      {data && (
+        <>
           {/* Storage table */}
           {data.storage.length > 0 && (
             <Card title="Storage" className="span2" style={{ marginBottom: 16 }}>
@@ -414,6 +440,43 @@ export default function CameraSystemPage() {
             className="span2"
             style={{ marginBottom: 16 }}
           >
+            {/* WARP-1963 — footage on the wrong disk.
+                Louder than near-full on purpose: a full drive shortens
+                retention, but this means the dedicated recordings drive
+                is doing nothing at all while the system disk fills. It
+                is the exact silent failure that left this box's 1.8 TB
+                array empty for a month.
+
+                WARP-3515 — lifted OUT of the "cameras are present" branch
+                below. Inside it, a box with no cameras (where footage lands
+                on the boot disk by default and nobody is watching) never saw
+                the warning at all. Gated on a successful read: while usage is
+                unavailable (`storageError`) we do not know, and an outage must
+                not be reported as a finding. Error text is --danger-ink, the
+                AA-clearing red for text in both themes. */}
+            {!storageError && storage?.recordingsOnBootDisk === true && (
+              <div
+                data-testid="boot-disk-warning"
+                role="alert"
+                style={{
+                  display: "flex",
+                  gap: 8,
+                  alignItems: "flex-start",
+                  marginBottom: 12,
+                  color: "var(--danger-ink)",
+                  fontSize: 12,
+                }}
+              >
+                <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+                <span>
+                  <strong>Recordings are being written to the system disk.</strong>{" "}
+                  The dedicated recordings drive isn&apos;t mounted, so footage
+                  is filling the same disk the appliance runs on and you have
+                  far less room than you think. Check that the recordings
+                  volume is mounted, then restart the camera service.
+                </span>
+              </div>
+            )}
             {storageError ? (
               <p style={{ fontSize: 12, color: "var(--text-muted)" }}>
                 Storage usage is unavailable right now, so this list may be
@@ -428,34 +491,6 @@ export default function CameraSystemPage() {
               </p>
             ) : (
               <>
-                {/* WARP-1963 — footage on the wrong disk.
-                    Louder than near-full on purpose: a full drive shortens
-                    retention, but this means the dedicated recordings drive
-                    is doing nothing at all while the system disk fills. It
-                    is the exact silent failure that left this box's 1.8 TB
-                    array empty for a month. */}
-                {storage.recordingsOnBootDisk === true && (
-                  <div
-                    data-testid="boot-disk-warning"
-                    style={{
-                      display: "flex",
-                      gap: 8,
-                      alignItems: "flex-start",
-                      marginBottom: 12,
-                      color: "#ef4444",
-                      fontSize: 12,
-                    }}
-                  >
-                    <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1 }} />
-                    <span>
-                      <strong>Recordings are being written to the system disk.</strong>{" "}
-                      The dedicated recordings drive isn&apos;t mounted, so footage
-                      is filling the same disk the appliance runs on and you have
-                      far less room than you think. Check that the recordings
-                      volume is mounted, then restart the camera service.
-                    </span>
-                  </div>
-                )}
                 {storage.nearFull && (
                   <div
                     style={{
@@ -533,7 +568,29 @@ export default function CameraSystemPage() {
                   {storage.cameras.map((c) => (
                     <li key={c.camera} style={{ display: "flex", flexDirection: "column", gap: 5 }}>
                       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-                        <span className="nm" style={{ minWidth: 0 }}>{c.camera}</span>
+                        {/* WARP-3511: from "what is using my disk" straight to
+                            that camera's footage, and to its settings where
+                            retention is set. */}
+                        <span className="nm" style={{ minWidth: 0 }}>
+                          <Link
+                            href={`/cameras/${encodeURIComponent(c.camera)}/recordings`}
+                            className="hover:underline underline-offset-2"
+                          >
+                            {c.camera}
+                          </Link>
+                          {canManage && (
+                            <>
+                              {" · "}
+                              <Link
+                                href={`/cameras/${encodeURIComponent(c.camera)}/settings`}
+                                className="hover:underline underline-offset-2"
+                                style={{ color: "var(--text-muted)" }}
+                              >
+                                Settings
+                              </Link>
+                            </>
+                          )}
+                        </span>
                         <span className="rmeta mono">
                           {/* null ≠ 0: say we don't know, don't imply empty. */}
                           {c.usedBytes === null ? "not recorded yet" : fmtBytes(c.usedBytes)}
@@ -641,27 +698,6 @@ export default function CameraSystemPage() {
 }
 
 // --- helpers ---
-
-/**
- * Binary maths with binary labels.
- *
- * This divided by 1024 while labelling the result "KB"/"MB"/"GB" — SI
- * names for binary quantities, so every drive figure on this page read
- * ~2.4% low against the label it carried (WARP-1960). Frigate reports MiB
- * and the array is sized in TiB, so binary is the right base; the labels
- * are what were wrong.
- */
-function fmtBytes(b: number): string {
-  if (!Number.isFinite(b) || b < 0) return "—";
-  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
-  let v = b;
-  let i = 0;
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024;
-    i++;
-  }
-  return `${v.toFixed(v >= 100 ? 0 : v >= 10 ? 1 : 2)} ${units[i]}`;
-}
 
 function fmtUptime(sec: number): string {
   if (!Number.isFinite(sec) || sec <= 0) return "—";

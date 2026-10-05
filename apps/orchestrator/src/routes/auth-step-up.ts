@@ -24,7 +24,7 @@
  * sensitive action. An owner without their authenticator signs in again with
  * a recovery code, which stamps `lastMfaAt` too, then re-enrols TOTP.
  */
-import { Router } from "express";
+import { Router, type Request, type Response } from "express";
 import type { PrismaClient } from "@prisma/client";
 import { z } from "zod";
 import { authRateLimit } from "../middleware/rate-limit.js";
@@ -34,6 +34,8 @@ import { verifyPassword } from "../services/password.service.js";
 import { checkLoginSecondFactor } from "../services/login-second-factor.service.js";
 import { throttledCredentialCheck } from "../services/throttled-credential-check.js";
 import { recordActivity } from "../services/activity.singleton.js";
+import { isBrowserRequest } from "../lib/browser-context.js";
+import { listUserSessions, revokeAllSessions, idleLimitSecondsForRole, absoluteLimitSecondsForRole } from "../services/session.service.js";
 
 const bodySchema = z
   .object({
@@ -46,6 +48,57 @@ const INVALID = { error: "Wrong password or code", code: "STEP_UP_INVALID" } as 
 
 export function createStepUpRouter(prisma: PrismaClient): Router {
   const router = Router();
+
+  // Self-service uses ONLY the confirmed bearer identity. The operator's
+  // box-wide /auth/sessions contract is unchanged, and no sid is exposed.
+  const confirmedSession = (req: Request, res: Response) => {
+    const me = req.user;
+    if (!me || me.role === "service" || !me.sid || req.sessionChecked !== true) {
+      res.status(401).json({ error: "Sign in again", code: "SESSION_REQUIRED" });
+      return null;
+    }
+    return me;
+  };
+  router.get("/auth/security", authRateLimit, async (req, res, next) => {
+    const me = confirmedSession(req, res);
+    if (!me) return;
+    try {
+      const factor = await prisma.totpCredential.findUnique({ where: { userId: me.id }, select: { confirmedAt: true } });
+      res.set("Cache-Control", "no-store").json({ totpEnabled: Boolean(factor?.confirmedAt) });
+    } catch (err) { next(err); }
+  });
+  router.get("/auth/sessions/mine", authRateLimit, async (req, res, next) => {
+    const me = confirmedSession(req, res);
+    if (!me) return;
+    try {
+      const sessions = await listUserSessions(me.id);
+      res.set("Cache-Control", "no-store");
+      if (sessions === null) {
+        res.status(503).json({ error: "Your sessions could not be read. Try again.", code: "SESSIONS_UNAVAILABLE" });
+        return;
+      }
+      res.json({ sessions: sessions.map((sn) => ({
+        role: sn.role, createdAt: sn.createdAt, lastSeenAt: sn.lastSeenAt,
+        idleDeadline: sn.lastSeenAt + idleLimitSecondsForRole(sn.role),
+        absoluteDeadline: sn.createdAt + absoluteLimitSecondsForRole(sn.role),
+      })) });
+    } catch (err) { next(err); }
+  });
+  router.post("/auth/sessions/revoke-others", authRateLimit, async (req, res, next) => {
+    const me = confirmedSession(req, res);
+    if (!me) return;
+    // No caller-selected identity/session exception: only this checked sid survives.
+    if (!z.object({}).strict().safeParse(req.body ?? {}).success) {
+      res.status(400).json({ error: "No identity or session fields are allowed", code: "INVALID_REQUEST" });
+      return;
+    }
+    try {
+      const revoked = await revokeAllSessions(me.id, { exceptSid: me.sid });
+      await recordActivity({ kind: "auth", severity: "ok", sourceIcon: "shield-check", what: "Other sessions revoked",
+        sub: `${revoked} session(s)`, refs: { outcome: "sessions_revoked", reason: "self_service", userId: me.id, revoked }, actor: { type: "user", id: me.id } });
+      res.set("Cache-Control", "no-store").json({ revoked });
+    } catch (err) { next(err); }
+  });
 
   // authRateLimit (20/min/IP), like every other credential check
   // (/auth/login, /auth/change-password, /auth/totp/verify): the per-user
@@ -149,7 +202,8 @@ export function createStepUpRouter(prisma: PrismaClient): Router {
         sid: me.sid,
         accessRoleId: row.accessRoleId ?? null,
       });
-      res.cookie(SESSION_COOKIE_NAME, accessToken, {
+      const wantBody = (req.query.return === "body" || req.query.return === "body=1") && !isBrowserRequest(req.headers);
+      if (!wantBody) res.cookie(SESSION_COOKIE_NAME, accessToken, {
         httpOnly: true,
         secure: req.secure || req.headers["x-forwarded-proto"] === "https",
         sameSite: "lax",
@@ -157,7 +211,11 @@ export function createStepUpRouter(prisma: PrismaClient): Router {
         maxAge: ACCESS_TOKEN_TTL_SECONDS * 1000,
       });
       await audit("success");
-      res.json({ ok: true, lastMfaAt });
+      res.set("Cache-Control", "no-store").json({ ok: true, lastMfaAt, ...(wantBody ? {
+        accessToken,
+        accessTokenExpiresAt: Math.floor(Date.now() / 1000) + ACCESS_TOKEN_TTL_SECONDS,
+        user: { id: me.id, username: me.username, displayName: me.displayName, role: (row.role as Role | null) ?? me.role },
+      } : {}) });
     } catch (err) {
       next(err);
     }

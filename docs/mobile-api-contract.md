@@ -366,18 +366,24 @@ To GENERATE a code, the dashboard (already authenticated) POSTs
 
 | Method | Path | Auth | Returns / body |
 |---|---|---|---|
-| GET | `/cameras` | Bearer | `{ cameras }`, the cameras this person may see; `{ cameras: [], _status: "disconnected" }` when the camera service is down (that is not "no cameras") |
-| GET | `/cameras/:name` | Bearer | full `CameraInfo` |
+| GET | `/cameras` | Bearer | `{ cameras }`, the cameras this person may see; `{ cameras: [], _status: "disconnected" }` when the camera service is down (that is not "no cameras"). When the camera service could not be read the list carries `degraded: true` and the `X-Droplet-Degraded: frigate-unavailable` header, and every `status` is unknown rather than "offline" (see "Recording state" below) |
+| GET | `/cameras/:name` | Bearer | full `CameraInfo` plus `recentEvents`; `X-Droplet-Degraded` as above |
 | GET | `/cameras/:name/snapshot` | Bearer | current JPEG frame |
 | GET | `/cameras/:name/live` | Bearer | MJPEG stream (`multipart/x-mixed-replace`, `Cache-Control: no-store`) |
 | GET | `/cameras/:name/events` | Bearer | events for one camera |
-| GET | `/cameras/events?limit=` | Bearer | recent events, newest first |
+| GET | `/cameras/events?limit=&businessHours=outside` | Bearer | `{ events, nextCursor, scanLimitReached }`, newest first; items include `outsideBusinessHours: boolean \| null` |
+| GET | `/cameras/reviews?severity=alert&businessHours=outside` | Bearer | `{ reviews, nextCursor, scanLimitReached }`; items include `outsideBusinessHours: boolean \| null` |
+| GET | `/cameras/motion?cameras=&after=&before=&businessHours=&limit=&cursor=` | Bearer (owner, admin, family) | `{ activity, nextCursor, scanLimitReached: false, coverage }`; motion in retained recordings, with per-camera scope |
+| GET | `/cameras/business-hours` | Bearer (owner, admin, family) | `{ configured, timezone, days }`; unset defaults below |
+| PUT | `/cameras/business-hours` | Bearer (owner, admin; cameras manage access) | same complete schedule body and response; invalid schedule → 400 |
 | GET | `/cameras/events/:eventId/thumbnail` | Bearer (owner, admin, family) | image bytes: Frigate's own `Content-Type` (`image/jpeg` when it sends none), `Cache-Control: private, no-store`. `:eventId` is a Frigate event id, `^[a-zA-Z0-9._-]{1,128}$`; errors below the table |
 | GET | `/cameras/events/:eventId/snapshot` | Bearer | event JPEG |
-| GET | `/cameras/reviews/:reviewId/thumbnail` | Bearer | review item image bytes |
+| GET | `/cameras/reviews/:reviewId/thumbnail` | Bearer | review item image bytes: `Content-Type: image/webp` (`image/jpeg` on an older Frigate), `Cache-Control: private, no-store`. 404 `{ "error": "review_not_found" }` or `{ "error": "thumbnail_not_found" }` when Frigate has no such review or no file for it (an in-progress review may not have one yet; key on the status). 503 `{ "error": "frigate_unavailable" }` with `X-Droplet-Degraded: frigate-unavailable` when Frigate is unreachable or answers with an error |
+| GET | `/cameras/reviews/:reviewId/preview` | Bearer | MP4 preview; preserves `Range`, 206, 416, `Content-Range`, `Accept-Ranges`, `Content-Length`. Missing preview → 404 `preview_not_found`; unavailable service → 503 `frigate_unavailable` |
 | GET | `/cameras/events/sse` | Bearer | SSE stream of camera events (`data: {json}`; `: heartbeat` every 30 s; first frame `{ "type": "connected" }`) |
 | GET | `/cameras/clips?camera=&limit=` | Bearer | `{ clips: [{ id, camera, label, score, start_time, end_time, thumbnail_url, clip_url }] }` (`limit` default 50, max 200; only events that have a clip) |
-| GET | `/cameras/clips/event/:eventId` | Bearer | mp4 bytes |
+| GET | `/cameras/clips/event/:eventId` | Bearer | mp4 bytes: Frigate's `clip.mp4`, a **fragmented** mp4 streamed as it is made (no duration in its header, its index at the end, no `Content-Length`, `Range` ignored). Fine to save as a file (`?download=1`, owner and admin); a player cannot read its length or seek in it, so play an event with the route below |
+| GET | `/cameras/events/:eventId/playback.m3u8` | Bearer (owner, admin, family) | HLS playlist of the same footage, the way `/cameras/:name/playback.m3u8` serves a recording: segments and the fMP4 init map point at `/cameras/:name/playback.segment` and carry the same short-lived signature (WARP-3122). The box picks the window: the event's start and end plus the pre/post-capture padding (20 s each by default), up to now for an event still in progress, at most an hour. Request it again for an event in progress to reach further. 404 `{ "error": "event_not_found" }` or `{ "error": "no_recordings_in_range" }`; 503 `{ "error": "frigate_unavailable" }` with `X-Droplet-Degraded: frigate-unavailable` when Frigate cannot be asked |
 | POST | `/cameras/clips/share` | Bearer (custody roles) | share a clip |
 | GET | `/cameras/groups` | Bearer | `[{ id, name, members }]` |
 | GET | `/cameras/pins` | Bearer | `[{ cameraName, sortOrder }]` |
@@ -390,6 +396,77 @@ header; the stream is per-connection and never cached) and stills come from
 `snapshot`. Camera routes are scoped per person: a client only sees the cameras
 it is granted. A save or download asked by a role that is not owner or admin
 answers `403 { code: "CAMERA_CUSTODY_REQUIRED" }`.
+
+**Business hours.** The complete schedule has `configured: boolean`, an IANA
+`timezone` string and `days` with exactly `monday` through `sunday`. Each day is
+`null` for closed, or `{ open: "09:00", close: "17:00" }`. Opening accepts
+`00:00`–`23:59`; closing also accepts `24:00`. Equal times are invalid. A close
+earlier than its open ends on the following day. `00:00`–`24:00` is all day.
+The unset response is `configured: false`, `timezone: "UTC"`, all days `null`;
+clients should ask for the user's timezone when first configuring the schedule.
+
+`outsideBusinessHours: null` means the schedule is unset, not that activity was
+within business hours. Otherwise the server classifies the whole `[startTime,
+endTime)` activity span against the saved timezone, including overnight windows
+and daylight saving changes; active items extend to now. The business-hours
+filter accepts exactly `outside` or `inside` on events, reviews and semantic
+event search. Event/review filtering scans upstream before paging. On
+`scanLimitReached: true`, follow `nextCursor` even if the current page is empty;
+do not present an empty bounded scan as an exhaustive absence of activity.
+Semantic search reports `searchLimitReached` for its bounded candidate set and
+returns `nextCursor: null`; narrow the query or filters for more precise coverage.
+
+**Retained motion.** Motion activity is independent of object reviews; Frigate
+0.17.1 only has `alert` and `detection` review severities. `/cameras/motion` reads
+raw per-recording positive motion counts and merges contiguous segments.
+`activity` items contain `{ id, camera, startTime, endTime, motion,
+outsideBusinessHours, playbackUrl }`; `motion` is a count, not a percentage.
+The default range is the last 24 hours and the maximum is 26 hours, allowing a
+day with a daylight saving transition. `limit` defaults to 50 and allows 1–200.
+Keep both original time bounds fixed between pages and pass `nextCursor` as the
+separate `cursor` query parameter. Equal-time windows stay together, so a page
+can contain more than `limit` items. Invalid ranges or parameters return 400.
+
+`coverage` is `{ after, before, partial, cameras: [{ camera, recordedSeconds,
+hasGaps, available }] }`, containing only cameras the person can see. A failed
+camera read has `available: false`, `recordedSeconds: null`, `hasGaps: true` and
+sets `partial: true`; an empty successful read has zero retained seconds and
+gaps. A successful, completely covered quiet window has no gaps. Do not label
+an empty page as proof of no movement outside the retained footage and selected
+range. These bounded motion queries classify and filter the full activity
+spans before pagination.
+
+**Review media.** The thumbnail proxy validates the review's own
+`/media/frigate/clips/review/thumb-<camera>-<reviewId>.webp` path. The preview
+proxy uses Frigate's `/api/review/:reviewId/preview?format=mp4` endpoint. Clips,
+previews and recording playback keep authenticated per-camera access checks.
+Clients can fall back from unavailable MP4 media to
+`/cameras/:name/playback.m3u8?after=<startTime>&before=<endTime>` for the same
+activity window, then display an unavailable message if recordings have expired.
+
+**Recording state (`CameraInfo.recording`, WARP-3511).** Every camera carries what
+it is keeping, from the same camera-service reading as `status`, so the two cannot
+disagree about whether anything is being saved. `null` always means "not known",
+never zero.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `mode` | `continuous`, `motion`, `events`, `off`, or `null` | Named for the broadest open retention window: `continuous` keeps everything, `motion` keeps segments with motion, `events` keeps only footage that overlaps an alert or detection, `off` keeps nothing. `null` only when `degraded` |
+| `retentionDays` | `{ continuous, motion, alerts, detections }` or `null` | Days each window keeps footage, as configured (0 closes a window). Present even when `mode` is `off`. `null` only when `degraded` |
+| `lastSegmentAt` | ISO string or `null` | When the newest saved segment ended, from a short recent window. `null` means unread or none was found there; check `lastSegmentReadFailed` before claiming no recent footage |
+| `lastSegmentReadFailed` | optional boolean | `true` when the recent-segment read failed. Show "Last save unavailable", never "Nothing saved recently"; this does not invalidate the mode and retention readings |
+| `usedBytes` | number or `null` | Bytes of footage on disk. `null` means none yet, or not known, and is never 0 |
+| `bytesPerDay` | number or `null` | The measured write rate scaled to a day. `null` means not measured yet |
+| `degraded` | boolean | The camera service could not be read. Every other field, and `status`, is unknown: show "service unavailable", never a recording or "not saving" claim |
+
+A degraded list is not cached, so it heals on the next poll. `GET` and `PATCH
+/cameras/:name/settings` answer `503 { error: "frigate_unavailable", degraded: true }`
+with the same header (an empty settings form served as 200 would be saved back over
+the real configuration), and `GET /cameras/:name/ptz` answers
+`{ supported: false, ... }`, adding `degraded: true` only when the camera service is
+unreachable. A camera with no PTZ is a normal answer, not an error. Retention
+windows and detection FPS have one set of limits for the service and the clients
+(`@droplet/shared-types`: detection FPS 1 to 30, every retention window 0 to 90 days).
 
 **Event still (`GET /cameras/events/:eventId/thumbnail`).** `:eventId` is a
 Frigate event id, and `thumbnail_url` on `/cameras/clips` points here. Its errors
@@ -995,6 +1072,57 @@ Differences that are not contract issues: iOS handles the 404 in both shapes (th
 `"Run not found"` sentence and the `not_found` slug) while Android keys 404 on status,
 and Android's `parkedCallMayHaveRun` (the `unknownOutcome` re-park case) is Android
 copy that the iOS card may not carry.
+
+### Recording storage — dashboard consumption (WARP-3515)
+
+> **Dashboard only.** The native clients do not consume these routes. The endpoint
+> specification is ADR-070 (`docs/ADR-070-camera-recording-storage.md`) and the
+> WARP-3514 / WARP-3513 PRs; this note records only what the web dashboard
+> *relies on*, so a change to any of it is visible to whoever reads this file.
+
+What the dashboard calls: `GET`/`PUT /api/storage/recordings`,
+`POST /api/storage/recordings/old-footage/delete`,
+`POST /api/storage/drives/:id/recovery-key/reveal`,
+`POST /api/storage/drives/:id/recovery-key/regenerate`, and the extended drive object
+(`encryption`, `preparation`, `usage`, `isSystemDisk`) on `GET /api/storage/drives`.
+`:id` is the drive's filesystem UUID, as on every other `/storage/drives/:uuid/*` route.
+
+- **Tier handshake.** Every write answers `202` with a single-use token
+  (`status: "confirmation_required"`, `confirmationToken`, `service`, `resourceId`). The
+  dashboard has already collected the owner's consent in a dialog (a click for tier 2, a
+  typed phrase for tier 3) and completes the handshake itself with
+  `POST /api/storage/command/confirm {confirmationToken, service, resourceId}`. The
+  one-time recovery key arrives on that confirm (`{ recoveryKey }`); a reveal that answers
+  `200 { recoveryKey }` directly is accepted too. The reveal is never retried and never
+  cached.
+- **Absence is not an error.** `404` on `GET /api/storage/recordings` → "not available on
+  this Droplet yet"; `403` (a family account: the route and its writes are owner + admin
+  only) → the card is hidden, and the dashboard does not issue the request for that role.
+  A drive object without the new fields makes no claim about encryption; the Prepare drive
+  and Recovery key actions are not offered for it.
+- **Status the card renders.** The `status` string is folded with `warnings` and
+  `migration.state` by the orchestrator's own precedence: `missing` > `migrating` >
+  `degraded` > `on_system_disk` > `pending` > `active` > `no_eligible_drive`. An unknown
+  status renders neutrally; unknown warning codes render their `message`.
+- **Retention estimate.** The additive `retentionKnown` boolean is omitted by older
+  servers. When it is `false`, `needBytes`, `retentionDays`, and each camera's `needBytes`
+  are numeric `0` unknown sentinels, not zero required storage or zero-day retention.
+  The dashboard says the recording-space estimate is unavailable while waiting for
+  Frigate retention. Measured usage, reserved/free capacity, and `daysStored` remain
+  unchanged. When omitted, older-server behavior is preserved.
+- **Refusals the dashboard recognises.** `409 tpm_required` on Prepare / pool format / pool
+  create (matched on `code`, or the text) → "This Droplet has no security chip (TPM);
+  drives can't be encrypted." `409` on `{ mode: "full" }` with a files-present reason
+  (`files_not_empty`, or prose about files) → Whole drive is locked for that drive with the
+  reason shown. `410` on reveal → "already shown or expired" with a Tier-3 "Generate a new
+  recovery key".
+
+**To confirm with WARP-3513 / WARP-3514** (assumed by the dashboard, not spelled out in the
+contract): the path `…/recovery-key/regenerate`; that `PUT /api/storage/recordings` and the
+old-footage delete confirm through `/api/storage/command/confirm`; the code name for the
+files-present refusal; and the values `oldFootage.location` takes besides `system_disk`
+(anything else is shown as "the previous recording drive"). Each lives in one function in
+`apps/web-dashboard/src/lib/api.ts` or `lib/recording-storage.ts`.
 
 ## Error shape
 

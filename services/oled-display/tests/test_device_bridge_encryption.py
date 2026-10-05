@@ -29,6 +29,7 @@ import copy
 import importlib.util
 import json
 import os
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
 import pytest
@@ -759,12 +760,17 @@ def _stub_eject_host(bridge, monkeypatch, tmp_path, *, state_mounts, mounted,
     monkeypatch.setattr(bridge.os, "replace", fake_replace)
     monkeypatch.setattr(bridge.os.path, "realpath", lambda p: aliases.get(p, p))
     monkeypatch.setattr(bridge.os.path, "ismount", lambda p: p in mounted)
+    # The encryption tests isolate the existing mount/device preflight. Shared
+    # Linux lock behavior is exercised by test_device_bridge_nvr_storage.py.
+    monkeypatch.setattr(bridge, "_recordings_topology_lock", nullcontext)
     if proc_mounts is None:
         monkeypatch.setattr(bridge, "_device_at_mountpoint", lambda mp: mounted.get(mp))
     ran = []
 
     def fake_run(cmd, timeout=15):
         ran.append(list(cmd))
+        if cmd == [bridge.NVR_SCRIPT, "--status"]:
+            return 0, json.dumps({"kind": "volume", "source": "nvrdata"}), ""
         return 0, "", ""
 
     monkeypatch.setattr(bridge, "_run", fake_run)
@@ -793,6 +799,43 @@ def test_eject_accepts_a_luks_bay_mounted_through_its_mapper(tmp_path, monkeypat
     # forgotten from the automount state + snapshot invalidated
     assert json.loads(state_file.read_text())["mounts"] == []
     assert snapshots == [True]
+
+
+def test_eject_rechecks_local_device_under_the_shared_lock_before_status(tmp_path, monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    mounted = {_BAY_MNT: _BAY_MAPPER}
+    state_file, ran, snapshots = _stub_eject_host(
+        bridge, monkeypatch, tmp_path, state_mounts=[_AUTOMOUNT_BAY], mounted=mounted)
+
+    @contextmanager
+    def completed_pool_change():
+        # Early preflight saw the old mapper; a pool operation finishes before
+        # this eject obtains the shared inode. The locked preflight must re-read.
+        mounted[_BAY_MNT] = "/dev/mapper/unrelated-new-drive"
+        yield
+
+    monkeypatch.setattr(bridge, "_recordings_topology_lock", completed_pool_change)
+    ok, info = bridge.eject_drive(_AUTOMOUNT_BAY["uuid"])
+    assert ok is False and "mismatch" in info
+    assert ran == [] and snapshots == []  # no status, sync or umount
+    assert json.loads(state_file.read_text())["mounts"] == [_AUTOMOUNT_BAY]
+
+
+def test_eject_preserves_drives_registered_before_it_acquires_the_lock(tmp_path, monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    state_file, ran, _snapshots = _stub_eject_host(
+        bridge, monkeypatch, tmp_path, state_mounts=[_AUTOMOUNT_BAY],
+        mounted={_BAY_MNT: _BAY_MAPPER})
+
+    @contextmanager
+    def completed_adoption():
+        state_file.write_text(json.dumps({"mounts": [_AUTOMOUNT_BAY, _PLAIN_USB]}))
+        yield
+
+    monkeypatch.setattr(bridge, "_recordings_topology_lock", completed_adoption)
+    assert bridge.eject_drive(_AUTOMOUNT_BAY["uuid"])[0] is True
+    assert _umounts(ran) == [["umount", _BAY_MNT]]
+    assert json.loads(state_file.read_text())["mounts"] == [_PLAIN_USB]
 
 
 def test_eject_reads_the_mapper_from_a_real_proc_mounts_line(tmp_path, monkeypatch):

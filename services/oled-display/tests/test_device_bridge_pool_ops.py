@@ -42,6 +42,11 @@ def _load_bridge_with_spool(monkeypatch, tmp_path):
     spool = tmp_path / "pool-spool"
     bridge = _load_bridge(monkeypatch,
                           {"DROPLET_POOL_SPOOL_DIR": str(spool)})
+    # Authoritative writer status for a box still using its named Docker
+    # volume: there is no allocated physical recordings drive. Keep the REAL
+    # topology validator/guard, independent of the fake root pool executor.
+    monkeypatch.setattr(bridge, "_nvr_status_read",
+                        lambda _timeout: ({"kind": "volume", "source": "nvrdata"}, ""))
     return bridge, spool
 
 
@@ -154,6 +159,17 @@ def test_pool_command_rejects_unknown_operation(monkeypatch, tmp_path):
     ok, info = bridge.run_pool_command("rm_rf_everything", {"device": "md0"})
     assert ok is False
     # Refused BEFORE anything was spooled.
+    assert not (spool / "request.json").exists()
+
+
+def test_pool_command_refuses_unreadable_recordings_status_before_executor(monkeypatch, tmp_path):
+    bridge, spool = _load_bridge_with_spool(monkeypatch, tmp_path)
+    monkeypatch.setattr(bridge, "_nvr_status_read", lambda _timeout: (None, "status unavailable"))
+    def no_executor(cmd, timeout=15):
+        pytest.fail("unverified recordings storage must not reach the root executor")
+    monkeypatch.setattr(bridge, "_run", no_executor)
+    ok, info = bridge.run_pool_command("drive_adopt", {"device": "sdb"})
+    assert ok is False and info.code == "recordings_status_unavailable"
     assert not (spool / "request.json").exists()
 
 

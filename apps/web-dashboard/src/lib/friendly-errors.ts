@@ -674,8 +674,74 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "That label isn't available anymore. Refresh and try again.",
     invalid_parent:
       "That parent item isn't available anymore. Refresh and try again.",
+    // WARP-3520 — the editing surfaces. Each names what happened and the way
+    // out, in the owner's words (column, field, option — never state group,
+    // property or tagged value).
+    work_item_archived: "That item is already archived.",
+    work_item_not_archived: "That item isn't archived.",
+    state_default_terminal:
+      "The default column can't be a done or cancelled one. Pick a column that work starts in.",
+    state_is_default:
+      "That column is where new items land. Make another column the default first, then delete this one.",
+    state_is_last: "A project needs at least one column, so this one can't be deleted.",
+    invalid_order:
+      "The list changed while you were reordering it. Refresh and try again.",
+    property_not_found:
+      "That field isn't available anymore. Refresh and try again.",
+    property_name_taken: "This project already has a field with that name.",
+    property_limit_reached: "A project can have up to 30 custom fields.",
+    invalid_options:
+      "Check the options — each one needs a name that no other option uses.",
+    invalid_value: "That value isn't allowed for this field.",
+    relation_cycle:
+      "That link would close a chain of blockers, so neither item could ever start.",
+    relation_exists: "Those two items are already linked that way.",
+    relation_self: "An item can't be linked to itself.",
+    relation_not_found: "That link is already gone. Refresh and try again.",
+    relation_scan_exhausted:
+      "This project's chain of blockers is too long to check, so the link wasn't added.",
+    concurrent_mutation:
+      "Someone changed this at the same moment, so nothing was applied. Try again.",
+    // WARP-3521 — cycles (sprints) and modules (milestones). Each says what
+    // happened and what to do, in the owner's words: cycle, module, start, end,
+    // item — never state machine, constraint or conflict.
+    cycle_not_found:
+      "We couldn't find that cycle anymore. It may have been deleted.",
+    invalid_cycle:
+      "That cycle isn't available for this item. Refresh and try again.",
+    cycle_completed:
+      "That cycle is finished, so it can't take new work. Pick another cycle.",
+    cycle_already_active:
+      "Another cycle is already running. Complete it before you start this one.",
+    cycle_not_draft:
+      "That cycle has already started. Refresh and try again.",
+    cycle_not_active:
+      "That cycle isn't running. Refresh and try again.",
+    cycle_dates_required:
+      "Set a start date and an end date first.",
+    invalid_dates:
+      "Check the dates — the end can't come before the start, and a cycle can run for at most a year.",
+    module_not_found:
+      "We couldn't find that module anymore. It may have been deleted.",
+    invalid_work_item:
+      "That item belongs to a different project, so it can't go in this module.",
+    lead_is_guest:
+      "A guest can't lead a module or a project. Pick someone on your team.",
     identifier_taken:
       "That project ID is already in use. Pick a different one.",
+    // WARP-3522 — saved views and the filter bar. Each says what to do next.
+    view_name_taken:
+      "A view with that name already exists. Pick another.",
+    view_limit_reached:
+      "You've reached the saved-view limit — delete one to add another.",
+    view_forbidden:
+      "You can't change this view. Save your own copy instead.",
+    view_not_found:
+      "That view isn't available anymore. Refresh and try again.",
+    view_is_builtin:
+      "The built-in views can't be changed.",
+    invalid_filter:
+      "That filter couldn't be applied. Clear it and try again.",
     // WARP-3371 — the work-item API now refuses what it used to swallow. Each
     // says what is wrong in the owner's words (item, column, person — never
     // cycle, state or assignee) and the one thing to do.
@@ -972,4 +1038,24 @@ export function translateError(err: unknown, domain: ErrorDomain): string {
     if (inferred && domainCodes[inferred]) return domainCodes[inferred];
   }
   return FALLBACK[domain];
+}
+
+// ─── WARP-3515: a Droplet with no TPM cannot encrypt a drive ──────────────────
+
+/**
+ * ADR-070 / WARP-3512: Prepare (and a pool create or format, which must be LUKS
+ * too) seals the drive's unlock key to the TPM2. A box without one refuses with
+ * `409 tpm_required` and wipes nothing. The refusal can come back as the typed
+ * `code`, as the whole error text, or as prose, and on the request that mints a
+ * confirm token or on the confirm that executes it — so every drive flow asks
+ * this one question and shows this one sentence.
+ */
+export const TPM_REQUIRED_MESSAGE =
+  "This Droplet has no security chip (TPM); drives can't be encrypted.";
+
+export function isTpmRequired(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const { code, message } = err as { code?: unknown; message?: unknown };
+  if (code === "tpm_required") return true;
+  return typeof message === "string" && /\btpm_required\b|\btpm2?\b/i.test(message);
 }

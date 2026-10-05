@@ -18,6 +18,9 @@ import type {
   ExtensionToolClassification,
   ExtensionToolDecision,
   CameraInfo,
+  CameraBusinessHours,
+  MotionFilter,
+  MotionActivityResult,
   CameraGroupInfo,
   CameraPinInfo,
   CameraSettings,
@@ -35,6 +38,8 @@ import type {
   PtzCapabilities,
   RecordingDay,
   RecordingSegment,
+  RetentionBackfillPreview,
+  RetentionBackfillResult,
   ReviewFilter,
   FilteredReviewsResult,
   TimelineEntry,
@@ -156,7 +161,10 @@ import type {
   NotificationAckAllResult,
   NotificationAckResult,
   NotificationsPage,
+  RecordingStorageChange,
+  RecordingStorageResult,
 } from "./types";
+import { normalizeRecordingStorage } from "./recording-storage";
 import { DEFAULT_API_FETCH_TIMEOUT_MS, apiFetch, type TypedError } from "./hooks/apiFetch";
 import type { RouterPortDisableGuard } from "@/lib/types/router-ports";
 import type {
@@ -1063,7 +1071,7 @@ export async function requestCreatePool(input: {
   });
   if (res.status !== 202) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Could not start pool creation: ${res.status}`);
+    throw storageWriteError(body, res.status, "Could not start pool creation");
   }
   return res.json();
 }
@@ -1104,7 +1112,7 @@ export async function requestFormatPool(
   );
   if (res.status !== 202) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Could not start pool format: ${res.status}`);
+    throw storageWriteError(body, res.status, "Could not start pool format");
   }
   return res.json();
 }
@@ -1128,7 +1136,7 @@ export async function requestAdoptDrive(input: {
   });
   if (res.status !== 202) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Could not start drive adopt: ${res.status}`);
+    throw storageWriteError(body, res.status, "Could not start drive adopt");
   }
   return res.json();
 }
@@ -1155,7 +1163,7 @@ export async function reclaimDrive(input: {
   });
   if (res.status !== 202) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Could not start drive reclaim: ${res.status}`);
+    throw storageWriteError(body, res.status, "Could not start drive reclaim");
   }
   return res.json();
 }
@@ -1173,7 +1181,7 @@ export async function confirmPoolCommand(input: {
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Could not complete the operation: ${res.status}`);
+    throw storageWriteError(body, res.status, "Could not complete the operation");
   }
   return res.json();
 }
@@ -1332,6 +1340,256 @@ export async function updatePoolLabel(
     throw storageWriteError(body, res.status, "Failed to update pool");
   }
   return res.json();
+}
+
+// --- Recording storage (WARP-3512 contract / ADR-070, consumed by WARP-3515) ---
+//
+// Decision record: docs/ADR-070-camera-recording-storage.md.
+//
+// The orchestrator side lands in WARP-3513/WARP-3514, separately from this
+// dashboard, so every function below is written to be called against an
+// orchestrator that does not have the endpoint (or the field) yet.
+
+/**
+ * GET /api/storage/recordings — where camera recordings live, how much is set
+ * aside, what each camera needs, any move in flight, and what is wrong.
+ *
+ * ABSENCE IS NOT AN ERROR: a 404 (an orchestrator that predates WARP-3514) and a
+ * 403 (a role that may not read it) both RESOLVE, to `{ available: false }`, so
+ * the card can hide itself or say "not available on this Droplet yet" instead of
+ * flashing an error. Only a transport failure or a 5xx THROWS — that is the
+ * "couldn't load right now" case, and it must not read as "not available".
+ *
+ * The body is normalised (lib/recording-storage.ts): a partial payload becomes a
+ * complete, safe value, and a 200 that is not a JSON object (a proxy's fallback
+ * page) counts as "not supported" rather than a crash.
+ */
+export async function fetchRecordingStorage(): Promise<RecordingStorageResult> {
+  const res = await authFetch(`${BASE}/api/storage/recordings`);
+  if (res.status === 404) return { available: false, reason: "not_supported" };
+  if (res.status === 403) return { available: false, reason: "forbidden" };
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw storageWriteError(body, res.status, "Failed to fetch recording storage");
+  }
+  const raw: unknown = await res.json().catch(() => null);
+  const data = normalizeRecordingStorage(raw);
+  if (!data) return { available: false, reason: "not_supported" };
+  return { available: true, data };
+}
+
+/**
+ * The tail of a tier-2 / tier-3 storage write. These routes answer 202 + a
+ * single-use confirmation token; the owner has ALREADY confirmed in the dialog
+ * that called us (a click for tier 2, a typed phrase for tier 3), so the
+ * handshake is completed here by echoing the token back through the storage
+ * confirm — the one wire path every other storage write uses
+ * (`POST /api/storage/command/confirm`, the `rebootRouter` / `disableCamera`
+ * pattern). These are confirmation-gated writes: any successful reply without
+ * the expected token is a protocol error, never a silent success.
+ *
+ * A refusal throws with the HTTP status attached (`storageWriteError`) so the UI
+ * can choose its copy (403 role, 409 move-in-progress, 404 not-there-yet).
+ */
+async function finishStorageWrite(
+  res: Response,
+  fallback: string,
+  expected: { service: string; resourceId: string },
+): Promise<void> {
+  const body = (await res.json().catch(() => ({}))) as {
+    confirmationToken?: unknown;
+    service?: unknown;
+    resourceId?: unknown;
+    error?: unknown;
+    code?: unknown;
+  };
+  if (!res.ok) throw storageWriteError(body, res.status, fallback);
+  if (res.status !== 202 || typeof body.confirmationToken !== "string" || !body.confirmationToken) {
+    throw new Error("Unexpected storage response: confirmation token was not issued");
+  }
+  if (body.service !== expected.service || body.resourceId !== expected.resourceId) {
+    throw new Error("Unexpected storage confirmation: operation or resource did not match");
+  }
+  await confirmStorageCommand({
+    confirmationToken: body.confirmationToken,
+    service: expected.service,
+    resourceId: expected.resourceId,
+  });
+}
+
+/**
+ * PUT /api/storage/recordings — change the recording mode (auto-sized slice vs
+ * whole drive) and/or the drive recordings go to. Owner/admin, tier 2: the
+ * caller confirms in a dialog first. Choosing a different drive starts a move;
+ * poll `fetchRecordingStorage` for `migration` progress.
+ */
+export async function updateRecordingStorage(change: RecordingStorageChange): Promise<void> {
+  if (!change.mode && !change.fsUuid) throw new Error("There's nothing to change.");
+  const res = await authFetch(`${BASE}/api/storage/recordings`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(change),
+  });
+  await finishStorageWrite(res, "Failed to update recording storage", {
+    service: "recordings_set",
+    resourceId: "recordings",
+  });
+}
+
+/**
+ * POST /api/storage/recordings/old-footage/delete — permanently delete the
+ * recordings still on the system drive after a move. Owner only, tier 3: the
+ * caller has the owner type a phrase first. Irreversible.
+ */
+export async function deleteOldRecordings(): Promise<void> {
+  const res = await authFetch(`${BASE}/api/storage/recordings/old-footage/delete`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  await finishStorageWrite(res, "Failed to delete the old recordings", {
+    service: "recordings_old_footage_delete",
+    resourceId: "recordings",
+  });
+}
+
+/**
+ * Why a drive's recovery key could not be handed over. `gone` is the one the UI
+ * has to word carefully: the key is shown ONCE, so 410 means it already was.
+ */
+export class RecoveryKeyUnavailableError extends Error {
+  readonly reason: "gone" | "not_found" | "forbidden";
+  constructor(reason: "gone" | "not_found" | "forbidden") {
+    super(
+      reason === "gone"
+        ? "This recovery key has already been shown."
+        : reason === "forbidden"
+          ? "Only the owner can view a recovery key."
+          : "No recovery key is available for this drive.",
+    );
+    this.name = "RecoveryKeyUnavailableError";
+    this.reason = reason;
+  }
+}
+
+/**
+ * POST /api/storage/drives/:id/recovery-key/reveal — hand over the drive's
+ * LUKS recovery key, ONCE (owner only, tier 2). `:id` is the drive's filesystem
+ * UUID, as on every other `/storage/drives/:uuid/*` route.
+ *
+ * It is a tier-2 write, so it follows the storage handshake: the POST answers
+ * 202 + a single-use token, the owner has ALREADY confirmed in the dialog that
+ * called us, and echoing the token through `POST /api/storage/command/confirm`
+ * is what executes the reveal and returns `{ recoveryKey }`. 200 the first time,
+ * 410 ever after (revealed already, or shredded after its 7-day hold). A server
+ * that answers the first POST with the key directly is accepted too.
+ *
+ * Because the reveal consumes the key, this function has hard rules:
+ *   - never retry (a retry after a reveal that succeeded server-side would 410
+ *     and the key would be lost — `authFetch` only re-sends after a 401, which
+ *     never reached the handler); a lost key is what `regenerateRecoveryKey`
+ *     is for;
+ *   - never cache (`cache: "no-store"` on BOTH requests — a secret in an HTTP
+ *     cache outlives the one-time promise);
+ *   - keep "gone" (410 → RecoveryKeyUnavailableError "gone") distinct from
+ *     "couldn't ask" (a plain Error with its status), so a flaky network is
+ *     never worded as a lost key.
+ * The key is returned, never stored: the caller holds it in component state for
+ * exactly as long as the dialog is open.
+ */
+export async function revealRecoveryKey(driveId: string): Promise<string> {
+  if (!driveId) throw new RecoveryKeyUnavailableError("not_found");
+  const first = await authFetch(
+    `${BASE}/api/storage/drives/${encodeURIComponent(driveId)}/recovery-key/reveal`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+      cache: "no-store",
+    },
+  );
+  const afterFirst = await readRecoveryKeyReply(first);
+  if (afterFirst.key) return afterFirst.key;
+  if (!afterFirst.token) throw new Error("The recovery key response was empty.");
+  const { confirmationToken, service, resourceId } = afterFirst.token;
+  if (service !== "recovery_key_reveal" || resourceId !== driveId) {
+    throw new Error("Unexpected recovery key confirmation: operation or drive did not match");
+  }
+  const confirmed = await authFetch(`${BASE}/api/storage/command/confirm`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirmationToken, service, resourceId }),
+    cache: "no-store",
+  });
+  const afterConfirm = await readRecoveryKeyReply(confirmed);
+  if (!afterConfirm.key) throw new Error("The recovery key response was empty.");
+  return afterConfirm.key;
+}
+
+/** One reply of the reveal handshake: a key, a token to confirm, or a typed
+ *  refusal. Anything else is a plain failure that carries its status. */
+async function readRecoveryKeyReply(
+  res: Response,
+): Promise<{
+  key?: string;
+  token?: { confirmationToken: string; service: string; resourceId: string };
+}> {
+  if (res.status === 410) throw new RecoveryKeyUnavailableError("gone");
+  if (res.status === 404) throw new RecoveryKeyUnavailableError("not_found");
+  if (res.status === 403) throw new RecoveryKeyUnavailableError("forbidden");
+  const body = (await res.json().catch(() => ({}))) as {
+    recoveryKey?: unknown;
+    confirmationToken?: unknown;
+    service?: unknown;
+    resourceId?: unknown;
+    error?: unknown;
+    code?: unknown;
+  };
+  if (!res.ok) throw storageWriteError(body, res.status, "Failed to fetch the recovery key");
+  const key = typeof body.recoveryKey === "string" ? body.recoveryKey.trim() : "";
+  if (key) return { key };
+  if (typeof body.confirmationToken === "string" && body.confirmationToken) {
+    if (typeof body.service !== "string" || typeof body.resourceId !== "string") {
+      throw new Error("Unexpected 202 response: missing service or resourceId");
+    }
+    return {
+      token: {
+        confirmationToken: body.confirmationToken,
+        service: body.service,
+        resourceId: body.resourceId,
+      },
+    };
+  }
+  return {};
+}
+
+/**
+ * POST /api/storage/drives/:id/recovery-key/regenerate — replace the drive's
+ * recovery key with a new one (owner only, tier 3), for when the key was missed
+ * or its 7-day hold expired. The old key stops working, so the caller has the
+ * owner type a phrase first; the new key is then revealed the same way as the
+ * first (`revealRecoveryKey`).
+ *
+ * NOTE: the WARP-3512 contract names this action ("Regenerate recovery key",
+ * owner, tier 3) but not its path. `.../recovery-key/regenerate` is the sibling
+ * of `.../recovery-key/reveal` and is assumed; this function is the one place
+ * to change if the orchestrator names it differently.
+ */
+export async function regenerateRecoveryKey(driveId: string): Promise<void> {
+  if (!driveId) throw new Error("There's no drive to generate a recovery key for.");
+  const res = await authFetch(
+    `${BASE}/api/storage/drives/${encodeURIComponent(driveId)}/recovery-key/regenerate`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+      cache: "no-store",
+    },
+  );
+  await finishStorageWrite(res, "Failed to generate a new recovery key", {
+    service: "recovery_key_regenerate",
+    resourceId: driveId,
+  });
 }
 
 // --- Health ---
@@ -2743,6 +3001,7 @@ export async function fetchReviewsFiltered(
   filter: ReviewFilter,
 ): Promise<FilteredReviewsResult> {
   const params = new URLSearchParams();
+  if (filter.businessHours) params.set("businessHours", filter.businessHours);
   if (filter.cameras?.length) params.set("cameras", filter.cameras.join(","));
   if (filter.severity?.length) params.set("severity", filter.severity.join(","));
   if (filter.before !== undefined) params.set("before", String(filter.before));
@@ -2847,6 +3106,22 @@ export function getRecordingHlsUrl(
   return `${BASE}/api/cameras/${encodeURIComponent(cameraName)}/playback.m3u8?after=${after}&before=${before}`;
 }
 
+/**
+ * Returns the proxied HLS m3u8 URL for an event's clip (WARP-3509).
+ *
+ * The box works out the window — the event's start and end plus the
+ * pre/post-capture padding, up to now for an event still in progress — so the
+ * client names the event, not a time range. Frigate's own clip.mp4 is a
+ * fragmented mp4 that a <video src> cannot read a duration from or seek in; this
+ * plays the same footage the way the Recordings page does. `refresh` re-keys
+ * the URL so the player loads the playlist again (hls.js reloads only when its
+ * source string changes), which is how an event in progress plays further.
+ */
+export function getEventHlsUrl(eventId: string, refresh = 0): string {
+  const query = refresh > 0 ? `?refresh=${refresh}` : "";
+  return `${BASE}/api/cameras/events/${encodeURIComponent(eventId)}/playback.m3u8${query}`;
+}
+
 // --- Per-camera settings (Phase 4.1) ---
 
 export async function fetchCameraSettings(
@@ -2856,6 +3131,9 @@ export async function fetchCameraSettings(
     `${BASE}/api/cameras/${encodeURIComponent(cameraName)}/settings`,
   );
   if (!res.ok) {
+    // WARP-3511: Frigate restarting (a settings save does that) is not a
+    // failure to retry forever; the caller shows a calm state and asks again.
+    if (cameraServiceDown(res)) throw new CamerasUnavailableError();
     const body = await res.json().catch(() => ({}));
     throw new Error((body as { error?: string }).error || `Failed: ${res.status}`);
   }
@@ -2895,6 +3173,37 @@ export async function renameCamera(
     throw new Error(body.error || `Failed to rename camera: ${res.status}`);
   }
   return (await res.json()) as { status: string; camera: string; displayName: string };
+}
+
+/**
+ * WARP-3511 — the box answered 503 with the camera-service marker
+ * (`X-Droplet-Degraded`): Frigate is unreachable or restarting.
+ */
+function cameraServiceDown(res: Response): boolean {
+  return res.status === 503 && !!res.headers?.get("X-Droplet-Degraded");
+}
+
+/**
+ * WARP-3511 — dry run of the retention repair: which cameras have no retention
+ * authored at all and would be given the standard windows, and what those
+ * windows are on this box. A camera whose windows were set to zero on purpose
+ * is not in the repair's reach.
+ */
+export async function fetchRetentionBackfillPlan(): Promise<RetentionBackfillPreview> {
+  const res = await authFetch(`${BASE}/api/cameras/retention/backfill`);
+  if (!res.ok) throw await cameraActionError(res, `Failed to check retention: ${res.status}`);
+  const body = (await res.json()) as Partial<RetentionBackfillPreview>;
+  return { plan: body.plan ?? [], defaults: body.defaults };
+}
+
+/**
+ * WARP-3511 — apply the retention repair (owner/admin). It writes Frigate's
+ * config, so every camera restarts briefly; the caller confirms first.
+ */
+export async function runRetentionBackfill(): Promise<RetentionBackfillResult> {
+  const res = await authFetch(`${BASE}/api/cameras/retention/backfill`, { method: "POST" });
+  if (!res.ok) throw await cameraActionError(res, `Failed to repair retention: ${res.status}`);
+  return (await res.json()) as RetentionBackfillResult;
 }
 
 /** WARP-1851 — read a camera's current storage allocation. */
@@ -3210,7 +3519,12 @@ export async function fetchPtzCapabilities(
   const res = await authFetch(
     `${BASE}/api/cameras/${encodeURIComponent(cameraName)}/ptz`,
   );
-  if (!res.ok) throw new Error(`Failed to fetch PTZ caps: ${res.status}`);
+  // WARP-3511: a camera with nothing to control is not an error. This used to
+  // throw on any non-2xx, and SWR retried that forever — against a camera that
+  // can never have PTZ, since adoption writes no `onvif:` block.
+  if (!res.ok) {
+    return { supported: false, supportsPanTilt: false, supportsZoom: false, presets: [] };
+  }
   return res.json();
 }
 
@@ -3282,6 +3596,7 @@ export async function patchCameraSettings(
     },
   );
   if (!res.ok) {
+    if (cameraServiceDown(res)) throw new CamerasUnavailableError();
     const body = await res.json().catch(() => ({}));
     throw new Error((body as { error?: string }).error || `Failed: ${res.status}`);
   }
@@ -3301,6 +3616,7 @@ export async function searchEventsSemantic(
   filter: EventFilter & { searchType?: "thumbnail" | "description" } = {},
 ): Promise<FilteredEventsResult> {
   const params = new URLSearchParams();
+  if (filter.businessHours) params.set("businessHours", filter.businessHours);
   params.set("query", query);
   if (filter.searchType) params.set("search_type", filter.searchType);
   if (filter.cameras?.length) params.set("cameras", filter.cameras.join(","));
@@ -3328,6 +3644,7 @@ export async function fetchEventsFiltered(
   filter: EventFilter,
 ): Promise<FilteredEventsResult> {
   const params = new URLSearchParams();
+  if (filter.businessHours) params.set("businessHours", filter.businessHours);
   if (filter.cameras?.length) params.set("cameras", filter.cameras.join(","));
   if (filter.labels?.length) params.set("labels", filter.labels.join(","));
   if (filter.minScore !== undefined) params.set("min_score", String(filter.minScore));
@@ -3344,6 +3661,38 @@ export async function fetchEventsFiltered(
   // WARP-3105: a Frigate outage is a degraded 200 + empty list, not "no events".
   if (res.headers?.get("X-Droplet-Degraded")) throw new CamerasUnavailableError();
   return res.json();
+}
+
+export async function fetchCameraBusinessHours(): Promise<CameraBusinessHours> {
+  const res = await authFetch(`${BASE}/api/cameras/business-hours`);
+  if (!res.ok) throw new Error(`Could not load business hours: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchMotionActivity(filter: MotionFilter): Promise<MotionActivityResult> {
+  const params = new URLSearchParams({ after: String(filter.after), before: String(filter.before) });
+  if (filter.cameras?.length) params.set("cameras", filter.cameras.join(","));
+  if (filter.businessHours) params.set("businessHours", filter.businessHours);
+  if (filter.limit !== undefined) params.set("limit", String(filter.limit));
+  if (filter.cursor !== undefined) params.set("cursor", String(filter.cursor));
+  const res = await authFetch(`${BASE}/api/cameras/motion?${params}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Could not load motion: ${res.status}`);
+  }
+  if (res.headers?.get("X-Droplet-Degraded")) throw new CamerasUnavailableError();
+  return res.json();
+}
+
+export async function saveCameraBusinessHours(schedule: CameraBusinessHours): Promise<CameraBusinessHours> {
+  const res = await authFetch(`${BASE}/api/cameras/business-hours`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(schedule),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || `Could not save business hours: ${res.status}`);
+  return body as CameraBusinessHours;
 }
 
 /**
@@ -3419,9 +3768,20 @@ export async function rejectDiscoveredCamera(id: string): Promise<void> {
   }
 }
 
+/**
+ * WARP-3511 — why a camera action failed, in the box's own words. These used
+ * to throw "Failed to enable camera: 500" and nothing else, which a toast
+ * cannot make useful.
+ */
+async function cameraActionError(res: Response, fallback: string): Promise<Error> {
+  if (cameraServiceDown(res)) return new CamerasUnavailableError();
+  const body = (await res.json().catch(() => ({}))) as { error?: string; message?: string };
+  return new Error(body.message || body.error || fallback);
+}
+
 export async function enableCamera(name: string): Promise<void> {
   const res = await authFetch(`${BASE}/api/cameras/${encodeURIComponent(name)}/enable`, { method: "POST" });
-  if (!res.ok) throw new Error(`Failed to enable camera: ${res.status}`);
+  if (!res.ok) throw await cameraActionError(res, `Failed to enable camera: ${res.status}`);
 }
 
 /** Consume a camera-domain Tier-2 confirmation token (WARP-861).
@@ -3437,6 +3797,9 @@ export async function confirmCameraCommand(
     body: JSON.stringify({ confirmationToken, operation }),
   });
   if (!res.ok) {
+    // WARP-3511: the confirm is where a disable is actually written, so a
+    // camera service that is restarting surfaces here as well.
+    if (cameraServiceDown(res)) throw new CamerasUnavailableError();
     const body = await res.json().catch(() => ({}));
     throw new Error((body as { error?: string }).error || `Confirm failed: ${res.status}`);
   }
@@ -3444,7 +3807,7 @@ export async function confirmCameraCommand(
 
 export async function disableCamera(name: string): Promise<void> {
   const res = await authFetch(`${BASE}/api/cameras/${encodeURIComponent(name)}/disable`, { method: "POST" });
-  if (!res.ok) throw new Error(`Failed to disable camera: ${res.status}`);
+  if (!res.ok) throw await cameraActionError(res, `Failed to disable camera: ${res.status}`);
   // disable_camera is Tier 2: the route 202s with a token and does nothing
   // until the token is consumed (WARP-861 — previously this silently
   // no-opped). The user already confirmed in the UI dialog that invoked us,

@@ -15,7 +15,9 @@ import {
   Skel,
 } from "./bits";
 import { cardAccent, isOverdue, fmtDate } from "./config";
-import type { PmWorkItem, PmState } from "./types";
+import { EstimateChip, StartChip, TypeIcon } from "./TypeBits";
+import { CycleTag } from "./planning-bits";
+import type { PmCycle, PmWorkItem, PmState, PmProject } from "./types";
 
 export type Domain = "populated" | "loading" | "empty" | "error" | "filtered";
 
@@ -31,6 +33,7 @@ export function WorkItemCard({
   onDragStart,
   onDragEnd,
   dragging,
+  cycles,
 }: {
   item: PmWorkItem;
   onOpen?: (i: PmWorkItem) => void;
@@ -39,7 +42,11 @@ export function WorkItemCard({
   onDragStart?: () => void;
   onDragEnd?: () => void;
   dragging?: boolean;
+  /** WARP-3521 — the project's cycles by id, so a card can name the cycle it is
+   *  planned into. Optional: a card shows no chip until the cycle is known. */
+  cycles?: ReadonlyMap<string, PmCycle>;
 }): JSX.Element {
+  const hasCycle = !!item.cycleId && !!cycles?.has(item.cycleId);
   return (
     <div
       className={"pm-card" + (dragging ? " dragging" : "")}
@@ -59,8 +66,11 @@ export function WorkItemCard({
       }}
     >
       <div className="pm-row" style={{ justifyContent: "space-between" }}>
-        <span className="pm-mono" style={{ fontSize: 11, color: "var(--text-4)", fontWeight: 600 }}>
-          {item.key}
+        <span className="pm-row" style={{ gap: 6 }}>
+          <TypeIcon type={item.type} size={12} />
+          <span className="pm-mono" style={{ fontSize: 11, color: "var(--text-4)", fontWeight: 600 }}>
+            {item.key}
+          </span>
         </span>
         <PriorityFlag p={item.priority} />
       </div>
@@ -73,8 +83,9 @@ export function WorkItemCard({
           nothing; an OVERRIDE is a per-item decision, and without the chip it
           is invisible right up until the item disappears from a department
           filter for reasons the board never showed. */}
-      {(item.labels.length > 0 || item.department?.source === "item") && (
+      {(item.labels.length > 0 || item.department?.source === "item" || hasCycle) && (
         <div className="pm-row" style={{ gap: 6, flexWrap: "wrap" }}>
+          <CycleTag cycleId={item.cycleId} cycles={cycles} small />
           {item.department?.source === "item" && (
             <DepartmentTag dept={item.department} small />
           )}
@@ -84,9 +95,11 @@ export function WorkItemCard({
         </div>
       )}
       <div className="pm-row" style={{ justifyContent: "space-between", marginTop: 1 }}>
-        <div className="pm-row" style={{ gap: 8 }}>
+        <div className="pm-row" style={{ gap: 8, flexWrap: "wrap" }}>
           <AvatarStack ids={item.assignees} size={22} />
+          <StartChip item={item} />
           <DueChip item={item} />
+          <EstimateChip estimate={item.estimate} />
         </div>
         <CountMeta item={item} />
       </div>
@@ -119,6 +132,15 @@ function StateColumnEmpty({ name }: { name: string }): JSX.Element {
   );
 }
 
+/** The Try again / Clear filters buttons of the error and filtered-to-empty states (brief §3.10). */
+function StateAction({ label, onClick }: { label: string; onClick: () => void }): JSX.Element {
+  return (
+    <button className="pm-btn ghost" type="button" onClick={onClick}>
+      {label}
+    </button>
+  );
+}
+
 export function BoardView({
   states,
   items,
@@ -128,17 +150,23 @@ export function BoardView({
   onOpen,
   onTransition,
   onNewItem,
+  onRetry,
+  onClearFilters,
+  cycles,
 }: {
   states: PmState[];
   items: PmWorkItem[];
   domain: Domain;
   readOnly: boolean;
-  /** More of the list is still arriving (WARP-3371): a column's count is a
-   *  floor, not an answer, until the last page lands. */
+  /** The query has not loaded every page, so grouped counts are still floors. */
   partial?: boolean;
   onOpen: (i: PmWorkItem) => void;
   onTransition: (item: PmWorkItem, stateId: string) => void;
   onNewItem: (stateId: string) => void;
+  onRetry?: () => void;
+  onClearFilters?: () => void;
+  /** WARP-3521 — see WorkItemCard. */
+  cycles?: ReadonlyMap<string, PmCycle>;
 }): JSX.Element {
   const [dragId, setDragId] = useState<string | null>(null);
   const [overState, setOverState] = useState<string | null>(null);
@@ -170,6 +198,7 @@ export function BoardView({
           tone="error"
           heading="Couldn't load this project."
           body="Check the appliance connection and try again."
+          cta={onRetry ? <StateAction label="Try again" onClick={onRetry} /> : undefined}
         />
       </div>
     );
@@ -195,7 +224,12 @@ export function BoardView({
   if (domain === "filtered") {
     return (
       <div className="pm-surface" style={{ padding: 8 }}>
-        <EmptyBlock icon="filter" heading="No work items match these filters." body="Try clearing a filter." />
+        <EmptyBlock
+          icon="filter"
+          heading="No work items match these filters."
+          body="Try clearing a filter."
+          cta={onClearFilters ? <StateAction label="Clear filters" onClick={onClearFilters} /> : undefined}
+        />
       </div>
     );
   }
@@ -252,6 +286,7 @@ export function BoardView({
                 <WorkItemCard
                   key={it.id}
                   item={it}
+                  cycles={cycles}
                   onOpen={onOpen}
                   readOnly={readOnly}
                   draggable
@@ -285,9 +320,11 @@ export function BoardView({
 export function ListRow({
   item,
   onOpen,
+  cycles,
 }: {
   item: PmWorkItem;
   onOpen: (i: PmWorkItem) => void;
+  cycles?: ReadonlyMap<string, PmCycle>;
 }): JSX.Element {
   const overdue = isOverdue(item);
   return (
@@ -302,6 +339,7 @@ export function ListRow({
       }}
       style={{ gap: 13, padding: "10px 6px", borderBottom: "1px solid var(--border)", cursor: "pointer", minHeight: 44 }}
     >
+      <TypeIcon type={item.type} />
       <span className="pm-mono" style={{ fontSize: 11.5, color: "var(--text-4)", width: 72, flex: "none" }}>
         {item.key}
       </span>
@@ -322,13 +360,16 @@ export function ListRow({
         {item.name}
       </span>
       <div className="pm-row" style={{ gap: 6, flex: "none" }}>
+        <CycleTag cycleId={item.cycleId} cycles={cycles} small />
         {item.labels.slice(0, 2).map((l) => (
           <LabelTag key={l.id} label={l} small />
         ))}
       </div>
+      <EstimateChip estimate={item.estimate} />
       <span style={{ flex: "none" }}>
         <AvatarStack ids={item.assignees} size={22} />
       </span>
+      <StartChip item={item} />
       <span
         className="pm-mono"
         style={{ fontSize: 11.5, color: overdue ? "var(--warn)" : "var(--text-4)", width: 56, flex: "none", textAlign: "right" }}
@@ -345,13 +386,24 @@ export function ListView({
   domain,
   partial = false,
   onOpen,
+  projects,
+  onRetry,
+  onClearFilters,
+  cycles,
 }: {
   states: PmState[];
   items: PmWorkItem[];
   domain: Domain;
-  /** More of the list is still arriving (WARP-3371): a group's count is a floor. */
+  /** More matching rows may still arrive from the paged query. */
   partial?: boolean;
   onOpen: (i: PmWorkItem) => void;
+  /** Present for a workspace-wide list: rows group by PROJECT, because states
+   *  belong to a project and there is no one set of columns across them. */
+  projects?: PmProject[];
+  onRetry?: () => void;
+  onClearFilters?: () => void;
+  /** WARP-3521 — see WorkItemCard. */
+  cycles?: ReadonlyMap<string, PmCycle>;
 }): JSX.Element {
   if (domain === "loading") {
     return (
@@ -371,7 +423,13 @@ export function ListView({
   if (domain === "error") {
     return (
       <div className="pm-surface" style={{ padding: 8 }}>
-        <EmptyBlock icon="alert" tone="error" heading="Couldn't load this project." body="Check the appliance connection and try again." />
+        <EmptyBlock
+          icon="alert"
+          tone="error"
+          heading="Couldn't load this project."
+          body="Check the appliance connection and try again."
+          cta={onRetry ? <StateAction label="Try again" onClick={onRetry} /> : undefined}
+        />
       </div>
     );
   }
@@ -385,14 +443,25 @@ export function ListView({
   if (domain === "filtered") {
     return (
       <div className="pm-surface" style={{ padding: 8 }}>
-        <EmptyBlock icon="filter" heading="No work items match these filters." body="Try clearing a filter." />
+        <EmptyBlock
+          icon="filter"
+          heading="No work items match these filters."
+          body="Try clearing a filter."
+          cta={onClearFilters ? <StateAction label="Clear filters" onClick={onClearFilters} /> : undefined}
+        />
       </div>
     );
   }
 
-  const groups = sortStates(states)
-    .map((s) => [s, items.filter((it) => it.stateId === s.id)] as const)
-    .filter(([, list]) => list.length);
+  // One set of rows, grouped by state — or, workspace-wide, by project.
+  type Group = { id: string; name: string; color: string | null; key?: string };
+  const groups: Array<readonly [Group, PmWorkItem[]]> = projects
+    ? projects
+        .map((p) => [{ id: p.id, name: p.name, color: p.color, key: p.identifier } as Group, items.filter((it) => it.projectId === p.id)] as const)
+        .filter(([, list]) => list.length)
+    : sortStates(states)
+        .map((st) => [st as Group, items.filter((it) => it.stateId === st.id)] as const)
+        .filter(([, list]) => list.length);
 
   return (
     <div className="pm-surface" style={{ overflow: "hidden" }}>
@@ -410,6 +479,7 @@ export function ListView({
           >
             <span className="pm-dot" style={{ background: s.color ?? "var(--text-4)" }} />
             <span style={{ fontSize: 12.5, fontWeight: 600 }}>{s.name}</span>
+            {s.key && <span className="pm-linechip">{s.key}</span>}
             <span style={{ fontSize: 12, color: "var(--text-4)" }}>
               {list.length}
               {partial ? "+" : ""}
@@ -417,24 +487,11 @@ export function ListView({
           </div>
           <div style={{ padding: "2px 14px" }}>
             {list.map((it) => (
-              <ListRow key={it.id} item={it} onOpen={onOpen} />
+              <ListRow key={it.id} item={it} onOpen={onOpen} cycles={cycles} />
             ))}
           </div>
         </div>
       ))}
-    </div>
-  );
-}
-
-export function PlaceholderView({ kind }: { kind: "cycles" | "modules" }): JSX.Element {
-  const map = {
-    cycles: ["target", "Cycles aren't ready yet.", "Sprint planning will live here. We'll turn it on in a future update."],
-    modules: ["layers", "Modules aren't ready yet.", "Grouping work into bigger efforts will live here. We'll turn it on in a future update."],
-  } as const;
-  const [icon, heading, body] = map[kind];
-  return (
-    <div className="pm-surface" style={{ padding: 8 }}>
-      <EmptyBlock icon={icon} heading={heading} body={body} />
     </div>
   );
 }

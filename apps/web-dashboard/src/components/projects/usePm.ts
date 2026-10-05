@@ -4,6 +4,14 @@
 import useSWR from "swr";
 import useSWRInfinite from "swr/infinite";
 import { useCallback, useEffect, useMemo, useRef } from "react";
+import {
+  serializePmFilter,
+  type PmFilter,
+  type PmGroupByField,
+  type PmSavedViewDto,
+  type PmSortSpec,
+  type PmViewLayout,
+} from "@droplet/shared-types";
 import { authFetch } from "@/lib/auth";
 import type { Department } from "@/lib/types";
 import { makePerson } from "./config";
@@ -16,6 +24,12 @@ import type {
   PmComment,
   PmSummary,
   PmActivity,
+  PmQueryPage,
+  PmCycle,
+  PmModule,
+  PmModuleRef,
+  PmBurndown,
+  PmScopedItems,
   Person,
 } from "./types";
 
@@ -132,6 +146,175 @@ export function useProjectLabels(projectId: string | null) {
     (u: string) => getJson<{ labels: PmLabel[] }>(u),
   );
   return { labels: data?.labels };
+}
+
+/** The browser's IANA zone. Relative dates in a filter ("today", "-7d") are
+ *  resolved by the SERVER in this zone — the browser never computes one. */
+export function browserTimeZone(): string | undefined {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Rows asked for per request. The server allows 500; a project of a few
+ *  hundred items arrives in one or two requests. */
+const QUERY_PAGE_SIZE = 200;
+/** Pages the board chases on its own — 10 000 items — before it stops and says so. */
+export const QUERY_MAX_PAGES = 50;
+
+export interface WorkItemQueryArgs {
+  enabled: boolean;
+  /** One project, or `null` for the whole workspace. */
+  projectId: string | null;
+  filter: PmFilter;
+  /** Named filters whose match counts come back on the first page (the saved-view chips). */
+  counts?: Record<string, PmFilter>;
+  /** WARP-3537 — the table's ordering. Absent: the server's own (a project's manual order). */
+  sort?: PmSortSpec[];
+  /** WARP-3537 — exact per-group counts for the whole result, returned as `groups` on the first page. */
+  groupBy?: PmGroupByField;
+}
+
+/**
+ * WARP-3522 — the board and the list read through the query API, so the filter
+ * runs on the server and the page never filters what it holds. Pages load one
+ * after another on their own (`useSWRInfinite`), the first renders at once, and
+ * the caller is told while more remain ("Showing 200 of 530"). Items repeated
+ * across a page boundary (offset paging; see the server's `cursor.ts`) are
+ * de-duplicated by id.
+ *
+ * `refresh` revalidates every loaded page and resolves to the fresh items, which
+ * is what the drawer needs to pick up its own item after an edit.
+ */
+export function useWorkItemQuery({ enabled, projectId, filter, counts, sort, groupBy }: WorkItemQueryArgs) {
+  const tz = useMemo(browserTimeZone, []);
+  const failedPage = useRef<{ error: unknown; cursor: string | null } | null>(null);
+  const filterKey = serializePmFilter(filter);
+  // By value, so an equal sort in a new array is the same query. The server binds a
+  // page cursor to the sort it was issued under, so the sort is part of the key.
+  const sortKey = sort ? JSON.stringify(sort) : "";
+  const countsKey = counts
+    ? Object.entries(counts)
+        .map(([name, f]) => name + "=" + serializePmFilter(f))
+        .join("|")
+    : "";
+
+  // Editing a filter must not flash the board to a skeleton, so the previous
+  // answer stays up while the next one loads — but only WITHIN one project:
+  // another project's items under this project's header, even for a moment,
+  // would be wrong (their states are not this board's columns).
+  const lastProject = useRef(projectId);
+  const sameScope = lastProject.current === projectId;
+  useEffect(() => {
+    lastProject.current = projectId;
+  }, [projectId]);
+
+  const { data, error, isLoading, isValidating, size, setSize, mutate } = useSWRInfinite<PmQueryPage>(
+    (_index, prev: PmQueryPage | null) => {
+      if (!enabled) return null;
+      if (prev && prev.nextCursor === null) return null;
+      return ["pm-query", projectId ?? "*", filterKey, tz ?? "", countsKey, sortKey, groupBy ?? "", prev ? prev.nextCursor : null];
+    },
+    (key: unknown[]) => {
+      const cursor = key[7] as string | null;
+      return send<PmQueryPage>("/api/pm/work-items/query", "POST", {
+        projectId,
+        filter,
+        tz,
+        limit: QUERY_PAGE_SIZE,
+        cursor,
+        ...(sort ? { sort } : {}),
+        // `counts` and `groups` are one answer for the whole result, not one per page.
+        ...(cursor === null && counts ? { counts } : {}),
+        ...(cursor === null && groupBy ? { groupBy } : {}),
+      }).catch((error: unknown) => {
+        failedPage.current = { error, cursor };
+        throw error;
+      });
+    },
+    { revalidateFirstPage: false, parallel: false, keepPreviousData: sameScope },
+  );
+
+  const last = data?.[data.length - 1];
+  const hasMore = !!last && last.nextCursor !== null;
+  useEffect(() => {
+    if (hasMore && !isValidating && !error && size < QUERY_MAX_PAGES) void setSize(size + 1);
+  }, [hasMore, isValidating, error, size, setSize]);
+
+  const items = useMemo(() => {
+    if (!data) return undefined;
+    const seen = new Set<string>();
+    const out: PmWorkItem[] = [];
+    for (const page of data) {
+      for (const it of page.work_items) {
+        if (seen.has(it.id)) continue;
+        seen.add(it.id);
+        out.push(it);
+      }
+    }
+    return out;
+  }, [data]);
+
+  const refresh = useCallback(async () => {
+    const fresh = await mutate();
+    return fresh?.flatMap((p) => p.work_items);
+  }, [mutate]);
+
+  const first = data?.[0];
+  return {
+    items,
+    total: first?.total,
+    counts: first?.counts,
+    /** WARP-3537 — exact per-group counts for the whole result (only when a group-by was asked for). */
+    groups: first?.groups,
+    stale: first?.stale,
+    effectiveFilter: first?.filter,
+    /** More pages remain and are on their way. */
+    loadingMore: hasMore && size < QUERY_MAX_PAGES && !error,
+    /** More pages remain and will not be fetched: the cap was reached. */
+    truncated: hasMore && size >= QUERY_MAX_PAGES,
+    /** Distinguish a failed tail from a new filter whose first request failed. */
+    partialError: !!error && failedPage.current?.error === error && failedPage.current?.cursor !== null,
+    loadError: error && failedPage.current?.error === error && failedPage.current?.cursor !== null ? error : undefined,
+    error,
+    isLoading,
+    refresh,
+  };
+}
+
+/** `INBOX-42` → the item. For a deep link to an item that is not in the loaded list. */
+export function useWorkItemByKey(key: string | null, enabled: boolean) {
+  const { data, error, mutate } = useSWR(
+    key && enabled ? `/api/pm/work-items/by-key/${encodeURIComponent(key)}` : null,
+    (u: string) => getJson<{ work_item: PmWorkItem }>(u),
+    // A key that answers 404 will not answer differently in five seconds.
+    { shouldRetryOnError: false },
+  );
+  return { item: data?.work_item, error, mutate };
+}
+
+/** Where saved views are listed from: one project's, or every view the caller can see. */
+export type ViewsScope = { kind: "project"; projectId: string } | { kind: "all" } | null;
+
+/**
+ * Saved views the CALLER can see: shared ones and their own personal ones. The
+ * built-ins are not fetched — they are constants in shared-types, needed before
+ * any request could return — so `views` is only the saved ones. A `null` scope
+ * is "do not fetch".
+ */
+export function useSavedViews(scope: ViewsScope) {
+  const url =
+    scope === null
+      ? null
+      : scope.kind === "project"
+        ? `/api/pm/views?project=${encodeURIComponent(scope.projectId)}`
+        : "/api/pm/views";
+  const { data, error, isLoading, mutate } = useSWR(url, (u: string) =>
+    getJson<{ builtin: PmSavedViewDto[]; views: PmSavedViewDto[] }>(u),
+  );
+  return { views: data?.views, error, isLoading, mutate };
 }
 
 /** Rows asked for per request. The server's own default is 100 and its ceiling
@@ -268,8 +451,8 @@ function usePages<T extends { id: string }>(url: string | null, field: string) {
   };
 }
 
-export function useProjectItems(projectId: string | null) {
-  const url = projectId ? `/api/pm/projects/${projectId}/work-items` : null;
+export function useProjectItems(projectId: string | null, opts: { archived?: boolean } = {}) {
+  const url = projectId ? `/api/pm/projects/${projectId}/work-items${opts.archived ? "?archived=only" : ""}` : null;
   const { rows, mutate, ...rest } = usePages<PmWorkItem>(url, "work_items");
   return {
     ...rest,
@@ -312,6 +495,90 @@ export function useActivity(workItemId: string | null) {
   return { activity: rows, mutate };
 }
 
+export interface PmDevelopmentLink {
+  id: string;
+  provider: "GITHUB" | "GITLAB";
+  kind: "PULL_REQUEST" | "COMMIT" | "BRANCH";
+  url: string;
+  title: string;
+  state: "OPEN" | "MERGED" | "CLOSED" | "DRAFT";
+  author: string | null;
+  ref: string | null;
+  number: number | null;
+  externalUpdatedAt: string;
+  repository: { fullName: string };
+}
+
+export function useDevelopmentLinks(workItemId: string | null) {
+  const { data, error, isLoading, mutate } = useSWR(
+    workItemId ? `/api/pm/work-items/${workItemId}/development` : null,
+    (url: string) => getJson<{ links: PmDevelopmentLink[] }>(url),
+  );
+  return { links: data?.links, error, isLoading, mutate };
+}
+
+// ── Cycles and modules (WARP-3521) ──────────────────────────────────────────
+
+/** A project's cycles, active first, then upcoming, then completed (the server's order). */
+export function useProjectCycles(projectId: string | null) {
+  const { data, error, isLoading, mutate } = useSWR(
+    projectId ? `/api/pm/projects/${projectId}/cycles` : null,
+    (u: string) => getJson<{ cycles: PmCycle[] }>(u),
+  );
+  return { cycles: data?.cycles, error, isLoading, mutate };
+}
+
+/** One cycle's own work items. Server-scoped: the board's project list is a capped page. */
+export function useCycleItems(cycleId: string | null) {
+  const { data, error, isLoading, mutate } = useSWR(
+    cycleId ? `/api/pm/cycles/${cycleId}/work-items` : null,
+    (u: string) => getJson<PmScopedItems>(u),
+  );
+  return { items: data?.work_items, total: data?.total, error, isLoading, mutate };
+}
+
+/** The planning backlog: the project's unfinished work that is in no cycle. */
+export function useBacklog(projectId: string | null) {
+  const { data, error, isLoading, mutate } = useSWR(
+    projectId ? `/api/pm/projects/${projectId}/backlog` : null,
+    (u: string) => getJson<PmScopedItems>(u),
+  );
+  return { items: data?.work_items, total: data?.total, error, isLoading, mutate };
+}
+
+export function useCycleBurndown(cycleId: string | null) {
+  const { data, error, isLoading, mutate } = useSWR(
+    cycleId ? `/api/pm/cycles/${cycleId}/burndown` : null,
+    (u: string) => getJson<{ burndown: PmBurndown }>(u),
+  );
+  return { burndown: data?.burndown, error, isLoading, mutate };
+}
+
+export function useProjectModules(projectId: string | null) {
+  const { data, error, isLoading, mutate } = useSWR(
+    projectId ? `/api/pm/projects/${projectId}/modules` : null,
+    (u: string) => getJson<{ modules: PmModule[] }>(u),
+  );
+  return { modules: data?.modules, error, isLoading, mutate };
+}
+
+/** One module's own work items. */
+export function useModuleItems(moduleId: string | null) {
+  const { data, error, isLoading, mutate } = useSWR(
+    moduleId ? `/api/pm/modules/${moduleId}/work-items` : null,
+    (u: string) => getJson<PmScopedItems>(u),
+  );
+  return { items: data?.work_items, total: data?.total, error, isLoading, mutate };
+}
+
+/** The modules ONE work item is in — the drawer's picker. */
+export function useWorkItemModules(workItemId: string | null) {
+  const { data, error, isLoading, mutate } = useSWR(
+    workItemId ? `/api/pm/work-items/${workItemId}/modules` : null,
+    (u: string) => getJson<{ modules: PmModuleRef[] }>(u),
+  );
+  return { modules: data?.modules, error, isLoading, mutate };
+}
 
 /** One entry of `GET /api/pm/people` — what Projects needs to show a person. */
 interface PmPerson {
@@ -361,6 +628,8 @@ export interface CreateWorkItemInput {
   assignees?: string[];
   label_ids?: string[];
   due_date?: string;
+  /** WARP-3521 — plan the new item into a cycle of this project. */
+  cycle_id?: string;
 }
 
 export function pmActions() {
@@ -392,5 +661,94 @@ export function pmActions() {
       send<{ project: PmProject }>(`/api/pm/projects/${id}`, "PATCH", { archived: false }),
     deleteProject: (id: string, confirmIdentifier: string) =>
       send<{ deleted: string }>(`/api/pm/projects/${id}`, "DELETE", { confirm_identifier: confirmIdentifier }),
+
+    // ── Cycles (WARP-3521). Dates are `YYYY-MM-DD`; `null` clears one. ──
+    createCycle: (
+      projectId: string,
+      body: { name: string; description?: string | null; start_date?: string | null; end_date?: string | null },
+    ) => send<{ cycle: PmCycle }>(`/api/pm/projects/${projectId}/cycles`, "POST", body),
+    updateCycle: (
+      id: string,
+      patch: { name?: string; description?: string | null; start_date?: string | null; end_date?: string | null },
+    ) => send<{ cycle: PmCycle }>(`/api/pm/cycles/${id}`, "PATCH", patch),
+    deleteCycle: (id: string) => send<{ deleted: string }>(`/api/pm/cycles/${id}`, "DELETE"),
+    startCycle: (id: string) => send<{ cycle: PmCycle }>(`/api/pm/cycles/${id}/start`, "POST"),
+    /** `moveIncompleteTo` is a cycle id or the word "backlog" — required, never defaulted. */
+    completeCycle: (id: string, moveIncompleteTo: string) =>
+      send<{ cycle: PmCycle; moved: { count: number; to: string | null } }>(
+        `/api/pm/cycles/${id}/complete`,
+        "POST",
+        { moveIncompleteTo },
+      ),
+    /** Plan an item into a cycle, or (null) take it out. */
+    setItemCycle: (itemId: string, cycleId: string | null) =>
+      send<{ work_item: PmWorkItem }>(`/api/pm/work-items/${itemId}`, "PATCH", { cycle_id: cycleId }),
+
+    // ── Modules (WARP-3521) ──
+    createModule: (
+      projectId: string,
+      body: {
+        name: string;
+        description?: string | null;
+        lead_id?: string | null;
+        status?: string;
+        start_date?: string | null;
+        target_date?: string | null;
+      },
+    ) => send<{ module: PmModule }>(`/api/pm/projects/${projectId}/modules`, "POST", body),
+    updateModule: (
+      id: string,
+      patch: {
+        name?: string;
+        description?: string | null;
+        lead_id?: string | null;
+        status?: string;
+        start_date?: string | null;
+        target_date?: string | null;
+      },
+    ) => send<{ module: PmModule }>(`/api/pm/modules/${id}`, "PATCH", patch),
+    deleteModule: (id: string) => send<{ deleted: string }>(`/api/pm/modules/${id}`, "DELETE"),
+    addModuleItems: (moduleId: string, workItemIds: string[]) =>
+      send<{ added: number; module: PmModule }>(`/api/pm/modules/${moduleId}/work-items`, "POST", {
+        work_item_ids: workItemIds,
+      }),
+    removeModuleItem: (moduleId: string, workItemId: string) =>
+      send<{ removed: number; module: PmModule }>(
+        `/api/pm/modules/${moduleId}/work-items/${workItemId}`,
+        "DELETE",
+      ),
+  };
+}
+
+export interface SaveViewInput {
+  projectId: string | null;
+  scope: "PERSONAL" | "SHARED";
+  name: string;
+  layout: PmViewLayout;
+  filter: PmFilter;
+  /** WARP-3537 — what the table and list persist per view. `null` is "the layout's own default". */
+  groupBy?: PmGroupByField | null;
+  sortBy?: PmSortSpec[] | null;
+  columns?: string[] | null;
+}
+
+/** WARP-3522 — saved-view writes. Errors carry the orchestrator's stable codes
+ *  (`view_name_taken`, `view_limit_reached`, …), which `translateError` words. */
+export function viewActions() {
+  return {
+    create: (input: SaveViewInput) => send<{ view: PmSavedViewDto }>("/api/pm/views", "POST", input),
+    update: (
+      id: string,
+      patch: Partial<{
+        name: string;
+        layout: PmViewLayout;
+        filter: PmFilter;
+        groupBy: PmGroupByField | null;
+        sortBy: PmSortSpec[] | null;
+        columns: string[] | null;
+      }>,
+    ) =>
+      send<{ view: PmSavedViewDto }>(`/api/pm/views/${encodeURIComponent(id)}`, "PATCH", patch),
+    remove: (id: string) => send<{ deleted: string }>(`/api/pm/views/${encodeURIComponent(id)}`, "DELETE"),
   };
 }

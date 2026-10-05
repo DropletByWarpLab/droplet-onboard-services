@@ -137,6 +137,7 @@ const grantFindMany = vi.fn(async ({ where }: { where: { userId: string } }) =>
 );
 
 const prisma = {
+  systemFlag: { findUnique: vi.fn().mockResolvedValue(null) },
   camera: {
     findMany: vi.fn().mockResolvedValue([]),
     findUnique: vi.fn(async ({ where }: { where: { name: string } }) => ({
@@ -198,7 +199,23 @@ function camerasIn(body: unknown): string[] {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  vi.stubGlobal("fetch", vi.fn(async () => new Response("media")));
+  // Frigate media is opaque bytes here, except the review row: since WARP-3509 a
+  // review's thumbnail is the `thumb_path` file that row names (Frigate 0.17
+  // serves it from /clips/review/, not from an /api/review/<id>/thumbnail
+  // route), so the handler's lookup must get JSON back.
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+      const review = /^\/api\/review\/([^/]+)$/.exec(url.pathname);
+      if (review) {
+        const id = review[1];
+        const camera = REVIEW_CAMERA[id];
+        return Response.json({ id, camera, thumb_path: `/media/frigate/clips/review/thumb-${camera}-${id}.webp` });
+      }
+      return new Response("media");
+    }),
+  );
 });
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -251,9 +268,7 @@ describe("cross-camera lists show a scoped user only their cameras", () => {
     expect(camerasIn(res.body)).not.toContain("bedroom");
     // The request is narrowed to NO cameras; the real client answers that
     // with [] (pinned at the bottom of this file).
-    expect(vi.mocked(frigate.fetchEventsFiltered)).toHaveBeenCalledWith(
-      expect.objectContaining({ cameras: [] }),
-    );
+    expect(vi.mocked(frigate.fetchEventsFiltered)).not.toHaveBeenCalled();
   });
 
   it("a user with no grants at all gets empty lists", async () => {

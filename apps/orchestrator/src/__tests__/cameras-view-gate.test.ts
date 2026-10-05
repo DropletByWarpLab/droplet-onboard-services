@@ -78,8 +78,6 @@ vi.mock("../services/frigate.client.js", () => ({
   tagEventAsFace: okAsync(),
   openBirdseyeStream: okAsync(),
   openMjpegStream: okAsync(),
-  enableDetection: okAsync(),
-  disableDetection: okAsync(),
   deleteCamera: okAsync(),
   deleteEvent: okAsync(),
   addCamera: okAsync(),
@@ -87,6 +85,10 @@ vi.mock("../services/frigate.client.js", () => ({
   fetchEvents: okAsync(),
   fetchReviewPreview: okAsync(),
   fetchReviewThumbnail: okAsync(),
+  fetchReview: vi.fn().mockResolvedValue({ camera: "front", thumb_path: "/media/frigate/clips/review/thumb-front-abc.webp" }),
+  reviewThumbnailUrl: vi.fn().mockReturnValue("http://frigate.test:5000/clips/review/thumb-front-abc.webp"),
+  // WARP-3509: an event's HLS playback route resolves the event first.
+  fetchEventPlaybackSpan: okAsync(),
   buildRecordingClipUrl: vi.fn().mockReturnValue("http://frigate.test/clip.mp4"),
   buildVodMasterUrl: vi.fn().mockReturnValue("http://frigate.test/master.m3u8"),
   buildVodSegmentUrl: vi.fn().mockReturnValue("http://frigate.test/0.ts"),
@@ -200,6 +202,8 @@ const IMAGERY_AND_FOOTAGE: Array<[string, string]> = [
   ["get", "/api/cameras/events/abc/snapshot"],
   // WARP-3103: playing an event clip inline stays open to members.
   ["get", "/api/cameras/clips/event/abc"],
+  // WARP-3509: the same clip, played as HLS.
+  ["get", "/api/cameras/events/abc/playback.m3u8"],
   ["get", "/api/cameras/system"],
   ["get", "/api/cameras/storage"],
 ];
@@ -533,6 +537,7 @@ describe("WARP-2982: routes that name NO camera are per-camera guarded too", () 
       "GET /cameras/birdseye/live",
       "GET /cameras/reviews/:reviewId/preview",
       "GET /cameras/reviews/:reviewId/thumbnail",
+      "GET /cameras/events/:eventId/playback.m3u8",
     ]) {
       expect(guarded, key).toContain(key);
     }
@@ -599,6 +604,12 @@ describe("camera footage is private, no-store", () => {
     const frigate = await import("../services/frigate.client.js");
     vi.mocked(frigate.fetchSnapshot).mockResolvedValue(jpeg() as never);
     vi.mocked(frigate.fetchEventThumbnail).mockResolvedValue(jpeg() as never);
+    // WARP-3509: a review thumbnail comes from fetchReviewThumbnail (the review's
+    // thumb_path file), not from a bare fetch of an /api/review/<id>/thumbnail route.
+    vi.mocked(frigate.fetchReviewThumbnail).mockResolvedValue({
+      bytes: Buffer.from([0xff, 0xd8, 0xff]),
+      contentType: "image/webp",
+    });
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => jpeg());
     try {
       const res = await request(appAs("owner")).get(path);

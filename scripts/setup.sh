@@ -16,6 +16,7 @@
 #   --skip-drivers     Skip camera-driver / kernel-module setup
 #   --skip-start       Skip starting the Docker Compose stack
 #   --systemd          Install systemd service for auto-start on boot
+#   --edge-router HOST[:PORT]  Use an external OpenWrt edge router (WARP-3835)
 #   --regenerate-env   Force-regenerate .env (backs up existing)
 #   --sync-secrets     Only rewrite Docker secret files from .env, then exit
 #   --verbose          Show full command output
@@ -38,6 +39,7 @@ SKIP_DRIVERS=false
 SKIP_START=false
 INSTALL_SYSTEMD=false
 REGENERATE_ENV=false
+# EDGE_ROUTER stays UNSET unless --edge-router is passed (so an empty value is refused, not ignored)
 SYNC_SECRETS_ONLY=false
 # WARP-2574 (delivery half): focused re-run of the host-artefact installer only
 # (no docker, no build, no stack restart). What droplet-host-integration.service
@@ -84,6 +86,11 @@ Options:
                      add strength. See docs/fips.md.
   --no-fips          Deactivate FIPS mode (DROPLET_FIPS_MODE=0). Restores the
                      default modern-crypto posture (TLS 1.3, OpenSSL defaults).
+  --edge-router HOST[:PORT]
+                     Put this box behind an EXTERNAL OpenWrt edge router: writes
+                     OPENWRT_HOST/PORT (default 80)/USERNAME=droplet-ai to .env.
+                     The router password goes in docker/secrets/openwrt_password
+                     (setup keeps it). Setup FAILS if routing cannot authenticate.
   --regenerate-env   Force-regenerate .env (backs up existing)
   --sync-secrets     Only rewrite Docker secret files from .env, then exit
   --reapply-host-integration
@@ -116,6 +123,8 @@ while [ $# -gt 0 ]; do
     --fips)             FIPS_MODE=true; shift ;;
     --no-fips)          FIPS_MODE=false; shift ;;
     --regenerate-env)   REGENERATE_ENV=true; shift ;;
+    --edge-router)      [ $# -ge 2 ] || { echo "--edge-router needs HOST[:PORT]"; exit 2; }; EDGE_ROUTER="$2"; shift 2 ;;
+    --edge-router=*)    EDGE_ROUTER="${1#*=}"; shift ;;
     --sync-secrets)     SYNC_SECRETS_ONLY=true; shift ;;
     --reapply-host-integration) REAPPLY_HOST_INTEGRATION=true; shift ;;
     --verbose)          VERBOSE=true; shift ;;
@@ -236,10 +245,15 @@ if [ "$SYNC_SECRETS_ONLY" = "true" ]; then
   # the container root pw + routing restart move in lockstep.
   # Print this WARNING first so an operator who just rotated OPENWRT_PASSWORD
   # sees the safe path before the generic restart command.
-  log_warn "  If you rotated OPENWRT_PASSWORD on a single-box, run this INSTEAD"
-  log_warn "  of a bare 'restart routing' (sets the container root pw + restarts"
-  log_warn "  routing in lockstep):"
+  log_warn "  If you rotated OPENWRT_PASSWORD on a single-box (OPENWRT_HOST loopback,"
+  log_warn "  bundled container), run this INSTEAD of a bare 'restart routing' (sets"
+  log_warn "  the container root pw + restarts routing in lockstep):"
   log_warn "    sudo systemctl restart droplet-openwrt-attach.service"
+  # WARP-3738: an external router is never touched by the attach unit, and
+  # sync keeps its password file as written.
+  log_info "  External edge router (OPENWRT_HOST set): write the router's"
+  log_info "  /etc/droplet/droplet-ai-password into docker/secrets/openwrt_password, then:"
+  log_info "    docker compose -f docker/docker-compose.yml up -d --no-deps --force-recreate routing"
   log_info "  For all other secret rotations:"
   log_info "    docker compose -f docker/docker-compose.yml restart"
   exit 0
@@ -288,6 +302,24 @@ _on_error() {
   # Lock release is handled by the EXIT trap (set right after _acquire_lock),
   # so it runs on EVERY exit path — not just this one. exit here fires it.
   exit 1
+}
+
+# --- Verify gate (WARP-3835, decision D1) ---
+# A failed verify.sh FAILS setup. It used to be log_warn, so a box that could
+# not authenticate to its router still printed "Setup Complete". Exits BEFORE
+# close_install_mode_ssh_window so a failed provision keeps the rescue window.
+# Skipped (never fatal) when the stack was not started (--skip-start).
+run_verify_gate() {
+  if [ "$SKIP_START" != "true" ] && [ -x "$SCRIPT_DIR/verify.sh" ]; then
+    if ! "$SCRIPT_DIR/verify.sh"; then
+      log_error "Verification failed — see the FAIL lines above"
+      log_divider
+      printf "\n  ${_BOLD}${_RED}Droplet Edge Platform — Setup finished with FAILED checks${_RESET}\n\n"
+      exit 1
+    fi
+  else
+    log_info "Skipping verification (stack not started or verify.sh not found)"
+  fi
 }
 
 # --- Dry run mode ---
@@ -391,7 +423,10 @@ if [ "$DRY_RUN" = "true" ]; then
   fi
 
   log_step 7 $TOTAL_STEPS "Verify"
-  log_info "  Would run ./scripts/verify.sh"
+  log_info "  Would run ./scripts/verify.sh (a failed check fails setup: exit 1)"
+  if [ -n "${EDGE_ROUTER+x}" ]; then
+    log_info "  Would point .env at external router '$EDGE_ROUTER' (OPENWRT_HOST/PORT/USERNAME=droplet-ai)"
+  fi
   log_info "  Would configure local DNS: mDNS (droplet-ai.local via host avahi)"
   log_info "                              + droplet-ai.lan via OpenWrt dnsmasq (if reachable)"
 
@@ -484,6 +519,12 @@ main() {
   # ROUTING_SERVICE_TOKEN) and (re)materialize Docker bind-mount sources.
   # No-ops on a fresh install; recovers stale installs without --regenerate-env.
   migrate_env
+  # WARP-3835: --edge-router must land in .env BEFORE materialize_artifacts
+  # (sync_openwrt_password_secret keys off OPENWRT_HOST, WARP-3738) and before
+  # configure_single_box_env (keep-the-host block, WARP-1980).
+  if [ -n "${EDGE_ROUTER+x}" ]; then
+    configure_edge_router "$EDGE_ROUTER" || exit 1
+  fi
   materialize_artifacts
   # WARP-232: once /data is a real encrypted mount, relocate the crypto-
   # sensitive secrets (.env carries DEVICE_SECRET_KEY → restic password;
@@ -650,11 +691,7 @@ main() {
 
   # --- Phase 7: Verify ---
   log_step 7 $total_steps "Verify"
-  if [ "$SKIP_START" != "true" ] && [ -x "$SCRIPT_DIR/verify.sh" ]; then
-    "$SCRIPT_DIR/verify.sh" || log_warn "Some verification checks failed — see output above"
-  else
-    log_info "Skipping verification (stack not started or verify.sh not found)"
-  fi
+  run_verify_gate
 
   # --- Local DNS (mDNS + router dnsmasq) ---
   # Runs after the stack is up so the routing service is ready to accept the
@@ -814,7 +851,12 @@ main() {
 
   log_divider
   printf "\n"
-  printf "  ${_BOLD}${_GREEN}Droplet Edge Platform — Setup Complete${_RESET}\n"
+  if [ "${LOG_WARN_COUNT:-0}" -gt 0 ]; then
+    printf "  ${_BOLD}${_YELLOW}Droplet Edge Platform — Setup Complete with %d warnings${_RESET}\n" "$LOG_WARN_COUNT"
+    printf '%s' "$LOG_WARN_LIST" | sed 's/^/    - /'
+  else
+    printf "  ${_BOLD}${_GREEN}Droplet Edge Platform — Setup Complete${_RESET}\n"
+  fi
   printf "\n"
   # ADR-023 / WARP-1300: surface the publicly-trusted per-device FQDN as the
   # PRIMARY dashboard URL when it's known — the one address that works at

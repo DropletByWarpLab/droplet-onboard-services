@@ -28,6 +28,61 @@ export interface CameraInfo {
   status: "recording" | "detecting" | "live" | "idle" | "offline";
   lastSeen: string;
   lastDetection: DetectionEvent | null;
+  /**
+   * WARP-3511 — what this camera is keeping, how much, and when something
+   * last landed on disk. Same Frigate reading as `status`, so the two can
+   * never disagree about whether anything is being saved.
+   */
+  recording: CameraRecordingState;
+}
+
+/**
+ * How footage is kept, named for the broadest retention window that is open
+ * (Frigate keeps a segment if ANY window still covers it):
+ *
+ *   continuous — a 24/7 window: everything is kept
+ *   motion     — segments with motion are kept
+ *   events     — only footage that overlaps an alert or detection
+ *   off        — nothing is kept (every window at 0, or record disabled)
+ */
+export type RecordingMode = "continuous" | "motion" | "events" | "off";
+
+/** Days each retention window keeps footage. 0 = that window is closed. */
+export interface CameraRetentionDays {
+  continuous: number;
+  motion: number;
+  alerts: number;
+  detections: number;
+}
+
+/**
+ * `null` always means "not known", never "nothing": Frigate answers a null
+ * usage for a camera with no segments yet, and a `0` rate before it has
+ * segments to average. The dashboard renders unknown differently from zero.
+ *
+ * `degraded: true` means Frigate could not be read (stats or config), so
+ * EVERY other field is unknown — and so is `CameraInfo.status`, which then
+ * reflects only what the orchestrator could not rule out. Render a
+ * "service unavailable" state; never a recording claim.
+ */
+export interface CameraRecordingState {
+  degraded: boolean;
+  /** Null only when `degraded`. */
+  mode: RecordingMode | null;
+  /** The windows as configured, even when `mode` is "off". Null only when `degraded`. */
+  retentionDays: CameraRetentionDays | null;
+  /**
+   * When the newest saved segment ended (ISO), looking back a short bounded
+   * window. Null when the read failed or none was found in it — normal for a camera
+   * that only keeps motion or events, and is not by itself a fault.
+   */
+  lastSegmentAt: string | null;
+  /** True when the recent-segment read failed, rather than finding no footage. */
+  lastSegmentReadFailed?: boolean;
+  /** Bytes of footage on disk, or null when Frigate has no segments / no figure. */
+  usedBytes: number | null;
+  /** Measured write rate scaled to a day, or null when not yet measured. */
+  bytesPerDay: number | null;
 }
 
 export interface DetectionEvent {
@@ -54,6 +109,8 @@ export interface DetectionEvent {
  * media URL, so camera streams stay LAN-side.
  */
 export interface EventDetail extends DetectionEvent {
+  /** Any part of the activity occurred outside saved hours; null when unset. */
+  outsideBusinessHours?: boolean | null;
   /** Frigate sub-label (e.g. detected person name from face recogniser). */
   subLabel: string | null;
   /** Highest-confidence sub-label score, [0, 1]. */
@@ -100,7 +157,9 @@ export interface ReviewItem {
   zones: string[];
   /** Underlying event IDs feeding this review item. */
   detectionIds: string[];
-  /** Authenticated proxy URL for the Frigate-rendered preview clip. */
+  /** Any part of the activity occurred outside saved hours; null when unset. */
+  outsideBusinessHours?: boolean | null;
+  /** Authenticated proxy URL for the Frigate-rendered review preview. */
   previewUrl: string | null;
   /** Authenticated proxy URL for the cluster thumbnail. */
   thumbnailUrl: string;
