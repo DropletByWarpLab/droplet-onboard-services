@@ -210,7 +210,7 @@ export function createIntegrationsRouter(
         displayName: descriptor.displayName,
         category: descriptor.category,
         track: descriptor.track,
-        description: descriptor.catalog?.description ?? null,
+        description: descriptor.track === "mcp" ? descriptor.description : descriptor.catalog?.description ?? null,
         availability: descriptor.catalog?.availability ?? "available",
         setupGuideHref: setupGuideHrefFor(descriptor) ?? null,
         // Base fields remain separate from variants. A client combines the

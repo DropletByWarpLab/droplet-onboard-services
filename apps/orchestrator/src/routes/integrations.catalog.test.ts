@@ -41,6 +41,7 @@ describe("native integration descriptor catalog", () => {
     for (const provider of response.body.providers) {
       if (["rest", "mcp", "catalog-only"].includes(provider.track)) expect(provider.canEnableWrites).toBe(false);
       if (["mcp", "catalog-only"].includes(provider.track)) { expect(provider.connectPath).toBeNull(); expect(provider.testPath).toBeNull(); }
+      if (provider.track === "mcp") expect(provider.description).toEqual(expect.any(String));
       for (const field of [...provider.credentialFields, ...provider.credentialVariants.flatMap((v: { fields: unknown[] }) => v.fields)]) {
         expect(field).not.toHaveProperty("value"); expect(field).not.toHaveProperty("defaultValue");
       }
