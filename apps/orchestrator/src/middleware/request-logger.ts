@@ -4,30 +4,17 @@ import { getRequestId } from "../lib/request-context.js";
 
 const isTest = process.env.NODE_ENV === "test" || !!process.env.VITEST;
 
-/**
- * Query parameters that carry a bearer-equivalent secret. They are scrubbed
- * from `req.query` on every route (the logged URL keeps only its path), so a log bundle
- * never carries a replayable credential. Add a name here when a route takes
- * one in the query string.
- *   - `token` — overlay link token (WARP-1474), calendar feed token.
- *   - `sig`   — signed recordings-segment URL (WARP-3122); `u`/`exp` alone
- *               are harmless without it.
- *   - `t`     — signed clip-share token (clips.service `signShareUrl`).
- */
-export const SECRET_QUERY_PARAMS: readonly string[] = ["token", "sig", "t"];
-
-const REDACTED = "[Redacted]";
-
 /** pino-http req serializer (receives the std-serialized req). */
-function scrubReq(req: { url?: string; query?: Record<string, unknown> } & Record<string, unknown>) {
+function scrubReq(req: { url?: string } & Record<string, unknown>) {
   const out = { ...req };
   // WARP-3193 SEC-DATA-4: log the path only, never the query string.
   if (typeof out.url === "string") out.url = out.url.split("?", 1)[0];
-  if (out.query && typeof out.query === "object") {
-    const query = { ...out.query };
-    for (const name of SECRET_QUERY_PARAMS) if (name in query) query[name] = REDACTED;
-    out.query = query;
-  }
+  // WARP-3622: nor the parsed copies of it. `query` (file paths, search terms,
+  // recipients, feed and segment tokens) and `params` (path segments such as a
+  // username or share id) are personal data that would ride into container logs
+  // and the diagnostics bundle, which redacts secrets, not personal data.
+  delete out.query;
+  delete out.params;
   return out;
 }
 
@@ -67,6 +54,10 @@ export function createRequestLogger(opts: {
         // that a future serializer or a `req.log.info({ req/res })` call might
         // emit, so a token can never ride out of the box in a log bundle.
         "req.body.token",
+        // WARP-3532: chat-app webhook URLs carry posting credentials in their
+        // path. The current request serializer omits bodies, but keep this
+        // secret out if a future handler logs a parsed request object.
+        "req.body.url",
         // AC2 defense-in-depth: a client that passes the redeem token as a
         // query param (?token=…) lands it under `req.query.token`, which the
         // default pino req serializer DOES emit — redact it alongside the body
@@ -74,8 +65,8 @@ export function createRequestLogger(opts: {
         // is unaffected; the routes take the token in the JSON body, not the
         // query string.)
         "req.query.token",
-        // WARP-3122: the signed-segment signature (see SECRET_QUERY_PARAMS,
-        // which the req serializer also scrubs from `req.query`).
+        // WARP-3122: the signed-segment signature (the req serializer also
+        // drops `req.query` entirely, WARP-3622).
         "req.query.sig",
         "req.body.sign_public_key_pem",
         'req.headers["x-overlay-pop"]',
@@ -97,10 +88,10 @@ export function createRequestLogger(opts: {
     : pino(httpBaseOpts);
   return pinoHttp({
     logger: httpBaseLogger,
-    // WARP-3122 + WARP-3193 SEC-DATA-4: `redact` cannot reach inside the `url`
-    // string, so a custom req serializer logs the path only and scrubs
-    // SECRET_QUERY_PARAMS from `req.query` (pino-http wraps it around the
-    // standard serializer).
+    // WARP-3122 + WARP-3193 SEC-DATA-4 + WARP-3622: `redact` cannot reach inside
+    // the `url` string, so a custom req serializer logs the path only and drops
+    // `req.query` and `req.params` (pino-http wraps it around the standard
+    // serializer).
     serializers: { req: scrubReq },
     level: opts.level ?? (isTest ? "silent" : "info"),
     customProps: (req) => ({

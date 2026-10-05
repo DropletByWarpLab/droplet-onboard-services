@@ -162,6 +162,28 @@ export function useActivity(workItemId: string | null) {
   return { activity: data?.activity, mutate };
 }
 
+export interface PmDevelopmentLink {
+  id: string;
+  provider: "GITHUB" | "GITLAB";
+  kind: "PULL_REQUEST" | "COMMIT" | "BRANCH";
+  url: string;
+  title: string;
+  state: "OPEN" | "MERGED" | "CLOSED" | "DRAFT";
+  author: string | null;
+  ref: string | null;
+  number: number | null;
+  externalUpdatedAt: string;
+  repository: { fullName: string };
+}
+
+export function useDevelopmentLinks(workItemId: string | null) {
+  const { data, error, isLoading, mutate } = useSWR(
+    workItemId ? `/api/pm/work-items/${workItemId}/development` : null,
+    (url: string) => getJson<{ links: PmDevelopmentLink[] }>(url),
+  );
+  return { links: data?.links, error, isLoading, mutate };
+}
+
 
 interface DirectoryUser {
   id: string;

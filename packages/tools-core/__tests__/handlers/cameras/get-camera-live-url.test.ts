@@ -24,4 +24,18 @@ describe("get_camera_live_url", () => {
       expect(data.snapshot_url).toBe("/api/cameras/front/snapshot");
     }
   });
+
+  // WARP-3691
+  it("includes a camera_live media descriptor (MJPEG + poster)", async () => {
+    const r = await getCameraLiveUrl.handler({ camera: "front" }, ctx);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect((r.data as { media: unknown }).media).toEqual({
+        kind: "camera_live",
+        camera: "front",
+        liveUrl: "/api/cameras/front/live",
+        snapshotUrl: "/api/cameras/front/snapshot",
+      });
+    }
+  });
 });

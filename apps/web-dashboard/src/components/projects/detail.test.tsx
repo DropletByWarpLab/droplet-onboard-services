@@ -34,6 +34,11 @@ vi.mock("@/lib/auth", () => ({
     }
     if (url.endsWith("/comments")) return json({ comments: [] });
     if (url.endsWith("/activity")) return json({ activity: [] });
+    if (url.endsWith("/development")) return json({ links: [{
+      id: "dev-1", provider: "GITHUB", kind: "PULL_REQUEST", url: "https://github.com/acme/app/pull/4",
+      title: "INBOX-1 fix login", state: "OPEN", author: "octocat", ref: "inbox-1-fix-login",
+      number: 4, externalUpdatedAt: "2026-10-04T00:00:00.000Z", repository: { fullName: "acme/app" },
+    }] });
     if (url.includes("/work-items?parent=")) return json({ work_items: [] });
     if (url.endsWith("/labels")) return json({ labels: PROJECT_LABELS });
     if (url.match(/\/work-items\/[^/]+$/) && method === "PATCH") {
@@ -135,5 +140,18 @@ describe("DetailDrawer — Labels field can add a label (WARP-948)", () => {
       expect(patch).toBeTruthy();
       expect((patch?.body as { label_ids?: string[] } | undefined)?.label_ids).toContain("lab-1");
     });
+  });
+});
+
+describe("DetailDrawer — Development links", () => {
+  it("renders linked changes and copies the canonical branch name", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    renderDrawer();
+    const link = await screen.findByRole("link", { name: /PR 4 INBOX-1 fix login open/i });
+    expect(link).toHaveAttribute("href", "https://github.com/acme/app/pull/4");
+    expect(link).toHaveAttribute("rel", "noopener noreferrer");
+    fireEvent.click(screen.getByRole("button", { name: /copy development branch name/i }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("inbox-1-first-task"));
   });
 });

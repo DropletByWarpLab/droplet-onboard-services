@@ -32,6 +32,7 @@ import setDeviceSchedule from "./handlers/network/set-device-schedule.js";
 // files
 import listFiles from "./handlers/files/list-files.js";
 import readFile from "./handlers/files/read-file.js";
+import showFile from "./handlers/files/show-file.js";
 import searchFiles from "./handlers/files/search-files.js";
 import searchContent from "./handlers/files/search-content.js";
 // Whole-document read over the file-indexer's extracted text — the PDF /
@@ -287,6 +288,8 @@ const allTools: Tool[] = [
   // files
   listFiles,
   readFile,
+  // WARP-3691: show a file inline in chat (descriptor only, no bytes)
+  showFile,
   searchFiles,
   searchContent,
   readDocumentText,

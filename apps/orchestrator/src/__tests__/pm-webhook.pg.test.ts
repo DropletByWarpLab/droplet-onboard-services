@@ -10,6 +10,8 @@
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import type { PrismaClient } from "@prisma/client";
+import { fanOutActivity } from "../services/pm/webhook-fanout.js";
+import { getWebhook, listDeliveries, PM_WEBHOOK_ERRORS } from "../services/pm/pm-webhook.service.js";
 
 vi.unmock("@prisma/client");
 
@@ -55,7 +57,7 @@ describe.skipIf(!RUN)("PmWebhook / PmWebhookDelivery — the database's own guar
       data: {
         workspaceId,
         name: "warp3532-hk-hook",
-        url: "https://hooks.example.com/services/abc",
+        urlEnc: "dcv1:sealed-webhook-url",
         secretEnc: "dcv1:test",
         events: ["work_item.created"],
         ...over,
@@ -102,13 +104,11 @@ describe.skipIf(!RUN)("PmWebhook / PmWebhookDelivery — the database's own guar
     await expect(webhook({ events: ["work_item.created", "sla.breached"] })).resolves.toBeTruthy();
   });
 
-  it("PmWebhook_url_is_http — the floor under the SSRF guard", async () => {
-    for (const bad of ["file:///etc/passwd", "gopher://h:70/x", "ftp://h/x", "javascript:alert(1)", "hooks.example.com"]) {
-      await expect(webhook({ url: bad }), bad).rejects.toThrow(/PmWebhook_url_is_http/);
-    }
-    // Scheme case is not significant to a URL.
-    await expect(webhook({ url: "HTTPS://hooks.example.com/x" })).resolves.toBeTruthy();
-    await expect(webhook({ url: "http://192.168.1.20:5678/webhook/x" })).resolves.toBeTruthy();
+  it("PmWebhook_urlEnc_is_encrypted — plaintext destinations cannot be stored", async () => {
+    await expect(webhook({ urlEnc: "https://hooks.example.com/services/plaintext-secret" })).rejects.toThrow(
+      /PmWebhook_urlEnc_is_encrypted/,
+    );
+    await expect(webhook({ urlEnc: "dcv1:sealed-webhook-url" })).resolves.toBeTruthy();
   });
 
   it("PmWebhook_consecutiveFailures_nonnegative", async () => {
@@ -210,6 +210,30 @@ describe.skipIf(!RUN)("PmWebhook / PmWebhookDelivery — the database's own guar
       await prisma.pmWorkspace.delete({ where: { id: workspaceId } });
       expect(await prisma.pmWebhook.findUnique({ where: { id: hook.id } })).toBeNull();
     });
+  });
+
+  it("a workspace Projects webhook queues a project event without a matching private ticket", async () => {
+    const desk = await prisma.pmProject.create({ data: { workspaceId, kind: "SERVICE_DESK", name: "warp3532-hk-private", identifier: "W32D" } });
+    const hook = await webhook();
+    const events = [];
+    for (const scope of [projectId, desk.id]) {
+      const item = await prisma.pmWorkItem.create({ data: { projectId: scope, sequenceId: 1, name: "same matching subject", createdById: "warp3532-hk-owner" } });
+      events.push(await prisma.pmActivity.create({ data: { workItemId: item.id, verb: "created" } }));
+    }
+    const deps = { origin: async () => "https://droplet.example" };
+    expect(await fanOutActivity(prisma, events[0]!, deps)).toBe(1);
+    expect(await fanOutActivity(prisma, events[1]!, deps)).toBe(0);
+    const rows = await prisma.pmWebhookDelivery.findMany({ where: { webhookId: hook.id } });
+    expect(rows.map((r) => r.sourceKey)).toEqual([`activity:${events[0]!.id}`]);
+    expect(JSON.stringify(rows)).not.toContain(desk.id);
+  });
+
+  it("legacy desk-scoped hooks cannot expose their settings or delivery log through Projects", async () => {
+    const desk = await prisma.pmProject.create({ data: { workspaceId, kind: "SERVICE_DESK", name: "warp3532-hk-private", identifier: "W32D" } });
+    const hook = await webhook({ projectId: desk.id });
+    await delivery(hook.id, { payload: { private: "customer conversation" } });
+    await expect(getWebhook(prisma, hook.id)).rejects.toThrow(PM_WEBHOOK_ERRORS.NOT_FOUND);
+    await expect(listDeliveries(prisma, hook.id)).rejects.toThrow(PM_WEBHOOK_ERRORS.NOT_FOUND);
   });
 
   // ── indexes ──────────────────────────────────────────────────────────────

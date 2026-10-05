@@ -21,7 +21,7 @@ CREATE TABLE "PmWebhook" (
     "workspaceId" TEXT NOT NULL,
     "projectId" TEXT,
     "name" TEXT NOT NULL,
-    "url" TEXT NOT NULL,
+    "urlEnc" TEXT NOT NULL,
     "format" "PmWebhookFormat" NOT NULL DEFAULT 'JSON',
     "secretEnc" TEXT NOT NULL,
     "events" TEXT[],
@@ -101,11 +101,11 @@ ALTER TABLE "PmWebhook" ADD CONSTRAINT "PmWebhook_events_not_empty"
 ALTER TABLE "PmWebhook" ADD CONSTRAINT "PmWebhook_consecutiveFailures_nonnegative"
     CHECK ("consecutiveFailures" >= 0);
 
--- The service guard (assertLanOrPublicUrl) is the real SSRF defence; this is the
--- floor under it, so a writer that skips the service still cannot store a
--- file: or gopher: URL for the delivery worker to be handed.
-ALTER TABLE "PmWebhook" ADD CONSTRAINT "PmWebhook_url_is_http"
-    CHECK ("url" ~* '^https?://');
+-- PmWebhook.urlEnc is authenticated ciphertext (column-crypto's dcv1 wire
+-- format). The service decrypts only at read/dial boundaries and validates the
+-- plaintext URL before it is stored.
+ALTER TABLE "PmWebhook" ADD CONSTRAINT "PmWebhook_urlEnc_is_encrypted"
+    CHECK ("urlEnc" LIKE 'dcv1:%');
 
 -- `status` is the state and `deliveredAt` an audit timestamp pinned to it — the
 -- PmActivity_notifiedAt_matches_status shape. A DELIVERED row without a time, or

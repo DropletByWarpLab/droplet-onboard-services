@@ -50,6 +50,7 @@ const ITEM = {
   assignees: [{ userId: "u-2" }],
   project: {
     id: "p-1",
+    kind: "PROJECT" as "PROJECT" | "SERVICE_DESK",
     workspaceId: "ws-1",
     identifier: "ENG",
     name: "Engineering",
@@ -66,7 +67,8 @@ function makePrisma(hooks: HookRow[], item: typeof ITEM | null = ITEM) {
         hooks.filter((h) => h.enabled === where.enabled && h.events.includes(where.events.has)),
       ),
     },
-    pmWorkItem: { findUnique: vi.fn(async () => item) },
+    pmWorkItem: { findFirst: vi.fn(async ({ where }: { where: { project: { is: { kind: string } } } }) =>
+      item?.project.kind === where.project.is.kind ? item : null) },
     user: {
       findMany: vi.fn(async () => [
         { id: "u-1", displayName: "Ana Cruz" },
@@ -111,6 +113,22 @@ const hook = (over: Partial<HookRow> = {}): HookRow => ({
 const deps = { now: () => T0, origin: async () => "https://droplet.example" };
 
 describe("fanOutActivity", () => {
+  it("does not load audience or queue private ticket data for a Projects subscriber", async () => {
+    const prisma = makePrisma([hook()], { ...ITEM, project: { ...ITEM.project, kind: "SERVICE_DESK" } });
+    const origin = vi.fn(async () => "https://droplet.example");
+    expect(await fanOutActivity(prisma as never, activity(), { ...deps, origin })).toBe(0);
+    expect(prisma.user.findMany).not.toHaveBeenCalled();
+    expect(prisma.pmState.findMany).not.toHaveBeenCalled();
+    expect(prisma.pmWebhookDelivery.createMany).not.toHaveBeenCalled();
+    expect(origin).not.toHaveBeenCalled();
+  });
+
+  it("does not fan out a detached deletion activity", async () => {
+    const prisma = makePrisma([hook()]);
+    expect(await fanOutActivity(prisma as never, activity({ workItemId: null } as unknown as Partial<PmActivity>), deps)).toBe(0);
+    expect(prisma.pmWebhook.findMany).not.toHaveBeenCalled();
+    expect(prisma.pmWorkItem.findFirst).not.toHaveBeenCalled();
+  });
   it("queues one delivery per interested webhook, keyed by the activity row", async () => {
     const prisma = makePrisma([hook({ id: "a" }), hook({ id: "b" })]);
     const queued = await fanOutActivity(prisma as never, activity(), deps);
@@ -168,7 +186,7 @@ describe("fanOutActivity", () => {
   it("does the cheap thing first: with nobody subscribed it never loads the work item", async () => {
     const prisma = makePrisma([hook({ events: ["work_item.created"] }), hook({ id: "off", enabled: false })]);
     expect(await fanOutActivity(prisma as never, activity(), deps)).toBe(0);
-    expect(prisma.pmWorkItem.findUnique).not.toHaveBeenCalled();
+    expect(prisma.pmWorkItem.findFirst).not.toHaveBeenCalled();
     expect(prisma.user.findMany).not.toHaveBeenCalled();
     expect(prisma.pmWebhookDelivery.createMany).not.toHaveBeenCalled();
   });

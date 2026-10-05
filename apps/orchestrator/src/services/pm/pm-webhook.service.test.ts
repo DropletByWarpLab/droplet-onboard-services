@@ -20,7 +20,8 @@ import {
   updateWebhook,
 } from "./pm-webhook.service.js";
 import { openWebhookSecret } from "./webhook-secret.js";
-import type { DeliveryDeps } from "./webhook-delivery.service.js";
+import { openWebhookUrl } from "./webhook-url.js";
+import { DELIVERY_LEASE_MS, type DeliveryDeps } from "./webhook-delivery.service.js";
 
 const KEY = Buffer.alloc(32, 5).toString("base64");
 const T0 = new Date("2026-10-04T12:00:00.000Z");
@@ -29,7 +30,7 @@ const WS = { id: "ws-1", slug: "home", name: "Home", createdAt: T0, updatedAt: T
 beforeEach(() => __setColumnCryptoKeyForTest(KEY));
 afterEach(() => __setColumnCryptoKeyForTest(null));
 
-function makePrisma(opts: { projects?: Record<string, string>; deliveries?: PmWebhookDelivery[] } = {}) {
+function makePrisma(opts: { projects?: Record<string, string>; deskProjects?: string[]; deliveries?: PmWebhookDelivery[] } = {}) {
   const hooks: PmWebhook[] = [];
   const deliveries: PmWebhookDelivery[] = [...(opts.deliveries ?? [])];
   let seq = 0;
@@ -41,8 +42,8 @@ function makePrisma(opts: { projects?: Record<string, string>; deliveries?: PmWe
       findUnique: vi.fn(async ({ where }: { where: { id: string } }) => (where.id === WS.id ? WS : null)),
     },
     pmProject: {
-      findUnique: vi.fn(async ({ where }: { where: { id: string } }) =>
-        opts.projects?.[where.id] ? { workspaceId: opts.projects[where.id] } : null,
+      findFirst: vi.fn(async ({ where }: { where: { id: string; kind: string } }) =>
+        where.kind === "PROJECT" && !opts.deskProjects?.includes(where.id) && opts.projects?.[where.id] ? { workspaceId: opts.projects[where.id] } : null,
       ),
     },
     pmWebhook: {
@@ -57,8 +58,8 @@ function makePrisma(opts: { projects?: Record<string, string>; deliveries?: PmWe
         hooks.push(row);
         return row;
       }),
-      findMany: vi.fn(async () => [...hooks]),
-      findUnique: vi.fn(async ({ where }: { where: { id: string } }) => hooks.find((h) => h.id === where.id) ?? null),
+      findMany: vi.fn(async () => hooks.filter((h) => !h.projectId || !opts.deskProjects?.includes(h.projectId))),
+      findFirst: vi.fn(async ({ where }: { where: { id: string } }) => hooks.find((h) => h.id === where.id && (!h.projectId || !opts.deskProjects?.includes(h.projectId))) ?? null),
       update: vi.fn(async ({ where, data }: { where: { id: string }; data: Record<string, unknown> }) => {
         const row = hooks.find((h) => h.id === where.id) as unknown as Record<string, unknown>;
         for (const [k, v] of Object.entries(data)) {
@@ -120,15 +121,37 @@ const good = {
 };
 
 describe("createWebhook", () => {
-  it("returns the signing secret once, seals it, and never stores it in the clear", async () => {
+  it("refuses a Service Desk scope before creating a Projects webhook", async () => {
+    const prisma = makePrisma({ projects: { desk: WS.id }, deskProjects: ["desk"] });
+    await expect(createWebhook(prisma as never, "u-1", { ...good, projectId: "desk" })).rejects.toThrow(PM_WEBHOOK_ERRORS.PROJECT_NOT_FOUND);
+    expect(prisma.pmWebhook.create).not.toHaveBeenCalled();
+    expect(prisma.pmProject.findFirst).toHaveBeenCalledWith({ where: { id: "desk", kind: "PROJECT" }, select: { workspaceId: true } });
+  });
+
+  it("hides legacy desk-scoped hooks from reads, delivery logs and updates", async () => {
+    const prisma = makePrisma({ projects: { desk: WS.id }, deskProjects: ["desk"] });
+    const { webhook } = await createWebhook(prisma as never, "u-1", good);
+    prisma.hooks[0]!.projectId = "desk";
+    expect(await listWebhooks(prisma as never)).toEqual([]);
+    await expect(getWebhook(prisma as never, webhook.id)).rejects.toThrow(PM_WEBHOOK_ERRORS.NOT_FOUND);
+    await expect(listDeliveries(prisma as never, webhook.id)).rejects.toThrow(PM_WEBHOOK_ERRORS.NOT_FOUND);
+    await expect(updateWebhook(prisma as never, webhook.id, { name: "Refused" })).rejects.toThrow(PM_WEBHOOK_ERRORS.NOT_FOUND);
+    expect(prisma.pmWebhookDelivery.findMany).not.toHaveBeenCalled();
+    expect(prisma.pmWebhook.update).not.toHaveBeenCalled();
+  });
+  it("returns the signing secret once and seals both credentials at rest", async () => {
     const prisma = makePrisma();
     const { webhook, secret } = await createWebhook(prisma as never, "u-1", good);
 
     expect(secret).toMatch(/^whsec_[A-Za-z0-9_-]{43}$/);
     const row = prisma.hooks[0]!;
     expect(row.secretEnc.startsWith("dcv1:")).toBe(true);
+    expect(row.urlEnc.startsWith("dcv1:")).toBe(true);
     expect(JSON.stringify(row)).not.toContain(secret);
+    expect(JSON.stringify(row)).not.toContain("very-secret-token");
     expect(openWebhookSecret(row.id, row.secretEnc)).toBe(secret);
+    expect(openWebhookUrl(row.id, row.urlEnc)).toBe(good.url);
+    expect(() => openWebhookUrl("different-webhook", row.urlEnc)).toThrow();
     expect(webhook).not.toHaveProperty("secret");
     expect(webhook).not.toHaveProperty("secretEnc");
     expect(row).toMatchObject({ workspaceId: "ws-1", projectId: null, createdById: "u-1", format: "SLACK" });
@@ -236,12 +259,12 @@ describe("updateWebhook", () => {
     await expect(updateWebhook(prisma as never, id, { url: "http://127.0.0.1/x" })).rejects.toThrow(
       PM_WEBHOOK_ERRORS.BLOCKED_DESTINATION,
     );
-    const before = prisma.hooks[0]!.url;
+    const before = prisma.hooks[0]!.urlEnc;
     await updateWebhook(prisma as never, id, { name: "Renamed" });
-    expect(prisma.hooks[0]!.url).toBe(before);
+    expect(prisma.hooks[0]!.urlEnc).toBe(before);
     expect(prisma.hooks[0]!.name).toBe("Renamed");
     await updateWebhook(prisma as never, id, { url: "https://other.example.com/hook" });
-    expect(destinationOf(prisma.hooks[0]!.url)).toBe("https://other.example.com");
+    expect(destinationOf(openWebhookUrl(id, prisma.hooks[0]!.urlEnc))).toBe("https://other.example.com");
   });
 
   it("validates events on edit too", async () => {
@@ -428,5 +451,30 @@ describe("sendTestDelivery", () => {
     const { webhook } = await createWebhook(prisma as never, null, good);
     const result = await sendTestDelivery(prisma as never, webhook.id, { id: null, name: null }, okDeps({ send: (async () => ({ status: 404 })) as never }));
     expect(result).toMatchObject({ status: "GIVEN_UP", attempts: 1, lastStatusCode: 404, lastError: "HTTP 404" });
+  });
+});
+
+describe("sendTestDelivery and the delivery worker (review of WARP-3532)", () => {
+  it("creates the test row already leased, so the worker's claim cannot take it while the test is in flight", async () => {
+    const prisma = makePrisma();
+    const { webhook } = await createWebhook(prisma as never, null, good);
+    await sendTestDelivery(prisma as never, webhook.id, { id: null, name: null }, {
+      now: () => T0,
+      resolveDestination: async () => ({
+        url: new URL("https://hooks.example.com/x"),
+        hostname: "hooks.example.com",
+        addresses: [{ address: "93.184.216.34", family: 4 }],
+        scope: "public",
+      }),
+      send: (async () => ({ status: 200 })) as never,
+      gate: async () => true,
+      notifyAdmins: async () => undefined,
+      logger: { warn: vi.fn(), error: vi.fn() },
+    });
+    // The claim selects `nextAttemptAt <= now`: a row due "now" is claimable, a row
+    // due one lease from now is not. Read what the insert asked for — the settle
+    // that follows rewrites the field.
+    const asked = prisma.pmWebhookDelivery.create.mock.calls[0]![0] as { data: { nextAttemptAt: Date } };
+    expect(asked.data.nextAttemptAt).toEqual(new Date(T0.getTime() + DELIVERY_LEASE_MS));
   });
 });

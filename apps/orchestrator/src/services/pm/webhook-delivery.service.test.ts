@@ -36,6 +36,7 @@ import { OutboundUrlBlockedError, resolvePinnedDestination, type PinnedDestinati
 import { buildWorkItemPayload } from "./webhook-payload.js";
 import { renderWebhookBody } from "./webhook-formats.js";
 import { sealWebhookSecret } from "./webhook-secret.js";
+import { sealWebhookUrl } from "./webhook-url.js";
 
 const KEY = Buffer.alloc(32, 3).toString("base64");
 const SECRET = "whsec_unit-test-secret";
@@ -76,7 +77,7 @@ function makeHook(over: Partial<PmWebhook> = {}): PmWebhook {
     workspaceId: "ws-1",
     projectId: null,
     name: "Team chat",
-    url: "https://hooks.example.com/services/T0/B0/xyz",
+    urlEnc: sealWebhookUrl(id, "https://hooks.example.com/services/T0/B0/xyz"),
     format: "JSON",
     secretEnc: sealWebhookSecret(id, SECRET),
     events: ["work_item.created"],
@@ -291,7 +292,7 @@ describe("the work_integrations egress switch", () => {
   });
 
   it("off, destination on the LAN: proceeds, and never even asks the switch", async () => {
-    const prisma = makePrisma([makeHook({ url: "http://192.168.1.20:5678/webhook/x" })], [makeDelivery()]);
+    const prisma = makePrisma([makeHook({ urlEnc: sealWebhookUrl("hook-1", "http://192.168.1.20:5678/webhook/x") })], [makeDelivery()]);
     const { all, send, gate } = deps({ scope: "lan", gate: vi.fn(async () => false) });
 
     expect(await run(prisma, all)).toBe("delivered");
@@ -360,7 +361,7 @@ describe("the SSRF guard", () => {
   ])("refuses %s, never dials, and records a fixed sentence", async (_label, url) => {
     // The row was written before the rule existed, or by something that skipped
     // the service: the dial site checks again.
-    const prisma = makePrisma([makeHook({ url })], [makeDelivery()]);
+    const prisma = makePrisma([makeHook({ urlEnc: sealWebhookUrl("hook-1", url) })], [makeDelivery()]);
     const { all, send, gate } = withRealGuard();
 
     expect(await run(prisma, all)).toBe("retry");
@@ -372,7 +373,7 @@ describe("the SSRF guard", () => {
   });
 
   it("refuses a public name that resolves to loopback — the rebind case", async () => {
-    const prisma = makePrisma([makeHook({ url: "https://innocent.example.com/x" })], [makeDelivery()]);
+    const prisma = makePrisma([makeHook({ urlEnc: sealWebhookUrl("hook-1", "https://innocent.example.com/x") })], [makeDelivery()]);
     const { all, send } = withRealGuard(async () => [{ address: "127.0.0.1", family: 4 }]);
     await run(prisma, all);
     expect(send).not.toHaveBeenCalled();
@@ -380,7 +381,7 @@ describe("the SSRF guard", () => {
   });
 
   it("says so when the name does not resolve", async () => {
-    const prisma = makePrisma([makeHook({ url: "https://nope.example.com/x" })], [makeDelivery()]);
+    const prisma = makePrisma([makeHook({ urlEnc: sealWebhookUrl("hook-1", "https://nope.example.com/x") })], [makeDelivery()]);
     const { all } = withRealGuard(async () => {
       throw new Error("ENOTFOUND");
     });

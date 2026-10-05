@@ -3,7 +3,7 @@
  *
  * Bulk delete for a cleanup: the junk and stale copies the user picked out of
  * an `analyze_file_cleanup` report, in one approved step instead of one
- * `delete_file` prompt per path. Everything goes to the Nextcloud trash, so a
+ * `delete_file` prompt per path. Everything goes to the File Store trash, so a
  * wrong pick is recoverable from the dashboard. Emptying the trash — the only
  * irreversible step — is not a tool, on purpose (ADR-019's line).
  *
@@ -145,7 +145,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     const listing = listings.get(parent);
     if (!listing) return { kind: "skipped", reason: "not attempted: the request was cancelled" };
     if (!listing.ok) {
-      return { kind: "failed", reason: `could not read ${parent} (nextcloud returned ${listing.status})` };
+      return { kind: "failed", reason: `could not read ${parent} (the File Store returned ${listing.status})` };
     }
     const entry = listing.entries.find((e) => e.path === target);
     if (!entry) return { kind: "failed", reason: "not found" };
@@ -176,7 +176,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
         reason: "cancelled while the delete was in flight; it may or may not be in the trash — re-run to check",
       };
     }
-    return res.ok ? { kind: "deleted" } : { kind: "failed", reason: `nextcloud returned ${res.status}` };
+    return res.ok ? { kind: "deleted" } : { kind: "failed", reason: `the File Store returned ${res.status}` };
   });
 
   // Fold back into the order the caller gave, whichever answered first.
@@ -199,7 +199,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
       skipped,
       failed,
       counts: { deleted: deleted.length, skipped: skipped.length, failed: failed.length },
-      note: "Deleted items are in the Nextcloud trash and can be restored from the dashboard.",
+      note: "Deleted items are in the File Store trash and can be restored from the dashboard.",
       // A parent is only listed for a target inside it, so an empty listing
       // always means a "not found" that an outage would explain just as well.
       ...(possiblyDegraded ? { caveat: DEGRADED_LISTING_CAVEAT } : {}),
@@ -210,7 +210,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "delete_files",
   description:
-    "Delete several FILES to the Nextcloud trash in one step, up to 100 paths, so one approval covers the whole list. Folders are refused — this deletes files only. Each path must exist in its folder listing or it is reported as not found; nothing is deleted permanently. Pass exactly the paths the user agreed to, for example from analyze_file_cleanup. Asks the user for approval.",
+    "Delete several FILES to the File Store trash in one step, up to 100 paths, so one approval covers the whole list. Folders are refused — this deletes files only. Each path must exist in its folder listing or it is reported as not found; nothing is deleted permanently. Pass exactly the paths the user agreed to, for example from analyze_file_cleanup. Asks the user for approval.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

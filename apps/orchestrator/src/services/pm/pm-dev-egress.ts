@@ -136,7 +136,11 @@ export function createDevelopmentFetch(
     }
 
     const res = await get(dest, { headers: headersOf(init.headers), signal: init.signal ?? undefined });
-    return new Response(NULL_BODY.has(res.status) ? null : res.body, { status: res.status, headers: res.headers });
+    // Node's undici Web Stream is a standards-compliant Response body; the
+    // workspace's DOM/Node stream declarations disagree on its generic
+    // ArrayBuffer backing type, so bridge that declaration mismatch at this
+    // boundary without buffering or changing the streamed response.
+    return new Response(NULL_BODY.has(res.status) ? null : (res.body as unknown as BodyInit), { status: res.status, headers: res.headers });
   };
 
   return {

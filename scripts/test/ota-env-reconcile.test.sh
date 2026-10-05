@@ -109,6 +109,17 @@ echo "$OUT" | grep -q '"SERVICE_TOKEN_VOICE"' && fail "report lists an existing 
 python3 -c 'import json,sys; json.loads(sys.argv[1])' "$OUT" 2>/dev/null \
   && pass "report is valid JSON" || fail "report is not JSON: $OUT"
 
+[ -L "$BOX/docker/.env" ] && [ "$(readlink "$BOX/docker/.env")" = "../.env" ] \
+  && pass "docker/.env link to ../.env created (compose interpolation source, WARP-3588)" \
+  || fail "docker/.env is not a symlink to ../.env after reconcile"
+
+echo "env-reconcile: a forked regular docker/.env is replaced by the link"
+BOXF="$TMP/boxf"; make_box "$BOXF"
+printf 'STALE_ONLY=1\n' > "$BOXF/docker/.env"
+reconcile "$BOXF" updf >/dev/null 2>&1
+[ -L "$BOXF/docker/.env" ] && [ -f "$BOXF/docker/.env.forked-updf" ] && grep -q '^STALE_ONLY=1$' "$BOXF/docker/.env.forked-updf" \
+  && pass "regular docker/.env backed up as .forked-<id> and relinked" || fail "forked docker/.env not repaired"
+
 echo "env-reconcile: second run is a no-op"
 cp "$BOX/.env" "$TMP/env.after1"; cp "$BOX/droplet.service" "$TMP/unit.after1"
 OUT2="$(reconcile "$BOX" upd2 2>"$TMP/err")"; RC=$?

@@ -11,7 +11,7 @@ import {
   confirmStorageCommand,
 } from "../services/storage-safety.service.js";
 import { config } from "../config.js";
-import { isBridgeConnectionError } from "../lib/bridge-errors.js";
+import { bridgeAdminToken, bridgeAuthToken, isBridgeConnectionError } from "../lib/bridge-errors.js";
 import { createLogger } from "../lib/logger.js";
 import { isOwnerOrAdmin } from "../middleware/admin-tier.js";
 
@@ -38,18 +38,6 @@ const logger = createLogger("storage-route");
  * legacy env alias (see config.ts).
  */
 const BRIDGE_URL = config.DEVICE_BRIDGE_URL;
-
-// WARP-612: shared secret the device-bridge requires on mutating routes
-// (eject). Mirrors the bridge's own env precedence. Read per-request (see the
-// eject handler) so a deployment that injects the secret after boot — and the
-// tests — see the current value rather than a boot-time snapshot.
-function bridgeAuthToken(): string {
-  return (
-    process.env.BRIDGE_AUTH_TOKEN ||
-    process.env.SERVICE_TOKEN_DISPLAY ||
-    ""
-  ).trim();
-}
 
 interface BridgeDrive {
   device: string;
@@ -261,6 +249,11 @@ interface BridgeSystemDisk {
    *  and it is forwarded verbatim — the dashboard branches on it, never on
    *  the nulls. */
   measurement: "complete" | "partial" | "unavailable";
+  /** WARP-3608: at-rest encryption of the data volume, an explicit state the
+   *  bridge decides (lsblk ancestry + /etc/crypttab) and this route forwards
+   *  verbatim. "unknown" means the bridge could not tell; absent on an older
+   *  bridge. Never derive it from anything else. */
+  encryption?: "tpm_sealed" | "recovery_key_only" | "not_encrypted" | "unknown";
   model: string;
   serial: string;
   bus: string;
@@ -346,7 +339,7 @@ async function bridgePoolCommand(
   operation: StorageOp,
   params: Record<string, unknown>,
 ): Promise<{ ok: boolean; body: Record<string, unknown> }> {
-  const bridgeToken = bridgeAuthToken();
+  const bridgeToken = bridgeAdminToken();
   if (!bridgeToken) {
     // Fail closed: with no bridge auth token we cannot safely invoke a
     // data-destroying host action.
@@ -977,7 +970,7 @@ export function createStorageRouter(prisma: PrismaClient): Router {
     if (!/^[A-Za-z0-9:-]{1,64}$/.test(uuid)) {
       return res.status(400).json({ error: "Invalid drive UUID" });
     }
-    const bridgeToken = bridgeAuthToken();
+    const bridgeToken = bridgeAdminToken();
     if (!bridgeToken) {
       return res.status(503).json({
         ok: false,
