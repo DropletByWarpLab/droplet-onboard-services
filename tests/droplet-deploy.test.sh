@@ -36,16 +36,20 @@ check "deploy script sources the reapply wrapper's resolver (no second resolver)
 echo "--- stubbed logic ---"
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 BIN="$WORK/bin"; mkdir -p "$BIN"
-for t in systemctl runuser docker visudo; do
+for t in systemctl runuser docker visudo id; do
   cat > "$BIN/$t" <<STUB
 #!/usr/bin/env bash
 echo "$t \$*" >> "$WORK/calls.log"
 case "$t" in
   docker) echo "-- dump --"; exit 0 ;;
-  runuser) [ -e "$WORK/sudoers" ] && echo grant-present >> "$WORK/calls.log"; [ -f "$WORK/setup_fail" ] && exit 7; exit 0 ;;
+  runuser) # runuser -u USER -- CMD...: git and docker are real/stubbed passthroughs
+    if [ "\$4" = git ]; then shift 3; exec git "\$@"; fi
+    if [ "\$4" = docker ]; then shift 3; exec docker "\$@"; fi
+    [ -e "$WORK/sudoers" ] && echo grant-present >> "$WORK/calls.log"; [ -f "$WORK/setup_fail" ] && exit 7; exit 0 ;;
   systemctl)
     [ "\$1" = is-active ] && [ -f "$WORK/inactive" ] && exit 3
     exit 0 ;;
+  id) [ "\$1" = -nG ] && { [ -f "'$WORK/nodocker'" ] && echo "droplet users" || echo "droplet users docker"; exit 0; }; exec /usr/bin/id "\$@" ;;
   *) exit 0 ;;
 esac
 STUB
@@ -54,13 +58,13 @@ done
 printf '#!/usr/bin/env bash\nexit 0\n' > "$WORK/hu"; chmod +x "$WORK/hu"
 
 new_repo() {
-  rm -rf "$WORK/repo" "$WORK/backups" "$WORK/sudoers"* "$WORK/calls.log" "$WORK/setup_fail" "$WORK/inactive"
+  rm -rf "$WORK/repo" "$WORK/backups" "$WORK/sudoers"* "$WORK/calls.log" "$WORK/setup_fail" "$WORK/inactive" "$WORK/nodocker"
   mkdir -p "$WORK/repo/docker/secrets" "$WORK/repo/docker/certs" "$WORK/repo/data/secrets" "$WORK/repo/.data"
   ( cd "$WORK/repo" && git init -q && git config user.email t@t && git config user.name t
     echo 'name: droplet' > docker/docker-compose.yml
     echo ".data/" > .gitignore
     echo S > docker/secrets/s; echo C > docker/certs/c; echo K > data/secrets/k; echo mq > docker/mosquitto.conf
-    echo 'SECRET=hunter2' > "$WORK/envreal"; ln -s "$WORK/envreal" .env
+    echo 'SECRET=hunter2' > .env.real; ln -s .env.real .env; echo .env.real >> .gitignore
     echo .env >> .gitignore; echo data/ >> .gitignore; echo docker/secrets >> .gitignore; echo docker/certs >> .gitignore
     git add -A && git commit -qm init )
 }
@@ -81,9 +85,9 @@ check "success: sudoers grant removed" test ! -e "$WORK/sudoers"
 bk="$WORK/backups/20260101T000000Z"
 check "backup: 0600 secrets.tar + db dump, 0700 dir" bash -c \
   "[ \"\$(stat -c %a '$bk/secrets.tar')\" = 600 ] && [ -s '$bk/db.sql.gz' ] && [ \"\$(stat -c %a '$bk')\" = 700 ]"
-check "backup: tar holds .env (through the symlink), secrets, certs, mosquitto" bash -c \
-  "t=\$(tar -tf '$bk/secrets.tar'); echo \"\$t\" | grep -qx .env && echo \"\$t\" | grep -q data/secrets/k && echo \"\$t\" | grep -q docker/certs/c && echo \"\$t\" | grep -q docker/secrets/s && echo \"\$t\" | grep -q docker/mosquitto.conf \
-   && [ \"\$(tar -xOf '$bk/secrets.tar' .env)\" = SECRET=hunter2 ]"
+check "backup: tar holds .env (.env link kept, its in-repo target archived), secrets, certs, mosquitto" bash -c \
+  "t=\$(tar -tf '$bk/secrets.tar'); echo \"\$t\" | grep -qx .env && echo \"\$t\" | grep -qx .env.real && echo \"\$t\" | grep -q data/secrets/k && echo \"\$t\" | grep -q docker/certs/c && echo \"\$t\" | grep -q docker/secrets/s && echo \"\$t\" | grep -q docker/mosquitto.conf \
+"
 check "output never prints secret contents" bash -c "! echo '$out' | grep -q hunter2"
 
 new_repo; touch "$WORK/setup_fail"
@@ -112,6 +116,30 @@ new_repo
 for i in 1 2 3 4 5; do run_deploy "2026010${i}T000000Z" >/dev/null; done
 check "rotation keeps the last 3 backup dirs" bash -c \
   "[ \"\$(ls '$WORK/backups' | wc -l | tr -d ' ')\" = 3 ] && [ -d '$WORK/backups/20260105T000000Z' ] && [ ! -d '$WORK/backups/20260101T000000Z' ]"
+
+echo "--- security fixes ---"
+check "git runs as droplet, no safe.directory override" bash -c \
+  "grep -q 'runuser -u droplet -- git -C' '$DEPLOY' && ! grep -v '^\s*#' '$DEPLOY' | grep -q safe.directory"
+check "tar never dereferences (no -h) and db dump runs as droplet" bash -c \
+  "! grep -Eq 'tar -c?h' '$DEPLOY' && grep -q 'runuser -u droplet -- docker compose' '$DEPLOY'"
+check "unit and polkit header state the WARP-2888 assumption" bash -c \
+  "grep -q WARP-2888 '$UNIT' && grep -q WARP-2888 '$RULES'"
+check "sourcing the reapply wrapper does not run its main" bash -c \
+  "[ -z \"\$(DROPLET_HOST_UNITS_BIN=/nonexistent DROPLET_REAPPLY_DRY_RUN=1 bash -c '. $REAPPLY; type resolve_checkout >/dev/null' 2>&1)\" ]"
+
+new_repo; ln -sf /etc/hostname "$WORK/repo/data/secrets/planted"
+out="$(run_deploy)"; rc=$?
+check "planted symlink in data/secrets is stored as a link, never read" bash -c \
+  "[ $rc -eq 0 ] && tar -tvf '$WORK/backups/20260101T000000Z/secrets.tar' | grep -q 'planted -> /etc/hostname' && ! tar -xOf '$WORK/backups/20260101T000000Z/secrets.tar' data/secrets/planted 2>/dev/null | grep -q ."
+
+new_repo; ln -sf /etc/hostname "$WORK/repo/.env"
+out="$(run_deploy)"; rc=$?
+check ".env symlink resolving outside the checkout is refused" test "$rc" -eq 1
+
+new_repo; touch "$WORK/nodocker"
+out="$(run_deploy)"; rc=$?; printf '%s\n' "$out" > "$WORK/out.txt"
+check "droplet not in docker: exit 1 naming WARP-2888, no sudoers ever written, nothing run" bash -c \
+  "[ $rc -eq 1 ] && grep -q WARP-2888 '$WORK/out.txt' && [ ! -e '$WORK/sudoers' ] && [ ! -e '$WORK/sudoers.new' ] && [ ! -d '$WORK/backups' ] && ! grep -q setup.sh '$WORK/calls.log'"
 
 echo ""
 if [ "$FAILURES" -eq 0 ]; then printf "  \033[32mAll %d tests passed\033[0m\n\n" "$TESTS"; exit 0; fi

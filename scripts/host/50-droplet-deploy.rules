@@ -2,6 +2,10 @@
 //
 // Start verb ONLY, this one unit ONLY (no stop/restart, no other unit). The
 // unit takes no argv, so the caller cannot influence what runs as root.
+// SECURITY (WARP-2888): this grant is privilege-neutral ONLY while `droplet` is
+// already root-equivalent via the docker group (ADR-020 §D6). droplet-deploy
+// refuses to run unless that membership exists; once WARP-2888 removes it, this
+// rule and the unit must be redesigned first.
 // A sibling of services/oled-display/50-droplet-device-bridge.rules, installed
 // by install_single_box_host_integration (not install-device-bridge.sh) so the
 // reapply heal and the host-artefact audit cover it.

@@ -56,14 +56,24 @@ die() {
   if [ -n "$BK" ]; then
     local q; q="$(printf %q "$REPO")"
     log "Backup (db dump + secrets tar): $BK"
-    log "Restore: 1) tar -xpf $BK/secrets.tar -C $q   (db: gunzip -c $BK/db.sql.gz | docker compose -f $q/docker/docker-compose.yml exec -T db psql ...)"
+    log "Restore: 1) cat $BK/secrets.tar | runuser -u droplet -- tar -xpf - -C $q   (as droplet, never root; chown any root-owned path by hand. db: gunzip -c $BK/db.sql.gz | docker compose -f $q/docker/docker-compose.yml exec -T db psql ...)"
     log "         2) runuser -u droplet -- bash -lc 'cd $q && ./scripts/setup.sh --sync-secrets'"
     log "         3) docker compose -f $q/docker/docker-compose.yml up -d --force-recreate"
   fi
   exit 1
 }
 
-git_repo() { git -c safe.directory="$REPO" -C "$REPO" "$@"; }
+# Every git call runs AS droplet with NO safe.directory override: the repo is
+# droplet-writable, so root running git there would execute a planted
+# core.fsmonitor (or similar) from .git/config.
+git_repo() { runuser -u droplet -- git -C "$REPO" "$@"; }
+
+# --- 0. trust assumption (WARP-2888) -----------------------------------------
+# The polkit start grant and the temporary NOPASSWD window are privilege-neutral
+# ONLY while `droplet` is already root-equivalent via the docker group
+# (ADR-020 §D6: the trust boundary is "who can become droplet"). Fail safe.
+id -nG droplet 2>/dev/null | tr ' ' '\n' | grep -qx docker \
+  || die "user droplet is not in the docker group. WARP-2888 deferred removing that membership; once droplet leaves the docker group the temporary NOPASSWD grant becomes a real privilege escalation, and this unit must be redesigned before it may run"
 
 # --- 1. preflight ------------------------------------------------------------
 REPO="$(resolve_checkout)" && [ -n "$REPO" ] || die "could not locate the checkout (set DROPLET_HOST_INTEGRATION_REPO_ROOT)"
@@ -81,21 +91,37 @@ mkdir -p "$BACKUP_DIR" && chmod 0700 "$BACKUP_DIR"
 BK="$BACKUP_DIR/${DROPLET_DEPLOY_TS:-$(date -u +%Y%m%dT%H%M%SZ)}"
 mkdir -m 0700 "$BK" || die "cannot create $BK"
 
-project="$(grep -E '^name:[[:space:]]' "$REPO/docker/docker-compose.yml" 2>/dev/null | head -1 | awk '{gsub(/["\x27]/,"",$2); print $2}' || true)"
 # The exact pg_dump line of scripts/host/device-backup.sh (empty overrides ->
-# the container's own POSTGRES_USER / POSTGRES_DB).
-docker compose -p "${project:-droplet}" -f "$REPO/docker/docker-compose.yml" exec -T -e "DROPLET_DUMP_USER=" -e "DROPLET_DUMP_DB=" db \
+# the container's own POSTGRES_USER / POSTGRES_DB). Runs AS droplet (docker
+# group) so root never parses the droplet-controlled compose file; the project
+# name comes from the compose file's pinned `name:`. Root only owns the output.
+runuser -u droplet -- docker compose -f "$REPO/docker/docker-compose.yml" exec -T -e "DROPLET_DUMP_USER=" -e "DROPLET_DUMP_DB=" db \
   sh -c 'pg_dump --username="${DROPLET_DUMP_USER:-$POSTGRES_USER}" --dbname="${DROPLET_DUMP_DB:-$POSTGRES_DB}" --format=plain --no-owner --no-privileges' \
   | gzip --best > "$BK/db.sql.gz"
 [ "${PIPESTATUS[0]}" -eq 0 ] && [ -s "$BK/db.sql.gz" ] || die "db dump failed"
 
-# -h: follow symlinks (.env and data/secrets may live on /data behind a link).
+# NO -h: symlinks are stored as links and never read. Root dereferencing a
+# droplet-planted link (data/secrets/x -> /etc/shadow) would be an arbitrary
+# file read. .env alone may legitimately be a link (relocated onto /data), so
+# it is resolved and must land inside the checkout; its target is archived too.
 paths=()
 for p in .env data/secrets docker/secrets docker/certs "$REPO"/docker/mosquitto.*; do
   p="${p#"$REPO"/}"
-  [ -e "$REPO/$p" ] && paths+=("$p")
+  [ -e "$REPO/$p" ] || [ -L "$REPO/$p" ] || continue
+  paths+=("$p")
+  if [ -L "$REPO/$p" ]; then
+    if [ "$p" = .env ]; then
+      real="$(readlink -f "$REPO/.env")"
+      case "$real" in
+        "$REPO"/*) paths+=("${real#"$REPO"/}") ;;
+        *) die ".env is a symlink resolving outside the checkout ($real)" ;;
+      esac
+    else
+      log "WARN: $p is a symlink; stored as a link, its target is NOT backed up"
+    fi
+  fi
 done
-tar -chf "$BK/secrets.tar" -C "$REPO" "${paths[@]}" || die "secrets tar failed"
+tar -cf "$BK/secrets.tar" -C "$REPO" "${paths[@]}" || die "secrets tar failed"
 chmod 0600 "$BK/db.sql.gz" "$BK/secrets.tar"
 log "backup written to $BK (${#paths[@]} paths + db dump)"
 
