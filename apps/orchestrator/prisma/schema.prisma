@@ -4103,6 +4103,8 @@ model EmailAccount {
   threads     EmailThread[]
   messages    EmailMessage[]
   drafts      EmailDraft[]
+  /// WARP-3529 — the service desk this mailbox is the front door of, if any.
+  supportChannel PmSupportChannel?
 
   @@index([userId, address])
 }
@@ -4131,6 +4133,10 @@ model EmailThread {
   updatedAt        DateTime          @updatedAt
   messages         EmailMessage[]
   drafts           EmailDraft[]
+  /// WARP-3529 — the tickets this conversation belongs to. More than one when a
+  /// reply to a final ticket opened a follow-up: the newest link is the thread's
+  /// current ticket.
+  ticketLinks      PmTicketEmailLink[]
 
   @@unique([accountId, threadKey])
   @@index([accountId, triageStatus, lastMessageAt(sort: Desc)])
@@ -4193,9 +4199,38 @@ model EmailMessage {
   /// WARP-3267 — the files this message carried.
   attachments EmailAttachment[]
 
+  /// WARP-3529 (ADR-069 §4) — what the sender's headers said about how the
+  /// message was sent: `{ references, autoSubmitted, precedence, xAutoreply,
+  /// xAutorespond, returnPath, reportType }`, validated at the ingest boundary
+  /// (routes/email.ts) and recorded as written. NULL only on a message stored
+  /// before this column existed or by an indexer that predates it — which the
+  /// desk reads as "could not be checked", never as "automatic mail is absent".
+  headers Json?
+
+  /// WARP-3529 — the service desk's ledger, the same shape as the filing arm's
+  /// `extract*` columns above and for the same reason: the durable row that
+  /// already says "new mail exists" carries its own claim, so the ingest route
+  /// needs NO change and cannot fail because a desk did. Every message starts
+  /// PENDING; only a mailbox bound to a desk channel is ever swept, and only
+  /// mail received after the channel was switched on (`PmSupportChannel.enabledAt`).
+  /// IGNORED and FAILED always carry a reason (a CHECK); nothing is skipped
+  /// without saying why.
+  deskIntakeStatus   PmEmailIntakeStatus  @default(PENDING)
+  deskIntakeReason   PmEmailIntakeReason?
+  deskIntakeAttempts Int                  @default(0)
+  /// When the message reached a terminal status. NULL exactly while PENDING.
+  deskIntakeAt       DateTime?
+
+  /// The ticket this message is part of, once the desk has taken it in.
+  ticketLink PmTicketEmailLink?
+
   @@unique([accountId, messageId])
   @@index([threadId, receivedAt(sort: Desc)])
   @@index([extractStatus, receivedAt])
+  /// The desk sweep's claim: one mailbox's pending mail, oldest first.
+  @@index([accountId, deskIntakeStatus, createdAt])
+  /// The per-sender rate window: one mailbox's recent mail.
+  @@index([accountId, createdAt])
 }
 
 /// WARP-3267 — one MIME part of an inbound message that is not its body.
@@ -4280,8 +4315,20 @@ model EmailDraft {
   /// WARP-3267 — stored `EmailAttachment` ids a forward carries. Checked on
   /// write to belong to this draft's mailbox; the indexer attaches them at send.
   attachmentIds    String[]         @default([])
+  /// WARP-3529 — the RFC 5322 Message-ID (no brackets) of the email this draft
+  /// becomes, chosen by the service desk when it queues the draft and sent by the
+  /// indexer exactly as stored, so the desk knows the id a customer's reply will
+  /// carry before anything is sent. NULL for a draft nothing chose one for (every
+  /// draft the mail screen and the assistant create); the indexer makes its own.
+  messageId        String?          @unique
+  /// WARP-3529 — an automatic acknowledgement rather than a person's reply: sent
+  /// as `Auto-Submitted: auto-replied` (RFC 3834).
+  autoSubmitted    Boolean          @default(false)
   createdAt        DateTime         @default(now())
   updatedAt        DateTime         @updatedAt
+
+  /// The service desk comment this draft is the delivery of, if it is one.
+  ticketLink PmTicketEmailLink?
 
   @@index([accountId, status, updatedAt(sort: Desc)])
 }
@@ -5627,6 +5674,9 @@ model PmProject {
   cycles     PmCycle[]
   modules    PmModule[]
   properties PmCustomProperty[]
+  /// WARP-3529 — the channels a SERVICE_DESK takes requests through. Always
+  /// empty for a PROJECT (a trigger holds that).
+  supportChannels PmSupportChannel[]
   /// WARP-3532 — webhooks scoped to this project (cascade with it).
   webhooks   PmWebhook[]
 
@@ -5705,6 +5755,14 @@ model PmState {
   /// can rename "Pending" without breaking its SLAs. Meaningful on service-desk
   /// states only; every project state carries the default and nothing reads it.
   slaClock  PmSlaClock   @default(RUNNING)
+  /// WARP-3529 (ADR-069 §4) — what a customer's email does to a ticket that sits
+  /// in this state: nothing, return it to work, or (the ticket being final) open
+  /// a follow-up. An explicit column for the same reason as `slaClock`: Solved and
+  /// Closed are both a completed state that stops the clock, and which of them
+  /// takes a reply back is the desk's rule, not something to read off a name a
+  /// desk may rename. Meaningful on service-desk states only; every project
+  /// state carries the default and nothing reads it.
+  onCustomerReply PmCustomerReplyEffect @default(NONE)
   createdAt DateTime     @default(now())
   updatedAt DateTime     @default(now()) @updatedAt
   workItems PmWorkItem[]
@@ -5995,10 +6053,24 @@ model PmComment {
   /// source is removed or a connector is purged, and none of those paths may be
   /// blocked by — or silently eat — a customer's conversation.
   contactId   String?
+  /// WARP-3529 (ADR-069 §4) — whether the email of a PUBLIC reply reached the
+  /// mail server: NONE for a comment that is not an outgoing email (a note, a
+  /// customer's message, a reply recorded on a desk with no channel), PENDING
+  /// from the moment it is queued, SENT or FAILED once the mail service says so.
+  /// Explicit, never read off the draft's status at display time, and pinned by
+  /// a CHECK: only a PUBLIC comment from staff or the system ever leaves NONE,
+  /// and a failure always says why.
+  deliveryStatus  PmDeliveryStatus   @default(NONE)
+  deliveryFailure PmDeliveryFailure?
   createdAt   DateTime            @default(now())
   updatedAt   DateTime            @default(now()) @updatedAt
 
+  /// The emails this comment is — the one it arrived as, or each attempt to send it.
+  emailLinks PmTicketEmailLink[]
+
   @@index([workItemId, createdAt])
+  /// The delivery sweep's read: the comments still waiting on the mail service.
+  @@index([deliveryStatus, createdAt])
 }
 
 /// Cycle / sprint — a time-boxed set of work items.
@@ -6603,6 +6675,9 @@ model PmTicket {
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
 
+  /// WARP-3529 — the emails this ticket is made of.
+  emailLinks PmTicketEmailLink[]
+
   /// "Other tickets from this requester".
   @@index([requesterContactId])
   @@index([requesterUserId])
@@ -6610,6 +6685,205 @@ model PmTicket {
   @@index([companyId])
   /// The "solved recently" queue.
   @@index([solvedAt])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Service desk email channel (ADR-069 §4, WARP-3529)
+//
+// A desk binds one existing `EmailAccount`; the sync the box already runs is the
+// intake and the account's own send path is the delivery. Every enum below is
+// UPPERCASE like the rest of the desk's, and every state is a column a service
+// writes on purpose — nothing is derived from a NULL.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// What a channel is. One value today; the column is the seam for the channels
+/// ADR-069 §4 reserves (it ships no public web form).
+enum PmSupportChannelKind {
+  EMAIL
+}
+
+/// Whether a message of a ticket's email conversation came in or went out.
+enum PmEmailDirection {
+  INBOUND
+  OUTBOUND
+}
+
+/// See `PmComment.deliveryStatus`.
+enum PmDeliveryStatus {
+  NONE
+  PENDING
+  SENT
+  FAILED
+}
+
+/// Why a reply was not delivered. A closed list, never the mail server's own
+/// words (which can name hosts and addresses): the detail stays on the
+/// `EmailDraft` row for an administrator.
+enum PmDeliveryFailure {
+  /// The `outbound_email` off-LAN channel is off (ADR-012).
+  OUTBOUND_BLOCKED
+  /// The Email module is off, or not set up on this box, so nothing would send it.
+  EMAIL_UNAVAILABLE
+  /// The customer has no email address on record.
+  NO_RECIPIENT
+  /// The mail service tried to send it and failed.
+  SEND_FAILED
+}
+
+/// See `PmState.onCustomerReply`.
+enum PmCustomerReplyEffect {
+  /// The message is added and the status stays.
+  NONE
+  /// The ticket returns to the desk's working status. From a completed status
+  /// that is a reopen, allowed for `PmSupportChannel.reopenWindowDays` after it
+  /// was solved; after that the message opens a follow-up instead.
+  REOPEN
+  /// The ticket is final: the message opens a new ticket linked to it.
+  FOLLOW_UP
+}
+
+/// See `EmailMessage.deskIntakeStatus`.
+enum PmEmailIntakeStatus {
+  PENDING
+  DONE
+  IGNORED
+  FAILED
+}
+
+/// Why the desk did not turn a message into (part of) a ticket. The first eight
+/// are IGNORED — the loop-protection rules and two of their kin — and the last
+/// two are FAILED. A CHECK keeps each status to its own reasons.
+enum PmEmailIntakeReason {
+  /// `Auto-Submitted` was anything but `no` (RFC 3834).
+  AUTO_SUBMITTED
+  /// `Precedence: bulk | junk | list | auto_reply`.
+  PRECEDENCE_BULK
+  /// `X-Autoreply` or `X-Autorespond` was present.
+  AUTO_REPLY_HEADER
+  /// A delivery-status report, a null `Return-Path`, or a mailer-daemon sender.
+  BOUNCE
+  /// Sent from the address of a mailbox this box operates — its own outbound.
+  OWN_ADDRESS
+  /// The message is one this desk sent (its Message-ID is a stored outbound one).
+  OWN_MESSAGE
+  /// More than 20 messages in an hour from one sender.
+  RATE_LIMITED
+  /// The desk was archived when the message reached the front of the queue.
+  DESK_ARCHIVED
+  /// The desk raised an error on every attempt (see the log).
+  PROCESSING_ERROR
+  /// The channel's contact owner is no longer an active member, so no contact
+  /// could be created for a stranger. Fixed by choosing another owner.
+  CONTACT_OWNER_UNAVAILABLE
+}
+
+/// A desk's email front door: one mailbox, bound to one desk.
+///
+/// 🔴 `contactOwnerUserId` is explicit and NOT NULL. A `Contact` is owner-scoped
+/// (`Contact.userId`), so every stranger the intake turns into a contact has to
+/// be somebody's, chosen on purpose by an owner or admin when the channel is
+/// bound — the desk lead by default. It is a plain `User.id` like every PM
+/// reference to a person.
+///
+/// 🔴 `enabledAt` is the intake's floor: mail received before it is never made
+/// into a ticket (connecting a mailbox imports thirty days of history, and a box
+/// that answered all of it the moment somebody bound a desk would email a month
+/// of strangers). The service resets it each time `enabled` goes false -> true.
+///
+/// INVARIANTS THE SCHEMA LANGUAGE CANNOT EXPRESS, in raw migration SQL
+/// (20261004130000_warp_3529_service_desk_email) and proven in
+/// `support-email.pg.test.ts`:
+///   * `PmSupportChannel_reopen_window_range` — 0..365 days.
+///   * `pmsupportchannel_project_is_service_desk` — trigger: a channel only ever
+///     hangs off a SERVICE_DESK project.
+model PmSupportChannel {
+  id        String               @id @default(uuid())
+  projectId String
+  project   PmProject            @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  kind      PmSupportChannelKind @default(EMAIL)
+
+  /// One mailbox serves one desk. Cascade: a channel is meaningless without its
+  /// mailbox (disconnecting one is already a warned, cascading act).
+  emailAccountId String       @unique
+  emailAccount   EmailAccount @relation(fields: [emailAccountId], references: [id], onDelete: Cascade)
+
+  enabled   Boolean  @default(true)
+  enabledAt DateTime @default(now())
+
+  contactOwnerUserId String
+
+  /// Off by default: an acknowledgement is mail to a stranger.
+  autoAckEnabled  Boolean @default(false)
+  /// Plain text with `{{requester.firstName}}`, `{{ticket.key}}`,
+  /// `{{ticket.title}}` and `{{desk.name}}` — validated when saved (a name
+  /// outside that list is refused) and escaped when rendered.
+  autoAckTemplate String
+
+  /// How long after a ticket was solved a customer's reply reopens it rather
+  /// than opening a follow-up.
+  reopenWindowDays Int @default(14)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  /// One email channel per desk: with two mailboxes there would be no rule for
+  /// which one answers a ticket nobody emailed in, and a rule nobody wrote down
+  /// is a guess.
+  @@unique([projectId, kind])
+}
+
+/// One email of a ticket's conversation — the way a later message finds its
+/// ticket, and the way the conversation finds the files an email carried.
+///
+/// One row per message, in either direction:
+///   * INBOUND — a stored `EmailMessage` the desk took in (`emailMessageId`).
+///   * OUTBOUND — an email the desk sent or tried to send (`emailDraftId`):
+///     `messageIdHeader` is the id the orchestrator chose, known before it left,
+///     which is what makes a reply to a conversation the desk started matchable
+///     by header. A retry is a NEW row; the failed attempt's id stays findable,
+///     because the failure may have been the mail service's report and not the
+///     mail's.
+/// `emailThreadId` is the stored thread the message belongs to, once there is
+/// one (an outbound-first conversation has none until the customer answers). It
+/// is not unique: a thread holds many messages, and after a follow-up it belongs
+/// to the newer of two tickets.
+///
+/// `workItemId` references the TICKET row, not the work item: a link can only
+/// exist for a ticket, which is only ever in a SERVICE_DESK project.
+///
+/// INVARIANT in raw migration SQL: `PmTicketEmailLink_direction_matches_ref` — an
+/// inbound row never names a draft and an outbound row never names a message.
+model PmTicketEmailLink {
+  id         String   @id @default(uuid())
+  workItemId String
+  ticket     PmTicket @relation(fields: [workItemId], references: [workItemId], onDelete: Cascade)
+
+  direction PmEmailDirection
+  /// The RFC 5322 Message-ID of this email, no brackets.
+  messageIdHeader String
+
+  emailThreadId  String?
+  emailThread    EmailThread?  @relation(fields: [emailThreadId], references: [id], onDelete: SetNull)
+  emailMessageId String?       @unique
+  emailMessage   EmailMessage? @relation(fields: [emailMessageId], references: [id], onDelete: SetNull)
+  emailDraftId   String?       @unique
+  emailDraft     EmailDraft?   @relation(fields: [emailDraftId], references: [id], onDelete: SetNull)
+
+  /// The comment this email is: a customer's reply, a staff reply, or the
+  /// automatic acknowledgement. NULL for the message a ticket was opened from
+  /// (its body is the ticket's description).
+  commentId String?
+  comment   PmComment? @relation(fields: [commentId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+
+  @@unique([workItemId, messageIdHeader])
+  /// Header matching: "which ticket has this Message-ID".
+  @@index([messageIdHeader])
+  /// "The thread's current ticket" is its newest link.
+  @@index([emailThreadId, createdAt])
+  @@index([workItemId, createdAt])
+  @@index([commentId])
 }
 
 /// KAN-6 — internal, operator-invisible one-shot markers for data migrations
