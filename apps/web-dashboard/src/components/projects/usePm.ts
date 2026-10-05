@@ -451,8 +451,8 @@ function usePages<T extends { id: string }>(url: string | null, field: string) {
   };
 }
 
-export function useProjectItems(projectId: string | null) {
-  const url = projectId ? `/api/pm/projects/${projectId}/work-items` : null;
+export function useProjectItems(projectId: string | null, opts: { archived?: boolean } = {}) {
+  const url = projectId ? `/api/pm/projects/${projectId}/work-items${opts.archived ? "?archived=only" : ""}` : null;
   const { rows, mutate, ...rest } = usePages<PmWorkItem>(url, "work_items");
   return {
     ...rest,
