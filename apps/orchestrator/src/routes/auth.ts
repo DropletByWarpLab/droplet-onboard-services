@@ -730,7 +730,12 @@ export function createPublicAuthRouter(
   // ── Check if initial setup is required ──
   router.get("/auth/setup", async (_req, res, next) => {
     try {
-      const setupRequired = await ncCheckSetupRequired();
+      // The local directory is the account bootstrap authority, matching POST
+      // below. Nextcloud availability or an unrelated downstream user must not
+      // decide whether the wizard offers owner creation or existing-owner login.
+      const setupRequired = prisma
+        ? (await prisma.user.count({ where: { role: "owner" } })) === 0
+        : await ncCheckSetupRequired();
       // WARP-165 — surface whether the physical-presence claim gate is on so
       // the setup wizard's Account step knows to show + require the claim-code
       // field. Reading config (not the DB) keeps this probe cheap; the field

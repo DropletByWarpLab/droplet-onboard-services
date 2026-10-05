@@ -16,7 +16,7 @@ import { unload, useSWRConfig } from "swr";
 // binding is fully initialized by the time it's called. Same shape as the
 // many components that import from both ./auth and ./api.
 import { patchSetupReady, patchTourCompleted } from "./api";
-import { HELP_PATH, PUBLIC_PATHS } from "./routing";
+import { isHelpPath, PUBLIC_PATHS } from "./routing";
 import { clearChatHandoffs } from "./session-reset";
 
 export interface AuthUser {
@@ -635,7 +635,7 @@ export async function authFetch(url: string, init?: RequestInit): Promise<Respon
   const onPublicPage =
     PUBLIC_PATHS.some((p) =>
       window.location.pathname.startsWith(p),
-    ) || window.location.pathname === HELP_PATH;
+    ) || isHelpPath(window.location.pathname);
   if (!onPublicPage) {
     window.location.assign(
       `/login?next=${encodeURIComponent(window.location.pathname + window.location.search)}`,

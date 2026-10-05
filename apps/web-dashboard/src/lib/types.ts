@@ -2330,6 +2330,8 @@ export interface TeamInviteResult {
   role: TeamInviteRole;
   /** ISO timestamp the invite expires. */
   expires_at: string;
+  /** Invitation issuance and email delivery are separate outcomes. */
+  send_status?: "sent" | "failed";
 }
 
 // --- Health types ---

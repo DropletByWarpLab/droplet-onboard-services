@@ -94,7 +94,7 @@ describe("sealPendingFlow / unsealPendingFlow (WARP-2704)", () => {
   };
 
   it("round-trips the in-flight sign-in for its owner", () => {
-    expect(unsealPendingFlow("user-1", sealPendingFlow("user-1", FLOW))).toEqual(FLOW);
+    expect(unsealPendingFlow("user-1", sealPendingFlow("user-1", FLOW))).toEqual({ ...FLOW, returnTo: "/settings" });
   });
 
   it("never stores the PKCE verifier in the clear", () => {
@@ -139,7 +139,7 @@ describe("sealPendingFlow / unsealPendingFlow (WARP-2704)", () => {
       // It may still be inside its 15-minute window when the box updates: the
       // person is on Microsoft's page and would otherwise see a sign-in that can
       // no longer be completed. (Mutation: drop the fallback and this throws.)
-      expect(unsealPendingFlow("user-1", sealRaw(LEGACY))).toEqual({ ...LEGACY, scopes: [...M365_BASE_SCOPES] });
+      expect(unsealPendingFlow("user-1", sealRaw(LEGACY))).toEqual({ ...LEGACY, scopes: [...M365_BASE_SCOPES], returnTo: "/settings" });
     });
 
     it("hands back a copy of the fallback, so redeeming cannot edit the shared base set", () => {

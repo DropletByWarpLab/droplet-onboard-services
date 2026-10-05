@@ -1,6 +1,7 @@
 import { decryptColumn, deriveGoogleOAuthKey, encryptColumn } from "../column-crypto.service.js";
 import type { GoogleApp } from "./google-client.js";
 import { DEFAULT_GOOGLE_FEATURES, scopesForGoogleFeatures, type GoogleFeatures } from "./scopes.js";
+import { accountConnectReturnTo, type AccountConnectReturnTo } from "../account-connect-return.js";
 
 export interface StoredGoogleGrant extends GoogleApp {
   refreshToken: string;
@@ -10,6 +11,7 @@ export interface StoredGoogleGrant extends GoogleApp {
 export interface PendingGoogleFlow extends GoogleApp, GoogleFeatures {
   codeVerifier: string;
   redirectUri: string;
+  returnTo?: AccountConnectReturnTo;
   prior?: PriorGoogleConnection;
 }
 
@@ -73,6 +75,7 @@ export function openGoogleFlow(userId: string, blob: string): PendingGoogleFlow 
   return {
     clientId: required(value, "clientId"), clientSecret: required(value, "clientSecret"),
     codeVerifier: required(value, "codeVerifier"), redirectUri: required(value, "redirectUri"),
+    returnTo: accountConnectReturnTo(value.returnTo),
     mail: value.mail === undefined ? true : value.mail as boolean,
     calendar: value.calendar === undefined ? false : value.calendar as boolean,
     ...(prior ? { prior } : {}),

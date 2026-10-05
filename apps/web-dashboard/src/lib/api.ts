@@ -316,17 +316,27 @@ export async function checkClaimGateEnabled(): Promise<boolean> {
  * Fire-and-forget from the caller's perspective: a failure to persist must
  * never block the customer from advancing the wizard locally, so we
  * swallow network errors (the in-memory step still moves forward; the next
- * successful PATCH re-syncs). Public endpoint — runs before any user
- * exists, like POST /api/auth/setup.
+ * successful PATCH re-syncs). Early first-run progress is public; steps
+ * after account creation require the owner session established by the wizard.
  */
-export async function patchSetupStep(setupStep: string): Promise<void> {
+export async function patchSetupStep(
+  setupStep: string,
+  options: { requireSuccess?: boolean } = {},
+): Promise<void> {
   try {
-    await fetch(`${BASE}/api/setup/state`, {
+    const res = await fetch(`${BASE}/api/setup/state`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
       body: JSON.stringify({ setup_step: setupStep }),
     });
-  } catch {
+    if (options.requireSuccess && !res.ok) {
+      throw new Error("Couldn't save setup progress. Please retry before connecting your account.");
+    }
+  } catch (error) {
+    // Leaving the page for provider consent requires a durable resume target.
+    // Ordinary in-page navigation keeps its existing best-effort behavior.
+    if (options.requireSuccess) throw error;
     /* non-fatal — local wizard progress is the source of truth mid-step */
   }
 }
@@ -556,16 +566,19 @@ export async function postTeamInvite(
 
 export async function loginUser(
   email: string,
-  password: string
+  password: string,
+  secondFactor?: { totp?: string; recoveryCode?: string },
 ): Promise<{ user: AuthUser }> {
   const res = await authFetch(`${BASE}/api/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify({ email, password, ...secondFactor }),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || "Login failed");
+    const error = new Error(data.error || "Login failed") as Error & { code?: string };
+    error.code = data.code;
+    throw error;
   }
   return res.json();
 }

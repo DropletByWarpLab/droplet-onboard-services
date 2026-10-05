@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useAuth } from "@/lib/auth";
 import { patchSetupStep } from "@/lib/api";
 import { DropletMark } from "@/components/DropletMark";
@@ -17,6 +17,7 @@ import { CamerasStep } from "@/components/setup/steps/CamerasStep";
 import { VpnStep } from "@/components/setup/steps/VpnStep";
 import { AiStep } from "@/components/setup/steps/AiStep";
 import { VoiceStep } from "@/components/setup/steps/VoiceStep";
+import { AccountsStep } from "@/components/setup/steps/AccountsStep";
 import { TeamStep } from "@/components/setup/steps/TeamStep";
 import { DoneStep } from "@/components/setup/steps/DoneStep";
 import { STEPS, type Step } from "@/components/setup/wizard-steps";
@@ -37,11 +38,10 @@ import { SetupNavProvider } from "@/components/setup/setup-nav";
  *     that later steps need to render
  *   - the per-step callback wiring that advances `step` on completion
  *
- * The 4-step base flow (welcome → account → discovery → done) shipped in
- * WARP-216 / WARP-298 / WARP-302. The walkthrough extension (WARP-174)
- * slots Internet / Storage / Cameras / VPN / AI between discovery and
- * done in subsequent commits — see `docs/SETUP_WIZARD_WALKTHROUGH.md`
- * and its addendum for the contract.
+ * The current walkthrough includes workspace, security, network, storage,
+ * device discovery, private AI, voice, connected accounts, and team setup.
+ * Connected accounts is optional and persists before provider consent so
+ * Google and Microsoft can return the owner to the same wizard step.
  *
  * PR #384 — the visual frame is the aurora left-rail `StepShell` (rail on
  * `lg+`, compact progress header below). Each step renders its own
@@ -134,9 +134,14 @@ export default function SetupPage() {
     setupProbeError,
     setupAutoRetrying,
     retrySetupProbe,
+    user,
+    isLoading,
   } = useAuth();
 
-  if (setupState == null) {
+  const needsSession = setupState != null &&
+    STEPS.indexOf(resumeStepFrom(setupState.setupStep)) > STEPS.indexOf("account");
+
+  if (setupState == null || (needsSession && isLoading)) {
     return (
       <div className="grid min-h-dvh place-items-center bg-surface-primary p-4">
         <div role="status" aria-live="polite" className="text-center max-w-sm">
@@ -188,10 +193,39 @@ export default function SetupPage() {
     );
   }
 
-  return <SetupWizard initialStep={resumeStepFrom(setupState.setupStep)} />;
+  const persisted = resumeStepFrom(setupState.setupStep);
+  // A refresh after account creation must restore the owner session before
+  // mounting authenticated steps. If it expired, sign in without resetting
+  // the durable step or consuming the provider callback's return hint.
+  if (needsSession && user === null) {
+    return <AccountStep signInOnly onComplete={() => {}} />;
+  }
+  // Provider consent can originate from a revisited accounts step after the
+  // resume pointer has advanced to team. Only reopen an already-reached step;
+  // a URL must never skip claim/account or displace the terminal Done screen.
+  const returningToAccounts =
+    typeof window !== "undefined" &&
+    new URLSearchParams(window.location.search).get("step") === "accounts" &&
+    setupState.appliance === "unclaimed" &&
+    STEPS.indexOf(persisted) >= STEPS.indexOf("accounts") &&
+    persisted !== "done";
+
+  return (
+    <SetupWizard
+      initialStep={returningToAccounts ? "accounts" : persisted}
+      furthestStep={persisted}
+    />
+  );
 }
 
-function SetupWizard({ initialStep }: { initialStep: Step }) {
+function SetupWizard({ initialStep, furthestStep }: { initialStep: Step; furthestStep: Step }) {
+  useEffect(() => {
+    if (initialStep !== "accounts") return;
+    const url = new URL(window.location.href);
+    if (url.searchParams.get("step") !== "accounts") return;
+    url.searchParams.delete("step");
+    window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+  }, [initialStep]);
   // Hydrate once from the persisted step (resumability). useState's
   // initializer runs only on first render, so later context updates don't
   // yank the customer back mid-wizard. The page above guarantees
@@ -203,7 +237,7 @@ function SetupWizard({ initialStep }: { initialStep: Step }) {
   // everything up to here unlocked. Not persisted: the orchestrator's
   // `setupStep` is the single resume pointer; "furthest reached" is session UI.
   const [maxReachedIdx, setMaxReachedIdx] = useState<number>(() =>
-    Math.max(0, STEPS.indexOf(initialStep)),
+    Math.max(0, STEPS.indexOf(furthestStep)),
   );
   const [displayName, setDisplayName] = useState("");
   const [discoveredCount, setDiscoveredCount] = useState(0);
@@ -425,9 +459,17 @@ function SetupWizard({ initialStep }: { initialStep: Step }) {
           — macOS dev); a generic error renders in-step (WARP-933). */}
       {step === "voice" && (
         <VoiceStep
+          onComplete={() => setStep("accounts")}
+          onSkip={() => setStep("accounts")}
+          onAutoSkip={() => autoSkip("accounts")}
+        />
+      )}
+
+      {step === "accounts" && (
+        <AccountsStep
           onComplete={() => setStep("team")}
           onSkip={() => setStep("team")}
-          onAutoSkip={() => autoSkip("team")}
+          beforeConnect={() => patchSetupStep("accounts", { requireSuccess: true })}
         />
       )}
 

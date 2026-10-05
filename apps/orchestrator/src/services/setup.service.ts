@@ -54,12 +54,9 @@ export const STEP_AFTER_CLAIM: SetupStep = "account";
  *
  * PR #373: `claim` ships and slots SECOND (welcome → claim → account, #371
  * handoff §1). PR #380: `org` ships and slots AFTER account (welcome → claim →
- * account → org → internet → …, #380 spec). PR #381: `team` ships and slots
- * near the END, after `ai` and before `done` (… → ai → team → done): once the
- * box is set up the owner brings people in. `team` is the LAST onboarding step
- * to wire — it extends `SetupStep`, this list, the wizard array, and the route
- * validation together, the way claim and org did. `team` IS skippable in the
- * wizard, but it is still a real reachable resume target, so it belongs here.
+ * account → org → internet → …, #380 spec). The optional Microsoft/Google
+ * `accounts` step follows AI (and the client-only voice step), then `team`
+ * brings people in before `done`. Both optional steps are real resume targets.
  *
  * Declared as a plain string-literal tuple (NOT `SetupStep.welcome` etc.)
  * so this module has NO runtime dependency on the Prisma enum OBJECT at
@@ -80,6 +77,7 @@ export const SETUP_STEPS = [
   "cameras",
   "vpn",
   "ai",
+  "accounts",
   "team",
   "done",
 ] as const satisfies readonly SetupStep[];
@@ -186,14 +184,22 @@ const DEFAULT_STATE: SetupState = {
  * EFFECTIVE step is resolved IN MEMORY to STEP_AFTER_CLAIM. The healing is
  * read-only: we never write here (M5 is preserved — `setSetupStep` durably
  * heals the row on the next wizard write). The `isClaimed` count is only
- * issued when the step is actually `claim`, so non-claim reads (the
- * overwhelming majority) keep their exact single-query behaviour.
+ * issued when resolving claim or a stale late pointer on an owner-less box.
+ * Unclaimed pointers after account also check the canonical local owner role;
+ * a missing owner resumes bootstrap without mutating this public read.
  */
 export async function getSetupState(prisma: SetupDbClient): Promise<SetupState> {
   const row = await prisma.applianceSetup.findUnique({
     where: { id: APPLIANCE_SETUP_ID },
   });
   const state = row ? toSetupState(row) : DEFAULT_STATE;
+  // Old public progress writes could put a fresh box past account before an
+  // owner existed. Resume from the actual bootstrap prerequisite without
+  // writing during this public GET; other people's rows do not count as owners.
+  if (state.appliance === "unclaimed" && SETUP_STEPS.indexOf(state.setupStep) > SETUP_STEPS.indexOf(STEP_AFTER_CLAIM)
+      && (await prisma.user.count({ where: { role: "owner" } })) === 0) {
+    return { ...state, setupStep: await isClaimed(prisma) ? STEP_AFTER_CLAIM : "claim" };
+  }
   if (state.setupStep === "claim" && (await isClaimed(prisma))) {
     return { ...state, setupStep: STEP_AFTER_CLAIM };
   }
@@ -245,7 +251,9 @@ export async function setSetupStep(
  * Floor semantics: persist `step` only when the CURRENT pointer orders
  * strictly before it in `SETUP_STEPS` (wizard order); otherwise return the
  * stored state untouched. The comparison uses `getSetupState`, so the
- * WARP-804 claim→account healing applies before ordering.
+ * WARP-804 claim→account healing applies before ordering. A stale late
+ * pointer on a box without an owner is durably recovered first: otherwise
+ * its old value would resurface immediately after owner creation.
  *
  * ATOMICITY (pr-reviewer on #599) — the compare and the write run inside ONE
  * SERIALIZABLE interactive transaction, not two independent round-trips. As
@@ -273,7 +281,19 @@ export async function advanceSetupStepToAtLeast(
     try {
       return await prisma.$transaction(
         async (tx) => {
-          const current = await getSetupState(tx);
+          let current = await getSetupState(tx);
+          if (current.appliance === "unclaimed"
+              && (current.setupStep === "claim" || current.setupStep === STEP_AFTER_CLAIM)) {
+            const stored = await tx.applianceSetup.findUnique({
+              where: { id: APPLIANCE_SETUP_ID },
+            });
+            // Only getSetupState's ownerless late-pointer recovery may lower
+            // a raw pointer. Legitimate progress with an owner and ready boxes
+            // retain the monotonic floor, and public reads remain read-only.
+            if (stored && SETUP_STEPS.indexOf(stored.setupStep) > SETUP_STEPS.indexOf(STEP_AFTER_CLAIM)) {
+              current = await setSetupStep(tx, current.setupStep);
+            }
+          }
           const currentIdx = SETUP_STEPS.indexOf(current.setupStep);
           const targetIdx = SETUP_STEPS.indexOf(step);
           if (currentIdx >= targetIdx) {

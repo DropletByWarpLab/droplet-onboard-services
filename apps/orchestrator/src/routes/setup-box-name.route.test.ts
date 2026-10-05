@@ -24,7 +24,15 @@ vi.mock("../services/jwt.service.js", () => ({
   verifyAccessToken: (token: string) =>
     token === "valid-session"
       ? { sub: "u1", username: "owner", displayName: "Owner", role: "owner" }
+      : token === "denied-owner-session"
+      ? { sub: "denied-user", username: "owner", displayName: "Owner", role: "owner", sid: "live-sid" }
       : null,
+}));
+vi.mock("../services/auth-denylist.service.js", () => ({
+  isUserDenied: vi.fn(async (userId: string) => userId === "denied-user"),
+}));
+vi.mock("../services/session.service.js", () => ({
+  checkSession: vi.fn(async () => ({ kind: "ok" })),
 }));
 
 import { createSetupRouter } from "./setup.js";
@@ -139,6 +147,21 @@ function buildApp(
     reissueTls,
   };
 }
+
+describe("ready appliance box-name changes honor hard revocation", () => {
+  it.each(["/api/setup/box-name", "/api/setup/box-name/rename"])("rejects a denied owner at %s despite a valid JWT and live session", async (path) => {
+    const prisma = createPrismaMock();
+    prisma._seedSetup({ id: "singleton", state: "ready", setupStep: "done", userTourCompleted: true, boxName: "studio" });
+    const { app, persistBoxNameToHost, claimBoxName, releaseBoxName, reissueTls } = buildApp(prisma);
+    const res = await request(app).post(path).set("Cookie", "droplet_session=denied-owner-session").send({ name: "renamed" });
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe("SESSION_EXPIRED");
+    expect(persistBoxNameToHost).not.toHaveBeenCalled();
+    expect(claimBoxName).not.toHaveBeenCalled();
+    expect(releaseBoxName).not.toHaveBeenCalled();
+    expect(reissueTls).not.toHaveBeenCalled();
+  });
+});
 
 describe("GET /api/setup/box-name/check (WARP-979)", () => {
   let prisma: ReturnType<typeof createPrismaMock>;

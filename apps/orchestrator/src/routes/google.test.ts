@@ -147,6 +147,28 @@ describe("Google browser and mail worker routes", () => {
     expect(cookieHeaders(callback.headers["set-cookie"])[0]).toContain("Expires=Thu, 01 Jan 1970");
   });
 
+  it.each(["connected", "cancelled", "expired", "failed"])("returns onboarding %s to the stored accounts step", async (outcome) => {
+    const { app, db } = setup();
+    const started = await asUser(request(app).post("/api/google/connect")).send({ returnTo: "/setup?step=accounts" });
+    expect(started.status).toBe(200);
+    const state = new URL(started.body.authorizeUrl).searchParams.get("state");
+    const cookie = cookieHeaders(started.headers["set-cookie"])[0].split(";")[0];
+    if (outcome === "expired") db.connections()[0].pendingExpiresAt = new Date(0);
+    const callback = await request(app).get("/api/google/callback").query({ state,
+      ...(outcome === "cancelled" ? { error: "access_denied" } : outcome === "failed" ? { error: "server_error" } : { code: "code" }),
+      returnTo: "https://evil.example", error_description: "PROVIDER_SECRET",
+    }).set("Cookie", cookie);
+    expect(callback.status).toBe(303);
+    expect(callback.headers.location).toBe(`/setup?step=accounts&google=${outcome}`);
+    expect(callback.text).not.toMatch(/evil.example|PROVIDER_SECRET/);
+  });
+
+  it.each(["https://evil.example", "//evil.example", "/setup?step=done", "/settings#x"])("rejects an untrusted Google return destination %s before creating a flow", async (returnTo) => {
+    const { app, db } = setup();
+    expect((await asUser(request(app).post("/api/google/connect")).send({ returnTo })).status).toBe(400);
+    expect(db.connections()).toHaveLength(0);
+  });
+
   it("callback cannot reflect a return URL, missing state cookie or provider error text", async () => {
     const { app, db, provider } = setup();
     const started = await asUser(request(app).post("/api/google/connect")).send({});

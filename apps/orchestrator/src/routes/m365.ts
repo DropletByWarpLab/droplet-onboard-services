@@ -68,6 +68,7 @@ import {
   beginAuthCodeConnect,
   beginDeviceCodeConnect,
   completeAuthCodeConnect,
+  getAuthCodeReturnTo,
   disconnect,
   getConnectionView,
   M365AppRequiredError,
@@ -79,6 +80,7 @@ import {
 import { getSyncStatus } from "../services/m365/sync-status.service.js";
 import { createEntraClient } from "../services/m365/entra-client.js";
 import { getMicrosoftApp } from "../services/account-provider-setup.service.js";
+import { ACCOUNT_CONNECT_RETURN_PATHS, accountConnectOutcomeUrl, type AccountConnectReturnTo } from "../services/account-connect-return.js";
 import {
   classifyAuthFailure,
   parseAppRegistration,
@@ -105,11 +107,7 @@ export const M365_CALLBACK_PATH = "/api/m365/callback";
 export const M365_STATE_COOKIE = "droplet_m365_state";
 const M365_COOKIE_PATH = "/api/m365";
 
-/** Where the callback lands the person, with the outcome for the page to say:
- *  Settings, where each person's own Microsoft 365 card lives (WARP-3056).
- *  Not the integrations hub — that is owner/admin and box-level, and this
- *  connection is per person, family included. */
-const M365_LANDING_PATH = "/settings";
+const returnToSchema = z.enum(ACCOUNT_CONNECT_RETURN_PATHS).optional();
 
 function isHttps(req: Request): boolean {
   return req.secure || req.headers["x-forwarded-proto"] === "https";
@@ -287,6 +285,8 @@ export function createM365Router(
       if (!userId) return res.status(401).json({ error: "unauthenticated" });
 
       const requested = appFromBody(req.body);
+      const returnTo = returnToSchema.safeParse(req.body?.returnTo);
+      if (!returnTo.success) return res.status(400).json({ error: "invalid_request" });
       if (!requested.ok) {
         return res
           .status(400)
@@ -298,6 +298,7 @@ export function createM365Router(
         const started = await beginAuthCodeConnect(prisma, entra, userId, {
           app: requested.app,
           redirectUri,
+          returnTo: returnTo.data,
         });
 
         res.cookie(M365_STATE_COOKIE, started.state, {
@@ -407,7 +408,9 @@ export function createM365CallbackRouter(
     res.clearCookie(M365_STATE_COOKIE, { path: M365_COOKIE_PATH });
 
     let outcome: string;
+    let returnTo: AccountConnectReturnTo = "/settings";
     try {
+      returnTo = await getAuthCodeReturnTo(prisma, param("state"), browserState);
       outcome = await completeAuthCodeConnect(prisma, entra, {
         state: param("state"),
         browserState,
@@ -420,7 +423,7 @@ export function createM365CallbackRouter(
     }
     // A fixed same-origin path and a closed set of outcomes — nothing from the
     // query is reflected into the Location header.
-    return res.redirect(303, `${M365_LANDING_PATH}?m365=${outcome}`);
+    return res.redirect(303, accountConnectOutcomeUrl(returnTo, "m365", outcome));
   });
 
   return router;

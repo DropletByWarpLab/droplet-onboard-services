@@ -38,6 +38,7 @@ import { purgeM365FileDataForUser, purgeSharePointDataForUser } from "./drive-da
 import { GRAPH_RESOURCES, grantCovers } from "./graph-resources.js";
 import { scopesForRefresh, scopesForSignIn } from "./scopes.js";
 import { getMicrosoftApp } from "../account-provider-setup.service.js";
+import { accountConnectReturnTo, type AccountConnectReturnTo } from "../account-connect-return.js";
 import { microsoftCalendarViewOf, purgeMicrosoftCalendar, setMicrosoftCalendarEnabled, type MicrosoftCalendarView } from "./calendar-landing.service.js";
 import {
   sealPendingFlow,
@@ -494,6 +495,7 @@ export async function beginAuthCodeConnect(
   opts: ConnectOptions & {
     /** The box's own callback URL, byte-identical in both legs. */
     redirectUri: string;
+    returnTo?: AccountConnectReturnTo;
   },
   now: Date = new Date(),
 ): Promise<{ authorizeUrl: string; state: string; expiresAt: Date }> {
@@ -527,6 +529,7 @@ export async function beginAuthCodeConnect(
       nonce,
       redirectUri: opts.redirectUri,
       scopes,
+      returnTo: accountConnectReturnTo(opts.returnTo),
     }),
     pendingFlowExpiresAt: expiresAt,
     lastError: null,
@@ -542,6 +545,18 @@ export async function beginAuthCodeConnect(
 
 /** How a callback ended, for the dashboard to say so. */
 export type AuthCodeOutcome = "connected" | "cancelled" | "expired" | "failed" | "invalid" | "different_account";
+
+/** Resolve the landing page from the sealed, browser-bound flow before completion clears it. */
+export async function getAuthCodeReturnTo(prisma: PrismaClient, state: string | null, browserState: string | null): Promise<AccountConnectReturnTo> {
+  if (!state || !browserState || !sameSecret(state, browserState)) return "/settings";
+  const row = await prisma.m365Connection.findUnique({ where: { pendingStateHash: hashState(state) } });
+  if (!row || row.state !== "PENDING_CONSENT" || !row.pendingFlowEnc) return "/settings";
+  try {
+    return accountConnectReturnTo(unsealPendingFlow(row.userId, row.pendingFlowEnc).returnTo);
+  } catch {
+    return "/settings";
+  }
+}
 
 /**
  * WARP-2704 — finish an authorization-code sign-in from Microsoft's redirect.

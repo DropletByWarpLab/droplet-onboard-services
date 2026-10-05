@@ -13,6 +13,7 @@ import {
   KeyRound,
   Lightbulb,
   Mic,
+  Link2,
   Shield,
   ShieldCheck,
   Sparkles,
@@ -79,6 +80,7 @@ export const RAIL_LABELS: Record<Step, { label: string; Icon: LucideIcon }> = {
   // WARP-1036 — the always-on "hey droplet" assistant gets its own rail row
   // between Private AI and Your team.
   voice: { label: "Voice", Icon: Mic },
+  accounts: { label: "Connected accounts", Icon: Link2 },
   team: { label: "Your team", Icon: Users },
   done: { label: "Done", Icon: Check },
 };
@@ -297,7 +299,7 @@ export function StepShell({
           </div>
           <div className="flex items-center gap-2 type-caption-1 leading-snug text-white/80">
             <Shield size={13} aria-hidden="true" />
-            Everything here stays on the box.
+            Local by default. You control sharing.
           </div>
         </div>
       </aside>

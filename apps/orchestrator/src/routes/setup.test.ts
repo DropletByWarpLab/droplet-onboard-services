@@ -38,6 +38,8 @@ vi.mock("../services/jwt.service.js", () => ({
         return { sub: "u1", username: "owner", displayName: "Owner", role: "owner" };
       case "guest-session":
         return { ...base, sub: "u-guest", role: "guest", sid: "sid-live" };
+      case "admin-session":
+        return { ...base, sub: "u-admin", role: "admin", sid: "sid-live" };
       case "revoked-owner-session":
         return { ...base, sub: "u1", role: "owner", sid: "sid-dead" };
       case "denied-owner-session":
@@ -81,7 +83,8 @@ function createPrismaMock(opts: { userCount?: number; consumedClaims?: number } 
   // pre-existing case keeps its exact behaviour — the claim-satisfied
   // short-circuit only fires when a `claim` step meets a claimed box.
   let consumedClaims = opts.consumedClaims ?? 0;
-  return {
+  const db = {
+    $transaction: async <T>(work: (tx: unknown) => Promise<T>): Promise<T> => work(db),
     _seed: (r: Record<string, unknown> | null) => {
       row = r;
     },
@@ -129,6 +132,7 @@ function createPrismaMock(opts: { userCount?: number; consumedClaims?: number } 
       },
     },
   };
+  return db;
 }
 
 function buildApp(prisma: ReturnType<typeof createPrismaMock>) {
@@ -194,6 +198,7 @@ describe("PATCH /api/setup/state", () => {
     const app = buildApp(prisma);
     const patch = await request(app)
       .patch("/api/setup/state")
+      .set("Cookie", "droplet_session=valid-session")
       .send({ setup_step: "cameras" });
     expect(patch.status).toBe(200);
     expect(patch.body.setup_step).toBe("cameras");
@@ -202,10 +207,32 @@ describe("PATCH /api/setup/state", () => {
     expect(get.body.setup_step).toBe("cameras");
   });
 
+  it("persists accounts across refresh and ignores a delayed earlier wizard write", async () => {
+    const app = buildApp(prisma);
+    const accounts = await request(app).patch("/api/setup/state").set("Cookie", "droplet_session=valid-session").send({ setup_step: "accounts" });
+    expect(accounts.status).toBe(200);
+    expect(accounts.body.setup_step).toBe("accounts");
+    expect((await request(app).get("/api/setup/state")).body.setup_step).toBe("accounts");
+    await request(app).patch("/api/setup/state").set("Cookie", "droplet_session=valid-session").send({ setup_step: "team" });
+    const stale = await request(app).patch("/api/setup/state").set("Cookie", "droplet_session=valid-session").send({ setup_step: "accounts" });
+    expect(stale.status).toBe(200);
+    expect(stale.body.setup_step).toBe("team");
+    expect((await request(app).get("/api/setup/state")).body.setup_step).toBe("team");
+  });
+
+  it("an owner replay cannot move a completed appliance away from done", async () => {
+    prisma._seed({ id: "singleton", state: "ready", setupStep: "done", userTourCompleted: false });
+    const res = await request(buildApp(prisma)).patch("/api/setup/state")
+      .set("Cookie", "droplet_session=valid-session").send({ setup_step: "accounts" });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ appliance: "ready", setup_step: "done" });
+  });
+
   it("flips the appliance to ready via an explicit field", async () => {
     const app = buildApp(prisma);
     const res = await request(app)
       .patch("/api/setup/state")
+      .set("Cookie", "droplet_session=valid-session")
       .send({ appliance: "ready" });
     expect(res.status).toBe(200);
     expect(res.body.appliance).toBe("ready");
@@ -219,6 +246,7 @@ describe("PATCH /api/setup/state", () => {
     const app = buildApp(prisma);
     const patch = await request(app)
       .patch("/api/setup/state")
+      .set("Cookie", "droplet_session=valid-session")
       .send({ appliance: "ready" });
     expect(patch.status).toBe(200);
     expect(patch.body).toEqual({
@@ -239,6 +267,7 @@ describe("PATCH /api/setup/state", () => {
     const app = buildApp(prisma);
     const first = await request(app)
       .patch("/api/setup/state")
+      .set("Cookie", "droplet_session=valid-session")
       .send({ appliance: "ready" });
     expect(first.status).toBe(200);
     expect(first.body.appliance).toBe("ready");
@@ -326,15 +355,34 @@ describe("PATCH /api/setup/state — claim (appliance:ready) auth gate", () => {
     expect(res.body.appliance).toBe("ready");
   });
 
-  it("ALLOWS the ready transition (no cookie) once an admin account exists", async () => {
-    // Backstop path (b): an admin row exists ⇒ the box is genuinely
-    // claimable; the finish PATCH succeeds without re-presenting a cookie.
+  it("rejects anonymous completion even after the owner account exists", async () => {
     const prisma = createPrismaMock({ userCount: 1 });
     const res = await request(buildApp(prisma))
       .patch("/api/setup/state")
       .send({ appliance: "ready" });
-    expect(res.status).toBe(200);
-    expect(res.body.appliance).toBe("ready");
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("SETUP_CLAIM_FORBIDDEN");
+    expect((await request(buildApp(prisma)).get("/api/setup/state")).body.appliance).toBe("unclaimed");
+  });
+
+  it.each(["guest-session", "admin-session"])("refuses first-run completion by a non-owner %s", async (cookie) => {
+    const prisma = createPrismaMock({ userCount: 1 });
+    const app = buildApp(prisma);
+    const res = await request(app).patch("/api/setup/state")
+      .set("Cookie", `droplet_session=${cookie}`).send({ appliance: "ready", setup_step: "done" });
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("SETUP_FORBIDDEN");
+    expect((await request(app).get("/api/setup/state")).body).toMatchObject({ appliance: "unclaimed", setup_step: "welcome" });
+  });
+
+  it.each(["revoked-owner-session", "denied-owner-session"])("refuses first-run completion by %s", async (cookie) => {
+    const prisma = createPrismaMock({ userCount: 1 });
+    const app = buildApp(prisma);
+    const res = await request(app).patch("/api/setup/state")
+      .set("Cookie", `droplet_session=${cookie}`).send({ appliance: "ready" });
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe("SESSION_EXPIRED");
+    expect((await request(app).get("/api/setup/state")).body.appliance).toBe("unclaimed");
   });
 
   it("rejects an invalid session cookie on a pre-claim box with 403", async () => {
@@ -347,15 +395,31 @@ describe("PATCH /api/setup/state — claim (appliance:ready) auth gate", () => {
     expect(res.body.code).toBe("SETUP_CLAIM_FORBIDDEN");
   });
 
-  it("still allows PUBLIC resumability writes (setup_step) with no auth", async () => {
+  it("still allows PUBLIC account resumability with no auth", async () => {
     // Resumability must not regress: an unauthenticated pre-claim wizard
     // can still persist its step.
     const prisma = createPrismaMock({ userCount: 0 });
     const res = await request(buildApp(prisma))
       .patch("/api/setup/state")
-      .send({ setup_step: "storage" });
+      .send({ setup_step: "account" });
     expect(res.status).toBe(200);
-    expect(res.body.setup_step).toBe("storage");
+    expect(res.body.setup_step).toBe("account");
+  });
+
+  it.each(["org", "internet", "accounts", "done"])("refuses anonymous pre-owner progress to %s before applying a mixed patch", async (setup_step) => {
+    const prisma = createPrismaMock({ userCount: 0 });
+    const app = buildApp(prisma);
+    const res = await request(app).patch("/api/setup/state").send({ setup_step, user_tour_completed: true });
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe("SETUP_AUTH_REQUIRED");
+    expect((await request(app).get("/api/setup/state")).body).toEqual({ appliance: "unclaimed", setup_step: "welcome", user_tour_completed: false });
+  });
+
+  it.each(["guest-session", "admin-session", "revoked-owner-session", "denied-owner-session"])("refuses protected first-run progress by %s", async (cookie) => {
+    const app = buildApp(createPrismaMock());
+    const res = await request(app).patch("/api/setup/state").set("Cookie", `droplet_session=${cookie}`).send({ setup_step: "accounts" });
+    expect(res.status).toBe(cookie.startsWith("revoked") || cookie.startsWith("denied") ? 401 : 403);
+    expect((await request(app).get("/api/setup/state")).body.setup_step).toBe("welcome");
   });
 });
 
@@ -411,10 +475,10 @@ describe("PATCH /api/setup/state — set-up (ready) box write gate (WARP-3193 SE
     },
   );
 
-  it("lets the owner write the step", async () => {
+  it("accepts the owner's stale step without regressing a ready appliance", async () => {
     const res = await patch({ setup_step: "cameras" }, "valid-session");
     expect(res.status).toBe(200);
-    expect(res.body.setup_step).toBe("cameras");
+    expect(res.body.setup_step).toBe("done");
   });
 
   it("lets ANY signed-in member complete the tour (a guest included)", async () => {
@@ -545,6 +609,7 @@ describe("PATCH /api/setup/state — model pre-warm trigger (WARP-1041)", () => 
 
       const res = await request(app)
         .patch("/api/setup/state")
+        .set("Cookie", "droplet_session=valid-session")
         .send({ setup_step: step });
       await flushWarmTick();
 
@@ -562,7 +627,7 @@ describe("PATCH /api/setup/state — model pre-warm trigger (WARP-1041)", () => 
     app.use(express.json());
     app.use("/api", createSetupRouter(prisma as never));
 
-    const res = await request(app).patch("/api/setup/state").send({ setup_step: "storage" });
+    const res = await request(app).patch("/api/setup/state").set("Cookie", "droplet_session=valid-session").send({ setup_step: "storage" });
     await flushWarmTick();
 
     expect(res.status).toBe(200);
@@ -578,6 +643,7 @@ describe("PATCH /api/setup/state — model pre-warm trigger (WARP-1041)", () => 
 
       const res = await request(app)
         .patch("/api/setup/state")
+        .set("Cookie", "droplet_session=valid-session")
         .send({ setup_step: step });
       await flushWarmTick();
 
@@ -620,6 +686,7 @@ describe("PATCH /api/setup/state — model pre-warm trigger (WARP-1041)", () => 
 
     const res = await request(app)
       .patch("/api/setup/state")
+      .set("Cookie", "droplet_session=valid-session")
       .send({ setup_step: "storage" });
     await flushWarmTick();
 
@@ -635,6 +702,7 @@ describe("PATCH /api/setup/state — model pre-warm trigger (WARP-1041)", () => 
 
     const res = await request(app)
       .patch("/api/setup/state")
+      .set("Cookie", "droplet_session=valid-session")
       .send({ setup_step: "vpn" });
     await flushWarmTick();
 

@@ -81,8 +81,8 @@ describe("AuthGate — routes off /setup/state (PR #372)", () => {
     expect(replaceMock).toHaveBeenCalledWith("/login?from=setup");
   });
 
-  it("renders /help during setup (unclaimed) instead of bouncing to /setup (WARP-930)", () => {
-    pathnameValue = "/help";
+  it.each(["/help", "/help/integrations/google-mail", "/help/integrations/microsoft-365"])("renders %s during setup instead of bouncing to /setup", (path) => {
+    pathnameValue = path;
     setAuth({
       user: null,
       isLoading: false,
@@ -91,6 +91,14 @@ describe("AuthGate — routes off /setup/state (PR #372)", () => {
     const { container } = render(<AuthGate>help content</AuthGate>);
     expect(replaceMock).not.toHaveBeenCalled();
     expect(container.textContent).toContain("help content");
+  });
+
+  it("does not exempt an unrelated path that merely starts with help", () => {
+    pathnameValue = "/helpful";
+    setAuth({ user: null, isLoading: false, setupState: { appliance: "unclaimed", setupStep: "accounts", userTourCompleted: false } });
+    const { container } = render(<AuthGate>other content</AuthGate>);
+    expect(replaceMock).toHaveBeenCalledWith("/setup");
+    expect(container.textContent).not.toContain("other content");
   });
 
   it("renders /help mid-wizard for the signed-in owner without bouncing (WARP-930)", () => {

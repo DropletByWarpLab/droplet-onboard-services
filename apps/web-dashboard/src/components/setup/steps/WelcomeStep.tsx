@@ -7,7 +7,7 @@ import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
 
 const TRUST = [
   { icon: Shield, label: "On-prem" },
-  { icon: Lock, label: "Nothing leaves the box" },
+  { icon: Lock, label: "You control sharing" },
   { icon: Check, label: "Set up once" },
 ] as const;
 
@@ -35,8 +35,9 @@ export function WelcomeStep({ onContinue }: { onContinue: () => void }) {
         data-testid="welcome-privacy-claim"
         className="type-headline text-label-primary max-w-md"
       >
-        Your files, conversations, and connected devices stay on your premises
-        — the AI that runs them lives on your own Droplet and never leaves it.
+        Your files and conversations stay on your premises by default. Local AI
+        runs on your own Droplet. You choose whether to connect outside services
+        or use cloud AI.
       </p>
 
       <ul className="mt-6 flex flex-wrap gap-2">
@@ -61,14 +62,13 @@ export function WelcomeStep({ onContinue }: { onContinue: () => void }) {
 
       <LearnMoreCard title="What is Droplet?" helpAnchor="privacy">
         <p>
-          A single box on your own network that runs your files, conversations,
-          cameras, and connected devices — your own private cloud, except it
-          never leaves your premises.
+          An appliance on your own network that runs your files, conversations,
+          cameras, and connected devices — with local AI on your premises.
         </p>
         <p>
-          The AI runs locally on the hardware in front of you, so your data
-          stays on the box. Tap “Learn more” for the full picture on how
-          Droplet keeps everything private.
+          Local AI keeps processing on your Droplet. Optional cloud AI and
+          connected services use the providers you choose and the permissions
+          you approve. Tap “Learn more” for the full picture on privacy.
         </p>
       </LearnMoreCard>
     </StepShell>

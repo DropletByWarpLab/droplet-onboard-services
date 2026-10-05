@@ -10,6 +10,7 @@ import { createGoogleProvider, GoogleProviderError, type GoogleApp, type GoogleP
 import { openGoogleFlow, openGoogleGrant, sealGoogleFlow, sealGoogleGrant, type PriorGoogleConnection } from "./token-store.js";
 import { DEFAULT_GOOGLE_FEATURES, googleGrantCovers, scopesForGoogleFeatures, type GoogleFeatures } from "./scopes.js";
 import { GOOGLE_CALENDAR_EVENTS_URL } from "./google-calendar-client.js";
+import { accountConnectReturnTo, type AccountConnectReturnTo } from "../account-connect-return.js";
 
 export const GOOGLE_FLOW_TTL_MS = 15 * 60_000;
 export type GoogleState = "DISCONNECTED" | "PENDING_CONSENT" | "CONNECTED" | "NEEDS_RECONNECT" | "ERROR";
@@ -161,7 +162,7 @@ export async function getGoogleConnectionView(prisma: PrismaClient, userId: stri
 
 export async function beginGoogleConnect(
   prisma: PrismaClient, userId: string, redirectUri: string, deps: GoogleDependencies,
-  features: GoogleFeatures = DEFAULT_GOOGLE_FEATURES,
+  features: GoogleFeatures & { returnTo?: AccountConnectReturnTo } = DEFAULT_GOOGLE_FEATURES,
 ) {
   if (!features.mail && !features.calendar) throw new GoogleSetupRequiredError();
   if (!validateGoogleRedirectUri(redirectUri)) throw new GoogleSetupRequiredError(true);
@@ -183,7 +184,8 @@ export async function beginGoogleConnect(
     }
     const pending = { state: "PENDING_CONSENT" as const, connectedAt: null, lastRefreshOkAt: null,
       pendingStateHash: sha256(state), pendingFlowEnc: sealGoogleFlow(userId, {
-        ...app, ...features, codeVerifier, redirectUri, prior: priorConnection(previous, features),
+        ...app, ...features, codeVerifier, redirectUri, returnTo: accountConnectReturnTo(features.returnTo),
+        prior: priorConnection(previous, features),
       }), pendingExpiresAt: expiresAt, lastError: null };
     // Retain an existing encrypted grant so disconnect can still revoke it
     // during re-consent. PENDING_CONSENT never permits the worker to use it.
@@ -194,6 +196,21 @@ export async function beginGoogleConnect(
   return { state, expiresAt, authorizeUrl: deps.provider.getAuthorizationUrl(app, {
     redirectUri, state, codeChallenge: createHash("sha256").update(codeVerifier).digest("base64url"), scopes: scopesForGoogleFeatures(features),
   }) };
+}
+
+/** Resolve the landing page from the sealed, browser-bound flow before completion clears it. */
+export async function getGoogleConnectReturnTo(prisma: PrismaClient, state: string | null, browserState: string | null): Promise<AccountConnectReturnTo> {
+  if (!state || !browserState || state.length > 256 || browserState.length > 256) return "/settings";
+  const expected = Buffer.from(state);
+  const actual = Buffer.from(browserState);
+  if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) return "/settings";
+  const row = await prisma.googleConnection.findUnique({ where: { pendingStateHash: sha256(state) } });
+  if (!row || row.state !== "PENDING_CONSENT" || !row.pendingFlowEnc) return "/settings";
+  try {
+    return accountConnectReturnTo(openGoogleFlow(row.userId, row.pendingFlowEnc).returnTo);
+  } catch {
+    return "/settings";
+  }
 }
 
 /** Browser-bound single-use claim. The sealed flow remains a CAS marker while the exchange runs. */

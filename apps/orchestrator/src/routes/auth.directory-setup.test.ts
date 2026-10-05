@@ -248,6 +248,36 @@ beforeEach(() => {
   isClaimed.mockImplementation(async () => true);
 });
 
+describe("GET /auth/setup uses the local bootstrap authority", () => {
+  it("offers owner creation when no local owner exists, even if Nextcloud has users", async () => {
+    const prisma = createPrismaMock([{ role: "family" }]);
+    vi.mocked(nc.ncCheckSetupRequired).mockResolvedValue(false);
+    const res = await request(buildApp(prisma)).get("/api/auth/setup");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ setupRequired: true, claimGateEnabled: false });
+    expect(nc.ncCheckSetupRequired).not.toHaveBeenCalled();
+    expect(prisma.user.count).toHaveBeenCalledWith({ where: { role: "owner" } });
+  });
+
+  it("offers existing-owner login while Nextcloud is unavailable", async () => {
+    const prisma = createPrismaMock([{ role: "owner" }]);
+    vi.mocked(nc.ncCheckSetupRequired).mockRejectedValue(new Error("Nextcloud unavailable"));
+    const res = await request(buildApp(prisma)).get("/api/auth/setup");
+    expect(res.status).toBe(200);
+    expect(res.body.setupRequired).toBe(false);
+    expect(nc.ncCheckSetupRequired).not.toHaveBeenCalled();
+  });
+
+  it("does not pretend a failed directory read means owner creation is available", async () => {
+    const prisma = createPrismaMock();
+    prisma.user.count.mockRejectedValueOnce(new Error("Directory unavailable"));
+    const res = await request(buildApp(prisma)).get("/api/auth/setup");
+    expect(res.status).toBe(500);
+    expect(res.body.setupRequired).toBeUndefined();
+    expect(nc.ncCheckSetupRequired).not.toHaveBeenCalled();
+  });
+});
+
 describe("ADR-013 — POST /auth/setup writes the argon2id hash to the directory", () => {
   it("hashes the password and stores the argon2id PHC string on the User row", async () => {
     const prisma = createPrismaMock();

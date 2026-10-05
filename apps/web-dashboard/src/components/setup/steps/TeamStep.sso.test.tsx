@@ -65,7 +65,7 @@ describe("TeamStep SSO control is honest (connectivity audit D1)", () => {
     getEnabledSsoProviders.mockResolvedValue(["google", "okta"]);
     render(<TeamStep onComplete={() => {}} onSkip={() => {}} />);
 
-    expect(await screen.findByText(/Synced/i)).toBeInTheDocument();
+    expect(await screen.findByText(/^Available$/i)).toBeInTheDocument();
     expect(screen.getByText(/Google Workspace/)).toBeInTheDocument();
     expect(screen.getByText(/Okta/)).toBeInTheDocument();
     // Still no dead button.
@@ -90,7 +90,7 @@ describe("TeamStep SSO control is honest (connectivity audit D1)", () => {
     getEnabledSsoProviders.mockResolvedValue(["azuread"]);
     render(<TeamStep onComplete={() => {}} onSkip={() => {}} />);
 
-    expect(await screen.findByText(/Synced/i)).toBeInTheDocument();
+    expect(await screen.findByText(/^Available$/i)).toBeInTheDocument();
     expect(screen.getByText(/Microsoft Entra/)).toBeInTheDocument();
   });
 });
