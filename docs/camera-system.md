@@ -90,7 +90,30 @@ get a redacted URL plus a `hasCredentials` boolean.
 
 Accept/reject accept two id shapes: `mac:<MAC>` routes to camera-discovery (which
 verifies the stream before committing it to Frigate, answering 422 when it can't),
-and a uuid takes the DB path.
+and a uuid takes the DB path. The candidate id carries the upper-case MAC; the
+orchestrator lower-cases it before calling camera-discovery, which keys its pending
+list by the lower-case form (and itself accepts any case, so neither side depends on
+the other getting it right — WARP-3508).
+
+#### A camera you already have is not a candidate (WARP-3508)
+
+camera-discovery only learns about the adoptions it made itself, so a camera added by
+hand (`POST /api/cameras`) used to keep showing up here as "Needs sign-in" for good.
+`GET /api/cameras/discovered` now drops a candidate when any of these holds:
+
+- camera-discovery lists it as known (committed to Frigate by discovery);
+- a **managed** Camera row carries its MAC (any letter case) or its IP — managed
+  meaning `enabled`, or created by hand (`autoDiscovered = false`, even if switched
+  off); `isManagedCameraRow()` in `camera-candidates.service.ts` is the one place that
+  decides this;
+- a Frigate camera input pulls from its IP (`cameras.<name>.ffmpeg.inputs[].path`).
+
+A failed or slow (> 3 s) Frigate read costs only that last exclusion — never the
+list. Known gap: a camera discovery adopted and the operator later *disabled* reads
+as `enabled = false, autoDiscovered = true`, the same shape as a never-adopted
+candidate; the explicit adoption state (WARP-3506/3510) replaces that inference.
+camera-discovery applies the same Frigate rule on its side and stops probing those
+hosts (see its README).
 
 `POST /api/cameras/discovered/:id/credentials` (`mac:` ids only) takes
 `{ username, password }` for a `needs_credentials` camera. camera-discovery tries
