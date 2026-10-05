@@ -16,6 +16,7 @@ stored URL is exactly the mistake that let this through.
 from __future__ import annotations
 
 import pytest
+from time import perf_counter
 
 import rtsp_url
 from tests.frigate_emulator import camera_connects_to, camera_receives, frigate_escape
@@ -272,6 +273,12 @@ class TestScrub:
     def test_leaves_text_without_credentials_alone(self):
         text = "Frigate rejected camera front: rtsp://192.168.9.5:554/live is not reachable"
         assert rtsp_url.scrub_credentials(text) == text
+
+    def test_scans_a_long_repeated_scheme_token_in_bounded_time(self):
+        text = "rtsp://" * 30_000
+        started = perf_counter()
+        assert rtsp_url.scrub_credentials(text) == text
+        assert perf_counter() - started < 2.0
 
 
 class TestStreamPath:
