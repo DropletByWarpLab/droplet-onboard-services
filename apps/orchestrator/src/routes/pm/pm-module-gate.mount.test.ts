@@ -58,7 +58,9 @@ import type { AuthUser } from "../../middleware/auth.js";
 import { packagePath } from "../../__tests__/helpers/test-paths.js";
 import { createPmNativeRouter } from "./native.js";
 import { createPmRelationsRouter } from "./relations.js";
+import { createPmWebhooksRouter } from "./webhooks.js";
 import { createPmScheduleRouter } from "./schedule.js";
+import { createPmDevelopmentRouter } from "./development.js";
 import { createPmOpenApiRouter } from "./openapi.js";
 import { createPmMobileRouter } from "../mobile/pm.js";
 
@@ -162,10 +164,22 @@ const PM_ROUTER_MOUNTS: readonly PmRouterMount[] = [
     router: createPmRelationsRouter(PRISMA),
   },
   {
+    factory: "createPmWebhooksRouter",
+    base: "/api",
+    file: "routes/pm/webhooks.ts",
+    router: createPmWebhooksRouter(PRISMA),
+  },
+  {
     factory: "createPmScheduleRouter",
     base: "/api",
     file: "routes/pm/schedule.ts",
     router: createPmScheduleRouter(PRISMA),
+  },
+  {
+    factory: "createPmDevelopmentRouter",
+    base: "/api",
+    file: "routes/pm/development.ts",
+    router: createPmDevelopmentRouter(PRISMA),
   },
   {
     factory: "createPmMobileRouter",
@@ -457,6 +471,8 @@ describe("WARP-1625 — the walk finds the routes the routers register", () => {
     ["createPmNativeRouter", "POST /api/pm/projects"],
     ["createPmNativeRouter", "DELETE /api/pm/projects/:id"],
     ["createPmRelationsRouter", "GET /api/pm/work-items/:id/relations"],
+    ["createPmWebhooksRouter", "GET /api/pm/webhooks"],
+    ["createPmDevelopmentRouter", "GET /api/pm/development/repositories"],
     ["createPmMobileRouter", "GET /api/mobile/pm/workspaces"],
   ];
 
