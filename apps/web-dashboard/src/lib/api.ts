@@ -3631,6 +3631,16 @@ async function cameraApiError(
   return err;
 }
 
+/**
+ * `added_no_stream` (WARP-3506): the camera IS added, but Frigate is not
+ * receiving video from it yet — a wrong address or password, or a camera that
+ * did not start. `reason` is operator-facing prose.
+ */
+export interface AddCameraResult {
+  status: "ok" | "added_no_stream";
+  reason?: string;
+}
+
 export async function addCameraManual(
   name: string,
   rtspUrl: string,
@@ -3638,7 +3648,7 @@ export async function addCameraManual(
   model?: string,
   username?: string,
   password?: string
-): Promise<void> {
+): Promise<AddCameraResult> {
   const res = await authFetch(`${BASE}/api/cameras`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -3654,6 +3664,10 @@ export async function addCameraManual(
     }),
   });
   if (!res.ok) throw await cameraApiError(res, `Failed to add camera: ${res.status}`);
+  const data = await res.json().catch(() => ({}));
+  return data?.status === "added_no_stream"
+    ? { status: "added_no_stream", reason: typeof data.reason === "string" ? data.reason : undefined }
+    : { status: "ok" };
 }
 
 /**
@@ -7867,11 +7881,43 @@ export interface AppModulesView {
   modules: AppModuleState[];
 }
 
+export interface AppBusinessType {
+  id: string;
+  label: string;
+  description: string;
+  modules: string[];
+}
+
 /** Full module states for the Settings Features panel (any signed-in role may
  *  read; the PATCH below is the admin-only half). */
 export async function fetchAppModules(): Promise<AppModulesView> {
   const res = await authFetch(`${BASE}/api/modules`);
   if (!res.ok) throw new Error(`Failed to fetch modules: ${res.status}`);
+  return res.json();
+}
+
+/** Read the code-resident business preset catalog. */
+export async function fetchBusinessTypes(): Promise<AppBusinessType[]> {
+  const res = await authFetch(`${BASE}/api/business-types`);
+  if (!res.ok) throw new Error(`Failed to fetch business types: ${res.status}`);
+  const body = (await res.json()) as { businessTypes?: AppBusinessType[] };
+  if (!Array.isArray(body.businessTypes)) {
+    throw new Error("Invalid business type catalog response");
+  }
+  return body.businessTypes;
+}
+
+/** Apply a business preset. The server returns the authoritative full module view. */
+export async function applyBusinessType(type: string): Promise<AppModulesView> {
+  const res = await authFetch(`${BASE}/api/admin/business-type`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ type }),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { message?: string };
+    throw new Error(body.message || `Failed to apply business type: ${res.status}`);
+  }
   return res.json();
 }
 
