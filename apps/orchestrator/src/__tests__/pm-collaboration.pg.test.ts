@@ -2865,15 +2865,15 @@ describe.skipIf(!RUN)("PM collaboration — comments, mentions, reactions, watch
 
     // Defends: the start date being the only thing left under `updated`, with
     // ISO strings for old and new.
-    it("a start-date change is `updated` / `startDate` with ISO old and new", async () => {
+    it("a start-date change is `start_date_changed` / `startDate` with ISO old and new", async () => {
       const w = await fresh();
       const first = new Date("2026-05-01T00:00:00.000Z");
       const second = new Date("2026-05-09T00:00:00.000Z");
       await pm.updateWorkItem(prisma, ben.id, w.id, { startDate: first });
       await pm.updateWorkItem(prisma, ben.id, w.id, { startDate: second });
       expect(await changes(w.id)).toEqual([
-        { verb: "updated", actorId: ben.id, field: "startDate", oldValue: null, newValue: first.toISOString() },
-        { verb: "updated", actorId: ben.id, field: "startDate", oldValue: first.toISOString(), newValue: second.toISOString() },
+        { verb: "start_date_changed", actorId: ben.id, field: "startDate", oldValue: null, newValue: first.toISOString() },
+        { verb: "start_date_changed", actorId: ben.id, field: "startDate", oldValue: first.toISOString(), newValue: second.toISOString() },
       ]);
     });
 
@@ -2898,7 +2898,7 @@ describe.skipIf(!RUN)("PM collaboration — comments, mentions, reactions, watch
           "priority_changed/priority",
           "description_changed/description",
           "label_added/labels",
-          "updated/startDate",
+          "start_date_changed/startDate",
         ]),
       );
       expect(rows.some((r) => r.verb === "updated" && (r.field === "fields" || r.field === "priority"))).toBe(false);
