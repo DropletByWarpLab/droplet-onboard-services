@@ -61,15 +61,16 @@ export interface DeskStateSeed {
   color: string;
   sortOrder: number;
   isDefault: boolean;
+  onCustomerReply: "NONE" | "REOPEN" | "FOLLOW_UP";
 }
 
 export const DESK_STATES: ReadonlyArray<DeskStateSeed> = [
-  { name: "New", group: "unstarted", slaClock: "RUNNING", color: "#6366f1", sortOrder: 0, isDefault: true },
-  { name: "Open", group: "started", slaClock: "RUNNING", color: "#f59e0b", sortOrder: 1, isDefault: false },
-  { name: "Pending", group: "started", slaClock: "PAUSED", color: "#0ea5e9", sortOrder: 2, isDefault: false },
-  { name: "On hold", group: "started", slaClock: "PAUSED", color: "#94a3b8", sortOrder: 3, isDefault: false },
-  { name: "Solved", group: "completed", slaClock: "STOPPED", color: "#22c55e", sortOrder: 4, isDefault: false },
-  { name: "Closed", group: "completed", slaClock: "STOPPED", color: "#64748b", sortOrder: 5, isDefault: false },
+  { name: "New", group: "unstarted", slaClock: "RUNNING", color: "#6366f1", sortOrder: 0, isDefault: true, onCustomerReply: "NONE" },
+  { name: "Open", group: "started", slaClock: "RUNNING", color: "#f59e0b", sortOrder: 1, isDefault: false, onCustomerReply: "NONE" },
+  { name: "Pending", group: "started", slaClock: "PAUSED", color: "#0ea5e9", sortOrder: 2, isDefault: false, onCustomerReply: "REOPEN" },
+  { name: "On hold", group: "started", slaClock: "PAUSED", color: "#94a3b8", sortOrder: 3, isDefault: false, onCustomerReply: "NONE" },
+  { name: "Solved", group: "completed", slaClock: "STOPPED", color: "#22c55e", sortOrder: 4, isDefault: false, onCustomerReply: "REOPEN" },
+  { name: "Closed", group: "completed", slaClock: "STOPPED", color: "#64748b", sortOrder: 5, isDefault: false, onCustomerReply: "FOLLOW_UP" },
 ];
 
 /** The four labels a desk is seeded with. They double as the ticket TYPE: a
@@ -261,6 +262,8 @@ export type ApiConversationEntry =
       /** Null for SYSTEM / AUTOMATION. For a CONTACT it is the requester. */
       author: ApiPerson | null;
       html: string;
+      deliveryStatus: "NONE" | "PENDING" | "SENT" | "FAILED";
+      deliveryFailure: "OUTBOUND_BLOCKED" | "EMAIL_UNAVAILABLE" | "NO_RECIPIENT" | "SEND_FAILED" | null;
       createdAt: string;
     }
   | {

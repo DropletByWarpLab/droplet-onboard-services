@@ -13,7 +13,7 @@ const DEPARTMENT_NONE = "none";
 
 import type { JSX } from "react";
 
-export type ProjectView = "board" | "list" | "calendar" | "timeline" | "cycles" | "modules";
+export type ProjectView = "board" | "list" | "calendar" | "timeline" | "cycles" | "modules" | "time";
 export type SavedView = "all" | "mine" | "active" | "overdue" | "noassignee";
 
 export function ViewSwitcher({
@@ -30,6 +30,7 @@ export function ViewSwitcher({
     ["timeline", "Timeline", "gantt"],
     ["cycles", "Cycles", "target"],
     ["modules", "Modules", "layers"],
+    ["time", "Time", "clock"],
   ];
   return (
     <div className="pm-pills" role="tablist" aria-label="View">

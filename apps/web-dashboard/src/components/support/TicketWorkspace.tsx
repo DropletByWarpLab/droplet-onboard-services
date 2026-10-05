@@ -217,6 +217,9 @@ export function TicketWorkspace({
             loading={convo.isLoading}
             error={!!convo.error}
             onRetry={() => void convo.mutate()}
+            onRetryDelivery={(commentId) => {
+              void supportActions().retryReply(ticket.id, commentId).then(() => convo.mutate());
+            }}
           />
           {writable && <Composer ticket={ticket} desk={desk} onSent={() => void refresh()} />}
         </div>

@@ -78,10 +78,13 @@ import {
   NewItemModal,
   NewProjectModal,
 } from "@/components/projects/modals";
+import { TimeAccessProvider } from "@/components/projects/time/access";
+import { TimerChip } from "@/components/projects/time/TimerChip";
+import { TimeView } from "@/components/projects/time/TimeView";
 
 // ── URL ↔ page vocabulary ───────────────────────────────────────────────────
 
-const PROJECT_TABS: readonly ProjectView[] = ["board", "list", "calendar", "timeline", "cycles", "modules"];
+const PROJECT_TABS: readonly ProjectView[] = ["board", "list", "calendar", "timeline", "cycles", "modules", "time"];
 
 /** The tab a `view=` names; anything else is the board. */
 function tabOf(view: string | null): ProjectView {
@@ -140,12 +143,22 @@ export default function ProjectsPage(): JSX.Element {
   // why its header renamed itself when a module it does not own flipped. The
   // CRM lives at /customers now.
   //
-  // WARP-3522 — `useSearchParams` must be read under a Suspense boundary
-  // (Next app router), so the workspace lives inside one.
+  // WARP-3526 — `?view=time` is read with `useSearchParams`, which Next requires
+  // under a Suspense boundary; the time surface also needs to know who is asking.
   return (
     <Suspense fallback={<ProjectsFallback />}>
-      <ProjectsWorkspace />
+      <ProjectsWithTimeAccess />
     </Suspense>
+  );
+}
+
+/** The session, handed to the time surface (see components/projects/time/access.tsx). */
+function ProjectsWithTimeAccess(): JSX.Element {
+  const { user } = useAuth();
+  return (
+    <TimeAccessProvider user={user}>
+      <ProjectsWorkspace />
+    </TimeAccessProvider>
   );
 }
 
@@ -193,10 +206,12 @@ function ProjectsWorkspace(): JSX.Element {
     !url.p && url.v && !isPmBuiltinViewId(url.v)
       ? savedViews?.find((v) => v.id === url.v && v.projectId === null)
       : undefined;
-  type Mode = "index" | "views" | "workspace" | "project" | "my-work";
+  type Mode = "index" | "views" | "workspace" | "project" | "my-work" | "time";
   const mode: Mode = url.p
     ? "project"
-    : url.view === "my-work"
+    : url.view === "time"
+      ? "time"
+      : url.view === "my-work"
       ? "my-work"
       : url.view === "views"
         ? "views"
@@ -255,7 +270,7 @@ function ProjectsWorkspace(): JSX.Element {
     for (const v of scopedViews) named[v.id] = v.filter;
     return Object.fromEntries(Object.entries(named).slice(0, 32));
   }, [scopedViews]);
-  const queryEnabled = !viewPending && ((mode === "project" && !!project) || mode === "workspace");
+  const queryEnabled = !viewPending && ((mode === "project" && !!project && tab !== "time") || mode === "workspace");
   const query = useWorkItemQuery({
     enabled: queryEnabled,
     projectId: mode === "project" ? (project?.id ?? null) : null,
@@ -347,6 +362,7 @@ function ProjectsWorkspace(): JSX.Element {
   const openWorkspace = () => go({ p: null, view: "workspace", v: null, f: null, item: null }, "push");
   const openViewsIndex = () => go({ p: null, view: "views", v: null, f: null, item: null }, "push");
   const openMyWork = () => go({ p: null, view: "my-work", v: null, f: null, item: null }, "push");
+  const openTime = () => go({ p: null, view: "time", v: null, f: null, item: null }, "push");
   const switchTab = (next: ProjectView) => go({ view: next === "board" ? null : next }, "push");
   const pickView = (id: string) => {
     setNotice(null);
@@ -502,12 +518,14 @@ function ProjectsWorkspace(): JSX.Element {
         : null;
 
   const headerTitle =
-    mode === "project" ? (project?.name ?? "Projects") : mode === "workspace" ? "All projects" : mode === "views" ? "Views" : mode === "my-work" ? "My work" : "Projects";
+    mode === "project" ? (project?.name ?? "Projects") : mode === "workspace" ? "All projects" : mode === "views" ? "Views" : mode === "my-work" ? "My work" : mode === "time" ? "Time" : "Projects";
   const headerSub =
     mode === "index"
       ? `${summary?.activeProjects ?? projects?.filter((p) => !p.archived).length ?? 0} projects · ${summary?.itemsOpen ?? 0} items open`
       : mode === "my-work"
         ? "Your open work across every project"
+        : mode === "time"
+          ? "Timesheet and report"
         : mode === "project"
         ? project
           ? `${project.openCount} open · ${project.doneCount} done`
@@ -524,6 +542,9 @@ function ProjectsWorkspace(): JSX.Element {
   const actions =
     mode === "index" ? (
       <>
+        <button className="btn" type="button" onClick={openTime}>
+          <PmIcon name="clock" size={14} /> Time
+        </button>
         {!readOnly && (
           <button className="btn primary" type="button" onClick={() => setModal("newproject")}>
             <FolderKanban size={14} /> New project
@@ -670,6 +691,7 @@ function ProjectsWorkspace(): JSX.Element {
             onNewItem={() => setModal("newitem")}
           />
         )}
+        {tab === "time" && mode === "project" && project && <TimeView projects={projects} projectId={project.id} />}
         {tab === "cycles" && mode === "project" && project && (
           <CyclesView project={project} states={states ?? []} readOnly={readOnly} onOpenItem={(i) => openItem(i.key)} onChanged={refreshAll} />
         )}
@@ -682,7 +704,7 @@ function ProjectsWorkspace(): JSX.Element {
 
   return (
     <PeopleContext.Provider value={person}>
-      <ShellPage icon={<FolderKanban size={15} />} label="Projects" title={headerTitle} sub={headerSub} actions={actions}>
+      <ShellPage icon={<FolderKanban size={15} />} label="Projects" title={headerTitle} sub={headerSub} actions={<><TimerChip />{actions}</>}>
         <div className="pm-scope">
           <div className="pm-page">
             {mode !== "index" && (
@@ -791,6 +813,7 @@ function ProjectsWorkspace(): JSX.Element {
             )}
             {(mode === "workspace" || (mode === "project" && !projectMissing && (project || (!projErr && projLoading)))) && listing}
             {mode === "my-work" && <MyWorkView />}
+            {mode === "time" && <TimeView projects={projects} projectId={null} />}
           </div>
         </div>
       </ShellPage>
