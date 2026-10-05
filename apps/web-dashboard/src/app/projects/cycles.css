@@ -1,0 +1,80 @@
+/* Cycles (sprints) and the list / detail layout cycles and modules share —
+ * WARP-3521. Scoped under `.pm-scope`; binds to the aliases projects.css maps
+ * onto the dashboard tokens. No hex literals, no new tokens (brief §2). */
+
+/* ── list ────────────────────────────────────────────────────────────────── */
+.pm-scope .pm-cycle-section { margin-bottom: 22px; }
+.pm-scope .pm-cycle-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 14px;
+}
+.pm-scope .pm-cycle-head { justify-content: space-between; gap: 10px; }
+.pm-scope .pm-cycle-name {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 14.5px; font-weight: 600; color: var(--text);
+}
+.pm-scope .pm-cycle-meta {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  font-size: 12px; color: var(--text-2);
+}
+.pm-scope .pm-cycle-figures {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+  font-size: 12px; color: var(--text-2); font-variant-numeric: tabular-nums;
+}
+.pm-scope .pm-cycle-hint { margin: 0; font-size: 12px; color: var(--text-2); }
+
+/* ── detail ──────────────────────────────────────────────────────────────── */
+.pm-scope .pm-cycle-detail { display: flex; flex-direction: column; gap: 16px; }
+.pm-scope .pm-cycle-detail-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.pm-scope .pm-cycle-title {
+  margin: 0; font-size: 22px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.25; color: var(--text);
+}
+.pm-scope .pm-cycle-desc { margin: 8px 0 0; max-width: 70ch; font-size: 13.5px; line-height: 1.55; color: var(--text-2); white-space: pre-wrap; }
+.pm-scope .pm-cycle-actions { gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.pm-scope .pm-cycle-progress { display: flex; flex-direction: column; gap: 6px; max-width: 520px; }
+.pm-scope .pm-cycle-panel { padding: 14px 16px; }
+
+/* ── backlog planning ────────────────────────────────────────────────────── */
+.pm-scope .pm-dropzone {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 5%, var(--bg-canvas));
+}
+.pm-scope .pm-backlog-row {
+  display: flex; align-items: center; gap: 10px; padding: 8px 2px; min-height: 44px;
+  border-bottom: 1px solid var(--border);
+}
+.pm-scope .pm-backlog-row[draggable="true"] { cursor: grab; }
+.pm-scope .pm-backlog-key { flex: none; width: 76px; font-size: 11.5px; color: var(--text-2); }
+.pm-scope .pm-backlog-name {
+  flex: 1; min-width: 0; text-align: left; background: transparent; border: none; padding: 4px 2px;
+  font-family: inherit; font-size: 13.5px; font-weight: 500; color: var(--text); cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-radius: 6px;
+}
+.pm-scope .pm-backlog-name:hover { color: var(--accent); }
+.pm-scope .pm-backlog-name:focus-visible { outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent); }
+
+/* ── burndown ────────────────────────────────────────────────────────────── */
+.pm-scope .pm-burndown { margin: 0; display: flex; flex-direction: column; gap: 10px; }
+.pm-scope .pm-burndown-summary { margin: 0; font-size: 13.5px; font-weight: 500; color: var(--text); font-variant-numeric: tabular-nums; }
+.pm-scope .pm-burndown-plot { width: 100%; height: 220px; min-height: 220px; }
+.pm-scope .pm-burndown-legend { display: flex; gap: 16px; flex-wrap: wrap; margin: 0; padding: 0; list-style: none; font-size: 12px; color: var(--text-2); }
+.pm-scope .pm-burndown-legend li { display: inline-flex; align-items: center; gap: 6px; }
+.pm-scope .pm-burndown-legend .swatch { display: inline-block; width: 20px; height: 0; border-top: 2px solid var(--text-2); }
+.pm-scope .pm-burndown-legend .swatch.remaining { border-top-color: var(--accent); border-top-width: 3px; }
+.pm-scope .pm-burndown-legend .swatch.scope { border-top-color: var(--text-2); }
+.pm-scope .pm-burndown-legend .swatch.ideal { border-top-style: dashed; border-top-color: var(--text-2); }
+.pm-scope .pm-burndown-tip { padding: 8px 10px; font-size: 12px; color: var(--text-2); line-height: 1.45; }
+
+@media (max-width: 720px) {
+  .pm-scope .pm-cycle-detail-head { flex-direction: column; }
+  .pm-scope .pm-cycle-actions { justify-content: flex-start; }
+  .pm-scope .pm-cycle-grid { grid-template-columns: 1fr; }
+  .pm-scope .pm-backlog-row { flex-wrap: wrap; }
+  .pm-scope .pm-backlog-key { width: auto; }
+  .pm-scope .pm-burndown-plot { height: 200px; min-height: 200px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pm-scope .pm-dropzone, .pm-scope .pm-backlog-name { transition: none !important; }
+}
