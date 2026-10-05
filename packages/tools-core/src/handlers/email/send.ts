@@ -133,7 +133,7 @@ async function handler(
 const tool: Tool = {
   name: "email_send",
   description:
-    "Send a draft only on an email request, including replies; an address alone is insufficient. Otherwise use team chat. Requires dashboard confirmation; off_lan_blocked if outbound_email is disabled.",
+    "Only when the user asks for email; replying to an email thread counts as asking for email. An address alone is insufficient; team chat is the default. Send a draft with dashboard confirmation; off_lan_blocked if outbound_email is disabled.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

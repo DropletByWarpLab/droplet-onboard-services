@@ -32,7 +32,7 @@ async function handler(_args: Record<string, unknown>, ctx: ToolContext): Promis
 
 const tool: Tool = {
   name: "email_accounts",
-  description: "List readable mailbox IDs, addresses and import status. Use before email_search/read. Outlook imports are read-only (canSend=false); drafts stay local.",
+  description: "List readable mailbox IDs and import status for email_search/read. Outlook: read-only (canSend=false), local drafts.",
   inputSchema: { type: "object", properties: {}, additionalProperties: false },
   requiresWrite: false,
   requiresConfirmation: false,
