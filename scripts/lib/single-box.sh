@@ -1414,13 +1414,13 @@ EOF
   case "$docs_engine" in
     onlyoffice)
       upsert_env DOCS_ENGINE        onlyoffice
-      upsert_env DOCS_ENGINE_IMAGE  "onlyoffice/documentserver:8.2"
+      upsert_env DOCS_ENGINE_IMAGE  "onlyoffice/documentserver:8.2@sha256:fb1c76177e578918f0d7ad51eda5006d728b9f2f071f93d18054c1f91edec78b"
       upsert_env DOCS_INTERNAL_URL  http://docserver
       log_info "Document engine: onlyoffice (OEM-licensed SKU posture — AGPLv3 CE otherwise)"
       ;;
     *)
       upsert_env DOCS_ENGINE        collabora
-      upsert_env DOCS_ENGINE_IMAGE  "collabora/code:26.04.2.4.1"
+      upsert_env DOCS_ENGINE_IMAGE  "collabora/code:26.04.2.4.1@sha256:1f864ce3f0c49e867787b6dd303bd6ba989542d3023f6809df558eafd04c1b97"
       upsert_env DOCS_INTERNAL_URL  "http://docserver:9980/docs"
       log_info "Document engine: collabora (Collabora CODE — LibreOffice, no licensing fee)"
       ;;
