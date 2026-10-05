@@ -350,6 +350,13 @@ jobs:
               - "**/Dockerfile*"
               - "Dockerfile*"
               - ".hadolint.yaml"
+              # WARP-3670: the digest-pin gate runs in this leg, so a change to
+              # the gate or its self-test must run the leg. Adds one ~1 min leg
+              # to the rare PR that edits those two files, nothing else.
+              - "scripts/check-dockerfile-base-pins.sh"
+              - "tests/check-dockerfile-base-pins.test.sh"
+              - "scripts/check-dockerfile-hash-locks.sh"
+              - "tests/check-dockerfile-hash-locks.test.sh"
             # WARP-2455: the pre-PR gate's own sources. ship-check.sh is
             # mandated by the preflight skill but was executed by NO
             # workflow — all eight `ship-check` mentions under .github/ were
@@ -1258,6 +1265,31 @@ jobs:
           mapfile -t files < <(git ls-files '*Dockerfile*')
           echo "Linting ${#files[@]} Dockerfiles"
           /tmp/hadolint --config .hadolint.yaml --failure-threshold warning "${files[@]}"
+
+      # WARP-3670: why this step exists -- a floating base tag (python:3.12-slim,
+      # node:20-bookworm-slim) lets two builds of one commit ship different base
+      # layers, and the cosign signature covers the resulting image digest, not
+      # how reproducible its contents were. Escape class closed: an unpinned
+      # `FROM` or `COPY --from=<image>` reaching a signed OTA image. A step in
+      # the existing leg, not a new job: same filter, no added minutes.
+      - name: Every Dockerfile image is pinned by digest
+        run: |
+          set -eu
+          bash tests/check-dockerfile-base-pins.test.sh
+          bash scripts/check-dockerfile-base-pins.sh
+
+      # WARP-3670: why this step exists -- an unhashed `pip install -r
+      # requirements.txt` re-resolves on every build, so two builds of one commit
+      # can ship different transitive packages into a signed OTA image. Escape
+      # class closed: a new service, or an edit to an install line, going back to
+      # an unhashed install. Every Python image installs a uv-compiled hash lock
+      # with `--require-hashes` (docs/SECURITY.md); this fails on a regression.
+      # A step in the existing leg, not a new job: same filter, no added minutes.
+      - name: Every Python image installs a hash-locked requirements file
+        run: |
+          set -eu
+          bash tests/check-dockerfile-hash-locks.test.sh
+          bash scripts/check-dockerfile-hash-locks.sh
   # WARP-2455: the pre-PR gate's own gate. scripts/test/ship-check.sh is
   # mandated by the preflight skill, but until this leg NO workflow executed
   # it — all eight `ship-check` mentions under .github/ were comments of the

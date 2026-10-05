@@ -183,6 +183,64 @@ security updates are repo settings, enabled one-time by an admin:
     gh api -X PUT repos/DropletByWarpLab/droplet-onboard-services/vulnerability-alerts
     gh api -X PUT repos/DropletByWarpLab/droplet-onboard-services/automated-security-fixes
 
+The security-updates setting is the repository owner's to change; the
+runbook is in shared_brain pull request 37 (not repeated here). The
+remediation deadline by severity is policy, drafted in shared_brain pull
+request 34; this file will link to the adopted text rather than restate it.
+
+### Base-image digest pins and the Python hash-lock runbook (WARP-3670)
+
+Every Dockerfile `FROM` (and the one `COPY --from=<image>`) is pinned
+`tag@sha256:<digest>`. `scripts/check-dockerfile-base-pins.sh` enforces it in
+the `hadolint` leg of `ci.yml` (self-test: `tests/check-dockerfile-base-pins.test.sh`),
+and the `docker` ecosystem in `.github/dependabot.yml` moves the pins in one
+grouped pull request a month. The digests are the multi-architecture index
+digests, so one pin serves amd64 and arm64.
+
+Every Python service image installs a hash-locked requirements file with
+`pip install --require-hashes --no-deps -r <lock>` (inference-manager does the
+same through `uv pip install`). `scripts/check-dockerfile-hash-locks.sh` fails
+the `hadolint` leg of `ci.yml` when a Dockerfile installs from a requirements
+file without `--require-hashes` (self-test:
+`tests/check-dockerfile-hash-locks.test.sh`; the exemption list in the script is
+empty). The layout is `inference-manager`'s: `requirements.txt` keeps the
+human-written specifiers and `requirements.lock` is the resolver output that
+the image installs. ops-console and voice-io install `requirements-dev.txt`
+(it begins with `-r requirements.txt`), so they lock that file as
+`requirements-dev.lock`; voice-io also locks its one `--no-deps` package in
+`requirements-openwakeword.txt` / `.lock`.
+
+A resolver is needed to produce hashes, so a lock is refreshed by a person on
+the test box (a throwaway `python:3.12-slim` container), never hand-written
+and never on a laptop. Per service, in `services/<name>/`, with the Python
+version of that service's Dockerfile base image:
+
+    pip install uv==0.12.23
+    uv pip compile --universal --python-version 3.12 --generate-hashes \
+        -o requirements.lock requirements.txt
+
+`--universal` makes one lock that covers every platform (the appliance is
+x86_64; the lock also carries the arm64 and other hashes), so there is no
+per-architecture file. A change to a specifier in `requirements.txt` needs the
+lock recompiled in the same pull request, or the image keeps installing the old
+set. Dependabot's pip ecosystem edits `requirements.txt` only; recompile the
+lock on its pull request before merging. Two things to know:
+
+- **ai-gateway**: `requirements.txt` carries
+  `torch --index-url https://download.pytorch.org/whl/cpu`. pip ignores an
+  option written on a requirement line, so today's image installs torch from
+  PyPI (the CUDA-enabled build, with its nvidia and triton packages), and uv
+  rejects the line. The lock therefore keeps exactly what the image installs
+  today and is compiled from the same file with that one line reduced to
+  `torch`: `sed 's/^torch --index-url .*/torch/' requirements.txt | uv pip compile --universal --python-version 3.12 --generate-hashes -o requirements.lock -`.
+  Moving ai-gateway to the CPU-only torch build is a separate decision (image
+  size, any GPU use of the gateway); it needs `--index-url`/`--extra-index-url`
+  at compile and install time and a check that the CPU wheels cover the
+  appliance platform.
+- **device-identity-svc** builds `tpm2-pytss` from source (it needs the apt
+  packages the Dockerfile installs), so its lock could only be resolved, not
+  trial-installed, outside the image; CI's image build is the install test.
+
 ## osv nightly
 
 Red-on-findings by design and NOT PR-blocking. The initial baseline

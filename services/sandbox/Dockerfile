@@ -24,9 +24,9 @@
 
 # Node from the official image, copied in rather than apt-installed: Debian
 # bookworm ships Node 18, and the toolchain ceiling is 20 (WARP-2069).
-FROM node:20-bookworm-slim AS node
+FROM node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 AS node
 
-FROM python:3.12-slim
+FROM python:3.12-slim@sha256:02108f5d322dd89f1c9e552442c25acb0543dfdbc455693a5599624f20d9155d
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -44,8 +44,8 @@ RUN groupadd --gid 1000 sandbox && \
     useradd --uid 1000 --gid sandbox --shell /usr/sbin/nologin --create-home sandbox
 
 WORKDIR /app
-COPY services/sandbox/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY services/sandbox/requirements.lock .
+RUN pip install --no-cache-dir --require-hashes --no-deps -r requirements.lock
 COPY services/sandbox/ .
 COPY extensions/templates/ /app/templates/
 
