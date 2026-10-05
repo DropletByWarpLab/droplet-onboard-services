@@ -47,9 +47,9 @@ export function PropertiesPanel({
   const view = edit.view;
   const person = usePerson();
   const { states } = useProjectStates(view.projectId);
-  const { users } = usePeople();
+  const { people: roster } = usePeople();
   const { departments } = useDepartments();
-  const people = useMemo(() => toPersonOptions(users), [users]);
+  const people = useMemo(() => toPersonOptions(roster), [roster]);
   const deptChoices = useMemo(() => departmentOptions([view], departments), [view, departments]);
   const patch = (key: string, label: string, optimistic: Partial<PmWorkItem>, body: Record<string, unknown>) =>
     edit.save(key, label, optimistic, () => editActions().patchItem(view.id, body));

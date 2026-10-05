@@ -231,10 +231,10 @@ describe.skipIf(!RUN)("PM work-item editing — the database's own guarantees (W
       expect(archived.isArchived).toBe(true);
       expect(archived.archivedAt).not.toBeNull();
 
-      expect((await pm.listWorkItems(prisma, projectId)).map((i) => i.id)).toEqual([keep.id]);
-      expect((await pm.listWorkItems(prisma, projectId, { archived: "only" })).map((i) => i.id)).toEqual([gone.id]);
+      expect((await pm.listWorkItems(prisma, projectId)).items.map((i) => i.id)).toEqual([keep.id]);
+      expect((await pm.listWorkItems(prisma, projectId, { archived: "only" })).items.map((i) => i.id)).toEqual([gone.id]);
       // Archived work is out of the counts and the search too.
-      expect((await pm.searchWorkItems(prisma, { q: "warp3520a-gone" })).map((i) => i.id)).toEqual([]);
+      expect(await pm.searchWorkItems(prisma, { q: "warp3520a-gone" })).toMatchObject({ items: [], total: 0, nextCursor: null });
       // …but still readable by id: the Archived list and an old link need it.
       expect((await pm.getWorkItem(prisma, gone.id)).isArchived).toBe(true);
     });
@@ -245,7 +245,32 @@ describe.skipIf(!RUN)("PM work-item editing — the database's own guarantees (W
       await pm.archiveWorkItem(prisma, null, a.id);
       await new Promise((r) => setTimeout(r, 15));
       await pm.archiveWorkItem(prisma, null, b.id);
-      expect((await pm.listWorkItems(prisma, projectId, { archived: "only" })).map((i) => i.id)).toEqual([b.id, a.id]);
+      expect((await pm.listWorkItems(prisma, projectId, { archived: "only" })).items.map((i) => i.id)).toEqual([b.id, a.id]);
+    });
+
+    it("pages tied archive instants and legacy missing instants without losing or repeating an item", async () => {
+      const recent = [await make("archive-a"), await make("archive-b")];
+      const legacy = [await make("legacy-a"), await make("legacy-b")];
+      await prisma.pmWorkItem.updateMany({
+        where: { id: { in: recent.map((i) => i.id) } },
+        data: { isArchived: true, archivedAt: new Date("2026-10-04T12:00:00.000Z") },
+      });
+      await prisma.pmWorkItem.updateMany({
+        where: { id: { in: legacy.map((i) => i.id) } },
+        data: { isArchived: true, archivedAt: null },
+      });
+      const expected = [...recent.map((i) => i.id).sort(), ...legacy.map((i) => i.id).sort()];
+      const seen: string[] = [];
+      let cursor: string | undefined;
+      for (let n = 0; n < expected.length; n++) {
+        const page = await pm.listWorkItems(prisma, projectId, { archived: "only", limit: 1, cursor });
+        expect(page.total).toBe(4);
+        expect(page.items).toHaveLength(1);
+        seen.push(page.items[0].id);
+        expect(page.nextCursor).toEqual(n === expected.length - 1 ? null : expect.any(String));
+        cursor = page.nextCursor ?? undefined;
+      }
+      expect(seen).toEqual(expected);
     });
 
     it("restores, clearing archivedAt", async () => {
@@ -254,7 +279,7 @@ describe.skipIf(!RUN)("PM work-item editing — the database's own guarantees (W
       const restored = await pm.restoreWorkItem(prisma, null, item.id);
       expect(restored.isArchived).toBe(false);
       expect(restored.archivedAt).toBeNull();
-      expect((await pm.listWorkItems(prisma, projectId)).map((i) => i.id)).toEqual([item.id]);
+      expect((await pm.listWorkItems(prisma, projectId)).items.map((i) => i.id)).toEqual([item.id]);
     });
 
     it("answers 409-class codes for a no-op and 404 for a missing item", async () => {
@@ -407,19 +432,20 @@ describe.skipIf(!RUN)("PM work-item editing — the database's own guarantees (W
       expect(key).toBe(`${identifier}-1`);
       for (const q of [key, key.toLowerCase()]) {
         const hits = await pm.searchWorkItems(prisma, { q, workspaceSlug: WS });
-        expect(hits.map((i) => i.id)).toEqual([item.id]);
+        expect(hits).toMatchObject({ total: 1, nextCursor: null });
+        expect(hits.items.map((i) => i.id)).toEqual([item.id]);
       }
     });
 
     it("finds nothing for a key that does not exist, and ignores an over-long number", async () => {
       await make("only");
-      expect(await pm.searchWorkItems(prisma, { q: `${identifier}-999`, workspaceSlug: WS })).toEqual([]);
-      expect(await pm.searchWorkItems(prisma, { q: `${identifier}-99999999999`, workspaceSlug: WS })).toEqual([]);
+      expect(await pm.searchWorkItems(prisma, { q: `${identifier}-999`, workspaceSlug: WS })).toMatchObject({ items: [], total: 0, nextCursor: null });
+      expect(await pm.searchWorkItems(prisma, { q: `${identifier}-99999999999`, workspaceSlug: WS })).toMatchObject({ items: [], total: 0, nextCursor: null });
     });
 
     it("keeps the name search working beside it", async () => {
       const item = await make("findable-by-name");
-      expect((await pm.searchWorkItems(prisma, { q: "findable-by", workspaceSlug: WS })).map((i) => i.id)).toEqual([
+      expect((await pm.searchWorkItems(prisma, { q: "findable-by", workspaceSlug: WS })).items.map((i) => i.id)).toEqual([
         item.id,
       ]);
     });
@@ -438,8 +464,13 @@ describe.skipIf(!RUN)("PM work-item editing — the database's own guarantees (W
         data: { workItemId: withValue.id, propertyId: property.id, value: { number: 7 } },
       });
 
-      const list = await pm.listWorkItems(prisma, projectId);
-      const byId = new Map(list.map((i) => [i.id, i]));
+      const first = await pm.listWorkItems(prisma, projectId, { limit: 1 });
+      expect(first.total).toBe(2);
+      expect(first.nextCursor).toEqual(expect.any(String));
+      const rest = await pm.listWorkItems(prisma, projectId, { limit: 1, cursor: first.nextCursor! });
+      expect(rest).toMatchObject({ total: 2, nextCursor: null });
+      const byId = new Map([...first.items, ...rest.items].map((i) => [i.id, i]));
+      expect(byId.size).toBe(2);
       expect(byId.get(withValue.id)?.properties).toEqual({ [property.id]: { number: 7 } });
       expect(byId.get(without.id)?.properties).toEqual({});
       expect((await pm.getWorkItem(prisma, withValue.id)).properties).toEqual({ [property.id]: { number: 7 } });

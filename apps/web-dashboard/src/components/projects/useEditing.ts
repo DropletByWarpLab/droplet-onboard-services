@@ -11,7 +11,7 @@
 import useSWR, { useSWRConfig } from "swr";
 import { useCallback } from "react";
 import { authFetch } from "@/lib/auth";
-import { PmRequestError } from "./usePm";
+import { PmRequestError, useProjectItems } from "./usePm";
 import type {
   PmProject,
   PmProperty,
@@ -148,11 +148,7 @@ export function useWorkItemLookup(itemId: string | null) {
 /** The project's archived items (the "Archived" list). `enabled` gates the fetch
  *  to when the list is actually open. */
 export function useArchivedItems(projectId: string | null, enabled: boolean) {
-  const { data, error, isLoading, mutate } = useSWR(
-    enabled && projectId ? pmKeys.archived(projectId) : null,
-    (u: string) => get<{ work_items: PmWorkItem[] }>(u),
-  );
-  return { items: data?.work_items, error, isLoading, mutate };
+  return useProjectItems(enabled ? projectId : null, { archived: true });
 }
 
 // ── Mutations ───────────────────────────────────────────────────────────────

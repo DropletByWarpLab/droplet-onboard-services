@@ -234,7 +234,9 @@ describe.skipIf(!RUN)("PM custom fields — the database's own guarantees (WARP-
         [many.id]: { optionIds: [optionId(many, "A"), optionId(many, "B")] },
         [who.id]: { userIds: [activeUserId] },
       });
-      expect((await pm.listWorkItems(prisma, projectId))[0].properties).toEqual(result.properties);
+      const page = await pm.listWorkItems(prisma, projectId);
+      expect(page).toMatchObject({ total: 1, nextCursor: null });
+      expect(page.items[0].properties).toEqual(result.properties);
     });
 
     it("writes one activity row per real change, with labels for selects", async () => {

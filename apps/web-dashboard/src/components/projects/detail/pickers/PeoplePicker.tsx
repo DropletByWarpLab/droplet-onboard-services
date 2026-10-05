@@ -10,19 +10,15 @@ export interface PersonOption {
 }
 
 /**
- * The directory as the picker offers it. PM ids (assignees, leads, member field
- * values) are LOCAL `User.id` UUIDs; a directory entry's `id` is the Nextcloud
- * username, which is NOT a PM id — so only entries that carry a `userId` can be
- * picked. One small adapter, so it is trivial to adjust when the PM-scoped people
- * endpoint lands behind `usePeople`.
+ * The PM roster as the picker offers it. Its `id` is the local User.id used by
+ * assignees, leads and member fields; it is already scoped to active accounts.
  */
 export function toPersonOptions(
-  users: ReadonlyArray<{ userId?: string | null; displayName: string }> | undefined,
+  people: ReadonlyArray<{ id: string; displayName: string }> | undefined,
 ): PersonOption[] | undefined {
-  if (!users) return undefined;
-  return users
-    .filter((u): u is { userId: string; displayName: string } => typeof u.userId === "string" && u.userId !== "")
-    .map((u) => ({ id: u.userId, name: u.displayName }))
+  if (!people) return undefined;
+  return people
+    .map((u) => ({ id: u.id, name: u.displayName }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
@@ -32,8 +28,7 @@ export function toPersonOptions(
  *
  * Opens in place — no portal — like the labels picker. Choosing or removing a
  * person calls `onChange` with the whole new set straight away. When the
- * directory is unavailable to the caller (`people` undefined: `/api/auth/users`
- * is owner/admin-only) the current people are still shown and can be removed, and
+ * roster is unavailable (`people` undefined) the current people are still shown and can be removed, and
  * the panel says why nobody can be added.
  */
 export function PeoplePicker({

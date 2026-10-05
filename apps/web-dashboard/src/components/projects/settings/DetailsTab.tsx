@@ -28,8 +28,8 @@ export function DetailsTab({
 }): JSX.Element {
   const { toast } = useToast();
   const person = usePerson();
-  const { users } = usePeople();
-  const people = useMemo(() => toPersonOptions(users), [users]);
+  const { people: roster } = usePeople();
+  const people = useMemo(() => toPersonOptions(roster), [roster]);
   const { departments } = useDepartments();
   // `undefined` when the CRM module is off or the caller cannot read it: the
   // customer field is then simply not offered (an unreadable list is not an error).

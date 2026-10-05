@@ -222,6 +222,82 @@
         ]
       }
     },
+    "/api/pm/people": {
+      "get": {
+        "operationId": "listPeople",
+        "summary": "List active project assignees",
+        "description": "Owner, admin or family only. Lists active human assignees, including guests, ordered by display name and ID. Returns IDs, display names and avatar URLs; service principals and inactive accounts are excluded.",
+        "tags": [
+          "Meta"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "people": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "displayName": {
+                            "type": "string"
+                          },
+                          "avatarUrl": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "displayName",
+                          "avatarUrl"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "people"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": [
+              "pm:read"
+            ]
+          },
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
     "/api/pm/projects": {
       "get": {
         "operationId": "listProjects",
@@ -252,6 +328,9 @@
           },
           {
             "$ref": "#/components/parameters/Department"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
           }
         ],
         "responses": {
@@ -519,7 +598,7 @@
       "delete": {
         "operationId": "deleteProject",
         "summary": "Delete a project",
-        "description": "Deletes the project with all its work items. Owner, admin or member.",
+        "description": "Owner or admin only. Permanently deletes an archived project and its work items after exact confirmation of its identifier. Archive it first using PATCH archived=true. Deletion and its audit record commit together. Service Desk containers cannot be deleted through this route.",
         "tags": [
           "Projects"
         ],
@@ -545,6 +624,9 @@
               }
             }
           },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
@@ -553,6 +635,26 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "description": "project_not_archived: archive the project before deleting it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "identifier_mismatch: the confirmation does not exactly match this project.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "429": {
             "$ref": "#/components/responses/TooManyRequests"
@@ -567,7 +669,28 @@
           {
             "sessionCookie": []
           }
-        ]
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "confirm_identifier": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "description": "The exact current project identifier, including case."
+                  }
+                },
+                "required": [
+                  "confirm_identifier"
+                ]
+              }
+            }
+          }
+        }
       }
     },
     "/api/pm/projects/{id}/states": {
@@ -1226,6 +1349,12 @@
               ]
             },
             "description": "only returns archived items; omitted returns active items. Other nonempty values are a 400."
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          },
+          {
+            "$ref": "#/components/parameters/Cursor"
           }
         ],
         "responses": {
@@ -1241,10 +1370,24 @@
                       "items": {
                         "$ref": "#/components/schemas/WorkItem"
                       }
+                    },
+                    "nextCursor": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "description": "Follow with cursor to read the next page; null means this was the final page."
+                    },
+                    "total": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "description": "Exact size of the filtered list, including rows beyond this page."
                     }
                   },
                   "required": [
-                    "work_items"
+                    "work_items",
+                    "nextCursor",
+                    "total"
                   ],
                   "additionalProperties": false
                 }
@@ -1371,6 +1514,12 @@
           },
           {
             "$ref": "#/components/parameters/Page"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          },
+          {
+            "$ref": "#/components/parameters/Cursor"
           }
         ],
         "responses": {
@@ -1386,10 +1535,24 @@
                       "items": {
                         "$ref": "#/components/schemas/WorkItem"
                       }
+                    },
+                    "nextCursor": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "description": "Follow with cursor to read the next page; null means this was the final page."
+                    },
+                    "total": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "description": "Exact size of the filtered list, including rows beyond this page."
                     }
                   },
                   "required": [
-                    "work_items"
+                    "work_items",
+                    "nextCursor",
+                    "total"
                   ],
                   "additionalProperties": false
                 }
@@ -1450,6 +1613,15 @@
           },
           {
             "$ref": "#/components/parameters/Department"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          },
+          {
+            "$ref": "#/components/parameters/Cursor"
+          },
+          {
+            "$ref": "#/components/parameters/Page"
           }
         ],
         "responses": {
@@ -1465,15 +1637,32 @@
                       "items": {
                         "$ref": "#/components/schemas/WorkItem"
                       }
+                    },
+                    "nextCursor": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "description": "Follow with cursor to read the next page; null means this was the final page."
+                    },
+                    "total": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "description": "Exact size of the filtered list, including rows beyond this page."
                     }
                   },
                   "required": [
-                    "work_items"
+                    "work_items",
+                    "nextCursor",
+                    "total"
                   ],
                   "additionalProperties": false
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -1805,6 +1994,18 @@
               "type": "string"
             },
             "description": "The work item id."
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          },
+          {
+            "$ref": "#/components/parameters/PerPage"
+          },
+          {
+            "$ref": "#/components/parameters/Cursor"
+          },
+          {
+            "$ref": "#/components/parameters/Page"
           }
         ],
         "responses": {
@@ -1820,15 +2021,32 @@
                       "items": {
                         "$ref": "#/components/schemas/Comment"
                       }
+                    },
+                    "nextCursor": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "description": "Follow with cursor to read the next page; null means this was the final page."
+                    },
+                    "total": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "description": "Exact size of the filtered list, including rows beyond this page."
                     }
                   },
                   "required": [
-                    "comments"
+                    "comments",
+                    "nextCursor",
+                    "total"
                   ],
                   "additionalProperties": false
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -1947,6 +2165,18 @@
               "type": "string"
             },
             "description": "The work item id."
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          },
+          {
+            "$ref": "#/components/parameters/PerPage"
+          },
+          {
+            "$ref": "#/components/parameters/Cursor"
+          },
+          {
+            "$ref": "#/components/parameters/Page"
           }
         ],
         "responses": {
@@ -1962,15 +2192,32 @@
                       "items": {
                         "$ref": "#/components/schemas/Activity"
                       }
+                    },
+                    "nextCursor": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "description": "Follow with cursor to read the next page; null means this was the final page."
+                    },
+                    "total": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "description": "Exact size of the filtered list, including rows beyond this page."
                     }
                   },
                   "required": [
-                    "activity"
+                    "activity",
+                    "nextCursor",
+                    "total"
                   ],
                   "additionalProperties": false
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -2693,9 +2940,9 @@
         "schema": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 200
+          "maximum": 500
         },
-        "description": "Page size. Default 100, at most 200."
+        "description": "Legacy alias for limit: default 100, at most 500. limit wins when both are supplied."
       },
       "Page": {
         "name": "page",
@@ -2703,9 +2950,10 @@
         "required": false,
         "schema": {
           "type": "integer",
-          "minimum": 1
+          "minimum": 1,
+          "maximum": 100000
         },
-        "description": "1-based page number."
+        "description": "Legacy 1-based offset page; cannot be combined with cursor."
       },
       "Workspace": {
         "name": "workspace",
@@ -2724,6 +2972,29 @@
           "type": "string"
         },
         "description": "A department or team id, slug or name (a department includes its teams), or `none` for work no department owns. An unknown value is a 404."
+      },
+      "Limit": {
+        "name": "limit",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 500,
+          "default": 100
+        },
+        "description": "Rows per page. Takes precedence over per_page."
+      },
+      "Cursor": {
+        "name": "cursor",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "description": "The opaque nextCursor returned by this same list. Cannot be combined with page. An invalid cursor is a 400."
       }
     },
     "responses": {

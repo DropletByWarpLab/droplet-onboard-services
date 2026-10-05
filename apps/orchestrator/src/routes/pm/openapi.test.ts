@@ -161,10 +161,11 @@ describe("the PM OpenAPI document — structure", () => {
   });
 
   it("declares a JSON request body on every operation whose handler parses one", () => {
-    // POST/PATCH routes in native.ts + relations.ts that take a zod-validated body.
+    // Native/relations routes that require a zod-validated JSON body.
     const withBody = new Set([
       "POST /api/pm/projects",
       "PATCH /api/pm/projects/{id}",
+      "DELETE /api/pm/projects/{id}",
       "POST /api/pm/projects/{id}/states",
       "POST /api/pm/projects/{id}/states/reorder",
       "PATCH /api/pm/states/{id}",

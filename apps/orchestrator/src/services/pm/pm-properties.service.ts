@@ -53,6 +53,7 @@
 
 import { randomUUID } from "node:crypto";
 import { Prisma, type PrismaClient } from "@prisma/client";
+import { nudgeOutbox } from "./pm-outbox.js";
 import { PM_ERRORS, getWorkItem, isServiceDesk, type ApiWorkItem } from "./pm.service.js";
 
 type Db = PrismaClient | Prisma.TransactionClient;
@@ -362,6 +363,7 @@ async function writePropertyActivity(
       newValue: r.newValue,
     })),
   });
+  nudgeOutbox();
 }
 
 // ── Locks ────────────────────────────────────────────────────────────────────

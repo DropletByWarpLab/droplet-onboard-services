@@ -130,6 +130,7 @@ export function BoardView({
   items,
   domain,
   readOnly,
+  partial = false,
   onOpen,
   onTransition,
   onNewItem,
@@ -138,6 +139,9 @@ export function BoardView({
   items: PmWorkItem[];
   domain: Domain;
   readOnly: boolean;
+  /** More of the list is still arriving (WARP-3371): a column's count is a
+   *  floor, not an answer, until the last page lands. */
+  partial?: boolean;
   onOpen: (i: PmWorkItem) => void;
   onTransition: (item: PmWorkItem, stateId: string) => void;
   onNewItem: (stateId: string) => void;
@@ -230,7 +234,10 @@ export function BoardView({
               <div className="pm-sect">
                 <span className="pm-dot" style={{ background: s.color ?? "var(--text-4)" }} />
                 {s.name}
-                <span className="sx">{colItems.length}</span>
+                <span className="sx">
+                  {colItems.length}
+                  {partial ? "+" : ""}
+                </span>
               </div>
               {!readOnly && (
                 <button
@@ -345,11 +352,14 @@ export function ListView({
   states,
   items,
   domain,
+  partial = false,
   onOpen,
 }: {
   states: PmState[];
   items: PmWorkItem[];
   domain: Domain;
+  /** More of the list is still arriving (WARP-3371): a group's count is a floor. */
+  partial?: boolean;
   onOpen: (i: PmWorkItem) => void;
 }): JSX.Element {
   if (domain === "loading") {
@@ -409,7 +419,10 @@ export function ListView({
           >
             <span className="pm-dot" style={{ background: s.color ?? "var(--text-4)" }} />
             <span style={{ fontSize: 12.5, fontWeight: 600 }}>{s.name}</span>
-            <span style={{ fontSize: 12, color: "var(--text-4)" }}>{list.length}</span>
+            <span style={{ fontSize: 12, color: "var(--text-4)" }}>
+              {list.length}
+              {partial ? "+" : ""}
+            </span>
           </div>
           <div style={{ padding: "2px 14px" }}>
             {list.map((it) => (

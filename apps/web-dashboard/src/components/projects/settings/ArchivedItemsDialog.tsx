@@ -35,7 +35,8 @@ export function ArchivedItemsDialog({
 }): JSX.Element {
   const titleId = useId();
   const { toast } = useToast();
-  const { items, error, isLoading, mutate } = useArchivedItems(project.id, true);
+  const { items, error, loadError, hasMore, total, mutate } = useArchivedItems(project.id, true);
+  const partial = items !== undefined && Boolean(hasMore || loadError || (total !== undefined && items.length < total));
   const [busyId, setBusyId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<PmWorkItem | null>(null);
 
@@ -70,12 +71,12 @@ export function ArchivedItemsDialog({
               heading="Couldn't load archived items."
               body="Check the appliance connection and try again."
               cta={
-                <button type="button" className="pm-btn ghost" onClick={() => void mutate()}>
+                <button type="button" className="pm-btn ghost" onClick={() => void mutate().catch(() => undefined)}>
                   Try again
                 </button>
               }
             />
-          ) : isLoading || items === undefined ? (
+          ) : items === undefined ? (
             <div aria-busy="true" aria-label="Loading archived items">
               {Array.from({ length: 3 }).map((_, i) => (
                 <div key={i} className="pm-set-row" style={{ padding: "10px 2px" }}>
@@ -84,7 +85,7 @@ export function ArchivedItemsDialog({
                 </div>
               ))}
             </div>
-          ) : items.length === 0 ? (
+          ) : items.length === 0 && !partial ? (
             <EmptyBlock icon="archive" heading="Nothing is archived." body="Archived items are kept here until you restore or delete them." />
           ) : (
             <ul className="pm-set-list" aria-label="Archived items">
@@ -129,6 +130,19 @@ export function ArchivedItemsDialog({
                 </li>
               ))}
             </ul>
+          )}
+          {partial && items !== undefined && (
+            <div className="pm-row" role="status" style={{ gap: 8, flexWrap: "wrap", marginTop: 12 }}>
+              <span>{total === undefined ? `${items.length} archived items loaded.` : `Showing ${items.length} of ${total} archived items.`}</span>
+              {loadError ? (
+                <>
+                  <span>Some archived items couldn't be loaded.</span>
+                  <button type="button" className="pm-btn ghost sm" onClick={() => void mutate().catch(() => undefined)}>Try again</button>
+                </>
+              ) : hasMore ? <span>Loading more…</span> : (
+                <button type="button" className="pm-btn ghost sm" onClick={() => void mutate().catch(() => undefined)}>Refresh incomplete list</button>
+              )}
+            </div>
           )}
         </div>
 

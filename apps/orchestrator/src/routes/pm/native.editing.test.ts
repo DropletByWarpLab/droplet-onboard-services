@@ -199,11 +199,11 @@ describe("work item create / patch — type, estimate, dates", () => {
     expect(svc.createWorkItem).not.toHaveBeenCalled();
   });
 
-  it("stores a calendar date at 00:00:00Z and still accepts an ISO datetime", async () => {
+  it("stores calendar dates at 00:00:00Z, including an accepted legacy ISO datetime", async () => {
     await patch({ start_date: "2026-10-04", due_date: "2026-10-09T13:45:10.000Z" });
     const fields = svc.updateWorkItem.mock.calls[0][3];
     expect((fields.startDate as Date).toISOString()).toBe("2026-10-04T00:00:00.000Z");
-    expect((fields.dueDate as Date).toISOString()).toBe("2026-10-09T13:45:10.000Z");
+    expect((fields.dueDate as Date).toISOString()).toBe("2026-10-09T00:00:00.000Z");
 
     await create({ name: "x", due_date: "2026-12-31" });
     expect((svc.createWorkItem.mock.calls[0][3].dueDate as Date).toISOString()).toBe("2026-12-31T00:00:00.000Z");

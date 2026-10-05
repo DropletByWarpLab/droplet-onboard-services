@@ -1,0 +1,38 @@
+[Unit]
+Description=Droplet bay drives — shred recovery keys the owner never revealed (WARP-3513)
+Documentation=https://warp-lab.atlassian.net/browse/WARP-3513
+# ADR-070: when a drive is prepared, its LUKS recovery key is escrowed in a
+# root-only file on the ENCRYPTED /data, to be shown to the owner exactly once.
+# A key nobody asked for within 7 days is shredded (the owner can then
+# "Regenerate recovery key"); droplet-storage-pool.sh enforces the same deadline
+# whenever someone asks for the key, and this timer-driven sweep makes sure an
+# unrevealed key does not sit on disk past it just because nobody asked.
+#
+# Until the first drive is prepared there is no escrow directory and nothing to
+# do: the condition skips the run cleanly (a skip, not a failure).
+ConditionPathExists=/data/droplet/secrets/bay-recovery
+
+[Service]
+Type=oneshot
+# Root, like every host-script oneshot here. The op takes no parameters and no
+# device: it only ever shreds escrow files that are past their deadline.
+ExecStart=/usr/local/sbin/droplet-storage-pool.sh recovery_key_expire
+TimeoutStartSec=120
+
+# --- Hardening ---
+# The sweep reads and shreds files under /data/droplet/secrets and needs
+# nothing else: no network, no homes, no kernel tunables, no namespaces.
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+PrivateNetwork=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+NoNewPrivileges=true

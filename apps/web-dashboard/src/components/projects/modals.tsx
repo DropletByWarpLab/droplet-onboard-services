@@ -1,6 +1,6 @@
 "use client";
 
-// Create item / create project / delete-project — canonical Dialog (center).
+// Create item / create project / archive / delete-project — canonical Dialog (center).
 
 import { useId, useState, type JSX } from "react";
 import { Dialog } from "@/components/Dialog";
@@ -91,7 +91,10 @@ export function NewItemModal({
           : undefined,
         state_id: stateId || undefined,
         priority,
-        due_date: dueDate ? new Date(dueDate).toISOString() : undefined,
+        // WARP-3372 — the date input already speaks YYYY-MM-DD. Send it as is: a
+        // `new Date(...)` here read it as UTC midnight and the display read it
+        // back in local time, so west of UTC it landed a day early.
+        due_date: dueDate || undefined,
       });
       toast("Item created", "success");
       onCreated();
@@ -231,6 +234,55 @@ export function NewProjectModal({ onClose, onCreated }: { onClose: () => void; o
   );
 }
 
+/** WARP-3370 — archive is the reversible half of "delete project": the project
+ *  leaves the list, its work items stay, and Archived brings it back. So this is
+ *  a quiet confirm (brief §2.10: "reversible", not the destructive treatment). */
+export function ConfirmArchiveProject({
+  project,
+  onClose,
+  onArchived,
+}: {
+  project: PmProject;
+  onClose: () => void;
+  onArchived: () => void;
+}): JSX.Element {
+  const titleId = useId();
+  const { toast } = useToast();
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await pmActions().archiveProject(project.id);
+      toast("Project archived", "success");
+      onArchived();
+      onClose();
+    } catch (e) {
+      toast(translateError(e, "projects"), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog open onClose={onClose} placement="center" maxWidth="sm" labelledBy={titleId} flush>
+      <div className="pm-scope pm-dialog-body">
+        <h2 id={titleId} style={{ margin: "0 0 16px", fontSize: 18, fontWeight: 600 }}>
+          Archive project
+        </h2>
+        <p style={{ margin: "0 0 4px", fontSize: 14, color: "var(--text)", fontWeight: 500 }}>
+          Archive <span className="pm-mono">{project.identifier}</span>, {project.name}?
+        </p>
+        <p style={{ margin: 0, fontSize: 12.5, color: "var(--text-3)" }}>
+          It leaves your project list and its work items stay put. You can restore it any time from Archived.
+        </p>
+        <Footer onClose={onClose} onSubmit={submit} submitLabel="Archive" busy={busy} />
+      </div>
+    </Dialog>
+  );
+}
+
 export function ConfirmDeleteProject({
   project,
   onClose,
@@ -249,7 +301,7 @@ export function ConfirmDeleteProject({
     if (confirm !== project.identifier || busy) return;
     setBusy(true);
     try {
-      await pmActions().deleteProject(project.id);
+      await pmActions().deleteProject(project.id, confirm);
       toast("Project deleted", "success");
       onDeleted();
       onClose();
@@ -264,7 +316,7 @@ export function ConfirmDeleteProject({
     <Dialog open onClose={onClose} placement="center" maxWidth="sm" labelledBy={titleId} flush>
       <div className="pm-scope pm-dialog-body">
         <h2 id={titleId} style={{ margin: "0 0 16px", fontSize: 18, fontWeight: 600 }}>
-          Delete project
+          Delete project permanently
         </h2>
         <div className="pm-row" style={{ gap: 12, alignItems: "flex-start" }}>
           <span

@@ -126,7 +126,7 @@ function defaults(c: Call): Reply {
     if (url.endsWith("/relations")) return { relations: RELATIONS };
     if (url.endsWith("/comments")) return { comments: [] };
     if (url.endsWith("/activity")) return { activity: [] };
-    if (url.endsWith("/users")) return { users: USERS };
+    if (url === "/api/pm/people") return { people: USERS.filter((u) => u.userId).map((u) => ({ id: u.userId, displayName: u.displayName, avatarUrl: null })) };
     if (url === "/api/departments") return { departments: [] };
     if (url.includes("?parent=")) return { work_items: [] };
     if (url.includes("/api/pm/work-items?q=")) return { work_items: SEARCH };
@@ -378,6 +378,8 @@ describe("built-in properties write what the user chose", () => {
     renderDrawer({ item: { assignees: ["u-ana"] } });
     fireEvent.click(await screen.findByRole("button", { name: "Add assignee" }));
     expect(await screen.findByRole("button", { name: /Bo Chen/ })).toBeInTheDocument();
+    expect(h.calls.some((c) => c.url === "/api/pm/people")).toBe(true);
+    expect(h.calls.some((c) => c.url === "/api/auth/users")).toBe(false);
     expect(screen.queryByText("No Local Row")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: /Bo Chen/ }));
     await waitFor(() => expect(lastWrite()?.body).toEqual({ assignees: ["u-ana", "u-bo"] }));
@@ -386,7 +388,7 @@ describe("built-in properties write what the user chose", () => {
   });
 
   it("assignees: with the directory unavailable the current people can still be removed", async () => {
-    h.handler = (c) => (c.url.endsWith("/users") ? fail(403, "Forbidden") : defaults(c));
+    h.handler = (c) => (c.url === "/api/pm/people" ? fail(403, "Forbidden") : defaults(c));
     renderDrawer({ item: { assignees: ["u-ana"] } });
     fireEvent.click(await screen.findByRole("button", { name: "Add assignee" }));
     expect(await screen.findByText("The people list isn't available.")).toBeInTheDocument();
@@ -423,7 +425,7 @@ describe("parent", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Set parent" }));
     fireEvent.change(screen.getByRole("searchbox", { name: "Search for a parent" }), { target: { value: "INBOX" } });
     fireEvent.click(await screen.findByRole("button", { name: /INBOX-2/ }));
-    await waitFor(() => expect(h.toast).toHaveBeenCalledWith(expect.stringMatching(/parent of its own parent/), "error"));
+    await waitFor(() => expect(h.toast).toHaveBeenCalledWith(expect.stringMatching(/sub-item of one of its own sub-items/), "error"));
     expect(await screen.findByText("No parent")).toBeInTheDocument();
   });
 

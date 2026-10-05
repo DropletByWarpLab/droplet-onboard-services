@@ -677,8 +677,6 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
     // WARP-3520 — the editing surfaces. Each names what happened and the way
     // out, in the owner's words (column, field, option — never state group,
     // property or tagged value).
-    parent_cycle:
-      "That would make this item a parent of its own parent. Pick a different parent.",
     work_item_archived: "That item is already archived.",
     work_item_not_archived: "That item isn't archived.",
     state_default_terminal:
@@ -706,6 +704,20 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "Someone changed this at the same moment, so nothing was applied. Try again.",
     identifier_taken:
       "That project ID is already in use. Pick a different one.",
+    // WARP-3371 — the work-item API now refuses what it used to swallow. Each
+    // says what is wrong in the owner's words (item, column, person — never
+    // cycle, state or assignee) and the one thing to do.
+    parent_cycle:
+      "That would make an item a sub-item of one of its own sub-items. Pick a different parent.",
+    state_required:
+      "A work item has to sit in a column. Pick one and try again.",
+    invalid_assignee:
+      "That person isn't available anymore. Refresh and pick someone else.",
+    // WARP-3370 — hard delete. Each says what is wrong and the one thing to do.
+    project_not_archived:
+      "Only an archived project can be deleted for good. Archive it first.",
+    identifier_mismatch:
+      "That doesn't match the project's ID. Type it exactly as shown.",
     // WARP-2730 (ADR-048) — the filing review surface, which lives inside the
     // CRM and therefore inside this domain. Each string says what happened and
     // what to do about it, in the owner's words: file, customer, look, undo —

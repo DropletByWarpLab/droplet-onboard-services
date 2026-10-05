@@ -135,6 +135,10 @@ StandardError=append:/var/log/droplet-device-bridge.log
 # keys never hit disk.
 StateDirectory=droplet-bridge
 StateDirectoryMode=0700
+# The storage-operation request/result spool can carry a one-time recovery key.
+# Keep it in volatile memory, shared with the root executor, never in /var/lib.
+RuntimeDirectory=droplet-bridge-pool-spool
+RuntimeDirectoryMode=0700
 # Lock down the filesystem view: readonly rootfs, private /tmp, mask
 # /proc so other users' details aren't visible.
 ProtectSystem=strict

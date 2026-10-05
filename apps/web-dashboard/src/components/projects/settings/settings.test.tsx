@@ -4,7 +4,7 @@
 // write is said plainly with the screen left as the server holds it.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
+import { act, render, screen, waitFor, fireEvent, within } from "@testing-library/react";
 import { SWRConfig } from "swr";
 import { ProjectMenu } from "./ProjectMenu";
 import { PeopleContext } from "../bits";
@@ -111,7 +111,7 @@ function defaults(c: Call): Reply {
     if (url.endsWith("/labels")) return { labels: LABELS };
     if (url.endsWith("/properties")) return { properties: PROPS };
     if (url.includes("archived=only")) return { work_items: ARCHIVED };
-    if (url.endsWith("/users")) return { users: USERS };
+    if (url === "/api/pm/people") return { people: USERS.filter((u) => u.userId).map((u) => ({ id: u.userId, displayName: u.displayName, avatarUrl: null })) };
     if (url === "/api/departments") return { departments: DEPARTMENTS };
     if (url.startsWith("/api/crm/companies")) return { companies: COMPANIES, total: 1 };
     return {};
@@ -272,7 +272,7 @@ describe("details", () => {
 
   it("without the people list the lead is shown but cannot be changed; without the CRM there is no customer field", async () => {
     h.handler = (c) =>
-      c.url.endsWith("/users") || c.url.startsWith("/api/crm/") ? fail(404, "module_disabled") : defaults(c);
+        c.url === "/api/pm/people" || c.url.startsWith("/api/crm/") ? fail(404, "module_disabled") : defaults(c);
     renderMenu();
     const dialog = await openSettings();
     const lead = within(dialog).getByLabelText("Lead") as HTMLSelectElement;
@@ -516,6 +516,44 @@ describe("fields", () => {
 });
 
 describe("archived items", () => {
+  it("walks later cursor pages and keeps the first page visible while they load", async () => {
+    let release!: (body: unknown) => void;
+    const tail = new Promise((resolve) => { release = resolve; });
+    h.handler = (c) => {
+      if (!c.url.includes("archived=only")) return defaults(c);
+      return new URL(c.url, "http://localhost").searchParams.has("cursor")
+        ? tail
+        : { work_items: [ARCHIVED[0]], total: 2, nextCursor: "archive-tail" };
+    };
+    renderMenu();
+    const dialog = await openArchived();
+    expect(await within(dialog).findByText("Old plan")).toBeInTheDocument();
+    expect(await within(dialog).findByText("Showing 1 of 2 archived items.")).toBeInTheDocument();
+    await act(async () => { release({ work_items: [ARCHIVED[1]], total: 2, nextCursor: null }); });
+    expect(await within(dialog).findByText("Retired bug")).toBeInTheDocument();
+    expect(within(dialog).getByText("Old plan")).toBeInTheDocument();
+    expect(h.calls.some((c) => c.url.includes("cursor=archive-tail") && c.url.includes("archived=only"))).toBe(true);
+  });
+
+  it("retains a partial archive after a later page fails and retries that page", async () => {
+    let tails = 0;
+    h.handler = (c) => {
+      if (!c.url.includes("archived=only")) return defaults(c);
+      if (new URL(c.url, "http://localhost").searchParams.has("cursor")) {
+        return ++tails === 1 ? fail(500, "boom") : { work_items: [ARCHIVED[1]], total: 2, nextCursor: null };
+      }
+      return { work_items: [ARCHIVED[0]], total: 2, nextCursor: "archive-tail" };
+    };
+    renderMenu();
+    const dialog = await openArchived();
+    expect(await within(dialog).findByText("Some archived items couldn't be loaded.")).toBeInTheDocument();
+    expect(within(dialog).getByText("Old plan")).toBeInTheDocument();
+    expect(within(dialog).queryByText("Nothing is archived.")).not.toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Try again" }));
+    expect(await within(dialog).findByText("Retired bug")).toBeInTheDocument();
+    expect(within(dialog).getByText("Old plan")).toBeInTheDocument();
+  });
+
   it("lists them with when they were archived, and restores one", async () => {
     const { onItemsChanged } = renderMenu();
     const dialog = await openArchived();
