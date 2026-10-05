@@ -17,12 +17,15 @@ import { createRateLimit } from "../../middleware/rate-limit.js";
 import { createPresenceStore } from "../../services/pm/pm-presence.js";
 import { createPmPresenceRouter } from "./presence.js";
 
-const ITEMS = new Set(["wi-1", "wi-2"]);
+const ITEMS = new Set(["wi-1", "wi-2", "desk-ticket"]);
 const GUEST_ASSIGNED = new Set(["wi-1"]); // wi-1 is assigned to the guest, wi-2 is not
 
 const prisma = {
   pmWorkItem: {
-    findUnique: async ({ where }: { where: { id: string } }) => (ITEMS.has(where.id) ? { id: where.id } : null),
+    findUnique: async ({ where }: { where: { id: string } }) =>
+      ITEMS.has(where.id)
+        ? { id: where.id, project: { kind: where.id === "desk-ticket" ? "SERVICE_DESK" : "PROJECT" } }
+        : null,
   },
   pmWorkItemAssignee: {
     findFirst: async ({ where }: { where: { workItemId: string; userId: string } }) =>
@@ -118,6 +121,20 @@ describe("GET /pm/work-items/:id/presence — a read", () => {
   it("is 404 for an item that does not exist", async () => {
     const res = await request(app(user({ id: "u-ana", role: "family" })).app).get("/api/pm/work-items/nope/presence");
     expect(res.status).toBe(404);
+  });
+});
+
+describe("private Service Desk presence", () => {
+  it.each(["get", "post"] as const)("refuses %s before reading or recording ticket viewers", async (method) => {
+    const store = createPresenceStore();
+    store.beat("desk-ticket", "support-reader");
+    const { app: a } = app(user({ id: "projects-only", role: "family" }), store);
+
+    const response = await request(a)[method]("/api/pm/work-items/desk-ticket/presence");
+
+    expect(response.status).toBe(404);
+    expect(response.body).toEqual({ error: "work_item_not_found" });
+    expect(store.others("desk-ticket", "someone-else")).toEqual(["support-reader"]);
   });
 });
 

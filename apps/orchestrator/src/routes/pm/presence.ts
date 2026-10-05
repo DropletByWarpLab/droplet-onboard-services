@@ -21,8 +21,8 @@
  *   - `guestAssignedWorkItem`, the item's own read check (`GET /pm/work-items/:id`
  *     carries the same one), so the day a guest tier may use this route it can
  *     only be on an item assigned to them;
- *   - the item must exist. Without that, a heartbeat on any string would grow the
- *     in-memory store.
+ *   - the item must exist in a PROJECT parent. Private Service Desk tickets
+ *     cannot expose viewers or populate the Projects presence store.
  * The service principal has no face to show and is refused.
  *
  * Mount order (P16): the paths here are longer than any `:id` route in the other
@@ -70,8 +70,11 @@ export function createPmPresenceRouter(prisma: PrismaClient, opts: PmPresenceRou
           return;
         }
         const id = String(req.params.id);
-        const item = await prisma.pmWorkItem.findUnique({ where: { id }, select: { id: true } });
-        if (!item) {
+        const item = await prisma.pmWorkItem.findUnique({
+          where: { id },
+          select: { id: true, project: { select: { kind: true } } },
+        });
+        if (!item || item.project.kind !== "PROJECT") {
           res.status(404).json({ error: "work_item_not_found" });
           return;
         }
