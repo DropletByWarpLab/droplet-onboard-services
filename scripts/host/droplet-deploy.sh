@@ -115,8 +115,8 @@ mkdir -m 0700 "$BK" || die "cannot create $BK"
 # name comes from the compose file's pinned `name:`. Root only owns the output.
 runuser -u droplet -- docker compose -f "$REPO/docker/docker-compose.yml" exec -T -e "DROPLET_DUMP_USER=" -e "DROPLET_DUMP_DB=" db \
   sh -c 'pg_dump --username="${DROPLET_DUMP_USER:-$POSTGRES_USER}" --dbname="${DROPLET_DUMP_DB:-$POSTGRES_DB}" --format=plain --no-owner --no-privileges' \
-  | gzip --best > "$BK/db.sql.gz"
-[ "${PIPESTATUS[0]}" -eq 0 ] && [ -s "$BK/db.sql.gz" ] || die "db dump failed"
+  | gzip --best > "$BK/db.sql.gz" || die "db dump failed"
+[ -s "$BK/db.sql.gz" ] || die "db dump failed"
 
 # NO -h: symlinks are stored as links and never read. Root dereferencing a
 # droplet-planted link (data/secrets/x -> /etc/shadow) would be an arbitrary

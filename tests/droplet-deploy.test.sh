@@ -36,12 +36,15 @@ check "deploy script sources the reapply wrapper's resolver (no second resolver)
 echo "--- stubbed logic ---"
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 BIN="$WORK/bin"; mkdir -p "$BIN"
-for t in systemctl runuser docker visudo id mountpoint; do
+for t in systemctl runuser docker visudo id mountpoint gzip; do
   cat > "$BIN/$t" <<STUB
 #!/usr/bin/env bash
 echo "$t \$*" >> "$WORK/calls.log"
 case "$t" in
-  docker) echo "-- dump --"; exit 0 ;;
+  docker) echo "-- dump --"; [ -f "$WORK/docker_fail" ] && exit 75; exit 0 ;;
+  gzip)
+    if [ -f "$WORK/gzip_fail" ]; then printf 'partial gzip'; exit 71; fi
+    exec /usr/bin/gzip "\$@" ;;
   runuser) # runuser -u USER -- CMD...: git and docker are real/stubbed passthroughs
     if [ "\$4" = git ]; then shift 3; exec "\$@"; fi
     if [ "\$4" = docker ]; then shift 3; exec "\$@"; fi
@@ -63,7 +66,7 @@ done
 printf '#!/usr/bin/env bash\nexit 0\n' > "$WORK/hu"; chmod +x "$WORK/hu"
 
 new_repo() {
-  rm -rf "$WORK/repo" "$WORK/backups" "$WORK/sudoers"* "$WORK/calls.log" "$WORK/setup_fail" "$WORK/inactive" "$WORK/nodocker" "$WORK/tar_fail" "$WORK/unmounted" "$WORK/data"
+  rm -rf "$WORK/repo" "$WORK/backups" "$WORK/sudoers"* "$WORK/calls.log" "$WORK/setup_fail" "$WORK/inactive" "$WORK/nodocker" "$WORK/tar_fail" "$WORK/unmounted" "$WORK/data" "$WORK/docker_fail" "$WORK/gzip_fail"
   mkdir -p "$WORK/repo/docker/secrets" "$WORK/repo/docker/certs" "$WORK/repo/data/secrets" "$WORK/repo/.data"
   ( cd "$WORK/repo" && git init -q && git config user.email t@t && git config user.name t
     echo 'name: droplet' > docker/docker-compose.yml
@@ -94,6 +97,16 @@ check "backup: tar holds .env (symlink dereferenced), secrets, certs, mosquitto"
   "t=\$(tar -tf '$bk/secrets.tar'); echo \"\$t\" | grep -qx .env && echo \"\$t\" | grep -q data/secrets/k && echo \"\$t\" | grep -q docker/certs/c && echo \"\$t\" | grep -q docker/secrets/s && echo \"\$t\" | grep -q docker/mosquitto.conf \
    && [ \"\$(tar -xOf '$bk/secrets.tar' .env)\" = SECRET=hunter2 ]"
 check "output never prints secret contents" bash -c "! echo '$out' | grep -q hunter2"
+
+# A nonempty output does not prove both stages of the backup pipeline succeeded.
+for failed_stage in docker gzip; do
+  new_repo; touch "$WORK/${failed_stage}_fail"
+  mkdir -p "$WORK/backups/20260101T000000Z" "$WORK/backups/20260102T000000Z" "$WORK/backups/20260103T000000Z"
+  out="$(run_deploy 20260104T000000Z)"; rc=$?
+  check "backup $failed_stage failure: exit 1, no setup/grant, old backups kept" bash -c \
+    "[ $rc -eq 1 ] && [ -s '$WORK/backups/20260104T000000Z/db.sql.gz' ] && [ ! -e '$WORK/sudoers' ] && [ ! -e '$WORK/sudoers.new' ] \
+     && ! grep -q setup.sh '$WORK/calls.log' && [ -d '$WORK/backups/20260101T000000Z' ] && [ -d '$WORK/backups/20260102T000000Z' ] && [ -d '$WORK/backups/20260103T000000Z' ]"
+done
 
 new_repo; touch "$WORK/setup_fail"
 out="$(run_deploy)"; rc=$?
