@@ -25,7 +25,7 @@ def _check(tmp_path: Path, status: object, params=None):
     command = tmp_path / "status.sh"
     command.write_text(
         '#!/bin/sh\ncat "$STATUS_FILE"\n', encoding="utf-8", newline="\n")
-    os.chmod(command, 0o700)
+    os.chmod(command, 0o700)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions -- owner-only executable fixture in a private pytest temporary directory; subprocess execution requires the owner's execute bit
     env = dict(os.environ)
     env.update({"DROPLET_NVR_STATUS_SCRIPT": str(command),
                 "STATUS_FILE": str(status_file)})

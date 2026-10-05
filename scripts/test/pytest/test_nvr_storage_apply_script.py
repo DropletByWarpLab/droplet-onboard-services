@@ -78,7 +78,7 @@ class Rig:
         self.spool.mkdir()
         self.writer = tmp_path / "writer-stub.sh"
         self.writer.write_text(WRITER_STUB, encoding="utf-8", newline="\n")
-        os.chmod(self.writer, 0o700)
+        os.chmod(self.writer, 0o700)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions -- owner-only executable fixture in a private pytest temporary directory; subprocess execution requires the owner's execute bit
         self.argv_log = tmp_path / "writer-argv.txt"
         self.topology_lock = tmp_path / "recordings-topology.lock"
         self.topology_lock.touch()

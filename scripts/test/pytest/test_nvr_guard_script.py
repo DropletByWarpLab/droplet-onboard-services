@@ -182,7 +182,7 @@ class Box:
     def shim(self, name: str, body: str):
         path = self.shims / name
         path.write_text(body, encoding="utf-8", newline="\n")
-        os.chmod(path, 0o700)
+        os.chmod(path, 0o700)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions -- owner-only executable fixture in a private pytest temporary directory; subprocess execution requires the owner's execute bit
 
     def write_env(self, text: str):
         self.env_file.write_text(
