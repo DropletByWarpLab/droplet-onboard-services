@@ -67,13 +67,16 @@ const FEED_MAX_PAGES = 10;
  * hundred and call it the timeline. A response without a `nextCursor` (an older
  * orchestrator) is one page, which is what it always was.
  */
-async function readFeed<T>(ctx: ToolContext, path: string, key: "activity" | "comments"): Promise<T[]> {
+async function readFeed<T>(
+  readPage: (query: string) => Promise<Record<string, unknown>>,
+  key: "activity" | "comments",
+): Promise<T[]> {
   const rows: T[] = [];
   let cursor: string | undefined;
   for (let page = 0; page < FEED_MAX_PAGES; page += 1) {
     const qs = new URLSearchParams({ limit: String(FEED_PAGE) });
     if (cursor) qs.set("cursor", cursor);
-    const data = await callOrch<Record<string, unknown>>(ctx, "get", `${path}?${qs.toString()}`);
+    const data = await readPage(qs.toString());
     rows.push(...((data[key] as T[] | undefined) ?? []));
     const next = data.nextCursor;
     if (typeof next !== "string" || next.length === 0) break;
@@ -133,8 +136,14 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   try {
     if (entity === "work_item") {
       const [activity, comments] = await Promise.all([
-        readFeed<Parameters<typeof mergePmFeed>[0][number]>(ctx, `/api/pm/work-items/${id}/activity`, "activity"),
-        readFeed<Parameters<typeof mergePmFeed>[1][number]>(ctx, `/api/pm/work-items/${id}/comments`, "comments"),
+        readFeed<Parameters<typeof mergePmFeed>[0][number]>(
+          (query) => callOrch<Record<string, unknown>>(ctx, "get", `/api/pm/work-items/${id}/activity?${query}`),
+          "activity",
+        ),
+        readFeed<Parameters<typeof mergePmFeed>[1][number]>(
+          (query) => callOrch<Record<string, unknown>>(ctx, "get", `/api/pm/work-items/${id}/comments?${query}`),
+          "comments",
+        ),
       ]);
       const merged = mergePmFeed(activity, comments);
       return {
