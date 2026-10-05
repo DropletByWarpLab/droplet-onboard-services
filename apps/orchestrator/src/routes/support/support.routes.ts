@@ -23,6 +23,7 @@
 import { Router, type Request, type RequestHandler, type Response } from "express";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
+import { config } from "../../config.js";
 import { requireRole } from "../../middleware/auth.js";
 import {
   requireFeatureAccess,
@@ -30,6 +31,7 @@ import {
   type EffectiveAccessResolver,
 } from "../../middleware/feature-gate.js";
 import { resolveEffectiveAccess } from "../../services/effective-access.service.js";
+import { getEffectiveModuleIds } from "../../services/modules.service.js";
 import { actorFromRequest } from "../../services/activity.service.js";
 import { recordActivity } from "../../services/activity.singleton.js";
 import { PM_ERRORS } from "../../services/pm/pm.service.js";
@@ -48,6 +50,8 @@ const ADMINS = ["owner", "admin"] as const;
 export interface SupportRouterDeps {
   /** Injectable per-person access resolver (the feature gate's own seam). */
   resolveAccess?: EffectiveAccessResolver;
+  /** Keeps Email module availability explicit in route tests. */
+  isEmailModuleEffective?: () => Promise<boolean>;
 }
 
 // ── Validation ───────────────────────────────────────────────────────────────
@@ -141,6 +145,15 @@ const contactSchema = z.object({
   organization: z.string().trim().max(300).optional(),
 });
 
+const emailChannelSchema = z.object({
+  emailAccountId: ID.nullable(),
+  contactOwnerUserId: ID.optional(),
+  enabled: z.boolean().optional(),
+  autoAckEnabled: z.boolean().optional(),
+  autoAckTemplate: z.string().max(4000).optional(),
+  reopenWindowDays: z.number().int().min(0).max(365).optional(),
+}).strict();
+
 function badRequest(res: Response, error: z.ZodError): void {
   res.status(400).json({ error: "invalid_request", details: error.flatten() });
 }
@@ -191,6 +204,29 @@ export function mapSupportError(err: unknown, res: Response): boolean {
         contactId: err instanceof support.SupportContactExistsError ? err.contactId : undefined,
       });
       return true;
+    case support.EMAIL_CHANNEL_ERRORS.ACCOUNT_NOT_FOUND:
+    case support.EMAIL_CHANNEL_ERRORS.CONTACT_OWNER_NOT_FOUND:
+      res.status(404).json({ error: msg });
+      return true;
+    case support.EMAIL_CHANNEL_ERRORS.EMAIL_MODULE_DISABLED:
+      res.status(409).json({ error: msg, message: "Enable the Email module before binding a mailbox." });
+      return true;
+    case support.EMAIL_CHANNEL_ERRORS.INVALID_TEMPLATE:
+      res.status(422).json({ error: msg });
+      return true;
+    case "reply_not_retryable":
+      res.status(409).json({ error: msg });
+      return true;
+    case "reply_too_long":
+      res.status(422).json({ error: msg, maxLength: 64000 });
+      return true;
+    case "email_channel_unavailable":
+    case "email_recipient_unavailable":
+      res.status(409).json({ error: msg });
+      return true;
+    case "outbound_email_blocked":
+      res.status(451).json({ error: msg, channel: "outbound_email" });
+      return true;
     default:
       return false;
   }
@@ -207,6 +243,15 @@ export function createSupportRouter(prisma: PrismaClient, deps: SupportRouterDep
   const canManage: RequestHandler = requireFeatureAccess("support", "manage", resolve);
   // Escalation writes a Projects row, so it needs that grant as well as Support.
   const canWorkProjects: RequestHandler = requireFeatureAccess("projects", "act", resolve);
+
+  const requireEmailModule = async (res: Response): Promise<boolean> => {
+    const effective = deps.isEmailModuleEffective
+      ? await deps.isEmailModuleEffective()
+      : (await getEffectiveModuleIds(prisma, config)).has("email");
+    if (effective) return true;
+    res.status(409).json({ error: support.EMAIL_CHANNEL_ERRORS.EMAIL_MODULE_DISABLED, message: "Enable the Email module before binding a mailbox." });
+    return false;
+  };
 
   const viewerOf = (req: Request): SupportViewer => ({
     id: req.user!.id,
@@ -327,6 +372,41 @@ export function createSupportRouter(prisma: PrismaClient, deps: SupportRouterDep
     }
   });
 
+  // Mailbox choices and binding are owner/admin-only and exist only when the
+  // same Email module the indexer uses is effective. The returned account rows
+  // contain no credentials or encrypted fields.
+  router.get("/support/email/accounts", admins, canManage, async (_req, res, next) => {
+    try {
+      if (!(await requireEmailModule(res))) return;
+      res.json({ accounts: await support.listDeskEmailAccounts(prisma) });
+    } catch (err) { fail(err, res, next); }
+  });
+
+  router.get("/support/desks/:id/email-channel", admins, canManage, async (req, res, next) => {
+    try {
+      if (!(await requireEmailModule(res))) return;
+      res.json({ channel: await support.getDeskEmailChannel(prisma, req.params.id) });
+    } catch (err) { fail(err, res, next); }
+  });
+
+  router.put("/support/desks/:id/email-channel", admins, canManage, async (req, res, next) => {
+    try {
+      if (!(await requireEmailModule(res))) return;
+      const parsed = emailChannelSchema.safeParse(req.body);
+      if (!parsed.success) return badRequest(res, parsed.error);
+      const channel = await support.bindDeskEmailChannel(prisma, {
+        projectId: req.params.id,
+        emailAccountId: parsed.data.emailAccountId,
+        contactOwnerUserId: parsed.data.contactOwnerUserId ?? viewerOf(req).id,
+        enabled: parsed.data.enabled,
+        autoAckEnabled: parsed.data.autoAckEnabled,
+        autoAckTemplate: parsed.data.autoAckTemplate,
+        reopenWindowDays: parsed.data.reopenWindowDays,
+      });
+      res.json({ channel });
+    } catch (err) { fail(err, res, next); }
+  });
+
   // ── Tickets ───────────────────────────────────────────────────────────────
 
   router.get("/support/queues", staff, async (req, res, next) => {
@@ -416,6 +496,14 @@ export function createSupportRouter(prisma: PrismaClient, deps: SupportRouterDep
         svcDeps,
       );
       res.status(201).json(result);
+    } catch (err) {
+      fail(err, res, next);
+    }
+  });
+
+  router.post("/support/tickets/:id/replies/:commentId/retry", staff, canAct, async (req, res, next) => {
+    try {
+      res.json(await support.retryPublicReply(prisma, req.params.id, req.params.commentId));
     } catch (err) {
       fail(err, res, next);
     }
