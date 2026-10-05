@@ -36,6 +36,8 @@ import {
   fetchEventCamera,
   fetchEventThumbnail,
   fetchReviewCamera,
+  fetchReview,
+  reviewThumbnailUrl,
   fetchKnownFaces,
   fetchKnownPlates,
   fetchFaceImage,
@@ -129,6 +131,22 @@ function wantsDownload(req: { query: Record<string, unknown> }): boolean {
 
 function isCustodyRole(role: string | undefined): boolean {
   return (CAMERA_CUSTODY_ROLES as readonly string[]).includes(role ?? "");
+}
+
+/** Preserve the browser's byte-range request and Frigate's partial response. */
+function mediaRequestHeaders(req: { headers: { range?: string } }): HeadersInit | undefined {
+  return req.headers.range ? { Range: req.headers.range } : undefined;
+}
+
+function mediaResponseHeaders(upstream: globalThis.Response, res: Response): void {
+  res.status(upstream.status);
+  res.setHeader("Cache-Control", "private, no-store");
+  for (const header of ["Content-Length", "Content-Range", "Accept-Ranges"]) {
+    // Error bodies are replaced with JSON, so their upstream length is invalid.
+    if (header === "Content-Length" && !upstream.ok) continue;
+    const value = upstream.headers.get(header);
+    if (value) res.setHeader(header, value);
+  }
 }
 import { getCameraSystemStatus, type CameraSystemStatus } from "../services/camera-system.service.js";
 import {
@@ -601,7 +619,8 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       }
       const eventId = req.params.eventId;
       const url = `${config.FRIGATE_URL}/api/events/${encodeURIComponent(eventId)}/clip.mp4`;
-      const upstream = await fetch(url, { signal: AbortSignal.timeout(30_000) });
+      const upstream = await fetch(url, { headers: mediaRequestHeaders(req), signal: AbortSignal.timeout(30_000) });
+      mediaResponseHeaders(upstream, res);
       if (!upstream.ok) {
         return res.status(upstream.status).json({ error: `frigate ${upstream.status}` });
       }
@@ -1523,7 +1542,11 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       const limitRaw = parseInt(q.limit || "50", 10);
       const limit = Math.min(Math.max(Number.isFinite(limitRaw) ? limitRaw : 50, 1), 200);
 
+      if (q.businessHours !== undefined && q.businessHours !== "outside" && q.businessHours !== "inside") {
+        return res.status(400).json({ error: "businessHours must be outside or inside" });
+      }
       const result = await getEventsFiltered({
+        businessHours: q.businessHours,
         cameras,
         labels,
         minScore,
@@ -1532,7 +1555,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
         hasClip: boolOrUndef(q.has_clip),
         hasSnapshot: boolOrUndef(q.has_snapshot),
         limit,
-      }, cameraScopeOf(res));
+      }, cameraScopeOf(res), prisma);
       res.json(result);
     } catch (err) {
       if (isUpstreamUnavailable(err)) {
@@ -1699,14 +1722,18 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       const limitRaw = parseInt(q.limit || "50", 10);
       const limit = Math.min(Math.max(Number.isFinite(limitRaw) ? limitRaw : 50, 1), 200);
 
+      if (q.businessHours !== undefined && q.businessHours !== "outside" && q.businessHours !== "inside") {
+        return res.status(400).json({ error: "businessHours must be outside or inside" });
+      }
       const result = await getReviewsFiltered({
+        businessHours: q.businessHours,
         cameras,
         severity,
         before: numOrUndef(q.before),
         after: numOrUndef(q.after),
         reviewed: boolOrUndef(q.reviewed),
         limit,
-      }, cameraScopeOf(res));
+      }, cameraScopeOf(res), prisma);
       res.json(result);
     } catch (err) {
       if (isUpstreamUnavailable(err)) {
@@ -1732,17 +1759,22 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     }
   });
 
-  // Review preview clip (Frigate-rendered cluster summary mp4).
+  // Frigate's review preview route takes a format query, not a file suffix.
   router.get("/cameras/reviews/:reviewId/preview", requireRole(...CAMERA_VIEW_ROLES), cameraAccess, async (req, res, next) => {
     try {
       if (!isValidEventId(req.params.reviewId)) {
         return res.status(400).json({ error: "Invalid review ID format" });
       }
-      const url = `${config.FRIGATE_URL}/api/review/${encodeURIComponent(req.params.reviewId)}/preview.mp4`;
-      const upstream = await fetch(url, { signal: AbortSignal.timeout(30_000) });
+      const url = `${config.FRIGATE_URL}/api/review/${encodeURIComponent(req.params.reviewId)}/preview?format=mp4`;
+      const upstream = await fetch(url, { headers: mediaRequestHeaders(req), signal: AbortSignal.timeout(60_000) });
+      mediaResponseHeaders(upstream, res);
       if (!upstream.ok) {
         return res.status(upstream.status).json({ error: `frigate ${upstream.status}` });
       }
+      const reviewId = req.params.reviewId;
+      void fetchReviewCamera(reviewId)
+        .then((camera) => camera ? auditCameraWatch(req, camera, "clip", { reviewId }) : undefined)
+        .catch(() => undefined);
       res.setHeader("Content-Type", upstream.headers.get("content-type") || "video/mp4");
       const len = upstream.headers.get("content-length");
       if (len) res.setHeader("Content-Length", len);
@@ -1762,12 +1794,14 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       if (!isValidEventId(req.params.reviewId)) {
         return res.status(400).json({ error: "Invalid review ID format" });
       }
-      const url = `${config.FRIGATE_URL}/api/review/${encodeURIComponent(req.params.reviewId)}/thumbnail.jpg`;
+      const review = await fetchReview(req.params.reviewId);
+      const url = review && reviewThumbnailUrl(req.params.reviewId, review);
+      if (!url) return res.status(404).json({ error: "Thumbnail not found" });
       const upstream = await fetch(url, { signal: AbortSignal.timeout(15_000) });
       if (!upstream.ok) {
         return res.status(upstream.status).json({ error: `frigate ${upstream.status}` });
       }
-      res.setHeader("Content-Type", upstream.headers.get("content-type") || "image/jpeg");
+      res.setHeader("Content-Type", "image/webp");
       res.setHeader("Cache-Control", "private, no-store"); // WARP-3103: footage never lands in a cache
       const buffer = Buffer.from(await upstream.arrayBuffer());
       res.send(buffer);
@@ -1832,8 +1866,13 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
 
       const searchType = q.search_type === "description" ? "description" : "thumbnail";
 
+      if (q.businessHours !== undefined && q.businessHours !== "outside" && q.businessHours !== "inside") {
+        return res.status(400).json({ error: "businessHours must be outside or inside" });
+      }
+
       try {
         const result = await searchEventsSemanticTyped({
+          businessHours: q.businessHours,
           query,
           searchType,
           cameras,
@@ -1842,7 +1881,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
           before: numOrUndef(q.before),
           after: numOrUndef(q.after),
           limit,
-        }, cameraScopeOf(res));
+        }, cameraScopeOf(res), prisma);
         res.json(result);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -2913,15 +2952,17 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
 
       const url = buildRecordingClipUrl(req.params.name, range.after, range.before);
       const ctrl = new AbortController();
-      req.on("close", () => ctrl.abort());
+      res.on("close", () => { if (!res.writableEnded) ctrl.abort(); });
       // Recording mp4 synthesis can take a few seconds for longer ranges.
       // Set a generous timeout but still bounded so a stuck request
       // eventually frees the connection.
       const upstream = await fetch(url, {
+        headers: mediaRequestHeaders(req),
         signal: AbortSignal.any
           ? AbortSignal.any([ctrl.signal, AbortSignal.timeout(60_000)])
           : ctrl.signal,
       });
+      mediaResponseHeaders(upstream, res);
       if (!upstream.ok) {
         return res.status(upstream.status).json({ error: `frigate ${upstream.status}` });
       }
@@ -3102,7 +3143,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
         seg,
       );
       const ctrl = new AbortController();
-      req.on("close", () => ctrl.abort());
+      res.on("close", () => { if (!res.writableEnded) ctrl.abort(); });
       const upstream = await fetch(url, {
         signal: AbortSignal.any
           ? AbortSignal.any([ctrl.signal, AbortSignal.timeout(30_000)])

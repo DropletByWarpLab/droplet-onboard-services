@@ -59,6 +59,12 @@ import type {
 } from "../types/camera.js";
 import { createLogger } from "../lib/logger.js";
 import { retainsFootage } from "./camera-retention-defaults.js";
+import {
+  createBusinessHoursClassifier,
+  emptyCameraBusinessHours,
+  getCameraBusinessHours,
+  type BusinessHoursFilter,
+} from "./camera-business-hours.service.js";
 
 const logger = createLogger("camera-service");
 
@@ -741,15 +747,80 @@ export async function getRecentEvents(
 export interface FilteredEventsResult {
   events: EventDetail[];
   nextCursor: number | null;
+  scanLimitReached?: boolean;
+  /** Semantic search filters only its bounded ranked candidate set. */
+  searchLimitReached?: boolean;
+}
+
+export interface CameraEventFilter extends FrigateEventFilter { businessHours?: BusinessHoursFilter }
+export interface CameraReviewFilter extends FrigateReviewFilter { businessHours?: BusinessHoursFilter }
+export interface CameraSearchFilter extends FrigateSearchFilter { businessHours?: BusinessHoursFilter }
+
+type CameraRow = Record<string, unknown>;
+const HOURS_SCAN_BATCH = 1000;
+const HOURS_SCAN_MAX_BATCHES = 5;
+
+/** Filter before paging: a quiet first batch must not conceal older matches.
+ * Continue scanning until a page is filled, the upstream ends, or the bounded
+ * scan budget is reached. The latter returns a resumable cursor explicitly.
+ * Keep equal-time rows together rather than cutting a timestamp boundary. */
+async function cameraRowsWithHours<F extends FrigateEventFilter | FrigateReviewFilter>(
+  filter: F & { businessHours?: BusinessHoursFilter },
+  scope: CameraScope,
+  prisma: PrismaClient | undefined,
+  fetchRows: (filter: F) => Promise<unknown[]>,
+  matches?: (row: CameraRow) => boolean,
+): Promise<{ rows: Array<CameraRow & { outsideBusinessHours: boolean | null }>; nextCursor: number | null; scanLimitReached: boolean }> {
+  const { businessHours, ...upstreamFilter } = filter;
+  const hours = prisma ? await getCameraBusinessHours(prisma) : emptyCameraBusinessHours();
+  const classify = createBusinessHoursClassifier(hours);
+  const cameras = narrowCameraFilter(scope, filter.cameras);
+  if (cameras?.length === 0 || (businessHours && !hours.configured)) {
+    return { rows: [], nextCursor: null, scanLimitReached: false };
+  }
+  const limit = filter.limit ?? 50;
+  const scanning = Boolean(businessHours || matches);
+  const batchLimit = scanning ? HOURS_SCAN_BATCH : limit;
+  const maxBatches = scanning ? HOURS_SCAN_MAX_BATCHES : 1;
+  let before = filter.before;
+  const rows: Array<CameraRow & { outsideBusinessHours: boolean | null }> = [];
+  for (let batch = 0; batch < maxBatches; batch++) {
+    const raw = (await fetchRows({ ...upstreamFilter, cameras, before, limit: batchLimit } as F)) as CameraRow[];
+    // Frigate lists newest first. Sorting also keeps an upstream tie adjacent.
+    raw.sort((a, b) => Number(b.start_time) - Number(a.start_time));
+    let pageBoundary: number | null = null;
+    for (const row of raw) {
+      const start = Number(row.start_time ?? 0);
+      if (pageBoundary !== null && start < pageBoundary) {
+        return { rows, nextCursor: pageBoundary, scanLimitReached: false };
+      }
+      if (!inCameraScope(scope, String(row.camera ?? ""))) continue;
+      if (matches && !matches(row)) continue;
+      const end = row.end_time === null || row.end_time === undefined ? null : Number(row.end_time);
+      const outsideBusinessHours = classify(start, end);
+      if (businessHours && outsideBusinessHours !== (businessHours === "outside")) continue;
+      rows.push({ ...row, outsideBusinessHours });
+      if (rows.length >= limit) pageBoundary = start;
+    }
+    const oldest = raw.length ? Number(raw[raw.length - 1].start_time) : null;
+    if (raw.length < batchLimit) return { rows, nextCursor: null, scanLimitReached: false };
+    if (pageBoundary !== null) return { rows, nextCursor: pageBoundary, scanLimitReached: false };
+    // A non-advancing upstream cannot be scanned indefinitely or truthfully
+    // presented as exhausted. Preserve the last cursor and show the scan cap.
+    if (oldest === null || !Number.isFinite(oldest) || (before !== undefined && oldest >= before)) {
+      return { rows, nextCursor: before ?? oldest, scanLimitReached: true };
+    }
+    before = oldest;
+  }
+  return { rows, nextCursor: before ?? null, scanLimitReached: scanning };
 }
 
 export async function getEventsFiltered(
-  filter: FrigateEventFilter,
+  filter: CameraEventFilter,
   scope: CameraScope,
+  prisma?: PrismaClient,
 ): Promise<FilteredEventsResult> {
-  const limit = filter.limit ?? 50;
-  const cameras = narrowCameraFilter(scope, filter.cameras);
-  const rawEvents = (await fetchEventsFiltered({ ...filter, cameras })) as Array<Record<string, unknown>>;
+  const { rows: rawEvents, nextCursor, scanLimitReached } = await cameraRowsWithHours(filter, scope, prisma, fetchEventsFiltered);
 
   const events: EventDetail[] = rawEvents
     .filter((e) => inCameraScope(scope, String(e.camera ?? "")))
@@ -765,6 +836,7 @@ export async function getEventsFiltered(
       score: Number(e.top_score ?? e.score ?? 0),
       startTime: Number(e.start_time ?? 0),
       endTime: e.end_time !== null && e.end_time !== undefined ? Number(e.end_time) : null,
+      outsideBusinessHours: e.outsideBusinessHours,
       thumbnail: `/api/cameras/events/${encodeURIComponent(id)}/thumbnail`,
       hasClip,
       hasSnapshot,
@@ -796,17 +868,7 @@ export async function getEventsFiltered(
     };
   });
 
-  // If Frigate returned a full page, the next call should fetch events
-  // strictly older than the oldest one we just got. Subtract a tiny
-  // epsilon (1ms in seconds) so we don't double-include the boundary
-  // event — Frigate's `before` is exclusive but only on whole-second
-  // precision, and start_times can collide.
-  const nextCursor =
-    events.length === limit && events.length > 0
-      ? Math.min(...events.map((ev) => ev.startTime))
-      : null;
-
-  return { events, nextCursor };
+  return { events, nextCursor, scanLimitReached };
 }
 
 /**
@@ -827,15 +889,24 @@ export async function setEventRetention(
 export interface FilteredReviewsResult {
   reviews: ReviewItem[];
   nextCursor: number | null;
+  scanLimitReached?: boolean;
 }
 
 export async function getReviewsFiltered(
-  filter: FrigateReviewFilter,
+  filter: CameraReviewFilter,
   scope: CameraScope,
+  prisma?: PrismaClient,
 ): Promise<FilteredReviewsResult> {
-  const limit = filter.limit ?? 50;
-  const cameras = narrowCameraFilter(scope, filter.cameras);
-  const raw = (await fetchReviews({ ...filter, cameras })) as Array<Record<string, unknown>>;
+  // Frigate 0.17.1 accepts one severity enum, not a comma-separated set.
+  // Multiple severities must be filtered before page assembly; filtering only
+  // the first upstream page would conceal older motion-only activity.
+  const severities = [...new Set(filter.severity ?? [])];
+  const multiple = severities.length > 1;
+  const { rows: raw, nextCursor, scanLimitReached } = await cameraRowsWithHours(
+    multiple ? { ...filter, severity: undefined } : filter,
+    scope, prisma, fetchReviews,
+    multiple ? (row) => severities.includes(String(row.severity)) : undefined,
+  );
 
   const reviews: ReviewItem[] = raw
     .filter((r) => inCameraScope(scope, String(r.camera ?? "")))
@@ -877,19 +948,14 @@ export async function getReviewsFiltered(
       audio,
       zones,
       detectionIds,
-      // Frigate serves preview clips at /api/review/<id>/preview.{mp4,gif}.
-      // We proxy through the orchestrator so camera/file URLs stay LAN-side.
+      outsideBusinessHours: r.outsideBusinessHours,
+      // Proxy the cluster preview without exposing upstream media URLs.
       previewUrl: `/api/cameras/reviews/${encodeURIComponent(id)}/preview`,
       thumbnailUrl: `/api/cameras/reviews/${encodeURIComponent(id)}/thumbnail`,
     };
   });
 
-  const nextCursor =
-    reviews.length === limit && reviews.length > 0
-      ? Math.min(...reviews.map((rv) => rv.startTime))
-      : null;
-
-  return { reviews, nextCursor };
+  return { reviews, nextCursor, scanLimitReached };
 }
 
 export async function setReviewViewed(reviewId: string): Promise<void> {
@@ -911,12 +977,18 @@ export async function setReviewViewed(reviewId: string): Promise<void> {
  * the route translates to 503 + a hint for the operator.
  */
 export async function searchEventsSemanticTyped(
-  filter: FrigateSearchFilter,
+  filter: CameraSearchFilter,
   scope: CameraScope,
+  prisma?: PrismaClient,
 ): Promise<FilteredEventsResult> {
   const limit = filter.limit ?? 50;
+  const { businessHours, ...upstreamFilter } = filter;
+  const hours = prisma ? await getCameraBusinessHours(prisma) : emptyCameraBusinessHours();
+  const classify = createBusinessHoursClassifier(hours);
   const cameras = narrowCameraFilter(scope, filter.cameras);
-  const raw = (await searchEventsSemantic({ ...filter, cameras })) as Array<Record<string, unknown>>;
+  if (cameras?.length === 0 || (businessHours && !hours.configured)) return { events: [], nextCursor: null };
+  const searchLimit = businessHours ? HOURS_SCAN_BATCH : limit;
+  const raw = (await searchEventsSemantic({ ...upstreamFilter, cameras, limit: searchLimit })) as Array<Record<string, unknown>>;
   const events: EventDetail[] = raw
     .filter((e) => inCameraScope(scope, String(e.camera ?? "")))
     .map((e) => {
@@ -931,6 +1003,8 @@ export async function searchEventsSemanticTyped(
       score: Number(e.top_score ?? e.score ?? 0),
       startTime: Number(e.start_time ?? 0),
       endTime: e.end_time !== null && e.end_time !== undefined ? Number(e.end_time) : null,
+      outsideBusinessHours: classify(Number(e.start_time ?? 0),
+        e.end_time !== null && e.end_time !== undefined ? Number(e.end_time) : null),
       thumbnail: `/api/cameras/events/${encodeURIComponent(id)}/thumbnail`,
       hasClip,
       hasSnapshot,
@@ -965,11 +1039,11 @@ export async function searchEventsSemanticTyped(
   // start_time-based cursor we use for /events doesn't apply here.
   // We just return the page; if the operator wants more, they'll
   // narrow the query.
-  const nextCursor =
-    events.length === limit && events.length > 0
-      ? Math.min(...events.map((ev) => ev.startTime))
-      : null;
-  return { events, nextCursor };
+  const matching = businessHours
+    ? events.filter((event) => event.outsideBusinessHours === (businessHours === "outside"))
+    : events;
+  return { events: matching.slice(0, limit), nextCursor: null,
+    searchLimitReached: raw.length === searchLimit || matching.length > limit };
 }
 
 // --- Recordings + timeline ---

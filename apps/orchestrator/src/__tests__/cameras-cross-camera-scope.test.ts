@@ -137,6 +137,7 @@ const grantFindMany = vi.fn(async ({ where }: { where: { userId: string } }) =>
 );
 
 const prisma = {
+  systemFlag: { findUnique: vi.fn().mockResolvedValue(null) },
   camera: {
     findMany: vi.fn().mockResolvedValue([]),
     findUnique: vi.fn(async ({ where }: { where: { name: string } }) => ({
@@ -198,7 +199,9 @@ function camerasIn(body: unknown): string[] {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  vi.stubGlobal("fetch", vi.fn(async () => new Response("media")));
+  vi.stubGlobal("fetch", vi.fn(async (url) => String(url).endsWith("/api/review/rv-front")
+    ? Response.json({ camera: "front_door", thumb_path: "/media/frigate/clips/review/thumb-front_door-rv-front.webp" })
+    : new Response("media")));
 });
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -251,9 +254,7 @@ describe("cross-camera lists show a scoped user only their cameras", () => {
     expect(camerasIn(res.body)).not.toContain("bedroom");
     // The request is narrowed to NO cameras; the real client answers that
     // with [] (pinned at the bottom of this file).
-    expect(vi.mocked(frigate.fetchEventsFiltered)).toHaveBeenCalledWith(
-      expect.objectContaining({ cameras: [] }),
-    );
+    expect(vi.mocked(frigate.fetchEventsFiltered)).not.toHaveBeenCalled();
   });
 
   it("a user with no grants at all gets empty lists", async () => {

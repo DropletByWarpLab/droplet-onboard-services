@@ -57,6 +57,7 @@ import { createCamerasRouter } from "../routes/cameras.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import {
   fetchEventCamera,
+  fetchReviewCamera,
   fetchHlsPlaylist,
   openMjpegStream,
   disableDetection,
@@ -109,6 +110,7 @@ beforeEach(() => {
   mockRecord.mockResolvedValue({ id: 1n } as never);
   resetCameraWatchDedupe();
   vi.mocked(fetchEventCamera).mockResolvedValue("front");
+  vi.mocked(fetchReviewCamera).mockResolvedValue("front");
   vi.mocked(openMjpegStream).mockImplementation(async () =>
     // image/jpeg, not multipart: supertest would try to parse a real MJPEG body.
     new globalThis.Response("frame", { headers: { "content-type": "image/jpeg" } }),
@@ -177,6 +179,14 @@ describe("watching writes one audit row per (actor, camera, kind) per window", (
     await settle();
     expect(rows()).toHaveLength(1);
     expect(rows()[0].refs).toMatchObject({ camera: "front", watch: "clip", saved: false, eventId: "ev1" });
+  });
+
+  it("a review preview is audited against the review's camera", async () => {
+    const res = await request(appAs(member)).get("/api/cameras/reviews/rv1/preview");
+    expect(res.status).toBe(200);
+    await settle();
+    expect(rows()).toHaveLength(1);
+    expect(rows()[0].refs).toMatchObject({ camera: "front", watch: "clip", saved: false, reviewId: "rv1" });
   });
 
   it("a failed write does not arm the window: the next fetch writes again", async () => {

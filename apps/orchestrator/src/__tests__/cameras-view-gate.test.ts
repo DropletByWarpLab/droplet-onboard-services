@@ -87,6 +87,8 @@ vi.mock("../services/frigate.client.js", () => ({
   fetchEvents: okAsync(),
   fetchReviewPreview: okAsync(),
   fetchReviewThumbnail: okAsync(),
+  fetchReview: vi.fn().mockResolvedValue({ camera: "front", thumb_path: "/media/frigate/clips/review/thumb-front-abc.webp" }),
+  reviewThumbnailUrl: vi.fn().mockReturnValue("http://frigate.test:5000/clips/review/thumb-front-abc.webp"),
   buildRecordingClipUrl: vi.fn().mockReturnValue("http://frigate.test/clip.mp4"),
   buildVodMasterUrl: vi.fn().mockReturnValue("http://frigate.test/master.m3u8"),
   buildVodSegmentUrl: vi.fn().mockReturnValue("http://frigate.test/0.ts"),

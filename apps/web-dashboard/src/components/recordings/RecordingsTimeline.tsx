@@ -1,538 +1,211 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { RecordingDay, TimelineEntry } from "@/lib/types";
+import { ChevronLeft, ChevronRight, Minus, Plus } from "lucide-react";
+import type { RecordingDay, RecordingSegment, TimelineEntry } from "@/lib/types";
 
-/** A range selected by the operator, expressed in seconds-since-midnight
- *  on the visible day. Resolution is minute-grained — the timeline
- *  caller computes the absolute Unix timestamp by pairing this with
- *  `day`. */
-export interface TimelineSelection {
-  startSec: number;
-  endSec: number;
-}
-
-const HOURS_IN_DAY = 24;
-const SEC_IN_DAY = HOURS_IN_DAY * 60 * 60;
-const SEC_IN_HOUR = 60 * 60;
+export interface TimelineSelection { startSec: number; endSec: number }
+const SEC_IN_DAY = 86400;
+const MIN_VIEW = 5 * 60;
+interface Viewport { start: number; span: number }
 
 interface Props {
-  /** YYYY-MM-DD selected date — drives which row of the summary we render. */
   day: string;
-  /** Per-camera summary returned by /recordings/summary. */
   summary: RecordingDay[];
-  /** Timeline entries (object/zone transitions) for the visible day. */
   timeline: TimelineEntry[];
-  /** Currently-selected hour [0, 23] — null = nothing picked yet. */
+  /** Exact segments for the day. Positions use elapsed seconds from local midnight. */
+  recordings?: RecordingSegment[];
   selectedHour: number | null;
-  /** Optional fine-grained playback position within the selected hour
-   *  (0..1). Drives the playhead. */
   playheadFraction?: number;
+  playheadSec?: number;
   onSelectHour: (hour: number) => void;
-  /** Operator's drag selection over the timeline (minute-precision).
-   *  null when nothing is selected. */
   selection?: TimelineSelection | null;
   onSelectionChange?: (next: TimelineSelection | null) => void;
-  /**
-   * Move playback to a point in the day, seconds-since-midnight.
-   *
-   * Dragging used to feed ONLY the Nextcloud export button — the gesture
-   * that most obviously means "take me here" did not move the video at
-   * all (WARP-1959).
-   */
   onScrubTo?: (secOfDay: number) => void;
-  /** Seconds-since-midnight of "now", when `day` is today. `null` on any
-   *  past day, which is what greys out the not-yet-happened hours. */
   nowSecOfDay?: number | null;
-  /** Oldest day (YYYY-MM-DD) still inside this camera's retention, when
-   *  known. Lets an empty morning read as "outside retention" rather than
-   *  "broken". */
   retentionOldestDay?: string | null;
 }
 
-/** A single hour bucket, ready to render. */
-interface HourSlot {
-  hour: number;
-  events: number;
-  /** Seconds of footage retained in this hour, 0…3600. */
-  duration: number;
-  /** Raw, unbounded motion activity count from Frigate. */
-  motion: number;
-  objects: number;
-  /** 0…1 — how much of the hour has footage. THE primary encoding. */
-  coverage: number;
-  /** True once this hour is entirely in the future. */
-  future: boolean;
-}
-
-/** Format seconds-since-midnight as HH:MM. Exported for the parent's chip. */
 export function fmtSecOfDay(sec: number): string {
   const total = Math.max(0, Math.min(SEC_IN_DAY, Math.round(sec)));
-  const h = Math.floor(total / SEC_IN_HOUR);
-  const m = Math.floor((total % SEC_IN_HOUR) / 60);
-  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+  return `${String(Math.floor(total / 3600)).padStart(2, "0")}:${String(Math.floor(total % 3600 / 60)).padStart(2, "0")}`;
+}
+function fmtCoverage(sec: number) {
+  const minutes = Math.round(sec / 60);
+  return minutes <= 0 ? "no footage" : minutes >= 60 ? "full hour" : `${minutes} min`;
+}
+function mergeRanges(ranges: Array<{ start: number; end: number }>) {
+  const merged: Array<{ start: number; end: number }> = [];
+  for (const range of [...ranges].sort((a, b) => a.start - b.start)) {
+    const previous = merged.at(-1);
+    if (previous && range.start <= previous.end + 0.25) previous.end = Math.max(previous.end, range.end);
+    else merged.push({ start: range.start, end: range.end });
+  }
+  return merged;
 }
 
-/** "1 h 04 m" / "9 m" — how much footage an hour actually holds. */
-function fmtCoverage(sec: number): string {
-  const m = Math.round(sec / 60);
-  if (m <= 0) return "no footage";
-  if (m >= 60) return "full hour";
-  return `${m} min`;
+/** Keeps the time under the cursor fixed as the ruler zooms. */
+export function zoomTimelineViewport(view: Viewport, factor: number, anchor: number, daySeconds = SEC_IN_DAY): Viewport {
+  const span = Math.max(MIN_VIEW, Math.min(daySeconds, view.span * factor));
+  const ratio = Math.max(0, Math.min(1, anchor));
+  return { start: Math.max(0, Math.min(daySeconds - span, view.start + ratio * (view.span - span))), span };
 }
 
-/**
- * Hour-bucket scrubber under the Recordings player.
- *
- * ## What it encodes, and why that changed
- *
- * The previous version coloured each hour by Frigate's `motion` score and
- * nothing else. `duration` — the one field that means *there is footage
- * here* — was fetched, normalised, and then thrown away.
- *
- * That made an hour holding a full 3600 s of continuous recording over a
- * quiet scene **pixel-identical to an hour with nothing on disk**. On the
- * production box, hours 05:00–12:00 held 3586 s each with `motion: 0` and
- * rendered as empty grey. Asked what was wrong, the honest answer from the
- * screen was "the cameras aren't recording" — which is exactly what got
- * reported (WARP-1959).
- *
- * So: **coverage is the base layer**, drawn as a filled bar whose height is
- * the fraction of the hour retained. Motion rides on top as discrete blips,
- * events as a count chip. Colour is never the only channel — a covered hour
- * differs from an empty one in fill height, border and label, so it reads
- * without relying on hue.
- */
-export function RecordingsTimeline({
-  day,
-  summary,
-  timeline,
-  selectedHour,
-  playheadFraction,
-  onSelectHour,
-  selection,
-  onSelectionChange,
-  onScrubTo,
-  nowSecOfDay = null,
-  retentionOldestDay = null,
-}: Props) {
-  const dayEntry = useMemo(
-    () => summary.find((d) => d.day === day) ?? null,
-    [summary, day],
-  );
-
+export function RecordingsTimeline({ day, summary, timeline, recordings, selectedHour,
+  playheadFraction, playheadSec, onSelectHour, selection, onSelectionChange, onScrubTo,
+  nowSecOfDay = null, retentionOldestDay = null }: Props) {
+  const [year, month, date] = day.split("-").map(Number);
+  const dayStart = new Date(year, month - 1, date).getTime() / 1000;
+  const daySeconds = new Date(year, month - 1, date + 1).getTime() / 1000 - dayStart;
+  const formatRuler = (sec: number) => {
+    if (sec === daySeconds) return "24:00";
+    const local = new Date((dayStart + sec) * 1000);
+    return `${String(local.getHours()).padStart(2, "0")}:${String(local.getMinutes()).padStart(2, "0")}`;
+  };
+  const [view, setView] = useState<Viewport>({ start: 0, span: SEC_IN_DAY });
+  const [drag, setDrag] = useState<TimelineSelection | null>(null);
   const gridRef = useRef<HTMLDivElement | null>(null);
-  const dragOriginRef = useRef<{ x: number; startSec: number; pointerId: number } | null>(
-    null,
-  );
-  const [dragState, setDragState] = useState<TimelineSelection | null>(null);
-  const DRAG_THRESHOLD_PX = 4;
+  const originRef = useRef<{ x: number; sec: number; pointerId: number } | null>(null);
+  const dragRef = useRef<TimelineSelection | null>(null);
+  useEffect(() => { setView({ start: 0, span: daySeconds }); setDrag(null); originRef.current = null; dragRef.current = null; }, [day, daySeconds]);
 
-  // ---------- Buckets ----------
-  const hours: HourSlot[] = useMemo(() => {
-    const slots: HourSlot[] = [];
-    for (let h = 0; h < HOURS_IN_DAY; h++) {
-      const found = dayEntry?.hours.find((x) => x.hour === h);
-      const duration = found?.duration ?? 0;
-      slots.push({
-        hour: h,
-        events: found?.events ?? 0,
-        duration,
-        motion: found?.motion ?? 0,
-        objects: found?.objects ?? 0,
-        // Clamped: Frigate occasionally reports a hair over 3600 across a
-        // segment boundary, and a >100% bar looks like a bug.
-        coverage: Math.max(0, Math.min(1, duration / SEC_IN_HOUR)),
-        future: nowSecOfDay !== null && h * SEC_IN_HOUR >= nowSecOfDay,
-      });
-    }
-    return slots;
-  }, [dayEntry, nowSecOfDay]);
-
-  /**
-   * Motion is an UNBOUNDED activity count, not a percentage — one real day
-   * on the box read 11, 3, 954, 160, 0, 774 across consecutive hours. Scale
-   * against the day's own maximum so a quiet day still shows contrast and a
-   * busy one doesn't saturate. (The old code clamped to 0–100, which put
-   * 954, 774 and 160 in the same tier.)
-   */
-  const motionMax = useMemo(
-    () => Math.max(1, ...hours.map((h) => h.motion)),
-    [hours],
-  );
-
-  const totalFootageSec = useMemo(
-    () => hours.reduce((n, h) => n + h.duration, 0),
-    [hours],
-  );
-  const coveredHours = useMemo(() => hours.filter((h) => h.duration > 0).length, [hours]);
-
-  // ---------- Geometry ----------
-  const xToSec = useCallback((clientX: number): number | null => {
-    const grid = gridRef.current;
-    if (!grid) return null;
-    const rect = grid.getBoundingClientRect();
-    const fraction = (clientX - rect.left) / rect.width;
-    if (fraction < 0 || fraction > 1) return null;
-    const sec = Math.round(fraction * SEC_IN_DAY);
-    // Snap to the minute — sub-minute precision is jitter with a mouse.
-    return Math.round(sec / 60) * 60;
-  }, []);
-
-  /** Never let the operator scrub into a time that hasn't happened. */
-  const clampToNow = useCallback(
-    (sec: number) => (nowSecOfDay === null ? sec : Math.min(sec, nowSecOfDay)),
-    [nowSecOfDay],
-  );
-
-  // ---------- Pointer: click to jump, drag to select ----------
-  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (e.button !== 0) return;
-    const sec = xToSec(e.clientX);
-    if (sec === null) return;
-    dragOriginRef.current = { x: e.clientX, startSec: sec, pointerId: e.pointerId };
-  };
-
-  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
-    const origin = dragOriginRef.current;
-    if (!origin) return;
-    const dx = Math.abs(e.clientX - origin.x);
-    if (!dragState && dx < DRAG_THRESHOLD_PX) return;
-    const sec = xToSec(e.clientX);
-    if (sec === null) return;
-    if (!dragState) {
-      e.currentTarget.setPointerCapture(origin.pointerId);
-    }
-    setDragState({ startSec: origin.startSec, endSec: sec });
-  };
-
-  const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
-    const origin = dragOriginRef.current;
-    dragOriginRef.current = null;
-
-    if (!dragState) {
-      // A click, not a drag: jump playback to that exact second.
-      if (origin) {
-        const target = clampToNow(origin.startSec);
-        onSelectHour(Math.floor(target / SEC_IN_HOUR));
-        onScrubTo?.(target);
-      }
-      return;
-    }
-
-    e.currentTarget.releasePointerCapture(e.pointerId);
-    const startSec = clampToNow(Math.min(dragState.startSec, dragState.endSec));
-    const endSec = clampToNow(Math.max(dragState.startSec, dragState.endSec));
-    setDragState(null);
-    if (endSec - startSec < 60) return;
-
-    onSelectionChange?.({ startSec, endSec });
-    // A drag means "take me here" as much as "export this". Move playback
-    // to the start of the range too — the old build only wired the export.
-    onSelectHour(Math.floor(startSec / SEC_IN_HOUR));
-    onScrubTo?.(startSec);
-  };
+  const entry = summary.find((d) => d.day === day);
+  const hours = useMemo(() => Array.from({ length: 24 }, (_, hour) => {
+    const found = entry?.hours.find((h) => h.hour === hour);
+    const duration = found?.duration ?? 0;
+    return { hour, duration, coverage: Math.min(1, Math.max(0, duration / 3600)),
+      motion: found?.motion ?? 0, events: found?.events ?? 0,
+      start: new Date(year, month - 1, date, hour).getTime() / 1000 - dayStart,
+      end: new Date(year, month - 1, date, hour + 1).getTime() / 1000 - dayStart,
+      future: nowSecOfDay !== null && new Date(year, month - 1, date, hour).getTime() / 1000 - dayStart >= nowSecOfDay };
+  }), [entry, nowSecOfDay, dayStart, year, month, date]);
+  const coveredHours = hours.filter((h) => h.duration > 0).length;
+  const totalFootage = recordings === undefined ? hours.reduce((n, h) => n + h.duration, 0)
+    : recordings.reduce((n, s) => n + Math.max(0, Math.min(dayStart + daySeconds, s.endTime) - Math.max(dayStart, s.startTime)), 0);
+  const motionMax = Math.max(1, ...hours.map((h) => h.motion));
+  const currentSec = playheadSec ?? (selectedHour === null ? null : hours[selectedHour].start + (playheadFraction ?? 0) * 3600);
+  const maxSec = Math.min(daySeconds - 1, nowSecOfDay ?? daySeconds - 1);
+  const left = (sec: number) => (sec - view.start) / view.span * 100;
+  const width = (start: number, end: number) => (end - start) / view.span * 100;
+  const visible = (start: number, end: number) => end > view.start && start < view.start + view.span;
+  const clamp = (sec: number) => Math.max(0, Math.min(maxSec, sec));
+  const jump = (sec: number) => { const target = clamp(sec); onSelectHour(new Date((dayStart + target) * 1000).getHours()); onScrubTo?.(target); };
+  const xToSec = useCallback((x: number) => {
+    const rect = gridRef.current?.getBoundingClientRect();
+    if (!rect || rect.width <= 0) return null;
+    const fraction = Math.max(0, Math.min(1, (x - rect.left) / rect.width));
+    const snap = view.span <= 3600 ? 1 : 60;
+    return Math.round((view.start + fraction * view.span) / snap) * snap;
+  }, [view]);
 
   useEffect(() => {
-    if (!dragState) return;
-    function onKey(ev: KeyboardEvent) {
-      if (ev.key === "Escape") {
-        setDragState(null);
-        dragOriginRef.current = null;
-      }
+    const grid = gridRef.current;
+    if (!grid) return;
+    function wheel(e: WheelEvent) {
+      e.preventDefault();
+      const rect = grid!.getBoundingClientRect();
+      if (!rect.width) return;
+      if (e.shiftKey) setView((v) => ({ ...v, start: Math.max(0, Math.min(daySeconds - v.span, v.start + Math.sign(e.deltaY || e.deltaX) * v.span / 8)) }));
+      else setView((v) => zoomTimelineViewport(v, e.deltaY < 0 ? 0.75 : 4 / 3, (e.clientX - rect.left) / rect.width, daySeconds));
     }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [dragState]);
+    grid.addEventListener("wheel", wheel, { passive: false });
+    return () => grid.removeEventListener("wheel", wheel);
+  }, [daySeconds]);
 
-  // ---------- Keyboard scrubbing ----------
-  //
-  // One focusable widget, not 24 tab stops. Arrow keys step an hour,
-  // shift-arrow jumps six, Home/End go to the ends of the available day.
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
-    const lastHour =
-      nowSecOfDay === null ? 23 : Math.min(23, Math.floor(nowSecOfDay / SEC_IN_HOUR));
-    const current = selectedHour ?? lastHour;
-    let next: number | null = null;
-
-    if (e.key === "ArrowLeft") next = current - (e.shiftKey ? 6 : 1);
-    else if (e.key === "ArrowRight") next = current + (e.shiftKey ? 6 : 1);
-    else if (e.key === "Home") next = 0;
-    else if (e.key === "End") next = lastHour;
-    if (next === null) return;
-
-    e.preventDefault();
-    const clamped = Math.max(0, Math.min(lastHour, next));
-    onSelectHour(clamped);
-    onScrubTo?.(clamped * SEC_IN_HOUR);
-  };
-
-  // ---------- Overlays ----------
-  const visibleSelection = dragState ?? selection ?? null;
-  const selLeft = visibleSelection
-    ? Math.min(visibleSelection.startSec, visibleSelection.endSec) / SEC_IN_DAY
-    : null;
-  const selWidth = visibleSelection
-    ? Math.abs(visibleSelection.endSec - visibleSelection.startSec) / SEC_IN_DAY
-    : null;
-
-  /**
-   * Motion blips, positioned by their real timestamp.
-   *
-   * The old build bucketed these with `d.getHours()` while the cells came
-   * from a UTC-keyed summary — two clocks on one graphic. Everything here
-   * is seconds-since-midnight in the operator's own zone.
-   */
-  const blips = useMemo(() => {
-    const out: Array<{ key: string; leftFraction: number; label: string }> = [];
-    for (const t of timeline) {
-      const d = new Date(t.timestamp * 1000);
-      const localDay = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-      if (localDay !== day) continue;
-      const sec = d.getHours() * SEC_IN_HOUR + d.getMinutes() * 60 + d.getSeconds();
-      out.push({
-        key: `${t.sourceId}-${t.timestamp}`,
-        leftFraction: sec / SEC_IN_DAY,
-        label: `${t.label || t.classType}${t.zone ? ` · ${t.zone}` : ""} at ${fmtSecOfDay(sec)}`,
-      });
-    }
-    return out;
+  const tickStep = view.span > 12 * 3600 ? 3 * 3600 : view.span > 3 * 3600 ? 3600 : view.span > 3600 ? 15 * 60 : view.span > 15 * 60 ? 5 * 60 : 60;
+  const ticks = [];
+  for (let sec = Math.ceil(view.start / tickStep) * tickStep; sec <= view.start + view.span; sec += tickStep) ticks.push(sec);
+  const events = useMemo(() => {
+    const [y, m, d] = day.split("-").map(Number);
+    const after = new Date(y, m - 1, d).getTime() / 1000, before = new Date(y, m - 1, d + 1).getTime() / 1000;
+    return timeline.filter((t) => t.timestamp >= after && t.timestamp < before).map((t) => ({ ...t, sec: t.timestamp - after }));
   }, [timeline, day]);
-
-  const playheadLeft =
-    selectedHour !== null &&
-    playheadFraction !== undefined &&
-    playheadFraction >= 0 &&
-    playheadFraction <= 1
-      ? ((selectedHour + playheadFraction) / HOURS_IN_DAY) * 100
-      : null;
-
-  const nowLeft =
-    nowSecOfDay === null ? null : (nowSecOfDay / SEC_IN_DAY) * 100;
-
-  const outsideRetention = Boolean(
-    retentionOldestDay && day < retentionOldestDay,
-  );
+  const ranges = useMemo(() => recordings?.map((s) => ({ ...s, start: Math.max(0, s.startTime - dayStart), end: Math.min(daySeconds, s.endTime - dayStart) })).filter((s) => s.end > s.start), [recordings, dayStart, daySeconds]);
+  const recordedRanges = useMemo(() => ranges === undefined ? undefined : mergeRanges(ranges), [ranges]);
+  const motionRanges = useMemo(() => ranges === undefined ? [] : mergeRanges(ranges.filter((s) => s.motion > 0)), [ranges]);
+  const selectionView = drag ?? selection;
+  const selectionStart = selectionView ? Math.min(selectionView.startSec, selectionView.endSec) : 0;
+  const selectionEnd = selectionView ? Math.max(selectionView.startSec, selectionView.endSec) : 0;
+  const pan = (direction: number) => setView((v) => ({ ...v, start: Math.max(0, Math.min(daySeconds - v.span, v.start + direction * v.span / 2)) }));
+  const zoom = (factor: number) => setView((v) => zoomTimelineViewport(v, factor, currentSec === null ? 0.5 : (currentSec - v.start) / v.span, daySeconds));
 
   return (
     <div className="card">
       <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
-        <h3 className="type-subheadline font-medium text-[color:var(--text)]">Timeline</h3>
-        <span className="type-caption-2 text-[color:var(--text-muted)]">
-          {coveredHours === 0 ? (
-            outsideRetention ? (
-              <>Outside this camera&apos;s retention window</>
-            ) : (
-              <>No footage kept on this day</>
-            )
-          ) : (
-            <>
-              {Math.round(totalFootageSec / 60)} min of footage across {coveredHours}{" "}
-              {coveredHours === 1 ? "hour" : "hours"}
-              {dayEntry?.events ? ` · ${dayEntry.events} events` : ""}
-            </>
-          )}
-        </span>
-      </div>
-
-      {/* Horizontal scroll on narrow screens: 24 cells across a 375px phone
-          is a 13px target. The strip keeps a minimum width so each hour
-          stays tappable, and the container scrolls instead of shrinking. */}
-      <div className="overflow-x-auto -mx-1 px-1">
-        <div style={{ minWidth: 24 * 44 }}>
-          {/* Hour axis. Uses the SAME inline template as the cells — the old
-              build used a `grid-cols-24` class, which Tailwind 3 does not
-              ship and nothing defined, so the labels collapsed into one
-              column and never sat over their hours. */}
-          <div
-            className="grid text-center mb-1 select-none"
-            style={{ gridTemplateColumns: `repeat(${HOURS_IN_DAY}, minmax(0, 1fr))` }}
-            aria-hidden="true"
-          >
-            {hours.map((h) => (
-              <div
-                key={`mark-${h.hour}`}
-                className="type-caption-2 text-[color:var(--text-faint)]"
-              >
-                {h.hour % 3 === 0 ? String(h.hour).padStart(2, "0") : "·"}
-              </div>
-            ))}
-          </div>
-
-          <div
-            ref={gridRef}
-            role="slider"
-            tabIndex={0}
-            aria-label="Recording timeline — arrow keys move through the day"
-            aria-valuemin={0}
-            aria-valuemax={23}
-            aria-valuenow={selectedHour ?? undefined}
-            aria-valuetext={
-              selectedHour === null
-                ? "No hour selected"
-                : `${String(selectedHour).padStart(2, "0")}:00, ${fmtCoverage(hours[selectedHour].duration)}`
-            }
-            onKeyDown={handleKeyDown}
-            className="grid gap-px relative touch-none rounded-md focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]"
-            style={{ gridTemplateColumns: `repeat(${HOURS_IN_DAY}, minmax(0, 1fr))` }}
-            onPointerDown={handlePointerDown}
-            onPointerMove={handlePointerMove}
-            onPointerUp={handlePointerUp}
-            onPointerCancel={() => setDragState(null)}
-          >
-            {hours.map((h) => {
-              const isSelected = selectedHour === h.hour;
-              const hasFootage = h.duration > 0;
-              const motionFraction = h.motion / motionMax;
-
-              return (
-                <div
-                  key={`cell-${h.hour}`}
-                  data-testid={`hour-cell-${h.hour}`}
-                  data-has-footage={hasFootage ? "true" : "false"}
-                  data-coverage={h.coverage.toFixed(3)}
-                  data-future={h.future ? "true" : "false"}
-                  aria-label={
-                    h.future
-                      ? `Hour ${h.hour}: not yet`
-                      : `Hour ${h.hour}: ${fmtCoverage(h.duration)}${
-                          h.events > 0 ? `, ${h.events} events` : ""
-                        }`
-                  }
-                  title={
-                    h.future
-                      ? `${String(h.hour).padStart(2, "0")}:00 — hasn't happened yet`
-                      : `${String(h.hour).padStart(2, "0")}:00 — ${fmtCoverage(h.duration)}${
-                          h.events > 0 ? `, ${h.events} events` : ""
-                        }`
-                  }
-                  className={`relative h-14 overflow-hidden rounded-sm transition-colors ${
-                    isSelected ? "ring-2 ring-[var(--brand)] z-10" : ""
-                  } ${h.future ? "opacity-40" : hasFootage ? "cursor-pointer" : ""}`}
-                  style={{
-                    // The empty state is a visibly different SURFACE, not
-                    // just a paler colour — so "no footage" survives a
-                    // colour-blind reader and a bad monitor.
-                    background: h.future
-                      ? "repeating-linear-gradient(45deg, var(--inset) 0 4px, transparent 4px 8px)"
-                      : "var(--inset)",
-                    border: hasFootage
-                      ? "1px solid color-mix(in srgb, var(--brand) 35%, transparent)"
-                      : "1px dashed var(--border)",
-                  }}
-                >
-                  {/* COVERAGE — the primary encoding. Height is the share of
-                      the hour actually retained. */}
-                  {hasFootage && (
-                    <div
-                      data-testid={`coverage-fill-${h.hour}`}
-                      className="absolute inset-x-0 bottom-0 pointer-events-none"
-                      style={{
-                        height: `${Math.max(8, h.coverage * 100)}%`,
-                        background: "color-mix(in srgb, var(--brand) 45%, var(--inset))",
-                      }}
-                    />
-                  )}
-
-                  {/* MOTION — rides ON the coverage, never replaces it. */}
-                  {h.motion > 0 && (
-                    <div
-                      data-testid={`motion-band-${h.hour}`}
-                      className="absolute inset-x-0 bottom-0 pointer-events-none"
-                      style={{
-                        height: `${Math.max(6, motionFraction * 46)}%`,
-                        background: "color-mix(in srgb, var(--brand) 85%, transparent)",
-                      }}
-                    />
-                  )}
-
-                  {h.events > 0 && (
-                    <span className="absolute top-0.5 right-0.5 type-caption-2 px-1 rounded bg-black/70 text-white pointer-events-none">
-                      {h.events}
-                    </span>
-                  )}
-                </div>
-              );
-            })}
-
-            {/* Motion blips, positioned by real timestamp across the strip. */}
-            {blips.map((b) => (
-              <span
-                key={b.key}
-                data-testid="motion-blip"
-                title={b.label}
-                className="absolute w-1 h-1 rounded-full bg-system-orange pointer-events-none z-20"
-                style={{ left: `calc(${b.leftFraction * 100}% - 2px)`, bottom: 4 }}
-              />
-            ))}
-
-            {/* "Now" marker — the boundary between recorded and not-yet. */}
-            {nowLeft !== null && (
-              <div
-                data-testid="now-marker"
-                className="absolute top-0 bottom-0 w-px pointer-events-none z-30"
-                style={{ left: `${nowLeft}%`, background: "var(--text-muted)" }}
-                title="Now"
-              />
-            )}
-
-            {/* Playhead. */}
-            {playheadLeft !== null && (
-              <div
-                data-testid="playhead"
-                className="absolute top-0 bottom-0 w-0.5 pointer-events-none z-30"
-                style={{ left: `calc(${playheadLeft}% - 1px)`, background: "var(--brand)" }}
-              />
-            )}
-
-            {/* Drag selection. `zIndex` inline: `z-15` is not a Tailwind
-                class and silently did nothing in the previous build. */}
-            {selLeft !== null && selWidth !== null && selWidth > 0 && (
-              <div
-                data-testid="selection-band"
-                className="absolute top-0 bottom-0 pointer-events-none"
-                style={{
-                  left: `${selLeft * 100}%`,
-                  width: `${selWidth * 100}%`,
-                  zIndex: 25,
-                  background: "color-mix(in srgb, var(--brand) 25%, transparent)",
-                  boxShadow: "0 0 0 2px var(--brand)",
-                }}
-              />
-            )}
-          </div>
+        <div><h3 className="type-subheadline font-medium text-[color:var(--text)]">Timeline</h3>
+          <span className="type-caption-2 text-[color:var(--text-muted)]">
+            {totalFootage === 0 ? retentionOldestDay && day < retentionOldestDay ? "Outside this camera's retention window" : "No footage kept on this day"
+              : recordings === undefined ? `${Math.round(totalFootage / 60)} min of footage across ${coveredHours} ${coveredHours === 1 ? "hour" : "hours"}${entry?.events ? ` · ${entry.events} events` : ""}`
+                : `${Math.round(totalFootage / 60)} min of footage${entry?.events ? ` · ${entry.events} events` : ""}`}
+          </span></div>
+        <div className="flex items-center gap-1 flex-wrap min-w-0">
+          <button type="button" className="icon-btn" aria-label="Pan earlier" disabled={view.start === 0} onClick={() => pan(-1)}><ChevronLeft size={15} /></button>
+          <button type="button" className="icon-btn" aria-label="Zoom out timeline" disabled={view.span === daySeconds} onClick={() => zoom(2)}><Minus size={15} /></button>
+          <span className="type-caption-2 font-mono min-w-16 text-center" data-testid="timeline-scale">{view.span >= 3600 ? `${Math.round(view.span / 3600 * 10) / 10} h` : `${Math.round(view.span / 60)} min`}</span>
+          <button type="button" className="icon-btn" aria-label="Zoom in timeline" disabled={view.span === MIN_VIEW} onClick={() => zoom(0.5)}><Plus size={15} /></button>
+          <button type="button" className="icon-btn" aria-label="Pan later" disabled={view.start + view.span === daySeconds} onClick={() => pan(1)}><ChevronRight size={15} /></button>
+          <button type="button" className="btn ghost sm" onClick={() => setView({ start: 0, span: daySeconds })}>Whole day</button>
         </div>
       </div>
-
-      {/* Legend — the graphic explains itself rather than needing a manual. */}
-      <div className="flex items-center gap-4 mt-3 flex-wrap type-caption-2 text-[color:var(--text-muted)]">
-        <span className="flex items-center gap-1.5">
-          <span
-            className="inline-block w-3 h-3 rounded-sm"
-            style={{
-              background: "color-mix(in srgb, var(--brand) 45%, var(--inset))",
-              border: "1px solid color-mix(in srgb, var(--brand) 35%, transparent)",
-            }}
-          />
-          Footage kept
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span
-            className="inline-block w-3 h-3 rounded-sm"
-            style={{ background: "var(--inset)", border: "1px dashed var(--border)" }}
-          />
-          Nothing kept
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span className="inline-block w-1.5 h-1.5 rounded-full bg-system-orange" />
-          Motion
-        </span>
+      <div className="flex gap-3">
+        <div className="w-16 shrink-0 pt-7 type-caption-2 text-[color:var(--text-muted)]" aria-hidden="true"><div className="h-8 flex items-center">Recorded</div><div className="h-8 flex items-center">Motion</div><div className="h-8 flex items-center">Events</div></div>
+        <div ref={gridRef} role="group" aria-label="Recording timeline"
+          data-testid="timeline-ruler" data-view-start={view.start} data-view-span={view.span}
+          className="relative flex-1 min-w-0 h-32 touch-none overflow-hidden rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]" style={{ background: "var(--inset)" }}
+          onKeyDown={(e) => {
+            if ((e.target as HTMLElement).getAttribute("role") !== "slider") return;
+            if (e.key === "Escape") { originRef.current = null; dragRef.current = null; setDrag(null); return; }
+            const current = Math.floor((currentSec ?? maxSec) / 3600); let target: number | null = null;
+            if (e.key === "Home") target = 0;
+            else if (e.key === "End") target = Math.floor(maxSec / 3600) * 3600;
+            else if (e.key === "ArrowLeft") target = (current - (e.shiftKey ? 6 : 1)) * 3600;
+            else if (e.key === "ArrowRight") target = Math.min(Math.floor(maxSec / 3600), current + (e.shiftKey ? 6 : 1)) * 3600;
+            else if (e.key === "+" || e.key === "=") zoom(0.5);
+            else if (e.key === "-") zoom(2);
+            else return;
+            e.preventDefault(); if (target !== null) jump(target);
+          }}
+          onPointerDown={(e) => { if (e.button !== 0) return; dragRef.current = null; const sec = xToSec(e.clientX); if (sec === null) return; originRef.current = { x: e.clientX, sec, pointerId: e.pointerId }; e.currentTarget.setPointerCapture?.(e.pointerId); }}
+          onPointerMove={(e) => { const origin = originRef.current; if (!origin || Math.abs(e.clientX - origin.x) < 4) return; const sec = xToSec(e.clientX); if (sec === null) return; const next = { startSec: clamp(origin.sec), endSec: clamp(sec) }; dragRef.current = next; setDrag(next); }}
+          onPointerUp={(e) => {
+            const origin = originRef.current; if (!origin) return; originRef.current = null; e.currentTarget.releasePointerCapture?.(e.pointerId);
+            const range = dragRef.current; dragRef.current = null; setDrag(null);
+            if (!range) { jump(origin.sec); return; }
+            const startSec = Math.min(range.startSec, range.endSec), endSec = Math.max(range.startSec, range.endSec);
+            if (endSec - startSec >= 1) onSelectionChange?.({ startSec, endSec }); jump(startSec);
+          }}
+          onPointerCancel={() => { originRef.current = null; dragRef.current = null; setDrag(null); }}>
+          <div role="slider" tabIndex={0} aria-label="Recording timeline — arrow keys move through the day"
+            aria-valuemin={0} aria-valuemax={maxSec} aria-valuenow={currentSec ?? undefined}
+            aria-valuetext={currentSec === null ? "No time selected" : formatRuler(currentSec)}
+            className="absolute inset-0 pointer-events-none rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--brand)]" />
+          <div data-testid="time-axis" className="absolute inset-x-0 top-0 h-7 border-b border-[var(--border)] pointer-events-none">
+            {ticks.map((sec) => <span key={sec} title={new Date((dayStart + sec) * 1000).toLocaleTimeString([], { timeZoneName: "short" })} className="absolute type-caption-2 text-[color:var(--text-muted)] font-mono" style={{ left: `${left(sec)}%`, transform: sec === daySeconds ? "translateX(-100%)" : sec === 0 ? "none" : "translateX(-50%)" }}>{formatRuler(sec)}<span className="block h-2 w-px mx-auto bg-[var(--border)]" /></span>)}
+          </div>
+          {hours.filter((h) => visible(h.start, h.end)).map((h) => (
+            <div key={h.hour} data-testid={`hour-cell-${h.hour}`} data-has-footage={h.duration > 0 ? "true" : "false"} data-coverage={h.coverage.toFixed(3)} data-future={h.future ? "true" : "false"}
+              aria-label={h.future ? `Hour ${h.hour}: not yet` : `Hour ${h.hour}: ${fmtCoverage(h.duration)}${h.events ? `, ${h.events} events` : ""}`}
+              title={`${fmtSecOfDay(h.hour * 3600)} · ${h.future ? "not yet" : fmtCoverage(h.duration)}`}
+              className="absolute top-7 h-8 pointer-events-none" style={{ left: `${left(h.start)}%`, width: `${width(h.start, h.end)}%`, opacity: h.future ? 0.3 : 1, border: h.duration > 0 ? "1px solid var(--border)" : "1px dashed var(--border)" }}>
+              {ranges === undefined && h.duration > 0 && <div data-testid={`coverage-fill-${h.hour}`} className="absolute inset-x-0 bottom-0 bg-[var(--brand)] opacity-60" style={{ height: `${Math.max(8, h.coverage * 100)}%` }} />}
+            </div>
+          ))}
+          <div className="absolute inset-x-0 top-[60px] h-8 border-y border-[var(--border)] pointer-events-none" />
+          {ranges === undefined ? hours.filter((h) => h.motion > 0 && visible(h.start, h.end)).map((h) => (
+            <div key={h.hour} data-testid={`motion-band-${h.hour}`} className="absolute top-[60px] bg-system-orange opacity-70 pointer-events-none" style={{ left: `${left(h.start)}%`, width: `${width(h.start, h.end)}%`, height: `${Math.max(6, h.motion / motionMax * 20)}%` }} />
+          )) : recordedRanges?.filter((s) => visible(s.start, s.end)).map((s) => <span key={s.start} data-testid="recorded-segment" title={`Recorded ${formatRuler(s.start)} – ${formatRuler(s.end)}`} className="absolute top-8 h-6 bg-[var(--brand)] opacity-70 pointer-events-none" style={{ left: `${left(s.start)}%`, width: `${width(s.start, s.end)}%`, minWidth: 1 }} />)}
+          {motionRanges.filter((s) => visible(s.start, s.end)).map((s) => <span key={s.start} data-testid="motion-segment" className="absolute top-[68px] h-4 bg-system-orange pointer-events-none" style={{ left: `${left(s.start)}%`, width: `${width(s.start, s.end)}%`, minWidth: 2 }} />)}
+          {events.filter((t) => visible(t.sec, t.sec + 1)).map((t, i) => <button key={`${t.sourceId}-${t.timestamp}-${i}`} type="button" data-testid="motion-blip" aria-label={`${t.label || t.classType} at ${formatRuler(t.sec)}`} title={`${t.label || t.classType}${t.zone ? ` · ${t.zone}` : ""} · ${new Date(t.timestamp * 1000).toLocaleTimeString([], { timeZoneName: "short" })}`} className="absolute top-[102px] w-2 h-4 rounded-sm bg-system-orange z-20" style={{ left: `calc(${left(t.sec)}% - 4px)` }} onPointerDown={(e) => e.stopPropagation()} onClick={() => jump(t.sec)} />)}
+          {nowSecOfDay !== null && <div data-testid="now-marker" title="Now" className="absolute top-6 bottom-0 w-px bg-[var(--text-muted)] pointer-events-none z-30" style={{ left: `${left(nowSecOfDay)}%` }} />}
+          {currentSec !== null && currentSec >= view.start && currentSec <= view.start + view.span && <div data-testid="playhead" className="absolute top-5 bottom-0 w-0.5 bg-[var(--brand)] pointer-events-none z-30" style={{ left: `${left(currentSec)}%` }}><span className="absolute -top-1 -left-1 w-2.5 h-2.5 rotate-45 bg-[var(--brand)]" /></div>}
+          {selectionView && selectionEnd > selectionStart && visible(selectionStart, selectionEnd) && <div data-testid="selection-band" className="absolute top-6 bottom-0 pointer-events-none z-20 bg-[var(--brand-subtle)] border-x-2 border-[var(--brand)]" style={{ left: `${left(selectionStart)}%`, width: `${width(selectionStart, selectionEnd)}%` }} />}
+        </div>
       </div>
-
-      <p className="type-caption-1 mt-2 text-[color:var(--text-muted)]">
-        Click to jump there. Drag to pick a range to export — playback follows.
-        Arrow keys move an hour, Shift+arrow six. Esc cancels a drag.
-      </p>
+      <div className="mt-3 flex items-center justify-between gap-3 flex-wrap type-caption-2 text-[color:var(--text-muted)]">
+        <span><span className="inline-block w-2 h-2 bg-[var(--brand)] mr-1" />Footage kept <span className="inline-block w-2 h-2 bg-system-orange ml-3 mr-1" />Motion / events <span className="ml-3">Empty space: nothing kept</span></span>
+        <span className="font-mono">{formatRuler(view.start)} – {formatRuler(view.start + view.span)}</span>
+      </div>
+      <p className="type-caption-1 mt-2 text-[color:var(--text-muted)]">Click to seek · scroll to zoom · Shift+scroll to pan · drag to select a range · click an event to jump</p>
     </div>
   );
 }

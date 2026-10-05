@@ -1,9 +1,11 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { ExternalLink, X } from "lucide-react";
+import { ExternalLink, RefreshCw, X } from "lucide-react";
 import type { ReviewItem } from "@/lib/types";
+import { HlsPlayer } from "@/components/recordings/HlsPlayer";
+import { MediaThumbnail } from "./MediaThumbnail";
 
 interface Props {
   review: ReviewItem;
@@ -22,6 +24,9 @@ interface Props {
  * in this UX.
  */
 export function ReviewClipModal({ review, onClose, onMarkViewed }: Props) {
+  const [playback, setPlayback] = useState<"preview" | "recording" | "failed">("preview");
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => { setPlayback("preview"); setAttempt(0); }, [review.id]);
   // Track whether we've already fired the mark-viewed callback for this
   // review id. Switching to a different review re-arms it.
   const markedFor = useRef<string | null>(null);
@@ -47,6 +52,8 @@ export function ReviewClipModal({ review, onClose, onMarkViewed }: Props) {
 
   const cameraDisplay = review.camera.replace(/_/g, " ");
   const startedAt = new Date(review.startTime * 1000);
+  const before = useMemo(() => review.endTime ?? Math.floor(Date.now() / 1000), [review.id, review.endTime, attempt]);
+  const recordingUrl = `/api/cameras/${encodeURIComponent(review.camera)}/playback.m3u8?after=${review.startTime}&before=${Math.max(review.startTime + 1, before)}`;
 
   return (
     <div
@@ -66,23 +73,33 @@ export function ReviewClipModal({ review, onClose, onMarkViewed }: Props) {
         </button>
 
         <div className="rounded-xl overflow-hidden bg-black shadow-2xl">
-          {review.previewUrl ? (
+          {playback === "recording" || (!review.previewUrl && playback !== "failed") ? (
+            <HlsPlayer key={`${review.id}-${attempt}`} src={recordingUrl} onError={() => setPlayback("failed")} className="w-full max-h-[70vh] bg-black" muted />
+          ) : playback === "preview" && review.previewUrl ? (
             <video
-              key={review.id}
+              key={`${review.id}-${attempt}`}
               src={review.previewUrl}
               controls
               autoPlay
               muted
+              onError={() => setPlayback("recording")}
               className="w-full max-h-[70vh] bg-black"
             />
           ) : (
-            <img
+            <MediaThumbnail
               src={review.thumbnailUrl}
               alt={`${review.severity} on ${cameraDisplay}`}
               className="w-full max-h-[70vh] object-contain bg-black"
             />
           )}
         </div>
+        {playback === "failed" && (
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-white" role="alert">
+            <p className="type-subheadline">This clip couldn&apos;t be loaded. The recording may have expired or the camera may be unavailable.</p>
+            <button className="btn" onClick={() => { setAttempt((n) => n + 1); setPlayback("preview"); }}><RefreshCw size={14} /> Retry</button>
+            <Link className="btn" href={`/cameras/${encodeURIComponent(review.camera)}/recordings?date=${startedAt.getFullYear()}-${String(startedAt.getMonth() + 1).padStart(2, "0")}-${String(startedAt.getDate()).padStart(2, "0")}`}>Browse recordings</Link>
+          </div>
+        )}
 
         <div className="mt-3 flex items-start justify-between gap-4 text-white">
           <div className="min-w-0 flex-1">

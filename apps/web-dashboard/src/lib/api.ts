@@ -18,6 +18,9 @@ import type {
   ExtensionToolClassification,
   ExtensionToolDecision,
   CameraInfo,
+  CameraBusinessHours,
+  MotionFilter,
+  MotionActivityResult,
   CameraGroupInfo,
   CameraPinInfo,
   CameraSettings,
@@ -2741,6 +2744,7 @@ export async function fetchReviewsFiltered(
   filter: ReviewFilter,
 ): Promise<FilteredReviewsResult> {
   const params = new URLSearchParams();
+  if (filter.businessHours) params.set("businessHours", filter.businessHours);
   if (filter.cameras?.length) params.set("cameras", filter.cameras.join(","));
   if (filter.severity?.length) params.set("severity", filter.severity.join(","));
   if (filter.before !== undefined) params.set("before", String(filter.before));
@@ -3299,6 +3303,7 @@ export async function searchEventsSemantic(
   filter: EventFilter & { searchType?: "thumbnail" | "description" } = {},
 ): Promise<FilteredEventsResult> {
   const params = new URLSearchParams();
+  if (filter.businessHours) params.set("businessHours", filter.businessHours);
   params.set("query", query);
   if (filter.searchType) params.set("search_type", filter.searchType);
   if (filter.cameras?.length) params.set("cameras", filter.cameras.join(","));
@@ -3326,6 +3331,7 @@ export async function fetchEventsFiltered(
   filter: EventFilter,
 ): Promise<FilteredEventsResult> {
   const params = new URLSearchParams();
+  if (filter.businessHours) params.set("businessHours", filter.businessHours);
   if (filter.cameras?.length) params.set("cameras", filter.cameras.join(","));
   if (filter.labels?.length) params.set("labels", filter.labels.join(","));
   if (filter.minScore !== undefined) params.set("min_score", String(filter.minScore));
@@ -3342,6 +3348,38 @@ export async function fetchEventsFiltered(
   // WARP-3105: a Frigate outage is a degraded 200 + empty list, not "no events".
   if (res.headers?.get("X-Droplet-Degraded")) throw new CamerasUnavailableError();
   return res.json();
+}
+
+export async function fetchCameraBusinessHours(): Promise<CameraBusinessHours> {
+  const res = await authFetch(`${BASE}/api/cameras/business-hours`);
+  if (!res.ok) throw new Error(`Could not load business hours: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchMotionActivity(filter: MotionFilter): Promise<MotionActivityResult> {
+  const params = new URLSearchParams({ after: String(filter.after), before: String(filter.before) });
+  if (filter.cameras?.length) params.set("cameras", filter.cameras.join(","));
+  if (filter.businessHours) params.set("businessHours", filter.businessHours);
+  if (filter.limit !== undefined) params.set("limit", String(filter.limit));
+  if (filter.cursor !== undefined) params.set("cursor", String(filter.cursor));
+  const res = await authFetch(`${BASE}/api/cameras/motion?${params}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Could not load motion: ${res.status}`);
+  }
+  if (res.headers?.get("X-Droplet-Degraded")) throw new CamerasUnavailableError();
+  return res.json();
+}
+
+export async function saveCameraBusinessHours(schedule: CameraBusinessHours): Promise<CameraBusinessHours> {
+  const res = await authFetch(`${BASE}/api/cameras/business-hours`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(schedule),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || `Could not save business hours: ${res.status}`);
+  return body as CameraBusinessHours;
 }
 
 /**

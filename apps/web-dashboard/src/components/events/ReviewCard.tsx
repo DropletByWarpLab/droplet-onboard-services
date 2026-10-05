@@ -2,6 +2,7 @@
 
 import { AlertTriangle, Eye, EyeOff, Layers } from "lucide-react";
 import type { ReviewItem } from "@/lib/types";
+import { MediaThumbnail } from "./MediaThumbnail";
 
 interface Props {
   review: ReviewItem;
@@ -79,7 +80,7 @@ export function ReviewCard({ review, onClick }: Props) {
       style={{ padding: 0 }}
     >
       <div className="relative aspect-video overflow-hidden" style={{ background: "var(--inset)" }}>
-        <img
+        <MediaThumbnail
           src={review.thumbnailUrl}
           alt={`${review.severity} on ${cameraDisplay}`}
           className="w-full h-full object-cover transition-transform group-hover:scale-105"
@@ -121,6 +122,7 @@ export function ReviewCard({ review, onClick }: Props) {
       </div>
 
       <div className="p-3">
+        {review.outsideBusinessHours === true && <span className="badge warn mb-1.5">Outside business hours</span>}
         <div className="flex items-center justify-between gap-2">
           <span className="type-subheadline font-medium truncate text-[color:var(--text)]">
             {review.objects.length > 0

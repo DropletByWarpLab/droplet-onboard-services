@@ -371,13 +371,18 @@ To GENERATE a code, the dashboard (already authenticated) POSTs
 | GET | `/cameras/:name/snapshot` | Bearer | current JPEG frame |
 | GET | `/cameras/:name/live` | Bearer | MJPEG stream (`multipart/x-mixed-replace`, `Cache-Control: no-store`) |
 | GET | `/cameras/:name/events` | Bearer | events for one camera |
-| GET | `/cameras/events?limit=` | Bearer | recent events, newest first |
+| GET | `/cameras/events?limit=&businessHours=outside` | Bearer | `{ events, nextCursor, scanLimitReached }`, newest first; items include `outsideBusinessHours: boolean \| null` |
+| GET | `/cameras/reviews?severity=alert&businessHours=outside` | Bearer | `{ reviews, nextCursor, scanLimitReached }`; items include `outsideBusinessHours: boolean \| null` |
+| GET | `/cameras/motion?cameras=&after=&before=&businessHours=&limit=&cursor=` | Bearer (owner, admin, family) | `{ activity, nextCursor, scanLimitReached: false, coverage }`; motion in retained recordings, with per-camera scope |
+| GET | `/cameras/business-hours` | Bearer (owner, admin, family) | `{ configured, timezone, days }`; unset defaults below |
+| PUT | `/cameras/business-hours` | Bearer (owner, admin; cameras manage access) | same complete schedule body and response; invalid schedule → 400 |
 | GET | `/cameras/events/:eventId/thumbnail` | Bearer (owner, admin, family) | image bytes: Frigate's own `Content-Type` (`image/jpeg` when it sends none), `Cache-Control: private, no-store`. `:eventId` is a Frigate event id, `^[a-zA-Z0-9._-]{1,128}$`; errors below the table |
 | GET | `/cameras/events/:eventId/snapshot` | Bearer | event JPEG |
-| GET | `/cameras/reviews/:reviewId/thumbnail` | Bearer | review item image bytes |
+| GET | `/cameras/reviews/:reviewId/thumbnail` | Bearer | review's validated WebP still, `Cache-Control: private, no-store`; missing still → 404 |
+| GET | `/cameras/reviews/:reviewId/preview` | Bearer | MP4 preview; preserves `Range`, 206, `Content-Range`, `Accept-Ranges`, `Content-Length` |
 | GET | `/cameras/events/sse` | Bearer | SSE stream of camera events (`data: {json}`; `: heartbeat` every 30 s; first frame `{ "type": "connected" }`) |
 | GET | `/cameras/clips?camera=&limit=` | Bearer | `{ clips: [{ id, camera, label, score, start_time, end_time, thumbnail_url, clip_url }] }` (`limit` default 50, max 200; only events that have a clip) |
-| GET | `/cameras/clips/event/:eventId` | Bearer | mp4 bytes |
+| GET | `/cameras/clips/event/:eventId` | Bearer | MP4 bytes; preserves byte ranges and partial responses |
 | POST | `/cameras/clips/share` | Bearer (custody roles) | share a clip |
 | GET | `/cameras/groups` | Bearer | `[{ id, name, members }]` |
 | GET | `/cameras/pins` | Bearer | `[{ cameraName, sortOrder }]` |
@@ -390,6 +395,53 @@ header; the stream is per-connection and never cached) and stills come from
 `snapshot`. Camera routes are scoped per person: a client only sees the cameras
 it is granted. A save or download asked by a role that is not owner or admin
 answers `403 { code: "CAMERA_CUSTODY_REQUIRED" }`.
+
+**Business hours.** The complete schedule has `configured: boolean`, an IANA
+`timezone` string and `days` with exactly `monday` through `sunday`. Each day is
+`null` for closed, or `{ open: "09:00", close: "17:00" }`. Opening accepts
+`00:00`–`23:59`; closing also accepts `24:00`. Equal times are invalid. A close
+earlier than its open ends on the following day. `00:00`–`24:00` is all day.
+The unset response is `configured: false`, `timezone: "UTC"`, all days `null`;
+clients should ask for the user's timezone when first configuring the schedule.
+
+`outsideBusinessHours: null` means the schedule is unset, not that activity was
+within business hours. Otherwise the server classifies the whole `[startTime,
+endTime)` activity span against the saved timezone, including overnight windows
+and daylight saving changes; active items extend to now. The business-hours
+filter accepts exactly `outside` or `inside` on events, reviews and semantic
+event search. Event/review filtering scans upstream before paging. On
+`scanLimitReached: true`, follow `nextCursor` even if the current page is empty;
+do not present an empty bounded scan as an exhaustive absence of activity.
+Semantic search reports `searchLimitReached` for its bounded candidate set and
+returns `nextCursor: null`; narrow the query or filters for more precise coverage.
+
+**Retained motion.** Motion activity is independent of object reviews; Frigate
+0.17.1 only has `alert` and `detection` review severities. `/cameras/motion` reads
+raw per-recording positive motion counts and merges contiguous segments.
+`activity` items contain `{ id, camera, startTime, endTime, motion,
+outsideBusinessHours, playbackUrl }`; `motion` is a count, not a percentage.
+The default range is the last 24 hours and the maximum is 26 hours, allowing a
+day with a daylight saving transition. `limit` defaults to 50 and allows 1–200.
+Keep both original time bounds fixed between pages and pass `nextCursor` as the
+separate `cursor` query parameter. Equal-time windows stay together, so a page
+can contain more than `limit` items. Invalid ranges or parameters return 400.
+
+`coverage` is `{ after, before, partial, cameras: [{ camera, recordedSeconds,
+hasGaps, available }] }`, containing only cameras the person can see. A failed
+camera read has `available: false`, `recordedSeconds: null`, `hasGaps: true` and
+sets `partial: true`; an empty successful read has zero retained seconds and
+gaps. A successful, completely covered quiet window has no gaps. Do not label
+an empty page as proof of no movement outside the retained footage and selected
+range. These bounded motion queries classify and filter the full activity
+spans before pagination.
+
+**Review media.** The thumbnail proxy validates the review's own
+`/media/frigate/clips/review/thumb-<camera>-<reviewId>.webp` path. The preview
+proxy uses Frigate's `/api/review/:reviewId/preview?format=mp4` endpoint. Clips,
+previews and recording playback keep authenticated per-camera access checks.
+Clients can fall back from unavailable MP4 media to
+`/cameras/:name/playback.m3u8?after=<startTime>&before=<endTime>` for the same
+activity window, then display an unavailable message if recordings have expired.
 
 **Event still (`GET /cameras/events/:eventId/thumbnail`).** `:eventId` is a
 Frigate event id, and `thumbnail_url` on `/cameras/clips` points here. Its errors

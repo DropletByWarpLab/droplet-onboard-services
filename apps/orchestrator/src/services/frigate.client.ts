@@ -379,15 +379,28 @@ export async function fetchEventCamera(eventId: string): Promise<string | null> 
 }
 
 /** WARP-2982 — which camera does this review cluster belong to? */
-export async function fetchReviewCamera(reviewId: string): Promise<string | null> {
+export async function fetchReview(reviewId: string): Promise<Record<string, unknown> | null> {
   const resp = await fetch(
     `${FRIGATE_URL}/api/review/${encodeURIComponent(reviewId)}`,
     { signal: timeout() },
   );
   if (resp.status === 404) return null;
   if (!resp.ok) throw new Error(`Frigate review lookup: ${resp.status}`);
-  const body = (await resp.json()) as { camera?: unknown };
-  return typeof body.camera === "string" && body.camera ? body.camera : null;
+  return resp.json();
+}
+
+export async function fetchReviewCamera(reviewId: string): Promise<string | null> {
+  const body = await fetchReview(reviewId);
+  return typeof body?.camera === "string" && body.camera ? body.camera : null;
+}
+
+/** Only the review's own thumbnail may be fetched through the media proxy. */
+export function reviewThumbnailUrl(reviewId: string, review: Record<string, unknown>): string | null {
+  const camera = review.camera;
+  if (typeof camera !== "string" || !/^[A-Za-z0-9_-]+$/.test(camera)) return null;
+  const filename = `thumb-${camera}-${reviewId}.webp`;
+  if (review.thumb_path !== `/media/frigate/clips/review/${filename}`) return null;
+  return `${FRIGATE_URL}/clips/review/${encodeURIComponent(filename)}`;
 }
 
 /**
@@ -480,7 +493,8 @@ export async function deleteEvent(eventId: string): Promise<void> {
 
 export interface FrigateReviewFilter {
   cameras?: string[];
-  /** Severities to include — "alert" | "detection" | "significant_motion". */
+  /** One upstream severity. The camera service scans and filters multi-selects
+   * locally because Frigate 0.17.1 accepts a scalar enum, not a comma list. */
   severity?: string[];
   before?: number;
   after?: number;
@@ -495,9 +509,12 @@ export async function fetchReviews(
   if (isEmptyCameraFilter(filter.cameras)) return [];
   const params = new URLSearchParams();
   if (filter.cameras?.length) params.set("cameras", filter.cameras.join(","));
-  if (filter.severity?.length) params.set("severity", filter.severity.join(","));
+  if (filter.severity?.length === 1) params.set("severity", filter.severity[0]);
   if (filter.before !== undefined) params.set("before", String(filter.before));
-  if (filter.after !== undefined) params.set("after", String(filter.after));
+  // Frigate otherwise silently defaults reviews to the last 24 hours; even
+  // after=0 triggers its Python `or` fallback. An omitted lower bound means
+  // all retained history in our Events page's "Any time" filter.
+  params.set("after", String(filter.after ?? 1));
   if (filter.reviewed !== undefined)
     params.set("reviewed", filter.reviewed ? "1" : "0");
   if (filter.limit !== undefined) params.set("limit", String(filter.limit));

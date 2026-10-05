@@ -2,6 +2,7 @@
 
 import { Bookmark, Film, Image as ImageIcon } from "lucide-react";
 import type { EventDetail } from "@/lib/types";
+import { MediaThumbnail } from "./MediaThumbnail";
 
 interface Props {
   event: EventDetail;
@@ -44,7 +45,7 @@ export function EventCard({ event, onClick }: Props) {
       style={{ padding: 0 }}
     >
       <div className="relative aspect-video overflow-hidden" style={{ background: "var(--inset)" }}>
-        <img
+        <MediaThumbnail
           src={event.thumbnail}
           alt={`${event.label} on ${cameraDisplay}`}
           className="w-full h-full object-cover transition-transform group-hover:scale-105"
@@ -83,6 +84,7 @@ export function EventCard({ event, onClick }: Props) {
       </div>
 
       <div className="p-3">
+        {event.outsideBusinessHours === true && <span className="badge warn mb-1.5">Outside business hours</span>}
         <div className="flex items-center justify-between">
           <span className="type-subheadline font-medium capitalize truncate text-[color:var(--text)]">
             {event.label}

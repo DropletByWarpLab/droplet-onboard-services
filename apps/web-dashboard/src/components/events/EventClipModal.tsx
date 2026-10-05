@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
   Bookmark,
@@ -18,6 +18,8 @@ import { useToast } from "@/components/Toast";
 import { useAuth } from "@/lib/auth";
 import { translateError } from "@/lib/friendly-errors";
 import { Dialog } from "@/components/Dialog";
+import { HlsPlayer } from "@/components/recordings/HlsPlayer";
+import { MediaThumbnail } from "./MediaThumbnail";
 
 interface Props {
   event: EventDetail;
@@ -50,6 +52,11 @@ interface Props {
  * the audit found these were leaking orchestrator-level strings.
  */
 export function EventClipModal({ event, onClose, onToggleRetain }: Props) {
+  const [playback, setPlayback] = useState<"clip" | "recording" | "failed">("clip");
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => { setPlayback("clip"); setAttempt(0); }, [event.id]);
+  const recordingEnd = useMemo(() => event.endTime ?? Math.floor(Date.now() / 1000), [event.id, event.endTime, attempt]);
+  const recordingUrl = `/api/cameras/${encodeURIComponent(event.camera)}/playback.m3u8?after=${event.startTime}&before=${Math.max(event.startTime + 1, recordingEnd)}`;
   const headingId = useId();
   const { toast } = useToast();
   const { user } = useAuth();
@@ -169,31 +176,31 @@ export function EventClipModal({ event, onClose, onToggleRetain }: Props) {
 
       <div className="p-4 space-y-3">
         <div className="rounded-lg overflow-hidden" style={{ background: "var(--inset)" }}>
-          {event.clipUrl ? (
+          {playback === "recording" ? (
+            <HlsPlayer key={`${event.id}-${attempt}`} src={recordingUrl} onError={() => setPlayback("failed")} className="w-full max-h-[60vh]" />
+          ) : event.clipUrl && playback !== "failed" ? (
             <video
-              key={event.id}
+              key={`${event.id}-${attempt}`}
               src={event.clipUrl}
               controls
               autoPlay
+              onError={() => setPlayback("recording")}
               className="w-full max-h-[60vh]"
               style={{ background: "var(--inset)" }}
             />
           ) : event.snapshotUrl ? (
-            <img
-              src={event.snapshotUrl}
-              alt={`${event.label} on ${cameraDisplay}`}
-              className="w-full max-h-[60vh] object-contain"
-              style={{ background: "var(--inset)" }}
-            />
+            <MediaThumbnail src={event.snapshotUrl} alt={`${event.label} on ${cameraDisplay}`} className="w-full max-h-[60vh] object-contain" />
           ) : (
-            <img
-              src={event.thumbnail}
-              alt={`${event.label} on ${cameraDisplay}`}
-              className="w-full max-h-[60vh] object-contain"
-              style={{ background: "var(--inset)" }}
-            />
+            <MediaThumbnail src={event.thumbnail} alt={`${event.label} on ${cameraDisplay}`} className="w-full max-h-[60vh] object-contain" />
           )}
         </div>
+        {playback === "failed" && (
+          <div className="flex flex-wrap items-center justify-between gap-3" role="alert">
+            <p className="type-subheadline">This clip couldn&apos;t be loaded. The recording may have expired or the camera may be unavailable.</p>
+            <button className="btn" onClick={() => { setAttempt((n) => n + 1); setPlayback("clip"); }}><RefreshCw size={14} /> Retry</button>
+            <Link className="btn" href={`/cameras/${encodeURIComponent(event.camera)}/recordings?date=${startedAt.getFullYear()}-${String(startedAt.getMonth() + 1).padStart(2, "0")}-${String(startedAt.getDate()).padStart(2, "0")}`}>Browse recordings</Link>
+          </div>
+        )}
 
         {/* GenAI description (Phase 7.7) — only renders when there is one. */}
         {event.description && (
