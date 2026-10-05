@@ -58,15 +58,39 @@ ssh -i $KEY root@192.168.9.1 'sh -s' < scripts/verify.sh   # in the router check
 ## R2. Cabling
 
 Router LAN port to the box NIC; router WAN to the upstream network. The box takes
-`192.168.9.10` from the router's DHCP pin on hostname `droplet-sys`.
+`192.168.9.10` from the router DHCP pin on hostname `droplet-sys` (verified: `FABRIC_ROLE_PINS="droplet-sys|192.168.9.10"` in router `droplet-edge.conf`).
 
 ## R3. Box first boot
 
 Boot the flashed box. `droplet-firstboot.service` clones the repo to
 `/home/droplet/edge-platform` and runs `setup.sh --single-box --systemd`
-unattended (see [`SINGLE_BOX.md`](SINGLE_BOX.md)). With no router password yet,
-`setup.sh` warns and routing cannot authenticate; that is expected until R4.
-Check: `ssh droplet@192.168.9.10 systemctl status droplet-firstboot.service`.
+unattended (see [`SINGLE_BOX.md`](SINGLE_BOX.md)). `OPENWRT_HOST` is unset, so
+`single-box.sh` points routing at the **bundled `droplet-openwrt` container**
+(`127.0.0.1:8181`), not at the edge router, and `verify.sh`'s router-auth check
+runs against that container. First boot is therefore independent of the router
+password; R4 re-points the box at the edge router either way.
+
+- Success: `setup.sh` closes the install-mode SSH window (WARP-2142), so SSH is off.
+- Failure: `setup.sh` exits 1 (WARP-3835) and the window stays open (key-only, LAN,
+  48 h max) for rescue.
+
+Check at the local console (no SSH yet): `systemctl status droplet-firstboot.service`.
+
+## R3b. Get SSH access for R4
+
+The image bakes no SSH key and disables password login (`allow-pw: false`), so
+nothing can SSH in until you add a key.
+
+1. At the **local console**, append your public key to
+   `/home/droplet/.ssh/authorized_keys` (as `droplet`). No dashboard route installs
+   an SSH key (checked `network-ssh.routes.ts`: only the on/off toggle and an
+   owner-chosen password login, WARP-2887), so the key is console-only.
+2. SSH must be on. After a failed first boot it already is (install-mode window).
+   After a successful one it is off: the owner turns it on in the dashboard,
+   Network -> System, "SSH access for troubleshooting" card (`SshAccessCard`,
+   WARP-1984). Note that card's password login is for a separate owner-chosen
+   account, not `droplet`; R4 needs the key.
+3. Check: `ssh droplet@192.168.9.10 true`.
 
 ## R4. Pair the box with the router (today: manual)
 
@@ -102,7 +126,7 @@ cd /home/droplet/edge-platform && ./scripts/verify.sh         # "Routing -> rout
 sudo droplet-host-units audit                                  # exit 0
 systemctl --failed                                             # no droplet-* units
 cat /var/lib/droplet/watchdog/status.json                      # router_auth: ok
-nslookup <box-fqdn> 192.168.9.1                                # resolves to the box
+nslookup <box-fqdn> 192.168.9.1                                # resolves to the box (unverified: FQDN and answer are deployment-specific)
 # router (see R1)
 ssh -i $KEY root@192.168.9.1 'sh -s' < scripts/verify.sh
 ```
