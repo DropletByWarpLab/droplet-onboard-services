@@ -112,4 +112,10 @@ describe("isBlankHtml", () => {
   it.each(["<p>x</p>", '<p><span data-mention-id="u1">@Ana</span></p>'])("treats %j as content", (html) => {
     expect(isBlankHtml(html)).toBe(false);
   });
+
+  it("strips an unterminated tag without discarding visible or escaped angle text", () => {
+    expect(isBlankHtml("<script")).toBe(true);
+    expect(isBlankHtml("Visible <script")).toBe(false);
+    expect(isBlankHtml("&lt;script")).toBe(false);
+  });
 });

@@ -71,7 +71,7 @@ export async function resolveCommentMentions(
  *  is NOT empty: its `@Name` is text. */
 export function isEmptyCommentHtml(html: string): boolean {
   const text = html
-    .replace(/<[^>]*>/g, "")
+    .replace(/<[^>]*(?:>|$)/g, "")
     .replace(/&nbsp;|&#160;/gi, " ")
     .trim();
   return text.length === 0;

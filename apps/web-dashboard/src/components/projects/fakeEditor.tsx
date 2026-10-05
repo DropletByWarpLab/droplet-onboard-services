@@ -24,7 +24,11 @@ import type {
 export type { MentionCandidate, RichTextEditorHandle, RichTextEditorProps };
 
 const htmlToText = (html: string): string =>
-  html.replace(/<[^>]*>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+  html
+    .replace(/<[^>]*(?:>|$)/g, "")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
 
 const textToHtml = (text: string): string =>
   text.trim() === ""

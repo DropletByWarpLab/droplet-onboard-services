@@ -68,5 +68,8 @@ export function isEditorEmpty(editor: Editor): boolean {
 
 /** The same rule for html that has no editor behind it yet. */
 export function isBlankHtml(html: string | undefined): boolean {
-  return (html ?? "").replace(/<[^>]*>/g, "").replace(/&nbsp;|&#160;/gi, " ").trim() === "";
+  return (html ?? "")
+    .replace(/<[^>]*(?:>|$)/g, "")
+    .replace(/&nbsp;|&#160;/gi, " ")
+    .trim() === "";
 }
