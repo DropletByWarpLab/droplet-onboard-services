@@ -17,6 +17,17 @@
 # Mount point convention: /mnt/droplet/<label>-<short-uuid> (human-friendly
 # but unambiguous). State file at /var/lib/droplet-automount/mounts.json
 # tracks what we've mounted so we clean up on remove.
+#
+# WARP-3513 — encrypted BAY drives. Every drive prepared through the dashboard
+# is LUKS2 (TPM2 + recovery key) with an ext4 `-O quota,project` inside, and has
+# an /etc/crypttab line `droplet-bay-<luks8> UUID=<luks-uuid> ...`. That line is
+# what makes a LUKS container a BAY here (hot-plugged USB LUKS drives have none
+# and keep today's droplet-usb-<luks8> behaviour). systemd-cryptsetup normally
+# unlocks the bay before this script runs; a hot-plugged or late-unlocked bay is
+# unlocked here with ONE bounded TPM attach. A bay is named from the
+# filesystem INSIDE the container, mounts prjquota, is never chowned, and is
+# registered with Nextcloud at <mount>/files only. A missing or locked bay is
+# logged and skipped with exit 0 — it must never block boot.
 
 set -euo pipefail
 
@@ -39,6 +50,16 @@ DEV_DIR="${DROPLET_AUTOMOUNT_DEV_DIR:-/dev}"
 USB_ENROLL="${DROPLET_AUTOMOUNT_USB_ENROLL:-/usr/local/sbin/droplet-usb-enroll.sh}"
 SYSTEMD_CRYPTSETUP="${DROPLET_SYSTEMD_CRYPTSETUP_BIN:-/usr/lib/systemd/systemd-cryptsetup}"
 CRYPTSETUP="${DROPLET_CRYPTSETUP_BIN:-cryptsetup}"
+
+# WARP-3513 seam (test-only override; production uses the default): the crypttab
+# whose `droplet-bay-<luks8>` lines mark a LUKS container as an encrypted bay.
+CRYPTTAB="${DROPLET_AUTOMOUNT_CRYPTTAB:-/etc/crypttab}"
+
+# WARP-3513: the ext4 project id of a bay's files/ directory (the household
+# files Nextcloud sees). WARP-3514 puts the recordings' nvr/ at 4096 and sets the
+# byte limits; this is the same constant the prepare script uses
+# (droplet-storage-pool.sh BAY_FILES_PROJID) - keep the two in step.
+BAY_FILES_PROJID=4097
 
 # WARP-1338: the shipping compose project is `droplet`, so the container is
 # droplet-nextcloud-1 (the old docker-nextcloud-1 default never matched a
@@ -76,6 +97,17 @@ log() {
   printf "%s [%s] %s\n" "$(date -Iseconds)" "$ACTION" "$*" >> "$LOG_FILE"
   command -v logger >/dev/null 2>&1 \
     && logger -t droplet-automount -- "[$ACTION] $*" 2>/dev/null || true
+}
+
+# WARP-3513: WARNING-priority log() for the conditions an operator must not
+# miss (a prjquota mount that was refused, a files/ directory that could not be
+# given its project id). Same file + journal destinations, but the journal entry
+# carries priority daemon.warning so
+# `journalctl -p warning -t droplet-automount` finds it.
+log_warn() {
+  printf "%s [%s] WARNING: %s\n" "$(date -Iseconds)" "$ACTION" "$*" >> "$LOG_FILE"
+  command -v logger >/dev/null 2>&1 \
+    && logger -p daemon.warning -t droplet-automount -- "[$ACTION] WARNING: $*" 2>/dev/null || true
 }
 
 if [ -z "$ACTION" ] || { [ "$ACTION" != "reconcile" ] && [ -z "$DEVICE" ]; }; then
@@ -205,11 +237,43 @@ notify_bridge() {
   fi
 }
 
+# WARP-3513: bay_crypttab_has <luks8> — true iff the (readable) crypttab has a
+# line whose FIRST field is exactly droplet-bay-<luks8> with something after it
+# (the device column). That line is the whole bay discriminator: the prepare
+# script writes it for every encrypted drive, a hot-plugged USB LUKS drive never
+# has one. Plain string comparison on the first field — the LUKS uuid prefix
+# comes off a drive's header, so it is never fed to a regex; a comment or a
+# longer name that merely starts with ours cannot match. A missing crypttab is
+# simply "no".
+bay_crypttab_has() {
+  local short="$1" ct_name="" ct_rest=""
+  [ -n "$short" ] && [ -r "$CRYPTTAB" ] || return 1
+  while read -r ct_name ct_rest || [ -n "$ct_name" ]; do
+    if [ "$ct_name" = "droplet-bay-${short}" ] && [ -n "$ct_rest" ]; then
+      return 0
+    fi
+  done < "$CRYPTTAB"
+  return 1
+}
+
 # WARP-232: try to unlock a droplet-enrolled LUKS2 drive. Sets the global
 # UNLOCKED_MAPPER (/dev/mapper/droplet-usb-<short-uuid>) and returns 0 on
 # success; returns 1 for a foreign LUKS container (no droplet token, no
 # derivable slot) so the caller can skip it cleanly.
+#
+# WARP-3513: a container with a crypttab `droplet-bay-<luks8>` line is an
+# encrypted BAY and takes its own branch: it returns 0 with UNLOCKED_MAPPER =
+# /dev/mapper/droplet-bay-<luks8> and IS_BAY=1 — either because systemd-
+# cryptsetup already unlocked it (the live mapper node is reused, nothing is
+# attached or opened again) or after ONE bounded, non-interactive TPM attach —
+# or returns 2 when it is still locked, so the caller can log the LOCKED line
+# and exit 0 (a locked bay must never block boot). A bay never takes the
+# derived-passphrase fallback below: its only keys are the TPM slot and the
+# owner-held recovery key. BAY_NAME / BAY_UNLOCK_DETAIL feed the caller's log.
 UNLOCKED_MAPPER=""
+IS_BAY=0
+BAY_NAME=""
+BAY_UNLOCK_DETAIL=""
 try_unlock_droplet_luks() {
   local dev="$1"
   local luks_uuid short mapper
@@ -218,6 +282,30 @@ try_unlock_droplet_luks() {
   short="$(printf '%s' "$luks_uuid" | head -c 8)"
   [ -z "$short" ] && short="usb"
   mapper="droplet-usb-${short}"
+
+  if [ -n "$luks_uuid" ] && bay_crypttab_has "$short"; then
+    BAY_NAME="droplet-bay-${short}"
+    local bay_node="${DEV_DIR}/mapper/${BAY_NAME}" attach_out="" attach_rc=0
+    if [ ! -e "$bay_node" ]; then
+      # One attempt, bounded (a wedged TPM must not hold the unit), headless
+      # (never prompt: nobody is at the console) and tries=1. stdin is
+      # /dev/null for the same reason; stderr is kept for the LOCKED line.
+      attach_out="$(timeout 60 "$SYSTEMD_CRYPTSETUP" attach "$BAY_NAME" "$dev" - \
+        tpm2-device=auto,headless=true,tries=1 </dev/null 2>&1)" || attach_rc=$?
+      attach_out="${attach_out%%$'\n'*}"
+      attach_out="${attach_out//$'\r'/}"
+      BAY_UNLOCK_DETAIL="systemd-cryptsetup attach exit ${attach_rc}${attach_out:+: ${attach_out:0:200}}"
+    fi
+    # Re-check the node rather than trusting the exit status: a racing
+    # systemd-cryptsetup@ unit may have unlocked it while we were attaching
+    # (our attach then fails "already exists" — and the drive is open).
+    if [ -e "$bay_node" ]; then
+      UNLOCKED_MAPPER="/dev/mapper/${BAY_NAME}"
+      IS_BAY=1
+      return 0
+    fi
+    return 2
+  fi
 
   # (1) droplet-enrolled? The LUKS2 header carries a systemd-tpm2 token. Attach
   #     via systemd-cryptsetup (uses the TPM keyslot, no passphrase).
@@ -287,6 +375,37 @@ is_droplet_md() {
   return 1
 }
 
+# WARP-3513: fs_has_project_quota <dev> — true iff <dev> is an ext4 whose
+# superblock carries the `project` feature (what `mkfs.ext4 -O quota,project`
+# sets on every drive prepared since the encrypted-bay work). Only then is it
+# mounted prjquota, so the per-directory byte limits the recordings allocation
+# sets are ENFORCED. Parsed from the "Filesystem features:" line of
+# `tune2fs -l` as a whole word; the output is captured FIRST (never
+# `tune2fs -l | grep -q`: under pipefail a match closes the pipe early and the
+# SIGPIPE turns a MATCH into a failed pipeline). A tune2fs that is not
+# installed (exit 127) or cannot read the superblock is "no" — logged, never
+# fatal: the drive then simply mounts without prjquota.
+fs_has_project_quota() {
+  local dev="$1" out line feats rc=0
+  out="$(tune2fs -l "$dev" 2>/dev/null)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    log "tune2fs -l $dev failed (exit $rc; 127 = tune2fs not installed) — cannot check the ext4 project-quota feature; mounting without prjquota"
+    return 1
+  fi
+  while IFS= read -r line; do
+    case "$line" in
+      "Filesystem features:"*)
+        feats=" ${line#Filesystem features:} "
+        feats="${feats//$'\t'/ }"
+        case "$feats" in
+          *" project "*) return 0 ;;
+        esac
+        return 1 ;;
+    esac
+  done <<< "$out"
+  return 1
+}
+
 nc_occ() {
   # Nextcloud's `occ` must run as UID 33 (www-data) — that's how the
   # image owns its config files. Using `docker exec -u 33` avoids the
@@ -294,9 +413,44 @@ nc_occ() {
   docker exec -u 33 "$NEXTCLOUD_CONTAINER" php occ "$@"
 }
 
+# WARP-3513: ensure <mount>/files exists — the ONLY directory of an encrypted
+# bay that Nextcloud may see. Created owner 33:33 (Nextcloud's www-data) mode
+# 0770 with ext4 project id $BAY_FILES_PROJID (inherited by everything created
+# inside, so the household files can be given their own byte limit), and ONLY
+# when it is missing: the prepare script already did all of that for every bay,
+# and an existing files/ keeps whatever owner/mode/project it has. Never
+# recursive — a recursive chown would break the uid-33 files Nextcloud wrote and
+# the root-only nvr/ directory. Returns 1 when it cannot be created (read-only
+# filesystem, a regular file in the way). The project id is best-effort HERE
+# (a warning, not a failure — registering the folder beats refusing it; the
+# prepare script, which owns the guarantee, treats the same failure as fatal).
+ensure_files_dir() {
+  local dir="$1/files"
+  [ -d "$dir" ] && return 0
+  mkdir -p "$dir" 2>/dev/null || return 1
+  chown 33:33 "$dir" 2>/dev/null \
+    || log_warn "could not chown $dir to 33:33 — Nextcloud may be unable to write there"
+  chmod 0770 "$dir" 2>/dev/null \
+    || log_warn "could not chmod 0770 $dir"
+  chattr +P -p "$BAY_FILES_PROJID" "$dir" 2>/dev/null \
+    || log_warn "could not set project id $BAY_FILES_PROJID on $dir — the household files will not be covered by a project quota until it is set (chattr +P -p $BAY_FILES_PROJID $dir)"
+  log "created $dir (33:33, 0770, project $BAY_FILES_PROJID)"
+  return 0
+}
+
+# nextcloud_add <mount> <name> [scope]
+# WARP-3513: scope is `root` (the default — registers /host/<name>, the whole
+# drive, which is what every plain/USB drive does) or `files` (registers
+# /host/<name>/files — what an encrypted bay does, so nvr/, lost+found and the
+# rest of the drive never reach Nextcloud). Idempotent for BOTH forms.
 nextcloud_add() {
   local mount="$1"
   local name="$2"
+  local scope="${3:-root}"
+  local datadir="/host/$name"
+  if [ "$scope" = "files" ]; then
+    datadir="/host/$name/files"
+  fi
   if ! nc_occ app:enable files_external >/dev/null 2>&1; then
     log "failed to enable files_external; is nextcloud running?"
     return 1
@@ -306,8 +460,37 @@ nextcloud_add() {
   # shape — so every re-run created a DUPLICATE external mount. Normalize the
   # escaping away, then fixed-string match (the boot reconcile re-runs this
   # on every boot, so the idempotency check must actually work).
-  if nc_occ files_external:list --output=json 2>/dev/null | tr -d '\\' \
-      | grep -qF "\"datadir\":\"/host/$name\""; then
+  # WARP-3513: the quote that closes `"datadir":"/host/<name>"` means that
+  # pattern never matches the files form (`.../files"`), so BOTH forms are
+  # looked for explicitly. The listing is captured first and matched in the
+  # shell — no `| grep -q` under pipefail, where an early match can turn into a
+  # SIGPIPE failure.
+  local reg_list has_root=0 has_files=0
+  reg_list="$(nc_occ files_external:list --output=json 2>/dev/null | tr -d '\\' || true)"
+  case "$reg_list" in
+    *"\"datadir\":\"/host/$name\""*) has_root=1 ;;
+  esac
+  case "$reg_list" in
+    *"\"datadir\":\"/host/$name/files\""*) has_files=1 ;;
+  esac
+  if [ "$scope" = "files" ]; then
+    if [ "$has_files" = 1 ]; then
+      log "nextcloud: already registered $name"
+      return 0
+    fi
+    if [ "$has_root" = 1 ]; then
+      # A drive-ROOT registration of this very name (a bay is only ever
+      # registered at files/, so this is not something Droplet made for it). A
+      # second registration would be a duplicate in every user's Files root AND
+      # a second route to the whole drive — leave it, nothing is re-pointed.
+      log "nextcloud: $name is already registered at the drive ROOT (/host/$name) — not creating a files-scope duplicate"
+      return 0
+    fi
+    if ! ensure_files_dir "$mount"; then
+      log "nextcloud: cannot create $mount/files — registration of $name skipped"
+      return 1
+    fi
+  elif [ "$has_root" = 1 ] || [ "$has_files" = 1 ]; then
     log "nextcloud: already registered $name"
     return 0
   fi
@@ -318,7 +501,7 @@ nextcloud_add() {
   # household except the bootstrap admin. An unscoped external mount is
   # visible to every user — exactly the household-wide posture we want.
   rc=$(nc_occ files_external:create \
-        "/$name" local null::null -c datadir="/host/$name" 2>&1) || true
+        "/$name" local null::null -c datadir="$datadir" 2>&1) || true
   log "nextcloud create: $rc"
 }
 
@@ -480,15 +663,51 @@ case "$ACTION" in
         # WARP-232: droplet-enrolled LUKS2 drives unlock here; everything else
         # (foreign LUKS) keeps the clean skip. RAID/LVM/swap fall through to the
         # next case (managed by their own subsystem).
-        if try_unlock_droplet_luks "$DEVICE"; then
-          MAPPER_DEVICE="$UNLOCKED_MAPPER"
-          DEVICE="$UNLOCKED_MAPPER"           # fall through to the mount path
-          TYPE="$(blkid -o value -s TYPE "$DEVICE" 2>/dev/null || echo ext4)"
-          TRUST="enrolled"
-        else
-          log "skip $DEVICE (foreign LUKS container — not droplet-enrolled)"
-          exit 0
-        fi
+        # WARP-3513: try_unlock_droplet_luks answers 0 (unlocked), 1 (foreign)
+        # or 2 (an encrypted bay that is STILL locked). `|| rc=$?` keeps the
+        # three-way answer alive under set -e.
+        unlock_rc=0
+        try_unlock_droplet_luks "$DEVICE" || unlock_rc=$?
+        case "$unlock_rc" in
+          0)
+            MAPPER_DEVICE="$UNLOCKED_MAPPER"
+            DEVICE="$UNLOCKED_MAPPER"           # fall through to the mount path
+            TRUST="enrolled"
+            if [ "$IS_BAY" = 1 ]; then
+              # WARP-3513: a bay is named, registered and recorded from the
+              # filesystem INSIDE the container — exactly like creation time
+              # (<label>-<fs-uuid8>) — not from the LUKS container's own
+              # uuid, which is all the pre-unlock probe above saw. Same
+              # newline/CR stripping as the backing probe.
+              TYPE="$(blkid -o value -s TYPE "$DEVICE" 2>/dev/null || true)"
+              LABEL="$(blkid -o value -s LABEL "$DEVICE" 2>/dev/null || true)"
+              UUID="$(blkid -o value -s UUID "$DEVICE" 2>/dev/null || true)"
+              TYPE="${TYPE//$'\n'/}"; TYPE="${TYPE//$'\r'/}"
+              LABEL="${LABEL//$'\n'/}"; LABEL="${LABEL//$'\r'/}"
+              UUID="${UUID//$'\n'/}"; UUID="${UUID//$'\r'/}"
+              if [ -z "$TYPE" ]; then
+                # e.g. a prepare interrupted between luksFormat and mkfs.
+                log "skip $BACKING_DEVICE (bay $BAY_NAME is unlocked but carries no readable filesystem — nothing to mount)"
+                exit 0
+              fi
+            else
+              TYPE="$(blkid -o value -s TYPE "$DEVICE" 2>/dev/null || echo ext4)"
+            fi
+            ;;
+          2)
+            # WARP-3513: a crypttab bay the TPM could not open (PCR change, a
+            # moved box). Not an error and never a blocked boot: say so in
+            # words an operator can act on, mount nothing, exit 0. The boot
+            # reconcile tries again next boot; the owner's recovery key is
+            # the way in meanwhile.
+            log "LOCKED $DEVICE ($BAY_NAME): encrypted bay could not be unlocked (${BAY_UNLOCK_DETAIL:-no attach attempted}) — needs the recovery key; not mounted, will retry on the next boot/reconcile"
+            exit 0
+            ;;
+          *)
+            log "skip $DEVICE (foreign LUKS container — not droplet-enrolled)"
+            exit 0
+            ;;
+        esac
         ;;
       linux_raid_member|LVM2_member|swap)
         log "skip $DEVICE (signature $TYPE — managed by its own subsystem, not mountable)"
@@ -501,7 +720,8 @@ case "$ACTION" in
         log "skip $DEVICE (label=$LABEL — system volume)"; exit 0 ;;
     esac
     SHORT_UUID="$(echo "${UUID:-}" | head -c 8)"
-    if is_md_node "$BACKING_DEVICE" && [ -z "${LABEL:-}" ] && [ -n "${UUID:-}" ]; then
+    if is_md_node "$BACKING_DEVICE" && [ -z "${LABEL:-}" ] && [ -n "${UUID:-}" ] \
+       && [ "$IS_BAY" != 1 ]; then
       # WARP-1361: LEGACY pool. Pre-WARP-1338 pool_format labeled nothing and
       # mounted at /mnt/droplet/<fs-uuid> — the dashboard, the Nextcloud
       # registration and the owner's bookmarks all point at that GUID path,
@@ -511,6 +731,9 @@ case "$ACTION" in
       # WARP-1361 review: same charset guard as the label path — blkid UUIDs
       # are hex+dashes today (byte-identical through this guard), but blkid
       # output is never trusted as a path component.
+      # WARP-3513: never for a BAY — an encrypted pool is new, has no legacy
+      # GUID path to preserve, and an unlabeled filesystem inside one takes
+      # the generic drive-<fs-uuid8> name below like any other bay.
       NAME="${UUID//[^A-Za-z0-9._-]/-}"
       log "$BACKING_DEVICE is an unlabeled md pool filesystem — keeping its legacy mount name $NAME"
     else
@@ -607,6 +830,18 @@ case "$ACTION" in
       HARDEN="${HARDEN},noexec"
     fi
 
+    # WARP-1361: the md array whose read-only state the mount path may have to
+    # flip with `mdadm --readwrite`. A plain md pool IS the mounted device.
+    # WARP-3513: an encrypted pool mounts the LUKS mapper instead, so there the
+    # array is the BACKING device — the same read-only-array recovery must
+    # still apply once pools are encrypted.
+    MD_NODE=""
+    if is_md_node "$DEVICE"; then
+      MD_NODE="$DEVICE"
+    elif [ "$IS_BAY" = 1 ] && is_md_node "$BACKING_DEVICE"; then
+      MD_NODE="$BACKING_DEVICE"
+    fi
+
     # If something already mounted this device at a STALE PATH UNDER OUR OWN
     # BASE (re-enumerated /dev/sdX after a re-plug, a desktop distro's
     # udisks), unmount it so we can reseat it at the derived path — that's
@@ -656,9 +891,9 @@ case "$ACTION" in
         case ",${cur_opts}," in
           *,ro,*)
             log "$MOUNT is mounted read-only but $DEVICE is trusted rw — remounting read-write"
-            if is_md_node "$DEVICE"; then
-              mdadm --readwrite "$DEVICE" 2>/dev/null \
-                || log "mdadm --readwrite $DEVICE failed (retrying the remount anyway)"
+            if [ -n "$MD_NODE" ]; then
+              mdadm --readwrite "$MD_NODE" 2>/dev/null \
+                || log "mdadm --readwrite $MD_NODE failed (retrying the remount anyway)"
             fi
             mount -o remount,rw "$MOUNT" 2>/dev/null \
               && log "remounted $MOUNT read-write" \
@@ -670,6 +905,7 @@ case "$ACTION" in
       # Permissive options for FAT/exFAT/NTFS (common on USB drives).
       # ext4/xfs/btrfs will reject `uid=` options, so branch.
       # WARP-232: $RW_MODE is ro for untrusted plain drives, rw otherwise.
+      MOUNT_NOTE=""
       case "$TYPE" in
         vfat|exfat|ntfs|msdos)
           mount -o "${RW_MODE},${HARDEN},noatime,uid=1000,gid=1000,umask=0002,nofail" \
@@ -677,22 +913,53 @@ case "$ACTION" in
             || { log "mount failed for $DEVICE ($TYPE) -> $MOUNT"; rmdir "$MOUNT" 2>/dev/null || true; exit 1; }
           ;;
         *)
-          if ! mount -o "${RW_MODE},${HARDEN},noatime,nofail" "$DEVICE" "$MOUNT"; then
-            if [ "$RW_MODE" = "rw" ] && is_md_node "$DEVICE"; then
-              # WARP-1361: a healthy-but-read-only array (mdadm auto-read-
-              # only after an unclean stop, or an explicit readonly state)
-              # refuses the rw mount. Flip it read-write and retry ONCE —
-              # never leave a healthy pool filesystem unmounted (or ro).
-              log "mount failed for $DEVICE ($TYPE) — array may be read-only; running mdadm --readwrite and retrying"
-              mdadm --readwrite "$DEVICE" 2>/dev/null \
-                || log "mdadm --readwrite $DEVICE failed (retrying the mount anyway)"
-              mount -o "${RW_MODE},${HARDEN},noatime,nofail" "$DEVICE" "$MOUNT" \
-                || { log "mount failed for $DEVICE ($TYPE) -> $MOUNT even after mdadm --readwrite"; rmdir "$MOUNT" 2>/dev/null || true; exit 1; }
+          MOUNT_OPTS="${RW_MODE},${HARDEN},noatime,nofail"
+          # WARP-3513: an ext4 carrying the project-quota feature (every drive
+          # prepared since the encrypted-bay work) mounts prjquota so the
+          # per-directory limits set later are ENFORCED. ext4 without the
+          # feature and every other filesystem mount exactly as before.
+          PRJQUOTA_OPT=""
+          if [ "$TYPE" = "ext4" ] && fs_has_project_quota "$DEVICE"; then
+            PRJQUOTA_OPT=",prjquota"
+          fi
+          mount_ok=0
+          md_retried=0
+          if mount -o "${MOUNT_OPTS}${PRJQUOTA_OPT}" "$DEVICE" "$MOUNT"; then
+            mount_ok=1
+          elif [ "$RW_MODE" = "rw" ] && [ -n "$MD_NODE" ]; then
+            # WARP-1361: a healthy-but-read-only array (mdadm auto-read-
+            # only after an unclean stop, or an explicit readonly state)
+            # refuses the rw mount. Flip it read-write and retry ONCE —
+            # never leave a healthy pool filesystem unmounted (or ro).
+            # WARP-3513: the retry is the same mount, prjquota included.
+            md_retried=1
+            log "mount failed for $DEVICE ($TYPE) — array may be read-only; running mdadm --readwrite and retrying"
+            mdadm --readwrite "$MD_NODE" 2>/dev/null \
+              || log "mdadm --readwrite $MD_NODE failed (retrying the mount anyway)"
+            if mount -o "${MOUNT_OPTS}${PRJQUOTA_OPT}" "$DEVICE" "$MOUNT"; then
+              mount_ok=1
+            fi
+          fi
+          if [ "$mount_ok" = 0 ] && [ -n "$PRJQUOTA_OPT" ]; then
+            # WARP-3513: the prjquota mount was refused (a kernel without
+            # project-quota support, a damaged quota inode). Never leave the
+            # drive dark over that: retry ONCE without it, and say so loudly —
+            # the data is reachable, the limits are not enforced until fixed.
+            log_warn "mount of $DEVICE with prjquota failed — retrying ONCE without it so the drive is not left unmounted; project quotas (recording limits) are NOT enforced on it until this is fixed (check dmesg and: tune2fs -l $DEVICE)"
+            if mount -o "$MOUNT_OPTS" "$DEVICE" "$MOUNT"; then
+              mount_ok=1
+            fi
+          elif [ "$mount_ok" = 1 ] && [ -n "$PRJQUOTA_OPT" ]; then
+            MOUNT_NOTE=", prjquota"
+          fi
+          if [ "$mount_ok" = 0 ]; then
+            if [ "$md_retried" = 1 ]; then
+              log "mount failed for $DEVICE ($TYPE) -> $MOUNT even after mdadm --readwrite"
             else
               log "mount failed for $DEVICE ($TYPE) -> $MOUNT"
-              rmdir "$MOUNT" 2>/dev/null || true
-              exit 1
             fi
+            rmdir "$MOUNT" 2>/dev/null || true
+            exit 1
           fi
           # WARP-1361 review: NEVER recursive on an md pool — this path is
           # hot on every boot now, and (a) a recursive chown over a
@@ -706,7 +973,11 @@ case "$ACTION" in
           # covers the first mount too). Plain drives keep the recursive
           # chown: that path runs on plug events only, and FAT-family media
           # never reaches here (uid= mount options above).
-          if [ "$RW_MODE" = "rw" ]; then
+          # WARP-3513: a BAY is never chowned at all, recursive or not. ITS
+          # ownership is set at format time — files/ is 33:33 (Nextcloud's
+          # www-data), nvr/ is root-only — and a chown here would break the
+          # uid-33 files Nextcloud wrote and hand nvr/ to the droplet user.
+          if [ "$RW_MODE" = "rw" ] && [ "$IS_BAY" != 1 ]; then
             if is_md_node "$BACKING_DEVICE"; then
               chown 1000:1000 "$MOUNT" 2>/dev/null || true
             else
@@ -715,7 +986,7 @@ case "$ACTION" in
           fi
           ;;
       esac
-      log "mounted $DEVICE ($TYPE, label=$LABEL, trust=$TRUST) -> $MOUNT"
+      log "mounted $DEVICE ($TYPE, label=$LABEL, trust=$TRUST${MOUNT_NOTE}) -> $MOUNT"
     fi
 
     # Record the BACKING partition as `device` (so udev remove + crypto-shred
@@ -730,7 +1001,14 @@ case "$ACTION" in
         # Enrolled/trusted drives and md-pool mounts register normally.
         log "nextcloud registration skipped for untrusted drive $NAME"
       else
-        nextcloud_add "$MOUNT" "$NAME" || log "nextcloud registration skipped"
+        # WARP-3513: a bay exposes ONLY <mount>/files to Nextcloud — never the
+        # drive root (nvr/ and lost+found live there). Everything else keeps
+        # the root scope it always had.
+        reg_scope="root"
+        if [ "$IS_BAY" = 1 ]; then
+          reg_scope="files"
+        fi
+        nextcloud_add "$MOUNT" "$NAME" "$reg_scope" || log "nextcloud registration skipped"
       fi
     else
       log "nextcloud auto-register disabled (set NEXTCLOUD_AUTO_REGISTER=1 to enable)"
@@ -800,6 +1078,59 @@ case "$ACTION" in
     # mount-time property, not a registration one. Grep-guarded append —
     # idempotent across boots — and best-effort (never a failed unit).
     #
+    # WARP-3513 — encrypted BAY late-unlock, before anything else mounts.
+    # systemd-cryptsetup normally unlocks every crypttab `droplet-bay-<luks8>`
+    # entry BEFORE this unit runs (After=cryptsetup.target, which includes the
+    # entries' x-systemd.device-timeout=30s waits), and the udev add for the
+    # backing disk then mounts it. This loop is the idempotent safety net for
+    # the bays that missed that window — unlocked late, an add event that fired
+    # while the container was still locked, a LUKS-over-md pool whose array
+    # assembled after the first look. Each crypttab bay whose backing device is
+    # present and whose mapper is not mounted goes through the SAME add flow the
+    # udev path runs (unlock reuse/attach, prjquota mount, state, registration).
+    # An absent drive and a bay that stays locked are logged and left alone:
+    # this must NEVER fail the unit or block boot, so every add failure is
+    # logged and retried next boot. Not gated on NEXTCLOUD_AUTO_REGISTER —
+    # mounting is independent of registration. The crypttab is read on fd 3 so
+    # the add flow's own stdin can never swallow the remaining lines.
+    if [ -r "$CRYPTTAB" ]; then
+      ct_name=""
+      while read -r -u 3 ct_name ct_src _ || [ -n "$ct_name" ]; do
+        case "$ct_name" in
+          droplet-bay-*) ;;
+          *) continue ;;                           # comments, /data, anything else
+        esac
+        if ! [[ "$ct_name" =~ ^droplet-bay-[A-Za-z0-9._-]+$ ]]; then
+          log "reconcile: skip a crypttab entry with unexpected characters in its name"
+          continue
+        fi
+        case "$ct_src" in
+          UUID=*) ct_uuid="${ct_src#UUID=}" ;;
+          *)
+            log "reconcile: bay $ct_name: crypttab source is not UUID=<luks-uuid> — cannot locate the drive; nothing to do"
+            continue ;;
+        esac
+        if ! [[ "$ct_uuid" =~ ^[A-Za-z0-9-]+$ ]]; then
+          log "reconcile: bay $ct_name: unexpected characters in the crypttab uuid — skipping"
+          continue
+        fi
+        ct_dev="$(blkid -U "$ct_uuid" 2>/dev/null | head -1 || true)"
+        ct_dev="${ct_dev//$'\n'/}"
+        if [ -z "$ct_dev" ]; then
+          log "reconcile: bay $ct_name: backing device (LUKS uuid $ct_uuid) not present — drive unplugged or not visible yet; nothing to do"
+          continue
+        fi
+        if findmnt -n -o TARGET --source "/dev/mapper/${ct_name}" >/dev/null 2>&1; then
+          log "reconcile: bay $ct_name already mounted — nothing to do"
+          continue
+        fi
+        log "reconcile: bay $ct_name is present but not mounted — running the add flow for $ct_dev"
+        "$BASH" "$0" add "$ct_dev" </dev/null \
+          || log "reconcile: add flow failed for bay $ct_name (will retry next boot)"
+      done 3< "$CRYPTTAB"
+    else
+      log "reconcile: no readable $CRYPTTAB — no encrypted bays to late-unlock"
+    fi
     # WARP-1361 — but FIRST: mount assembled-but-unmounted droplet pool
     # arrays. The per-device udev add can fire while the array is still
     # assembling (blkid sees no filesystem yet) and nothing re-fires on the
@@ -840,6 +1171,11 @@ case "$ACTION" in
       fi
       case "$md_type" in
         ext4|xfs|btrfs) ;;
+        crypto_LUKS)
+          # WARP-3513: an encrypted pool (LUKS over the array). The bay
+          # late-unlock loop above owns it — it unlocks and mounts the mapper.
+          log "reconcile: skip $md_base (LUKS container — an encrypted pool is mounted by the bay late-unlock loop above, not here)"
+          continue ;;
         *)
           log "reconcile: skip $md_base (unsupported filesystem type $md_type)"
           continue ;;
@@ -906,6 +1242,7 @@ case "$ACTION" in
       [ -n "$src" ] || continue
       name="$(basename "$m")"
       eligible=0
+      reg_scope="root"
       case "$src" in
         /dev/md*)
           # WARP-1361: signature-gated (same reasoning as the trust-list
@@ -921,6 +1258,12 @@ case "$ACTION" in
           fi
           ;;
         /dev/mapper/droplet-usb-*) eligible=1 ;;   # droplet-enrolled LUKS
+        /dev/mapper/droplet-bay-*)
+          # WARP-3513: an encrypted bay — droplet-prepared and TPM-unlocked,
+          # trusted like the enrolled LUKS above, but exposed at files/ ONLY.
+          eligible=1
+          reg_scope="files"
+          ;;
         *)
           uuid="$(blkid -o value -s UUID "$src" 2>/dev/null | head -1 || true)"
           uuid="${uuid//$'\n'/}"
@@ -931,7 +1274,7 @@ case "$ACTION" in
           ;;
       esac
       if [ "$eligible" = 1 ]; then
-        nextcloud_add "$m" "$name" \
+        nextcloud_add "$m" "$name" "$reg_scope" \
           || log "reconcile: nextcloud registration failed for $name"
       else
         log "reconcile: skip untrusted mount $name"
@@ -955,6 +1298,12 @@ case "$ACTION" in
       | while IFS= read -r dd; do
           tail="${dd#*\"datadir\":\"/host/}"
           tail="${tail%\"}"
+          [ -n "$tail" ] || continue
+          # WARP-3513: a bay's registration is /host/<name>/files — strip the
+          # suffix so it is judged by the SAME <name> mount as a root-scoped
+          # one (otherwise the nested-path guard below skips it and the
+          # registration of an unplugged bay is never pruned).
+          tail="${tail%/files}"
           [ -n "$tail" ] || continue
           case "$tail" in */*) continue ;; esac   # defensive: never nested
           if mountpoint -q "$MOUNT_BASE/$tail"; then

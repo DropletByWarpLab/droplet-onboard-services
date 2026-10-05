@@ -43,12 +43,14 @@ def _load_bridge(monkeypatch: pytest.MonkeyPatch, env: dict | None = None):
 
 
 def _disk(name, size, fstype=None, mountpoint=None, tran="sata",
-          model="", serial="", children=None):
+          model="", serial="", children=None, fsver=None):
     return {
         "name": name,
         "type": "disk",
         "size": size,
         "fstype": fstype,
+        # WARP-3513: lsblk's FSVER column ("2" on a LUKS2 container).
+        "fsver": fsver,
         "mountpoint": mountpoint,
         "tran": tran,
         "model": model,
@@ -57,12 +59,14 @@ def _disk(name, size, fstype=None, mountpoint=None, tran="sata",
     }
 
 
-def _part(name, fstype=None, mountpoint=None, type_="part", children=None):
+def _part(name, fstype=None, mountpoint=None, type_="part", children=None,
+          fsver=None):
     return {
         "name": name,
         "type": type_,
         "size": 0,
         "fstype": fstype,
+        "fsver": fsver,
         "mountpoint": mountpoint,
         **({"children": children} if children is not None else {}),
     }
@@ -268,6 +272,333 @@ def test_classify_handles_missing_or_garbage_input(monkeypatch):
     assert bridge.classify_disks(None, "nvme0n1") == []
     assert bridge.classify_disks({}, "nvme0n1") == []
     assert bridge.classify_disks({"blockdevices": None}, "nvme0n1") == []
+
+
+# ---------------------------------------------------------------------------
+# WARP-3513 — every prepared bay drive is LUKS2 (ext4 inside). Two things the
+# whole-disk inventory must get right:
+#   1. an explicit `encryption` enum on each disk, so the dashboard can tell a
+#      LOCKED bay (a crypto_LUKS disk nothing has unlocked) from a random
+#      foreign disk — both are `foreign` state, only one is ours to unlock;
+#   2. the WARP-1336 regression guard. With LUKS in the middle the MOUNTED node
+#      is the crypt child of the md array, whose NAME ("droplet-bay-xxxxxxxx")
+#      does not start with "md". The old name-prefix test therefore flipped every
+#      pool member to in_use and dropped pool_member + md + md_mounted, making
+#      Reclaim unreachable exactly when the pool works. Ownership is now decided
+#      by ANCESTRY: an md node, or anything beneath one, is the ARRAY in use.
+# ---------------------------------------------------------------------------
+
+_BAY_MNT = "/mnt/droplet/drive-9e8d7c6b"
+_LUKS_POOL_MNT = "/mnt/droplet/pool-3c4d5e6f"
+_VALID_ENCRYPTION = ("luks2", "none", "unknown")
+
+
+def _crypt(name, mountpoint=None):
+    # The dm-crypt node: lsblk NAME is the mapper name, the ext4 lives here.
+    return _part(name, fstype="ext4", fsver="1.0", mountpoint=mountpoint,
+                 type_="crypt")
+
+
+def _luks_pool_member(name, serial, mounted=True, md_fsver="2", unlocked=True):
+    # LUKS over md: sdX (linux_raid_member) -> md127 (raid1, crypto_LUKS)
+    #               -> droplet-bay-cafef00d (crypt, ext4, mounted)
+    children = ([_crypt("droplet-bay-cafef00d",
+                        _LUKS_POOL_MNT if mounted else None)]
+                if unlocked else None)
+    return _disk(name, TB, fstype="linux_raid_member", fsver="1.2",
+                 model="WDC WD20EARZ", serial=serial,
+                 children=[_part("md127", type_="raid1", fstype="crypto_LUKS",
+                                 fsver=md_fsver, children=children)])
+
+
+_OS_NVME = _disk("nvme0n1", 512_000_000_000, tran="nvme", model="Samsung 980",
+                 children=[
+                     _part("nvme0n1p1", fstype="vfat", mountpoint="/boot/efi"),
+                     _part("nvme0n1p2", fstype="ext4", mountpoint="/"),
+                 ])
+
+
+def test_luks_over_md_members_stay_pool_member_when_the_pool_is_mounted(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    tree = {"blockdevices": [
+        _OS_NVME,
+        _luks_pool_member("sda", "WD-A"),
+        _luks_pool_member("sdb", "WD-B"),
+    ]}
+    by_name = {d["name"]: d for d in bridge.classify_disks(tree, "nvme0n1")}
+    assert set(by_name) == {"sda", "sdb"}
+    for d in by_name.values():
+        assert d["state"] == "pool_member", (
+            "a mount on the crypt child of the md array is the ARRAY in use, "
+            "not the member disk (WARP-1336)")
+        assert d["md"] == "md127"
+        assert d["md_mounted"] is True
+        assert d["encryption"] == "luks2"
+
+
+def test_luks_over_md_members_are_still_never_adoptable(monkeypatch):
+    # The Reclaim route (pool_member + md) must stay reachable, and adopt
+    # eligibility must not widen: foreign/available only.
+    bridge = _load_bridge(monkeypatch)
+    for unlocked in (True, False):
+        tree = {"blockdevices": [
+            _luks_pool_member("sda", "WD-A", unlocked=unlocked),
+            _luks_pool_member("sdb", "WD-B", unlocked=unlocked),
+        ]}
+        for d in bridge.classify_disks(tree, "nvme0n1"):
+            assert d["state"] == "pool_member"
+            assert d["state"] not in ("foreign", "available")
+            assert d["md"] == "md127"
+
+
+def test_luks_over_md_pool_that_is_not_unlocked_reports_md_mounted_false(monkeypatch):
+    # md127 carries crypto_LUKS but nothing has opened it: no crypt child.
+    bridge = _load_bridge(monkeypatch)
+    tree = {"blockdevices": [
+        _luks_pool_member("sda", "WD-A", unlocked=False),
+        _luks_pool_member("sdb", "WD-B", unlocked=False),
+    ]}
+    for d in bridge.classify_disks(tree, "nvme0n1"):
+        assert d["state"] == "pool_member"
+        assert d["md"] == "md127"
+        assert d["md_mounted"] is False
+        assert d["encryption"] == "luks2"
+
+
+def test_luks_over_md_pool_unlocked_but_not_mounted(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    tree = {"blockdevices": [
+        _luks_pool_member("sda", "WD-A", mounted=False),
+        _luks_pool_member("sdb", "WD-B", mounted=False),
+    ]}
+    for d in bridge.classify_disks(tree, "nvme0n1"):
+        assert d["state"] == "pool_member"
+        assert d["md_mounted"] is False
+
+
+def test_plain_pool_classification_is_unchanged(monkeypatch):
+    # The pre-WARP-3513 shape (ext4 straight on md127): same states, same md
+    # linkage — plus the new `encryption`, which is "none" for it.
+    bridge = _load_bridge(monkeypatch)
+    for tree, md_mounted in ((_LSBLK_MOUNTED_POOL, True), (_LSBLK_LIVE_BOX, False)):
+        by_name = {d["name"]: d for d in bridge.classify_disks(tree, "nvme0n1")}
+        assert set(by_name) == {"sda", "sdb"}
+        for d in by_name.values():
+            assert d["state"] == "pool_member"
+            assert d["md"] == "md127"
+            assert d["md_mounted"] is md_mounted
+            assert d["encryption"] == "none"
+
+
+def test_luks_bay_on_a_single_disk_is_in_use_when_mounted(monkeypatch):
+    # sdb (crypto_LUKS) -> droplet-bay-1a2b3c4d (crypt, ext4, mounted). The
+    # mounted node is NOT beneath any md array, so the disk itself is in use.
+    bridge = _load_bridge(monkeypatch)
+    tree = {"blockdevices": [
+        _disk("sdb", TB, fstype="crypto_LUKS", fsver="2", model="WDC WD20EARZ",
+              serial="WD-B",
+              children=[_crypt("droplet-bay-1a2b3c4d", _BAY_MNT)]),
+    ]}
+    disks = bridge.classify_disks(tree, "nvme0n1")
+    assert len(disks) == 1
+    assert disks[0]["state"] == "in_use"
+    assert disks[0]["encryption"] == "luks2"
+    assert "md" not in disks[0] and "md_mounted" not in disks[0]
+
+
+def test_locked_luks_bay_is_foreign_but_marked_luks2(monkeypatch):
+    # A crypto_LUKS disk nothing has unlocked: no children, nothing mounted.
+    # Its STATE is still `foreign` (it has a signature, nothing is mounted) —
+    # `encryption` is what lets the UI say "locked bay" instead of "unknown disk".
+    bridge = _load_bridge(monkeypatch)
+    tree = {"blockdevices": [
+        _disk("sdb", TB, fstype="crypto_LUKS", fsver="2"),
+    ]}
+    disks = bridge.classify_disks(tree, "nvme0n1")
+    assert disks[0]["state"] == "foreign"
+    assert disks[0]["encryption"] == "luks2"
+    assert disks[0]["fstype"] == "crypto_LUKS"
+
+
+def test_locked_luks1_container_is_foreign_with_unknown_encryption(monkeypatch):
+    # Only an explicit LUKS2 is ours. LUKS1 / a missing version is "unknown" —
+    # never the prepared state.
+    bridge = _load_bridge(monkeypatch)
+    tree = {"blockdevices": [
+        _disk("sdb", TB, fstype="crypto_LUKS", fsver="1"),
+        _disk("sdc", TB, fstype="crypto_LUKS", fsver=None),
+    ]}
+    disks = bridge.classify_disks(tree, "nvme0n1")
+    assert [d["state"] for d in disks] == ["foreign", "foreign"]
+    assert [d["encryption"] for d in disks] == ["unknown", "unknown"]
+
+
+def test_crypt_child_mounted_outside_md_marks_the_disk_in_use(monkeypatch):
+    # LUKS on a PARTITION: sdc -> sdc1 (crypto_LUKS) -> crypt (mounted). Not
+    # beneath an md array => in_use, and encryption comes from the descendant.
+    bridge = _load_bridge(monkeypatch)
+    tree = {"blockdevices": [
+        _disk("sdc", TB, children=[
+            _part("sdc1", fstype="crypto_LUKS", fsver="2", children=[
+                _crypt("droplet-bay-5d6e7f80", "/mnt/droplet/drive-aa00bb11"),
+            ]),
+        ]),
+    ]}
+    disks = bridge.classify_disks(tree, "nvme0n1")
+    assert disks[0]["state"] == "in_use"
+    assert disks[0]["encryption"] == "luks2"
+
+
+def test_mount_outside_md_on_a_pool_member_still_wins_as_in_use(monkeypatch):
+    # The carve-out is ancestry, not "anything encrypted". A member whose OTHER
+    # partition carries a mounted LUKS bay is genuinely in use; the md linkage
+    # rides along (md_mounted describes the ARRAY side only).
+    bridge = _load_bridge(monkeypatch)
+    tree = {"blockdevices": [
+        _disk("sda", TB, children=[
+            _part("sda1", fstype="linux_raid_member", children=[
+                _part("md0", type_="raid1", fstype="crypto_LUKS", fsver="2",
+                      children=[_crypt("droplet-bay-cafef00d")]),
+            ]),
+            _part("sda2", fstype="crypto_LUKS", fsver="2", children=[
+                _crypt("droplet-bay-99887766", "/mnt/droplet/extra-99887766"),
+            ]),
+        ]),
+    ]}
+    disks = bridge.classify_disks(tree, "nvme0n1")
+    assert disks[0]["state"] == "in_use"
+    assert disks[0]["md"] == "md0"
+    assert disks[0]["md_mounted"] is False
+    assert disks[0]["encryption"] == "luks2"
+
+
+def test_lvm_beneath_an_md_array_is_the_array_in_use(monkeypatch):
+    # Ancestry rule, pinned for the non-LUKS stack too: an LV (or a partition of
+    # a partitionable md) beneath the array is the ARRAY in use. A mount on a
+    # descendant that is NOT beneath an md (a plain partition, LVM straight on
+    # the disk) is still the disk in use.
+    bridge = _load_bridge(monkeypatch)
+    beneath = {"blockdevices": [
+        _disk("sda", TB, fstype="linux_raid_member", children=[
+            _part("md0", type_="raid1", children=[
+                _part("vg-data", type_="lvm", fstype="ext4",
+                      mountpoint="/mnt/droplet/data-1"),
+            ]),
+        ]),
+        _disk("sdb", TB, fstype="linux_raid_member", children=[
+            _part("md1", type_="raid1", children=[
+                _part("md1p1", fstype="ext4", mountpoint="/mnt/droplet/data-2"),
+            ]),
+        ]),
+    ]}
+    for d in bridge.classify_disks(beneath, "nvme0n1"):
+        assert d["state"] == "pool_member"
+        assert d["md_mounted"] is True
+    beside = {"blockdevices": [
+        _disk("sdc", TB, children=[
+            _part("vg-data", type_="lvm", fstype="ext4",
+                  mountpoint="/mnt/droplet/data-3"),
+        ]),
+    ]}
+    assert bridge.classify_disks(beside, "nvme0n1")[0]["state"] == "in_use"
+
+
+def test_a_mount_several_levels_beneath_an_md_array_is_still_the_array_in_use(monkeypatch):
+    # Ancestry holds at ANY depth, not just for the array's direct child:
+    # md0 -> LUKS (crypt) -> LVM volume -> mount.
+    bridge = _load_bridge(monkeypatch)
+    tree = {"blockdevices": [
+        _disk("sda", TB, fstype="linux_raid_member", children=[
+            _part("md0", type_="raid1", fstype="crypto_LUKS", fsver="2", children=[
+                _part("cryptlvm", type_="crypt", fstype="LVM2_member", children=[
+                    _part("vg-data", type_="lvm", fstype="ext4", fsver="1.0",
+                          mountpoint="/mnt/droplet/data-4"),
+                ]),
+            ]),
+        ]),
+    ]}
+    d = bridge.classify_disks(tree, "nvme0n1")[0]
+    assert d["state"] == "pool_member"
+    assert d["md"] == "md0"
+    assert d["md_mounted"] is True
+    assert d["encryption"] == "luks2"
+
+
+def test_md_ownership_is_decided_by_ancestry_not_by_name_prefix(monkeypatch):
+    # A mounted dm volume that merely STARTS with "md" is not an md array: the
+    # old startswith("md") test invented md="mdbackup" + md_mounted for it.
+    bridge = _load_bridge(monkeypatch)
+    tree = {"blockdevices": [
+        _disk("sdc", TB, children=[
+            _part("sdc1", fstype="LVM2_member", children=[
+                _part("mdbackup", type_="lvm", fstype="ext4",
+                      mountpoint="/mnt/droplet/backup-1"),
+            ]),
+        ]),
+    ]}
+    disks = bridge.classify_disks(tree, "nvme0n1")
+    assert disks[0]["state"] == "in_use"
+    assert "md" not in disks[0]
+    assert "md_mounted" not in disks[0]
+
+
+def test_encryption_looks_at_the_disk_and_every_descendant(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    cases = {
+        # container ON the disk
+        "sda": _disk("sda", TB, fstype="crypto_LUKS", fsver="2"),
+        # container on a partition
+        "sdb": _disk("sdb", TB, children=[
+            _part("sdb1", fstype="crypto_LUKS", fsver="2")]),
+        # container is the md array above the disk (LUKS over md)
+        "sdc": _luks_pool_member("sdc", "WD-C", unlocked=False),
+        # a luks2 container beats a legacy one sharing the disk
+        "sdd": _disk("sdd", TB, children=[
+            _part("sdd1", fstype="crypto_LUKS", fsver="1"),
+            _part("sdd2", fstype="crypto_LUKS", fsver="2")]),
+    }
+    tree = {"blockdevices": list(cases.values())}
+    by_name = {d["name"]: d for d in bridge.classify_disks(tree, "nvme0n1")}
+    assert {n: by_name[n]["encryption"] for n in cases} == {n: "luks2" for n in cases}
+
+
+def test_encryption_is_none_without_any_luks_container(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    tree = {"blockdevices": [
+        _disk("sda", TB, children=[_part("sda1", fstype="ntfs")]),
+        _disk("sdb", TB),
+        _disk("sdc", TB, fstype="ext4", mountpoint="/mnt/droplet/fresh"),
+        # crypt node whose parent carries NO LUKS signature is not LUKS
+        _disk("sdd", TB, children=[
+            _part("plain-dmcrypt", type_="crypt", fstype="ext4")]),
+    ]}
+    by_name = {d["name"]: d for d in bridge.classify_disks(tree, "nvme0n1")}
+    assert {d["encryption"] for d in by_name.values()} == {"none"}
+
+
+def test_every_disk_entry_carries_an_explicit_encryption_enum(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    trees = (
+        _LSBLK_LIVE_BOX, _LSBLK_MOUNTED_POOL,
+        {"blockdevices": [_luks_pool_member("sda", "WD-A"),
+                          _disk("sdb", TB, fstype="crypto_LUKS", fsver="2")]},
+    )
+    for tree in trees:
+        disks = bridge.classify_disks(tree, "nvme0n1")
+        assert disks
+        for d in disks:
+            assert d["encryption"] in _VALID_ENCRYPTION
+
+
+def test_encryption_addition_is_purely_additive_for_existing_fixtures(monkeypatch):
+    # No key removed or renamed; the only new key on a disk entry is `encryption`.
+    bridge = _load_bridge(monkeypatch)
+    old_keys = {"name", "size_bytes", "state", "fstype", "bus", "model", "serial",
+                "md", "md_mounted"}
+    for d in bridge.classify_disks(_LSBLK_MOUNTED_POOL, "nvme0n1"):
+        assert set(d) == old_keys | {"encryption"}
+    plain = bridge.classify_disks({"blockdevices": [_disk("sdd", TB)]}, "nvme0n1")[0]
+    assert set(plain) == (old_keys - {"md", "md_mounted"}) | {"encryption"}
 
 
 # ---------------------------------------------------------------------------
