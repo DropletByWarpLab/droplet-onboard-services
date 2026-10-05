@@ -91,6 +91,9 @@ CHANNEL_KEYS = (
     "web_push",
     # WARP-3264 — calendar place suggestions (OpenStreetMap Nominatim).
     "place_lookup",
+    # WARP-3532 — work webhooks and chat-app notifications (ADR-069 §9). No
+    # overlay chain classifies it yet, so it reads 0 until one does.
+    "work_integrations",
 )
 CHAIN_PREFIX = "droplet_offlan_"
 

@@ -383,6 +383,7 @@ describe("wifi.primary converger (WARP-1761)", () => {
         capturedIntervalMs = ms;
         capturedHandler = handler;
         capturedLockKey = opts?.lockKey ?? null;
+        return { runNow: () => undefined };
       },
       scheduleCron: () => {},
       stop: () => {},
