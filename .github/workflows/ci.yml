@@ -115,6 +115,30 @@ jobs:
       - name: Customer setup guides — coverage, fact pins, link integrity
         run: bash scripts/check-setup-guides.sh
 
+      # WARP-3601 — third-party image pin gate. Same placement rationale as
+      # the setup-guides step above: `detect` is the one job that runs on
+      # every PR, so this reports under the required ci-summary with no new
+      # leg, no matrix entry and no `paths:` change, in well under a second.
+      # Closes the class "a compose edit reintroduces a floating third-party
+      # tag (postgres, redis, the MQTT broker, ...) that a fresh pull
+      # resolves to whatever the registry serves that day". Locally built
+      # services (those with `build:`) are exempt by construction.
+      - name: Third-party images are pinned by digest
+        run: |
+          bash scripts/check-pinned-images.sh --selfcheck
+          bash scripts/check-pinned-images.sh
+
+      # WARP-3667 — vulnerability exceptions are time-bound. Fails when a
+      # .trivyignore entry or osv-scanner.toml ignore has no expiry or is past
+      # due, or when the pinned Trivy DB snapshot is older than 35 days.
+      # Closes the class "an accepted finding is never looked at again": the
+      # baseline and the DB pin are what make the scans deterministic, so
+      # both must be re-reviewed on a clock. Same placement as above.
+      - name: Vulnerability exceptions have expiries and the Trivy DB pin is fresh
+        run: |
+          bash scripts/check-vuln-exceptions.sh --selfcheck
+          bash scripts/check-vuln-exceptions.sh
+
       - name: Map changed paths to affected legs
         if: github.event_name == 'pull_request'
         uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4
@@ -350,6 +374,13 @@ jobs:
               - "**/Dockerfile*"
               - "Dockerfile*"
               - ".hadolint.yaml"
+              # WARP-3670: the digest-pin gate runs in this leg, so a change to
+              # the gate or its self-test must run the leg. Adds one ~1 min leg
+              # to the rare PR that edits those two files, nothing else.
+              - "scripts/check-dockerfile-base-pins.sh"
+              - "tests/check-dockerfile-base-pins.test.sh"
+              - "scripts/check-dockerfile-hash-locks.sh"
+              - "tests/check-dockerfile-hash-locks.test.sh"
             # WARP-2455: the pre-PR gate's own sources. ship-check.sh is
             # mandated by the preflight skill but was executed by NO
             # workflow — all eight `ship-check` mentions under .github/ were
@@ -1226,6 +1257,70 @@ jobs:
           /tmp/gitleaks git . --config .gitleaks.toml --no-banner --redact --exit-code 1 \
             --log-opts "origin/${{ github.base_ref }}..HEAD"
 
+      # WARP-3665 — dependency vulnerability gate that reaches branch
+      # protection. It lives in this job on purpose: `gitleaks` is already an
+      # unfiltered ci-summary leg, so the verdict blocks a merge with no new
+      # required context, no new job and no `paths:` change (docs/ci-required-
+      # checks.md). Closes the class "a PR bumps or adds a vulnerable pinned
+      # dependency and every required check stays green": the Trivy image
+      # gate in docker-build.yml is real but not a required context.
+      #
+      # It is DIFF-SHAPED by construction, not absolute: Trivy scans the
+      # lockfiles and requirements files against the DB snapshot pinned in
+      # .github/trivy-db-version, and .trivyignore is the reviewed baseline of
+      # accepted findings. Only a fixable HIGH/CRITICAL that is not in the
+      # baseline (or whose entry has expired) fails, so the accepted backlog
+      # never turns every PR red. The same scan runs in publish-release.yml's
+      # gate-node job, so a release cannot ship what a PR could not merge.
+      #
+      # Cost: the scope step is ~2 s. The scan (~2 min: Trivy install + DB
+      # download) runs on a PR only when a lockfile, a requirements file, the
+      # baseline, the DB pin or this workflow changed, and always on main
+      # pushes. It runs in parallel with the other legs, so it adds no
+      # wall-clock to them.
+      - name: Dependency scan scope (lockfiles, requirements, baseline, pin)
+        id: depscope
+        run: |
+          set -eu
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if git diff --name-only "origin/${{ github.base_ref }}...HEAD" -- \
+               ':(glob)**/package-lock.json' ':(glob)**/requirements*' \
+               .trivyignore .github/trivy-db-version .github/workflows/ci.yml \
+               .github/workflows/publish-release.yml \
+               | grep -q .; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "No dependency input changed; Trivy dependency scan skipped."
+          fi
+
+      - name: Read pinned Trivy DB digest
+        if: steps.depscope.outputs.run == 'true'
+        id: trivydb
+        run: echo "ref=$(grep -v '^#' .github/trivy-db-version | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Trivy dependency scan (block new HIGH/CRITICAL)
+        if: steps.depscope.outputs.run == 'true'
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_DB_REPOSITORY: ghcr.io/aquasecurity/trivy-db@${{ steps.trivydb.outputs.ref }}
+          TRIVY_SKIP_VERSION_CHECK: "true"
+          # Trivy's pip default recognizes only requirements.txt. Include the
+          # exact pins and transitive packages in our runtime/dev hash locks.
+          TRIVY_FILE_PATTERNS: 'pip:requirements[^/]*\.lock$'
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          trivyignores: .trivyignore
+          skip-dirs: node_modules,.git
+
   # WARP-243 Dockerfile lint over every tracked Dockerfile (27 at time of
   # writing — the git ls-files glob keeps the list live, so a new service's
   # Dockerfile is gated automatically). Moved here from hadolint.yml under
@@ -1258,6 +1353,31 @@ jobs:
           mapfile -t files < <(git ls-files '*Dockerfile*')
           echo "Linting ${#files[@]} Dockerfiles"
           /tmp/hadolint --config .hadolint.yaml --failure-threshold warning "${files[@]}"
+
+      # WARP-3670: why this step exists -- a floating base tag (python:3.12-slim,
+      # node:20-bookworm-slim) lets two builds of one commit ship different base
+      # layers, and the cosign signature covers the resulting image digest, not
+      # how reproducible its contents were. Escape class closed: an unpinned
+      # `FROM` or `COPY --from=<image>` reaching a signed OTA image. A step in
+      # the existing leg, not a new job: same filter, no added minutes.
+      - name: Every Dockerfile image is pinned by digest
+        run: |
+          set -eu
+          bash tests/check-dockerfile-base-pins.test.sh
+          bash scripts/check-dockerfile-base-pins.sh
+
+      # WARP-3670: why this step exists -- an unhashed `pip install -r
+      # requirements.txt` re-resolves on every build, so two builds of one commit
+      # can ship different transitive packages into a signed OTA image. Escape
+      # class closed: a new service, or an edit to an install line, going back to
+      # an unhashed install. Every Python image installs a uv-compiled hash lock
+      # with `--require-hashes` (docs/SECURITY.md); this fails on a regression.
+      # A step in the existing leg, not a new job: same filter, no added minutes.
+      - name: Every Python image installs a hash-locked requirements file
+        run: |
+          set -eu
+          bash tests/check-dockerfile-hash-locks.test.sh
+          bash scripts/check-dockerfile-hash-locks.sh
   # WARP-2455: the pre-PR gate's own gate. scripts/test/ship-check.sh is
   # mandated by the preflight skill, but until this leg NO workflow executed
   # it — all eight `ship-check` mentions under .github/ were comments of the

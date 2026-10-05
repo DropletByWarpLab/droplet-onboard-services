@@ -69,6 +69,7 @@ type Item = {
   lastAttemptedAt: Date | null;
   recentAttemptCount: number;
   recentAttemptWindowStartedAt: Date | null;
+  ingestPolicy: "auto_embed" | "await_approval";
 };
 
 type Chunk = {
@@ -96,6 +97,7 @@ type Fis = {
 const itemStore = new Map<string, Item>();
 const chunkStore = new Map<string, Chunk>();
 const fisStore = new Map<string, Fis>();
+let holdOnNextRead = false;
 
 function itemsFor(userId: string): Item[] {
   return [...itemStore.values()].filter((i) => i.userId === userId);
@@ -580,8 +582,11 @@ vi.mock("@prisma/client", () => {
     },
     brainMemoryItem: {
       findUnique: vi.fn(
-        async ({ where }: { where: { id: string } }) =>
-          itemStore.get(where.id) ?? null,
+        async ({ where }: { where: { id: string } }) => {
+          const row = itemStore.get(where.id);
+          if (row && holdOnNextRead) { holdOnNextRead = false; const snapshot = { ...row }; row.ingestPolicy = "await_approval"; return snapshot; }
+          return row ?? null;
+        },
       ),
       update: vi.fn(
         async ({
@@ -597,6 +602,14 @@ vi.mock("@prisma/client", () => {
           return r;
         },
       ),
+      updateMany: vi.fn(async ({ where, data }: { where: Partial<Item>; data: Partial<Item> }) => {
+        const row = itemStore.get(where.id!);
+        if (!row || !Object.entries(where).every(([key, value]) => {
+          const stored = row[key as keyof Item];
+          return stored instanceof Date && value instanceof Date ? stored.getTime() === value.getTime() : stored === value;
+        })) { return { count: 0 }; }
+        Object.assign(row, data); return { count: 1 };
+      }),
     },
   };
   return {
@@ -652,6 +665,7 @@ beforeEach(() => {
   chunkStore.clear();
   fisStore.clear();
   publishMock.mockReset();
+  holdOnNextRead = false;
   setUser("alice");
 });
 
@@ -677,6 +691,7 @@ function makeItem(overrides: Partial<Item> = {}): Item {
     lastAttemptedAt: null,
     recentAttemptCount: 0,
     recentAttemptWindowStartedAt: null,
+    ingestPolicy: "auto_embed",
     ...overrides,
   };
   base.id = id;
@@ -811,6 +826,7 @@ describe("GET /api/me/context-stats/failed", () => {
     });
     const res = await request(app).get("/api/me/context-stats/failed");
     expect(res.status).toBe(200);
+    expect(res.body.retryDocumentSupported).toBe(true);
     expect(res.body.items).toHaveLength(1);
     expect(res.body.items[0]).toMatchObject({
       id: "f-1",
@@ -818,9 +834,50 @@ describe("GET /api/me/context-stats/failed", () => {
       category: "video",
     });
   });
+  it("advertises document retry even when the caller has no failures", async () => {
+    const res = await request(app).get("/api/me/context-stats/failed");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ items: [], retryDocumentSupported: true });
+  });
 });
 
 describe("POST /api/me/context-stats/failed/:id/retry", () => {
+  it("retries a document through document ingestion, retaining original bytes and metadata", async () => {
+    const row = makeItem({ id: "doc-retry", status: "failed", mimeType: "application/pdf", filename: "中文.pdf", originatingChatId: "own-chat", failureReason: "extract_failed", indexedAt: null });
+    const source = { filename: row.filename, bytes: row.bytes, storagePath: row.storagePath, mimeType: row.mimeType, originatingChatId: row.originatingChatId, extractorWarnings: row.extractorWarnings, hasOriginalBytes: row.hasOriginalBytes };
+    const response = await request(app).post("/api/me/context-stats/failed/doc-retry/retry");
+    expect(response.status).toBe(202); expect(response.body.status).toBe("indexing"); expect(row.status).toBe("indexing"); expect(row.recentAttemptCount).toBe(1);
+    expect(publishMock).toHaveBeenCalledExactlyOnceWith("droplet/files/brain/uploaded", { itemId: row.id, userId: "alice", path: row.storagePath, mimeType: row.mimeType, filename: row.filename, originatingChatId: "own-chat" });
+    expect(row).toMatchObject(source);
+    const repeated = await request(app).post("/api/me/context-stats/failed/doc-retry/retry"); expect(repeated.status).toBe(409); expect(publishMock).toHaveBeenCalledTimes(1);
+  });
+  it.each(["application/pdf", "audio/mpeg", "video/mp4"])("refuses a held %s before changing state or enqueueing", async (mimeType) => {
+    const row = makeItem({ id: "held", status: "failed", mimeType, ingestPolicy: "await_approval" });
+    const response = await request(app).post("/api/me/context-stats/failed/held/retry"); expect(response.status).toBe(409); expect(response.body.error).toBe("awaiting_approval"); expect(row.status).toBe("failed"); expect(row.recentAttemptCount).toBe(0); expect(publishMock).not.toHaveBeenCalled();
+  });
+  it.each([null, "application/octet-stream", "audio/unsupported"])("refuses unsupported MIME %s without changing state", async (mimeType) => {
+    const row = makeItem({ id: "unsupported", status: "failed", mimeType }); const response = await request(app).post("/api/me/context-stats/failed/unsupported/retry"); expect(response.status).toBe(415); expect(response.body.error).toBe("unsupported_mime"); expect(row.status).toBe("failed"); expect(publishMock).not.toHaveBeenCalled();
+  });
+  it("refuses retry when original bytes have been purged", async () => {
+    const row = makeItem({ id: "purged", status: "failed", hasOriginalBytes: false }); const response = await request(app).post("/api/me/context-stats/failed/purged/retry"); expect(response.status).toBe(409); expect(response.body.error).toBe("original_unavailable"); expect(row.status).toBe("failed"); expect(publishMock).not.toHaveBeenCalled();
+  });
+  it("caps document retries in the same rolling hour", async () => {
+    const row = makeItem({ id: "doc-cap", status: "failed", recentAttemptCount: 2, recentAttemptWindowStartedAt: new Date(Date.now() - 1000) });
+    expect((await request(app).post("/api/me/context-stats/failed/doc-cap/retry")).status).toBe(202); expect(row.recentAttemptCount).toBe(3); row.status = "failed";
+    const response = await request(app).post("/api/me/context-stats/failed/doc-cap/retry"); expect(response.status).toBe(429); expect(response.headers["retry-after"]).toBeDefined(); expect(publishMock).toHaveBeenCalledTimes(1);
+  });
+  it("does not enqueue an item held after the ownership read", async () => {
+    const row = makeItem({ id: "policy-race", status: "failed" });
+    holdOnNextRead = true;
+    const response = await request(app).post("/api/me/context-stats/failed/policy-race/retry"); expect(response.status).toBe(409); expect(row.status).toBe("failed"); expect(publishMock).not.toHaveBeenCalled();
+  });
+  it("only enqueues one document retry when requests overlap", async () => {
+    makeItem({ id: "concurrent", status: "failed" }); const results = await Promise.all([request(app).post("/api/me/context-stats/failed/concurrent/retry"), request(app).post("/api/me/context-stats/failed/concurrent/retry")]); expect(results.map(r => r.status).sort()).toEqual([202, 409]); expect(publishMock).toHaveBeenCalledTimes(1);
+  });
+  it("resets an expired document retry window instead of retaining its old cap", async () => {
+    const row = makeItem({ id: "expired", status: "failed", recentAttemptCount: 3, recentAttemptWindowStartedAt: new Date(Date.now() - 2 * 60 * 60 * 1000) });
+    const response = await request(app).post("/api/me/context-stats/failed/expired/retry"); expect(response.status).toBe(202); expect(row.recentAttemptCount).toBe(1); expect(row.recentAttemptWindowStartedAt!.getTime()).toBeGreaterThan(Date.now() - 10000);
+  });
   it("flips a failed row to queued and publishes run-one", async () => {
     makeItem({
       id: "f-1",

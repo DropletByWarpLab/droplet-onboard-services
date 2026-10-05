@@ -12,6 +12,7 @@ import { describe, it, expect, vi } from "vitest";
 import type { PrismaClient } from "@prisma/client";
 import {
   searchByVector,
+  searchByLexical,
   listRecent,
   hnswEfSearchFor,
   HNSW_EF_SEARCH_FLOOR,
@@ -103,6 +104,18 @@ function chunkRow(path: string, score: number) {
 }
 
 describe("searchByVector", () => {
+  it("retains indexed SMB identities for the caller's permission check in both search arms", async () => {
+    const row = { ...chunkRow("/Droplet/report.pdf", 0.9), externalFileId: 42 };
+    const prisma = buildFakePrisma([[row], [row]]);
+    const vector = await searchByVector(prisma, { userId: "u1", additionalUserIds: ["__droplet_share__"], vector: [0.1], limit: 5, minSimilarity: 0 });
+    const lexical = await searchByLexical(prisma, { userId: "u1", additionalUserIds: ["__droplet_share__"], query: "report", limit: 5 });
+    expect(vector[0].externalFileId).toBe(42);
+    expect(lexical[0].externalFileId).toBe(42);
+    const calls = (prisma.$queryRawUnsafe as unknown as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls.every(([sql]) => sql.includes('CASE WHEN "userId" = \'__droplet_share__\' THEN "ncFileId" END AS "externalFileId"'))).toBe(true);
+    expect(calls.every((call) => call.includes("__droplet_share__"))).toBe(true);
+  });
+
   it("filters by userId and applies the score threshold", async () => {
     const prisma = buildFakePrisma([
       [

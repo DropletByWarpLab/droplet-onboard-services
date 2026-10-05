@@ -264,6 +264,16 @@ export interface ConnectorSelector {
   /** Resolve/persist hooks for the track's OAuth tokens. Absent → the
    *  connector keeps its own blocked resolver and degrades honestly. */
   cloudTokens?: CloudTokenAccess;
+
+  /**
+   * WARP-3535 — the fetch a declarative-REST connector dials through. Absent for
+   * every existing caller, and then the connector's own default (`globalThis.
+   * fetch`) is exactly what it was. The development panel passes the one that
+   * adds the owner's `work_integrations` switch, the SSRF guard and a pinned
+   * socket (`services/pm/pm-dev-egress.ts`) UNDER the connector's own host guard.
+   * Read only by `restProfileFactory`; every other track ignores it.
+   */
+  fetchImpl?: (input: string, init?: RequestInit) => Promise<Response>;
 }
 
 /** Read/rotate the cloud track's tokens. `persist` exists because Intuit
@@ -1301,6 +1311,7 @@ const restProfileFactory: ConnectorFactory = ({ selector: sel, descriptor, confi
             return out;
           }
         : undefined,
+      fetchImpl: sel.fetchImpl,
     },
   );
 };

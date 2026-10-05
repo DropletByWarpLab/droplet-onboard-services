@@ -25,7 +25,7 @@ import { PrismaClient } from "@prisma/client";
 // WARP-2821 — the sentinel-assembly rule the assistant runs. Asserted against
 // here rather than re-spelled, so this route and `resolveChunkOwnerIds` cannot
 // answer the same question differently.
-import { deptCorpusKeys } from "@droplet/tools-core";
+import { deptCorpusKeys, SHARED_DRIVE_INDEX_USER } from "@droplet/tools-core";
 
 vi.mock("../config.js", () => ({
   config: {
@@ -95,8 +95,9 @@ const vhit = (path: string, score: number, snippet: string) => ({
 // registered in createApp keeps its real client; override only ncSearchFiles
 // so we can observe the name-search arm without a live Nextcloud.
 // ─────────────────────────────────────────────────────────────────────────
-const { ncSearchFilesSpy } = vi.hoisted(() => ({
+const { ncSearchFilesSpy, ncGetFileIdSpy } = vi.hoisted(() => ({
   ncSearchFilesSpy: vi.fn(),
+  ncGetFileIdSpy: vi.fn(),
 }));
 
 vi.mock("../services/nextcloud.client.js", async (importOriginal) => {
@@ -105,6 +106,7 @@ vi.mock("../services/nextcloud.client.js", async (importOriginal) => {
   return {
     ...actual,
     ncSearchFiles: (...args: unknown[]) => ncSearchFilesSpy(...args),
+    ncGetFileId: (...args: unknown[]) => ncGetFileIdSpy(...args),
   };
 });
 
@@ -232,6 +234,8 @@ describe("GET /api/files/search/content — mode matrix (WARP-880)", () => {
     cacheGetSpy.mockReset();
     cacheSetSpy.mockReset();
     ncSearchFilesSpy.mockReset();
+    ncGetFileIdSpy.mockReset();
+    ncGetFileIdSpy.mockResolvedValue(null);
     // Default: cache miss + accepted write, gateway up.
     cacheGetSpy.mockResolvedValue(null);
     cacheSetSpy.mockResolvedValue(undefined);
@@ -253,6 +257,65 @@ describe("GET /api/files/search/content — mode matrix (WARP-880)", () => {
     resolveNcTokenSpy.mockReset();
     // Default: a valid NC session token is present (mirrors dev-mode).
     resolveNcTokenSpy.mockResolvedValue("dev-mode-token");
+  });
+
+  it.each(["semantic", "keyword", "hybrid"])("%s gates SMB snippets against the caller's live file identity", async (mode) => {
+    grpcEmbedSpy.mockResolvedValue([[0.1, 0.2, 0.3]]);
+    const hits = [
+      { ...vhit("/Droplet/allowed.pdf", 0.9, "allowed snippet"), externalFileId: 42 },
+      { ...vhit("/Droplet/denied.pdf", 0.8, "secret denied"), externalFileId: 43 },
+      { ...vhit("/Droplet/replaced.pdf", 0.7, "secret replaced"), externalFileId: 44 },
+      vhit("/Personal/a.pdf", 0.6, "personal"),
+    ];
+    searchByVectorSpy.mockResolvedValue(hits);
+    searchByLexicalSpy.mockResolvedValue(hits);
+    searchHybridSpy.mockResolvedValue(hits);
+    ncGetFileIdSpy.mockImplementation(async (_token, _user, path) => path === "/Droplet/allowed.pdf" ? 42 : path === "/Droplet/replaced.pdf" ? 45 : null);
+    const res = await request(app).get(`/api/files/search/content?q=report&mode=${mode}`);
+    expect(res.status).toBe(200);
+    expect(res.body.results.map((hit: { path: string }) => hit.path)).toEqual(["/Droplet/allowed.pdf", "/Personal/a.pdf"]);
+    expect(JSON.stringify(res.body)).not.toContain("secret");
+    expect(ncGetFileIdSpy).toHaveBeenCalledWith("dev-mode-token", "dev", "/Droplet/allowed.pdf", expect.any(AbortSignal));
+    expect(cacheSetSpy.mock.calls[0][1][0].externalFileId).toBe(42);
+  });
+
+  it("rechecks cached SMB snippets after access is revoked or a path is replaced", async () => {
+    cacheGetSpy.mockResolvedValue([
+      { path: "/Droplet/report.pdf", score: 0.9, text: "secret", externalFileId: 42 },
+      { path: "/Personal/report.pdf", score: 0.8, text: "own" },
+    ]);
+    ncGetFileIdSpy.mockResolvedValueOnce(42).mockResolvedValueOnce(null).mockResolvedValueOnce(99);
+    const first = await request(app).get("/api/files/search/content?q=report");
+    const revoked = await request(app).get("/api/files/search/content?q=report");
+    const replaced = await request(app).get("/api/files/search/content?q=report");
+    expect(first.body.results).toHaveLength(2);
+    expect(revoked.body.results).toEqual([{ path: "/Personal/report.pdf", score: 0.8, text: "own" }]);
+    expect(replaced.body.results).toEqual(revoked.body.results);
+    expect(searchByVectorSpy).not.toHaveBeenCalled();
+  });
+
+  it("excludes SMB candidates without a caller credential and denies legacy cached shared hits", async () => {
+    resolveNcTokenSpy.mockResolvedValue(null);
+    grpcEmbedSpy.mockResolvedValue([[0.1, 0.2, 0.3]]);
+    searchByVectorSpy.mockResolvedValue([vhit("/Personal/a.pdf", 0.9, "own")]);
+    const res = await request(app).get("/api/files/search/content?q=report");
+    expect(res.status).toBe(200);
+    expect(searchByVectorSpy.mock.calls[0][1].additionalUserIds).toEqual([]);
+    cacheGetSpy.mockResolvedValue([{ path: "/Droplet/report.pdf", score: 0.9, text: "legacy secret" }]);
+    const cached = await request(app).get("/api/files/search/content?q=report");
+    expect(cached.body.results).toEqual([]);
+    expect(ncGetFileIdSpy).not.toHaveBeenCalled();
+  });
+
+  it("authorizes the MCP batch endpoint with caller credentials and exact identities", async () => {
+    ncGetFileIdSpy.mockResolvedValueOnce(42).mockResolvedValueOnce(null);
+    const files = [{ path: "/Droplet/a.pdf", externalFileId: 42 }, { path: "/Droplet/b.pdf", externalFileId: 43 }];
+    const res = await request(app).post("/api/files/shared-drive/access").send({ files });
+    expect(res.status).toBe(200);
+    expect(res.body.files).toEqual([files[0]]);
+    expect(ncGetFileIdSpy).toHaveBeenCalledWith("dev-mode-token", "dev", "/Droplet/a.pdf", expect.any(AbortSignal));
+    const unsafe = await request(app).post("/api/files/shared-drive/access").send({ files: [{ path: "/Droplet/../private", externalFileId: 42 }] });
+    expect(unsafe.status).toBe(400);
   });
 
   // ── 1. keyword calls searchByLexical, never the gRPC embed ──────────────
@@ -664,7 +727,7 @@ describe("GET /api/files/search/content — mode matrix (WARP-880)", () => {
     expect(res.body.results[0].path).toBe("/Household/Trips/burrito.txt");
     const params = searchByVectorSpy.mock.calls[0][1];
     expect(params.userId).toBe("dev");
-    expect(params.additionalUserIds).toEqual(["__household__", "__dept_hh-uuid__"]);
+    expect(params.additionalUserIds).toEqual(["__household__", "__dept_hh-uuid__", SHARED_DRIVE_INDEX_USER]);
   });
 
   it("includes both household sentinel forms in keyword search when the caller is visible into the HOUSEHOLD department", async () => {
@@ -677,7 +740,7 @@ describe("GET /api/files/search/content — mode matrix (WARP-880)", () => {
 
     const params = searchByLexicalSpy.mock.calls[0][1];
     expect(params.userId).toBe("dev");
-    expect(params.additionalUserIds).toEqual(["__household__", "__dept_hh-uuid__"]);
+    expect(params.additionalUserIds).toEqual(["__household__", "__dept_hh-uuid__", SHARED_DRIVE_INDEX_USER]);
   });
 
   it("includes both household sentinel forms in hybrid search when the caller is visible into the HOUSEHOLD department", async () => {
@@ -691,7 +754,7 @@ describe("GET /api/files/search/content — mode matrix (WARP-880)", () => {
 
     const params = searchHybridSpy.mock.calls[0][1];
     expect(params.userId).toBe("dev");
-    expect(params.additionalUserIds).toEqual(["__household__", "__dept_hh-uuid__"]);
+    expect(params.additionalUserIds).toEqual(["__household__", "__dept_hh-uuid__", SHARED_DRIVE_INDEX_USER]);
   });
 
   // WARP-1264: owner/admin see ALL active departments — a non-household one
@@ -705,7 +768,7 @@ describe("GET /api/files/search/content — mode matrix (WARP-880)", () => {
     await request(app).get("/api/files/search/content?q=budget&mode=keyword");
 
     const params = searchByLexicalSpy.mock.calls[0][1];
-    expect(params.additionalUserIds).toEqual(["__dept_fin-uuid__"]);
+    expect(params.additionalUserIds).toEqual(["__dept_fin-uuid__", SHARED_DRIVE_INDEX_USER]);
   });
 
   // WARP-2821 — the assistant asks this same question behind `search_content`,
@@ -732,7 +795,7 @@ describe("GET /api/files/search/content — mode matrix (WARP-880)", () => {
     // The caller's own corpus stays FIRST and separate ($1 binding); every
     // sentinel after it is the shared helper's answer, unaltered.
     expect(params.userId).toBe("dev");
-    expect(params.additionalUserIds).toEqual(deptCorpusKeys(depts));
+    expect(params.additionalUserIds).toEqual([...deptCorpusKeys(depts), SHARED_DRIVE_INDEX_USER]);
   });
 
   it("degrades to the personal corpus when the department lookup fails (never a new failure mode)", async () => {
@@ -747,7 +810,7 @@ describe("GET /api/files/search/content — mode matrix (WARP-880)", () => {
 
     expect(res.status).toBe(200);
     const params = searchByLexicalSpy.mock.calls[0][1];
-    expect(params.additionalUserIds).toEqual([]);
+    expect(params.additionalUserIds).toEqual([SHARED_DRIVE_INDEX_USER]);
   });
 
   // ── WARP-1914: semantic must initialize the gRPC client on demand ────────

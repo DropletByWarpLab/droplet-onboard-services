@@ -167,8 +167,10 @@ import { createMcpStepDispatcher } from "./services/mcp-step-dispatcher.js";
 import { mineToolCallPatterns } from "./services/pattern-miner.service.js";
 import { runTeamChatMeetingReminderSweep } from "./services/team-chat-reminders.service.js";
 import { runActivityNotifySweep } from "./services/activity-notify.service.js";
+import { sweepAttachments } from "./services/pm/pm-attachments.service.js";
 import { runImportTick } from "./services/pm/import/runner.js";
 import { registerOutboxConsumer, stopOutbox } from "./services/pm/pm-outbox.js";
+import { runDevelopmentSync } from "./services/pm/pm-development.service.js";
 import { createWebhookFanOutConsumer } from "./services/pm/webhook-fanout.js";
 import {
   pruneWebhookDeliveries,
@@ -1616,6 +1618,24 @@ async function main() {
     { lockKey: "droplet:activity-notify" },
   );
 
+  // WARP-1505 — PM attachment sweep. Every 5 minutes: UPLOADING rows older than
+  // an hour (a client that vanished, a crash mid-stream) become FAILED, then
+  // every FAILED / DELETED row has its blob unlinked and is deleted. The upload
+  // and delete paths record intent in the row FIRST, so whatever they could not
+  // finish is exactly what this finishes — there is no blob a row does not
+  // already account for. Pure DB + unlink work, so it carries a lockKey (the
+  // house pattern, unlike the long-running filing tick above) and its own key.
+  cronRuntime.scheduleInterval(
+    5 * 60_000,
+    async () => {
+      const result = await sweepAttachments(prisma);
+      if (result.staleUploads > 0 || result.reaped > 0 || result.failed > 0) {
+        logger.info(result, "pm attachment sweep");
+      }
+    },
+    { lockKey: "droplet:pm-attachment-sweep" },
+  );
+
   // WARP-3527 (ADR-069 WS-11) — the Projects import runner's tick. A job is
   // normally started by a `setImmediate` kick right after "Run"; THIS is what
   // makes that safe to lose. Every 15 s it claims a PENDING job (the process
@@ -1653,6 +1673,13 @@ async function main() {
     createWebhookFanOutConsumer(prisma, { onQueued: () => webhookDeliveryJob?.runNow() }),
     { prisma, cronRuntime },
   );
+  // WARP-3535 — refresh code-host links on the five-minute cadence documented
+  // by WS-18. A lock prevents two orchestrator instances polling the same
+  // repository; per-repository nextSyncAt is the durable backoff/cursor.
+  cronRuntime.scheduleInterval(5 * 60_000, async () => {
+    const result = await runDevelopmentSync(prisma);
+    if (result.checked > 0) logger.info(result, "PM development sync sweep");
+  }, { lockKey: "droplet:pm-development-sync", immediate: true });
   //  2. The delivery worker. The delivery table is the queue; this drains it. Its
   //     retry ladder lives on the rows, so a restart loses nothing.
   webhookDeliveryJob = cronRuntime.scheduleInterval(

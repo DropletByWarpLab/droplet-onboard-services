@@ -23,6 +23,7 @@
 import { createHash } from "node:crypto";
 
 import type { PrismaClient } from "@prisma/client";
+import { SHARED_DRIVE_INDEX_USER, isSharedDrivePath } from "@droplet/tools-core";
 
 import { decryptColumn, isEncryptedColumn } from "./column-crypto.service.js";
 import { getDeksByIds } from "./document-key.service.js";
@@ -143,6 +144,7 @@ export interface SearchHit {
   snippet: string;
   brainItemId: string | null;
   metadata: Record<string, unknown> | null;
+  externalFileId?: number;
 }
 
 interface RawSearchRow {
@@ -154,6 +156,7 @@ interface RawSearchRow {
   score: number;
   snippet: string;
   metadata: Record<string, unknown> | null;
+  externalFileId?: number | null;
 }
 
 /**
@@ -297,6 +300,7 @@ export async function searchByVector(
            "chunkIdx",
            "pageNumber",
            "brainItemId",
+           CASE WHEN "userId" = '__droplet_share__' THEN "ncFileId" END AS "externalFileId",
            ${SNIPPET_SQL},
            metadata,
            1 - (embedding <=> '${vec}'::vector) AS score
@@ -343,6 +347,7 @@ export async function searchByVector(
       score: r.score,
       snippet: r.snippet,
       metadata: r.metadata ?? null,
+      ...(r.externalFileId != null ? { externalFileId: r.externalFileId } : {}),
     }));
   // WARP-242: decrypt-on-read BEFORE fusion/rerank so every downstream
   // consumer (RRF, cross-encoder passages, LLM tool result) sees plaintext.
@@ -398,6 +403,7 @@ export async function searchByLexical(
 
   const sql = `SELECT
        source, path, "chunkIdx", "pageNumber", "brainItemId", metadata,
+       CASE WHEN "userId" = '__droplet_share__' THEN "ncFileId" END AS "externalFileId",
        ${SNIPPET_SQL},
        ts_rank_cd("text_tsv", websearch_to_tsquery('english', $${queryParam}), 32) AS score
      FROM "FileContentChunk"
@@ -418,6 +424,7 @@ export async function searchByLexical(
     score: r.score,
     snippet: r.snippet,
     metadata: r.metadata ?? null,
+    ...(r.externalFileId != null ? { externalFileId: r.externalFileId } : {}),
   }));
   // WARP-242: encrypted chunks have a NULL text_tsv (generated column) so
   // they can't match this arm — the decrypt pass is defensive parity with
@@ -782,6 +789,8 @@ export interface ReadDocumentTextParams {
   startChunk: number;
   /** Approximate character budget; whole chunks are always returned. */
   maxChars: number;
+  /** Live credential-bound check, required before any shared-volume read. */
+  authorizeSharedDrive?: (file: { path: string; externalFileId: number }) => Promise<boolean>;
 }
 
 export interface ReadDocumentTextResult {
@@ -845,13 +854,42 @@ export async function readDocumentText(
   prisma: PrismaClient,
   params: ReadDocumentTextParams,
 ): Promise<ReadDocumentTextResult> {
+  let readOwnerId = params.userId;
+  let additionalUserIds = params.additionalUserIds?.filter((id) => id !== SHARED_DRIVE_INDEX_USER);
+  let sharedFileId: number | undefined;
+  if (params.path === "/Droplet" || params.path.startsWith("/Droplet/")) {
+    const denied: ReadDocumentTextResult = {
+      source: null, chunks: [], totalChunks: 0, unreadableChunks: 0, nextChunk: null,
+    };
+    if (!isSharedDrivePath(params.path) || !params.authorizeSharedDrive) return denied;
+    const chunk = await prisma.fileContentChunk.findFirst({
+      where: { userId: SHARED_DRIVE_INDEX_USER, source: "nextcloud", path: params.path },
+      select: { ncFileId: true },
+    });
+    const externalFileId = chunk?.ncFileId;
+    if (!Number.isSafeInteger(externalFileId) || externalFileId! <= 0) return denied;
+    try {
+      if (!await params.authorizeSharedDrive({ path: params.path, externalFileId: externalFileId! })) return denied;
+    } catch {
+      return denied;
+    }
+    // Bind the text query to the SAME indexed file that was authorized.
+    // A replacement can update the index between the check and the read;
+    // another corpus can also hold an unrelated document at the same path.
+    readOwnerId = SHARED_DRIVE_INDEX_USER;
+    additionalUserIds = undefined;
+    sharedFileId = externalFileId!;
+  }
   const countArgs: unknown[] = [];
   const { predicate: countPredicate, nextParam: countNext } = buildUserIdPredicate(
-    params.userId,
-    params.additionalUserIds,
+    readOwnerId,
+    additionalUserIds,
     countArgs,
   );
   countArgs.push(params.path);
+  const countIdentity = sharedFileId === undefined ? "" :
+    ` AND source = 'nextcloud' AND "ncFileId" = $${countNext + 1}`;
+  if (sharedFileId !== undefined) countArgs.push(sharedFileId);
   const countRows = await (
     prisma as unknown as {
       $queryRawUnsafe: (
@@ -861,7 +899,7 @@ export async function readDocumentText(
     }
   ).$queryRawUnsafe(
     `SELECT COUNT(*)::bigint AS count FROM "FileContentChunk"
-     WHERE ${countPredicate} AND path = $${countNext}`,
+     WHERE ${countPredicate} AND path = $${countNext}${countIdentity}`,
     ...countArgs,
   );
   const totalChunks = Number(countRows[0]?.count ?? 0);
@@ -879,13 +917,16 @@ export async function readDocumentText(
 
   const args: unknown[] = [];
   const { predicate, nextParam } = buildUserIdPredicate(
-    params.userId,
-    params.additionalUserIds,
+    readOwnerId,
+    additionalUserIds,
     args,
   );
   let p = nextParam;
   const pathParam = p++;
   args.push(params.path);
+  const identityWhere = sharedFileId === undefined ? "" :
+    ` AND source = 'nextcloud' AND "ncFileId" = $${p++}`;
+  if (sharedFileId !== undefined) args.push(sharedFileId);
   const startParam = p++;
   args.push(params.startChunk);
   const limitParam = p++;
@@ -908,7 +949,7 @@ export async function readDocumentText(
            text,
            warnings
     FROM "FileContentChunk"
-    WHERE ${predicate} AND path = $${pathParam} AND "chunkIdx" >= $${startParam}
+    WHERE ${predicate} AND path = $${pathParam}${identityWhere} AND "chunkIdx" >= $${startParam}
     ORDER BY "chunkIdx" ASC
     LIMIT $${limitParam}
   `;

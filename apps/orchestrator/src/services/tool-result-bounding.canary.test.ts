@@ -97,6 +97,7 @@ const NOT_A_CURSOR: Record<string, string> = {
   nextStorage: "routes/access.ts — the storage target being switched TO",
   nextModel: "routes/models.ts — the model id being switched TO",
   nextEnabled: "routes/settings.ts — the boolean feature state being switched TO",
+  nextSyncAt: "pm/pm-development.service.ts — the code-host poller's scheduled retry timestamp, never a pagination position",
 };
 
 function tsFilesUnder(dir: string): string[] {

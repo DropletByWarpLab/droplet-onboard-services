@@ -52,6 +52,7 @@
 import type { Prisma, PrismaClient } from "@prisma/client";
 import { READ_COMMITTED_TX } from "../../lib/prisma-tx.js";
 import { PM_ERRORS, isPrismaCode, writeActivity } from "./pm.service.js";
+import { nudgeOutbox } from "./pm-outbox.js";
 import {
   FUTURE_START_SKEW_MS,
   WORKLOG_MAX_MINUTES,
@@ -348,7 +349,7 @@ export async function createWorklog(
     if (!person) throw new Error(PM_TIME_ERRORS.USER_NOT_FOUND);
   }
   try {
-    return await prisma.$transaction(async (tx) => {
+    const result = await prisma.$transaction(async (tx) => {
       await loadTrackableItem(tx, workItemId);
       const row = await tx.pmWorklog.create({
         data: { workItemId, userId, startedAt, minutes: input.minutes, note: input.note ?? "" },
@@ -357,11 +358,14 @@ export async function createWorklog(
         workItemId,
         actorId: actor.id,
         verb: "time_logged",
+        nudge: false,
         field: worklogField(actor.id, userId),
         newValue: String(row.minutes),
       });
       return mapWorklog(row);
     }, READ_COMMITTED_TX);
+    nudgeOutbox();
+    return result;
   } catch (err) {
     // The item was deleted between the read above and this insert.
     if (isPrismaCode(err, "P2003")) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
@@ -385,8 +389,9 @@ export async function updateWorklog(
 ): Promise<ApiWorklog> {
   if (patch.minutes !== undefined) assertMinutes(patch.minutes);
   if (patch.startedAt !== undefined) assertNotFuture(patch.startedAt, now);
+  let activityWritten = false;
   try {
-    return await prisma.$transaction(async (tx) => {
+    const result = await prisma.$transaction(async (tx) => {
       const existing = await tx.pmWorklog.findUnique({ where: { id } });
       if (!existing) throw new Error(PM_TIME_ERRORS.WORKLOG_NOT_FOUND);
       await loadProjectItem(tx, existing.workItemId, PM_TIME_ERRORS.WORKLOG_NOT_FOUND);
@@ -409,12 +414,16 @@ export async function updateWorklog(
         workItemId: row.workItemId,
         actorId: actor.id,
         verb: "time_log_updated",
+        nudge: false,
         field: worklogField(actor.id, existing.userId),
         oldValue: String(existing.minutes),
         newValue: String(row.minutes),
       });
+      activityWritten = true;
       return mapWorklog(row);
     }, READ_COMMITTED_TX);
+    if (activityWritten) nudgeOutbox();
+    return result;
   } catch (err) {
     if (isPrismaCode(err, "P2025")) throw new Error(PM_TIME_ERRORS.WORKLOG_NOT_FOUND);
     throw err;
@@ -433,10 +442,12 @@ export async function deleteWorklog(prisma: PrismaClient, actor: TimeActor, id: 
         workItemId: existing.workItemId,
         actorId: actor.id,
         verb: "time_log_removed",
+        nudge: false,
         field: worklogField(actor.id, existing.userId),
         oldValue: String(existing.minutes),
       });
     }, READ_COMMITTED_TX);
+    nudgeOutbox();
   } catch (err) {
     if (isPrismaCode(err, "P2025")) throw new Error(PM_TIME_ERRORS.WORKLOG_NOT_FOUND);
     throw err;
@@ -477,6 +488,7 @@ async function stopRunningTimer(
     // The person whose clock it was: stopping a timer is them logging their time.
     actorId: running.userId,
     verb: "time_logged",
+    nudge: false,
     field: "worklog",
     newValue: String(minutes),
   });
@@ -522,7 +534,7 @@ export async function startTimer(
   now: Date = new Date(),
 ): Promise<{ timer: ApiTimer; stopped: ApiWorklog | null }> {
   try {
-    return await prisma.$transaction(async (tx) => {
+    const result = await prisma.$transaction(async (tx) => {
       await lockTimerOf(tx, userId);
       const item = await loadTrackableItem(tx, workItemId);
       const running = await tx.pmTimer.findUnique({ where: { userId } });
@@ -536,6 +548,8 @@ export async function startTimer(
       const timer = await tx.pmTimer.create({ data: { userId, workItemId, startedAt: now } });
       return { timer: mapTimer(timer, item), stopped };
     }, READ_COMMITTED_TX);
+    if (result.stopped) nudgeOutbox();
+    return result;
   } catch (err) {
     // A writer that skipped the lock hit the primary key: nothing was applied.
     if (isPrismaCode(err, "P2002")) throw new Error(PM_ERRORS.CONCURRENT_MUTATION);
@@ -558,13 +572,15 @@ export async function stopTimer(
   now: Date = new Date(),
 ): Promise<{ worklog: ApiWorklog; capped: boolean }> {
   try {
-    return await prisma.$transaction(async (tx) => {
+    const result = await prisma.$transaction(async (tx) => {
       await lockTimerOf(tx, userId);
       const running = await tx.pmTimer.findUnique({ where: { userId } });
       if (!running) throw new Error(PM_TIME_ERRORS.TIMER_NOT_FOUND);
       await loadProjectItem(tx, running.workItemId, PM_TIME_ERRORS.TIMER_NOT_FOUND);
       return stopRunningTimer(tx, running, now);
     }, READ_COMMITTED_TX);
+    nudgeOutbox();
+    return result;
   } catch (err) {
     // The timer's item was deleted between reading the timer and writing its
     // worklog: the worklog's foreign key fails and the stop rolls back. The timer
