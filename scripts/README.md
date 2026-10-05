@@ -541,7 +541,7 @@ warning and `release.json` keeps naming `ghcr.io`.
    the `publish-release.yml` header.
 4. Once the HQ Worker is deployed and reads that bucket, set the repo variable
    `OTA_REGISTRY_HOST` (`gh variable set OTA_REGISTRY_HOST -R ... --body
-   droplet-fleet-hq.rjouffret.workers.dev`: host only, no `https://`, no
+   registry.example`: host only, no `https://`, no
    path). From the next publish `release.json` names
    `<host>/droplet-<name>@sha256:…` (same digests), and the R2 secrets become
    mandatory: unsetting one fails the publish before the build instead of

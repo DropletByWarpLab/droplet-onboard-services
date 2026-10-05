@@ -115,7 +115,7 @@ entries:
   # WARP-3503 (ADR-068) — `ota-image-registry` (ghcr.io and
   # pkg-containers.githubusercontent.com, runtime, added by WARP-3430) is
   # DROPPED. The release images are private and a box pulls and
-  # cosign-verifies them from the HQ registry, which is the `fleet-hq-issuance`
+  # cosign-verifies them from the HQ registry, which is the `fleet-hq-registry`
   # host below (the `/v2/` registry and the `/v1/device/` token paths); no
   # customer box dials GHCR any more. The lab-only fallback in
   # docker/ota/apply-update.sh (DROPLET_OTA_GITHUB_TOKEN, ghcr.io refs, never
@@ -228,53 +228,6 @@ entries:
     review_by: 2027-07-04
     code_refs: [services/fleet-agent/config.py, apps/orchestrator/src/services/analytics/client.ts, docker/docker-compose.yml]
 
-  - id: cloudflare-tunnel-edge
-    kind: egress
-    service: cloudflared
-    destination:
-      hosts: ["*.argotunnel.com", api.cloudflare.com]
-      ports: [443, 7844]
-      protocol: quic
-    phase: runtime
-    data_class: user-content-on-request
-    purpose: >-
-      Outbound-only tunnel transport for remote dashboard access (ADR-025);
-      carries TLS-encrypted user sessions the user initiated. No repo
-      literal — destination comes from the tunnel token consumed by the
-      pinned cloudflare/cloudflared image.
-    ticket: WARP-978
-    added: 2026-07-04
-    review_by: 2027-07-04
-    code_refs: [docker/docker-compose.yml]
-    no_code_literal: >-
-      The pinned cloudflare/cloudflared image resolves its own edge from the
-      tunnel token; no Droplet source names the host. Restates the purpose
-      field's "No repo literal" so the gate can check it. (WARP-2452)
-
-  - id: overlay-stun-mapping
-    kind: egress
-    service: device-bridge
-    destination:
-      hosts: [stun.cloudflare.com, stun.l.google.com]
-      # Cloudflare answers STUN on 3478; Google's public STUN on 19302. Both are
-      # documented so the WARP-268 runtime audit knows the real ports.
-      ports: [3478, 19302]
-      protocol: udp/stun
-    phase: runtime
-    data_class: none
-    purpose: >-
-      STUN Binding probe (RFC 5389) sent by device-bridge FROM host udp/51820 to
-      learn the box's own public UDP mapping for the direct-punch remote-access
-      overlay (ADR-030 / WARP-1385). One request/response per connect; carries no
-      user content — only the box's reflexive ip:port, handed to HQ in the
-      overlay `answer`. The orchestrator only calls device-bridge's internal
-      /host/stun-probe endpoint; the STUN socket egress originates in
-      device-bridge (host netns), so that is the owning service.
-    ticket: WARP-1385
-    added: 2026-07-18
-    review_by: 2027-07-18
-    code_refs: [services/oled-display/device-bridge.py]
-
   - id: sso-oidc-idps
     kind: egress
     service: orchestrator
@@ -370,7 +323,7 @@ entries:
   # it FINDS that are unregistered (:199). docs/ is outside SCOPE_PREFIXES
   # (:50-51), so registry.ollama.ai is matched nowhere in scanner scope and
   # this entry ALREADY prints the non-fatal stale NOTICE (:208) — exactly as
-  # the other daemon/SDK-owned entries do (cloudflare-tunnel-edge,
+  # the other daemon/SDK-owned entries do (
   # cloud-llm-providers-optin). The gate is indifferent in both directions;
   # the reason to keep this is the runtime record, nothing to do with CI.
   #
@@ -1063,39 +1016,21 @@ entries:
     code_refs: [services/erp-connector/src/dentrix/ascend-connector.ts]
 
   # ── dynamic (config-driven) destinations ────────────────────────────────
-  - id: fleet-hq-issuance
-    kind: egress
+  - id: fleet-hq-registry
+    kind: dynamic
     service: orchestrator
-    destination:
-      hosts: [droplet-fleet-hq.rjouffret.workers.dev, fleet-hq.droplet-us.com]
-      ports: [443]
-      protocol: https
+    config_key: HQ_ISSUANCE_URL
     phase: runtime
     data_class: none
     purpose: >-
-      Fleet HQ (one Worker origin, HQ_ISSUANCE_URL). TLS issuance API (ADR-023
-      public-CA-per-device via HQ DNS-01), CSR/cert material only. Since
-      WARP-3503 (ADR-068) also the device-token service (`/v1/device/challenge`
-      and `/v1/device/token`: the box sends its key fingerprint, a nonce and
-      a signature, nothing else) and the read-only private image registry
-      (`/v2/`: the OTA release images by digest and their cosign signatures,
-      pulled by docker/ota/apply-update.sh with the short-lived `registry:pull`
-      token and verified by cosign). None carries customer data. Now baked as
-      the default HQ_ISSUANCE_URL in
-      .env.example + scripts/lib/secrets.sh (WARP-978) so a reflash
-      self-provisions its publicly-trusted cert with zero hand-patching;
-      still operator-overridable via HQ_ISSUANCE_URL. Was kind: dynamic
-      before the default host became a repo literal. The default is the LIVE
-      HQ Worker (droplet-fleet-hq.rjouffret.workers.dev) — the vanity name
-      fleet-hq.droplet-us.com was allowlisted + baked before it was ever
-      bound in DNS (NXDOMAIN), dead-ending issuance on every fresh flash; it
-      stays allowlisted here so the production-cutover flip
-      (droplet-fleet-hq docs/HQ-CUTOVER-RUNBOOK.md) is a default swap, not an
-      egress change.
-    ticket: WARP-243
-    added: 2026-07-04
-    review_by: 2027-07-04
-    code_refs: [apps/orchestrator/src/services/tls-issuance.adapters.ts, apps/orchestrator/src/services/hq-token.service.ts, docker/ota/apply-update.sh, scripts/lib/secrets.sh, .env.example]
+      Explicitly provisioned fleet device authentication and private image
+      distribution for OTA. No default origin is seeded; remote access uses
+      local WireGuard and internal DNS independently. Legacy registration
+      release/deregister remains available for appliance decommissioning.
+    ticket: WARP-3503
+    added: 2026-10-05
+    review_by: 2027-10-05
+    code_refs: [apps/orchestrator/src/services/hq-token.service.ts, docker/ota/apply-update.sh]
 
   - id: user-mail-servers
     kind: dynamic

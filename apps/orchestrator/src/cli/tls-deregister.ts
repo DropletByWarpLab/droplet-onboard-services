@@ -24,9 +24,9 @@ import {
   deregisterFromHq,
   type DeregisterDeps,
   type DeregisterResult,
-  type TlsLogger,
-} from "../services/tls-issuance.service.js";
-import { createHqIssuanceClient } from "../services/tls-issuance.adapters.js";
+  type FleetLogger,
+} from "../services/fleet-registration.service.js";
+import { createFleetRegistrationClient } from "../services/fleet-registration.service.js";
 import { createDeviceIdentityClient } from "../services/device-identity.client.js";
 import { createLogger } from "../lib/logger.js";
 
@@ -36,7 +36,7 @@ export interface RunTlsDeregisterCliArgs {
   deps: DeregisterDeps;
   /** Injected for tests; defaults to the real `deregisterFromHq`. */
   deregister?: (deps: DeregisterDeps) => Promise<DeregisterResult>;
-  logger: TlsLogger;
+  logger: FleetLogger;
 }
 
 /**
@@ -75,7 +75,7 @@ async function main(): Promise<void> {
   try {
     const deps: DeregisterDeps = {
       deviceId: config.DROPLET_DEVICE_ID,
-      hq: createHqIssuanceClient(),
+      hq: createFleetRegistrationClient(),
       identity: createDeviceIdentityClient(),
       logger,
     };

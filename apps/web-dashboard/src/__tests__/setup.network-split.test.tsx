@@ -211,12 +211,12 @@ describe("setup network split — wifi → address integration (Onboarding-Flow 
 
     // WARP-979 — the address step is now the Secured / name-your-box step.
     expect(
-      screen.getByText(/name your secure address/i),
+      screen.getByText(/your internal web address/i),
     ).toBeInTheDocument();
     // The .droplet-us.com suffix + name input confirm we're on the reworked
     // AddressStep (not still on Wi-Fi).
-    expect(screen.getByText(".droplet-us.com")).toBeInTheDocument();
-    expect(screen.getByLabelText(/box name/i)).toBeInTheDocument();
+    expect(screen.getByText(/internal DNS address/i)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/box name/i)).not.toBeInTheDocument();
   });
 
   it("advancing the Wi-Fi step with Continue (blank SSID) also lands on Address", async () => {
@@ -233,7 +233,7 @@ describe("setup network split — wifi → address integration (Onboarding-Flow 
     });
 
     expect(
-      screen.getByText(/name your secure address/i),
+      screen.getByText(/your internal web address/i),
     ).toBeInTheDocument();
   });
 

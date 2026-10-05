@@ -55,7 +55,7 @@ log_error()   { printf '%s\n' "$*" >> "$TMP/warn.log"; }
 reload_gateway_nginx() { printf 'reload\n' >> "$TMP/reload.log"; return 0; }
 # shellcheck source=../scripts/lib/secrets.sh
 source "$SECRETS"
-unset DROPLET_PUBLIC_FQDN
+unset DROPLET_LAN_HOSTNAME
 
 pin_of() {  # the SPKI pin the apps compute — what must survive a move
   openssl x509 -in "$1" -pubkey -noout 2>/dev/null \
@@ -154,8 +154,9 @@ pin5="$(pin_of "$CERT")"
 # --- 6. a public-CA leaf is never regenerated for a stale address -----------------
 mkdir -p "$TMP/ca"
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$TMP/ca/ca.key" -out "$TMP/ca/ca.crt" -days 2 -subj "/CN=Fixture CA" >/dev/null 2>&1
-openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$KEY" -out "$TMP/ca/leaf.csr" -subj "/CN=d-fixture.devices.warp-lab.ai" >/dev/null 2>&1
-openssl x509 -req -in "$TMP/ca/leaf.csr" -CA "$TMP/ca/ca.crt" -CAkey "$TMP/ca/ca.key" -CAcreateserial -out "$CERT" -days 2 >/dev/null 2>&1
+openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$KEY" -out "$TMP/ca/leaf.csr" -subj "/CN=office.lan" >/dev/null 2>&1
+printf 'subjectAltName=DNS:droplet-ai.lan\n' > "$TMP/ca/local-san.cnf"
+openssl x509 -req -in "$TMP/ca/leaf.csr" -extfile "$TMP/ca/local-san.cnf" -CA "$TMP/ca/ca.crt" -CAkey "$TMP/ca/ca.key" -CAcreateserial -out "$CERT" -days 2 >/dev/null 2>&1
 export DROPLET_TLS_SAN_IPS="192.168.77.1"
 before_cert="$(sha256sum "$CERT" | cut -c1-16)"; before_key="$(sha256sum "$KEY" | cut -c1-16)"
 _generate_tls_cert >/dev/null 2>&1
@@ -255,30 +256,44 @@ lkey_sha="$(sha256sum "$L/docker/certs/droplet.key" | cut -c1-16)"; lcert_sha="$
   && ok "…while the same call WITHOUT the lock (setup.sh's path) still heals the torn pair with a fresh key" \
   || bad "…the lock leaked: setup.sh's path no longer heals a torn pair"
 
-# 9d. a refresh keeps the per-device FQDN SAN (read from .env, as setup.sh does).
-printf 'DROPLET_PUBLIC_FQDN="d-fixture.devices.warp-lab.ai"\nADMIN_TOKEN=not-a-real-token\n' > "$W/.env"
+# 9d. a refresh keeps the internal hostname SAN (read from .env, as setup.sh does).
+printf 'DROPLET_LAN_HOSTNAME="office.lan"\nADMIN_TOKEN=not-a-real-token\n' > "$W/.env"
 out="$(REPO_ROOT="$W" DROPLET_TLS_SAN_IPS="10.99.0.2" bash "$WRAPPER" 2>/dev/null)"
 printf '%s' "$out" | grep -q '"changed":true' && ok "wrapper: a move with a .env present still refreshes ($out)" || bad "wrapper with a .env: $out"
 case "$(dns_sans_of "$WCERT")" in
-  *"DNS:d-fixture.devices.warp-lab.ai"*) ok "…and the regenerated SAN carries the per-device FQDN from .env" ;;
-  *) bad "…the refresh DROPPED the per-device FQDN SAN: $(dns_sans_of "$WCERT")" ;;
+  *"DNS:office.lan"*) ok "…and the regenerated SAN carries the internal hostname from .env" ;;
+  *) bad "…the refresh DROPPED the internal hostname SAN: $(dns_sans_of "$WCERT")" ;;
 esac
-printf 'DROPLET_PUBLIC_FQDN=bad host; rm -rf /\n' > "$W/.env"
+printf 'DROPLET_LAN_HOSTNAME=bad host; rm -rf /\n' > "$W/.env"
 out="$(REPO_ROOT="$W" DROPLET_TLS_SAN_IPS="10.99.0.3" bash "$WRAPPER" 2>/dev/null)"
 case "$(dns_sans_of "$WCERT")" in
-  *"bad"*|*"rm"*) bad "…a malformed DROPLET_PUBLIC_FQDN reached the SAN" ;;
+  *"bad"*|*"rm"*) bad "…a malformed DROPLET_LAN_HOSTNAME reached the SAN" ;;
   *) ok "…a value that is not shaped like a hostname is ignored, not sourced" ;;
 esac
 rm -f "$W/.env"
 
 # 9e. a public-CA leaf: the wrapper says so and stops before the generator.
-openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$WKEY" -out "$TMP/ca/wleaf.csr" -subj "/CN=d-fixture.devices.warp-lab.ai" >/dev/null 2>&1
-openssl x509 -req -in "$TMP/ca/wleaf.csr" -CA "$TMP/ca/ca.crt" -CAkey "$TMP/ca/ca.key" -CAcreateserial -out "$WCERT" -days 2 >/dev/null 2>&1
+openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$WKEY" -out "$TMP/ca/wleaf.csr" -subj "/CN=office.lan" >/dev/null 2>&1
+printf 'subjectAltName=DNS:droplet-ai.lan\n' > "$TMP/ca/wleaf-san.cnf"
+openssl x509 -req -in "$TMP/ca/wleaf.csr" -extfile "$TMP/ca/wleaf-san.cnf" -CA "$TMP/ca/ca.crt" -CAkey "$TMP/ca/ca.key" -CAcreateserial -out "$WCERT" -days 2 >/dev/null 2>&1
 wcert_sha="$(sha256sum "$WCERT" | cut -c1-16)"
 out="$(REPO_ROOT="$W" DROPLET_TLS_SAN_IPS="10.99.0.4" bash "$WRAPPER" 2>/dev/null)"; rc=$?
-[ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q '"reason":"public-CA leaf"' && [ "$(sha256sum "$WCERT" | cut -c1-16)" = "$wcert_sha" ] \
+[ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q '"reason":"CA certificate for internal DNS"' && [ "$(sha256sum "$WCERT" | cut -c1-16)" = "$wcert_sha" ] \
   && ok "wrapper: a public-CA leaf is reported as such and never touched ($out)" \
   || bad "wrapper on a public-CA leaf: rc=$rc $out"
+
+# An old fleet-only leaf is replaced without changing the pairing identity.
+printf 'subjectAltName=DNS:old.devices.warp-lab.ai\n' > "$TMP/ca/wleaf-san.cnf"
+openssl x509 -req -in "$TMP/ca/wleaf.csr" -extfile "$TMP/ca/wleaf-san.cnf" \
+  -CA "$TMP/ca/ca.crt" -CAkey "$TMP/ca/ca.key" -CAcreateserial \
+  -out "$WCERT" -days 2 >/dev/null 2>&1
+legacy_key_sha="$(sha256sum "$WKEY" | cut -c1-16)"
+out="$(REPO_ROOT="$W" DROPLET_TLS_SAN_IPS="10.99.0.4" bash "$WRAPPER" 2>/dev/null)"
+if printf '%s' "$out" | grep -q '"changed":true' \
+   && [ "$(sha256sum "$WKEY" | cut -c1-16)" = "$legacy_key_sha" ] \
+   && dns_sans_of "$WCERT" | grep -q 'DNS:droplet-ai.lan'; then
+  ok "wrapper cuts over a legacy fleet certificate to internal TLS with the same key"
+else bad "wrapper did not cut over old fleet TLS around its current key ($out)"; fi
 
 # --- 10. WARP-3414: `droplet-fingerprint` prints the key fingerprint the apps show
 # A Droplet app confirms a self-signed box by this string; the box prints it on

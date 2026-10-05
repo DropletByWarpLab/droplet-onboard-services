@@ -794,10 +794,8 @@ def _render_chrome(disp, draw, now, state: str) -> None:
     draw.rectangle([g.left, g.band_a_rule, g.content_r, g.band_a_rule], fill=d.V3_SEP)
 
 
-# WARP-2944 — the screen's one-line certificate status. The ticket's rule:
-# speak when fewer than this many days remain AND renewal is failing; a
-# healthy box, a box mid-renewal with weeks to go, and a self-signed box all
-# say nothing here (the self-signed box's story is the rail's SCAN TO PAIR).
+# Warn about the installed local certificate, independent of retired HQ
+# renewal state. Unknown metadata must not create an expiry countdown.
 TLS_SCREEN_WARNING_DAYS = 14
 
 
@@ -809,13 +807,17 @@ def tls_warning_line(tls: dict) -> str:
         return ""
     state = tls.get("state")
     days = tls.get("daysLeft")
-    if state != "LE_RENEW_FAILED" or not isinstance(days, (int, float)):
+    if state != "LOCAL_CERTIFICATE":
+        return ""
+    if tls.get("coversInternalHostname") is False:
+        return "CERTIFICATE · internal DNS name mismatch · needs replacement"
+    if not isinstance(days, (int, float)):
         return ""
     if days < 0:
-        return "CERTIFICATE EXPIRED · renewal failing · needs internet"
+        return "CERTIFICATE EXPIRED · needs replacement"
     if days < TLS_SCREEN_WARNING_DAYS:
         n = int(days)
-        return "CERTIFICATE · renewal failing · {} day{} left · needs internet".format(
+        return "CERTIFICATE · {} day{} left · needs replacement".format(
             n, "" if n == 1 else "s")
     return ""
 
@@ -1509,9 +1511,9 @@ def render_claim(disp, code: str, setup_url: str,
     Wi-Fi join creds, C4 is hidden, the rail holds the claim QR.
 
     TODO(PR-4): full implementation. The default deep link
-    (`https://d-<hmac>.droplet-us.com/setup?c=DRPL-XXXX-XXXX`, ~56 bytes) fits
-    at version 4 with room to spare. The failure case is a long *named
-    address* host, which pushes past the ~62-byte budget — assert before
+    (`https://droplet-ai.lan/setup?c=DRPL-XXXX-XXXX`) fits
+    at version 4 with room to spare. A long configured internal hostname
+    can push past the ~62-byte budget — assert before
     painting and fall back to the typed path rather than shipping a code
     nobody can scan.
 

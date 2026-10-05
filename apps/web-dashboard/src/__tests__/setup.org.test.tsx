@@ -145,25 +145,25 @@ describe("setup Org step (PR #380)", () => {
       fetchVpnStatusMock.mockResolvedValue({
         configured: false,
         endpointConfigured: false,
-        publicFqdn: "studio.droplet-us.com",
+        internalHostname: "droplet-ai.lan",
       });
       render(<SetupPage />);
       await advanceToOrg();
       await act(async () => {
         await Promise.resolve();
       });
-      expect(screen.getByText("studio.droplet-us.com /")).toBeInTheDocument();
+      expect(screen.getByText("droplet-ai.lan /")).toBeInTheDocument();
       // The .local prefix must NOT be the previewed host anymore…
       expect(screen.queryByText("droplet.local /")).not.toBeInTheDocument();
       // …but the name survives in copy as the typing shortcut.
-      expect(screen.getByText(/droplet\.local/)).toBeInTheDocument();
+      expect(screen.queryByText(/droplet\.local/)).not.toBeInTheDocument();
     });
 
     it("falls back to the droplet.local shortcut when no FQDN is known", async () => {
       fetchVpnStatusMock.mockResolvedValue({
         configured: false,
         endpointConfigured: false,
-        publicFqdn: null,
+        internalHostname: null,
       });
       render(<SetupPage />);
       await advanceToOrg();

@@ -46,7 +46,7 @@ ALL = {
     "R2_SECRET_ACCESS_KEY": "key-secret",
     "R2_BUCKET": "droplet-ota",
 }
-HOST = "droplet-fleet-hq.rjouffret.workers.dev"
+HOST = "registry.example"
 
 
 def sha(data):

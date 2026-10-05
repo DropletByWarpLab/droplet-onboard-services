@@ -21,7 +21,7 @@ trap cleanup EXIT
 # remapped; the template source and REAPPLY_HOST_INTEGRATION flag are unchanged.
 awk '
   /^  # --- \/etc\/droplet-host-net\// { in_dns = 1; seen_start = 1 }
-  in_dns && /^  # --- relay DNS origin/ { seen_end = 1; exit }
+  in_dns && /^  # --- bootstrap-certificate refresh/ { seen_end = 1; exit }
   in_dns { print }
   END { if (!seen_start || !seen_end) exit 1 }
 ' "$SINGLE_BOX" | sed 's|/etc/droplet-host-net|"$DNS_TEST_ROOT"/etc/droplet-host-net|g' \
@@ -62,9 +62,9 @@ assert_bytes() {
 cp "$template" "$conf"
 cat >> "$conf" <<'DNS'
 
-# ADR-023 managed host-record (split-horizon FQDN) — do not edit by hand
-host-record=fixture.devices.warp-lab.ai,192.0.2.42
-# WARP-2189 managed relay DNS listener
+# Droplet managed host-record (internal DNS) — do not edit by hand
+host-record=fixture.lan,192.0.2.42
+# Operator-managed DNS listener
 listen-address=192.0.2.42
 DNS
 cp "$conf" "$WORK/existing.conf"

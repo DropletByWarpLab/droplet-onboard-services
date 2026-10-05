@@ -509,145 +509,100 @@ class TestVpnPeersEndpoint:
         assert resp.status_code == 404
 
 
-class TestVpnOverlayPeerEndpoint:
-    """WARP-1385 — POST /vpn/peers/overlay installs a caller-keyed direct-punch
-    peer with an endpoint + keepalive (no server-side keygen)."""
+class TestVpnPeerInstallEndpoint:
+    """Saved public-key peers are restored without a fleet connection broker."""
 
     def test_requires_setup(self, vpn_client: TestClient) -> None:
         _, pub = VPNApi.generate_keypair()
         resp = vpn_client.post(
-            "/vpn/peers/overlay",
-            json={
-                "public_key": pub,
-                "endpoint": "203.0.113.7:51820",
-                "allowed_ips": ["10.13.13.9/32"],
-            },
+            "/vpn/peers/install",
+            json={"public_key": pub, "allowed_ips": ["10.13.13.9/32"]},
             headers=AUTH,
         )
         assert resp.status_code == 409
-        assert "setup" in resp.json()["detail"].lower()
 
-    def test_installs_peer_with_endpoint_and_keepalive(self, vpn_client: TestClient) -> None:
+    def test_restores_saved_peer_with_no_endpoint_or_private_key(self, vpn_client: TestClient) -> None:
         vpn_client.post("/vpn/setup", json={}, headers=AUTH)
         _, pub = VPNApi.generate_keypair()
         resp = vpn_client.post(
-            "/vpn/peers/overlay",
+            "/vpn/peers/install",
             json={
-                "public_key": pub,
-                "endpoint": "203.0.113.7:51820",
-                "allowed_ips": ["10.13.13.9/32"],
-                "persistent_keepalive": 25,
-                "description": "overlay sess-42",
-            },
-            headers=AUTH,
+                "public_key": pub, "allowed_ips": ["10.13.13.9/32"],
+                "persistent_keepalive": 25, "description": "Laptop",
+            }, headers=AUTH,
         )
         assert resp.status_code == 200, resp.text
-        body = resp.json()
-        # Never mints or returns a private key — the phone brings its own key.
-        assert "private_key" not in body
-        assert body["public_key"] == pub
-        assert body["endpoint"] == "203.0.113.7:51820"
-
-        # The installed peer carries the phone's key + observed endpoint + keepalive.
-        peers = vpn_client.get("/vpn/peers", headers=AUTH).json()["peers"]
-        match = [p for p in peers if p["public_key"] == pub]
-        assert len(match) == 1
-        assert match[0]["endpoint_host"] == "203.0.113.7:51820"
-        assert str(match[0]["persistent_keepalive"]) == "25"
-        assert match[0]["allowed_ips"] == ["10.13.13.9/32"]
-
-    def test_reinstall_refreshes_endpoint_no_duplicate(self, vpn_client: TestClient) -> None:
-        vpn_client.post("/vpn/setup", json={}, headers=AUTH)
-        _, pub = VPNApi.generate_keypair()
-        base = {
-            "public_key": pub,
-            "allowed_ips": ["10.13.13.9/32"],
-            "persistent_keepalive": 25,
-        }
-        vpn_client.post("/vpn/peers/overlay", json={**base, "endpoint": "203.0.113.7:51820"}, headers=AUTH)
-        # Re-connect from a new observed endpoint — must REFRESH, not duplicate.
-        vpn_client.post("/vpn/peers/overlay", json={**base, "endpoint": "198.51.100.9:40000"}, headers=AUTH)
-        peers = vpn_client.get("/vpn/peers", headers=AUTH).json()["peers"]
-        match = [p for p in peers if p["public_key"] == pub]
-        assert len(match) == 1  # refreshed in place, no duplicate section
-        assert match[0]["endpoint_host"] == "198.51.100.9:40000"
-
-    def test_installs_peer_without_an_endpoint(self, vpn_client: TestClient) -> None:
-        """WARP-1757 — a client-initiated peer needs no endpoint.
-
-        WireGuard learns a peer's endpoint from its first authenticated
-        handshake. The box needs one configured only when the BOX must initiate
-        (the NAT hole-punch). A peer installed at approval time — before any
-        punch, and for a box that is its own edge router, behind a successful
-        port map, or reached over the LAN — must install WITHOUT one, or those
-        paths would be forced through a rendezvous they don't need.
-        """
-        vpn_client.post("/vpn/setup", json={}, headers=AUTH)
-        _, pub = VPNApi.generate_keypair()
-        resp = vpn_client.post(
-            "/vpn/peers/overlay",
-            json={
-                "public_key": pub,
-                "allowed_ips": ["10.13.13.9/32"],
-                "persistent_keepalive": 25,
-                "description": "Phone",
-            },
-            headers=AUTH,
-        )
-        assert resp.status_code == 200, resp.text
-        assert resp.json()["endpoint"] is None
+        assert resp.json()["public_key"] == pub
+        assert resp.json()["applied"] is True
+        assert resp.json()["peer_verified"] is True
         assert "private_key" not in resp.json()
-
+        assert "endpoint" not in resp.json()
         peers = vpn_client.get("/vpn/peers", headers=AUTH).json()["peers"]
         match = [p for p in peers if p["public_key"] == pub]
         assert len(match) == 1
-        # endpoint_host must be ABSENT (or empty), never the literal "None".
         assert not match[0].get("endpoint_host")
         assert match[0]["allowed_ips"] == ["10.13.13.9/32"]
 
-    def test_punch_can_add_an_endpoint_to_a_peer_installed_without_one(
-        self, vpn_client: TestClient
-    ) -> None:
-        """The connect tick still upgrades an endpoint-less peer when a punch
-        genuinely is needed — approval-time install must not foreclose it."""
+    def test_reinstall_updates_allowed_ips_without_a_duplicate(self, vpn_client: TestClient) -> None:
         vpn_client.post("/vpn/setup", json={}, headers=AUTH)
         _, pub = VPNApi.generate_keypair()
-        base = {"public_key": pub, "allowed_ips": ["10.13.13.9/32"], "persistent_keepalive": 25}
-        vpn_client.post("/vpn/peers/overlay", json=base, headers=AUTH)
-        vpn_client.post(
-            "/vpn/peers/overlay",
-            json={**base, "endpoint": "198.51.100.9:40000"},
-            headers=AUTH,
-        )
+        for ip in ["10.13.13.9/32", "10.13.13.10/32"]:
+            resp = vpn_client.post("/vpn/peers/install", json={
+                "public_key": pub, "allowed_ips": [ip],
+            }, headers=AUTH)
+            assert resp.status_code == 200, resp.text
         peers = vpn_client.get("/vpn/peers", headers=AUTH).json()["peers"]
         match = [p for p in peers if p["public_key"] == pub]
-        assert len(match) == 1  # refreshed in place, no duplicate section
-        assert match[0]["endpoint_host"] == "198.51.100.9:40000"
+        assert len(match) == 1
+        assert match[0]["allowed_ips"] == ["10.13.13.10/32"]
 
-    @pytest.mark.parametrize("bad_ep", ["notanip", "203.0.113.7", "203.0.113.7:", "203.0.113.7:99999999"])
-    def test_rejects_bad_endpoint(self, vpn_client: TestClient, bad_ep: str) -> None:
-        """A PRESENT endpoint is still strictly validated — WARP-1757 made it
-        optional, not unvalidated."""
+    def test_rejects_a_configured_peer_endpoint(self, vpn_client: TestClient) -> None:
         vpn_client.post("/vpn/setup", json={}, headers=AUTH)
         _, pub = VPNApi.generate_keypair()
-        resp = vpn_client.post(
-            "/vpn/peers/overlay",
-            json={"public_key": pub, "endpoint": bad_ep, "allowed_ips": ["10.13.13.9/32"]},
-            headers=AUTH,
-        )
+        resp = vpn_client.post("/vpn/peers/install", json={
+            "public_key": pub, "allowed_ips": ["10.13.13.9/32"],
+            "endpoint": "203.0.113.7:51820",
+        }, headers=AUTH)
         assert resp.status_code == 422
+
+    def test_retired_overlay_route_is_absent(self, vpn_client: TestClient) -> None:
+        resp = vpn_client.post("/vpn/peers/overlay", json={}, headers=AUTH)
+        assert resp.status_code == 404
+
+    def test_install_that_never_reaches_the_interface_is_staged(self, vpn_client: TestClient) -> None:
+        vpn_client.post("/vpn/setup", json={}, headers=AUTH)
+        main.router_instance.vpn._reload_effective = False
+        _, pub = VPNApi.generate_keypair()
+        resp = vpn_client.post("/vpn/peers/install", json={
+            "public_key": pub, "allowed_ips": ["10.13.13.9/32"],
+        }, headers=AUTH)
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "staged"
+        assert resp.json()["applied"] is False
+        assert resp.json()["peer_verified"] is False
+
+    def test_unknown_kernel_state_is_preserved(self, vpn_client: TestClient) -> None:
+        vpn_client.post("/vpn/setup", json={}, headers=AUTH)
+        main.router_instance.vpn._live_available = False
+        _, pub = VPNApi.generate_keypair()
+        resp = vpn_client.post("/vpn/peers/install", json={
+            "public_key": pub, "allowed_ips": ["10.13.13.9/32"],
+        }, headers=AUTH)
+        assert resp.status_code == 200
+        assert resp.json()["applied"] is True
+        assert resp.json()["peer_verified"] is None
 
 
 class TestVpnPeerHandshakeEnrichment:
     """WARP-1389 — GET /vpn/peers enriches each peer with `latest_handshake`
-    (runtime epoch, 0 = never/unknown) for the overlay punch-success telemetry."""
+    (runtime epoch, 0 = never/unknown) for the remote-access device status."""
 
     def test_list_peers_carries_latest_handshake_zero_by_default(self, vpn_client: TestClient) -> None:
         vpn_client.post("/vpn/setup", json={}, headers=AUTH)
         _, pub = VPNApi.generate_keypair()
         vpn_client.post(
-            "/vpn/peers/overlay",
-            json={"public_key": pub, "endpoint": "203.0.113.7:51820", "allowed_ips": ["10.13.13.9/32"]},
+            "/vpn/peers/install",
+            json={"public_key": pub, "allowed_ips": ["10.13.13.9/32"]},
             headers=AUTH,
         )
         peers = vpn_client.get("/vpn/peers", headers=AUTH).json()["peers"]
@@ -660,11 +615,11 @@ class TestVpnPeerHandshakeEnrichment:
         vpn_client.post("/vpn/setup", json={}, headers=AUTH)
         _, pub = VPNApi.generate_keypair()
         vpn_client.post(
-            "/vpn/peers/overlay",
-            json={"public_key": pub, "endpoint": "203.0.113.7:51820", "allowed_ips": ["10.13.13.9/32"]},
+            "/vpn/peers/install",
+            json={"public_key": pub, "allowed_ips": ["10.13.13.9/32"]},
             headers=AUTH,
         )
-        # Simulate the peer completing a handshake (punch succeeded).
+        # Simulate the peer completing a handshake.
         main.router_instance.vpn._handshakes[pub] = 1_784_000_000
         peers = vpn_client.get("/vpn/peers", headers=AUTH).json()["peers"]
         match = [p for p in peers if p["public_key"] == pub]
@@ -683,8 +638,8 @@ class TestVpnPeerHandshakeEnrichment:
         vpn_client.post("/vpn/setup", json={}, headers=AUTH)
         _, pub = VPNApi.generate_keypair()
         vpn_client.post(
-            "/vpn/peers/overlay",
-            json={"public_key": pub, "endpoint": "203.0.113.7:51820", "allowed_ips": ["10.13.13.9/32"]},
+            "/vpn/peers/install",
+            json={"public_key": pub, "allowed_ips": ["10.13.13.9/32"]},
             headers=AUTH,
         )
         main.router_instance.vpn._handshakes_available = False
@@ -731,6 +686,113 @@ def _mint(client: TestClient, desc: str = "laptop") -> str:
 
 class TestRevocationReachesTheInterface:
     """The security half. A revoke that only edits config is not a revoke."""
+
+    def test_missing_uci_interface_does_not_hide_a_live_kernel_peer(
+        self, vpn_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        pub = _mint(vpn_client)
+        vpn = main.router_instance.vpn
+        monkeypatch.setattr(vpn, "interface_exists", lambda _interface: False)
+        monkeypatch.setattr(vpn, "reload_interface", lambda _interface: False)
+        resp = vpn_client.request(
+            "DELETE", "/vpn/peers", json={"public_key": pub}, headers=AUTH,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "staged"
+        assert resp.json()["applied"] is False
+        assert pub in vpn._live["wg0"]
+
+    @pytest.mark.parametrize("uci_present", [True, False])
+    def test_failed_reload_with_unknown_kernel_cannot_claim_revocation(
+        self, vpn_client: TestClient, monkeypatch: pytest.MonkeyPatch, uci_present: bool,
+    ) -> None:
+        pub = _mint(vpn_client)
+        vpn = main.router_instance.vpn
+        vpn._live_available = False
+        if not uci_present:
+            monkeypatch.setattr(vpn, "interface_exists", lambda _interface: False)
+        monkeypatch.setattr(vpn, "reload_interface", lambda _interface: False)
+        resp = vpn_client.request(
+            "DELETE", "/vpn/peers", json={"public_key": pub}, headers=AUTH,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "staged"
+        assert resp.json()["applied"] is False
+        assert resp.json()["revocation_verified"] is None
+        assert pub in vpn._live["wg0"]
+
+    def test_observed_absence_can_confirm_revocation_after_unconfirmed_reload(
+        self, vpn_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        pub = _mint(vpn_client)
+        vpn = main.router_instance.vpn
+
+        def unconfirmed_reload(interface: str) -> bool:
+            vpn._live[interface].discard(pub)
+            return False
+
+        monkeypatch.setattr(vpn, "reload_interface", unconfirmed_reload)
+        resp = vpn_client.request(
+            "DELETE", "/vpn/peers", json={"public_key": pub}, headers=AUTH,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["applied"] is True
+        assert resp.json()["revocation_verified"] is True
+
+    def test_retry_after_staged_delete_cannot_report_absence_while_peer_is_live(
+        self, vpn_client: TestClient,
+    ) -> None:
+        pub = _mint(vpn_client)
+        vpn = main.router_instance.vpn
+        vpn._reload_effective = False
+        payload = {"interface": "wg0", "public_key": pub}
+
+        first = vpn_client.request("DELETE", "/vpn/peers", json=payload, headers=AUTH)
+        assert first.status_code == 200
+        assert first.json()["removed"] == 1
+        assert first.json()["applied"] is False
+        assert vpn.list_peers("wg0") == []
+        assert pub in vpn._live["wg0"]
+
+        # UCI no longer contains the peer, but this must not become a 404 that
+        # the orchestrator would accept as proof the device has lost access.
+        retry = vpn_client.request("DELETE", "/vpn/peers", json=payload, headers=AUTH)
+        assert retry.status_code == 200
+        assert retry.json()["removed"] == 0
+        assert retry.json()["status"] == "staged"
+        assert retry.json()["applied"] is False
+        assert retry.json()["revocation_verified"] is False
+        assert pub in vpn._live["wg0"]
+
+        vpn._reload_effective = True
+        final = vpn_client.request("DELETE", "/vpn/peers", json=payload, headers=AUTH)
+        assert final.status_code == 404
+        assert pub not in vpn._live["wg0"]
+
+    def test_missing_config_with_unknown_kernel_state_still_performs_reload(
+        self, vpn_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        pub = _mint(vpn_client)
+        vpn = main.router_instance.vpn
+        vpn.delete_peer("wg0", pub)
+        assert pub in vpn._live["wg0"]
+        vpn._live_available = False
+        reloads: list[str] = []
+        original_reload = vpn.reload_interface
+
+        def reload(interface: str) -> bool:
+            reloads.append(interface)
+            return original_reload(interface)
+
+        monkeypatch.setattr(vpn, "reload_interface", reload)
+        resp = vpn_client.request(
+            "DELETE", "/vpn/peers", json={"public_key": pub}, headers=AUTH,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["removed"] == 0
+        assert resp.json()["revocation_verified"] is None
+        assert reloads == ["wg0"]
+        assert pub not in vpn._live["wg0"]
 
     def test_revoked_peer_is_gone_from_the_interface(self, vpn_client: TestClient) -> None:
         # The bug in one assertion: pre-fix, DELETE returned ok while the peer
@@ -826,8 +888,7 @@ class TestSetupDoesNotInventAnInterface:
         # WARP-2689 — the idempotent (`created: False`) branch is the one the
         # field hits: a wg0 uci section exists on every box after its first
         # setup. It MUST carry interface_live, or every orchestrator gate that
-        # reads `setup.interface_live === false` (mint 503, profile 503,
-        # provisionOverlayPeer, the reconciler) is dead on exactly the routers
+        # reads `setup.interface_live === false` (mint 503, the reconciler) is dead on exactly the routers
         # WARP-2689 is about.
         first = vpn_client.post("/vpn/setup", json={}, headers=AUTH).json()
         assert first["created"] is True and first["interface_live"] is True

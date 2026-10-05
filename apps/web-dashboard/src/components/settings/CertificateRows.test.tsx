@@ -1,12 +1,4 @@
-/**
- * WARP-2944 — Settings → Device information shows the certificate lifecycle.
- *
- * Pins: every state's row value and whether a warning appears; the warning
- * carries the ONE action and the 60-day rule; the copy is honest that the
- * Droplet apps keep working (they pair by the box's key) while browsers need
- * the public certificate; lesser roles render nothing; a failed load is a
- * dash, never a fake "OK".
- */
+/** Installed HTTPS certificate metadata, local trust guidance and permissions. */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 
@@ -20,7 +12,7 @@ vi.mock("@/lib/auth", () => ({
   useAuth: () => ({ user: { id: "u1", username: "stefan", role: mockRole } }),
 }));
 
-import { CertificateRows, RENEW_ACTION, certificateCopy } from "./CertificateRows";
+import { CertificateRows, CERTIFICATE_ACTION, certificateCopy } from "./CertificateRows";
 import type { TlsCertificate } from "@/lib/api";
 
 /** The known bootstrap leaf's key fingerprint (served-cert-pin.test.ts). */
@@ -29,13 +21,14 @@ const FINGERPRINT =
 
 function cert(over: Partial<TlsCertificate> = {}): TlsCertificate {
   return {
-    state: "LE_ISSUED",
-    fqdn: "mybox.droplet-us.com",
+    state: "LOCAL_CERTIFICATE",
+    fqdn: "droplet-ai.lan",
     notAfter: "2026-11-19T00:00:00.000Z",
     daysLeft: 60,
-    renewsInDays: 30,
+    renewsInDays: null,
+    coversInternalHostname: true,
     expiringSoon: false,
-    hqConfigured: true,
+    hqConfigured: false,
     checkedAt: "2026-09-20T04:00:00.000Z",
     fingerprint: FINGERPRINT,
     ...over,
@@ -47,61 +40,67 @@ beforeEach(() => {
   fetchTlsCertificate.mockReset();
 });
 
-describe("certificateCopy — one line per state", () => {
-  it("an issued certificate says when the box renews, with no warning", () => {
-    const c = certificateCopy(cert());
-    expect(c.value).toBe("mybox.droplet-us.com · renews in 30 days");
-    expect(c.warning).toBeNull();
+describe("certificateCopy — installed certificate", () => {
+  it("shows the served leaf's expiry without cloud renewal promises", () => {
+    const copy = certificateCopy(cert());
+    expect(copy.value).toBe("droplet-ai.lan · valid for 60 days more");
+    expect(copy.warning).toBeNull();
+    expect(copy.note).toContain("may need to trust");
+    expect(copy.note).not.toMatch(/renew|HQ|public certificate/);
   });
-
-  it("inside the renew window it says renewing; inside the last week it warns with the action", () => {
-    expect(certificateCopy(cert({ daysLeft: 20, renewsInDays: 0 })).value).toBe(
-      "mybox.droplet-us.com · renewing (20 days left)",
-    );
-    const c = certificateCopy(cert({ daysLeft: 5, renewsInDays: 0, expiringSoon: true }));
-    expect(c.warning).toContain("Expires in 5 days");
-    expect(c.warning).toContain(RENEW_ACTION);
-    expect(c.warning).toContain("every 60 days");
+  it("warns when the installed certificate is close to expiry", () => {
+    const copy = certificateCopy(cert({ daysLeft: 5, expiringSoon: true }));
+    expect(copy.warning).toContain("Expires in 5 days");
+    expect(copy.warning).toContain(CERTIFICATE_ACTION);
   });
-
-  it("renewal failing names the failure, what still works, and the one action", () => {
-    const c = certificateCopy(cert({ state: "LE_RENEW_FAILED", daysLeft: 12, renewsInDays: 0 }));
-    expect(c.value).toBe("mybox.droplet-us.com · renewal failing");
-    expect(c.warning).toContain("could not reach the certificate service");
-    expect(c.warning).toContain("valid for 12 days more");
-    expect(c.warning).toContain(RENEW_ACTION);
-    // Past expiry: browsers warn, the apps keep working — both said.
-    const expired = certificateCopy(cert({ state: "LE_RENEW_FAILED", daysLeft: -3, renewsInDays: 0, expiringSoon: true }));
-    expect(expired.warning).toContain("expired 3 days ago");
-    expect(expired.warning).toContain("browsers will warn");
-    expect(expired.warning).toContain("apps keep working");
+  it("reports an expired leaf and how to replace it", () => {
+    const copy = certificateCopy(cert({ daysLeft: -3, expiringSoon: true }));
+    expect(copy.value).toContain("expired 3 days ago");
+    expect(copy.warning).toContain("browsers will warn");
+    expect(copy.warning).toContain(CERTIFICATE_ACTION);
   });
-
-  it("the self-signed bootstrap certificate is not an error: the apps pair by its key, browsers wait for HQ", () => {
-    const c = certificateCopy(cert({ state: "BOOTSTRAP_SELF_SIGNED", fqdn: null, daysLeft: null, renewsInDays: null }));
-    expect(c.value).toBe("Self-signed (the Droplet's own key)");
-    expect(c.warning).toBeNull();
-    expect(c.note).toContain("pair by this key");
-    expect(c.note).toContain("Browsers show a warning until");
-    // Air-gapped (no HQ): the documented exception, said as such.
-    const air = certificateCopy(cert({ state: "BOOTSTRAP_SELF_SIGNED", fqdn: null, daysLeft: null, renewsInDays: null, hqConfigured: false }));
-    expect(air.note).toContain("not set up for a public certificate");
-    expect(air.note).toContain("the apps do not");
+  it("warns about expiry today", () => {
+    const copy = certificateCopy(cert({ daysLeft: 0, expiringSoon: true }));
+    expect(copy.value).toContain("expires today");
+    expect(copy.warning).toContain("expires today");
+  });
+  it("reports an internal hostname mismatch even when the leaf is unexpired", () => {
+    const copy = certificateCopy(cert({ coversInternalHostname: false }));
+    expect(copy.warning).toContain("does not cover the internal DNS hostname");
+    expect(copy.warning).toContain(CERTIFICATE_ACTION);
+  });
+  it("combines mismatch and expiry guidance", () => {
+    const copy = certificateCopy(cert({ coversInternalHostname: false, daysLeft: -2, expiringSoon: true }));
+    expect(copy.warning).toContain("does not cover");
+    expect(copy.warning).toContain("has expired");
+    expect(copy.warning?.split(CERTIFICATE_ACTION)).toHaveLength(2);
+  });
+  it("does not imply coverage or expiry when metadata is unavailable", () => {
+    const copy = certificateCopy(cert({ coversInternalHostname: null, daysLeft: null, notAfter: null }));
+    expect(copy.value).toContain("expiry unavailable");
+    expect(copy.note).toContain("Hostname coverage could not be verified");
+    expect(copy.warning).toBeNull();
+  });
+  it("unknown leaf metadata stays unknown instead of claiming a self-signed certificate", () => {
+    const copy = certificateCopy(cert({ state: "UNKNOWN", daysLeft: null, notAfter: null, coversInternalHostname: null }));
+    expect(copy.value).toBe("Certificate information unavailable");
+    expect(copy.note).toContain("couldn't read its installed HTTPS certificate");
+    expect(copy.warning).toBeNull();
   });
 });
 
 describe("<CertificateRows />", () => {
-  it("renders the row and the warning for a failing renewal", async () => {
-    fetchTlsCertificate.mockResolvedValue(cert({ state: "LE_RENEW_FAILED", daysLeft: 12, renewsInDays: 0 }));
+  it("renders the installed certificate and hostname mismatch warning", async () => {
+    fetchTlsCertificate.mockResolvedValue(cert({ coversInternalHostname: false }));
     render(<CertificateRows />);
-    await waitFor(() => expect(screen.getByTestId("certificate-row")).toHaveTextContent("renewal failing"));
-    expect(screen.getByRole("alert")).toHaveTextContent("could not reach the certificate service");
+    await waitFor(() => expect(screen.getByTestId("certificate-row")).toHaveTextContent("valid for 60 days more"));
+    expect(screen.getByRole("alert")).toHaveTextContent("does not cover the internal DNS hostname");
   });
 
   it("renders the row without an alert when nothing needs the owner", async () => {
     fetchTlsCertificate.mockResolvedValue(cert());
     render(<CertificateRows />);
-    await waitFor(() => expect(screen.getByTestId("certificate-row")).toHaveTextContent("renews in 30 days"));
+    await waitFor(() => expect(screen.getByTestId("certificate-row")).toHaveTextContent("valid for 60 days more"));
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
@@ -115,7 +114,7 @@ describe("<CertificateRows />", () => {
   // WARP-3414 — the key fingerprint, in full, four groups to a line, with
   // copy that never presents it as proof.
   it("shows the key fingerprint in full, four groups to a line, selectable, with a Copy action", async () => {
-    fetchTlsCertificate.mockResolvedValue(cert({ state: "BOOTSTRAP_SELF_SIGNED", fqdn: null, daysLeft: null, renewsInDays: null }));
+    fetchTlsCertificate.mockResolvedValue(cert());
     render(<CertificateRows />);
     const block = await screen.findByTestId("key-fingerprint");
     expect(block).toHaveTextContent("Key fingerprint (SHA-256)");
@@ -148,7 +147,7 @@ describe("<CertificateRows />", () => {
   it("shows no fingerprint block when the box has none to offer", async () => {
     fetchTlsCertificate.mockResolvedValue(cert({ fingerprint: null }));
     render(<CertificateRows />);
-    await waitFor(() => expect(screen.getByTestId("certificate-row")).toHaveTextContent("renews in 30 days"));
+    await waitFor(() => expect(screen.getByTestId("certificate-row")).toHaveTextContent("valid for 60 days more"));
     expect(screen.queryByTestId("key-fingerprint")).toBeNull();
   });
 

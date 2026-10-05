@@ -5,8 +5,6 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 // trusted-origin.test.ts).
 vi.mock("../config.js", () => ({
   config: {
-    REMOTE_ACCESS_MODE: "fqdn",
-    DROPLET_PUBLIC_FQDN: "",
     WIREGUARD_ENDPOINT_HOST: "",
     agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
@@ -15,7 +13,8 @@ vi.mock("../config.js", () => ({
 import { computeOffLanReachable, isLanOnlyHost } from "./remote-access.js";
 import { config } from "../config.js";
 
-type MutableConfig = {
+// Add legacy values only in the fixture to prove the direct path ignores them.
+type MutableConfig = typeof config & {
   REMOTE_ACCESS_MODE: string;
   DROPLET_PUBLIC_FQDN: string;
   WIREGUARD_ENDPOINT_HOST: string;
@@ -107,7 +106,7 @@ describe("isLanOnlyHost", () => {
   });
 });
 
-// ── computeOffLanReachable: mirrors resolveEndpointHost() priority ──
+// ── computeOffLanReachable: uses only the explicit direct endpoint ──
 describe("computeOffLanReachable", () => {
   it("is false with nothing configured", () => {
     expect(computeOffLanReachable()).toBe(false);

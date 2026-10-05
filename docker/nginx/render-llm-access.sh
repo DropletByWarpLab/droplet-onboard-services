@@ -3,24 +3,10 @@
 # WARP-3452 — 04-llm-access.sh: the peers `location /llm/` refuses
 # =============================================================================
 # /llm/ (nginx.conf) hands employees' coding tools the box's model runtime. It
-# is for the office LAN and the WireGuard VPN, never the cloudflared relay and
-# never the guest Wi-Fi (Romain, 2026-10-02). Neither of those carries a header
-# nginx could test, so this renders the signal that does exist — the TCP peer
+# is for the office LAN and the WireGuard VPN. Guest and host-originated
+# traffic is restricted using the TCP peer
 # address — into the `geo $llm_refused_source` map nginx.conf includes.
 #
-# * Relay. cloudflared runs in the HOST netns (docker-compose.yml, service
-#   `cloudflared`: `network_mode: host`) and proxies each WARP flow at L4. TLS
-#   stays end-to-end (the box serves its own cert; Cloudflare never terminates
-#   it), so nothing can add a header. The flow is dialled at the address the
-#   box's FQDN resolves to, the box's own, and nginx sees a host-originated
-#   connection: from that address (Docker's published-port DNAT keeps the
-#   source) or from this network's gateway (when docker-proxy carries it).
-#   Both are refused below. The address is the LAST `host-record=<fqdn>,<ip>`
-#   line of the host dnsmasq conf — the record the relay's DNS fallback
-#   answers with, and the same source of truth scripts/host/droplet-relay-dns.sh
-#   reads (local-dns.sh appends it; on a relay box it is the uplink leg, not
-#   192.168.20.1). compose mounts /etc/droplet-host-net read-only for it;
-#   DROPLET_PUBLIC_FQDN_IP overrides it.
 # * Guest Wi-Fi. droplet-openwrt-attach (guest_firewall_zone, plus the
 #   192.168.30.0/24 nft masquerade out eth0) forwards guests to OpenWrt's
 #   uplink, which on the single box is its docker veth on THIS compose
@@ -38,9 +24,7 @@
 # names resolve to IPv4).
 #
 # Fails CLOSED — every /llm/ request answers 403 — when this network's gateway
-# cannot be read, or when the relay is on (`relay` in COMPOSE_PROFILES, which
-# scripts/lib/single-box.sh adds exactly when TUNNEL_TOKEN is set) and no box
-# address can be read. The image bakes that closed form (Dockerfile) until
+# cannot be read. The image bakes that closed form (Dockerfile) until
 # this runs. Runs at every container start; local-dns.sh re-runs it in a
 # running gateway when it rewrites the host-record (a gateway restart does too).
 # =============================================================================
@@ -51,16 +35,12 @@ ROUTES="${DROPLET_LLM_ACCESS_ROUTES:-/proc/net/route}"
 HOST_DNS_CONF="${DROPLET_LLM_ACCESS_HOST_DNS_CONF:-/etc/droplet-host-net/lan-dhcp.conf}"
 IPV4='[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}'
 
-BOX_IP="${DROPLET_PUBLIC_FQDN_IP:-}"
+BOX_IP="${DROPLET_LLM_BOX_IP:-}"
 if [ -z "$BOX_IP" ]; then
   BOX_IP="$(grep -E "^host-record=[^,]+,${IPV4}[[:space:]]*\$" "$HOST_DNS_CONF" 2>/dev/null | tail -n 1 \
     | sed 's/^.*,//; s/[[:space:]]*$//')"
 fi
 printf '%s' "$BOX_IP" | grep -Eq "^${IPV4}\$" || BOX_IP=""
-case ",${DROPLET_COMPOSE_PROFILES:-}," in
-  *,relay,*) relay=1 ;;
-  *) relay=0 ;;
-esac
 
 # /proc/net/route keeps addresses as little-endian hex: 010012AC = 172.18.0.1.
 gw=""
@@ -75,7 +55,6 @@ esac
 
 reason=""
 [ -n "$gw" ] || reason="no default route in $ROUTES"
-[ "$relay" = 0 ] || [ -n "$BOX_IP" ] || reason="relay on but no box address in $HOST_DNS_CONF"
 
 {
   echo "# RENDERED by /docker-entrypoint.d/04-llm-access.sh — DO NOT EDIT (WARP-3452)."
@@ -95,7 +74,7 @@ reason=""
 } > "$OUT.tmp" && mv "$OUT.tmp" "$OUT"
 
 if [ -z "$reason" ]; then
-  echo "{\"event\":\"llm_access_render\",\"gateway\":\"nginx\",\"relay\":$relay,\"refused\":\"127.0.0.0/8 192.168.20.1 $gw${BOX_IP:+ $BOX_IP}\"}"
+  echo "{\"event\":\"llm_access_render\",\"gateway\":\"nginx\",\"refused\":\"127.0.0.0/8 192.168.20.1 $gw${BOX_IP:+ $BOX_IP}\"}"
 else
-  echo "{\"event\":\"llm_access_render\",\"gateway\":\"nginx\",\"relay\":$relay,\"refused\":\"all\",\"reason\":\"$reason\"}"
+  echo "{\"event\":\"llm_access_render\",\"gateway\":\"nginx\",\"refused\":\"all\",\"reason\":\"$reason\"}"
 fi

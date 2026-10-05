@@ -7,7 +7,7 @@ import {
   RELEASE_RESULT_FAILED,
   RELEASE_RESULT_SKIPPED,
   type ReleaseDeps,
-} from "../services/tls-issuance.service.js";
+} from "../services/fleet-registration.service.js";
 
 // ---------------------------------------------------------------------------
 // WARP-980 — the tls-release CLI (the DEFAULT factory-reset HQ path).

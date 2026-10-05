@@ -188,8 +188,8 @@ _upsert_env_kv() {
   fi
   # WARP-2537: strip an INDENTED or COMMENTED-OUT assignment of the same key as
   # well as a bare one. Every sed writer this primitive replaces matched
-  # `^[[:space:]]*#?[[:space:]]*KEY=` (droplet-set-box-name.sh,
-  # droplet-set-public-fqdn.sh, and droplet-set-nvr-media.sh before WARP-2522),
+  # `^[[:space:]]*#?[[:space:]]*KEY=` (including the NVR media setter before
+  # WARP-2522),
   # so a plain `^KEY=` strip would leave their commented placeholder behind and
   # append a SECOND line for the same key. Only an assignment form is matched —
   # `# KEY: prose` documentation lines in the generated .env are untouched.
@@ -1117,44 +1117,17 @@ DROPLET_TPM_BACKEND=mock
 # See _derive_device_id in scripts/lib/secrets.sh for the derivation.
 DROPLET_DEVICE_ID=$device_id
 
-# --- Public-CA per-device TLS (ADR-023) ---
-# DROPLET_PUBLIC_FQDN: the opaque per-device subdomain
-#   d-HMAC.devices.warp-lab.ai. The box CANNOT compute the HQ-keyed HMAC, so it
-#   starts EMPTY and is populated when the tls-issuance cron learns the FQDN
-#   from the HQ challenge response and persists it back here. Empty is the
-#   correct first-boot value: the bootstrap self-signed cert keeps the box
-#   serving TLS, and the FQDN becomes the canonical origin + a bootstrap-SAN
-#   entry once known.
-DROPLET_PUBLIC_FQDN=
+# --- Internal DNS and optional fleet registry ---
+DROPLET_LAN_HOSTNAME=${DROPLET_LAN_HOSTNAME:-droplet-ai.lan}
 # HQ_ISSUANCE_URL: optional fleet control-plane origin, explicitly provisioned.
 #   Local WireGuard and internal DNS work with this empty. No Cloudflare Worker
 #   is selected automatically on first boot or reflash.
 HQ_ISSUANCE_URL=${HQ_ISSUANCE_URL:-}
-# OVERLAY_CONNECT_ENABLED: the box half of customer remote access (WARP-1767 /
-#   ADR-031) — outbound long-poll to HQ signaling, STUN mapping discovery, and
-#   the wg0 peer install that lands a hole-punched session. ON by default: this
-#   is the shipped remote-access path, and a box written without it cannot be
-#   reached from outside at all. Overridable from the provisioning environment
-#   for a box that must ship LAN-only. Requires HQ_ISSUANCE_URL (above) and
-#   router supervision; index.ts gates on all three.
-OVERLAY_CONNECT_ENABLED=${OVERLAY_CONNECT_ENABLED:-true}
-OVERLAY_CONNECT_POLL_SECONDS=${OVERLAY_CONNECT_POLL_SECONDS:-15}
-OVERLAY_PEER_IDLE_EXPIRY_HOURS=${OVERLAY_PEER_IDLE_EXPIRY_HOURS:-720}
-# TUNNEL_TOKEN: Cloudflare Tunnel connector token for the remote-access relay
-#   (WARP-974 / ADR-025). PRESERVED from the provisioning environment. Empty =
-#   relay OFF — single-box.sh only activates the \`relay\` compose profile
-#   (cloudflared) when this is set, so an un-provisioned box never brings up a
-#   tokenless connector.
-TUNNEL_TOKEN=${TUNNEL_TOKEN:-}
 # DROPLET_PROVISION_TOKEN: one-time HQ-minted provisioning token (WARP-983).
 #   PRESERVED from the provisioning environment / manifest so a fresh or
 #   FACTORY-RESET box can re-enroll itself into the HQ registry. Factory-reset
-#   sends the ADR-023 signed deregister, which DELETES the device from the HQ
-#   registry — on the next boot tls-issuance is then rejected with 404
-#   \`device_id not in registry\` and the box would stay on the self-signed
-#   bootstrap cert forever. When this token is set, the orchestrator self-provisions
-#   (POST /api/issuance/provision with a TPM proof-of-possession over the token)
-#   on that 404, then retries issuance and installs its droplet-us.com cert.
+#   deletes the device from the HQ registry. The token allows the explicitly
+#   configured fleet registry to provision that device again for image access.
 #   Empty disables self-provision (dev / pre-fleet / provisioned by another path).
 DROPLET_PROVISION_TOKEN=${DROPLET_PROVISION_TOKEN:-}
 
@@ -1386,23 +1359,13 @@ migrate_env() {
   _migrate_ensure_key INFERENCE_RUNTIME "ollama"
   # Preserve explicitly provisioned fleet settings. An absent HQ URL stays
   # empty: local WireGuard and DNS have no fleet issuance prerequisite.
+  _migrate_ensure_key DROPLET_LAN_HOSTNAME "${DROPLET_LAN_HOSTNAME:-droplet-ai.lan}"
   _migrate_ensure_key HQ_ISSUANCE_URL "${HQ_ISSUANCE_URL:-}"
-  _migrate_ensure_key TUNNEL_TOKEN "${TUNNEL_TOKEN:-}"
-  # WARP-1767: backfill the overlay connect agent onto boxes already in the field.
-  # These installs predate the key entirely, so the orchestrator fell back to the
-  # zod default (false) and the connect tick + idle-expiry sweep never registered
-  # — every one of them is unreachable from outside. `_migrate_ensure_key` only
-  # appends when the key is ABSENT, so a box deliberately opted out (explicit
-  # `false`) keeps that value across the re-run.
-  _migrate_ensure_key OVERLAY_CONNECT_ENABLED "${OVERLAY_CONNECT_ENABLED:-true}"
-  _migrate_ensure_key OVERLAY_CONNECT_POLL_SECONDS "${OVERLAY_CONNECT_POLL_SECONDS:-15}"
-  _migrate_ensure_key OVERLAY_PEER_IDLE_EXPIRY_HOURS "${OVERLAY_PEER_IDLE_EXPIRY_HOURS:-720}"
   # WARP-983: ensure the one-time HQ provisioning token exists on re-run, seeded
   # from the provisioning environment (empty = self-provision disabled). Pairs
   # with the seed-block `${DROPLET_PROVISION_TOKEN:-}` above so a fresh or
-  # factory-reset box that was handed a token can re-enroll into the HQ registry
-  # and re-issue its droplet-us.com cert, instead of dead-ending on the 404
-  # `device_id not in registry` and staying on the self-signed bootstrap cert.
+  # factory-reset box that was handed a token can re-enroll into an explicitly
+  # configured fleet registry. Local access does not require registration.
   _migrate_ensure_key DROPLET_PROVISION_TOKEN "${DROPLET_PROVISION_TOKEN:-}"
   # WARP-834 backfill: existing installs predate the per-box OpenWrt password.
   # Without it sync_openwrt_password_secret() writes an empty secret file and
@@ -2260,6 +2223,15 @@ _cert_covers_current_ips() {
   return 0
 }
 
+_cert_covers_internal_hostname() {
+  local name="${DROPLET_LAN_HOSTNAME:-droplet-ai.lan}"
+  # x509 -checkhost reports mismatches on stdout but may still exit zero.
+  # Require a DNS SAN and the explicit positive result, including wildcard SANs.
+  openssl x509 -in "$1" -noout -ext subjectAltName 2>/dev/null | grep -q 'DNS:' || return 1
+  openssl x509 -in "$1" -noout -checkhost "$name" 2>/dev/null \
+    | grep -qxF "Hostname $name does match certificate"
+}
+
 _cert_has_all_required_sans() {
   local cert_file="$1"
   local dns_list
@@ -2274,7 +2246,7 @@ _cert_has_all_required_sans() {
               | tr '[:upper:]' '[:lower:]')"
 
   local required
-  for required in "${_REQUIRED_DNS_SANS[@]}"; do
+  for required in "${_REQUIRED_DNS_SANS[@]}" "${DROPLET_LAN_HOSTNAME:-droplet-ai.lan}"; do
     # Compare against the lowercased list — if we can't find an exact match,
     # the cert is incomplete and must be regenerated.
     if ! printf '%s\n' "$dns_list" | grep -qxF "$(printf '%s' "$required" | tr '[:upper:]' '[:lower:]')"; then
@@ -2284,28 +2256,9 @@ _cert_has_all_required_sans() {
   return 0
 }
 
-# ADR-023 PR-2: detect whether the installed leaf is a PUBLIC-CA cert (an
-# LE / ZeroSSL / Google Trust Services fullchain the box-side tls-issuance cron
-# installed) rather than our own self-signed bootstrap cert.
-#
-# Detector: issuer != subject. A self-signed cert has issuer == subject; any
-# CA-signed leaf has a distinct issuer DN. `openssl x509` reads only the FIRST
-# PEM block in the file, so this correctly inspects just the leaf even when
-# cert_file is a fullchain (leaf + intermediate concatenated). NOTE: we do NOT
-# use `openssl verify -CAfile <cert> <cert>` — on a fullchain PEM, OpenSSL
-# loads all PEM blocks as trusted anchors, the intermediate verifies the leaf,
-# and the command exits 0, indistinguishable from self-signed.
-#
-# Deliberately NOT keyed on the literal string "Let's Encrypt": the HQ Worker
-# has CA failover (ZeroSSL primary, Google Trust Services fallback), all
-# non-self-signed — matching on a CA name would miss the fallback issuers.
-#
-# Parse gate: if either DN is unreadable (corrupt/truncated/garbage cert), we
-# require both to be non-empty before trusting the issuer!=subject result. An
-# unparseable droplet.crt is NOT a preservable public-CA leaf — fall through
-# so the normal path regenerates a fresh self-signed cert.
-#
-# Returns 0 (true) when the cert is a public-CA leaf we must preserve.
+# Detect a CA-signed leaf by comparing issuer and subject on the first PEM
+# block. This also handles a leaf followed by its intermediate chain. The
+# generator preserves it only when it covers the configured internal hostname.
 _cert_is_public_ca_leaf() {
   local cert_file="$1"
   [ -f "$cert_file" ] || return 1
@@ -2378,6 +2331,11 @@ _write_tls_bootstrap_copy() {
 }
 
 _generate_tls_cert() {
+  local internal_hostname="${DROPLET_LAN_HOSTNAME:-droplet-ai.lan}"
+  if [[ ! "$internal_hostname" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$ ]]; then
+    log_error "TLS: DROPLET_LAN_HOSTNAME must be a plain DNS hostname"
+    return 1
+  fi
   local cert_dir="$REPO_ROOT/docker/certs"
   local cert_file="$cert_dir/droplet.crt"
   local key_file="$cert_dir/droplet.key"
@@ -2401,31 +2359,14 @@ _generate_tls_cert() {
       return 0
     fi
 
-    # ADR-023 PR-2 — NEVER CLOBBER A PUBLIC-CA LEAF.
-    # The box-side tls-issuance cron installs the HQ-issued publicly-trusted
-    # fullchain into these SAME files. A re-run that reaches here (SAN-incomplete
-    # OR expired trigger) must NOT regenerate a self-signed cert over a live
-    # public-CA leaf — that silently reverts the box to self-signed until the
-    # next 04:00 issuance, and a fresh -newkey also breaks every client that
-    # imported the original cert. If the installed cert is a public-CA leaf,
-    # leave the fullchain in place and return success.
-    if _cert_is_public_ca_leaf "$cert_file"; then
-      if _tls_pair_matches "$cert_file" "$key_file"; then
-        log_success "TLS certificate is a publicly-trusted (public-CA) leaf — preserving it (ADR-023)"
-      else
-        # WARP-595: preserving is still correct — setup cannot mint public-CA
-        # material, and clobbering with self-signed would break the trust
-        # story — but this must NEVER read as a clean success. The 04:00
-        # tls-issuance cron does NOT heal a torn pair outside the ≤30-day
-        # renew window (its decision is DB-state-driven; it never checks the
-        # on-disk key), so a broken public-CA pair can sit unloadable for
-        # weeks while nginx fails to load it. Tell the operator to trigger
-        # re-issuance instead of waiting for the renew window.
-        log_warn "TLS certificate is a public-CA leaf but the private key does NOT match it (torn issuance write)"
-        log_warn "  Preserving the fullchain (setup cannot mint public-CA material) — but nginx may fail to"
-        log_warn "  load this pair. Trigger re-issuance manually rather than waiting for the ≤30-day renew"
-        log_warn "  window (the issuance cron never checks the on-disk key)."
-      fi
+    # A CA-signed leaf is useful only if it covers our configured internal
+    # address and has a valid matching key. An old fleet-only leaf is replaced
+    # with a local certificate around the SAME private key below.
+    if _cert_is_public_ca_leaf "$cert_file" \
+       && _cert_covers_internal_hostname "$cert_file" \
+       && openssl x509 -checkend 86400 -noout -in "$cert_file" >/dev/null 2>&1 \
+       && _tls_pair_matches "$cert_file" "$key_file"; then
+      log_success "TLS: preserving the valid CA certificate for the internal DNS name"
       return 0
     fi
 
@@ -2439,7 +2380,8 @@ _generate_tls_cert() {
     local pair_broken=false
     _tls_pair_matches "$cert_file" "$key_file" || pair_broken=true
     local boot_cert="$cert_file.bootstrap" boot_key="$key_file.bootstrap"
-    if { ! openssl x509 -checkend 86400 -noout -in "$cert_file" >/dev/null 2>&1 \
+    if ! _cert_is_public_ca_leaf "$cert_file" \
+       && { ! openssl x509 -checkend 86400 -noout -in "$cert_file" >/dev/null 2>&1 \
          || [ "$pair_broken" = "true" ]; } \
        && [ -f "$boot_cert" ] && [ -f "$boot_key" ] \
        && openssl x509 -checkend 86400 -noout -in "$boot_cert" >/dev/null 2>&1 \
@@ -2514,7 +2456,7 @@ _generate_tls_cert() {
   # across devices so every Droplet cert trusts the same names.
   local san=""
   local dns
-  for dns in "${_REQUIRED_DNS_SANS[@]}"; do
+  for dns in "${_REQUIRED_DNS_SANS[@]}" "${DROPLET_LAN_HOSTNAME:-droplet-ai.lan}"; do
     san="${san:+$san,}DNS:$dns"
   done
 
@@ -2524,19 +2466,6 @@ _generate_tls_cert() {
   local hn
   hn=$(hostname 2>/dev/null || echo "droplet")
   san="$san,DNS:$hn,DNS:${hn}.local"
-
-  # ADR-023 (C2): the opaque per-device FQDN (`d-<hmac>.devices.warp-lab.ai`).
-  # The box can't compute the HQ-keyed HMAC, so it learns its FQDN from the HQ
-  # challenge response and persists it to .env (DROPLET_PUBLIC_FQDN). When it is
-  # known, add it to the bootstrap self-signed SAN so the box serves a
-  # name-matching cert for the FQDN even BEFORE the first LE cert is issued
-  # (works offline / pre-issuance). The LE cert later overwrites these same
-  # files with a publicly-trusted fullchain. Empty on first ever boot — harmless.
-  local public_fqdn="${DROPLET_PUBLIC_FQDN:-}"
-  if [ -n "$public_fqdn" ]; then
-    san="$san,DNS:$public_fqdn"
-    log_info "  Including per-device FQDN in SAN: $public_fqdn"
-  fi
 
   # Add all non-loopback IPv4 addresses (the same list the skip-guard checks
   # the installed cert against, so the two can never disagree).

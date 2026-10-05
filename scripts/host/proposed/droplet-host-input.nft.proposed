@@ -49,7 +49,6 @@
 # host-listener: tcp 445,139 samba lan
 # host-listener: udp 137,138,3702 samba lan
 # host-listener: tcp 5357 samba lan
-# host-listener: none - cloudflared none
 #
 # NOT YET VERIFIED ON A BOX (validate with the checklist before enabling):
 # DNS (53) served by dnsmasq/OpenWrt to LAN clients, Matter commissioning

@@ -11,10 +11,10 @@
  *
  * `key_fingerprint` is the SHA-256 of the DER SubjectPublicKeyInfo of the
  * device key, lowercase hex, no prefix. It is NOT the `certFingerprint` the
- * TLS-issuance and overlay flows send (`sha256:` + hash of the cert PEM);
- * those paths are unchanged and HQ resolves this one by SPKI.
+ * legacy fleet cleanup contracts send (`sha256:` + hash of the cert PEM);
+ * HQ resolves the token credential by SPKI.
  *
- * The HQ base URL is `HQ_ISSUANCE_URL` (the same origin as TLS issuance) and
+ * The fleet registry base URL is the existing `HQ_ISSUANCE_URL` key and
  * signing goes through the device-identity sidecar, both injected.
  *
  * SECURITY: a token is a bearer credential. Nothing here logs one, and no

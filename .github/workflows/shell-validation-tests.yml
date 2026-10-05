@@ -1,8 +1,8 @@
 name: shell-validation-tests
 
 # WARP-996 — hermetic pytest suites for the scripts/host + scripts/lib
-# shell-script validation guards (WARP-988 box-name, WARP-994 public-fqdn,
-# WARP-995 local-dns hostname). They live in scripts/test/pytest/ — a
+# shell-script validation guards, including local DNS hostname validation.
+# They live in scripts/test/pytest/ — a
 # deliberately conftest-free home with NO service-module import at collection
 # time — so these security guards run independently of any service's import
 # health (they previously sat under services/oled-display/tests/, whose

@@ -288,11 +288,8 @@ export function renderPeerConf(opts: {
   return lines.join("\n");
 }
 
-/** WARP-1757 — keepalive for overlay peers, in seconds. Matches the value the
- *  connect agent installs (overlay-connect.service.ts) so a peer's keepalive
- *  doesn't change depending on which path last touched it. Shared with the
- *  WARP-2694 reconciler for the same reason. */
-export const OVERLAY_KEEPALIVE_SECONDS = 25;
+/** Keepalive shared by WireGuard peer minting and reconciliation. */
+export const VPN_KEEPALIVE_SECONDS = 25;
 
 /**
  * Compute the server's CIDR address inside a VPN subnet, e.g.

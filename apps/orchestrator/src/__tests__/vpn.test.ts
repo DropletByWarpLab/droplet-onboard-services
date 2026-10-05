@@ -14,9 +14,7 @@ vi.mock("../config.js", () => ({
     ROUTING_SERVICE_TOKEN: "test-token",
     ROUTING_MODE: "real",
     WIREGUARD_ENDPOINT_HOST: "vpn.example.com",
-    DROPLET_PUBLIC_FQDN: "",
     DROPLET_LAN_HOSTNAME: "droplet-ai.lan",
-    REMOTE_ACCESS_MODE: "fqdn",
     WIREGUARD_VPN_SUBNET: "10.13.13.0/24",
     WIREGUARD_LISTEN_PORT: 51820,
     WIREGUARD_LAN_CIDR: "192.168.50.0/24",
@@ -154,7 +152,11 @@ function createPrismaMock() {
 // these tests focus on the route's business logic, not the guard.
 // Tests that need a non-privileged caller pass `role: "family"`
 // explicitly.
-function buildApp(prismaMock: any, user = { username: "alice", role: "owner" }) {
+function buildApp(
+  prismaMock: any,
+  user = { username: "alice", role: "owner" },
+  opts: Parameters<typeof createVpnRouter>[1] = {},
+) {
   const app = express();
   app.use(express.json());
   // Inject a synthetic auth user so getUser() in the route picks it up.
@@ -162,7 +164,7 @@ function buildApp(prismaMock: any, user = { username: "alice", role: "owner" }) 
     (req as any).user = { id: user.username, ...user, displayName: user.username };
     next();
   });
-  app.use("/api", createVpnRouter(prismaMock));
+  app.use("/api", createVpnRouter(prismaMock, opts));
   // Generic error handler so unhandled errors surface as 500 with the message.
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
     res.status(err.status ?? 500).json({ error: err.message ?? "internal" });
@@ -192,9 +194,7 @@ describe("GET /api/vpn/status", () => {
         endpointConfigured: true,
         homeEndpointHost: "192.168.1.87",
         internalHostname: "droplet-ai.lan",
-        publicFqdn: null,
         offLanReachable: false,
-        overlayEnrollmentAvailable: false,
       });
     } finally {
       (config as any).WIREGUARD_ENDPOINT_HOST = origEndpoint;
@@ -222,11 +222,11 @@ describe("GET /api/vpn/status", () => {
       const app = buildApp(createPrismaMock());
       const res = await request(app).get("/api/vpn/status");
       expect(res.status).toBe(200);
+      expect(res.body).not.toHaveProperty("publicFqdn");
+      expect(res.body).not.toHaveProperty("overlayEnrollmentAvailable");
       expect(res.body).toMatchObject({
         endpointConfigured: false,
         internalHostname: "droplet-ai.lan",
-        overlayEnrollmentAvailable: false,
-        publicFqdn: "home.droplet-us.com",
       });
     } finally {
       (config as any).WIREGUARD_ENDPOINT_HOST = origEnv;
@@ -618,7 +618,7 @@ describe("POST /api/vpn/peers", () => {
 
   it("mints against the direct endpoint even when a fleet web name is set", async () => {
     setupHappyPath();
-    const savedFqdn = config.DROPLET_PUBLIC_FQDN;
+    const savedFqdn = (config as any).DROPLET_PUBLIC_FQDN;
     (config as any).DROPLET_PUBLIC_FQDN = "old-fleet.droplet-us.com";
     try {
       const res = await request(buildApp(createPrismaMock()))
@@ -831,6 +831,82 @@ describe("POST /api/vpn/peers — home mode (hybrid P1)", () => {
 });
 
 describe("DELETE /api/vpn/peers/:id", () => {
+  function legacyPeerRow() {
+    const prisma = createPrismaMock();
+    prisma.rows.push({
+      id: "legacy", userId: "alice", kind: "overlay", deviceLabel: "Old laptop",
+      publicKey: "LEGACY=", assignedIp: "10.13.13.5", status: "active", revokedAt: null,
+    });
+    return prisma;
+  }
+
+  it("cuts off a legacy device when HQ is unset and records cleanup debt", async () => {
+    const prisma = legacyPeerRow();
+    (openwrt.deleteVpnPeer as any).mockResolvedValue({ removed: 1, applied: true });
+    // The production default client rejects the unconfigured HQ URL before
+    // any identity operation or network request.
+    const audit = vi.fn();
+    const res = await request(buildApp(prisma, undefined, { recordOverlayAudit: audit }))
+      .delete("/api/vpn/peers/legacy");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ status: "revoked", id: "legacy", hqRevokePending: true });
+    expect(prisma.rows[0]).toMatchObject({ status: "revoked", hqRevokePending: true });
+    expect(openwrt.deleteVpnPeer).toHaveBeenCalledWith({ publicKey: "LEGACY=" });
+    expect(audit).toHaveBeenCalledWith(expect.objectContaining({
+      status: 200,
+      refs: expect.objectContaining({ outcome: "REVOKED_HQ_PENDING", hq_revoke_pending: true }),
+    }));
+  });
+
+  it("allows a member to revoke their own legacy device during an HQ outage", async () => {
+    const prisma = legacyPeerRow();
+    (openwrt.deleteVpnPeer as any).mockResolvedValue({ removed: 1, applied: true });
+    const audit = vi.fn();
+    const beforeHq: unknown[] = [];
+    const overlayRevoke = vi.fn(async () => {
+      beforeHq.push({ status: prisma.rows[0].status, hqRevokePending: prisma.rows[0].hqRevokePending });
+      throw new Error("HQ connection timeout");
+    });
+    const res = await request(buildApp(prisma, { username: "alice", role: "family" }, {
+      overlayRevoke, recordOverlayAudit: audit,
+    })).delete("/api/vpn/peers/legacy");
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ status: "revoked", hqRevokePending: true });
+    // Debt is durable before the remote operation begins, including failure.
+    expect(beforeHq).toEqual([{ status: "revoked", hqRevokePending: true }]);
+    expect(audit).toHaveBeenCalledWith(expect.objectContaining({
+      event: "overlay_revoke_own",
+      refs: expect.objectContaining({ outcome: "REVOKED_HQ_PENDING" }),
+    }));
+  });
+
+  it("clears legacy cleanup debt after successful HQ revocation", async () => {
+    const prisma = legacyPeerRow();
+    (openwrt.deleteVpnPeer as any).mockResolvedValue({ removed: 1, applied: true });
+    const overlayRevoke = vi.fn(async () => {
+      expect(prisma.rows[0]).toMatchObject({ status: "revoked", hqRevokePending: true });
+    });
+    const res = await request(buildApp(prisma, undefined, { overlayRevoke }))
+      .delete("/api/vpn/peers/legacy");
+    expect(res.status).toBe(200);
+    expect(res.body.hqRevokePending).toBe(false);
+    expect(prisma.rows[0]).toMatchObject({ status: "revoked", hqRevokePending: false });
+  });
+
+  it("does not report success or contact HQ when legacy removal is only staged", async () => {
+    const prisma = legacyPeerRow();
+    (openwrt.deleteVpnPeer as any).mockResolvedValue({ removed: 1, applied: false });
+    const overlayRevoke = vi.fn(async () => { throw new Error("HQ unavailable"); });
+    const res = await request(buildApp(prisma, undefined, { overlayRevoke }))
+      .delete("/api/vpn/peers/legacy");
+    expect(res.status).toBe(502);
+    expect(res.body.code).toBe("REVOKE_STAGED");
+    expect(res.body.error).toMatch(/still connected/i);
+    expect(prisma.rows[0]).toMatchObject({ status: "active", revokedAt: null });
+    expect(overlayRevoke).not.toHaveBeenCalled();
+    expect(prisma.vpnPeer.updateMany).not.toHaveBeenCalled();
+  });
+
   it("404s on unknown id", async () => {
     const app = buildApp(createPrismaMock());
     const res = await request(app).delete("/api/vpn/peers/nope");
@@ -839,7 +915,7 @@ describe("DELETE /api/vpn/peers/:id", () => {
 
   it("403s a family-tier caller on a static peer (WARP-171; WARP-3121 only opens OWN overlay devices)", async () => {
     // Members may revoke their own OVERLAY device (WARP-3121, covered in
-    // vpn-overlay-qr-enroll.test.ts). A static peer — and anyone else's
+    // historical overlay records). A static peer — and anyone else's
     // device — stays owner/admin only.
     const prisma = createPrismaMock();
     prisma.rows.push({

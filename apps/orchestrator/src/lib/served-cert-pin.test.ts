@@ -16,6 +16,7 @@ import {
   servedCertPin,
   formatKeyFingerprint,
   servedCertFingerprint,
+  servedCertMetadata,
   buildPairUrl,
   _resetServedCertPinCacheForTests,
 } from "./served-cert-pin.js";
@@ -184,6 +185,40 @@ describe("servedCertFingerprint", () => {
     writeFileSync(join(dir, "droplet.crt"), LEAF_PEM + OTHER_PEM);
     expect(servedCertFingerprint(dir)).toBe(LEAF_FINGERPRINT);
     expect(servedCertFingerprint(join(dir, "does-not-exist"))).toBeNull();
+  });
+});
+
+describe("servedCertMetadata", () => {
+  let dir: string;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "served-cert-metadata-")); });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  it("reads the installed leaf's expiry and internal DNS coverage, without a pin", () => {
+    writeFileSync(join(dir, "droplet.crt"), LEAF_PEM + OTHER_PEM);
+    utimesSync(join(dir, "droplet.crt"), 1_700_000_000, 1_700_000_000);
+    const metadata = servedCertMetadata("droplet-ai.lan", dir);
+    expect(metadata).toEqual({
+      state: "LOCAL_CERTIFICATE",
+      fqdn: "droplet-ai.lan",
+      notAfter: new Date("2036-08-21T00:16:59Z"),
+      updatedAt: new Date(1_700_000_000_000),
+      coversInternalHostname: true,
+    });
+    expect(metadata).not.toHaveProperty("fingerprint");
+    expect(metadata).not.toHaveProperty("pin");
+  });
+
+  it("reports an internal DNS mismatch instead of claiming the leaf covers it", () => {
+    writeFileSync(join(dir, "droplet.crt"), LEAF_PEM);
+    expect(servedCertMetadata("other.office.lan", dir)?.coversInternalHostname).toBe(false);
+  });
+
+  it("does not keep old expiry metadata after an unreadable leaf replacement", () => {
+    writeFileSync(join(dir, "droplet.crt"), LEAF_PEM);
+    expect(servedCertMetadata("droplet-ai.lan", dir)).not.toBeNull();
+    writeFileSync(join(dir, "droplet.crt"), "broken replacement");
+    expect(servedCertMetadata("droplet-ai.lan", dir)).toBeNull();
+    expect(servedCertMetadata("droplet-ai.lan", join(dir, "missing"))).toBeNull();
   });
 });
 

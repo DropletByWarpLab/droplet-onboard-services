@@ -71,7 +71,7 @@ name: publish-release
 # Read & Write on that one bucket, then sets these on the repo):
 #   secrets    R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET
 #   variable   OTA_REGISTRY_HOST — the HQ host, no scheme or path, e.g.
-#              droplet-fleet-hq.rjouffret.workers.dev
+#              registry.example
 #
 #   R2 secrets absent, OTA_REGISTRY_HOST unset  mirror SKIPPED with a warning
 #              annotation and a job-summary line; release.json keeps ghcr.io,

@@ -42,7 +42,7 @@ const logger = createLogger("settings-route");
 // path-param validator. Any drift between these and the Prisma enum is
 // a schema bug; workspace-settings.schema.test.ts locks the contract.
 // IMPORTANT: `off_lan` (underscore) is the legacy WorkspaceSetting
-// section for VPN/DDNS config (off_lan.vpn_enabled etc.). The new
+// section for remote-access preferences (off_lan.vpn_enabled etc.). The new
 // sovereignty channels (cloud_model_escape, outbound_email, etc.)
 // live under `/api/settings/off-lan` (hyphen) which is mounted as
 // a separate router below — NOT through this enum. Do NOT add

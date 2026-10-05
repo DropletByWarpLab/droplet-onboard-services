@@ -363,28 +363,13 @@ describe("setup wizard E2E happy path (WARP-174)", () => {
       fireEvent.click(screen.getByRole("button", { name: /^continue$/i }));
     });
 
-    // 4b. Address → WARP-979 Secured / name-your-box. Type a name; the debounced
-    // availability check enables Continue, which POSTs the chosen name.
-    // WARP-853: the 450ms CHECK_DEBOUNCE_MS runs on REAL timers here, so
-    // waitFor's 1s default left only ~550ms of slack for a contended
-    // worker — the one real-clock wait in this walk gets a generous budget.
-    fireEvent.change(screen.getByLabelText(/box name/i), {
-      target: { value: "studio" },
-    });
-    await waitFor(
-      () =>
-        expect(
-          screen.getByRole("button", { name: /^continue$/i }),
-        ).toBeEnabled(),
-      { timeout: 10_000 },
-    );
+    // Internal DNS is local configuration guidance, so Continue does not claim a public name.
+    expect(screen.getByText(/your internal web address/i)).toBeInTheDocument();
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /^continue$/i }));
       await Promise.resolve();
-      await Promise.resolve();
-      await Promise.resolve();
     });
-    expect(setBoxNameMock).toHaveBeenCalledWith("studio");
+    expect(setBoxNameMock).not.toHaveBeenCalled();
 
     // 4. Storage → name two drives + save. #5: 2+ drives default to pooling
     // ON; toggle it OFF to take the name-the-drives-separately path.

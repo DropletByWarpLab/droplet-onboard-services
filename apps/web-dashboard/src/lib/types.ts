@@ -930,13 +930,6 @@ export interface VpnStatusInfo {
   endpointHost?: string | null;
   /** Unicast name registered with the office DNS resolver; usable over WireGuard. */
   internalHostname?: string | null;
-  /** Fleet-backed Droplet-app enrollment is unavailable without an HQ URL. */
-  overlayEnrollmentAvailable?: boolean;
-  /** ADR-023: the publicly-trusted per-device FQDN `d-<hmac>.devices.warp-lab.ai`.
-   *  The one address that works at home AND over the tunnel with a green padlock.
-   *  Null until the box learns it from HQ. Safe to show to any user (it is
-   *  published to Certificate Transparency anyway, carries no PII, has no A record). */
-  publicFqdn?: string | null;
   /** Whether an explicit non-LAN WireGuard endpoint is configured. This does
    *  not probe live connectivity. Missing means unavailable to the UI. */
   offLanReachable?: boolean;
@@ -975,64 +968,6 @@ export interface VpnPeerCreatedInfo {
   /** WARP-993: same honest reachability signal as VpnStatusInfo, echoed on
    *  the create response so the QR step can gate its copy without a refetch. */
   offLanReachable?: boolean;
-}
-
-// ── WARP-1475: overlay QR-enroll (ADR-030) ──
-
-/**
- * One-shot response from `POST /api/vpn/overlay/link-tokens` (owner/admin).
- * The plaintext `token` is returned exactly ONCE — the box persists only its
- * hash. The dashboard encodes {server, token, box_name} into the
- * `droplet://overlay-enroll` QR, shows it, and forgets it on dialog close.
- * Minting again supersedes (expires) the prior token.
- */
-export interface OverlayLinkToken {
-  /** Plaintext link token (base64url). Shown once; NEVER logged. */
-  token: string;
-  /** The endpoint host a scanning device redeems the token against. */
-  server: string;
-  /** Human box name to display in the app while enrolling. */
-  box_name: string;
-  /** ISO-8601 expiry (~5 min TTL). */
-  expires_at: string;
-}
-
-/** Lifecycle of a staged overlay enrollment, mirrored from the orchestrator. */
-export type OverlayEnrollmentState =
-  | "pending"
-  | "approving"
-  | "approved"
-  | "denied"
-  | "expired";
-
-/**
- * A staged, awaiting-owner-review overlay enrollment, from
- * `GET /api/vpn/overlay/pending-enrollments` (owner/admin).
- *
- * `label` is DEVICE-PRESENTED (the scanning phone self-reports it at redeem
- * time) — it is untrusted input and MUST render as text, never as HTML.
- * `conflict:true` marks a security event: a second, different device redeemed
- * the same link token (the box flags it for the owner to review, not a benign
- * expiry).
- */
-export interface PendingOverlayEnrollment {
-  id: string;
-  /** Device-presented label — untrusted; render as text only. */
-  label: string | null;
-  /** First 8 hex of sha256(device sign-key PEM) — the owner eyeball-matches this. */
-  fingerprint_short: string;
-  /** ISO-8601 timestamp the device presented the token. */
-  presented_at: string;
-  state: OverlayEnrollmentState;
-  /** True when a different device redeemed the same token — a security event. */
-  conflict: boolean;
-}
-
-/** Response from the approve endpoint on success (200). */
-export interface OverlayApproveResult {
-  state: "approved";
-  /** HQ device ref for the newly-enrolled overlay device; null if not yet known. */
-  device_id: string | null;
 }
 
 // ── WARP-1036: Voice assistant ──
@@ -1288,63 +1223,6 @@ export interface ApDeviceInfo {
   lastOperationId: string | null;
 }
 
-/**
- * WARP-979 — response from GET /api/setup/box-name/check. `available` is the
- * best-effort answer; `authoritative` is false until the HQ device-authed
- * registry check lands (coupled fleet-hq follow-up), so the UI stays honest.
- * `reason` + `message` are present only when the name is invalid.
- */
-export interface BoxNameCheckResult {
-  available: boolean;
-  slug: string;
-  fqdn: string;
-  authoritative: boolean;
-  reason?: string;
-  message?: string;
-}
-
-/**
- * WARP-979 — response from POST /api/setup/box-name.
- *
- * WARP-980 — the persist now also drives a device-auth HQ name CLAIM, so the
- * response carries the AUTHORITATIVE result: `authoritative` is true only when HQ
- * device-auth-confirmed the name belongs to this box (false = persisted but fell
- * back to opaque/bootstrap issuance, e.g. the device isn't registered yet).
- * `taken` + `suggestions` accompany a 409 when HQ says the name is taken.
- */
-export interface BoxNameSetResult {
-  ok: boolean;
-  slug: string;
-  fqdn: string;
-  /** WARP-980 — HQ device-auth-confirmed the name (present on the 2xx path). */
-  authoritative?: boolean;
-  /** WARP-980 — true on a 409 name-taken body. */
-  taken?: boolean;
-  /** WARP-980 — alternate names HQ offered on a 409 name-taken. */
-  suggestions?: string[];
-}
-
-/**
- * WARP-1039 — response from GET /api/setup/box-name: the CURRENTLY saved box
- * name (normalized slug) + its fqdn, both null when no name has been chosen
- * yet. Read by the AddressStep to rehydrate its input on re-entry and by the
- * VpnStep precheck to render the honest "address is being set up" blocked
- * view instead of bouncing the customer back to a step they already finished.
- */
-export interface BoxNameCurrentResult {
-  name: string | null;
-  fqdn: string | null;
-}
-
-/**
- * WARP-1109 — response from POST /api/setup/box-name/rename. Same shape as
- * BoxNameSetResult: the rename RELEASES the current name at HQ then claims the
- * new one, so `authoritative` is true only when HQ device-auth-confirmed the new
- * name (false = the new name was persisted but issuance fell back to
- * opaque/bootstrap and re-claims on the next tick). A 409 name-taken on the NEW
- * name surfaces as a thrown error carrying `code: "BOX_NAME_TAKEN"` + suggestions.
- */
-export type BoxNameRenameResult = BoxNameSetResult;
 // --- Auth types ---
 
 export interface AuthUser {

@@ -72,8 +72,8 @@ def test_every_route_in_the_handlers_has_a_class(monkeypatch):
     ("POST", "/system/factory-reset"), ("POST", "/pools/command"),
     ("POST", "/openwrt/wifi/hostapd"), ("POST", "/openwrt/wifi/guest"),
     ("DELETE", "/openwrt/wifi/guest"), ("POST", "/tls/reload"),
-    ("POST", "/tls/bootstrap-refresh"), ("POST", "/host/public-fqdn"),
-    ("POST", "/host/box-name"), ("POST", "/drives/abc-123/eject"),
+    ("POST", "/tls/bootstrap-refresh"),
+ ("POST", "/drives/abc-123/eject"),
 ])
 def test_destructive_routes_refuse_the_panel_token(monkeypatch, route):
     bridge = _load(monkeypatch)

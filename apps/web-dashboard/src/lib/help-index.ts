@@ -34,7 +34,7 @@ export const HELP_INDEX: readonly HelpEntry[] = [
     id: "privacy",
     title: "What is Droplet & how privacy works",
     summary:
-      "Droplet is a private AI appliance that lives on your own network — a single box that runs your files, conversations, video, and smart-device control. The AI runs locally on the hardware in front of you (the GPU inside this Droplet), not on someone else's servers, so by default your messages and the model's replies never leave the box. Everything you store and record stays on the Droplet's own drives; nothing is sent off the appliance unless you explicitly choose to, like adding an optional cloud AI key in Settings. On your office network, your devices reach the Droplet over its own end-to-end-encrypted VPN, without passing through any cloud service — away-from-office access arrives with the secure relay, coming soon.",
+      "Droplet is a private AI appliance that lives on your own network — a single box that runs your files, conversations, video, and smart-device control. The AI runs locally on the hardware in front of you (the GPU inside this Droplet), not on someone else's servers, so by default your messages and the model's replies never leave the box. Everything you store and record stays on the Droplet's own drives; nothing is sent off the appliance unless you explicitly choose to, like adding an optional cloud AI key in Settings. On your office network, your devices reach the Droplet over its own end-to-end-encrypted VPN, without passing through any cloud service. Away access needs a reachable direct WireGuard endpoint and the router must allow its UDP port.",
     keywords: ["privacy", "what is droplet", "local ai", "local", "private", "on device", "on-device", "no cloud", "data", "security", "gpu", "hardware", "offline"],
   },
   {
@@ -69,7 +69,7 @@ export const HELP_INDEX: readonly HelpEntry[] = [
     id: "internet",
     title: "Your box's web address",
     summary:
-      "Your Droplet has its own secure web address — the name you gave it during setup — and it works across your office network, with a padlock and nothing to install. There's nothing to sign up for and no address to type in. Away-from-office access arrives with the secure relay — coming soon; when it lands you'll open the Droplet app, turn on Connect, and use the same address you use at the office. No dynamic DNS, no subdomain or token, and no changes to your office router.",
+      "Use the Droplet's configured internal DNS address on your office network and through WireGuard. HTTPS uses the Droplet's certificate; each device may need to trust it, and it must cover the hostname. Away access needs a reachable direct WireGuard endpoint and its UDP port allowed through your router.",
     keywords: ["web address", "domain", "remote access", "connect", "away from the office", "hostname", "url"],
   },
   {
@@ -90,7 +90,7 @@ export const HELP_INDEX: readonly HelpEntry[] = [
     id: "vpn",
     title: "Remote Access (WireGuard VPN)",
     summary:
-      "Remote Access uses WireGuard, a modern open-source VPN. Each device gets its own private key and the key never goes through any cloud service. Add a device, name it, and scan the QR code with the WireGuard app to connect. Revoke a device to stop its access immediately — the lost-phone case, or to rotate a key. The Add a device button needs the box's web address ready first, which happens automatically.",
+      "Remote Access uses WireGuard, a modern open-source VPN. Each device gets its own private key and the key never goes through any cloud service. Add a device, name it, and scan the QR code with the WireGuard app to connect. Revoke a device to stop its access immediately — the lost-phone case, or to rotate a key. Office configurations need the Droplet's discovered LAN endpoint. Away configurations need a reachable direct WireGuard endpoint. The tunnel uses the Droplet's internal DNS.",
     keywords: ["vpn", "wireguard", "remote", "remote access", "tunnel", "qr code", "revoke", "rotate key", "away from the office"],
   },
   {

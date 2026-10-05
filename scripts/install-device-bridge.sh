@@ -283,9 +283,9 @@ fi
 install -m 0755 "$LOGS_SCRIPT_SRC" "$LOGS_SCRIPT_DST"
 log "installed $LOGS_SCRIPT_DST"
 
-# ADR-023 (C2): gateway-nginx reload host executor. The orchestrator's
-# tls-issuance cron POSTs /tls/reload to the bridge after writing a fresh LE
-# fullchain; the bridge execs this wrapper, which delegates to the shared
+# Gateway-nginx reload host executor. Certificate refresh POSTs /tls/reload
+# to the bridge after updating the box's local certificate; the bridge execs
+# this wrapper, which delegates to the shared
 # scripts/lib/tls-reload.sh::reload_gateway_nginx (the orchestrator has no docker
 # socket). Repo-tracked (architecture-guard rule 20), installed here so
 # factory-reset removes it cleanly. Repo source is scripts/host/.
@@ -302,8 +302,9 @@ log "installed $TLS_RELOAD_SCRIPT_DST"
 # runs this when the box's uplink address changes (and once at boot) so the
 # self-signed cert's SAN names where the box is NOW, regenerated around the
 # SAME key — every app that pinned the key keeps working. Delegates to
-# scripts/lib/secrets.sh::_generate_tls_cert (idempotent; never touches a
-# public-CA leaf). Repo-tracked (architecture-guard rule 20), installed here so
+# scripts/lib/secrets.sh::_generate_tls_cert (idempotent; preserves a valid CA
+# leaf that covers the configured internal hostname). Repo-tracked
+# (architecture-guard rule 20), installed here so
 # factory-reset removes it cleanly. Repo source is scripts/host/.
 TLS_REFRESH_SCRIPT_SRC="$REPO_ROOT/scripts/host/droplet-tls-bootstrap-refresh.sh"
 TLS_REFRESH_SCRIPT_DST="/usr/local/sbin/droplet-tls-bootstrap-refresh.sh"
@@ -313,38 +314,6 @@ if [[ ! -f "$TLS_REFRESH_SCRIPT_SRC" ]]; then
 fi
 install -m 0755 "$TLS_REFRESH_SCRIPT_SRC" "$TLS_REFRESH_SCRIPT_DST"
 log "installed $TLS_REFRESH_SCRIPT_DST"
-
-# ADR-023 PR-1: public-FQDN write-back host executor. The orchestrator's
-# tls-issuance service POSTs /host/public-fqdn to the bridge once it has LEARNED
-# the box's opaque per-device FQDN from HQ; the bridge execs this wrapper, which
-# idempotently persists DROPLET_PUBLIC_FQDN into the repo .env and re-registers
-# split-horizon DNS (the orchestrator can't write the host .env itself).
-# Repo-tracked (architecture-guard rule 20), installed here so factory-reset
-# removes it cleanly. Repo source is scripts/host/.
-SET_FQDN_SCRIPT_SRC="$REPO_ROOT/scripts/host/droplet-set-public-fqdn.sh"
-SET_FQDN_SCRIPT_DST="/usr/local/sbin/droplet-set-public-fqdn.sh"
-if [[ ! -f "$SET_FQDN_SCRIPT_SRC" ]]; then
-  log "missing source: $SET_FQDN_SCRIPT_SRC"
-  exit 1
-fi
-install -m 0755 "$SET_FQDN_SCRIPT_SRC" "$SET_FQDN_SCRIPT_DST"
-log "installed $SET_FQDN_SCRIPT_DST"
-
-# WARP-988: box-name write-back host executor. The orchestrator POSTs
-# /host/box-name to the bridge once the owner has chosen a name in the wizard's
-# "name your box" step (WARP-979); the bridge execs this wrapper, which
-# idempotently persists DROPLET_BOX_NAME into the repo .env (no DNS legs — HQ
-# owns the name's DNS; the orchestrator can't write the host .env itself).
-# Repo-tracked (architecture-guard rule 20), installed here so factory-reset
-# removes it cleanly. Repo source is scripts/host/.
-SET_BOX_NAME_SCRIPT_SRC="$REPO_ROOT/scripts/host/droplet-set-box-name.sh"
-SET_BOX_NAME_SCRIPT_DST="/usr/local/sbin/droplet-set-box-name.sh"
-if [[ ! -f "$SET_BOX_NAME_SCRIPT_SRC" ]]; then
-  log "missing source: $SET_BOX_NAME_SCRIPT_SRC"
-  exit 1
-fi
-install -m 0755 "$SET_BOX_NAME_SCRIPT_SRC" "$SET_BOX_NAME_SCRIPT_DST"
-log "installed $SET_BOX_NAME_SCRIPT_DST"
 
 # NVR recordings-target write-back executor (WARP-2099). The only writer of
 # NVR_MEDIA_SOURCE, the key that decides whether 24/7 camera footage lands on
@@ -513,13 +482,8 @@ if [[ -f "$REPO_ENV" ]]; then
     *) log "external router (OPENWRT_HOST=$OPENWRT_HOST): not copying OPENWRT_PASSWORD into OPENWRT_PASS (WARP-3839)" ;;
   esac
 
-  # WARP-985: the public-FQDN write-back (droplet-set-public-fqdn.sh, exec'd
-  # by the bridge's POST /host/public-fqdn) registers split-horizon DNS via the
-  # routing service (POST /dhcp/hostnames in scripts/lib/local-dns.sh), which
-  # authenticates with ROUTING_SERVICE_TOKEN. The host script inherits the
-  # bridge's environment, so mirror the token here — without it the .env upsert
-  # succeeds but the routing-DNS leg 401s. setup.sh writes the token to the
-  # repo .env; set_env_if_blank never clobbers an operator override.
+  # The bridge uses the routing service for router operations. Mirror the
+  # scoped token without clobbering an operator override.
   if [[ -n "${ROUTING_SERVICE_TOKEN:-}" ]]; then
     set_env_if_blank "ROUTING_SERVICE_TOKEN" "$ROUTING_SERVICE_TOKEN"
   fi

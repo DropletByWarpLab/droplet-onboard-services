@@ -209,10 +209,10 @@ describe("setup VPN step (WARP-174)", () => {
     await advanceToVpn();
 
     expect(
-      screen.getByText(/remote access needs an internet address first/i),
+      screen.getByText(/WireGuard needs a network endpoint/i),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: /set up internet address/i }),
+      screen.getByRole("button", { name: /check again/i }),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: /skip for now/i }),
@@ -220,137 +220,24 @@ describe("setup VPN step (WARP-174)", () => {
     expect(createVpnPeerMock).not.toHaveBeenCalled();
   });
 
-  it("Set up internet address returns the customer to the Address step (and prefills a saved name)", async () => {
-    fetchVpnStatusMock.mockResolvedValue({
-      configured: false,
-      endpointConfigured: false,
-    });
-    // WARP-1039 — mutable saved-name store: empty through the walk (so the
-    // blocked view keeps its back-jump), then a saved name appears before the
-    // jump so the Address step can rehydrate it.
-    let saved: { name: string | null; fqdn: string | null } = {
-      name: null,
-      fqdn: null,
-    };
-    fetchBoxNameMock.mockImplementation(async () => saved);
+  it("rechecks the local network without jumping back to cloud naming", async () => {
+    fetchVpnStatusMock.mockResolvedValue({ configured: false, endpointConfigured: false });
     render(<SetupPage />);
     await advanceToVpn();
-
-    saved = { name: "studio", fqdn: "studio.droplet-us.com" };
-    await act(async () => {
-      fireEvent.click(
-        screen.getByRole("button", { name: /set up internet address/i }),
-      );
-    });
-
-    // Onboarding-Flow redesign — the precheck jumps back to the dedicated
-    // Address step (not the old combined Internet step). WARP-1109 — because a
-    // name is already saved, the step shows the "your box is named X" state (its
-    // fqdn + padlock) instead of the empty fresh-pick input; the address is
-    // NEVER rendered as an empty/blank picker once the box already holds a name.
-    await waitFor(() =>
-      expect(screen.getByText(/your box is named/i)).toBeInTheDocument(),
-    );
-    expect(screen.getByText("studio.droplet-us.com")).toBeInTheDocument();
-    expect(screen.queryByLabelText(/box name/i)).not.toBeInTheDocument();
-    // Keep-this-address advances; Rename is offered for a change.
-    expect(
-      screen.getByRole("button", { name: /keep this address/i }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: /rename this address/i }),
-    ).toBeInTheDocument();
+    fetchVpnStatusMock.mockResolvedValue({ configured: true, endpointConfigured: false, homeEndpointHost: "192.168.1.87", internalHostname: "droplet-ai.lan", peerCount: 0 });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: /check again/i })); });
+    expect(await screen.findByRole("switch", { name: /turn on remote access/i })).toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: /box name/i })).not.toBeInTheDocument();
   });
 
-  it("saving on Address returns the customer to the VPN step, not storage (WARP-1039)", async () => {
-    fetchVpnStatusMock.mockResolvedValue({
-      configured: false,
-      endpointConfigured: false,
-    });
-    let saved: { name: string | null; fqdn: string | null } = {
-      name: null,
-      fqdn: null,
-    };
-    fetchBoxNameMock.mockImplementation(async () => saved);
+  it("internal DNS reached via the rail continues forward to storage", async () => {
+    fetchVpnStatusMock.mockResolvedValue({ configured: false, endpointConfigured: false, internalHostname: "droplet-ai.lan" });
     render(<SetupPage />);
     await advanceToVpn();
-
-    // Blocked without a name → the back-jump is offered.
-    await act(async () => {
-      fireEvent.click(
-        screen.getByRole("button", { name: /set up internet address/i }),
-      );
-    });
-    expect(screen.getByText(/name your secure address/i)).toBeInTheDocument();
-
-    // Choose a name; the debounced availability check enables Continue.
-    fireEvent.change(screen.getByLabelText(/box name/i), {
-      target: { value: "studio" },
-    });
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: /^continue$/i })).toBeEnabled(),
-    );
-    // The POST persists the name — the remounted VPN precheck now sees it.
-    saved = { name: "studio", fqdn: "studio.droplet-us.com" };
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /^continue$/i }));
-      await Promise.resolve();
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-
-    // Back on the VPN step (NOT storage) — and since the name is now saved,
-    // the blocked view is the honest "being set up" variant with no bounce.
-    await waitFor(() =>
-      expect(
-        screen.getByRole("heading", { name: /your address is being set up/i }),
-      ).toBeInTheDocument(),
-    );
-    expect(screen.queryByText(/name your storage/i)).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: /set up internet address/i }),
-    ).not.toBeInTheDocument();
-  });
-
-  it("a stale return-to flag is cleared by rail navigation — Address reached via the rail goes forward to storage (WARP-1039)", async () => {
-    fetchVpnStatusMock.mockResolvedValue({
-      configured: false,
-      endpointConfigured: false,
-    });
-    render(<SetupPage />);
-    await advanceToVpn();
-
-    // VPN CTA sets the return-to flag and jumps to Address …
-    await act(async () => {
-      fireEvent.click(
-        screen.getByRole("button", { name: /set up internet address/i }),
-      );
-    });
-    expect(screen.getByText(/name your secure address/i)).toBeInTheDocument();
-
-    // … but the customer wanders off via the rail instead (flag must clear) …
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Go to Wi-Fi" }));
-    });
-    await act(async () => {
-      fireEvent.click(
-        screen.getByRole("button", { name: "Go to Internet address" }),
-      );
-    });
-    expect(screen.getByText(/name your secure address/i)).toBeInTheDocument();
-
-    // … so skipping Address now moves FORWARD to storage, not back to VPN.
-    await act(async () => {
-      fireEvent.click(
-        screen.getByRole("button", { name: /skip — i'll do this later/i }),
-      );
-      await Promise.resolve();
-      await Promise.resolve();
-    });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Go to Internal DNS" })); });
+    expect(await screen.findByText("https://droplet-ai.lan")).toBeInTheDocument();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: /^continue$/i })); });
     expect(screen.getByText(/name your storage/i)).toBeInTheDocument();
-    expect(
-      screen.queryByRole("heading", { name: /turn on remote access/i }),
-    ).not.toBeInTheDocument();
   });
 
   it("Skip for now from blocked advances to done", async () => {

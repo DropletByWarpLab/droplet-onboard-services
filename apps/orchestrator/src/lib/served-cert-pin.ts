@@ -3,9 +3,8 @@
  * pairing link.
  *
  * A client can only pair to a box whose certificate it can verify. The
- * public-CA path (ADR-023) needs HQ; a box that never went through HQ — every
- * box, on the customer's terms — serves its own self-signed bootstrap
- * certificate, whose KEY is stable for the life of the install. What a client
+ * box serves a local certificate, whose KEY is stable for the life of the
+ * install. What a client
  * lacks is an authenticated way to learn WHICH key is this box's. The pairing
  * link the box mints (`droplet://pair?server=…&code=…`) is that way: it is
  * shown by the box's own dashboard to a logged-in owner, so a host on the LAN
@@ -25,7 +24,7 @@
  * anchor, which is why it rides only the owner-authenticated pairing link and
  * not the unauthenticated `GET /api/tls/status`.
  *
- * Cached by the file's mtime: a cert swap (tls-issuance install, tls-reload)
+ * Cached by the file's mtime: a local certificate swap or refresh
  * changes the mtime and the next mint recomputes. A box whose key changed
  * therefore mints a new pin, and a client holding the old one is told
  * "identity changed — scan again", never silently re-trusted.
@@ -35,7 +34,7 @@ import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 /** docker/certs lives at the repo root; the orchestrator container mounts it
- *  at /app/docker/certs (docker-compose.yml). Same default as tls-issuance. */
+ *  at /app/docker/certs (docker-compose.yml). */
 const DEFAULT_CERTS_DIR = process.env.DROPLET_CERTS_DIR || "/app/docker/certs";
 const LEAF_FILE = "droplet.crt";
 
@@ -108,6 +107,39 @@ export function formatKeyFingerprint(pinBase64: string): string {
 export function servedCertFingerprint(certsDir?: string): string | null {
   const pin = servedCertPin(certsDir);
   return pin ? formatKeyFingerprint(pin) : null;
+}
+
+export interface ServedCertMetadata {
+  state: "LOCAL_CERTIFICATE";
+  fqdn: string | null;
+  notAfter: Date;
+  updatedAt: Date;
+  coversInternalHostname: boolean | null;
+}
+
+/** Current leaf metadata for local TLS status. Historical fleet database rows
+ * cannot describe a certificate that setup has replaced on disk. No key or pin
+ * is returned, so this metadata can also supply the public DNS/status view. */
+export function servedCertMetadata(
+  internalHostname: string,
+  certsDir: string = DEFAULT_CERTS_DIR,
+): ServedCertMetadata | null {
+  try {
+    const path = join(certsDir, LEAF_FILE);
+    const cert = new X509Certificate(firstCertificateBlock(readFileSync(path, "utf8")));
+    const notAfter = new Date(cert.validTo);
+    if (!Number.isFinite(notAfter.getTime())) return null;
+    const hostname = internalHostname.trim();
+    return {
+      state: "LOCAL_CERTIFICATE",
+      fqdn: hostname || null,
+      notAfter,
+      updatedAt: statSync(path).mtime,
+      coversInternalHostname: hostname ? Boolean(cert.checkHost(hostname, { subject: "never" })) : null,
+    };
+  } catch {
+    return null;
+  }
 }
 
 /** Test hook: drop the mtime cache. */

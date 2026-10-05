@@ -57,10 +57,10 @@ function statusFixture(overrides: Record<string, unknown> = {}) {
   return {
     configured: true,
     endpointConfigured: true,
-    endpointHost: "casa.droplet-us.com",
+    endpointHost: "vpn.example.com",
     publicFqdn: null,
     internalHostname: "droplet-ai.lan",
-    overlayEnrollmentAvailable: false,
+    overlayEnrollmentAvailable: true,
     // WARP-1391: a configured box has discovered its home LAN IP, so the
     // "Add device" affordance (a HOME-mode mint) is enabled.
     homeEndpointHost: "192.168.1.87",

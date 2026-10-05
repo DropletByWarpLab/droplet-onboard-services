@@ -713,18 +713,8 @@ const envSchema = z.object({
   // Defaults match the OpenWrt LAN. Override if the LAN is reconfigured.
   WIREGUARD_LAN_CIDR: z.string().default("192.168.50.0/24"),
   WIREGUARD_DNS: z.string().default("192.168.50.1"),
-  // --- Home-mode remote access (hybrid P1) ---
-  // A HOME-mode peer dials the box DIRECTLY at its home-network-facing LAN IP
-  // (no server, no public inbound — the foundation-clean path). Over that
-  // tunnel the client resolves the per-device FQDN through the box's own
-  // split-horizon dnsmasq so the padlock works, exactly as ADR-023 §3.4
-  // describes (the box answers the FQDN with 192.168.20.1 for tunnel clients).
-  // These values shape the home-mode .conf; the away-mode path is untouched.
-  //
-  // WIREGUARD_HOME_DNS — the split-horizon resolver the home-mode client points
-  //   at over the tunnel. Single-box: the WireGuard gateway 192.168.20.1, the
-  //   SAME address DROPLET_PUBLIC_FQDN_IP defaults to (they must agree so the
-  //   FQDN resolves). Override on a LAN whose gateway differs.
+  // Office mode dials the discovered LAN endpoint and resolves the internal
+  // dashboard name with the office DNS resolver over the tunnel.
   WIREGUARD_HOME_DNS: z.string().default("192.168.20.1"),
   // WIREGUARD_HOME_ALLOWED_IPS — the box subnet(s) a home-mode client routes
   //   over the tunnel. HOME mode is SPLIT-tunnel to the box (never 0.0.0.0/0):
@@ -739,67 +729,11 @@ const envSchema = z.object({
   //   at a wrong guess. The box IP is DHCP, so there is intentionally no
   //   host-specific default here.
   WIREGUARD_HOME_ENDPOINT_HOST: z.string().default(""),
-  // WIREGUARD_PUBLIC_FORWARD (WARP-3018) — a UDP port forward the operator set
-  //   up on the upstream gateway to wg0. `<port>` (public IP taken from STUN on
-  //   every profile fetch, so a dynamic IP needs nothing) or
-  //   `<public-ipv4>:<port>` (static IP, or STUN unavailable). Advertised to
-  //   overlay clients as the `mapped` candidate. Needed whenever wg0 sits
-  //   behind a NAT that rewrites the source port, e.g. box behind an edge
-  //   router behind an ISP gateway. Empty (default) = no forward declared.
-  //   Parsed leniently per profile fetch (routes/vpn.ts): a bad value is
-  //   logged and ignored rather than failing boot.
-  WIREGUARD_PUBLIC_FORWARD: z.string().default(""),
-  // Legacy values accepted for existing installs. Direct WireGuard
-  // reachability now depends only on WIREGUARD_ENDPOINT_HOST.
-  REMOTE_ACCESS_MODE: z.enum(["fqdn", "relay"]).default("fqdn"),
-
-  // --- Public-CA per-device TLS (ADR-023) ---
-  // DROPLET_PUBLIC_FQDN — the opaque per-device subdomain
-  //   `d-<hmac>.devices.warp-lab.ai`. The box CANNOT compute the HQ-keyed HMAC,
-  //   so it learns this from the HQ challenge response and persists it back to
-  //   .env (scripts/lib/secrets.sh). Empty until first HQ contact — the
-  //   tls-issuance cron is a no-op while empty and the bootstrap self-signed
-  //   cert keeps the box serving TLS. When set it is the TOP-priority canonical
-  //   origin (trusted-origin.ts) and the one address that works at home AND
-  //   over the WireGuard tunnel.
-  DROPLET_PUBLIC_FQDN: z.string().default(""),
-  // DROPLET_BOX_NAME — the owner-chosen box name (WARP-979). Set on the
-  //   "Secured / name your box" setup step; becomes `<name>.droplet-us.com`
-  //   (publicly-trusted, green padlock). Persisted to the host .env via the
-  //   device-bridge (createBridgeBoxNamePersister), the SAME transport
-  //   DROPLET_PUBLIC_FQDN uses. When set, tls-issuance sends it to HQ as the
-  //   `requested_name` on the cert ORDER so HQ issues `<name>.droplet-us.com`
-  //   instead of the opaque `d-<hmac>` fallback. Empty = no name chosen yet
-  //   (the opaque-HMAC fallback stays in effect). The HQ device-authed name
-  //   CLAIM is a coupled fleet-hq follow-up — until it lands, HQ may ignore
-  //   requested_name and this is harmless.
+  // Locally stored display label from existing installs.
   DROPLET_BOX_NAME: z.string().default(""),
-  // DROPLET_PUBLIC_FQDN_IP — the IP the per-device FQDN resolves to via the
-  //   split-horizon dnsmasq (ADR-023 C3). Defaults to the WireGuard gateway
-  //   address 192.168.20.1, which is reachable on the single-box LAN AND over
-  //   the tunnel, so the one FQDN works at home and remotely. The routing-leg
-  //   registrar (createRoutingDnsRegistrar) POSTs {hostname, ip} to
-  //   /dhcp/hostnames with this value; matches the host-leg default in
-  //   scripts/lib/local-dns.sh::setup_public_fqdn_dns. Operators on a multi-box
-  //   LAN whose box IP differs can override it.
-  DROPLET_PUBLIC_FQDN_IP: z.string().default("192.168.20.1"),
-  // HQ_ISSUANCE_URL — base URL of the fleet HQ issuance API
-  //   (hq.warp-lab.com). Plain outbound HTTPS; does NOT require the fleet
-  //   WireGuard tunnel. Empty disables live issuance (the cron skips), which is
-  //   the correct posture for dev laptops + CI.
+  // Explicit fleet device authentication/image distribution; unrelated to
+  // direct WireGuard access or local certificate provisioning.
   HQ_ISSUANCE_URL: z.string().default(""),
-  // DROPLET_PROVISION_TOKEN — one-time HQ-minted provisioning token (WARP-983).
-  //   A fresh / factory-reset box has NO registry entry at HQ (factory-reset
-  //   sends the ADR-023 signed deregister, which DELETES the device row), so on
-  //   the next boot the tls-issuance challenge/order flow is rejected with 404
-  //   `device_id not in registry` and the box would otherwise stay on the
-  //   bootstrap self-signed cert forever. When this token is set, tls-issuance
-  //   self-enrolls the box into the HQ registry (POST /api/issuance/provision
-  //   with a TPM proof-of-possession over the token) on that 404, then retries
-  //   issuance once. Empty (the default) = self-provision DISABLED — the correct
-  //   posture for dev laptops + CI + a box that provisions via another path.
-  //   PRESERVED from the provisioning environment across reflash (secrets.sh),
-  //   the SAME way HQ_ISSUANCE_URL / TUNNEL_TOKEN are (WARP-978).
   DROPLET_PROVISION_TOKEN: z.string().default(""),
   // DROPLET_DEVICE_ID — the device's HQ registry id. Mirrors the value the
   //   device-identity sidecar reads (docker-compose.yml). Defaults to the
@@ -819,33 +753,6 @@ const envSchema = z.object({
     .string()
     .default("0")
     .transform((v) => v === "1" || v.trim().toLowerCase() === "true"),
-
-  // --- Direct-punch remote-access overlay (ADR-030 / WARP-1385) ---
-  // OVERLAY_CONNECT_ENABLED — the box overlay connect agent (WARP-1767).
-  //   Default TRUE. It was FALSE because the agent long-polls HQ's
-  //   /api/overlay/* endpoints, which had not shipped yet, so polling would have
-  //   404'd every tick. WARP-1384 deployed them and they answer, so the reason
-  //   for the opt-in has expired — and while it persisted, the default silently
-  //   meant no shipping box could be reached from outside at all. Set false to
-  //   opt a box out (LAN-only); it changes nothing about home-LAN operation.
-  //   Also requires HQ_ISSUANCE_URL (the agent shares that HQ base URL) and
-  //   router supervision — index.ts gates on all three.
-  OVERLAY_CONNECT_ENABLED: z
-    .string()
-    .transform((v) => v === "true" || v === "1")
-    .default("true"),
-  // Seconds between HQ long-poll ticks (event-driven; NOT a busy loop —
-  // scheduled via cron-runtime). Bounded to keep the outbound heartbeat light.
-  OVERLAY_CONNECT_POLL_SECONDS: z.coerce.number().int().min(2).max(300).default(15),
-  // Hours an overlay peer may sit without a session OR an observed handshake
-  // before the sweep revokes it. WARP-2060: overlay peers are CLIENT-initiated
-  // — a phone that is simply away holds no endpoint on the box and is inert,
-  // so an aggressive window buys no security and costs real breakage: at the
-  // old 12h default a phone left home for a weekend came back to a silently
-  // dead tunnel (row revoked, /profile 503s, owner re-approval required).
-  // 720h (30 days) reaps genuinely abandoned enrollments; with the sweep's
-  // handshake-sparing an active device is never reaped at any setting.
-  OVERLAY_PEER_IDLE_EXPIRY_HOURS: z.coerce.number().int().min(1).max(720).default(720),
 
   // --- Coverage extender APs (WARP-446) ---
   // Per ADR-005. `DROPLET_AP_*` prefix is mandatory (see the long
@@ -1730,7 +1637,7 @@ if (isShippedDropletEnv(process.env.DROPLET_ENV) && isWeakDeviceSecret(parsed.DE
 function resolveCorsAllowedOrigins(
   raw: string,
   nodeEnv: string,
-  publicFqdn: string,
+  internalHostname: string,
 ): string[] {
   const explicit = raw
     .split(",")
@@ -1748,15 +1655,10 @@ function resolveCorsAllowedOrigins(
           ...(nodeEnv !== "production" ? ["http://localhost:3001"] : []),
         ];
 
-  // ADR-023 (C4): the publicly-trusted per-device FQDN is a first-class
-  // browser origin — the dashboard is served on it at home AND over the
-  // tunnel. Add it whether the operator set an explicit allowlist or fell
-  // through to the defaults, deduped, so credentialed CORS never rejects the
-  // canonical address. Empty until first HQ contact.
-  const fqdn = publicFqdn.trim();
-  if (fqdn) {
-    const fqdnOrigin = `https://${fqdn}`;
-    if (!origins.includes(fqdnOrigin)) origins.push(fqdnOrigin);
+  const hostname = internalHostname.trim();
+  if (hostname) {
+    const origin = `https://${hostname}`;
+    if (!origins.includes(origin)) origins.push(origin);
   }
 
   // Fail-fast on wildcard + credentials, mirroring ai-gateway's guard
@@ -1788,7 +1690,7 @@ export const config = {
   corsAllowedOrigins: resolveCorsAllowedOrigins(
     parsed.CORS_ALLOWED_ORIGINS,
     parsed.NODE_ENV,
-    parsed.DROPLET_PUBLIC_FQDN,
+    parsed.DROPLET_LAN_HOSTNAME,
   ),
   // Image vision (chat). `model` is the preferred LOCAL vision model that image
   // turns auto-route to when the selected model can't see (and that

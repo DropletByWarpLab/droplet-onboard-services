@@ -72,7 +72,7 @@ COPY docker/nginx/tls-status/index.html               /usr/share/nginx/tls-statu
 COPY docker/nginx/docs-engine.collabora.conf  /etc/nginx/docs-engine.collabora.conf
 COPY docker/nginx/docs-engine.onlyoffice.conf /etc/nginx/docs-engine.onlyoffice.conf
 COPY docker/nginx/docker-entrypoint-docs-engine.sh /docker-entrypoint.d/03-docs-engine.sh
-# WARP-3452: renders the peers `location /llm/` refuses (relay, guest Wi-Fi)
+# WARP-3452: renders the peers `location /llm/` refuses (host-originated traffic, guest Wi-Fi)
 # from this container's network at start.
 COPY docker/nginx/render-llm-access.sh /docker-entrypoint.d/04-llm-access.sh
 RUN chmod +x /docker-entrypoint.d/00-fips-profile.sh /docker-entrypoint.d/01-internal-scheme.sh \
@@ -118,12 +118,12 @@ RUN set -eu; \
       -subj /CN=TestCA -days 1 >/dev/null 2>&1; \
     openssl req -newkey rsa:2048 -nodes -keyout /tmp/l.key -out /tmp/l.csr \
       -subj /CN=leaf >/dev/null 2>&1; \
-    printf 'subjectAltName=DNS:test-box.droplet-us.com\n' > /tmp/san.cnf; \
+    printf 'subjectAltName=DNS:test-box.lan\n' > /tmp/san.cnf; \
     openssl x509 -req -in /tmp/l.csr -CA /tmp/ca.crt -CAkey /tmp/ca.key -CAcreateserial \
       -days 1 -extfile /tmp/san.cnf -out /tmp/l.crt >/dev/null 2>&1; \
-    DROPLET_LAN_DNS_AUTHORITY=1 DROPLET_CANONICAL_CERT=/tmp/l.crt \
+    DROPLET_LAN_DNS_AUTHORITY=1 DROPLET_LAN_HOSTNAME=test-box.lan DROPLET_CANONICAL_CERT=/tmp/l.crt \
       DROPLET_CANONICAL_OUT=/tmp/ch-on.conf /usr/local/bin/render-canonical-host.sh; \
-    grep -q 'test-box.droplet-us.com' /tmp/ch-on.conf; \
+    grep -q 'test-box.lan' /tmp/ch-on.conf; \
     for ch in /etc/nginx/canonical-host.active.conf /tmp/ch-on.conf; do \
       printf 'events{}\nhttp{\n resolver 127.0.0.11 valid=10s ipv6=off;\n include %s;\n}\n' "$ch" > /tmp/test-nginx.conf; \
       nginx -t -c /tmp/test-nginx.conf; \
@@ -140,20 +140,19 @@ RUN set -eu; \
     # WARP-3452: the /llm/ map rendered from a fixture route table carries this
     # network's gateway and the box address, and parses.
     printf 'Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\neth0\t00000000\t010012AC\t0003\t0\t0\t0\t00000000\t0\t0\t0\n' > /tmp/route; \
-    DROPLET_LLM_ACCESS_ROUTES=/tmp/route DROPLET_LLM_ACCESS_OUT=/tmp/llm.conf DROPLET_PUBLIC_FQDN_IP=192.168.1.87 \
+    DROPLET_LLM_ACCESS_ROUTES=/tmp/route DROPLET_LLM_ACCESS_OUT=/tmp/llm.conf DROPLET_LLM_BOX_IP=192.168.1.87 \
       /docker-entrypoint.d/04-llm-access.sh; \
     grep -q ' 172\.18\.0\.1 ' /tmp/llm.conf; \
     grep -q ' 192\.168\.1\.87 ' /tmp/llm.conf; \
     printf 'events{}\nhttp{\n include /tmp/llm.conf;\n}\n' > /tmp/test-nginx.conf; \
     nginx -t -c /tmp/test-nginx.conf; \
-    # The relay box's address comes from the host dnsmasq's last host-record;
-    # with the relay on and no record, every peer is refused.
+    # The box address comes from the host dnsmasq's last host-record.
     printf 'host-record=d-old.example,192.168.20.1\nhost-record=d-new.example,192.168.9.250\n' > /tmp/hostdns.conf; \
-    DROPLET_LLM_ACCESS_ROUTES=/tmp/route DROPLET_LLM_ACCESS_OUT=/tmp/llm.conf DROPLET_COMPOSE_PROFILES=single-box,relay \
+    DROPLET_LLM_ACCESS_ROUTES=/tmp/route DROPLET_LLM_ACCESS_OUT=/tmp/llm.conf \
       DROPLET_LLM_ACCESS_HOST_DNS_CONF=/tmp/hostdns.conf /docker-entrypoint.d/04-llm-access.sh; \
     grep -q ' 192\.168\.9\.250 ' /tmp/llm.conf; \
-    DROPLET_LLM_ACCESS_ROUTES=/tmp/route DROPLET_LLM_ACCESS_OUT=/tmp/llm.conf DROPLET_COMPOSE_PROFILES=single-box,relay \
-      DROPLET_LLM_ACCESS_HOST_DNS_CONF=/nonexistent /docker-entrypoint.d/04-llm-access.sh; \
+    DROPLET_LLM_ACCESS_ROUTES=/nonexistent DROPLET_LLM_ACCESS_OUT=/tmp/llm.conf \
+      /docker-entrypoint.d/04-llm-access.sh; \
     grep -qE '^ +default +1;' /tmp/llm.conf; \
     rm -f /tmp/route /tmp/llm.conf /tmp/hostdns.conf; \
     # WARP-1688: and finally the REAL /etc/nginx/nginx.conf, end to end.

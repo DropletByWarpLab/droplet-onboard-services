@@ -2,10 +2,9 @@
  * Revoking a VPN / overlay peer — the one path shared by `DELETE
  * /api/vpn/peers/:id` and by deactivating or deleting a person (WARP-3160).
  *
- * Order is load-bearing (WARP-2061): HQ first for an overlay peer, so the
- * connect tick can't resurrect it; then the router; then a conditional row
- * flip. Any step that fails leaves the row `active`, so the device list keeps
- * showing a device that is still connected, and the retry stays available.
+ * Confirm removal on the router before marking the row revoked. A legacy
+ * fleet grant is cleaned up afterward; its failure cannot leave local access
+ * enabled now that fleet connection and enrollment paths have been retired.
  */
 import { OVERLAY_PEER_USER_ID } from "@droplet/auth-policy";
 import { config } from "../config.js";
@@ -14,7 +13,7 @@ import {
   isRevokeApplied,
   RouterError,
 } from "./openwrt.client.js";
-import { revokeOverlayDeviceAtHq } from "./overlay-connect.service.js";
+import { revokeOverlayDeviceAtHq } from "./overlay-revoke.service.js";
 import { createDeviceIdentityClient } from "./device-identity.client.js";
 import { recordActivity } from "./activity.singleton.js";
 import type { ActivityActor } from "./activity.service.js";
@@ -52,7 +51,6 @@ export type PeerRevokeOutcome =
   | "revoked"
   /** WARP-3172: router + row revoked, HQ unreachable; `hqRevokePending` set. */
   | "REVOKED_HQ_PENDING"
-  | "HQ_REVOKE_FAILED"
   | "REVOKE_STAGED";
 
 export interface PeerRevokePrisma {
@@ -65,38 +63,17 @@ export interface PeerRevokePrisma {
 }
 
 /**
- * Revoke one peer. Throws only on an unexpected router fault.
+ * Revoke one peer. Router and persistence faults remain visible to the caller.
  *
- * `continueOnHqFailure` (WARP-3172) is for a leaver: their account is already
- * gone, so a still-live router peer is the worse outcome. The router peer is
- * removed anyway and the row flagged `hqRevokePending`; the connect tick
- * refuses the device (inactive owner) and retries the HQ revoke. The manual
- * revoke route keeps the strict WARP-2061 behaviour (nothing changes, retry).
+ * Stop local access first. A staged router removal leaves the row active and
+ * the revoke available for retry. For a legacy overlay grant, persist cleanup
+ * debt with the revoked row before contacting HQ, so a crash or an unavailable
+ * HQ cannot lose that debt. The legacy sweep retries without connecting devices.
  */
 export async function revokeVpnPeer(
   deps: { prisma: PeerRevokePrisma; overlayRevoke: OverlayRevokeFn },
   peer: RevocablePeer,
-  opts: { continueOnHqFailure?: boolean } = {},
 ): Promise<PeerRevokeOutcome> {
-  let hqPending = false;
-  if (peer.kind === "overlay") {
-    try {
-      await deps.overlayRevoke(peer.publicKey);
-    } catch (err) {
-      if (!opts.continueOnHqFailure) {
-        logger.error(
-          { err, peerId: peer.id },
-          "vpn: HQ overlay revoke failed — device left enrolled; nothing revoked locally either",
-        );
-        return "HQ_REVOKE_FAILED";
-      }
-      logger.error(
-        { err, peerId: peer.id },
-        "vpn: HQ overlay revoke failed — removing the router peer anyway and flagging the row for an HQ retry",
-      );
-      hqPending = true;
-    }
-  }
   try {
     const removal = await deleteVpnPeer({ publicKey: peer.publicKey });
     // A staged-but-unapplied removal leaves the peer live on wg0; keep the row
@@ -119,10 +96,25 @@ export async function revokeVpnPeer(
     data: {
       status: "revoked",
       revokedAt: new Date(),
-      ...(hqPending ? { hqRevokePending: true } : {}),
+      ...(peer.kind === "overlay" ? { hqRevokePending: true } : {}),
     },
   });
-  return hqPending ? "REVOKED_HQ_PENDING" : "revoked";
+  if (peer.kind === "overlay") {
+    try {
+      await deps.overlayRevoke(peer.publicKey);
+      await deps.prisma.vpnPeer.updateMany({
+        where: { id: peer.id, status: "revoked", publicKey: peer.publicKey },
+        data: { hqRevokePending: false },
+      });
+    } catch (err) {
+      logger.error(
+        { err, peerId: peer.id },
+        "vpn: local access revoked; legacy HQ cleanup remains pending for retry",
+      );
+      return "REVOKED_HQ_PENDING";
+    }
+  }
+  return "revoked";
 }
 
 export interface UserDeviceRevokePrisma extends PeerRevokePrisma {
@@ -142,7 +134,7 @@ export interface UserDeviceRevokeSummary {
   revoked: number;
   /** Still live on the router — the admin must retry from the device list. */
   failed: number;
-  /** Cut off on the box, HQ revoke owed (retried by the connect tick). */
+  /** Cut off on the box, HQ revoke owed (retried by the legacy revoke sweep). */
   hqPending: number;
   pendingDenied: number;
 }
@@ -195,9 +187,7 @@ export async function revokeUserVpnDevices(
   for (const peer of peers) {
     let outcome: PeerRevokeOutcome | "ERROR";
     try {
-      outcome = await revokeVpnPeer({ prisma, overlayRevoke }, peer, {
-        continueOnHqFailure: true,
-      });
+      outcome = await revokeVpnPeer({ prisma, overlayRevoke }, peer);
     } catch (err) {
       logger.error({ err, peerId: peer.id }, "WARP-3160: device revoke failed");
       outcome = "ERROR";

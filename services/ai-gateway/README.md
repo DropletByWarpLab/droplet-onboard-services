@@ -148,7 +148,7 @@ per `INFERENCE_RUNTIME`) to employees' coding tools through nginx's
   `stream_options.include_usage`, so without it the request is counted with
   0 prompt and 0 completion tokens. Ollama and Anthropic streams always carry
   their counts.
-- nginx refuses `/llm/` to the cloudflared relay and the guest Wi-Fi by peer
+- nginx refuses `/llm/` to untrusted ingress and guest Wi-Fi by peer
   address (`docker/nginx/render-llm-access.sh`, rendered at gateway start and
   by `scripts/lib/local-dns.sh` when it rewrites the host-record).
 

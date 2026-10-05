@@ -1,37 +1,19 @@
 import { Router } from "express";
 import type { PrismaClient } from "@prisma/client";
 import { config } from "../config.js";
+import { servedCertMetadata } from "../lib/served-cert-pin.js";
 
-/**
- * Warning-free droplet.local (ADR-023 follow-through, spec §3): the gateway's
- * plain-HTTP status page polls this to auto-advance to the trusted FQDN the
- * moment issuance lands. PUBLIC by design — it runs BEFORE any login can
- * exist and rides plain HTTP on the LAN, so the payload carries NO device
- * secrets: cert lifecycle state, the (CT-public) FQDN, and whether HQ
- * issuance is configured at all (drives the page's air-gapped branch).
- * Mounted in app.ts BEFORE authMiddleware, like the other public routers.
- *
- * WARP-1302: the payload deliberately carries NO navigation target. The FQDN
- * is split-horizon (public-NXDOMAIN) and only resolvable where the box owns
- * the LAN's DNS — a shape fact the orchestrator cannot see (compose wires
- * DROPLET_LAN_DNS_AUTHORITY to the gateway only). The advance signal is
- * nginx's canonical-host 307, which IS authority-gated (spec §2(d)): the
- * status page's poll surfaces it as an opaqueredirect and reloads. A
- * payload-driven redirect here would send authority=0 clients to a DNS
- * dead-end.
- */
-export function createTlsStatusPublicRouter(prisma: PrismaClient): Router {
+/** Public, nonsecret local hostname and installed certificate metadata.
+ * No certificate fingerprint or device credentials are exposed here. */
+export function createTlsStatusPublicRouter(_prisma: PrismaClient): Router {
   const router = Router();
 
   router.get("/tls/status", async (_req, res) => {
     try {
-      const row = await prisma.tlsCert.findFirst({ orderBy: { updatedAt: "desc" } });
-      const fqdn = row?.fqdn || config.DROPLET_PUBLIC_FQDN || null;
-      const state = row?.state ?? "BOOTSTRAP_SELF_SIGNED";
-      // WARP-2944: whole days until the current public certificate expires
-      // (null on the bootstrap self-signed cert). The screen's one-line
-      // warning reads this; a public certificate's dates are already public
-      // (Certificate Transparency), so nothing new leaves the box here.
+      const row = servedCertMetadata(config.DROPLET_LAN_HOSTNAME);
+      const fqdn = row?.fqdn || null;
+      const state = row?.state ?? "UNKNOWN";
+      // Count down the installed leaf, never an old fleet issuance record.
       const notAfter = row?.notAfter ?? null;
       const daysLeft = notAfter
         ? Math.floor((notAfter.getTime() - Date.now()) / 86_400_000)
@@ -39,13 +21,15 @@ export function createTlsStatusPublicRouter(prisma: PrismaClient): Router {
       res.json({
         state,
         fqdn,
-        hqConfigured: Boolean(config.HQ_ISSUANCE_URL),
+        hqConfigured: false,
+        internalHostname: config.DROPLET_LAN_HOSTNAME || null,
         daysLeft,
+        coversInternalHostname: row?.coversInternalHostname ?? null,
       });
     } catch {
-      // The page treats any non-advance answer as "keep polling" — degrade
+      // Degrade on unavailable metadata
       // without leaking error internals onto an unauthenticated surface.
-      res.status(503).json({ state: "UNKNOWN", fqdn: null, hqConfigured: false, daysLeft: null });
+      res.status(503).json({ state: "UNKNOWN", fqdn: null, hqConfigured: false, daysLeft: null, internalHostname: config.DROPLET_LAN_HOSTNAME || null, coversInternalHostname: null });
     }
   });
 

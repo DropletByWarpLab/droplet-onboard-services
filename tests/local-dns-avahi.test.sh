@@ -111,37 +111,37 @@ printf 'garbage\n' > "$TMP/garbage.crt"
   || bad "an unreadable certificate is not state=bootstrap"
 
 # fqdn= : env wins, then .env, and only a valid name ever renders
-unset DROPLET_PUBLIC_FQDN
-[ "$(avahi_public_fqdn)" = "" ] \
-  && ok "no FQDN anywhere → fqdn= is empty" \
-  || bad "no FQDN anywhere should render empty (got '$(avahi_public_fqdn)')"
-printf 'DROPLET_PUBLIC_FQDN=d-abc123.devices.warp-lab.ai\n' > "$REPO_ROOT/.env"
-[ "$(avahi_public_fqdn)" = "d-abc123.devices.warp-lab.ai" ] \
+unset DROPLET_LAN_HOSTNAME
+[ "$(avahi_internal_hostname)" = "droplet-ai.lan" ] \
+  && ok "missing configuration uses the internal DNS default" \
+  || bad "missing configuration did not use the internal DNS default"
+printf 'DROPLET_LAN_HOSTNAME=droplet-ai.lan\n' > "$REPO_ROOT/.env"
+[ "$(avahi_internal_hostname)" = "droplet-ai.lan" ] \
   && ok "fqdn= is read from \$REPO_ROOT/.env when not exported (the tls-reload wrapper's case)" \
-  || bad "fqdn= not read from .env (got '$(avahi_public_fqdn)')"
-printf 'DROPLET_PUBLIC_FQDN="quoted.example.com"\n' > "$REPO_ROOT/.env"
-[ "$(avahi_public_fqdn)" = "quoted.example.com" ] \
+  || bad "fqdn= not read from .env (got '$(avahi_internal_hostname)')"
+printf 'DROPLET_LAN_HOSTNAME="quoted.example.com"\n' > "$REPO_ROOT/.env"
+[ "$(avahi_internal_hostname)" = "quoted.example.com" ] \
   && ok "a quoted .env value is unquoted" \
-  || bad "a quoted .env value is not unquoted (got '$(avahi_public_fqdn)')"
-DROPLET_PUBLIC_FQDN="env-wins.example.com"
-[ "$(avahi_public_fqdn)" = "env-wins.example.com" ] \
-  && ok "an exported DROPLET_PUBLIC_FQDN wins over .env" \
+  || bad "a quoted .env value is not unquoted (got '$(avahi_internal_hostname)')"
+DROPLET_LAN_HOSTNAME="env-wins.example.com"
+[ "$(avahi_internal_hostname)" = "env-wins.example.com" ] \
+  && ok "an exported DROPLET_LAN_HOSTNAME wins over .env" \
   || bad "the exported value does not win over .env"
-DROPLET_PUBLIC_FQDN='evil.example.com</txt-record><txt-record>x=1'
-[ "$(avahi_public_fqdn)" = "" ] \
+DROPLET_LAN_HOSTNAME='evil.example.com</txt-record><txt-record>x=1'
+[ "$(avahi_internal_hostname)" = "" ] \
   && ok "a value with XML metacharacters is refused before it can reach the file" \
-  || bad "an XML-injecting FQDN was accepted (got '$(avahi_public_fqdn)')"
-DROPLET_PUBLIC_FQDN=$'ok.example.com\nnext=line'
-[ "$(avahi_public_fqdn)" = "" ] \
+  || bad "an XML-injecting FQDN was accepted (got '$(avahi_internal_hostname)')"
+DROPLET_LAN_HOSTNAME=$'ok.example.com\nnext=line'
+[ "$(avahi_internal_hostname)" = "" ] \
   && ok "a multi-line value is refused (whole-string match, not line-based)" \
   || bad "a multi-line FQDN was accepted"
-unset DROPLET_PUBLIC_FQDN
+unset DROPLET_LAN_HOSTNAME
 rm -f "$REPO_ROOT/.env"
 
 # XML shape
-xml="$(avahi_service_xml "d-abc123.devices.warp-lab.ai" "issued")"
+xml="$(avahi_service_xml "droplet-ai.lan" "issued")"
 for needle in '<type>_droplet._tcp</type>' '<type>_https._tcp</type>' '<type>_http._tcp</type>' \
-              '<txt-record>fqdn=d-abc123.devices.warp-lab.ai</txt-record>' '<txt-record>state=issued</txt-record>' \
+              '<txt-record>fqdn=droplet-ai.lan</txt-record>' '<txt-record>state=issued</txt-record>' \
               '<name replace-wildcards="yes">Droplet (%h)</name>' '<type>_smb._tcp</type>'; do
   grep -qF -- "$needle" <<<"$xml" && ok "rendered XML carries $needle" || bad "rendered XML lacks $needle"
 done
@@ -185,8 +185,8 @@ write_avahi_service_file && [ -f "$AVAHI_SERVICE_DIR/droplet.service" ] \
 grep -q '<txt-record>state=bootstrap</txt-record>' "$AVAHI_SERVICE_DIR/droplet.service" \
   && ok "a fresh install with the bootstrap cert advertises state=bootstrap" \
   || bad "a fresh install did not advertise state=bootstrap"
-grep -q '<txt-record>fqdn=</txt-record>' "$AVAHI_SERVICE_DIR/droplet.service" \
-  && ok "no FQDN yet → the record is present and empty (clients treat it as 'peek')" \
+grep -q '<txt-record>fqdn=droplet-ai.lan</txt-record>' "$AVAHI_SERVICE_DIR/droplet.service" \
+  && ok "default internal DNS hostname is advertised" \
   || bad "the empty-fqdn record is missing or malformed"
 before="$(stat -c %Y "$AVAHI_SERVICE_DIR/droplet.service" 2>/dev/null || stat -f %m "$AVAHI_SERVICE_DIR/droplet.service")"
 # Make an mtime change observable even on a 1-second filesystem clock.
@@ -199,10 +199,10 @@ after="$(stat -c %Y "$AVAHI_SERVICE_DIR/droplet.service" 2>/dev/null || stat -f 
   || bad "the file was rewritten although nothing changed"
 # The cert swap the tls-issuance path performs: fullchain in, FQDN known.
 cp "$TMP/fullchain.crt" "$REPO_ROOT/docker/certs/droplet.crt"
-printf 'DROPLET_PUBLIC_FQDN=d-abc123.devices.warp-lab.ai\n' > "$REPO_ROOT/.env"
+printf 'DROPLET_LAN_HOSTNAME=droplet-ai.lan\n' > "$REPO_ROOT/.env"
 write_avahi_service_file
 grep -q '<txt-record>state=issued</txt-record>' "$AVAHI_SERVICE_DIR/droplet.service" \
-  && grep -q '<txt-record>fqdn=d-abc123.devices.warp-lab.ai</txt-record>' "$AVAHI_SERVICE_DIR/droplet.service" \
+  && grep -q '<txt-record>fqdn=droplet-ai.lan</txt-record>' "$AVAHI_SERVICE_DIR/droplet.service" \
   && ok "after a cert install the advertisement says state=issued with the FQDN" \
   || bad "the advertisement did not follow the cert swap"
 # And the same hook the reload uses, standalone (the device-bridge wrapper's

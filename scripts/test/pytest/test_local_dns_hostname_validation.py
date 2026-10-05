@@ -3,17 +3,15 @@
 `local-dns.sh` makes the box reachable by name on the LAN. Before it interpolates
 a hostname into `/etc/avahi/avahi-daemon.conf` (via `sed`, `host-name=<value>`) or
 into the OpenWrt dnsmasq host-record, it screens the operator-controlled env vars
-`DROPLET_MDNS_HOSTNAME` / `DROPLET_LAN_HOSTNAME` (and, later, `DROPLET_PUBLIC_FQDN`)
-through `_valid_hostname()`. That guard is the unit under test.
+`DROPLET_MDNS_HOSTNAME` / `DROPLET_LAN_HOSTNAME` through `_valid_hostname()`. That guard is the unit under test.
 
-Unlike the host scripts (WARP-988 box-name, WARP-994 public-fqdn) which validate an
-argv value, `local-dns.sh` is a *sourced library*: it validates the env vars at
+`local-dns.sh` is a *sourced library*: it validates the env vars at
 source time (the `if ! _valid_hostname ...` blocks blank the var on rejection), so
 the payload rides in via the ENVIRONMENT block. That is also the Windows-safe
 delivery — `CreateProcess` command-line quoting mangles a newline embedded in argv,
 which would silently exercise a clean value instead of the injection payload.
 
-The bug (WARP-995, mirroring WARP-994/WARP-988): `_valid_hostname` matched with a
+The bug (WARP-995): `_valid_hostname` matched with a
 line-based `printf '%s' "$name" | grep -Eq '^...$'`. `grep -q` succeeds if ANY line
 matches, so a newline-bearing value like `droplet-ai\nHostName=evil` passes on its
 first line and the injected second line survives into the rendered config. The fix
@@ -23,8 +21,7 @@ each line. These tests assert the newline payload is refused before any write wh
 legitimate single-label and dotted FQDN names still pass.
 
 We drive bash in a subprocess, sourcing `logging.sh` then `local-dns.sh` exactly as
-the real caller (`scripts/host/droplet-set-public-fqdn.sh`) does. Skipped
-automatically if a POSIX `bash` isn't on PATH.
+the internal DNS provisioning helper does. Skipped automatically if a POSIX `bash` isn't on PATH.
 """
 
 from __future__ import annotations
@@ -59,7 +56,7 @@ def _source_dns(snippet: str, extra_env: dict | None = None) -> subprocess.Compl
     env = dict(os.environ)
     # Neutralize any inherited hostname/routing config from the dev shell so the
     # test is hermetic and never attempts a real DNS/curl/avahi side effect.
-    for k in ("ROUTING_MODE", "DROPLET_PUBLIC_FQDN"):
+    for k in ("ROUTING_MODE",):
         env.pop(k, None)
     env["ROUTING_MODE"] = "disabled"
     env["LOGGING"] = str(LOGGING)
@@ -88,7 +85,7 @@ def test_scripts_exist_and_are_bash():
 @pytest.mark.parametrize("good", [
     "droplet-ai",                       # single mDNS label
     "droplet-ai.lan",                   # dotted FQDN (router DNS)
-    "d-0123456789abcdef.devices.warp-lab.ai",  # opaque per-device FQDN
+    "box.office.example",               # configured internal domain
     "a",                                # minimal single char
 ])
 def test_valid_hostname_accepts_legit_names(good):

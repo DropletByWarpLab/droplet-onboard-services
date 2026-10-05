@@ -199,16 +199,12 @@ class TestRealAllowlist:
                      dst_names=frozenset({"telemetry.evil.example"}))
         assert rule is None  # -> collector emits an unlisted_destination anomaly
 
-    def test_host_attributed_cloudflared_tunnel_matches(self):
+    def test_retired_tunnel_destination_is_not_allowed(self):
         al = load_allowlist(REAL_ALLOWLIST.read_text())
-        # cloudflared runs network_mode:host, so the attributor emits "host",
-        # NOT the registry label "cloudflared". The alias must let the box's own
-        # outbound tunnel match instead of surfacing as a false anomaly.
         rule = match(al, service="host", dst_ip="198.41.192.7", port=7844,
                      protocol="udp",
                      dst_names=frozenset({"tunnel.argotunnel.com"}))
-        assert rule is not None
-        assert rule.entry_id == "cloudflare-tunnel-edge"
+        assert rule is None
 
     def test_every_runtime_egress_service_is_attributor_producible(self):
         """WARP-268 drift guard. match() filters candidate rules by the string
@@ -218,8 +214,8 @@ class TestRealAllowlist:
         anomaly on every box. The producible set is derived from
         docker-compose.yml, so a renamed service or a newly host-mode container
         trips this test instead of silently shipping false anomalies. This fails
-        before the _SERVICE_ALIASES fix (openwrt-router / cloudflared are not
-        attributor outputs).
+        before the _SERVICE_ALIASES fix (openwrt-router is not an
+        attributor output).
         """
         import yaml
         from attribution import service_from_container_name

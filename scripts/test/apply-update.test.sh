@@ -92,10 +92,18 @@ case "${1:-}" in
     exit 0
     ;;
   ps)
+    case "$*" in
+      *'name=^/droplet-cloudflared$'*)
+        printf '%s\n' "${DOCKER_STUB_RETIRED_CONNECTOR:-}"
+        exit "${DOCKER_STUB_RETIRED_PROBE_EXIT:-0}" ;;
+    esac
     # WARP-1044 helper listing: scripted newline-joined container ids.
     printf '%s\n' "${DOCKER_STUB_PS_ALL_IDS:-}"
     exit 0
     ;;
+  rm)
+    [ "${!#}" != droplet-cloudflared ] || exit "${DOCKER_STUB_RETIRED_REMOVE_EXIT:-0}"
+    exit 0 ;;
   logs)
     # WARP-1044 log capture: scripted helper log content + exit code.
     printf '%s\n' "${DOCKER_STUB_LOGS:-stub helper logs}"
@@ -186,6 +194,9 @@ run_apply() {
   DOCKER_STUB_PS_CID="${DOCKER_STUB_PS_CID:-}" \
   DOCKER_STUB_MOUNTS="${DOCKER_STUB_MOUNTS:-}" \
   DOCKER_STUB_FAIL_RECREATE="${DOCKER_STUB_FAIL_RECREATE:-}" \
+  DOCKER_STUB_RETIRED_CONNECTOR="${DOCKER_STUB_RETIRED_CONNECTOR:-}" \
+  DOCKER_STUB_RETIRED_PROBE_EXIT="${DOCKER_STUB_RETIRED_PROBE_EXIT:-0}" \
+  DOCKER_STUB_RETIRED_REMOVE_EXIT="${DOCKER_STUB_RETIRED_REMOVE_EXIT:-0}" \
   DOCKER_STUB_REPO_DIGESTS="${DOCKER_STUB_REPO_DIGESTS:-}" \
   DOCKER_STUB_IMAGE_ID="${DOCKER_STUB_IMAGE_ID:-}" \
   DOCKER_STUB_PS_ALL_IDS="${DOCKER_STUB_PS_ALL_IDS:-}" \
@@ -345,13 +356,46 @@ echo ""
 echo "--- Phase 1: recreate-services per-target pinning ---"
 
 stub_reset
-if run_apply recreate-services --compose-file "$COMPOSE_FILE" \
+if TUNNEL_TOKEN=legacy-ignored DOCKER_STUB_RETIRED_CONNECTOR=retired-cid \
+    run_apply recreate-services --compose-file "$COMPOSE_FILE" \
     --update-id "$UPDATE_ID" --services web-dashboard,routing \
     --target release >/dev/null 2>&1; then
   pass "recreate-services --target release exits 0"
 else
   fail "recreate-services --target release exited non-zero"
 fi
+
+if grep -qx 'rm -f droplet-cloudflared' "$STUB_DIR/calls.log" \
+   && ! grep -q -- '--remove-orphans' "$STUB_DIR/calls.log"; then
+  pass "OTA removes only the retired connector even with a stale tunnel token"
+else
+  fail "OTA did not retire the connector narrowly"
+fi
+REMOVE_LINE="$(grep -n '^rm -f droplet-cloudflared$' "$STUB_DIR/calls.log" | cut -d: -f1)"
+UP_LINE="$(grep -n ' up -d ' "$STUB_DIR/calls.log" | head -n1 | cut -d: -f1)"
+if [ -n "$REMOVE_LINE" ] && [ "$REMOVE_LINE" -lt "$UP_LINE" ]; then
+  pass "retired connector is removed before service recreation"
+else
+  fail "retired connector removal happened after service recreation"
+fi
+
+# An empty requested service set still retires the connector without a swap.
+stub_reset
+if DOCKER_STUB_RETIRED_CONNECTOR=retired-cid run_apply recreate-services \
+    --compose-file "$COMPOSE_FILE" --update-id "$UPDATE_ID" \
+    --services '' --target release >/dev/null 2>&1 \
+   && grep -qx 'rm -f droplet-cloudflared' "$STUB_DIR/calls.log" \
+   && ! grep -q ' up ' "$STUB_DIR/calls.log"; then
+  pass "empty OTA service set still retires the connector without recreating services"
+else
+  fail "empty OTA service set did not retire the connector narrowly"
+fi
+# Restore the release calls for the pinning assertions below.
+stub_reset
+TUNNEL_TOKEN=legacy-ignored DOCKER_STUB_RETIRED_CONNECTOR=retired-cid \
+  run_apply recreate-services --compose-file "$COMPOSE_FILE" \
+  --update-id "$UPDATE_ID" --services web-dashboard,routing \
+  --target release >/dev/null 2>&1
 
 for svc in web-dashboard routing; do
   if grep -qF -- "compose -f $COMPOSE_FILE -f $UDIR/override-release.yml up -d --no-deps --no-build --pull never --force-recreate $svc" \
@@ -391,6 +435,27 @@ if grep " up " "$STUB_DIR/calls.log" | grep -qv "override-"; then
 else
   pass "every compose up invocation carries a per-target override"
 fi
+
+for retired_failure in probe remove; do
+  stub_reset
+  if [ "$retired_failure" = probe ]; then
+    DOCKER_STUB_RETIRED_PROBE_EXIT=1
+    DOCKER_STUB_RETIRED_REMOVE_EXIT=0
+  else
+    DOCKER_STUB_RETIRED_PROBE_EXIT=0
+    DOCKER_STUB_RETIRED_REMOVE_EXIT=1
+  fi
+  if DOCKER_STUB_RETIRED_CONNECTOR=retired-cid run_apply recreate-services \
+      --compose-file "$COMPOSE_FILE" --update-id "$UPDATE_ID" \
+      --services web-dashboard --target release >/dev/null 2>&1; then
+    fail "retired connector $retired_failure failure must abort recreation"
+  elif grep -q ' up ' "$STUB_DIR/calls.log"; then
+    fail "services were recreated despite retired connector $retired_failure failure"
+  else
+    pass "retired connector $retired_failure failure aborts before any service swap"
+  fi
+done
+unset DOCKER_STUB_RETIRED_PROBE_EXIT DOCKER_STUB_RETIRED_REMOVE_EXIT
 
 stub_reset
 if run_apply recreate-services --compose-file "$COMPOSE_FILE" \
@@ -509,7 +574,8 @@ printf '%s\n' "\${REC_STUB_OUT:-}"
 exit "\${REC_STUB_EXIT:-0}"
 RECEOF
 stub_reset
-REC_OUT="$(REC_STUB_OUT="$REC_REPORT" run_apply reconcile-env --compose-file "$COMPOSE_FILE" \
+REC_OUT="$(TUNNEL_TOKEN=legacy-ignored DOCKER_STUB_RETIRED_CONNECTOR=retired-cid \
+  REC_STUB_OUT="$REC_REPORT" run_apply reconcile-env --compose-file "$COMPOSE_FILE" \
   --update-id "$UPDATE_ID" --image "$REC_IMG" 2>/dev/null)"; REC_RC=$?
 if [ "$REC_RC" -eq 0 ] && [ "$REC_OUT" = "$REC_REPORT" ] \
   && grep -qxF -- "env-reconcile $REC_ROOT $UPDATE_ID" "$STUB_DIR/calls.log" \
@@ -517,6 +583,13 @@ if [ "$REC_RC" -eq 0 ] && [ "$REC_OUT" = "$REC_REPORT" ] \
   pass "reconcile-env runs the STAGED script directly on the host (no nested container)"
 else
   fail "reconcile-env invocation wrong (rc=$REC_RC out=$REC_OUT calls: $(cat "$STUB_DIR/calls.log" 2>/dev/null))"
+fi
+if grep -qx 'rm -f droplet-cloudflared' "$STUB_DIR/calls.log" \
+   && ! grep -q ' up ' "$STUB_DIR/calls.log" \
+   && ! grep -q -- '--remove-orphans' "$STUB_DIR/calls.log"; then
+  pass "OTA env reconciliation retires the connector before any image recreation"
+else
+  fail "OTA env reconciliation did not retire the connector narrowly"
 fi
 if [ "$(cat "$UDIR/env-reconcile.json" 2>/dev/null)" = "$REC_REPORT" ]; then
   pass "reconcile-env keeps its report in the update dir"
