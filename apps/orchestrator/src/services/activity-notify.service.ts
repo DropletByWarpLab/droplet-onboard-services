@@ -112,6 +112,7 @@ import {
 } from "./notifications.service.js";
 import { createLogger } from "../lib/logger.js";
 import { isUserIdShaped } from "@droplet/auth-policy";
+import { buildPmPath, pmWorkItemPath } from "@droplet/shared-types";
 import { isServiceDesk } from "./pm/pm.service.js";
 import { resolveEffectiveAccess } from "./effective-access.service.js";
 
@@ -222,6 +223,28 @@ function workItemLabel(item: {
   return key ? `${key} — ${item.name}` : item.name;
 }
 
+/**
+ * WARP-3522 — where a tap on a PM notification should land, in the `/projects`
+ * deep-link contract (`?p=<IDENTIFIER>&item=<KEY>`, packages/shared-types
+ * `pm-links.ts`). One item opens that item's drawer; several items in one
+ * project open the project; a mix opens Projects. A notification used to carry
+ * no link at all, so a tap went nowhere.
+ */
+function pmLink(
+  rows: ReadonlyArray<{
+    workItemId: string;
+    workItem: { sequenceId: number; project: { identifier: string } | null };
+  }>,
+): string {
+  const identifier = rows[0]?.workItem.project?.identifier;
+  if (!identifier) return buildPmPath({});
+  if (new Set(rows.map((r) => r.workItemId)).size === 1) {
+    return pmWorkItemPath(identifier, `${identifier}-${rows[0].workItem.sequenceId}`);
+  }
+  const sameProject = rows.every((r) => r.workItem.project?.identifier === identifier);
+  return sameProject ? buildPmPath({ p: identifier }) : buildPmPath({});
+}
+
 /** "2 assigned · 1 moved" — insertion-ordered so the tally reads in the order
  *  things happened rather than alphabetically. */
 function tally(words: string[]): string {
@@ -238,9 +261,7 @@ interface Outgoing {
   username: string;
   title: string;
   body: string;
-  /** WARP-3528 — where a click opens: a same-origin dashboard path (the toast
-   *  and the NotificationLog row both carry it; `assertNotificationLink` checks
-   *  it). Only the ticket notification has one; PM and CRM send none. */
+  /** Same-origin dashboard destination: PM work-item or view links and Support ticket links. */
   url?: string;
 }
 
@@ -602,6 +623,7 @@ async function sweepProjectItems(
         username,
         title: truncate(title, TITLE_MAX),
         body: truncate(label, BODY_MAX),
+        url: pmLink([row]),
       });
       continue;
     }
@@ -609,6 +631,7 @@ async function sweepProjectItems(
       username,
       title: truncate(`${list.length} updates on your work`, TITLE_MAX),
       body: truncate(tally(list.map((r) => PM_VERB_WORD[r.verb] ?? "updated")), BODY_MAX),
+      url: pmLink(list),
     });
   }
 

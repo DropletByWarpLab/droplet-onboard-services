@@ -12,7 +12,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
 import { SWRConfig } from "swr";
 import React from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { buildPmPath, parsePmUrl, type PmUrlState } from "@droplet/shared-types";
 import { createFakeTimeApi, ITEM_1, worklog } from "@/__tests__/helpers/fake-time-api";
 import type { PmTimesheet } from "@/components/projects/time/types";
 import type { PmProject } from "@/components/projects/types";
@@ -77,6 +77,21 @@ const SHEET: PmTimesheet = {
 
 let fake: ReturnType<typeof createFakeTimeApi>;
 const replace = vi.fn();
+const push = vi.fn();
+const navigation = { search: "" };
+vi.mock("@/components/projects/useProjectsUrl", () => ({
+  useProjectsUrl: () => {
+    const [, rerender] = React.useState(0);
+    const state = parsePmUrl(new URLSearchParams(navigation.search));
+    const go = (patch: Partial<Required<PmUrlState>>, mode: string) => {
+      const href = buildPmPath({ ...state, ...patch });
+      (mode === "push" ? push : replace)(href, { scroll: false });
+      navigation.search = href.split("?")[1] ?? "";
+      rerender((n) => n + 1);
+    };
+    return { state, go, openItem: (key: string) => go({ item: key }, "push"), closeItem: () => go({ item: null }, "replace") };
+  },
+}));
 
 function renderPage() {
   return render(
@@ -89,8 +104,8 @@ function renderPage() {
 beforeEach(() => {
   toast.mockReset();
   replace.mockReset();
-  vi.mocked(useSearchParams).mockReturnValue(new URLSearchParams() as never);
-  vi.mocked(useRouter).mockReturnValue({ push: vi.fn(), replace, back: vi.fn() } as never);
+  push.mockReset();
+  navigation.search = "";
   api.user = { id: "u-me", username: "me", displayName: "Mia Member", role: "family" };
   fake = createFakeTimeApi({ timesheet: SHEET, projects: [PROJECT] });
   api.handler = fake.handler;
@@ -98,7 +113,7 @@ beforeEach(() => {
 
 describe("/projects?view=time", () => {
   it("opens straight onto the time view — titled Time, with the way back — instead of the project index", async () => {
-    vi.mocked(useSearchParams).mockReturnValue(new URLSearchParams("view=time") as never);
+    navigation.search = "view=time";
     renderPage();
     expect(await screen.findByRole("tab", { name: /Timesheet/ })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByRole("heading", { level: 1, name: "Time" })).toBeInTheDocument();
@@ -109,38 +124,54 @@ describe("/projects?view=time", () => {
     expect(screen.queryByRole("tab", { name: "Board" })).toBeNull();
   });
 
+  it("restores global and project Time from browser navigation without stale local view state", async () => {
+    navigation.search = "view=time";
+    const page = renderPage();
+    await screen.findByRole("tab", { name: /Timesheet/ });
+    navigation.search = "p=INBOX&view=time";
+    page.rerender(<SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}><ProjectsPage /></SWRConfig>);
+    await screen.findByRole("heading", { level: 1, name: "Inbox" });
+    fireEvent.click(screen.getByRole("tab", { name: /Report/ }));
+    expect((await screen.findByRole("combobox", { name: "Project" }) as HTMLSelectElement).value).toBe("p1");
+    navigation.search = "view=time";
+    page.rerender(<SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}><ProjectsPage /></SWRConfig>);
+    await screen.findByRole("heading", { level: 1, name: "Time" });
+    expect(screen.queryByRole("tab", { name: "Board" })).toBeNull();
+  });
+
   it("is reached from the index by a Time button, and writes the address", async () => {
     renderPage();
     fireEvent.click(await screen.findByRole("button", { name: /^Time$/ }));
     expect(await screen.findByRole("tab", { name: /Timesheet/ })).toBeInTheDocument();
-    expect(replace).toHaveBeenLastCalledWith("/projects?view=time", { scroll: false });
+    expect(push).toHaveBeenLastCalledWith("/projects?view=time", { scroll: false });
   });
 
   it("goes back to the index and takes the address with it", async () => {
-    vi.mocked(useSearchParams).mockReturnValue(new URLSearchParams("view=time") as never);
+    navigation.search = "view=time";
     renderPage();
     fireEvent.click(await screen.findByRole("button", { name: /All projects/ }));
     expect(await screen.findByText("Active projects")).toBeInTheDocument();
-    expect(replace).toHaveBeenLastCalledWith("/projects", { scroll: false });
+    expect(push).toHaveBeenLastCalledWith("/projects", { scroll: false });
     expect(screen.queryByRole("tab", { name: /Timesheet/ })).toBeNull();
   });
 
-  it("does not touch the address for any other view", async () => {
+  it("keeps other view navigation in the same canonical project URL", async () => {
     renderPage();
     fireEvent.click(await screen.findByText("Inbox")); // open the project: the board
     await screen.findByRole("tab", { name: "Board" });
     fireEvent.click(screen.getByRole("tab", { name: "List" }));
     fireEvent.click(screen.getByRole("tab", { name: "Board" }));
+    expect(push.mock.calls.map(([href]) => href)).toEqual(["/projects?p=INBOX", "/projects?p=INBOX&view=list", "/projects?p=INBOX"]);
     expect(replace).not.toHaveBeenCalled();
   });
 
-  it("is a tab of a project too: the report starts filtered to that project, and Board brings the address back", async () => {
+  it("is a tab of a project too: the report and URL preserve its scope, and Board returns to that project", async () => {
     renderPage();
     fireEvent.click(await screen.findByText("Inbox"));
     fireEvent.click(await screen.findByRole("tab", { name: "Time" }));
 
     expect(await screen.findByRole("tab", { name: /Timesheet/ })).toBeInTheDocument();
-    expect(replace).toHaveBeenLastCalledWith("/projects?view=time", { scroll: false });
+    expect(push).toHaveBeenLastCalledWith("/projects?p=INBOX&view=time", { scroll: false });
     expect(screen.getByRole("heading", { level: 1, name: "Inbox" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("tab", { name: /Report/ }));
@@ -148,11 +179,11 @@ describe("/projects?view=time", () => {
     expect(project.value).toBe("p1");
 
     fireEvent.click(screen.getByRole("tab", { name: "Board" }));
-    await waitFor(() => expect(replace).toHaveBeenLastCalledWith("/projects", { scroll: false }));
+    await waitFor(() => expect(push).toHaveBeenLastCalledWith("/projects?p=INBOX", { scroll: false }));
   });
 
   it("hands the signed-in person to the time surface: a member may edit their own entry, a guest-level role may not", async () => {
-    vi.mocked(useSearchParams).mockReturnValue(new URLSearchParams("view=time") as never);
+    navigation.search = "view=time";
     const first = renderPage();
     const list = await screen.findByRole("list", { name: "Time entries" });
     expect(within(list).getByRole("button", { name: /^Edit/ })).toBeInTheDocument();

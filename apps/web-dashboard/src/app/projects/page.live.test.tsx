@@ -12,6 +12,20 @@ import { render, screen, fireEvent, waitFor, act, cleanup } from "@testing-libra
 import React from "react";
 import { SWRConfig } from "swr";
 import { publishPmLiveFrame } from "@/lib/pm-live-events";
+import { buildPmPath, parsePmUrl, type PmUrlState } from "@droplet/shared-types";
+
+const navigation = { search: "" };
+vi.mock("@/components/projects/useProjectsUrl", () => ({
+  useProjectsUrl: () => {
+    const [, rerender] = React.useState(0);
+    const state = parsePmUrl(new URLSearchParams(navigation.search));
+    const go = (patch: Partial<Required<PmUrlState>>) => {
+      navigation.search = buildPmPath({ ...state, ...patch }).split("?")[1] ?? "";
+      rerender(n => n + 1);
+    };
+    return { state, go, openItem: (key: string) => go({ item: key }), closeItem: () => go({ item: null }) };
+  },
+}));
 
 vi.mock("@/components/shell/ShellPage", () => ({
   ShellPage: ({ title, sub, children, actions }: any) => (
@@ -85,8 +99,9 @@ vi.mock("@/lib/auth", () => ({
   useAuth: () => ({ user: { id: "u1", username: "ada", displayName: "Ada", role: "owner" }, isLoading: false }),
   authFetch: vi.fn((url: string, init?: RequestInit) => {
     const method = (init?.method ?? "GET").toUpperCase();
-    if (method === "GET") gets.push(url);
+    if (method === "GET" || (method === "POST" && url === "/api/pm/work-items/query")) gets.push(url);
     const json = (body: unknown) => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) } as Response);
+    if (url === "/api/pm/work-items/query" && method === "POST") return json({ work_items: server.items, nextCursor: null, total: server.items.length });
     if (url.startsWith("/api/pm/projects/p-1/work-items?parent=")) return json({ work_items: [], nextCursor: null, total: 0 });
     if (url.startsWith("/api/pm/projects/p-1/work-items")) return json({ work_items: server.items, nextCursor: null, total: server.items.length });
     if (url === "/api/pm/projects/p-1/states") return json({ states: STATES });
@@ -104,7 +119,7 @@ vi.mock("@/lib/auth", () => ({
 
 import ProjectsPage from "./page";
 
-const boardReads = () => gets.filter((u) => u.startsWith("/api/pm/projects/p-1/work-items") && !u.includes("parent=")).length;
+const boardReads = () => gets.filter((u) => u === "/api/pm/work-items/query").length;
 
 const FRAME = { type: "pm.changed", projectId: "p-1", workItemId: "w-1", verb: "updated" };
 const frame = (over: Partial<typeof FRAME> = {}) =>
@@ -123,6 +138,7 @@ async function openBoard() {
 beforeEach(() => {
   cleanup();
   gets.length = 0;
+  navigation.search = "";
   server.items = [ITEM];
 });
 

@@ -42,6 +42,13 @@ function makeReview(overrides: Partial<ReviewItem> = {}): ReviewItem {
 const BASE_RING = /(^| )ring-2 ring-\[/;
 
 describe("ReviewCard unreviewed indicator (WARP-1089)", () => {
+  it("shows a fallback label and after-hours badge when a review has no object labels", () => {
+    render(<ReviewCard review={makeReview({ objects: [], outsideBusinessHours: true })} onClick={vi.fn()} />);
+    expect(screen.getByText("Motion")).toBeInTheDocument();
+    expect(screen.getByText("Outside business hours")).toBeInTheDocument();
+    expect(screen.queryByText("person")).not.toBeInTheDocument();
+  });
+
   it("keeps the focus-visible ring on every card", () => {
     const { container } = render(
       <ReviewCard review={makeReview()} onClick={vi.fn()} />,

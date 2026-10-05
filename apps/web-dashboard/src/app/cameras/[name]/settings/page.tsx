@@ -34,6 +34,10 @@ import { ZoneEditor } from "@/components/settings/ZoneEditor";
 import { MotionMaskEditor } from "@/components/settings/MotionMaskEditor";
 import { CameraRecordingSummary } from "@/components/cameras/CameraRecordingSummary";
 import { CameraServiceNotice } from "@/components/cameras/CameraServiceNotice";
+import {
+  CameraRecordingNote,
+  OverAllocationNote,
+} from "@/components/cameras/CameraRecordingNote";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { useAuth } from "@/lib/auth";
 import { formatStorageBytes, isRecordingDegraded } from "@/lib/camera-recording";
@@ -567,6 +571,17 @@ export default function CameraSettingsPage() {
                   : `Using ${formatStorageBytes(camera.recording.usedBytes)} now.`}
               </p>
             )}
+            {/* WARP-3515 — where this camera records and what it needs there,
+                with a link to the Recording storage card; and the budget
+                route's overAllocation advisory (the type never carried it, so
+                nothing rendered it). Both render nothing when there is nothing
+                to say. */}
+            <CameraRecordingNote camera={name} />
+            {budget?.overAllocation?.overAllocated && (
+              <div data-testid="budget-over-allocation" className="text-system-orange">
+                <OverAllocationNote overAllocation={budget.overAllocation} />
+              </div>
+            )}
             <label className="flex items-center gap-2">
               <input
                 type="number"
@@ -583,18 +598,12 @@ export default function CameraSettingsPage() {
             </label>
             {/* Budgets are per camera but the drive is shared: one camera's
                 number says nothing about whether they all fit. */}
-            {budget?.overAllocation && (
+            {budget?.overAllocation && !budget.overAllocation.overAllocated && (
               <p
                 data-testid="budget-over-allocation"
-                className={`type-caption-1 ${
-                  budget.overAllocation.overAllocated
-                    ? "text-system-orange bg-system-orange/10 px-2 py-1 rounded-lg"
-                    : "text-label-tertiary"
-                }`}
+                className="type-caption-1 text-label-tertiary"
               >
-                {budget.overAllocation.overAllocated
-                  ? `All camera budgets add up to ${formatStorageBytes(budget.overAllocation.allocatedBytes)}, more than the ${formatStorageBytes(budget.overAllocation.capacityBytes)} recordings drive holds. When it fills, the oldest footage is deleted first, so some cameras will keep less than they were promised.`
-                  : `All camera budgets together: ${formatStorageBytes(budget.overAllocation.allocatedBytes)} of the ${formatStorageBytes(budget.overAllocation.capacityBytes)} recordings drive.`}
+                {`All camera budgets together: ${formatStorageBytes(budget.overAllocation.allocatedBytes)} of the ${formatStorageBytes(budget.overAllocation.capacityBytes)} recordings drive.`}
               </p>
             )}
             {budgetMsg && (

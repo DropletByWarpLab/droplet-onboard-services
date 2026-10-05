@@ -47,9 +47,10 @@ describe("every PmActivity writer wakes the outbox", () => {
       expect(text).toMatch(/import \{[^}]*\bnudgeOutbox\b[^}]*\} from "(?:\.\/pm-outbox\.js|\.\.\/pm\/pm-outbox\.js)"/);
       if (_name === "services/pm/pm.service.ts") {
         // Deletion batches its tombstone and related audit rows, then wakes
-        // once after commit. Ordinary writeActivity calls retain their nudge.
-        expect(sites).toBe(3);
-        expect(nudges).toBe(2);
+        // once after commit. Single and bulk writeActivity paths retain their nudges.
+        expect(sites).toBe(4);
+        expect(nudges).toBe(3);
+        expect(text).toMatch(/if \(input\.some\(\(entry\) => entry\.nudge !== false\)\) nudgeOutbox\(\)/);
         expect(text).toMatch(/if \(input\.nudge !== false\) nudgeOutbox\(\)/);
         expect(text).toMatch(/\}, \{ \.\.\.SERIALIZABLE_TX, timeout: 5_000 \}\);\s*nudgeOutbox\(\)/);
       } else if (_name === "services/support/escalation.service.ts") {

@@ -277,6 +277,87 @@
   .pm-scope .pm-search { height: 44px; }
 }
 
+/* ── WARP-3522: filter bar, active-filter chips, saved views, popovers ──────
+ * Existing tokens only (the aliases at the top of this file). The popover's
+ * shadow is the card-hover one, repeated rather than invented. */
+.pm-scope .pm-pop-anchor { position: relative; display: inline-flex; align-items: center; }
+.pm-scope .pm-pop {
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 40;
+  width: max-content; min-width: 220px; max-width: min(360px, calc(100vw - 32px)); max-height: 360px; overflow: auto;
+  padding: 10px; background: var(--bg-canvas); border: 1px solid var(--border); border-radius: 12px;
+  box-shadow: 0 14px 30px -16px rgba(30, 30, 60, 0.28), 0 0 0 1px rgba(99, 102, 241, 0.18);
+}
+.pm-scope .pm-pop-h { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 13px; color: var(--text); }
+.pm-scope .pm-pop-sect { font-size: 11px; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase; color: var(--text-4); margin: 4px 2px 6px; }
+.pm-scope .pm-pop-list { border: none; padding: 0; margin: 8px 0 0; min-width: 0; }
+.pm-scope .pm-pop-row { display: flex; align-items: center; gap: 9px; min-height: 30px; padding: 2px 4px; border-radius: 6px; font-size: 13px; color: var(--text); cursor: pointer; }
+.pm-scope .pm-pop-row:hover { background: var(--bg-hover); }
+.pm-scope .pm-pop-row input { margin: 0; flex: none; }
+.pm-scope .pm-pop-empty { padding: 8px 4px; font-size: 12.5px; color: var(--text-3); }
+.pm-scope .pm-pop-f { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+.pm-scope .pm-pop-grid { display: flex; flex-wrap: wrap; gap: 6px; }
+.pm-scope .pm-pop-menu { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.pm-scope .pm-pop-item {
+  display: block; width: 100%; text-align: left; min-height: 32px; padding: 0 10px; border: none; border-radius: 6px;
+  background: transparent; font-size: 13px; color: var(--text); cursor: pointer; font-family: inherit;
+}
+.pm-scope .pm-pop-item:hover { background: var(--bg-hover); }
+.pm-scope .pm-pop-item:focus-visible,
+.pm-scope .pm-pop-row:focus-within,
+.pm-scope .pm-chip:focus-visible,
+.pm-scope .pm-fchip-b:focus-visible,
+.pm-scope .pm-fchip-x:focus-visible,
+.pm-scope .pm-vrow:focus-visible { outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent); }
+
+.pm-scope .pm-fchips { gap: 8px; flex-wrap: wrap; }
+.pm-scope .pm-fchip {
+  display: inline-flex; align-items: stretch; height: 30px; border-radius: 999px; overflow: visible;
+  background: rgba(99, 102, 241, 0.1); border: 1px solid color-mix(in srgb, var(--accent) 38%, var(--border));
+}
+.pm-scope .pm-fchip-b, .pm-scope .pm-fchip-x {
+  display: inline-flex; align-items: center; border: none; background: transparent; color: var(--text);
+  font-family: inherit; font-size: 12.5px; cursor: pointer;
+}
+.pm-scope .pm-fchip-b { padding: 0 6px 0 12px; border-radius: 999px 0 0 999px; max-width: 320px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pm-scope .pm-fchip-b.static { cursor: default; }
+.pm-scope .pm-fchip-x { min-width: 26px; justify-content: center; padding: 0 8px 0 4px; border-radius: 0 999px 999px 0; color: var(--text-3); }
+.pm-scope .pm-fchip-b:hover, .pm-scope .pm-fchip-x:hover { background: var(--bg-hover); }
+.pm-scope .pm-fchip-x:hover { color: var(--text); }
+
+.pm-scope .pm-vchip { display: inline-flex; align-items: center; gap: 2px; }
+.pm-scope .pm-vchip-k { width: 26px; height: 26px; opacity: 0.55; }
+.pm-scope .pm-vchip:hover .pm-vchip-k, .pm-scope .pm-vchip:focus-within .pm-vchip-k, .pm-scope .pm-vchip-k[aria-expanded="true"] { opacity: 1; }
+@media (hover: none) { .pm-scope .pm-vchip-k { opacity: 1; } }
+.pm-scope .pm-vsep { width: 1px; height: 18px; background: var(--border-strong); margin: 0 2px; }
+.pm-scope .pm-chip-add { border-style: dashed; }
+.pm-scope .pm-chip[aria-disabled="true"] { opacity: 0.5; cursor: not-allowed; }
+.pm-scope .pm-chip[aria-disabled="true"]:hover { color: var(--text-3); border-color: var(--border); }
+
+.pm-scope .pm-note {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 12px; border-radius: 10px;
+  font-size: 12.5px; color: var(--text-2); background: color-mix(in srgb, var(--info) 8%, var(--bg-canvas));
+  border: 1px solid color-mix(in srgb, var(--info) 28%, var(--border));
+}
+.pm-scope .pm-status { font-size: 12px; color: var(--text-3); }
+.pm-scope .pm-scope-label { font-size: 13px; font-weight: 600; color: var(--text); }
+
+.pm-scope .pm-vrow {
+  display: flex; align-items: center; gap: 12px; width: 100%; min-height: 44px; padding: 10px 16px; text-align: left;
+  background: transparent; border: none; border-bottom: 1px solid var(--border); color: var(--text); cursor: pointer; font-family: inherit;
+}
+.pm-scope .pm-vrow:last-child { border-bottom: none; }
+.pm-scope .pm-vrow:hover { background: var(--bg-hover); }
+.pm-scope .pm-vrow-name { display: inline-flex; align-items: center; gap: 7px; flex: 1; min-width: 0; font-size: 13.5px; font-weight: 500; }
+.pm-scope .pm-vrow-meta { font-size: 12px; color: var(--text-3); }
+.pm-scope .pm-vrow-door .pm-vrow-name { flex: none; }
+.pm-scope .pm-vrow-door .pm-vrow-meta { flex: 1; text-align: right; }
+
+@media (max-width: 720px) {
+  .pm-scope .pm-chip, .pm-scope .pm-fchip { min-height: 36px; }
+  .pm-scope .pm-fchip-b, .pm-scope .pm-fchip-x { min-height: 34px; }
+  .pm-scope .pm-pop { position: fixed; left: 16px; right: 16px; top: auto; bottom: 16px; max-width: none; width: auto; max-height: 70vh; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .pm-scope .pm-card, .pm-scope .pm-skel { animation: none !important; transition: none !important; }
   .pm-scope .pm-card:hover { transform: none; }

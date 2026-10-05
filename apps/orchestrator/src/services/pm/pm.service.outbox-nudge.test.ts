@@ -7,7 +7,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 vi.mock("./pm-outbox.js", () => ({ nudgeOutbox: vi.fn() }));
 
 import { nudgeOutbox } from "./pm-outbox.js";
-import { addComment, deleteWorkItem } from "./pm.service.js";
+import { addComment, deleteWorkItem, writeActivity } from "./pm.service.js";
 import { createTransactionSeam, expectAllTransactionsAt } from "../../__tests__/helpers/prisma-tx-harness.js";
 
 const T0 = new Date("2026-10-04T12:00:00.000Z");
@@ -143,5 +143,31 @@ describe("delete tombstones nudge only after commit", () => {
     });
     expect(tx.pmWorkItem.delete).toHaveBeenCalledWith({ where: { id: "wi-1" } });
     expect(nudgeOutbox).toHaveBeenCalledTimes(1);
+  });
+});
+
+
+describe("imported activity in the shared bulk mapper", () => {
+  it("keeps historical rows out of notification delivery for both insert shapes", async () => {
+    const create = vi.fn(async () => ({}));
+    const createMany = vi.fn(async () => ({ count: 2 }));
+    const db = { pmActivity: { create, createMany } };
+    const history = {
+      workItemId: "imported-item", actorId: "importer", verb: "created" as const,
+      field: "import", newValue: "CSV:job-1", notifyStatus: "not_needed" as const,
+      nudge: false,
+    };
+    await writeActivity(db as never, history);
+    await writeActivity(db as never, [history, {
+      workItemId: "regular-item", actorId: "owner", verb: "updated", nudge: false,
+    }]);
+    expect(create.mock.calls[0]).toEqual([{ data: expect.objectContaining({
+      notifyStatus: "not_needed", field: "import", newValue: "CSV:job-1",
+    }) }]);
+    expect(createMany.mock.calls[0]).toEqual([{ data: [
+      expect.objectContaining({ notifyStatus: "not_needed", field: "import" }),
+      expect.not.objectContaining({ notifyStatus: expect.anything() }),
+    ] }]);
+    expect(nudgeOutbox).not.toHaveBeenCalled();
   });
 });

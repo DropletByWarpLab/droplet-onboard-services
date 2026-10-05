@@ -61,6 +61,7 @@ export async function auditCameraWatch(
   opts: {
     saved?: boolean;
     eventId?: string;
+    reviewId?: string;
     now?: number;
     /**
      * WARP-3692 — the assistant fetched this frame for the user's own chat
@@ -92,6 +93,7 @@ export async function auditCameraWatch(
       saved: opts.saved === true,
       delivery: opts.saved ? "attachment" : "inline",
       eventId: opts.eventId ?? null,
+      ...(opts.reviewId ? { reviewId: opts.reviewId } : {}),
       actor: req.user?.username ?? null,
       ...(opts.via ? { via: opts.via } : {}),
     },

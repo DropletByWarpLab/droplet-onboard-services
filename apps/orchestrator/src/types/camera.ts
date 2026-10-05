@@ -109,6 +109,8 @@ export interface DetectionEvent {
  * media URL, so camera streams stay LAN-side.
  */
 export interface EventDetail extends DetectionEvent {
+  /** Any part of the activity occurred outside saved hours; null when unset. */
+  outsideBusinessHours?: boolean | null;
   /** Frigate sub-label (e.g. detected person name from face recogniser). */
   subLabel: string | null;
   /** Highest-confidence sub-label score, [0, 1]. */
@@ -155,7 +157,9 @@ export interface ReviewItem {
   zones: string[];
   /** Underlying event IDs feeding this review item. */
   detectionIds: string[];
-  /** Authenticated proxy URL for the Frigate-rendered preview clip. */
+  /** Any part of the activity occurred outside saved hours; null when unset. */
+  outsideBusinessHours?: boolean | null;
+  /** Authenticated proxy URL for the Frigate-rendered review preview. */
   previewUrl: string | null;
   /** Authenticated proxy URL for the cluster thumbnail. */
   thumbnailUrl: string;

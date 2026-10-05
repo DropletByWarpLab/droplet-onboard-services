@@ -236,10 +236,15 @@ if [ "$SYNC_SECRETS_ONLY" = "true" ]; then
   # the container root pw + routing restart move in lockstep.
   # Print this WARNING first so an operator who just rotated OPENWRT_PASSWORD
   # sees the safe path before the generic restart command.
-  log_warn "  If you rotated OPENWRT_PASSWORD on a single-box, run this INSTEAD"
-  log_warn "  of a bare 'restart routing' (sets the container root pw + restarts"
-  log_warn "  routing in lockstep):"
+  log_warn "  If you rotated OPENWRT_PASSWORD on a single-box (OPENWRT_HOST loopback,"
+  log_warn "  bundled container), run this INSTEAD of a bare 'restart routing' (sets"
+  log_warn "  the container root pw + restarts routing in lockstep):"
   log_warn "    sudo systemctl restart droplet-openwrt-attach.service"
+  # WARP-3738: an external router is never touched by the attach unit, and
+  # sync keeps its password file as written.
+  log_info "  External edge router (OPENWRT_HOST set): write the router's"
+  log_info "  /etc/droplet/droplet-ai-password into docker/secrets/openwrt_password, then:"
+  log_info "    docker compose -f docker/docker-compose.yml up -d --no-deps --force-recreate routing"
   log_info "  For all other secret rotations:"
   log_info "    docker compose -f docker/docker-compose.yml restart"
   exit 0
