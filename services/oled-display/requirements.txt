@@ -1,4 +1,4 @@
-fastapi>=0.141.1
+fastapi>=0.142.2
 uvicorn>=0.53.0
 # Floor raised to 0.0.32 (WARP-1948): every release below 0.0.31 carries at
 # least one OSV advisory (PYSEC-2026-1851/-1852/-3036..-3041). 0.0.32 matches
@@ -20,7 +20,7 @@ qrcode>=8.2
 # "FIPS not enabled" even where OpenSSL is genuinely enforcing. Same
 # fix class as WARP-1018 (file-indexer); kept in lockstep with
 # services/ai-gateway's pin.
-cryptography>=50.0.1
+cryptography>=50.0.2
 
 # WARP-1948 — OSV floors: the osv-nightly resolver scores transitive deps at
 # their minimum resolvable version; state the real minimum instead of

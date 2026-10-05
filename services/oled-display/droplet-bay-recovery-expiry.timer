@@ -1,0 +1,16 @@
+[Unit]
+Description=Droplet bay drives — daily sweep of unrevealed recovery keys (WARP-3513)
+Documentation=https://warp-lab.atlassian.net/browse/WARP-3513
+
+[Timer]
+# Once a day. Persistent=true runs a sweep missed while the box was off as soon
+# as it boots, so a long power-off never extends a key's 7-day life; the random
+# delay only spreads the work, the deadline is 7 days, not 7 days to the minute.
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=15min
+AccuracySec=1min
+Unit=droplet-bay-recovery-expiry.service
+
+[Install]
+WantedBy=timers.target

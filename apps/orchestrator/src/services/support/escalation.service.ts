@@ -17,6 +17,7 @@
  * is this one, and the route in front of it requires BOTH grants.
  */
 import type { PrismaClient } from "@prisma/client";
+import { nudgeOutbox } from "../pm/pm-outbox.js";
 import { writeActivity } from "../pm/pm.service.js";
 import { ticketKey } from "./support-mappers.js";
 import { assertDeskOpen, findTicketRow, getTicket } from "./ticket.service.js";
@@ -84,7 +85,7 @@ export async function escalateTicket(
       data: { fromId, toId, kind: "RELATES", createdById: viewer.id },
     });
 
-    await writeActivity(tx, { workItemId: created.id, actorId: viewer.id, verb: "created" });
+    await writeActivity(tx, { workItemId: created.id, actorId: viewer.id, verb: "created", nudge: false });
     // Each end's own timeline explains the link, naming the OTHER end.
     await tx.pmActivity.createMany({
       data: [
@@ -107,6 +108,7 @@ export async function escalateTicket(
     await tx.pmWorkItem.update({ where: { id: ticket.id }, data: { updatedAt: now } });
     return created;
   });
+  nudgeOutbox();
 
   return {
     workItem: {

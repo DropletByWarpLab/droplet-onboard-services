@@ -1345,14 +1345,27 @@ model ResetJob {
 
 model Camera {
   id             String   @id @default(uuid())
+  /// The camera's FRIGATE KEY, not a label (WARP-3506): always the output of
+  /// `toFrigateKey()` (apps/orchestrator/src/services/camera-key.ts) — lower
+  /// case, [a-z0-9_] only. It names the recording directory, keys Frigate's
+  /// events and roots the MQTT topic tree, so DB↔Frigate joins are plain
+  /// string equality. What the operator typed lives in `displayName`.
   name           String   @unique
   displayName    String
   manufacturer   String?
   model          String?
   ipAddress      String
   macAddress     String?
+  /// Operator toggle (detection on/off). Says NOTHING about adoption — that
+  /// is `adoption` below (WARP-3510).
   enabled        Boolean  @default(true)
   autoDiscovered Boolean  @default(false)
+  /// WARP-3510 — is this row a real camera, or a discovery candidate?
+  /// An explicit state, never inferred from `enabled` (an operator-disabled
+  /// live camera is `enabled = false` and still ADOPTED). Discovery merges
+  /// rank ADOPTED rows first and only ever delete or rename CANDIDATE rows;
+  /// a Frigate key owned by an ADOPTED row is never pruned.
+  adoption       CameraAdoption @default(CANDIDATE)
   lastSeen       DateTime @default(now())
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
@@ -1424,6 +1437,17 @@ model CameraAccessGrant {
   @@unique([userId, cameraId])
   @@index([userId])
   @@index([cameraId])
+}
+
+/// WARP-3510 — whether a Camera row is a camera the operator (or discovery's
+/// verified auto-add) put into Frigate, or a device discovery merely found.
+enum CameraAdoption {
+  /// Found on the network, not yet in Frigate. A placeholder: discovery may
+  /// rename, merge or delete it.
+  CANDIDATE
+  /// In Frigate and owned by the operator. Never renamed, merged away or
+  /// pruned by discovery.
+  ADOPTED
 }
 
 /// WARP-1851 — how a camera's retention window is decided.
@@ -4989,6 +5013,13 @@ enum OffLanChannelKey {
   /// OpenStreetMap (Nominatim) lookup. Owner-only switch, default off;
   /// read fail-closed by `placeLookupGate` in GET /api/calendar/places.
   place_lookup
+  /// WARP-3532 (ADR-069 §9) — "may work data leave this box": the one switch
+  /// for webhooks and Slack / Teams / Discord / Google Chat notifications, and
+  /// for WS-18's GitHub / GitLab poll. Owner-only, default off; read
+  /// fail-closed by `workIntegrationsGate` before every off-LAN delivery. LAN
+  /// destinations never need it (they still pass the SSRF guard). One key, not
+  /// one per integration: an owner decides this once.
+  work_integrations
 }
 
 /// WARP-473 — Phase G1. File ↔ ChatMessage citations.
@@ -5540,6 +5571,8 @@ model PmWorkspace {
   createdAt DateTime    @default(now())
   updatedAt DateTime    @default(now()) @updatedAt
   projects  PmProject[]
+  /// WARP-3532 — the workspace's webhook destinations.
+  webhooks  PmWebhook[]
 }
 
 /// A project (Plane "project"). `identifier` is the short key prefix (e.g.
@@ -5594,6 +5627,8 @@ model PmProject {
   cycles     PmCycle[]
   modules    PmModule[]
   properties PmCustomProperty[]
+  /// WARP-3532 — webhooks scoped to this project (cascade with it).
+  webhooks   PmWebhook[]
 
   /// WARP-2117 — the deals this project delivers. A won deal becomes a job;
   /// the link is on the deal so deleting the project leaves the commercial
@@ -6148,6 +6183,135 @@ model PmActivity {
 
   @@index([workItemId, createdAt])
   @@index([notifyStatus, createdAt])
+  /// WARP-3532 (ADR-069 §7) — the outbox cursor's read: "rows after
+  /// (createdAt, id), oldest first, LIMIT n". Without it every consumer sweep
+  /// is a sequential scan plus a sort of the whole feed, several times a
+  /// minute, for the life of the box. The pair matches the ORDER BY exactly, so
+  /// the planner walks the index and stops at the limit.
+  @@index([createdAt, id])
+}
+
+// ── WARP-3532 (ADR-069 §9): work webhooks and chat-app notifications ─────────
+//
+// Work events leave the box through one gate: the owner's `work_integrations`
+// off-LAN switch (a destination on the box's own LAN needs no switch but always
+// passes the SSRF guard). The PmActivity outbox (ADR-069 §7) feeds the fan-out;
+// `PmWebhookDelivery` IS the queue — there is no job table beside it.
+
+/// What a `PmWebhook` sends. `JSON` is the documented v1 payload
+/// (docs/work-webhooks.md); the others are the same event rendered as the
+/// incoming-webhook body that chat app expects.
+enum PmWebhookFormat {
+  JSON
+  SLACK
+  TEAMS
+  DISCORD
+  GOOGLE_CHAT
+}
+
+/// Why a webhook is or is not delivering. Paired with `PmWebhook.enabled` by
+/// the `PmWebhook_enabled_matches_status` CHECK, so the boolean a query can
+/// index on and the reason a person reads can never disagree:
+/// `enabled` ⇔ `status = ACTIVE`.
+///   ACTIVE           delivering.
+///   PAUSED           an owner or admin turned it off.
+///   DISABLED_FAILING the box turned it off after 20 consecutive failed
+///                    attempts, and told the owners and admins.
+enum PmWebhookStatus {
+  ACTIVE
+  PAUSED
+  DISABLED_FAILING
+}
+
+/// One delivery's place in the retry ladder. Explicit, never inferred from
+/// `attempts` or `deliveredAt` (CLAUDE.md "no guessing").
+///   PENDING    never attempted — or held back because the destination is off
+///              the LAN and the `work_integrations` switch is off.
+///   FAILED     attempted at least once and failed; `nextAttemptAt` is the retry.
+///   DELIVERED  a 2xx. `deliveredAt` is set exactly when this is.
+///   GIVEN_UP   out of retries, expired, or its webhook was turned off.
+enum PmWebhookDeliveryStatus {
+  PENDING
+  DELIVERED
+  FAILED
+  GIVEN_UP
+}
+
+/// A destination for work events. `urlEnc` is bearer-like for chat apps (a
+/// Slack incoming-webhook URL IS the credential), so the full URL is sealed at
+/// rest and never returned, logged, audited or sent in a notification. `urlEnc`
+/// and `secretEnc` use separate AAD labels under the SaaS credential key, so
+/// neither blob can be opened as the other. The URL's host is shown; its path
+/// remains write-only. The HMAC signing secret is shown once on create/rotate.
+model PmWebhook {
+  id                  String          @id @default(uuid())
+  workspaceId         String
+  workspace           PmWorkspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  /// Null = every project in the workspace. Cascade, not SetNull: a
+  /// project-scoped hook that survived its project as a workspace-wide one
+  /// would widen what it sends.
+  projectId           String?
+  project             PmProject?      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  name                String
+  urlEnc              String
+  format              PmWebhookFormat @default(JSON)
+  secretEnc           String
+  /// Event names from `WORK_EVENT_NAMES` (services/pm/webhook-events.ts) — a
+  /// text array, not a Postgres enum, because the vocabulary grows with the
+  /// slices (`ticket.*` joins with the service desk) and a value must never
+  /// need a migration to be subscribable. Validated on write; never empty.
+  events              String[]
+  enabled             Boolean         @default(true)
+  status              PmWebhookStatus @default(ACTIVE)
+  /// Consecutive failed ATTEMPTS (not events); any success resets it. At 20 the
+  /// box disables the webhook.
+  consecutiveFailures Int             @default(0)
+  createdById         String?
+  createdAt           DateTime        @default(now())
+  updatedAt           DateTime        @default(now()) @updatedAt
+
+  deliveries PmWebhookDelivery[]
+
+  /// The fan-out's lookup: "enabled webhooks for this workspace".
+  @@index([workspaceId, enabled])
+  /// WARP-845: an unindexed ON DELETE CASCADE FK makes the parent delete a
+  /// sequential scan of this table.
+  @@index([projectId])
+}
+
+/// One event, for one webhook — and the queue the delivery worker drains. The
+/// worker's claim is `FOR UPDATE SKIP LOCKED` over the partial index
+/// `PmWebhookDelivery_due_idx` (raw migration SQL — Prisma cannot express a
+/// WHERE-filtered index), which moves `nextAttemptAt` forward as a lease, so a
+/// worker that dies mid-send is retried rather than stuck.
+model PmWebhookDelivery {
+  id             String                  @id @default(uuid())
+  webhookId      String
+  webhook        PmWebhook               @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+  event          String
+  /// What this delivery came from, for idempotence: `activity:<PmActivity.id>`
+  /// for the outbox fan-out, a caller-chosen key for a direct enqueue (the SLA
+  /// events WS-14 emits); null for a test ping and a re-delivery. NOT a foreign
+  /// key: the delivery log outlives the activity (deleting a work item cascades
+  /// its activity away). `(webhookId, sourceKey)` is unique, which is what makes
+  /// the fan-out idempotent — a replayed outbox row creates nothing the second
+  /// time. NULLs are distinct in a unique index, which is exactly what a ping
+  /// and a re-delivery need.
+  sourceKey      String?
+  /// The v1 event payload, as built at fan-out — the body is rendered from it
+  /// at send time.
+  payload        Json
+  status         PmWebhookDeliveryStatus @default(PENDING)
+  attempts       Int                     @default(0)
+  nextAttemptAt  DateTime                @default(now())
+  lastStatusCode Int?
+  lastError      String?
+  createdAt      DateTime                @default(now())
+  deliveredAt    DateTime?
+
+  @@unique([webhookId, sourceKey])
+  /// The delivery log: newest first, per webhook.
+  @@index([webhookId, createdAt(sort: Desc)])
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
