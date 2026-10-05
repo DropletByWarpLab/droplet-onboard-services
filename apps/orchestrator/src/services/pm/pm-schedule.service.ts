@@ -25,7 +25,7 @@
 
 import type { Prisma, PmModuleStatus, PrismaClient } from "@prisma/client";
 import { DEPARTMENT_SELECT } from "./pm-department.js";
-import { PM_ERRORS, WORK_ITEM_INCLUDE, mapWorkItem, type ApiWorkItem } from "./pm.service.js";
+import { PM_ERRORS, WORK_ITEM_INCLUDE, isServiceDesk, mapWorkItem, type ApiWorkItem } from "./pm.service.js";
 
 // ── Limits ────────────────────────────────────────────────────────────────────
 /** A year-quarter view of three years is the widest window the Timeline asks for. */
@@ -131,7 +131,7 @@ export async function getProjectTimeline(
     where: { id: projectId },
     include: { department: { select: DEPARTMENT_SELECT } },
   });
-  if (!project) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
+  if (!project || isServiceDesk(project)) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
 
   const fromAt = utcMidnight(range.from);
   // Exclusive upper bound = midnight AFTER the `to` day, so a row carrying a
@@ -267,7 +267,7 @@ function myWorkWhere(
 ): Prisma.PmWorkItemWhereInput {
   const base: Prisma.PmWorkItemWhereInput = {
     isArchived: false,
-    project: { isArchived: false },
+    project: { isArchived: false, kind: "PROJECT" },
   };
   const mine: Prisma.PmWorkItemWhereInput = { assignees: { some: { userId } } };
   const todayStart = utcMidnight(today);

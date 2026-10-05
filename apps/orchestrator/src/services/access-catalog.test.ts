@@ -32,9 +32,10 @@ import { MODULES } from "../modules/module-registry.js";
 
 describe("access-catalog — module vocabulary", () => {
   // WARP-2117/2018 added `crm` and `contacts`, taking this from 12 to 14;
-  // WARP-2581 added `money` for 15. The list is pinned so a new ModuleId cannot arrive without someone writing its
+  // WARP-2581 added `money` for 15; WARP-3528 added `support` for 16. The list
+  // is pinned so a new ModuleId cannot arrive without someone writing its
   // §9 ladder — which is exactly what this test caught each time they did.
-  it("gates the 15 non-core ModuleIds; chat is the always-on module at act", () => {
+  it("gates the 16 non-core ModuleIds; chat is the always-on module at act", () => {
     expect([...GATEABLE_MODULE_IDS].sort()).toEqual(
       [
         "calendar",
@@ -50,6 +51,7 @@ describe("access-catalog — module vocabulary", () => {
         "network",
         "projects",
         "smart_home",
+        "support",
         "team_chat",
         "voice",
       ].sort(),
@@ -127,8 +129,8 @@ describe("access-catalog — tier default catalog (null accessRoleId world)", ()
   });
 });
 
-// A module's `view` can be floored at family (`crm`, `projects` and `money`: an
-// external guest gets nothing from the company's own data). `view` is the
+// A module's `view` can be floored at family (`crm`, `projects`, `money` and
+// `support`: an external guest gets nothing from the company's own data). `view` is the
 // lowest rung, so a tier below its floor would clamp DOWN to it and hold it
 // anyway: a guest role could store crm:view and the roles list would advertise
 // reach the routes refuse. The floor is a refusal (`refuseBelowFloor`), the
@@ -147,20 +149,21 @@ describe("access-catalog — a family floor on `view` is a refusal (refuseBelowF
   // company-wide business data unless it is explicitly shared with them. Nothing
   // in the CRM or Projects is shared per record, so both refuse `view` below the
   // family floor.
-  it("the refusal is opt-in per module: crm, projects and money (below family) are the only ones that refuse a guest tier, and none refuses a family tier", () => {
+  it("the refusal is opt-in per module: crm, projects, money and support (below family) are the only ones that refuse a guest tier, and none refuses a family tier", () => {
     const refusing = (tier: "guest" | "family") =>
       GATEABLE_MODULE_IDS.filter((m) => maxLevelFor(tier, m) === null || clampLevel(tier, m, "manage") === null);
-    expect([...refusing("guest")].sort()).toEqual(["crm", "money", "projects"]);
+    expect([...refusing("guest")].sort()).toEqual(["crm", "money", "projects", "support"]);
     expect(refusing("family")).toEqual([]);
     // the route gate and the assistant gate mount off THIS list
-    expect([...tierRefusingModuleIds()].sort()).toEqual(["crm", "money", "projects"]);
+    expect([...tierRefusingModuleIds()].sort()).toEqual(["crm", "money", "projects", "support"]);
   });
 
-  it("only crm, projects and money refuse a tier: every other module still clamps to at least `view`", () => {
-    // The refusal is opt-in per module. Crm, projects and money refuse below
-    // family (guest; WARP-3365 / WARP-3369 for the business three). This pins
-    // the set exactly, in both directions.
-    const refusing = new Set<string>(["crm", "projects", "money"]);
+  it("only crm, projects, money and support refuse a tier: every other module still clamps to at least `view`", () => {
+    // The refusal is opt-in per module. Crm, projects, money and support refuse
+    // below family (guest; WARP-3365 / WARP-3369 for the business three,
+    // WARP-3528 for the service desk). This pins the set exactly, in both
+    // directions.
+    const refusing = new Set<string>(["crm", "projects", "money", "support"]);
     for (const moduleId of GATEABLE_MODULE_IDS) {
       if (refusing.has(moduleId)) continue;
       for (const tier of ["family", "guest"] as const) {
@@ -172,7 +175,7 @@ describe("access-catalog — a family floor on `view` is a refusal (refuseBelowF
     expect(maxLevelFor("family", "crm")).not.toBeNull();
   });
 
-  it("a role-less guest's catalog has no crm, projects or money row; a role-less family, admin and owner keep theirs", () => {
+  it("a role-less guest's catalog has no crm, projects, money or support row; a role-less family, admin and owner keep theirs", () => {
     const level = (tier: "guest" | "family" | "admin" | "owner", moduleId: ModuleId) =>
       fullCatalogFeatures(tier).find((f) => f.moduleId === moduleId)?.level;
     expect(level("guest", "crm")).toBeUndefined();
@@ -181,27 +184,39 @@ describe("access-catalog — a family floor on `view` is a refusal (refuseBelowF
     expect(level("family", "money")).toBe("view"); // Money is read-only for a member: no act level
     expect(level("admin", "money")).toBe("manage");
     expect(level("owner", "money")).toBe("manage");
+    // WARP-3528 — a customer's own words are the company's data: no row for a
+    // guest. `act` (answering and working tickets) is what a member holds;
+    // `manage` (running the desks) is admin work, so only admin and owner.
+    expect(level("guest", "support")).toBeUndefined();
+    expect(level("family", "support")).toBe("act");
+    expect(level("admin", "support")).toBe("manage");
+    expect(level("owner", "support")).toBe("manage");
     for (const moduleId of ["crm", "projects"] as const) {
       expect(level("family", moduleId), `family ${moduleId}`).toBe("manage");
       expect(level("admin", moduleId), `admin ${moduleId}`).toBe("manage");
       expect(level("owner", moduleId), `owner ${moduleId}`).toBe("manage");
     }
     // and nothing else about the guest's catalog moved: every other module is still there, chat included,
-    // so chat + every gateable module but those three.
-    expect(fullCatalogFeatures("guest")).toHaveLength(GATEABLE_MODULE_IDS.length + 1 - 3);
+    // so chat + every gateable module but those four.
+    expect(fullCatalogFeatures("guest")).toHaveLength(GATEABLE_MODULE_IDS.length + 1 - 4);
     for (const moduleId of ["files", "team_chat", "voice", "calendar", "chat"] as const) {
       expect(level("guest", moduleId), `guest ${moduleId}`).toBeDefined();
     }
   });
 
-  it("a guest-based role cannot store a crm, projects or money grant, at any level; a family-based one clamps as before", () => {
-    for (const moduleId of ["crm", "projects", "money"] as const) {
+  it("a guest-based role cannot store a crm, projects, money or support grant, at any level; a family-based one clamps as before", () => {
+    for (const moduleId of ["crm", "projects", "money", "support"] as const) {
       for (const level of ["view", "act", "manage"] as const) {
         expect(clampLevel("guest", moduleId, level), `guest ${moduleId} ${level}`).toBeNull();
       }
     }
     expect(clampLevel("family", "money", "manage")).toBe("view"); // manage is admin-only: a clamp, not a refusal
     expect(clampLevel("admin", "money", "manage")).toBe("manage");
+    // support: act is a family rung, manage is admin-only — a clamp, not a refusal
+    expect(clampLevel("family", "support", "manage")).toBe("act");
+    expect(clampLevel("family", "support", "act")).toBe("act");
+    expect(clampLevel("family", "support", "view")).toBe("view");
+    expect(clampLevel("admin", "support", "manage")).toBe("manage");
     for (const moduleId of ["crm", "projects"] as const) {
       for (const level of ["view", "act", "manage"] as const) {
         expect(clampLevel("guest", moduleId, level), `guest ${moduleId} ${level}`).toBeNull();

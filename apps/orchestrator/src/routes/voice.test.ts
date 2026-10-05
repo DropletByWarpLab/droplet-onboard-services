@@ -175,13 +175,13 @@ describe("GET /api/voice/status — the transcript stays out of the default answ
 });
 
 describe("GET /api/voice/devices (WARP-1036)", () => {
-  it("proxies to voice-io /audio/devices", async () => {
+  it("proxies to voice-io /voice/devices (WARP-3710: scored list + active pair)", async () => {
     fetchSpy.mockResolvedValue(upstreamJson(200, { input: null, devices: [] }));
     const res = await request(buildApp(mkUser("owner"))).get("/api/voice/devices");
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ input: null, devices: [] });
     expect(fetchSpy).toHaveBeenCalledWith(
-      "http://voice-io:8086/audio/devices",
+      "http://voice-io:8086/voice/devices",
       expect.objectContaining({ method: "GET" }),
     );
   });
@@ -498,6 +498,187 @@ describe("POST /api/voice/restart-processor (WARP-1057)", () => {
     const whats = recordActivityMock.mock.calls.map((c) => c[0].what);
     expect(whats).not.toContain("Voice processor restarted");
     expect(whats).not.toContain("Voice processor restart failed");
+  });
+});
+
+describe("POST /api/voice/mic/restart (WARP-3710)", () => {
+  const OK = {
+    ok: true,
+    device: "reSpeaker XVF3800 (hw:3,0)",
+    device_is_xvf: true,
+    dsp_rebooted: false,
+    dsp_error: null,
+    state: "listening",
+    mic_fault: null,
+    restarted_at: 123,
+  };
+
+  it("forwards {} and audits a successful restart naming the device", async () => {
+    fetchSpy.mockResolvedValue(upstreamJson(200, OK));
+    const res = await request(buildApp(mkUser("owner")))
+      .post("/api/voice/mic/restart")
+      .send({});
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(OK);
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "http://voice-io:8086/voice/mic/restart",
+      expect.objectContaining({ method: "POST", body: JSON.stringify({}) }),
+    );
+    expect(recordActivityMock).toHaveBeenCalledTimes(1);
+    expect(recordActivityMock.mock.calls[0]![0]).toMatchObject({
+      kind: "voice",
+      severity: "info",
+      what: "Microphone restarted",
+      sub: "Now using reSpeaker XVF3800 (hw:3,0)",
+      refs: { surface: "voice-mic-restart", upstreamStatus: 200 },
+      actor: { type: "user", id: "user-owner" },
+    });
+  });
+
+  it("forwards a strict-boolean dspReboot and notes it in the audit row", async () => {
+    fetchSpy.mockResolvedValue(upstreamJson(200, { ...OK, dsp_rebooted: true }));
+    const res = await request(buildApp(mkUser("admin")))
+      .post("/api/voice/mic/restart")
+      .send({ dspReboot: true, junk: "dropped" });
+    expect(res.status).toBe(200);
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "http://voice-io:8086/voice/mic/restart",
+      expect.objectContaining({ body: JSON.stringify({ dspReboot: true }) }),
+    );
+    expect(recordActivityMock.mock.calls[0]![0]).toMatchObject({
+      sub: "Now using reSpeaker XVF3800 (hw:3,0) · DSP rebooted",
+    });
+  });
+
+  it("rejects a non-boolean dspReboot before touching hardware", async () => {
+    for (const bad of ["true", 1, null, {}]) {
+      const res = await request(buildApp(mkUser("owner")))
+        .post("/api/voice/mic/restart")
+        .send({ dspReboot: bad });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe("invalid_dsp_reboot");
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+
+  it("relays an upstream fault verbatim and audits the failure", async () => {
+    fetchSpy.mockResolvedValue(
+      upstreamJson(503, { detail: "No microphone came back after the restart." }),
+    );
+    const res = await request(buildApp(mkUser("owner")))
+      .post("/api/voice/mic/restart")
+      .send({});
+    expect(res.status).toBe(503);
+    expect(res.body.detail).toMatch(/No microphone came back/);
+    expect(recordActivityMock.mock.calls[0]![0]).toMatchObject({
+      severity: "err",
+      what: "Microphone restart failed",
+      refs: { upstreamStatus: 503 },
+    });
+  });
+
+  it("answers 503 voice_unavailable when unreachable", async () => {
+    fetchSpy.mockRejectedValue(new Error("ECONNREFUSED"));
+    const res = await request(buildApp(mkUser("owner")))
+      .post("/api/voice/mic/restart")
+      .send({});
+    expect(res.status).toBe(503);
+    expect(res.body.error).toBe("voice_unavailable");
+  });
+
+  it("denies every role except owner/admin and never reaches upstream", async () => {
+    for (const role of ["family", "guest", "service"] as const) {
+      const res = await request(buildApp(mkUser(role)))
+        .post("/api/voice/mic/restart")
+        .send({});
+      expect(res.status).toBe(403);
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
+    const whats = recordActivityMock.mock.calls.map((c) => c[0].what);
+    expect(whats).not.toContain("Microphone restarted");
+    expect(whats).not.toContain("Microphone restart failed");
+  });
+});
+
+describe("POST /api/voice/mic/test (WARP-3710)", () => {
+  const RESULT = {
+    ok: true,
+    flatlined: false,
+    rms_dbfs: -38.2,
+    peak_dbfs: -21.4,
+    duration_s: 3,
+    device: "reSpeaker XVF3800 (hw:3,0)",
+    device_is_xvf: true,
+    played: null,
+  };
+
+  it("forwards the validated fields and relays the result", async () => {
+    fetchSpy.mockResolvedValue(upstreamJson(200, RESULT));
+    const res = await request(buildApp(mkUser("owner")))
+      .post("/api/voice/mic/test")
+      .send({ playback: true, duration_s: 4, junk: 1 });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(RESULT);
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "http://voice-io:8086/voice/mic/test",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ playback: true, duration_s: 4 }),
+      }),
+    );
+  });
+
+  it("works with an empty body (voice-io applies its 3 s default)", async () => {
+    fetchSpy.mockResolvedValue(upstreamJson(200, RESULT));
+    const res = await request(buildApp(mkUser("admin")))
+      .post("/api/voice/mic/test")
+      .send({});
+    expect(res.status).toBe(200);
+    expect(fetchSpy).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ body: JSON.stringify({}) }),
+    );
+  });
+
+  it("rejects a bad playback flag or duration", async () => {
+    const app = buildApp(mkUser("owner"));
+    for (const body of [
+      { playback: "yes" },
+      { duration_s: 0 },
+      { duration_s: 99 },
+      { duration_s: "3" },
+    ]) {
+      const res = await request(app).post("/api/voice/mic/test").send(body);
+      expect(res.status).toBe(400);
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("relays a 409 busy answer verbatim", async () => {
+    fetchSpy.mockResolvedValue(upstreamJson(409, { detail: "busy" }));
+    const res = await request(buildApp(mkUser("owner")))
+      .post("/api/voice/mic/test")
+      .send({});
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ detail: "busy" });
+  });
+
+  it("answers 503 voice_unavailable when unreachable", async () => {
+    fetchSpy.mockRejectedValue(new Error("ECONNREFUSED"));
+    const res = await request(buildApp(mkUser("owner")))
+      .post("/api/voice/mic/test")
+      .send({});
+    expect(res.status).toBe(503);
+    expect(res.body.error).toBe("voice_unavailable");
+  });
+
+  it("denies non owner/admin roles", async () => {
+    const res = await request(buildApp(mkUser("family")))
+      .post("/api/voice/mic/test")
+      .send({});
+    expect(res.status).toBe(403);
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
 

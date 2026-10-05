@@ -402,3 +402,44 @@ def resolve_devices(
         output_source=output_source,
         all_devices=devs,
     )
+
+
+# ────────────────────────────────────────────────────────────────────
+# WARP-3710 - active-device helpers for the self-heal path
+# ────────────────────────────────────────────────────────────────────
+
+_XVF_NAME_RE = re.compile(r"xvf", re.I)
+
+
+def is_xvf_device(device: Optional[AudioDevice]) -> bool:
+    """True when `device` is a reSpeaker XVF3800 array - the only input
+    `xvf_host REBOOT 1` can reach. A ReSpeaker without an XVF chip, the
+    onboard codec and every USB headset are NOT."""
+    return device is not None and bool(_XVF_NAME_RE.search(device.name or ""))
+
+
+_CARD_DIR_RE = re.compile(r"^card(\d+)$")
+
+
+def alsa_fingerprint(
+    sys_root: Path = Path("/sys/class/sound"),
+) -> Optional[tuple[str, ...]]:
+    """Cheap snapshot of which ALSA cards exist: sorted `cardN:<id>`.
+
+    Used by the hot-plug rescan to notice a USB array enumerating late
+    (or re-enumerating) WITHOUT touching PortAudio - re-initialising it
+    under an open stream is unsafe. None when sysfs is unreadable, which
+    callers treat as "can't tell" rather than "changed".
+    """
+    try:
+        entries = sorted(p for p in sys_root.iterdir() if _CARD_DIR_RE.match(p.name))
+    except OSError:
+        return None
+    out: list[str] = []
+    for card in entries:
+        try:
+            card_id = (card / "id").read_text(encoding="utf-8").strip()
+        except OSError:
+            card_id = ""
+        out.append(f"{card.name}:{card_id}")
+    return tuple(out)
