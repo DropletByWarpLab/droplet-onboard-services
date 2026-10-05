@@ -1,0 +1,119 @@
+/* Project import and export (WARP-3527).
+ *
+ * Two scopes, because the pieces live in two places:
+ *   - the ⋯ menu sits in the page HEADER, which is `.droplet-shell`, so it uses
+ *     the shell tokens (--card-bg, --card-bd, --lift, --surface-2, …);
+ *   - the wizard renders inside the Dialog under `.pm-scope`, so it uses the
+ *     same alias tokens projects.css defines (--bg-canvas, --text-3, …).
+ * No hex literals and no new tokens (design brief §2): every colour below is
+ * an existing variable, or a `color-mix` of two.
+ */
+
+/* ── ⋯ project actions menu ─────────────────────────────────────────────── */
+.pm-import-menu { position: relative; display: inline-flex; }
+.pm-import-menu__panel {
+  position: absolute; right: 0; top: calc(100% + 6px); z-index: 40; min-width: 232px; padding: 6px;
+  background: var(--card-bg); border: 1px solid var(--card-bd); border-radius: 12px; box-shadow: var(--lift);
+}
+.pm-import-menu__item {
+  display: flex; align-items: center; gap: 10px; width: 100%; min-height: 36px; padding: 0 10px;
+  border: 0; border-radius: var(--radius-input); background: transparent; color: var(--text);
+  font: inherit; font-size: 13.5px; text-align: left; cursor: pointer;
+}
+.pm-import-menu__item:hover { background: var(--surface-2); }
+.pm-import-menu__item:focus-visible { outline: none; background: var(--surface-2); box-shadow: 0 0 0 2px var(--brand); }
+.pm-import-menu__item[aria-disabled="true"] { opacity: 0.55; cursor: progress; }
+.pm-import-menu__sep { height: 1px; margin: 4px 6px; background: var(--card-bd); }
+@media (max-width: 720px) {
+  .pm-import-menu__item { min-height: 44px; }
+}
+
+/* ── wizard ─────────────────────────────────────────────────────────────── */
+.pm-scope .pm-imp-steps { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 0 0 18px; padding: 0; list-style: none; }
+.pm-scope .pm-imp-step { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--text-3); }
+.pm-scope .pm-imp-step .num {
+  display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; border-radius: 50%;
+  border: 1.5px solid var(--border-strong); font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums;
+}
+.pm-scope .pm-imp-step.on { color: var(--text); font-weight: 600; }
+.pm-scope .pm-imp-step.on .num { border-color: var(--accent); color: var(--text); }
+.pm-scope .pm-imp-step.done .num { border-color: var(--ok); color: var(--ok); }
+
+.pm-scope .pm-imp-drop {
+  display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 30px 20px; text-align: center;
+  border: 1.5px dashed var(--border-strong); border-radius: 14px; background: var(--bg-tint); cursor: pointer;
+  transition: border-color 150ms var(--ease), background 150ms var(--ease);
+}
+.pm-scope .pm-imp-drop:hover, .pm-scope .pm-imp-drop.over {
+  border-color: var(--accent); background: color-mix(in srgb, var(--accent) 6%, var(--bg-tint));
+}
+.pm-scope .pm-imp-drop:focus-within { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent); }
+.pm-scope .pm-imp-drop strong { font-size: 14px; color: var(--text); }
+.pm-scope .pm-imp-drop span { font-size: 12.5px; color: var(--text-3); max-width: 46ch; }
+.pm-scope .pm-imp-drop input[type="file"] { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.pm-scope .pm-imp-drop-wrap { position: relative; }
+
+.pm-scope .pm-imp-presets { display: grid; gap: 8px; }
+.pm-scope .pm-imp-preset {
+  display: flex; align-items: flex-start; gap: 10px; padding: 11px 13px; border: 1px solid var(--border);
+  border-radius: 12px; background: var(--bg-canvas); cursor: pointer; text-align: left; width: 100%; font: inherit; color: var(--text);
+}
+.pm-scope .pm-imp-preset:hover:not(:disabled) { border-color: var(--border-strong); background: var(--bg-hover); }
+.pm-scope .pm-imp-preset[aria-checked="true"] { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); background: color-mix(in srgb, var(--accent) 7%, var(--bg-canvas)); }
+.pm-scope .pm-imp-preset:focus-visible { outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent); }
+.pm-scope .pm-imp-preset:disabled { opacity: 0.5; cursor: not-allowed; }
+.pm-scope .pm-imp-preset .t { font-size: 13.5px; font-weight: 600; }
+.pm-scope .pm-imp-preset .h { font-size: 12px; color: var(--text-3); margin-top: 2px; }
+.pm-scope .pm-imp-radio {
+  flex: none; width: 16px; height: 16px; margin-top: 2px; border-radius: 50%; border: 1.5px solid var(--border-strong);
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.pm-scope .pm-imp-preset[aria-checked="true"] .pm-imp-radio { border-color: var(--accent); }
+.pm-scope .pm-imp-preset[aria-checked="true"] .pm-imp-radio::after { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+
+.pm-scope .pm-imp-h { margin: 0 0 4px; font-size: 14px; font-weight: 600; color: var(--text); }
+.pm-scope .pm-imp-sub { margin: 0 0 12px; font-size: 12.5px; color: var(--text-3); }
+
+.pm-scope .pm-imp-notes { margin: 12px 0 0; padding: 10px 12px 10px 28px; border-radius: 10px; background: var(--warn-soft); font-size: 12.5px; color: var(--text); }
+.pm-scope .pm-imp-notes li { margin: 3px 0; }
+.pm-scope .pm-imp-error { margin: 12px 0 0; padding: 10px 12px; border-radius: 10px; background: var(--err-soft); font-size: 12.5px; color: var(--text); }
+.pm-scope .pm-imp-error ul { margin: 6px 0 0; padding-left: 18px; }
+
+.pm-scope .pm-imp-scroll { overflow-x: auto; max-width: 100%; border: 1px solid var(--border); border-radius: 12px; }
+.pm-scope .pm-imp-scroll.tall { max-height: 280px; overflow-y: auto; }
+.pm-scope .pm-imp-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.pm-scope .pm-imp-table th {
+  position: sticky; top: 0; background: var(--bg-tint); text-align: left; font-weight: 600; color: var(--text-3);
+  padding: 8px 10px; border-bottom: 1px solid var(--border); white-space: nowrap;
+}
+.pm-scope .pm-imp-table td { padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; color: var(--text); }
+.pm-scope .pm-imp-table tr:last-child td { border-bottom: 0; }
+.pm-scope .pm-imp-table .muted { color: var(--text-3); }
+.pm-scope .pm-imp-table .num { font-variant-numeric: tabular-nums; text-align: right; }
+.pm-scope .pm-imp-table select.pm-input { height: 32px; min-width: 150px; }
+
+.pm-scope .pm-imp-field { display: grid; grid-template-columns: minmax(110px, 150px) minmax(0, 1fr); gap: 10px; align-items: center; padding: 6px 0; }
+.pm-scope .pm-imp-field > label { font-size: 12.5px; color: var(--text-2); font-weight: 500; }
+.pm-scope .pm-imp-field .also { grid-column: 2; font-size: 11.5px; color: var(--text-3); margin-top: -2px; }
+@media (max-width: 720px) {
+  .pm-scope .pm-imp-field { grid-template-columns: 1fr; }
+  .pm-scope .pm-imp-field .also { grid-column: 1; }
+}
+.pm-scope .pm-imp-check { display: flex; align-items: center; gap: 9px; font-size: 13px; color: var(--text); padding: 4px 0; cursor: pointer; }
+.pm-scope .pm-imp-check input { width: 16px; height: 16px; accent-color: var(--accent); }
+
+.pm-scope .pm-imp-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin: 0 0 14px; }
+.pm-scope .pm-imp-tile { background: var(--bg-canvas); border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; }
+.pm-scope .pm-imp-tile .v { font-size: 22px; font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; line-height: 1.1; }
+.pm-scope .pm-imp-tile .l { font-size: 11.5px; color: var(--text-3); margin-top: 3px; }
+
+.pm-scope .pm-imp-bar { height: 8px; border-radius: 999px; background: var(--bg-sunken); overflow: hidden; }
+.pm-scope .pm-imp-bar > span { display: block; height: 100%; border-radius: 999px; background: var(--accent); transition: width 240ms var(--ease); }
+
+.pm-scope .pm-imp-list { margin: 6px 0 0; padding-left: 18px; font-size: 12.5px; color: var(--text-2); }
+.pm-scope .pm-imp-list li { margin: 3px 0; }
+.pm-scope .pm-imp-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; padding: 14px 0 0; margin-top: 16px; border-top: 1px solid var(--border); }
+
+@media (prefers-reduced-motion: reduce) {
+  .pm-scope .pm-imp-bar > span, .pm-scope .pm-imp-drop { transition: none !important; }
+}
