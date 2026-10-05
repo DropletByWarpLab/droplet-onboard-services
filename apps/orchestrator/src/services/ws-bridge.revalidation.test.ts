@@ -51,16 +51,25 @@ async function connect(headers: Record<string, string>, protocol?: string) {
       protocol ? [protocol] : [],
       { headers },
     );
-    ws.on("open", () => {
-      ws.on("close", (code) => resolve({ status: "open", closeCode: code }));
-      // Safety net: if the server never closes, end the test with no code.
-      const timer = setTimeout(() => {
-        ws.close();
-        resolve({ status: "open" });
-      }, 1000);
-      safetyTimers.add(timer);
+    let safetyTimer: ReturnType<typeof setTimeout> | undefined;
+    const clearSafetyTimer = () => {
+      if (safetyTimer === undefined) return;
+      clearTimeout(safetyTimer);
+      safetyTimers.delete(safetyTimer);
+    };
+    ws.on("close", (code) => {
+      clearSafetyTimer();
+      resolve({ status: "open", closeCode: code });
     });
-    ws.on("unexpected-response", (_req, res) => resolve({ status: res.statusCode ?? 0 }));
+    ws.on("open", () => {
+      // Resolve only after the actual close, including the bounded safety net.
+      safetyTimer = setTimeout(() => ws.terminate(), 1000);
+      safetyTimers.add(safetyTimer);
+    });
+    ws.on("unexpected-response", (_req, res) => {
+      clearSafetyTimer();
+      resolve({ status: res.statusCode ?? 0 });
+    });
     ws.on("error", () => undefined);
   });
 }
