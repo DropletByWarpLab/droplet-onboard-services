@@ -45,7 +45,8 @@ from config import (
     DROPLET_SHARE_ROOT, DROPLET_SHARE_STORAGE_ID, DROPLET_SHARE_USER_ID,
 )
 from shared_file import (
-    shared_file_snapshot, UnsafeSharedFile, OversizedSharedFile, SharedFileChanged,
+    shared_file_snapshot, shared_file_identity_matches,
+    UnsafeSharedFile, OversizedSharedFile, SharedFileChanged,
 )
 from extractors.registry import EXTRACTOR_CAPABILITY, dispatch
 from chunker import chunk_spans, format_chunk_with_header
@@ -651,12 +652,19 @@ class IndexHandler(FileSystemEventHandler):
                 return
             # Nextcloud discovers out-of-band writes on access. The shared
             # retry sweep resumes these files once their real IDs exist.
-            if not _resolve_file_id(target):
+            file_id = _resolve_file_id(target)
+            if not file_id:
+                delete_chunks_for_path(target.index_user, target.stored_path)
                 _set_status(target, "failed", reason="nc_file_id_unresolved")
                 return
             try:
                 with shared_file_snapshot(DROPLET_SHARE_ROOT, target.relpath) as snapshot:
-                    self._index_target(snapshot, target)
+                    self._index_target(
+                        snapshot,
+                        target,
+                        expected_file_id=file_id,
+                        expected_source_identity=getattr(snapshot, "source_identity", None),
+                    )
             except SharedFileChanged:
                 # A still-running SMB copy can outlast the debounce window.
                 # Retry the final bytes even if its last event was coalesced.
@@ -670,7 +678,14 @@ class IndexHandler(FileSystemEventHandler):
 
         self._index_target(path, target)
 
-    def _index_target(self, path: str, target: WatchTarget) -> None:
+    def _index_target(
+        self,
+        path: str,
+        target: WatchTarget,
+        *,
+        expected_file_id: int | None = None,
+        expected_source_identity: tuple[int, int, int, int] | None = None,
+    ) -> None:
 
         # Skip hidden files, part files (Nextcloud uploads in progress), and tiny files.
         basename = os.path.basename(target.relpath)
@@ -715,9 +730,13 @@ class IndexHandler(FileSystemEventHandler):
         # Resolve Nextcloud file ID
         file_id = _resolve_file_id(target)
         if not file_id:
+            if expected_file_id is not None:
+                raise SharedFileChanged("shared file identity disappeared during extraction")
             logger.debug("No fileId for %s — skipping", target.stored_path)
             _set_status(target, "failed", reason="nc_file_id_unresolved")
             return
+        if expected_file_id is not None and file_id != expected_file_id:
+            raise SharedFileChanged("shared file identity changed during extraction")
 
         # Chunk — span-scoped + sentence-aware. Each Chunk carries its
         # anchor (WARP-287) and section_path (WARP-435).
@@ -744,6 +763,17 @@ class IndexHandler(FileSystemEventHandler):
                 target, "failed", nc_file_id=file_id, reason="embedding_count_mismatch"
             )
             return
+
+        # The shared path can be replaced while an extractor or embedder is
+        # running. Keep the captured Nextcloud ID and source inode/version
+        # paired through the last check before any chunk writes.
+        if expected_file_id is not None:
+            if _resolve_file_id(target) != expected_file_id:
+                raise SharedFileChanged("shared file identity changed before indexing")
+            if expected_source_identity is not None and not shared_file_identity_matches(
+                DROPLET_SHARE_ROOT, target.relpath, expected_source_identity
+            ):
+                raise SharedFileChanged("shared file path changed before indexing")
 
         # WARP-214: forward ExtractedDoc.metadata (chain[], subtitle_source) to
         # the chunk row so the dashboard can render breadcrumbs + source-channel

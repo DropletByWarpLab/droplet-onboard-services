@@ -145,6 +145,91 @@ def test_share_pipeline_persists_same_file_id_under_distinct_corpus(share_root, 
     assert status.call_args.args[1] == "ready"
 
 
+@pytest.mark.parametrize("subsequent_ids", [(43,), (None,), (42, 43)])
+def test_share_identity_change_never_indexes_snapshot_under_new_or_unresolved_id(
+    share_root, monkeypatch, subsequent_ids
+):
+    file = share_root / "note.txt"
+    file.write_text("The captured descriptor still contains the previous file bytes.")
+
+    @contextmanager
+    def captured(root, relative):
+        assert root == str(share_root)
+        assert relative == "note.txt"
+        # Model a stable private snapshot of file ID 42 while Nextcloud's
+        # current path lookup changes to a new file-cache row during extract.
+        yield str(file)
+
+    ids = iter((42, *subsequent_ids))
+    monkeypatch.setattr(watcher, "shared_file_snapshot", captured)
+    monkeypatch.setattr(watcher, "_resolve_file_id", lambda target: next(ids))
+    span = Span(text=file.read_text(), anchor=NoneAnchor(kind="none"))
+    monkeypatch.setattr(
+        watcher, "dispatch", lambda path, mime: {"spans": [span], "metadata": {}}
+    )
+    monkeypatch.setattr(watcher, "chunk_spans", lambda spans: [MagicMock(
+        text=span.text, anchor=span.anchor, section_path=[]
+    )])
+    monkeypatch.setattr(watcher, "format_chunk_with_header", lambda text, name, section: text)
+    monkeypatch.setattr(watcher, "embed_texts", lambda texts: [[0.1, 0.2]])
+    upsert = MagicMock()
+    purge = MagicMock()
+    status = MagicMock()
+    monkeypatch.setattr(watcher, "upsert_chunk", upsert)
+    monkeypatch.setattr(watcher, "delete_chunks_for_path", purge)
+    monkeypatch.setattr(watcher, "prune_excess_chunks", MagicMock())
+    monkeypatch.setattr(watcher, "_set_status", status)
+    monkeypatch.setattr(watcher, "publish", MagicMock())
+
+    watcher.IndexHandler()._index(str(file))
+
+    upsert.assert_not_called()
+    purge.assert_called_once_with("__droplet_share__", "/Droplet/note.txt")
+    assert status.call_args.args[1] == "failed"
+    assert status.call_args.kwargs["reason"] == "shared_file_changed"
+
+
+def test_share_path_replacement_before_chunk_writes_purges_stale_content(
+    share_root, monkeypatch
+):
+    file = share_root / "note.txt"
+    file.write_text("The captured inode must still match the shared path before writes.")
+
+    class CapturedSnapshot(str):
+        source_identity = (1, 2, 70, 3)
+
+    @contextmanager
+    def captured(root, relative):
+        yield CapturedSnapshot(str(file))
+
+    monkeypatch.setattr(watcher, "shared_file_snapshot", captured)
+    monkeypatch.setattr(watcher, "_resolve_file_id", lambda target: 42)
+    monkeypatch.setattr(watcher, "shared_file_identity_matches", lambda *args: False)
+    span = Span(text=file.read_text(), anchor=NoneAnchor(kind="none"))
+    monkeypatch.setattr(
+        watcher, "dispatch", lambda path, mime: {"spans": [span], "metadata": {}}
+    )
+    monkeypatch.setattr(watcher, "chunk_spans", lambda spans: [MagicMock(
+        text=span.text, anchor=span.anchor, section_path=[]
+    )])
+    monkeypatch.setattr(watcher, "format_chunk_with_header", lambda text, name, section: text)
+    monkeypatch.setattr(watcher, "embed_texts", lambda texts: [[0.1, 0.2]])
+    upsert = MagicMock()
+    purge = MagicMock()
+    status = MagicMock()
+    monkeypatch.setattr(watcher, "upsert_chunk", upsert)
+    monkeypatch.setattr(watcher, "delete_chunks_for_path", purge)
+    monkeypatch.setattr(watcher, "prune_excess_chunks", MagicMock())
+    monkeypatch.setattr(watcher, "_set_status", status)
+    monkeypatch.setattr(watcher, "publish", MagicMock())
+
+    watcher.IndexHandler()._index(str(file))
+
+    upsert.assert_not_called()
+    purge.assert_called_once_with("__droplet_share__", "/Droplet/note.txt")
+    assert status.call_args.kwargs["reason"] == "shared_file_changed"
+
+
 def test_unsafe_shared_file_never_reaches_extractor_and_purges_old_text(share_root, monkeypatch):
     (share_root / "link.txt").write_text("This path is rejected by the secure capture.")
     @contextmanager

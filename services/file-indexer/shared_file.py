@@ -30,6 +30,19 @@ class SharedFileChanged(ValueError):
     pass
 
 
+class SharedFileSnapshot(str):
+    """Private snapshot path bound to the source file identity it captured."""
+
+    def __new__(cls, path: str, source_identity: tuple[int, int, int, int]):
+        value = super().__new__(cls, path)
+        value.source_identity = source_identity
+        return value
+
+
+def _file_identity(metadata: os.stat_result) -> tuple[int, int, int, int]:
+    return metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns
+
+
 def open_shared_file(root: str, relative_path: str) -> int:
     """Return a regular-file descriptor, refusing links in every component."""
     parts = relative_path.split("/")
@@ -58,6 +71,20 @@ def open_shared_file(root: str, relative_path: str) -> int:
         os.close(directory)
 
 
+def shared_file_identity_matches(
+    root: str, relative_path: str, expected: tuple[int, int, int, int]
+) -> bool:
+    """Check that the path still names the captured regular-file version."""
+    try:
+        descriptor = open_shared_file(root, relative_path)
+    except (OSError, UnsafeSharedFile):
+        return False
+    try:
+        return _file_identity(os.fstat(descriptor)) == expected
+    finally:
+        os.close(descriptor)
+
+
 @contextmanager
 def shared_file_snapshot(root: str, relative_path: str):
     """Yield a bounded private copy of the safely opened file."""
@@ -79,6 +106,9 @@ def shared_file_snapshot(root: str, relative_path: str):
                     destination.write(block)
                     remaining -= len(block)
             after = os.fstat(source.fileno())
-            if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+            if _file_identity(before) != _file_identity(after):
                 raise SharedFileChanged("shared file changed during capture")
-            yield str(snapshot)
+            identity = _file_identity(before)
+            if not shared_file_identity_matches(root, relative_path, identity):
+                raise SharedFileChanged("shared file path changed during capture")
+            yield SharedFileSnapshot(str(snapshot), identity)

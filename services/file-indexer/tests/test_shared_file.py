@@ -57,6 +57,32 @@ def test_snapshot_extracts_private_regular_copy_and_removes_it(tmp_path, monkeyp
 
 
 @pytest.mark.skipif(not SECURE_OPEN_SUPPORTED, reason="appliance no-follow API requires POSIX")
+def test_snapshot_rejects_path_replacement_even_when_open_descriptor_is_unchanged(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "note.txt"
+    replacement = tmp_path / "replacement.txt"
+    source.write_text("Captured bytes belong to the original inode.")
+    replacement.write_text("The path now names a different inode.")
+    real_fstat = os.fstat
+    calls = 0
+
+    def replace_after_capture(descriptor):
+        nonlocal calls
+        calls += 1
+        # open_shared_file and the pre-copy check are calls one and two;
+        # replace the directory entry immediately before the post-copy fstat.
+        if calls == 3:
+            os.replace(replacement, source)
+        return real_fstat(descriptor)
+
+    monkeypatch.setattr(os, "fstat", replace_after_capture)
+    with pytest.raises(shared_file.SharedFileChanged, match="path changed"):
+        with shared_file.shared_file_snapshot(str(tmp_path), "note.txt"):
+            pytest.fail("a replaced pathname reached extraction")
+
+
+@pytest.mark.skipif(not SECURE_OPEN_SUPPORTED, reason="appliance no-follow API requires POSIX")
 @pytest.mark.parametrize("directory_link", [False, True])
 def test_snapshot_refuses_file_and_directory_symlink_escapes(tmp_path, directory_link):
     root = tmp_path / "share"
