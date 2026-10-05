@@ -256,7 +256,15 @@ check "Docker secret: openwrt_password" _openwrt_secret || true
 # Require routing's own /health to report connected:true; on failure print its
 # `error` field, which names ROUTER_AUTH (wrong password) vs unreachable.
 # Skip under the same ROUTING_MODE guard as lib/local-dns.sh.
-_routing_health() { curl -sf --max-time 5 "${ROUTING_SERVICE_URL:-http://localhost:8080}/health"; }
+_routing_health() {
+  local url="${ROUTING_SERVICE_URL:-http://localhost:8080}"
+  local -a tls_args=()
+  if [ "$ITLS_SCHEME" = https ]; then
+    url="${url/#http:/https:}"
+    tls_args=(--cacert "$_itls_host_bundle/ca.pem" --cert "$_itls_host_bundle/cert.pem" --key "$_itls_host_bundle/key.pem")
+  fi
+  curl -sf --max-time 5 "${tls_args[@]}" "${url%/}/health"
+}
 _routing_connected() { _routing_health | grep -Eq '"connected" *: *true'; }
 _router_auth() {
   wait_for "routing router auth" 60 _routing_connected && return 0

@@ -2499,6 +2499,55 @@ else
   fail "verify.sh still only checks that the openwrt_password file exists"
 fi
 
+# Exercise the shipping probe without running verify.sh's other stack checks.
+# The curl stub refuses an HTTPS health request unless all three host-admin
+# paths arrive as intact arguments (the checkout path can contain spaces).
+p13_routing_probe() (
+  ITLS_SCHEME="$1" ROUTING_SERVICE_URL="$2"
+  _itls_host_bundle="$TMP_ROOT/host admin"
+  P13_CONNECTED="$3"
+  P13_PROBE_URL="$4"
+  curl() {
+    local ca="" cert="" key="" url=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --cacert) ca="$2"; shift ;;
+        --cert) cert="$2"; shift ;;
+        --key) key="$2"; shift ;;
+        http://*|https://*) url="$1" ;;
+      esac
+      shift
+    done
+    [ "$url" = "$P13_PROBE_URL" ] || return 1
+    if [ "$ITLS_SCHEME" = https ]; then
+      [ "$ca|$cert|$key" = "$_itls_host_bundle/ca.pem|$_itls_host_bundle/cert.pem|$_itls_host_bundle/key.pem" ] || return 1
+    else
+      [ -z "$ca$cert$key" ] || return 1
+    fi
+    printf '{"connected":%s}\n' "$P13_CONNECTED"
+  }
+  eval "$(awk '/^_routing_health\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$P13_VERIFY")"
+  eval "$(grep '^_routing_connected()' "$P13_VERIFY")"
+  _routing_connected
+)
+if p13_routing_probe http '' true http://localhost:8080/health \
+   && p13_routing_probe http http://192.168.50.10:18080/ true http://192.168.50.10:18080/health; then
+  pass "routing health: plain HTTP keeps the default or configured endpoint without client certificates"
+else
+  fail "routing health: plain HTTP endpoint or credential behavior changed"
+fi
+if p13_routing_probe https http://192.168.50.10:18080/ true https://192.168.50.10:18080/health \
+   && p13_routing_probe https https://localhost:8080 true https://localhost:8080/health; then
+  pass "routing health: TLS upgrades HTTP and sends the host-admin CA, certificate and key"
+else
+  fail "routing health: TLS URL or client certificate configuration missing"
+fi
+if ! p13_routing_probe https http://localhost:8080 false https://localhost:8080/health; then
+  pass "routing health: authenticated connected:false still fails router verification"
+else
+  fail "routing health: connected:false incorrectly passed router verification"
+fi
+
 # (6) a failing verify.sh fails setup (exit 1) and the gate precedes the SSH
 # window close; a passing / skipped verify does not fail.
 eval "$(awk '/^run_verify_gate\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$P13_SETUP")"
