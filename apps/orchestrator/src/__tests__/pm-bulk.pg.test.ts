@@ -69,6 +69,14 @@ describe.skipIf(!RUN)("PM bulk edit (WARP-3537)", () => {
     owner = await user("owner", "owner");
     guest = await user("guest", "guest");
     other = await user("other", "family");
+    // Assignee ids name real active people, as the single-item and bulk
+    // reference guards require; these fixtures are removed by cleanup().
+    await prisma.user.createMany({
+      data: ["a", "b", "c", "x", "z", "q"].map((key) => ({
+        id: `${PREFIX}${key}`, username: `${PREFIX}${key}`, displayName: key,
+        role: "family" as const, directoryStatus: "ACTIVE" as const,
+      })),
+    });
 
     const slug = `${PREFIX}ws`;
     const a = await pm.createProject(prisma, owner.userId, { workspaceSlug: slug, name: `${PREFIX}a`, identifier: "W6BA" });
@@ -293,6 +301,33 @@ describe.skipIf(!RUN)("PM bulk edit (WARP-3537)", () => {
       );
       expect(await feed(ids)).toHaveLength(0);
     }
+
+    it("refuses unknown, deactivated and service assignees before changing any item or history", async () => {
+      const leaver = await prisma.user.create({
+        data: { username: `${PREFIX}leaver`, displayName: "Leaver", role: "family", directoryStatus: "DEACTIVATED" },
+      });
+      const machine = await prisma.user.create({
+        data: { username: `${PREFIX}machine`, displayName: "Machine", role: "service" },
+      });
+      const ids = await mk(p1, 2);
+      const before = await rowsOf(ids);
+      await expect(bulk(ids, { assigneeIds: ["ws6b-a", "missing", leaver.id, machine.id], priority: "high" }))
+        .rejects.toMatchObject({ message: "invalid_assignee", ids: ["missing", leaver.id, machine.id] });
+      await untouched(ids, before);
+      expect((await rowsOf(ids)).every((r) => r.assignees.length === 0)).toBe(true);
+    });
+
+    it("can retain an existing leaver while editing another field, then remove them", async () => {
+      const person = await prisma.user.create({
+        data: { username: `${PREFIX}retained-leaver`, displayName: "Retained leaver", role: "family" },
+      });
+      const ids = await mk(p1, 2, { assignees: [person.id] });
+      await prisma.user.update({ where: { id: person.id }, data: { directoryStatus: "DEACTIVATED" } });
+      await expect(bulk(ids, { assigneeIds: [person.id], priority: "high" })).resolves.toMatchObject({ changed: 2 });
+      for (const row of await rowsOf(ids)) expect(row.assignees.map((a) => a.userId)).toEqual([person.id]);
+      await bulk(ids, { assigneeIds: [] });
+      expect((await rowsOf(ids)).every((r) => r.assignees.length === 0)).toBe(true);
+    });
 
   it("404 work_item_not_found: an id that is not a work item sinks the batch, and is named", async () => {
       const ids = await mk(p1, 2);

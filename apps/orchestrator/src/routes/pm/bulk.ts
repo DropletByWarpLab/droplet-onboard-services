@@ -29,6 +29,7 @@
  *   404 work_item_not_found     ids = the ids that are not work items
  *   404 state_not_found | label_not_found | cycle_not_found
  *   422 invalid_state | invalid_label | invalid_cycle   ids = the items it does not fit
+ *   422 invalid_assignee        ids = unusable person ids from the patch
  *   409 concurrent_mutation     nothing applied; send it again
  */
 import { Router, type Request, type Response } from "express";
@@ -36,7 +37,7 @@ import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import { PM_BULK_MAX_IDS, PM_BULK_MAX_VALUES, PM_PRIORITIES } from "@droplet/shared-types";
 import { requireRole } from "../../middleware/auth.js";
-import { PM_ERRORS } from "../../services/pm/pm.service.js";
+import { PM_ERRORS, PmRefError } from "../../services/pm/pm.service.js";
 import {
   PM_BULK_ERRORS,
   PM_BULK_WRITER_ROLES,
@@ -85,6 +86,10 @@ function badRequest(res: Response, parsed: { error: z.ZodError }): void {
 
 /** Service code → HTTP. Returns true if handled. */
 function mapBulkError(err: unknown, res: Response): boolean {
+  if (err instanceof PmRefError && err.message === PM_ERRORS.INVALID_ASSIGNEE) {
+    res.status(422).json({ error: err.message, ids: err.ids });
+    return true;
+  }
   if (err instanceof PmBulkError) {
     switch (err.code) {
       case PM_BULK_ERRORS.FORBIDDEN:

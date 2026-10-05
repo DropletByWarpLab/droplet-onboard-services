@@ -60,6 +60,7 @@ import { DEPARTMENT_SELECT } from "./pm-department.js";
 import {
   PM_ERRORS,
   WORK_ITEM_INCLUDE,
+  assertAssignable,
   isPrismaCode,
   mapWorkItem,
   writeActivity,
@@ -384,6 +385,10 @@ export async function bulkUpdateWorkItems(
       assertBulkReferences(items, patch, refs);
 
       const plan = planBulk(items, patch, refs, actor.userId, now);
+      // Match the single-item path: newly added assignees must be active
+      // people. Validate inside this transaction before any batch write;
+      // retaining or removing a previously assigned leaver stays possible.
+      await assertAssignable(tx, plan.assigneeAdds.map((a) => a.userId));
 
       if (plan.state) {
         await tx.pmWorkItem.updateMany({

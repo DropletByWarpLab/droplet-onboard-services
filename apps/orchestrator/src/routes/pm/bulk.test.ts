@@ -21,7 +21,7 @@ vi.mock("../../services/pm/pm-bulk.service.js", async (importOriginal) => {
 });
 
 import { PM_BULK_ERRORS, PmBulkError } from "../../services/pm/pm-bulk.service.js";
-import { PM_ERRORS } from "../../services/pm/pm.service.js";
+import { PM_ERRORS, PmRefError } from "../../services/pm/pm.service.js";
 import { createPmBulkRouter } from "./bulk.js";
 
 const OWNER = { id: "u-owner", role: "owner" };
@@ -209,6 +209,13 @@ describe("POST /api/pm/work-items/bulk: what a refusal looks like", () => {
     expect(res.status).toBe(409);
     expect(res.body).toMatchObject({ error: "concurrent_mutation", code: "CONCURRENT_MUTATION" });
     expect(res.body.message).toMatch(/Nothing was applied/);
+  });
+
+  it("422 invalid_assignee names the unusable people in the patch", async () => {
+    svc.bulkUpdateWorkItems.mockRejectedValue(new PmRefError(PM_ERRORS.INVALID_ASSIGNEE, ["leaver", "missing"]));
+    const res = await post({ ids: ["a", "b"], patch: { assigneeIds: ["leaver", "missing"] } });
+    expect(res.status).toBe(422);
+    expect(res.body).toEqual({ error: "invalid_assignee", ids: ["leaver", "missing"] });
   });
 
   it("anything else is the error handler's, not a leaked code", async () => {

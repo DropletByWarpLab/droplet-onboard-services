@@ -524,7 +524,7 @@ async function assertLabelsInProject(
  * would carry it and the board would render "Former member" for a person who
  * was never one.
  */
-async function assertAssignable(db: Db, userIds: readonly string[]): Promise<void> {
+export async function assertAssignable(db: Db, userIds: readonly string[]): Promise<void> {
   const wanted = uniq(userIds);
   if (wanted.length === 0) return;
   const found = await db.user.findMany({
