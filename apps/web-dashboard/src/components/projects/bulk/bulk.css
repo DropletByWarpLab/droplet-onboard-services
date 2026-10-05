@@ -1,0 +1,25 @@
+/* WARP-3537 — the floating bulk-action bar.
+ *
+ * Existing tokens only (the aliases in app/projects/projects.css). Fixed at the bottom
+ * centre; the toast stack sits bottom-right (Toast.tsx), which clears a bar this wide
+ * from ~1100px up — below that the bar rides above it. On a phone it moves to the top,
+ * under the page header, where a thumb and the toasts both leave it alone. */
+.pm-scope .pm-bulkbar {
+  position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 50;
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+  max-width: min(720px, calc(100vw - 32px)); padding: 8px 12px;
+  background: var(--bg-canvas); border: 1px solid var(--border-strong); border-radius: 14px;
+  box-shadow: 0 18px 40px -16px rgba(30, 30, 60, 0.34), 0 0 0 1px rgba(99, 102, 241, 0.25);
+  font-size: 13px; color: var(--text);
+}
+.pm-scope .pm-bulkbar-count { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.pm-scope .pm-bulkbar-count strong { font-weight: 700; }
+.pm-scope .pm-bulkbar-note { font-size: 12px; color: var(--text-3); }
+.pm-scope .pm-bulkbar-sep { width: 1px; height: 18px; background: var(--border-strong); }
+
+@media (max-width: 1100px) and (min-width: 721px) {
+  .pm-scope .pm-bulkbar { bottom: 112px; }
+}
+@media (max-width: 720px) {
+  .pm-scope .pm-bulkbar { top: 64px; bottom: auto; left: 16px; right: 16px; transform: none; max-width: none; }
+}

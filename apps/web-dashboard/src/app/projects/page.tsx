@@ -73,6 +73,18 @@ import { InsightsView } from "@/components/projects/insights/InsightsView";
 import { CalendarView } from "@/components/projects/calendar/CalendarView";
 import { TimelineView } from "@/components/projects/timeline/TimelineView";
 import { MyWorkView } from "@/components/projects/mywork/MyWorkView";
+import { TableView } from "@/components/projects/table/TableView";
+import type { TableApi } from "@/components/projects/table/TableView";
+import { DisplayControls } from "@/components/projects/table/DisplayControls";
+import { useTableDisplay } from "@/components/projects/table/display";
+import { useTableEdits } from "@/components/projects/table/useTableEdits";
+import { useOptimisticRows } from "@/components/projects/table/useOptimisticRows";
+import { BulkBar } from "@/components/projects/bulk/BulkBar";
+import { useSelection } from "@/components/projects/bulk/selection";
+import { useBulkActions } from "@/components/projects/bulk/useBulkActions";
+import { ProjectsKeyboard } from "@/components/projects/palette/ProjectsKeyboard";
+import type { PaletteLayout } from "@/components/projects/palette/commands";
+import type { PmTableScope } from "@droplet/shared-types";
 import { ProjectMenu } from "@/components/projects/import/ProjectMenu";
 import { ImportWizard } from "@/components/projects/import/ImportWizard";
 import {
@@ -87,7 +99,7 @@ import { TimeView } from "@/components/projects/time/TimeView";
 
 // ── URL ↔ page vocabulary ───────────────────────────────────────────────────
 
-const PROJECT_TABS: readonly ProjectView[] = ["board", "list", "calendar", "timeline", "cycles", "modules", "insights", "time"];
+const PROJECT_TABS: readonly ProjectView[] = ["board", "list", "table", "calendar", "timeline", "cycles", "modules", "insights", "time"];
 
 /** The tab a `view=` names; anything else is the board. */
 function tabOf(view: string | null): ProjectView {
@@ -96,12 +108,21 @@ function tabOf(view: string | null): ProjectView {
 
 /** A tab that is a layout a view can be saved in. */
 function layoutOfTab(tab: ProjectView): PmViewLayout | null {
-  return tab === "board" ? "BOARD" : tab === "list" ? "LIST" : tab === "calendar" ? "CALENDAR" : tab === "timeline" ? "TIMELINE" : null;
+  if (tab === "board") return "BOARD";
+  if (tab === "list") return "LIST";
+  if (tab === "table") return "TABLE";
+  if (tab === "calendar") return "CALENDAR";
+  if (tab === "timeline") return "TIMELINE";
+  return null;
 }
 
-/** The tab a saved layout opens in. TABLE opens as the list until WS-6b. */
+/** The tab a saved layout opens in. */
 function tabOfLayout(layout: PmViewLayout): ProjectView {
-  return layout === "BOARD" ? "board" : layout === "CALENDAR" ? "calendar" : layout === "TIMELINE" ? "timeline" : "list";
+  if (layout === "BOARD") return "board";
+  if (layout === "TABLE") return "table";
+  if (layout === "CALENDAR") return "calendar";
+  if (layout === "TIMELINE") return "timeline";
+  return "list";
 }
 
 /** Brief §3.9, verbatim for one; counted for several. */
@@ -169,15 +190,16 @@ function ProjectsWorkspace(): JSX.Element {
   const { user } = useAuth();
   const role = user?.role;
   const readOnly = !canWrite(role);
-  // WARP-3370 — members archive and restore; only owner/admin may delete for good.
   const mayDelete = canDeleteProject(role);
   const { toast } = useToast();
-  const { person, people: roster } = usePeople();
+  const { person, people: users } = usePeople();
   const { state: url, go, openItem, closeItem } = useProjectsUrl();
+  const tableApi = useRef<TableApi | null>(null);
 
   const [showArchived, setShowArchived] = useState(false);
   const [modal, setModal] = useState<"newitem" | "newproject" | "import" | "archive" | "delete" | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [announcement, setAnnouncement] = useState("");
 
   // ── which project, which mode ──
   const { projects, error: projErr, isLoading: projLoading, mutate: mutateProjects } = useProjects(showArchived);
@@ -218,12 +240,16 @@ function ProjectsWorkspace(): JSX.Element {
       ? "time"
       : url.view === "my-work"
       ? "my-work"
-      : url.view === "views"
-        ? "views"
-        : url.view === "workspace" || crossViewInUrl
-          ? "workspace"
-          : "index";
-  const tab: ProjectView = mode === "project" ? tabOf(url.view) : "list";
+    : url.view === "views"
+      ? "views"
+      : url.view === "workspace" || crossViewInUrl
+        ? "workspace"
+        : "index";
+  const tab: ProjectView = mode === "project"
+    ? tabOf(url.view)
+    : mode === "workspace" && crossViewInUrl
+      ? tabOfLayout(crossViewInUrl.layout ?? "LIST")
+      : "list";
 
   // ── the active view and the filter ──
   const scopedViews = useMemo(
@@ -233,9 +259,9 @@ function ProjectsWorkspace(): JSX.Element {
   const activeView = useMemo(() => {
     if (!url.v) return null;
     const builtin = PM_BUILTIN_VIEWS.find((b) => b.id === url.v);
-    if (builtin) return { id: builtin.id, name: builtin.name, filter: builtin.filter, canEdit: false };
+    if (builtin) return { id: builtin.id, name: builtin.name, filter: builtin.filter, canEdit: false, groupBy: null, sortBy: null, columns: null };
     const saved = scopedViews.find((v) => v.id === url.v);
-    return saved ? { id: saved.id, name: saved.name, filter: saved.filter, canEdit: saved.canEdit } : null;
+    return saved ? { ...saved, canEdit: saved.canEdit } : null;
   }, [url.v, scopedViews]);
   const viewsReady = savedViews !== undefined;
   const namedSavedView = !!url.v && !isPmBuiltinViewId(url.v);
@@ -276,18 +302,37 @@ function ProjectsWorkspace(): JSX.Element {
     return Object.fromEntries(Object.entries(named).slice(0, 32));
   }, [scopedViews]);
   const queryEnabled = !viewPending && ((mode === "project" && !!project && tab !== "time" && tab !== "insights") || mode === "workspace");
+  const tableScope: PmTableScope = mode === "workspace" ? "workspace" : "project";
+  const tableLayout = tab === "table" ? "table" : "list";
+  const tableDisplay = useTableDisplay({
+    saved: activeView ? {
+      groupBy: activeView.groupBy ?? null,
+      sortBy: activeView.sortBy ?? null,
+      columns: activeView.columns ?? null,
+    } : null,
+    scopeKey: `${mode}:${project?.id ?? "workspace"}:${activeView?.id ?? "default"}:${tableLayout}`,
+    scope: tableScope,
+    layout: tableLayout,
+  });
+  const usesDisplay = (mode === "project" || mode === "workspace") && tab === "table";
   const query = useWorkItemQuery({
     enabled: queryEnabled,
     projectId: mode === "project" ? (project?.id ?? null) : null,
     filter,
     counts,
+    sort: usesDisplay ? tableDisplay.resolved.sort ?? undefined : undefined,
+    groupBy: usesDisplay ? tableDisplay.resolved.groupBy ?? undefined : undefined,
   });
   const { states } = useProjectStates(mode === "project" ? (project?.id ?? null) : null);
   const { labels } = useProjectLabels(mode === "project" ? (project?.id ?? null) : null);
   const { departments } = useDepartments();
   const allItems = query.items ?? [];
+  const optimistic = useOptimisticRows();
+  const visibleItems = optimistic.apply(allItems);
+  const selection = useSelection();
   // WARP-3521 — the project's cycles, so a board card can name its cycle.
-  const { cycles, mutate: mutateCycles } = useProjectCycles(mode === "project" ? (project?.id ?? null) : null);
+  const projectId = mode === "project" ? (project?.id ?? null) : null;
+  const { cycles, mutate: mutateCycles } = useProjectCycles(projectId);
   const cyclesById = useMemo(() => new Map((cycles ?? []).map((c) => [c.id, c])), [cycles]);
 
   // The server dropped something the filter named that no longer exists
@@ -330,18 +375,18 @@ function ProjectsWorkspace(): JSX.Element {
   // ── labels for the chips, options for the editors ──
   const deptOptions = useMemo(() => departmentOptions(allItems, departments), [allItems, departments]);
   const people = useMemo(
-    () => (roster ?? []).map((u) => ({ value: u.id, label: u.displayName })),
-    [roster],
+    () => (users ?? []).map((u) => ({ value: u.id, label: u.displayName })),
+    [users],
   );
   const lookups: ChipLookups = useMemo(
     () => ({
       stateName: (id) => states?.find((s) => s.id === id)?.name,
       labelName: (id) => labels?.find((l) => l.id === id)?.name,
-      personName: (id) => roster?.find((u) => u.id === id)?.displayName,
+      personName: (id) => users?.find((u) => u.id === id)?.displayName,
       departmentName: (ref) => deptOptions.find((d) => d.id === ref)?.name,
       projectName: (id) => projects?.find((p) => p.id === id)?.name,
     }),
-    [states, labels, roster, deptOptions, projects],
+    [states, labels, users, deptOptions, projects],
   );
   const editorOptions: EditorOptions = useMemo(
     () => ({
@@ -366,6 +411,7 @@ function ProjectsWorkspace(): JSX.Element {
   };
   const openWorkspace = () => go({ p: null, view: "workspace", v: null, f: null, item: null }, "push");
   const openViewsIndex = () => go({ p: null, view: "views", v: null, f: null, item: null }, "push");
+  const openInsights = () => go({ p: null, view: "insights", v: null, f: null, item: null }, "push");
   const openMyWork = () => go({ p: null, view: "my-work", v: null, f: null, item: null }, "push");
   const openTime = () => go({ p: null, view: "time", v: null, f: null, item: null }, "push");
   const switchTab = (next: ProjectView) => go({ view: next === "board" ? null : next }, "push");
@@ -406,13 +452,9 @@ function ProjectsWorkspace(): JSX.Element {
     void mutateViews();
     void byKey.mutate();
     await query.refresh();
-    void mutateCycles();
+    if (projectId) void mutateCycles();
   };
 
-  const openInsights = () => go({ p: null, view: "insights", v: null, f: null, item: null }, "push");
-
-  // WARP-3370 — leaving a project for good (archived or deleted): back to the
-  // index, with the list and the KPIs re-read.
   const afterProjectGone = () => {
     backToIndex();
     void mutateProjects();
@@ -431,6 +473,25 @@ function ProjectsWorkspace(): JSX.Element {
     }
   };
 
+  const edits = useTableEdits({
+    optimistic,
+    refresh: query.refresh,
+    toast,
+    announce: setAnnouncement,
+  });
+  const bulk = useBulkActions({
+    selection,
+    rows: visibleItems,
+    lookups: { states: states ?? [], labels: labels ?? [], personName: (id) => users?.find((u) => u.id === id)?.displayName ?? `User ${id.slice(0, 4)}` },
+    optimistic,
+    refresh: query.refresh,
+    toast,
+    announce: setAnnouncement,
+  });
+  const tableGroupContext = useMemo(() => ({
+    personName: (id: string) => users?.find((u) => u.id === id)?.displayName ?? `User ${id.slice(0, 4)}`,
+    projectName: (id: string) => projects?.find((p) => p.id === id)?.name,
+  }), [users, projects]);
   const onTransition = async (item: PmWorkItem, stateId: string) => {
     try {
       await pmActions().transitionItem(item.id, stateId);
@@ -448,12 +509,18 @@ function ProjectsWorkspace(): JSX.Element {
   const canShare = role === "owner" || role === "admin" || (mode === "project" && !!project && project.leadId === user?.id);
 
   const saveView = async ({ name, scope }: { name: string; scope: "PERSONAL" | "SHARED" }) => {
+    const layout = layoutOfTab(tab) ?? "LIST";
     const res = await viewActions().create({
       projectId: mode === "project" ? (project?.id ?? null) : null,
       scope,
       name,
-      layout: layoutOfTab(tab) ?? "LIST",
+      layout,
       filter,
+      ...(layout === "TABLE" ? {
+        groupBy: tableDisplay.raw.groupBy,
+        sortBy: tableDisplay.raw.sortBy,
+        columns: tableDisplay.raw.columns,
+      } : {}),
     });
     await mutateViews();
     go({ v: res.view.id, f: null }, "replace");
@@ -477,8 +544,16 @@ function ProjectsWorkspace(): JSX.Element {
   const updateActiveView = async () => {
     if (!activeView) return;
     try {
-      const layout = mode === "project" ? layoutOfTab(tab) : null;
-      await viewActions().update(activeView.id, { filter, ...(layout ? { layout } : {}) });
+      const layout = layoutOfTab(tab);
+      await viewActions().update(activeView.id, {
+        filter,
+        ...(layout ? { layout } : {}),
+        ...(layout === "TABLE" ? {
+          groupBy: tableDisplay.raw.groupBy,
+          sortBy: tableDisplay.raw.sortBy,
+          columns: tableDisplay.raw.columns,
+        } : {}),
+      });
       await mutateViews();
       go({ f: null }, "replace");
       toast("View updated", "success");
@@ -496,6 +571,46 @@ function ProjectsWorkspace(): JSX.Element {
       canEdit: v.canEdit,
     })),
   ];
+
+  const paletteLayouts: Array<{ id: PaletteLayout; label: string }> =
+    mode === "project"
+      ? [
+          { id: "board", label: "Board" },
+          { id: "list", label: "List" },
+          { id: "table", label: "Table" },
+          { id: "calendar", label: "Calendar" },
+          { id: "timeline", label: "Timeline" },
+        ]
+      : mode === "workspace"
+        ? [
+            { id: "list", label: "List" },
+            { id: "table", label: "Table" },
+          ]
+        : [];
+  const keyboardPalette = {
+    readOnly,
+    scope: mode === "project" ? "project" as const : mode === "workspace" || mode === "my-work" ? "workspace" as const : mode === "views" ? "views" as const : "index" as const,
+    project: project ? { name: project.name, identifier: project.identifier } : null,
+    projects: projects ?? [],
+    views: chipItems.map(({ id, name }) => ({ id, name })),
+    layouts: paletteLayouts,
+    selectionCount: selection.count,
+    canArchive: mode === "workspace" || !project?.archived,
+    states: states ?? [],
+    labels: labels ?? [],
+    people,
+    meId: user?.id ?? null,
+    handlers: {
+      createItem: () => setModal("newitem"),
+      openProject,
+      openAll: openWorkspace,
+      openViewsIndex,
+      pickView,
+      switchLayout: (layout: PaletteLayout) => switchTab(layout),
+      clearSelection: selection.clear,
+      bulk: (op: Parameters<typeof bulk.run>[0]) => void bulk.run(op),
+    },
+  };
 
   // ── what the body shows ──
   const loading = viewPending || (queryEnabled ? query.items === undefined && !query.error : true);
@@ -523,6 +638,7 @@ function ProjectsWorkspace(): JSX.Element {
       : filterActive && total !== undefined && !loading
         ? `${total} ${total === 1 ? "item matches" : "items match"}.`
         : null;
+
   // WARP-3527: the API also enforces owner/admin or the project's lead.
   const canImport = role === "owner" || role === "admin" || (role === "family" && !!project && project.leadId === user?.id);
 
@@ -541,7 +657,7 @@ function ProjectsWorkspace(): JSX.Element {
         ? project
           ? `${project.openCount} open · ${project.doneCount} done`
           : undefined
-        : mode === "workspace" && total !== undefined
+      : mode === "workspace" && total !== undefined
           ? `${total} ${total === 1 ? "item" : "items"}`
           : undefined;
 
@@ -561,11 +677,11 @@ function ProjectsWorkspace(): JSX.Element {
             <FolderKanban size={14} /> New project
           </button>
         )}
-        <button className="btn" type="button" onClick={openInsights}>
-          <PmIcon name="chart" size={14} /> Insights
-        </button>
         <button className="btn" type="button" onClick={openViewsIndex}>
           <PmIcon name="filter" size={14} /> Views
+        </button>
+        <button className="btn" type="button" onClick={openInsights}>
+          <PmIcon name="chart" size={14} /> Insights
         </button>
         <button className="btn" type="button" onClick={openMyWork}>
           <PmIcon name="user" size={14} /> My work
@@ -615,11 +731,22 @@ function ProjectsWorkspace(): JSX.Element {
       <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: 14 }}>
         <div className="pm-row" style={{ justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
           {mode === "project" ? <ViewSwitcher view={tab} onView={switchTab} /> : <span className="pm-scope-label">Every project</span>}
-          {(mode === "workspace" || layoutOfTab(tab) !== null) && (
+          {(mode === "workspace" || tab === "board" || tab === "list" || tab === "table" || tab === "calendar" || tab === "timeline") && (
             <FilterBar scope={editorOptions.scope} filter={filter} onChange={writeFilter} options={editorOptions} lookups={lookups} />
           )}
         </div>
-        {(mode === "workspace" || layoutOfTab(tab) !== null) && (
+        {usesDisplay && (
+          <DisplayControls
+            layout="table"
+            scope={tableScope}
+            groupBy={tableDisplay.resolved.groupBy}
+            onGroupBy={tableDisplay.setGroupBy}
+            columns={tableDisplay.resolved.columns}
+            onColumns={tableDisplay.setColumns}
+            departments={deptOptions.length > 0}
+          />
+        )}
+        {(mode === "workspace" || tab === "board" || tab === "list" || tab === "table" || tab === "calendar" || tab === "timeline") && (
           <>
             <ViewChips
               views={chipItems}
@@ -634,8 +761,16 @@ function ProjectsWorkspace(): JSX.Element {
               onRename={renameView}
               onDelete={deleteView}
               dirty={
-                activeView && activeView.id !== "all" && dirty
-                  ? { name: activeView.name, canUpdate: activeView.canEdit, onUpdate: updateActiveView, onReset: () => writeFilter(baseFilter) }
+                activeView && activeView.id !== "all" && (dirty || (usesDisplay && tableDisplay.dirty))
+                  ? {
+                      name: activeView.name,
+                      canUpdate: activeView.canEdit,
+                      onUpdate: updateActiveView,
+                      onReset: () => {
+                        writeFilter(baseFilter);
+                        tableDisplay.reset();
+                      },
+                    }
                   : null
               }
             />
@@ -651,6 +786,7 @@ function ProjectsWorkspace(): JSX.Element {
                 {partialFailure && <button className="pm-btn ghost sm" type="button" onClick={() => void refreshAll()}>Retry</button>}
               </div>
             )}
+            {announcement && <div className="pm-status" role="status" aria-live="polite">{announcement}</div>}
           </>
         )}
       </div>
@@ -660,28 +796,55 @@ function ProjectsWorkspace(): JSX.Element {
           <BoardView
             states={states ?? []}
             items={allItems}
+            cycles={cyclesById}
             domain={boardDomain}
             readOnly={readOnly}
+            partial={query.loadingMore || query.truncated}
             onOpen={(i) => openItem(i.key)}
             onTransition={onTransition}
             onNewItem={() => setModal("newitem")}
             onRetry={() => void refreshAll()}
             onClearFilters={() => writeFilter(EMPTY_FILTER)}
-            partial={query.loadingMore || query.truncated}
-            cycles={cyclesById}
           />
         )}
-        {(tab === "list" || mode === "workspace") && (
+        {tab === "list" && (mode === "project" || mode === "workspace") && (
           <ListView
             states={states ?? []}
             items={allItems}
+            cycles={cyclesById}
             domain={boardDomain}
+            partial={query.loadingMore || query.truncated}
             onOpen={(i) => openItem(i.key)}
             projects={mode === "workspace" ? (projects ?? []) : undefined}
             onRetry={() => void refreshAll()}
             onClearFilters={() => writeFilter(EMPTY_FILTER)}
-            partial={query.loadingMore || query.truncated}
-            cycles={cyclesById}
+          />
+        )}
+        {tab === "table" && (mode === "project" || mode === "workspace") && (
+          <TableView
+            rows={visibleItems}
+            domain={boardDomain}
+            scope={tableScope}
+            columns={tableDisplay.resolved.columns}
+            sort={tableDisplay.resolved.sort}
+            onSort={tableDisplay.setSort}
+            groupBy={tableDisplay.resolved.groupBy}
+            groupCounts={query.groups}
+            loadingMore={query.loadingMore}
+            readOnly={readOnly}
+            selection={selection}
+            pending={optimistic.pending}
+            states={states ?? []}
+            people={people}
+            groupContext={tableGroupContext}
+            projects={projects ?? []}
+            edits={edits}
+            onOpen={(item) => openItem(item.key)}
+            onAnnounce={setAnnouncement}
+            onRetry={() => void refreshAll()}
+            onClearFilters={() => writeFilter(EMPTY_FILTER)}
+            onNewItem={() => setModal("newitem")}
+            apiRef={tableApi}
           />
         )}
         {tab === "calendar" && mode === "project" && (
@@ -689,7 +852,7 @@ function ProjectsWorkspace(): JSX.Element {
             items={allItems}
             domain={boardDomain}
             readOnly={readOnly}
-            onOpen={(i) => openItem(i.key)}
+            onOpen={(item) => openItem(item.key)}
             onChanged={refreshAfterSchedule}
             onNewItem={() => setModal("newitem")}
           />
@@ -701,7 +864,7 @@ function ProjectsWorkspace(): JSX.Element {
             revision={itemsRevision}
             domain={boardDomain}
             readOnly={readOnly}
-            onOpen={(i) => openItem(i.key)}
+            onOpen={(item) => openItem(item.key)}
             onChanged={refreshAfterSchedule}
             onNewItem={() => setModal("newitem")}
           />
@@ -715,6 +878,31 @@ function ProjectsWorkspace(): JSX.Element {
           <ModulesView project={project} readOnly={readOnly} onOpenItem={(i) => openItem(i.key)} onChanged={refreshAll} />
         )}
       </div>
+      {tab === "table" && selection.count > 0 && !readOnly && (
+        <BulkBar
+          count={selection.count}
+          capped={selection.capped}
+          busy={bulk.busy}
+          scope={tableScope}
+          states={states ?? []}
+          labels={labels ?? []}
+          people={people}
+          canArchive={mode === "workspace" || !project?.archived}
+          onRun={(op) => void bulk.run(op)}
+          onClear={selection.clear}
+        />
+      )}
+      <ProjectsKeyboard
+        enabled
+        blocked={modal !== null || !!url.item}
+        readOnly={readOnly}
+        tableApi={usesDisplay ? tableApi : null}
+        onCreate={mode === "project" && project && !readOnly ? () => setModal("newitem") : null}
+        selectionCount={selection.count}
+        onClearSelection={selection.clear}
+        onOpenItem={openItem}
+        palette={keyboardPalette}
+      />
     </>
   );
 
@@ -797,6 +985,7 @@ function ProjectsWorkspace(): JSX.Element {
                 onRetry={() => void mutateViews()}
               />
             )}
+            {mode === "my-work" && <MyWorkView />}
             {mode === "index" && namedSavedView && !savedViews && !viewsErr && <ListView states={[]} items={[]} domain="loading" onOpen={() => undefined} />}
             {mode === "project" && projectMissing && (
               <div className="pm-surface" style={{ padding: 8 }}>
@@ -828,9 +1017,8 @@ function ProjectsWorkspace(): JSX.Element {
               </div>
             )}
             {(mode === "workspace" || (mode === "project" && !projectMissing && (project || (!projErr && projLoading)))) && listing}
-            {mode === "my-work" && <MyWorkView />}
-            {mode === "time" && <TimeView projects={projects} projectId={null} />}
             {mode === "insights" && <InsightsView projectId={null} />}
+            {mode === "time" && <TimeView projects={projects} projectId={null} />}
           </div>
         </div>
       </ShellPage>

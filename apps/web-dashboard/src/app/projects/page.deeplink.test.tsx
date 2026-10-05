@@ -83,6 +83,7 @@ vi.mock("@/components/projects/usePm", () => ({
   useSummary: () => ({ summary: { activeProjects: 1, itemsOpen: 2, doneThisWeek: 0, overdue: 0 }, error: undefined, isLoading: false, mutate: vi.fn() }),
   useProjectStates: (id: string | null) => ({ states: id ? h.states : undefined }),
   useProjectLabels: (id: string | null) => ({ labels: id ? h.labels : undefined }),
+  useProjectCycles: () => ({ cycles: [], mutate: vi.fn() }),
   useWorkItemQuery: (args: { enabled: boolean; projectId: string | null; filter: unknown; counts?: unknown }) => {
     h.queryCalls.push(args);
     return {
@@ -110,7 +111,6 @@ vi.mock("@/components/projects/usePm", () => ({
     mutate: vi.fn(),
   }),
   useDepartments: () => ({ departments: undefined }),
-  useProjectCycles: () => ({ cycles: [], mutate: vi.fn() }),
   usePeople: () => ({
     person: (id: string) => ({ id, name: "Tester", initials: "T", tone: 1 }),
     people: [{ id: "u1", displayName: "Ana", avatarUrl: null }],

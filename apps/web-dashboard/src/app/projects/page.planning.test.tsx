@@ -46,12 +46,16 @@ vi.mock("next/link", () => ({
 vi.mock("@/components/Toast", () => ({ useToast: () => ({ toast: vi.fn() }) }));
 vi.mock("@/lib/auth", () => ({
   useAuth: () => ({ user: { id: "u1", username: "ada", displayName: "Ada", role: roleRef.current }, isLoading: false }),
-  authFetch: vi.fn(),
+  authFetch: vi.fn(async (url: string) => ({
+    ok: true,
+    json: async () => url.endsWith("/timer")
+      ? { timer: null }
+      : { worklogs: [], total_entries: 0, total_minutes: 0 },
+  })),
 }));
 vi.mock("@/lib/hooks/useAppCapabilities", () => ({ useAppCapabilities: () => ({ projects: true }) }));
 
 const roleRef = { current: "owner" };
-
 const PROJECT = {
   id: "p1",
   workspaceId: "w",
@@ -119,10 +123,9 @@ vi.mock("@/components/projects/usePm", () => ({
   useProjects: () => ({ projects: [PROJECT], ...idle }),
   useSummary: () => ({ summary: undefined, ...idle }),
   useProjectStates: () => ({ states: [STATE], error: undefined, isLoading: false }),
-  useWorkItemQuery: ({ enabled }: { enabled: boolean }) => ({ items: enabled ? [ITEM] : undefined, total: 1, counts: { all: 1 }, refresh: vi.fn(), ...idle }),
+  useWorkItemQuery: (args: { enabled: boolean }) => ({ items: args.enabled ? [ITEM] : undefined, total: 1, counts: { all: 1 }, ...idle, refresh: vi.fn(async () => undefined) }),
   useWorkItemByKey: () => ({ item: undefined, ...idle }),
   useSavedViews: () => ({ views: [], ...idle }),
-  viewActions: () => ({}),
   usePeople: () => ({ person: (id: string) => ({ id, name: "Tester", initials: "T", tone: 1 }), people: [] }),
   useDepartments: () => ({ departments: undefined }),
   useProjectCycles: () => ({ cycles: cyclesRef.current, ...idle }),
@@ -137,6 +140,7 @@ vi.mock("@/components/projects/usePm", () => ({
   useComments: () => ({ comments: [], mutate: vi.fn() }),
   useActivity: () => ({ activity: [], mutate: vi.fn() }),
   pmActions: () => ({}),
+  viewActions: () => ({}),
   PmRequestError: class extends Error {},
 }));
 
@@ -216,6 +220,22 @@ describe("/projects — planning wiring", () => {
     expect(screen.queryByRole("button", { name: /New cycle/ })).toBeNull();
     fireEvent.click(screen.getByRole("tab", { name: /Modules/ }));
     expect(screen.queryByRole("button", { name: /New module/ })).toBeNull();
+  });
+
+  it("a read-only drawer preserves planning and Time while hiding their write controls", async () => {
+    roleRef.current = "guest";
+    openProject();
+    fireEvent.click(screen.getByRole("tab", { name: /Cycles/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Sprint 12, Active" }));
+    fireEvent.click(screen.getByRole("button", { name: /INBOX-1, First task/ }));
+    const drawer = screen.getByRole("dialog");
+    expect(within(drawer).getByText("Cycle")).toBeInTheDocument();
+    expect(within(drawer).getByText("Sprint 12")).toBeInTheDocument();
+    expect(within(drawer).queryByRole("combobox", { name: "Cycle" })).toBeNull();
+    expect(within(drawer).queryByRole("combobox", { name: /module/i })).toBeNull();
+    expect(await within(drawer).findByText("No time logged yet.")).toBeInTheDocument();
+    expect(within(drawer).queryByRole("button", { name: "Log time" })).toBeNull();
+    expect(within(drawer).queryByRole("button", { name: "Start timer" })).toBeNull();
   });
 
   it("opening a cycle's item from the planning view opens the same drawer as the board", () => {

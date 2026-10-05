@@ -90,6 +90,20 @@ beforeEach(() => {
 });
 
 describe("/projects?view=insights", () => {
+  it("restores project Insights and follows a URL change back to the table", () => {
+    projectsRef.current = [{ id: "p1", identifier: "INBOX", name: "Inbox", archived: false, openCount: 0, doneCount: 0 }];
+    paramsRef.current = new URLSearchParams("p=INBOX&view=insights");
+    const { rerender } = render(<ProjectsPage />);
+    expect(screen.getByTestId("insights")).toHaveAttribute("data-project", "p1");
+    expect(screen.getByRole("tab", { name: "Insights" })).toHaveAttribute("aria-selected", "true");
+    expect(query.mock.calls.at(-1)?.[0]).toMatchObject({ enabled: false, projectId: "p1" });
+    paramsRef.current = new URLSearchParams("p=INBOX&view=table");
+    rerender(<ProjectsPage />);
+    expect(screen.queryByTestId("insights")).toBeNull();
+    expect(screen.getByRole("tab", { name: "Table" })).toHaveAttribute("aria-selected", "true");
+    expect(query.mock.calls.at(-1)?.[0]).toMatchObject({ enabled: true, projectId: "p1" });
+  });
+
   it("opens the workspace-level Insights straight from the deep link", () => {
     paramsRef.current = new URLSearchParams("view=insights");
     window.history.replaceState(null, "", "/projects?view=insights");

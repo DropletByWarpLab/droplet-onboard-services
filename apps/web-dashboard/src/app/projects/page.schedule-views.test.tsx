@@ -26,11 +26,27 @@ vi.mock("next/link", () => ({
 vi.mock("@/components/Toast", () => ({ useToast: () => ({ toast: vi.fn() }) }));
 
 const role = { current: "owner" };
+const route = vi.hoisted(() => ({ current: { p: null as string | null, view: null as string | null, v: null as string | null, f: null as string | null, item: null as string | null } }));
 vi.mock("@/lib/auth", () => ({
   useAuth: () => ({ user: { id: "u1", username: "ada", displayName: "Ada", role: role.current }, isLoading: false }),
   authFetch: vi.fn(),
 }));
 vi.mock("@/lib/hooks/useAppCapabilities", () => ({ useAppCapabilities: () => ({ projects: true }) }));
+vi.mock("@/components/projects/useProjectsUrl", async () => {
+  const React = await import("react");
+  return {
+    useProjectsUrl: () => {
+      const [state, setState] = React.useState(route.current);
+      const go = (patch: Partial<typeof route.current>) => setState((current) => ({ ...current, ...patch }));
+      return {
+        state,
+        go,
+        openItem: (key: string) => go({ item: key }),
+        closeItem: () => go({ item: null }),
+      };
+    },
+  };
+});
 
 const refreshQuery = vi.fn<() => Promise<void>>(async () => undefined);
 const createView = vi.fn();
@@ -130,6 +146,17 @@ vi.mock("@/components/projects/timeline/TimelineView", () => ({
   },
 }));
 vi.mock("@/components/projects/mywork/MyWorkView", () => ({ MyWorkView: () => <div data-testid="my-work" /> }));
+vi.mock("@/components/projects/palette/useItemSearch", () => ({
+  useItemSearch: () => ({ items: [], searching: false }),
+}));
+vi.mock("@/components/projects/board", () => ({
+  BoardView: () => <div data-testid="board" />,
+  ListView: () => <div data-testid="list" />,
+  PlaceholderView: () => <div data-testid="placeholder" />,
+}));
+vi.mock("@/components/projects/table/TableView", () => ({
+  TableView: () => <div data-testid="table" />,
+}));
 
 import ProjectsPage from "./page";
 
@@ -141,6 +168,7 @@ function openProject() {
 
 beforeEach(() => {
   role.current = "owner";
+  route.current = { p: null, view: null, v: null, f: null, item: null };
   calendarProps.current = null;
   timelineProps.current = null;
   refreshQuery.mockReset().mockResolvedValue(undefined);
@@ -157,7 +185,22 @@ describe("view switcher", () => {
   it("offers Calendar and Timeline between List and Cycles", () => {
     openProject();
     const tabs = within(screen.getByRole("tablist", { name: "View" })).getAllByRole("tab");
-    expect(tabs.map((t) => t.textContent)).toEqual(["Board", "List", "Calendar", "Timeline", "Cycles", "Modules", "Insights", "Time"]);
+    expect(tabs.map((t) => t.textContent)).toEqual(["Board", "List", "Table", "Calendar", "Timeline", "Cycles", "Modules", "Insights", "Time"]);
+  });
+
+  it("shows the table layout without rendering the list underneath it", () => {
+    openProject();
+    fireEvent.click(screen.getByRole("tab", { name: "Table" }));
+    expect(screen.getByTestId("table")).toBeInTheDocument();
+    expect(screen.queryByTestId("list")).toBeNull();
+  });
+
+  it("opens the command palette and switches to the table", () => {
+    openProject();
+    fireEvent.keyDown(document, { key: "k", ctrlKey: true });
+    fireEvent.click(screen.getByRole("option", { name: /Go to the table/ }));
+    expect(screen.getByTestId("table")).toBeInTheDocument();
+    expect(screen.queryByTestId("list")).toBeNull();
   });
 
   it("Calendar gets the server query's items, role and an awaited revalidation", async () => {
@@ -306,7 +349,7 @@ describe("saved scheduling layouts", () => {
   it.each([
     ["CALENDAR", "Calendar", "calendar"],
     ["TIMELINE", "Timeline", "timeline"],
-    ["TABLE", "List", "list"],
+    ["TABLE", "Table", "table"],
   ])("opens a %s saved view in its supported layout", (layout, label, tab) => {
     queryState.savedViews = [{
       id: "v-schedule", name: "Scheduled work", projectId: "p1", ownerId: "u1",

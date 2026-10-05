@@ -193,10 +193,8 @@ describe("/projects board — every page, progressively (WARP-3371)", () => {
     await waitFor(() => expect(cards()).toHaveLength(TOTAL));
     // No "x of y" noise on a list that is complete.
     expect(screen.queryByRole("status")).toBeNull();
-    // The query hook revalidates its first page before fetching the tail.
-    // Both pages remain scoped to the actual POST query, with no missing rows.
+    // The tail request preserves the project scope and does not refetch the first page.
     expect(itemRequests).toEqual([
-      { projectId: "p1", limit: 200, cursor: null },
       { projectId: "p1", limit: 200, cursor: null },
       { projectId: "p1", limit: 200, cursor: "after-200" },
     ]);

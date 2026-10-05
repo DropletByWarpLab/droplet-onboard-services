@@ -152,8 +152,7 @@ export function BoardView({
   items: PmWorkItem[];
   domain: Domain;
   readOnly: boolean;
-  /** More of the list is still arriving (WARP-3371): a column's count is a
-   *  floor, not an answer, until the last page lands. */
+  /** The query has not loaded every page, so grouped counts are still floors. */
   partial?: boolean;
   onOpen: (i: PmWorkItem) => void;
   onTransition: (item: PmWorkItem, stateId: string) => void;
@@ -386,7 +385,7 @@ export function ListView({
   states: PmState[];
   items: PmWorkItem[];
   domain: Domain;
-  /** More of the list is still arriving (WARP-3371): a group's count is a floor. */
+  /** More matching rows may still arrive from the paged query. */
   partial?: boolean;
   onOpen: (i: PmWorkItem) => void;
   /** Present for a workspace-wide list: rows group by PROJECT, because states

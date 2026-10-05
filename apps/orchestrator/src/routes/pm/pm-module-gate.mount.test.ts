@@ -67,6 +67,7 @@ import { createPmTimeRouter } from "./time.js";
 import { createPmWebhooksRouter } from "./webhooks.js";
 import { createPmScheduleRouter } from "./schedule.js";
 import { createPmOpenApiRouter } from "./openapi.js";
+import { createPmBulkRouter } from "./bulk.js";
 import { createPmMobileRouter } from "../mobile/pm.js";
 
 // ── the edges ───────────────────────────────────────────────────────────────
@@ -144,8 +145,7 @@ interface PmRouterMount {
 const PRISMA = stubPrisma();
 
 /**
- * Mirrors the seven PM mounts in app.ts, base and ORDER. The six native
- * routers mount at `/api`; routes/mobile/pm.ts registers absolute
+ * Mirrors the PM mounts in app.ts, base and ORDER. The routers mount at `/api`; routes/mobile/pm.ts registers absolute
  * `/api/mobile/pm/...` paths and is mounted with no base. The source pin below
  * is what keeps this table honest.
  */
@@ -167,6 +167,12 @@ const PM_ROUTER_MOUNTS: readonly PmRouterMount[] = [
     base: "/api",
     file: "routes/pm/views.ts",
     router: createPmViewsRouter(PRISMA),
+  },
+  {
+    factory: "createPmBulkRouter",
+    base: "/api",
+    file: "routes/pm/bulk.ts",
+    router: createPmBulkRouter(PRISMA),
   },
   {
     factory: "createPmNativeRouter",

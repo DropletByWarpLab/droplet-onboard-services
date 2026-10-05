@@ -60,6 +60,7 @@ import { createPmNativeRouter } from "./routes/pm/native.js";
 import { createPmRelationsRouter } from "./routes/pm/relations.js";
 import { createPmQueryRouter } from "./routes/pm/query.js";
 import { createPmViewsRouter } from "./routes/pm/views.js";
+import { createPmBulkRouter } from "./routes/pm/bulk.js";
 import { createPmImportExportRouter } from "./routes/pm/import-export.js";
 import { createPmPlanningRouter } from "./routes/pm/planning.js";
 import { createPmTimeRouter } from "./routes/pm/time.js";
@@ -592,10 +593,8 @@ export function createApp(
   app.use("/api", createSystemResetRouter(prisma));
   app.use("/api", createMatterRouter(prisma));
   // WARP-3533 — GET /api/pm/openapi.json, the OpenAPI 3.1 description of the PM
-  // API. First among the PM routers on purpose: a literal path goes ahead of the
-  // `/pm/<thing>/:id` routes below, so no parameterised sibling can ever shadow
-  // it. It sits under /api/pm, so the projects module gate, the tier floor and
-  // (for a token) the pm:read scope all apply to it.
+  // API. First among the PM routers on purpose so a parameterized sibling cannot
+  // shadow this literal route; the /api/pm gates still apply.
   app.use("/api", createPmOpenApiRouter());
   // WARP-3522 (ADR-069 §8) — the one filter language: `POST /pm/work-items/query`,
   // `GET /pm/work-items/by-key/:key` and saved views (`/pm/views`). Mounted BEFORE
@@ -605,6 +604,9 @@ export function createApp(
   // by, or shadow, a native one; the order is the cheap guarantee.
   app.use("/api", createPmQueryRouter(prisma));
   app.use("/api", createPmViewsRouter(prisma));
+  // WARP-3537 — `POST /pm/work-items/bulk`: the same literal-under-`:id` case as
+  // `/pm/work-items/query` above, so the same rule: before the native router.
+  app.use("/api", createPmBulkRouter(prisma));
   // ADR-026 — native PM (projects, work-items, states, labels, comments).
   // The Droplet-owned project-management surface: state in the orchestrator's
   // own Postgres, dashboard session is the auth, no embedded third-party stack.
