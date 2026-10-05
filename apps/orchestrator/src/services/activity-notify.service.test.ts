@@ -62,6 +62,7 @@ interface PmRow {
   actorId: string | null;
   verb: string;
   newValue: string | null;
+  field?: string | null;
   createdAt: Date;
   notifyStatus: "pending" | "sent" | "not_needed";
   notifiedAt: Date | null;
@@ -107,6 +108,7 @@ function makeStub(seed: {
   users?: Array<{ id: string; username: string; role?: string; directoryStatus?: string }>;
   crm?: CrmRow[];
   stages?: Array<{ id: string; name: string; kind: "OPEN" | "WON" | "LOST" }>;
+  policies?: Array<{ projectId: string; escalation: unknown }>;
 }) {
   const pm = [...(seed.pm ?? [])];
   const crm = [...(seed.crm ?? [])];
@@ -129,6 +131,7 @@ function makeStub(seed: {
             id: r.workItemId,
             name: `item ${r.workItemId}`,
             sequenceId: 1,
+            projectId: "p1",
             project: { identifier: "INBOX" },
             ...override,
           },
@@ -180,9 +183,11 @@ function makeStub(seed: {
       ),
     },
     pmState: { findMany: vi.fn(async () => [{ id: "s-done", name: "Done" }]) },
+    pmSlaPolicy: { findMany: vi.fn(async () => seed.policies ?? []) },
     user: {
       findMany: vi.fn(async (args: any) =>
-        users.filter((u) => args.where.id.in.includes(u.id) &&
+        users.filter((u) => (!args.where.id || args.where.id.in.includes(u.id)) &&
+          (!args.where.role || args.where.role.in.includes(u.role ?? "family")) &&
           (!args.where.directoryStatus || (u.directoryStatus ?? "ACTIVE") === args.where.directoryStatus)),
       ),
     },
@@ -590,6 +595,31 @@ describe("WARP-3528 — service-desk tickets", () => {
   const bob = { id: "u-bob", username: "bob", role: "family" };
   const carol = { id: "u-carol", username: "carol", role: "family" };
   const LEGACY = { id: "0d9c5c1e-2f4a-4b6d-8e10-3a5c7e9b1d2f", username: "5f0c2a1e-7b3d-4c9e-8a21-0e6d4b9c3f70" };
+
+  it("SLA transitions notify current assignees, admins and explicit escalation recipients once, with no Project watchers", async () => {
+    const admin = { id: "u-admin", username: "administrator", role: "admin" };
+    const narrowed = { id: "u-narrowed", username: "narrowed", role: "owner" };
+    const inactive = { id: "u-inactive", username: "inactive", role: "admin", directoryStatus: "DEACTIVATED" };
+    resolveAccess.mockImplementation(async (id) => grants(id === narrowed.id ? [["projects", "manage"]] : [["support", "view"]]));
+    const prisma = makeStub({ pm: [ticketRow({ id: "sla1", verb: "sla_breached", actorId: null, field: "resolution", newValue: "BREACHED" })],
+      assignees: [{ workItemId: "t1", userId: bob.id }, { workItemId: "t1", userId: narrowed.id }], users: [bob, carol, admin, narrowed, inactive],
+      policies: [{ projectId: "p1", escalation: [{ on: "BREACHED", metric: "resolution", actions: [{ type: "notify", userIds: [carol.id, bob.id] }] }] }],
+    });
+    const watchers = vi.fn(async () => new Map([["t1", ["u-projects-only"]]]));
+    await runActivityNotifySweep(prisma, { ...opts, departmentWatchers: watchers });
+    expect(recordMock.mock.calls.map((c: any) => c[1].username).sort()).toEqual(["administrator", "bob", "carol"]);
+    expect(recordMock.mock.calls.every((c: any) => c[1].title === "Ticket SUP-12 SLA breached" && c[1].body === "A ticket needs your attention." && c[1].url === "/support?t=SUP-12")).toBe(true);
+    expect(watchers).not.toHaveBeenCalled(); expect(resolveAccess).not.toHaveBeenCalledWith(inactive.id);
+    expect(prisma.pm[0]!.notifyStatus).toBe("sent");
+    await runActivityNotifySweep(prisma, opts); expect(recordMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("an unverifiable SLA recipient leaves the whole transition pending before any claim or notification", async () => {
+    const prisma = makeStub({ pm: [ticketRow({ id: "sla1", verb: "sla_at_risk", actorId: null, field: "resolution", newValue: "AT_RISK" })], assignees: [{ workItemId: "t1", userId: bob.id }], users: [bob] });
+    resolveAccess.mockRejectedValue(new Error("access offline"));
+    await expect(runActivityNotifySweep(prisma, opts)).rejects.toThrow("access offline");
+    expect(prisma.pm[0]!.notifyStatus).toBe("pending"); expect(recordMock).not.toHaveBeenCalled(); expect(publishMock).not.toHaveBeenCalled();
+  });
 
   it("an assignment tells the user it names: the ticket key, its subject and the support link", async () => {
     const prisma = makeStub({

@@ -22,6 +22,7 @@
  */
 import { Router, type Request, type RequestHandler, type Response } from "express";
 import { z } from "zod";
+import { installSlaRoutes } from "./sla.routes.js";
 import type { PrismaClient } from "@prisma/client";
 import { requireRole } from "../../middleware/auth.js";
 import {
@@ -475,5 +476,6 @@ export function createSupportRouter(prisma: PrismaClient, deps: SupportRouterDep
     }
   });
 
+  installSlaRoutes(router, prisma, { staff, admins, canAct, canManage, viewerOf, ctxOf, fail, svcDeps });
   return router;
 }

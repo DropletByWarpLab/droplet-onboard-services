@@ -29,7 +29,7 @@ export function grants(entries: Array<[ModuleId, FeatureLevel]>): EffectiveAcces
 }
 
 export interface RouteCase {
-  method: "get" | "post" | "patch";
+  method: "get" | "post" | "patch" | "put" | "delete";
   path: string;
   url: string;
   body?: unknown;
@@ -55,4 +55,17 @@ export const ROUTES: RouteCase[] = [
   { method: "post", path: "/support/tickets/:id/notes", url: "/api/support/tickets/t1/notes", body: { bodyHtml: "<p>x</p>" }, ok: 201 },
   { method: "post", path: "/support/tickets/:id/escalate", url: "/api/support/tickets/t1/escalate", body: { projectId: "p1" }, ok: 201 },
   { method: "get", path: "/support/requesters/:contactId/tickets", url: "/api/support/requesters/c1/tickets", ok: 200 },
+  { method: "get", path: "/support/calendars", url: "/api/support/calendars", ok: 200 },
+  { method: "post", path: "/support/calendars", url: "/api/support/calendars", body: { name: "Office", timezone: "UTC", windows: [{ day: 1, start: "09:00", end: "17:00" }], holidays: [] }, ok: 201, adminOnly: true },
+  { method: "put", path: "/support/calendars/:id", url: "/api/support/calendars/c1", body: { name: "Office", timezone: "UTC", windows: [{ day: 1, start: "09:00", end: "17:00" }], holidays: [] }, ok: 200, adminOnly: true },
+  { method: "delete", path: "/support/calendars/:id", url: "/api/support/calendars/c1", ok: 204, adminOnly: true },
+  { method: "get", path: "/support/desks/:id/sla", url: "/api/support/desks/d1/sla", ok: 200 },
+  { method: "put", path: "/support/desks/:id/sla", url: "/api/support/desks/d1/sla", body: { policy: { enabled: true, calendarId: null, targets: { high: { resolutionMins: 60 } }, atRiskPercent: 75, escalation: [] }, assignment: { mode: "MANUAL", departmentId: null, memberIds: [] } }, ok: 200, adminOnly: true },
+  { method: "get", path: "/support/desks/:id/sla/report", url: "/api/support/desks/d1/sla/report?from=2026-01-01&to=2026-01-31", ok: 200 },
+  { method: "get", path: "/support/macros", url: "/api/support/macros?deskId=d1", ok: 200 },
+  { method: "post", path: "/support/macros", url: "/api/support/macros", body: { projectId: "d1", name: "Greeting", bodyHtml: "<p>Hello</p>", actions: {}, visibility: "PERSONAL" }, ok: 201 },
+  { method: "put", path: "/support/macros/:id", url: "/api/support/macros/m1", body: { projectId: "d1", name: "Greeting", bodyHtml: "<p>Hello</p>", actions: {}, visibility: "PERSONAL" }, ok: 200 },
+  { method: "delete", path: "/support/macros/:id", url: "/api/support/macros/m1", ok: 204 },
+  { method: "post", path: "/support/tickets/:id/macros/:macroId/preview", url: "/api/support/tickets/t1/macros/m1/preview", ok: 200 },
+  { method: "post", path: "/support/tickets/:id/macros/:macroId/apply", url: "/api/support/tickets/t1/macros/m1/apply", ok: 200 },
 ];

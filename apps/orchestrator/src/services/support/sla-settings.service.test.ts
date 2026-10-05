@@ -1,0 +1,75 @@
+import { describe, expect, it, vi } from "vitest";
+import { deleteMacro, getDeskSla, listMacros, previewMacro, saveDeskSla, saveMacro } from "./sla-settings.service.js";
+import { getSlaReport } from "./sla-report.service.js";
+const viewer = { id: "agent", role: "family" } as const;
+const ticketId = "3fd5b450-a07a-4ad0-afab-5094b08b18cf";
+function fixture() {
+  const macro: any = { id: "m1", projectId: "desk", ownerId: "agent", name: "Greeting", visibility: "PERSONAL", bodyHtml: "<p>Hello {{requester.firstName}}, {{agent.name}} here for {{ticket.key}} at {{desk.name}}</p>", actions: {} };
+  const row: any = { id: ticketId, projectId: "desk", sequenceId: 12, project: { kind: "SERVICE_DESK", name: "Help <desk>", identifier: "SUP" }, ticket: { requesterName: '<img/src=x/onerror="evil()"> Ana' }, labels: [] };
+  const db: any = {
+    pmProject: { findFirst: vi.fn(async () => ({ id: "desk", kind: "SERVICE_DESK", workspaceId: "home", isArchived: false })) },
+    pmWorkItem: { findFirst: vi.fn(async () => row) },
+    pmMacro: { findFirst: vi.fn(async () => macro), findUnique: vi.fn(async () => macro), findMany: vi.fn(async () => []), update: vi.fn(), create: vi.fn(), deleteMany: vi.fn(async () => ({ count: 0 })) },
+    pmSlaPolicy: { findUnique: vi.fn(async () => null), upsert: vi.fn() },
+    pmAssignmentRule: { findUnique: vi.fn(async () => null), upsert: vi.fn() },
+    pmBusinessCalendar: { findFirst: vi.fn(async () => null) },
+    user: { findUnique: vi.fn(async () => ({ displayName: 'Agent "<script>"' })), findMany: vi.fn(async () => []) },
+    $transaction: vi.fn(async (fn) => fn(db)),
+  };
+  return { db, macro, row };
+}
+describe("Support SLA settings boundary", () => {
+  it("does not expose SLA settings or macros for a native Project", async () => {
+    const f = fixture(); f.db.pmProject.findFirst.mockResolvedValue(null);
+    await expect(getDeskSla(f.db, "project")).rejects.toThrow("desk_not_found");
+    await expect(listMacros(f.db, viewer, "project")).rejects.toThrow("desk_not_found");
+    expect(f.db.pmSlaPolicy.findUnique).not.toHaveBeenCalled(); expect(f.db.pmMacro.findMany).not.toHaveBeenCalled();
+  });
+  it("binds a calendar to the desk workspace before either policy or assignment write", async () => {
+    const f = fixture();
+    await expect(saveDeskSla(f.db, "desk", { policy: { enabled: true, calendarId: "other-workspace", targets: {}, atRiskPercent: 75, escalation: [] }, assignment: { mode: "MANUAL", departmentId: null, memberIds: [] } })).rejects.toThrow("calendar_not_found");
+    expect(f.db.pmBusinessCalendar.findFirst).toHaveBeenCalledWith({ where: { id: "other-workspace", workspaceId: "home" } });
+    expect(f.db.pmSlaPolicy.upsert).not.toHaveBeenCalled(); expect(f.db.pmAssignmentRule.upsert).not.toHaveBeenCalled();
+  });
+  it("neither an admin nor another agent can edit another person's personal macro", async () => {
+    const f = fixture(); f.macro.ownerId = "another";
+    await expect(saveMacro(f.db, { id: "admin", role: "admin" }, "m1", { projectId: "desk", name: "X", bodyHtml: "<p>x</p>", actions: {}, visibility: "PERSONAL" })).rejects.toThrow("macro_not_found");
+    expect(f.db.pmMacro.update).not.toHaveBeenCalled();
+    await expect(deleteMacro(f.db, viewer, "m1")).rejects.toThrow("macro_not_found");
+    expect(f.db.pmMacro.deleteMany.mock.calls[0][0].where).toEqual({ id: "m1", OR: [{ ownerId: "agent" }] });
+  });
+  it("an agent cannot turn their own macro into a shared administrator macro", async () => {
+    const f = fixture(); await expect(saveMacro(f.db, viewer, null, { projectId: "desk", name: "X", bodyHtml: "<p>x</p>", actions: {}, visibility: "SHARED" })).rejects.toThrow("macro_not_found");
+    expect(f.db.pmMacro.create).not.toHaveBeenCalled();
+  });
+  it("escapes substituted person/desk data and keeps preview read-only", async () => {
+    const f = fixture(); const result = await previewMacro(f.db, viewer, ticketId, "m1");
+    expect(result.bodyHtml).toContain("&lt;img/src=x/onerror=&quot;evil()&quot;&gt;");
+    expect(result.bodyHtml).toContain("Agent &quot;&lt;script&gt;&quot;");
+    expect(result.bodyHtml).toContain("SUP-12 at Help &lt;desk&gt;");
+    expect(result.bodyHtml).not.toMatch(/<img|<script/);
+    expect(f.db.pmMacro.update).not.toHaveBeenCalled(); expect(f.db.$transaction).not.toHaveBeenCalled();
+    expect(f.db.pmMacro.findFirst.mock.calls[0][0].where.AND[1]).toEqual({ OR: [{ ownerId: "agent" }, { visibility: "SHARED" }] });
+  });
+  it("refuses unsupported variables and global desk-specific state actions on save", async () => {
+    const f = fixture();
+    await expect(saveMacro(f.db, viewer, null, { projectId: "desk", name: "Bad", bodyHtml: "{{requester.email}}", actions: {}, visibility: "PERSONAL" })).rejects.toThrow("invalid_sla_configuration");
+    await expect(saveMacro(f.db, viewer, null, { projectId: null, name: "Bad", bodyHtml: "Hi", actions: { stateId: "desk-only" }, visibility: "PERSONAL" })).rejects.toThrow();
+    expect(f.db.pmMacro.create).not.toHaveBeenCalled();
+  });
+});
+describe("SLA cohort report", () => {
+  it("validates honest calendar dates and the 366-day bound before querying", async () => {
+    const f = fixture();
+    for (const range of [{ from: "2026-02-30", to: "2026-03-01" }, { from: "2026-01-02", to: "2026-01-01" }, { from: "2025-01-01", to: "2026-01-02" }]) {
+      await expect(getSlaReport(f.db, "desk", range)).rejects.toThrow("invalid_report_range");
+    }
+    expect(f.db.pmProject.findFirst).not.toHaveBeenCalled();
+  });
+  it("keeps the entire aggregate scoped to Support and excludes NONE/active tickets from attainment", async () => {
+    const f = fixture(); f.db.pmTicket = { groupBy: vi.fn(async (args) => args.where.solvedAt ? [{ slaStatus: "MET", _count: { workItemId: 3 } }, { slaStatus: "BREACHED", _count: { workItemId: 1 } }] : [{ slaStatus: "MET", _count: { workItemId: 3 } }, { slaStatus: "BREACHED", _count: { workItemId: 4 } }, { slaStatus: "NONE", _count: { workItemId: 8 } }, { slaStatus: "ON_TRACK", _count: { workItemId: 2 } }]) };
+    const result = await getSlaReport(f.db, "desk", { from: "2026-01-01", to: "2026-01-31" });
+    expect(result).toMatchObject({ total: 17, met: 3, breached: 1, attainmentPercent: 75 });
+    expect(f.db.pmTicket.groupBy.mock.calls[0][0].where.workItem).toMatchObject({ projectId: "desk", project: { kind: "SERVICE_DESK" }, isArchived: false });
+  });
+});

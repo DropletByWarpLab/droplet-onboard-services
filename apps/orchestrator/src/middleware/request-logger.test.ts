@@ -216,6 +216,30 @@ describe("requestLogger overlay QR link-token redaction (WARP-1474)", () => {
   });
 });
 
+describe("requestLogger webhook URL redaction (WARP-3532)", () => {
+  it("redacts a webhook URL if a parsed request body is explicitly logged", () => {
+    const secretUrl = "https://hooks.example.com/services/T0/B0/RAW-WEBHOOK-CREDENTIAL";
+    const lines: string[] = [];
+    const logger = createRequestLogger({
+      dest: { write: (s: string) => lines.push(s) },
+      level: "info",
+    });
+    const req = Object.assign(mockReq("WEBHOOK-URL-ID"), {
+      body: { url: secretUrl },
+    }) as ReturnType<typeof mockReq> & {
+      body: { url: string };
+      log: { info: (obj: unknown, msg: string) => void };
+    };
+    const res = mockRes();
+    runWithRequestId("WEBHOOK-URL-ID", () => {
+      logger(req as never, res as never);
+      req.log.info({ req }, "explicit request serialization");
+    });
+    res.emit("finish");
+    expect(lines.join("")).not.toContain("RAW-WEBHOOK-CREDENTIAL");
+  });
+});
+
 describe("requestLogger secret query params (WARP-3122)", () => {
   const SIG = "SECRET-SEGMENT-SIGNATURE-zz9";
   const url = `/api/cameras/front/playback.segment?after=1&before=2&seg=0.ts&u=u1&exp=9&sig=${SIG}`;

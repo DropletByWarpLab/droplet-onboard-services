@@ -204,6 +204,8 @@ export interface ApiTicketSummary {
   /** Already resolved: the item's own department, else the desk's. */
   department: PmDepartmentRef | null;
   slaStatus: SlaStatus;
+  /** Business minutes remaining at this response, held while the explicit state pauses. */
+  sla?: { firstResponseDueAt: string | null; nextResponseDueAt: string | null; resolutionDueAt: string | null; remainingBusinessMins: number | null; paused: boolean } | null;
   firstRespondedAt: string | null;
   solvedAt: string | null;
   reopenCount: number;

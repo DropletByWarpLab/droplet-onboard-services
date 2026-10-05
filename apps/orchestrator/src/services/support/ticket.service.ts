@@ -13,6 +13,8 @@
  * authorisation.
  */
 import type { Prisma, PrismaClient } from "@prisma/client";
+import { lockTicketClock, syncTicketSla } from "./sla-clock.service.js";
+import { assignNewTicket } from "./assignment.service.js";
 import { PM_ERRORS, isPrismaCode, writeActivity, type Db } from "../pm/pm.service.js";
 import { assertAssignableDepartment } from "../pm/pm-department.js";
 import { sanitizePmHtml } from "../pm/sanitize-html.js";
@@ -81,7 +83,7 @@ export async function findTicketRow(db: Db, ref: string): Promise<LiveTicketRow>
 }
 
 export async function getTicket(
-  prisma: PrismaClient,
+  prisma: Db,
   ref: string,
   ctx: SupportCtx,
 ): Promise<ApiTicket> {
@@ -224,6 +226,7 @@ export async function applyStateChange(
   now: Date,
 ): Promise<void> {
   const toTerminal = isTerminalGroup(target.group);
+  await lockTicketClock(tx, existing.id);
   const cas = await tx.pmWorkItem.updateMany({
     where: { id: existing.id, stateId: existing.stateId },
     data: {
@@ -252,6 +255,7 @@ export async function applyStateChange(
     oldValue: existing.stateId,
     newValue: target.id,
   });
+  await syncTicketSla(tx, existing.id, now, "state");
 }
 
 /** Sanitised HTML, or null when nothing survives the allowlist. */
@@ -338,7 +342,7 @@ export async function createTicket(
 
   const labelIds = [...new Set(input.labelIds ?? [])];
   await assertDeskLabels(prisma, desk, labelIds);
-  const assigneeIds = [...new Set(input.assigneeIds ?? [])];
+  let assigneeIds = [...new Set(input.assigneeIds ?? [])];
   await assertAgents(prisma, assigneeIds, deps);
 
   const now = clock(deps);
@@ -361,6 +365,8 @@ export async function createTicket(
       });
       const sequenceId = bumped.seqCounter;
 
+      if (input.assigneeIds === undefined) assigneeIds = await assignNewTicket(tx, desk.id, input.departmentId ?? desk.departmentId, deps);
+
       const item = await tx.pmWorkItem.create({
         data: {
           projectId: desk.id,
@@ -372,6 +378,8 @@ export async function createTicket(
           departmentId: input.departmentId ?? null,
           createdById: viewer.id,
           sortOrder: sequenceId,
+          createdAt: now,
+          updatedAt: now,
           isCompleted: terminal,
           completedAt: terminal ? now : null,
           assignees: assigneeIds.length
@@ -394,6 +402,7 @@ export async function createTicket(
           solvedAt: terminal ? now : null,
         },
       });
+      await syncTicketSla(tx, item.id, now, "create", deps);
       await writeActivity(tx, { workItemId: item.id, actorId: viewer.id, verb: "created" });
       // A create WITH assignees is an assignment, and `created` does not say who:
       // one `assigned` row per assignee, the same shape pm.createWorkItem writes.
@@ -426,19 +435,21 @@ export async function updateTicket(
   input: TicketUpdateInput,
   ctx: SupportCtx,
   deps: SupportDeps = {},
+  transaction?: Prisma.TransactionClient,
 ): Promise<ApiTicket> {
-  const existing = await findTicketRow(prisma, ticketId);
-  const desk = await prisma.pmProject.findUnique({
+  const db = transaction ?? prisma;
+  const existing = await findTicketRow(db, ticketId);
+  const desk = await db.pmProject.findUnique({
     where: { id: existing.projectId },
     include: { states: true, labels: true },
   });
   if (!desk) throw new Error(SUPPORT_ERRORS.DESK_NOT_FOUND);
   if (desk.isArchived) throw new Error(SUPPORT_ERRORS.DESK_ARCHIVED);
 
-  const target = input.stateId !== undefined ? await pickState(prisma, desk, input.stateId) : null;
+  const target = input.stateId !== undefined ? await pickState(db, desk, input.stateId) : null;
   const labelIds = input.labelIds ? [...new Set(input.labelIds)] : undefined;
-  if (labelIds) await assertDeskLabels(prisma, desk, labelIds);
-  if (input.companyId) await assertCompany(prisma, input.companyId, ctx);
+  if (labelIds) await assertDeskLabels(db, desk, labelIds);
+  if (input.companyId) await assertCompany(db, input.companyId, ctx);
 
   const currentAssignees = existing.assignees.map((a) => a.userId);
   const nextAssignees = input.assigneeIds ? [...new Set(input.assigneeIds)] : undefined;
@@ -446,7 +457,7 @@ export async function updateTicket(
   // grant must not block an unrelated edit of the ticket they were already on.
   if (nextAssignees) {
     await assertAgents(
-      prisma,
+      db as PrismaClient,
       nextAssignees.filter((id) => !currentAssignees.includes(id)),
       deps,
     );
@@ -455,7 +466,8 @@ export async function updateTicket(
   const now = clock(deps);
   const actorId = viewer.id;
   try {
-    await prisma.$transaction(async (tx) => {
+    const write = async (tx: Prisma.TransactionClient) => {
+      await lockTicketClock(tx, existing.id);
       if (input.departmentId) await assertAssignableDepartment(tx, input.departmentId);
 
       // The state move goes first: a lost compare-and-set aborts the whole
@@ -509,6 +521,9 @@ export async function updateTicket(
         });
       }
       await tx.pmWorkItem.update({ where: { id: existing.id }, data });
+      if (input.priority !== undefined && input.priority !== existing.priority) {
+        await syncTicketSla(tx, existing.id, now, "priority", deps);
+      }
 
       if (nextAssignees) {
         const added = nextAssignees.filter((id) => !currentAssignees.includes(id));
@@ -597,10 +612,12 @@ export async function updateTicket(
           newValue: input.companyId,
         });
       }
-    });
+    };
+    if (transaction) await write(transaction);
+    else await prisma.$transaction(write);
   } catch (err) {
     if (isPrismaCode(err, "P2003")) throw new Error(SUPPORT_ERRORS.COMPANY_NOT_FOUND);
     throw err;
   }
-  return getTicket(prisma, ticketId, ctx);
+  return getTicket(db, ticketId, ctx);
 }

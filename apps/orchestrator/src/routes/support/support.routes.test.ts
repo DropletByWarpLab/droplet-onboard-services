@@ -58,6 +58,8 @@ const svc = vi.hoisted(() => {
     addNote: vi.fn(),
     escalateTicket: vi.fn(),
     listRequesterTickets: vi.fn(),
+    listBusinessCalendars: vi.fn(), saveBusinessCalendar: vi.fn(), deleteBusinessCalendar: vi.fn(), getDeskSla: vi.fn(), saveDeskSla: vi.fn(),
+    listMacros: vi.fn(), saveMacro: vi.fn(), deleteMacro: vi.fn(), previewMacro: vi.fn(), applyMacro: vi.fn(), getSlaReport: vi.fn(),
   };
 });
 vi.mock("../../services/support/support.service.js", () => svc);

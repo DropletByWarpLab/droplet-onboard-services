@@ -164,7 +164,8 @@ export interface OffLanChannelDefault {
     | "web_fetch"
     | "ambient_data"
     | "web_push"
-    | "place_lookup";
+    | "place_lookup"
+    | "work_integrations";
   enabled: boolean;
   requiresAdmin: boolean;
 }
@@ -190,6 +191,11 @@ export const OFF_LAN_CHANNEL_DEFAULTS: readonly OffLanChannelDefault[] = [
   // OFF by default: the text someone types in an event's place field is
   // company data. Owner-only to turn on (settings.ts OWNER_ONLY_CHANNELS).
   { key: "place_lookup", enabled: false, requiresAdmin: true },
+  // WARP-3532 (ADR-069 §9) — work webhooks and Slack / Teams / Discord /
+  // Google Chat notifications. OFF by default: a work item title is company
+  // data and this is the switch that lets it leave. Owner-only to turn on
+  // (settings.ts OWNER_ONLY_CHANNELS). LAN destinations never need it.
+  { key: "work_integrations", enabled: false, requiresAdmin: true },
 ];
 
 /**

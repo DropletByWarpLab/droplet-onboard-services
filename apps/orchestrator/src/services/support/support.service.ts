@@ -24,3 +24,6 @@ export {
   type SupportDeps,
 } from "./requester.service.js";
 export { INVALID_CURSOR } from "./ticket-query.js";
+export { listBusinessCalendars, saveBusinessCalendar, deleteBusinessCalendar, getDeskSla, saveDeskSla,
+  listMacros, saveMacro, deleteMacro, previewMacro, applyMacro } from "./sla-settings.service.js";
+export { getSlaReport } from "./sla-report.service.js";

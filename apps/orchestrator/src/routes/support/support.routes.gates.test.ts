@@ -31,6 +31,8 @@ const svc = vi.hoisted(() => {
     "listAgents", "searchRequesterContacts", "createRequesterContact", "listDesks", "createDesk",
     "updateDesk", "getDesk", "queueCounts", "listTickets", "createTicket", "getTicket", "updateTicket",
     "getConversation", "addReply", "addNote", "escalateTicket", "listRequesterTickets",
+    "listBusinessCalendars", "saveBusinessCalendar", "deleteBusinessCalendar", "getDeskSla", "saveDeskSla",
+    "listMacros", "saveMacro", "deleteMacro", "previewMacro", "applyMacro", "getSlaReport",
   ] as const;
   const out: Record<string, ReturnType<typeof vi.fn>> = {};
   for (const f of fns) out[f] = vi.fn().mockResolvedValue({});

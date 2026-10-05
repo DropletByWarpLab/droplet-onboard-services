@@ -711,6 +711,7 @@ describe("overlapping ticks do not re-enter the re-open (one tick in flight)", (
       {
         scheduleInterval: (_ms, fn) => {
           handler = fn;
+          return { runNow: () => undefined };
         },
       },
       h.deps,
