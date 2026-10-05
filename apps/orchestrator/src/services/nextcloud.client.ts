@@ -1439,22 +1439,98 @@ export async function ncListRecents(
  * Fetch a preview thumbnail for a file via Nextcloud's core/preview endpoint.
  * Returns raw bytes + content-type so the orchestrator can stream them through.
  */
+export interface NcFetchThumbnailOptions {
+  /** Stream no more than this many bytes before cancelling the upstream body. */
+  maxBytes?: number;
+  /** Abort both the request and body read after this many milliseconds. */
+  timeoutMs?: number;
+  /** Optional caller cancellation, composed with the timeout when both exist. */
+  signal?: AbortSignal;
+}
+
 export async function ncFetchThumbnail(
   token: string,
   fileId: number,
   x: number = 256,
-  y: number = 256
+  y: number = 256,
+  options?: NcFetchThumbnailOptions,
 ): Promise<{ body: ArrayBuffer; contentType: string } | null> {
   const url = `${config.NEXTCLOUD_URL}/index.php/core/preview?fileId=${fileId}&x=${x}&y=${y}&a=1&forceIcon=0`;
-  const resp = await fetch(url, { headers: davHeaders(token) });
-  if (!resp.ok) {
-    if (resp.status === 404) return null;
-    return null;
+  const maxBytes = options?.maxBytes;
+  if (maxBytes !== undefined && (!Number.isSafeInteger(maxBytes) || maxBytes < 0)) {
+    throw new RangeError("maxBytes must be a non-negative safe integer");
   }
-  return {
-    body: await resp.arrayBuffer(),
-    contentType: resp.headers.get("content-type") || "image/png",
-  };
+  if (options?.timeoutMs !== undefined && (!Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0)) {
+    throw new RangeError("timeoutMs must be a positive finite number");
+  }
+
+  const bounded = maxBytes !== undefined;
+  const controller = bounded || options?.timeoutMs !== undefined || options?.signal
+    ? new AbortController()
+    : undefined;
+  const externalSignal = options?.signal;
+  const forwardAbort = () => controller?.abort(externalSignal?.reason);
+  if (externalSignal?.aborted) forwardAbort();
+  else externalSignal?.addEventListener("abort", forwardAbort, { once: true });
+  const timeout = options?.timeoutMs === undefined || !controller
+    ? undefined
+    : setTimeout(() => controller.abort(), options.timeoutMs);
+
+  try {
+    const resp = await fetch(url, {
+      headers: davHeaders(token),
+      ...(controller ? { signal: controller.signal } : {}),
+    });
+    if (!resp.ok) {
+      await resp.body?.cancel().catch(() => undefined);
+      return null;
+    }
+
+    if (maxBytes === undefined) {
+      return {
+        body: await resp.arrayBuffer(),
+        contentType: resp.headers.get("content-type") || "image/png",
+      };
+    }
+
+    const declared = Number(resp.headers.get("content-length") ?? "");
+    if (Number.isFinite(declared) && declared > maxBytes) {
+      controller?.abort();
+      await resp.body?.cancel().catch(() => undefined);
+      return null;
+    }
+    if (!resp.body) {
+      return { body: new ArrayBuffer(0), contentType: resp.headers.get("content-type") || "image/png" };
+    }
+
+    const reader = resp.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        controller?.abort();
+        await reader.cancel().catch(() => undefined);
+        return null;
+      }
+      chunks.push(value);
+    }
+    const bytes = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return {
+      body: bytes.buffer,
+      contentType: resp.headers.get("content-type") || "image/png",
+    };
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+    externalSignal?.removeEventListener("abort", forwardAbort);
+  }
 }
 
 // ── Share V2 (full options + update / delete / shared-with-me) ──

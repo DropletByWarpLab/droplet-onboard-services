@@ -69,7 +69,7 @@
  * intersection on CRM OR Projects (WARP-2988; before it, for ANY feature set),
  * so `domainsForFeatures` passes it for EITHER
  * feature set, and the route layer does not make up the difference: only
- * eight modules are in `FEATURE_GATED_MODULES` (module-mounts.ts) and
+ * nine modules are in `FEATURE_GATED_MODULES` (module-mounts.ts) and
  * `projects` is not one of them, so the whole `/api/pm` tree carries the
  * box-wide toggle and no per-person check. A `business` grant therefore
  * reaches `business_find({entity:"work_item"})` with nothing narrowing it per

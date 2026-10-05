@@ -39,6 +39,10 @@ export const APP_CAPABILITY_DEFAULTS: AppCapabilities = {
   projects: true,
   crm: false,
   contacts: false,
+  // WARP-3528 — like `crm`: new and `defaultEnabled: false`, so "off" is the
+  // honest answer while the probe is unresolved. A /support that guessed "on"
+  // would offer a surface the module gate then 404s.
+  support: false,
 };
 
 export function useAppCapabilities(): AppCapabilities {

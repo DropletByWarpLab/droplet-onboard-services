@@ -36,16 +36,16 @@ function modelBlock(name: string): string {
 
 describe("the WS-5 migration", () => {
   it("ships exactly once, under the reserved timestamp", () => {
-    expect(dirs).toEqual(["20261004050000_warp_3521_pm_cycles_modules"]);
+    expect(dirs).toEqual(["20261004140000_warp_3521_pm_cycles_modules"]);
   });
 
   it("uses a timestamp strictly greater than every migration before it", () => {
     const stamps = readdirSync(MIGRATIONS_DIR)
       .filter((d) => /^\d{14}_/.test(d))
       .map((d) => d.slice(0, 14))
-      .filter((s) => s < "20261004050000");
-    expect(stamps.every((s) => s < "20261004050000")).toBe(true);
-    expect([...stamps].sort().at(-1)! < "20261004050000").toBe(true);
+      .filter((s) => s < "20261004140000");
+    expect(stamps.every((s) => s < "20261004140000")).toBe(true);
+    expect([...stamps].sort().at(-1)! < "20261004140000").toBe(true);
   });
 
   it("adds the two completion columns, explicitly", () => {
