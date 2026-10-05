@@ -13,7 +13,7 @@
     "lint": "eslint src/"
   },
   "dependencies": {
-    "undici": "^7.29.1"
+    "undici": "^7.30.0"
   },
   "devDependencies": {
     "@droplet/shared-types": "0.1.0",
