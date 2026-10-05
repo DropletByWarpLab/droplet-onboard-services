@@ -32,9 +32,9 @@
  * authorized API, so the exposure of a stale roster is a timestamp, not data.
  * It matches the 5-10 s the module gate and the tool verdict already accept.
  *
- * Service desk: `PmProject.kind` does not exist yet (WS-12). When it does, a
- * ticket's items must be announced to the `support` grant's audience, not this
- * one; `pm-live-wiring.guard.test.ts` fails the day the column appears.
+ * Service desk: `PmProject.kind` is checked by the consumer before this
+ * audience is asked. Service-desk items and deletion tombstones never enter
+ * the Projects audience; this roster is not a Support audience.
  */
 import type { ModuleId, PrismaClient } from "@prisma/client";
 import { resolveEffectiveAccess } from "../effective-access.service.js";

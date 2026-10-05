@@ -110,7 +110,7 @@ export function publishPmChanged(
 }
 
 export interface PmLiveDeps {
-  prisma: Pick<PrismaClient, "pmWorkItem">;
+  prisma: Pick<PrismaClient, "pmWorkItem" | "pmProject">;
   audience: PmLiveAudience;
   /** Seam: is the broker up? Default: the health record's own answer. */
   connected?: () => boolean;
@@ -150,6 +150,13 @@ export function createPmLiveConsumer(deps: PmLiveDeps): OutboxConsumer {
       }
 
       if (row.deletedWorkItemId && row.deletedProjectId) {
+        // A tombstone outlives its work-item FK. Recheck its owning project
+        // before using the Projects audience, so Support IDs never escape here.
+        const project = await deps.prisma.pmProject.findUnique({
+          where: { id: row.deletedProjectId },
+          select: { kind: true },
+        });
+        if (!project || project.kind !== "PROJECT") return;
         const usernames = await deps.audience.usernamesForDeleted(row.deletedGuestUserIds);
         if (usernames.length === 0) return;
         let failed = false;
@@ -175,11 +182,14 @@ export function createPmLiveConsumer(deps: PmLiveDeps): OutboxConsumer {
       if (projectId === undefined) {
         const item = await deps.prisma.pmWorkItem.findUnique({
           where: { id: row.workItemId },
-          select: { projectId: true },
+          select: { projectId: true, project: { select: { kind: true } } },
         });
         // Deleted since the write. Its activity rows go with it, so there is
         // nothing left to announce (and a row we could not place is not cached).
         if (!item) return;
+        // A SERVICE_DESK item has a separate Support audience; this consumer
+        // handles only Projects changes, and fails closed before roster lookup.
+        if (item.project.kind !== "PROJECT") return;
         if (projectOf.size >= MAX_REMEMBERED_ITEMS) projectOf.clear();
         projectOf.set(row.workItemId, item.projectId);
         projectId = item.projectId;

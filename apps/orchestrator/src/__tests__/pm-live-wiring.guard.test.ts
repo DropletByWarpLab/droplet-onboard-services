@@ -67,30 +67,16 @@ describe("the pm-live consumer is scheduled (index.ts), forwarded (ws-bridge) an
   });
 });
 
-describe("the follow-up that WS-12 owes this slice", () => {
-  /**
-   * `PmProject.kind` (PROJECT | SERVICE_DESK) arrives with WS-12. The day it
-   * does, a ticket's work item is a `PmWorkItem` in a SERVICE_DESK project, and
-   * this consumer would announce it to everybody with Projects access — people
-   * ADR-069 §1 says must never learn a ticket exists. The same rule keeps a
-   * ticket out of the webhook fan-out (docs/work-webhooks.md, "Reserved").
-   *
-   * So this test is a tripwire, not a feature: it fails the moment the column
-   * exists, and its message is the instruction. Whoever lands WS-12 (or rebases
-   * this onto it) must make `pm-live` skip SERVICE_DESK items here and publish a
-   * ticket's change to the `support` grant's audience instead.
-   */
-  it("PmProject has no `kind` column yet; when it does, pm-live must learn about it", () => {
+describe("Projects live updates exclude the Support service desk", () => {
+  it("keeps the PROJECT kind check at both live-row and deleted-tombstone boundaries", () => {
     const schema = readFileSync(path.resolve(SRC, "../prisma/schema.prisma"), "utf8");
     const model = /^model PmProject \{([\s\S]*?)^\}/m.exec(schema)?.[1];
     expect(model, "model PmProject not found in schema.prisma").toBeTruthy();
-    const hasKind = /^\s*kind\s/m.test(model ?? "");
-    expect(
-      hasKind,
-      "PmProject.kind exists now (WS-12). Before this can pass: make services/pm/pm-live.ts publish NOTHING " +
-        "for a SERVICE_DESK project's items (select the project's kind and return early), publish a ticket's " +
-        "change to the `support` grant's audience instead (pm-live-audience.ts), then replace this tripwire " +
-        "with a test for that. See docs/work-live-updates.md, \"Service desk\".",
-    ).toBe(false);
+    expect(model).toMatch(/^\s*kind\s+PmProjectKind\b/m);
+    expect(schema).toMatch(/^enum PmProjectKind \{[\s\S]*?^\s*PROJECT\s*$/m);
+    const consumer = code(read("services/pm/pm-live.ts"));
+    expect(consumer).toMatch(/project: \{ select: \{ kind: true \} \}/);
+    expect(consumer).toMatch(/item\.project\.kind !== "PROJECT"/);
+    expect(consumer).toMatch(/pmProject\.findUnique\([\s\S]*?select: \{ kind: true \}[\s\S]*?project\.kind !== "PROJECT"/);
   });
 });

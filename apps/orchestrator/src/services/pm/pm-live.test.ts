@@ -34,23 +34,31 @@ function logger() {
   return { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
 }
 
-function setup(over: { connected?: () => boolean; names?: string[]; item?: { projectId: string } | null } = {}) {
+function setup(over: {
+  connected?: () => boolean;
+  names?: string[];
+  item?: { projectId: string; project: { kind: "PROJECT" | "SERVICE_DESK" } } | null;
+  deletedProject?: { kind: "PROJECT" | "SERVICE_DESK" } | null;
+} = {}) {
   const sent: Array<{ topic: string; payload: Record<string, unknown> }> = [];
   const send = vi.fn((topic: string, payload: Record<string, unknown>) => void sent.push({ topic, payload }));
   const audience = {
     usernamesFor: vi.fn(async () => over.names ?? ["ana", "ben"]),
     usernamesForDeleted: vi.fn(async () => over.names ?? ["ana", "ben"]),
   };
-  const findUnique = vi.fn(async () => (over.item === undefined ? { projectId: "p-1" } : over.item));
+  const findUnique = vi.fn(async () =>
+    over.item === undefined ? { projectId: "p-1", project: { kind: "PROJECT" as const } } : over.item,
+  );
+  const findProject = vi.fn(async () => (over.deletedProject === undefined ? { kind: "PROJECT" as const } : over.deletedProject));
   const log = logger();
   const consumer = createPmLiveConsumer({
-    prisma: { pmWorkItem: { findUnique } } as never,
+    prisma: { pmWorkItem: { findUnique }, pmProject: { findUnique: findProject } } as never,
     audience,
     connected: over.connected ?? (() => true),
     send,
     logger: log,
   });
-  return { consumer, sent, send, audience, findUnique, log };
+  return { consumer, sent, send, audience, findUnique, findProject, log };
 }
 
 describe("what is published", () => {
@@ -88,7 +96,7 @@ describe("what is published", () => {
   });
 
   it("publishes a committed deletion tombstone after the work-item row is gone", async () => {
-    const { consumer, sent, findUnique, audience } = setup({ item: null, names: ["owner", "assigned-guest"] });
+    const { consumer, sent, findUnique, findProject, audience } = setup({ item: null, names: ["owner", "assigned-guest"] });
     await consumer.handle(row({
       workItemId: null,
       verb: "deleted",
@@ -98,11 +106,41 @@ describe("what is published", () => {
     }));
 
     expect(findUnique).not.toHaveBeenCalled();
+    expect(findProject).toHaveBeenCalledWith({ where: { id: "p-1" }, select: { kind: true } });
     expect(audience.usernamesForDeleted).toHaveBeenCalledWith(["guest-id"]);
     expect(sent.map(({ topic, payload }) => [topic, payload])).toEqual([
       ["droplet/pm/owner", { type: "pm.changed", projectId: "p-1", workItemId: "wi-gone", verb: "deleted" }],
       ["droplet/pm/assigned-guest", { type: "pm.changed", projectId: "p-1", workItemId: "wi-gone", verb: "deleted" }],
     ]);
+  });
+
+  it("does not publish live work-item activity from a service desk project", async () => {
+    const { consumer, sent, audience, findUnique } = setup({
+      item: { projectId: "desk-1", project: { kind: "SERVICE_DESK" } },
+    });
+    await consumer.handle(row());
+    expect(findUnique).toHaveBeenCalledWith({
+      where: { id: "wi-1" },
+      select: { projectId: true, project: { select: { kind: true } } },
+    });
+    expect(audience.usernamesFor).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
+  });
+
+  it("does not publish a deletion tombstone from a service desk project", async () => {
+    const { consumer, sent, audience, findProject } = setup({
+      deletedProject: { kind: "SERVICE_DESK" },
+    });
+    await consumer.handle(row({
+      workItemId: null,
+      verb: "deleted",
+      deletedProjectId: "desk-1",
+      deletedWorkItemId: "wi-gone",
+      deletedGuestUserIds: ["guest-id"],
+    }));
+    expect(findProject).toHaveBeenCalledWith({ where: { id: "desk-1" }, select: { kind: true } });
+    expect(audience.usernamesForDeleted).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
   });
 
   it("builds the topic from the username", () => {

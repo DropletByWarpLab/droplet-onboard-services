@@ -44,8 +44,8 @@ describe("every PmActivity writer wakes the outbox", () => {
     (_name, text) => {
       const sites = text.match(/\bpmActivity\.(create|createMany)\(/g)?.length ?? 0;
       const nudges = text.match(/\bnudgeOutbox\(\)/g)?.length ?? 0;
-      expect(text).toMatch(/import \{[^}]*\bnudgeOutbox\b[^}]*\} from "\.\/pm-outbox\.js"/);
       if (_name === "services/pm/pm.service.ts") {
+        expect(text).toMatch(/import \{[^}]*\bnudgeOutbox\b[^}]*\} from "\.\/pm-outbox\.js"/);
         // `writeActivity` wakes once per ordinary committed write. Deletion is
         // one logical transaction with three possible activity inserts
         // (tombstone, child audit rows and relation audit rows), so it wakes
@@ -55,7 +55,16 @@ describe("every PmActivity writer wakes the outbox", () => {
         expect(nudges).toBe(2);
         expect(text).toMatch(/if \(input\.nudge !== false\) nudgeOutbox\(\)/);
         expect(text).toMatch(/\}, \{ \.\.\.SERIALIZABLE_TX, timeout: 5_000 \}\);\s*nudgeOutbox\(\)/);
+      } else if (_name === "services/support/escalation.service.ts") {
+        // Escalation batches a related PM item and two relation activity rows
+        // in one transaction. Its shared writeActivity call is the single
+        // wake-up for that transaction; per-insert nudges would be redundant.
+        expect(sites).toBe(1);
+        expect(nudges).toBe(0);
+        expect(text).toMatch(/import \{ writeActivity \} from "\.\.\/pm\/pm\.service\.js"/);
+        expect(text).toMatch(/await writeActivity\(tx,[\s\S]*?await tx\.pmActivity\.createMany\(/);
       } else {
+        expect(text).toMatch(/import \{[^}]*\bnudgeOutbox\b[^}]*\} from "\.\/pm-outbox\.js"/);
         expect(nudges).toBeGreaterThanOrEqual(sites);
       }
     },
