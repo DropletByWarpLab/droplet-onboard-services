@@ -30,12 +30,13 @@ export const PM_FEED_MAX_EVENTS = 500;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
- * Which projects a feed may read. Archived ones never. WS-12 adds
- * `kind = SERVICE_DESK` projects, whose items are customer conversations and
- * must never reach a work feed: the filter for them belongs HERE, in the one
- * place both feeds take their projects from.
+ * Which projects a feed may read. Archived ones never. A SERVICE_DESK project
+ * holds customer conversations and must never reach a work feed: the filter
+ * belongs HERE, in the one place both feeds take their projects from. Keep it
+ * on the item query too, so a kind change between project validation and item
+ * retrieval cannot expose ticket content.
  */
-const FEED_PROJECT_WHERE = { isArchived: false } satisfies Prisma.PmProjectWhereInput;
+const FEED_PROJECT_WHERE = { isArchived: false, kind: "PROJECT" } satisfies Prisma.PmProjectWhereInput;
 
 const FEED_SELECT = {
   id: true,

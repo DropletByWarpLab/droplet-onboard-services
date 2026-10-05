@@ -39,6 +39,7 @@ import {
   revokeFeedTokens,
   rotateFeedToken,
 } from "../services/calendar-feed-token.service.js";
+import { findFeedProject, listFeedProjects, listMyWorkFeedItems, listProjectFeedItems } from "../services/pm/pm-ics.service.js";
 
 // The global unit setup mocks @prisma/client so the DB-less lane never needs
 // Postgres. This file must talk to a REAL one.
@@ -58,6 +59,7 @@ describe.skipIf(!RUN)("PmApiToken + scoped CalendarFeedToken — the database's 
 
   let userId = "";
   let projectId = "";
+  let workspaceId = "";
   let n = 0;
 
   beforeAll(async () => {
@@ -89,6 +91,7 @@ describe.skipIf(!RUN)("PmApiToken + scoped CalendarFeedToken — the database's 
     });
     userId = user.id;
     const ws = await prisma.pmWorkspace.create({ data: { slug: `warp3533-ws-${Date.now()}`, name: "warp3533-ws" } });
+    workspaceId = ws.id;
     const project = await prisma.pmProject.create({
       data: { workspaceId: ws.id, name: "warp3533-project", identifier: "W33" },
     });
@@ -429,5 +432,34 @@ describe.skipIf(!RUN)("the token and feed-link services over real Postgres (WARP
     expect((await getFeedTokenStatus(prisma, user.id, { scope: "pm_project", projectId })).state).toBe("none");
     expect((await getFeedTokenStatus(prisma, user.id, { scope: "pm_project", projectId: otherProjectId })).state).toBe("active");
     expect((await getFeedTokenStatus(prisma, user.id)).state).toBe("active");
+  });
+
+  it("real ICS project and item queries exclude service-desk conversations", async () => {
+    const desk = await prisma.pmProject.create({
+      data: {
+        workspaceId,
+        kind: "SERVICE_DESK",
+        name: "warp3533-private-desk",
+        identifier: `D${Date.now().toString().slice(-6)}`,
+        states: { create: [{ name: "New", group: "unstarted", isDefault: true }] },
+      },
+      include: { states: true },
+    });
+    const item = await prisma.pmWorkItem.create({
+      data: {
+        projectId: desk.id,
+        sequenceId: 1,
+        name: "warp3533-private-ticket",
+        stateId: desk.states[0]!.id,
+        dueDate: new Date(),
+        assignees: { create: [{ userId }] },
+      },
+    });
+
+    expect(await findFeedProject(prisma, desk.id)).toBeNull();
+    expect((await listFeedProjects(prisma)).some((project) => project.id === desk.id)).toBe(false);
+    expect(await listProjectFeedItems(prisma, desk.id)).toEqual([]);
+    expect(await listMyWorkFeedItems(prisma, userId)).toEqual([]);
+    expect(await prisma.pmWorkItem.findUnique({ where: { id: item.id } })).not.toBeNull();
   });
 });

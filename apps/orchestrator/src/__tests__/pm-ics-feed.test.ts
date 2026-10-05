@@ -86,6 +86,7 @@ interface ProjectRow {
   identifier: string;
   name: string;
   isArchived: boolean;
+  kind: "PROJECT" | "SERVICE_DESK";
 }
 interface ItemRow {
   id: string;
@@ -139,9 +140,10 @@ function makeDb(opts: { projectsEnabled?: boolean } = {}) {
     ].map(([id, username, role]) => [id, { id, username, role, directoryStatus: "ACTIVE" }]),
   );
   const projects: ProjectRow[] = [
-    { id: "p-abc", identifier: "ABC", name: "Alpha build", isArchived: false },
-    { id: "p-xyz", identifier: "XYZ", name: "Xylophone", isArchived: false },
-    { id: "p-old", identifier: "OLD", name: "Old stuff", isArchived: true },
+    { id: "p-abc", identifier: "ABC", name: "Alpha build", isArchived: false, kind: "PROJECT" },
+    { id: "p-xyz", identifier: "XYZ", name: "Xylophone", isArchived: false, kind: "PROJECT" },
+    { id: "p-old", identifier: "OLD", name: "Old stuff", isArchived: true, kind: "PROJECT" },
+    { id: "p-desk", identifier: "SECRET", name: "Private service desk", isArchived: false, kind: "SERVICE_DESK" },
   ];
   const items: ItemRow[] = [];
   const tokens: TokenRow[] = [];
@@ -497,6 +499,23 @@ describe("WARP-3533 — the gates the route bypasses, re-checked inside it", () 
     // Back on: the same links work again — the switch revoked nothing.
     db.moduleEnabled = true;
     expect((await fetchFeed(db, mine, freshIp())).status).toBe(200);
+  });
+
+  it("never emits service-desk tickets through my-work or a project feed", async () => {
+    const db = makeDb();
+    db.addItem({ projectId: "p-desk", name: "Private ticket subject", assignees: ["u-alice"] });
+    const mine = await link(db, "u-alice", { scope: "pm_my_work" });
+    const desk = await link(db, "u-alice", { scope: "pm_project", projectId: "p-desk" });
+
+    const myFeed = await fetchFeed(db, mine, freshIp());
+    expect(myFeed.status).toBe(200);
+    expect(myFeed.text).not.toContain("Private ticket subject");
+
+    const deskFeed = await fetchFeed(db, desk, freshIp());
+    expect(deskFeed.status).toBe(404);
+    expect(deskFeed.text).not.toContain("Private ticket subject");
+    expect(db.pmWorkItem.findMany).toHaveBeenCalledTimes(1);
+    expect(db.pmWorkItem.findMany.mock.calls[0]?.[0].where.project).toEqual({ isArchived: false, kind: "PROJECT" });
   });
 
   it("an unreadable module table fails closed", async () => {
