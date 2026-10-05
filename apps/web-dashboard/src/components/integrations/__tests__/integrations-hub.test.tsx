@@ -591,9 +591,14 @@ describe("entries are the union of the catalog and the response", () => {
       // Payments
       "Stripe",
       "Square",
+      // WARP-3697 — GoCardless, at `catalog.order` 19, joins the Payments
+      // group Stripe and Square already opened.
+      "GoCardless",
       // CRM
       "HubSpot",
       "Pipedrive",
+      // WARP-3698 — Capsule CRM, at `catalog.order` 20, joins the CRM group.
+      "Capsule CRM",
       // Marketing. WARP-2466 — these arrive with no hub code change at all:
       // the grid is DERIVED from the descriptor catalog (#1809 + #1808), so
       // registering a descriptor is what puts a tile on the page. Mutation:
@@ -654,9 +659,14 @@ describe("entries are the union of the catalog and the response", () => {
       // Payments
       "Stripe",
       "Square",
+      // WARP-3697 — GoCardless, at `catalog.order` 19, joins the Payments
+      // group Stripe and Square already opened.
+      "GoCardless",
       // CRM
       "HubSpot",
       "Pipedrive",
+      // WARP-3698 — Capsule CRM, at `catalog.order` 20, joins the CRM group.
+      "Capsule CRM",
       // Marketing. WARP-2466 — these arrive with no hub code change at all:
       // the grid is DERIVED from the descriptor catalog (#1809 + #1808), so
       // registering a descriptor is what puts a tile on the page. Mutation:
@@ -709,14 +719,15 @@ describe("entries are the union of the catalog and the response", () => {
     const { container } = renderHub();
     await waitFor(() => expect(renderedNames(container)).toContain("M365"));
 
-    // Eighteen catalog tiles (four original, the five WARP-2214 vendors — Xero
+    // Twenty catalog tiles (four original, the five WARP-2214 vendors — Xero
     // included — the three wave-1 vendors, the two WARP-2707 REST vendors,
     // the WARP-2916 GitHub one, the WARP-2917 GitLab one, WARP-2918's
-    // Todoist and the WARP-2919 Loyverse card) absorb four of the rows; the
-    // two the catalog knows nothing about each get their own. WARP-2659 adds
-    // the MCP-track tile, which this fixture reports no row for — it renders
-    // from the registry regardless, which is the point.
-    expect(tiles(container)).toHaveLength(21);
+    // Todoist, the WARP-2919 Loyverse card, WARP-3697's GoCardless and
+    // WARP-3698's Capsule CRM) absorb four of the rows; the two the catalog
+    // knows nothing about each get their own. WARP-2659 adds the MCP-track
+    // tile, which this fixture reports no row for — it renders from the
+    // registry regardless, which is the point.
+    expect(tiles(container)).toHaveLength(23);
     for (const name of [
       "Eaglesoft",
       "Dentrix",
@@ -745,6 +756,10 @@ describe("entries are the union of the catalog and the response", () => {
       "Todoist",
       // WARP-2919 — the sixth REST card, at `catalog.order` 17.
       "Loyverse",
+      // WARP-3697 — the seventh REST card, at `catalog.order` 19.
+      "GoCardless",
+      // WARP-3698 — the eighth REST card, at `catalog.order` 20.
+      "Capsule CRM",
       "Atlassian (Jira & Confluence)",
       "M365",
       "Something Nobody Wrote A Tile For",

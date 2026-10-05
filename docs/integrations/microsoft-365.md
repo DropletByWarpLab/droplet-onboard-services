@@ -24,8 +24,8 @@ Open **Settings → Microsoft 365** in Droplet first. It shows a **redirect URI*
 4. On the new app: **Authentication → Add a platform → Mobile and desktop applications.** In **Custom redirect URIs**, paste the redirect URI Droplet showed you, exactly. Select **Configure**.
    - Not **Web**, and not **Single-page application**. Those two need a secret or a browser-only sign-in, and Droplet's sign-in will fail with a message naming the redirect.
 5. Still under **Authentication**, set **Allow public client flows** to **Yes** and **Save**. (This is only used if your organisation still allows sign-in by code on another device; it is harmless otherwise.)
-6. **API permissions → Add a permission → Microsoft Graph → Delegated permissions**, and tick the permissions listed in §4. Select **Add permissions**.
-7. If your organisation requires an administrator to approve apps: **Grant admin consent for <your organisation>**.
+6. **API permissions → Add a permission → Microsoft Graph → Delegated permissions**, and tick the permissions listed in §4. Include `Sites.Read.All` if anyone will use SharePoint (you can add it later; then repeat step 7). Select **Add permissions**.
+7. **Grant admin consent for <your organisation>.** On Microsoft's default setting, **Let Microsoft manage your consent settings** (the default for new tenants), people cannot approve the Files, Mail, Calendars or Contacts permissions themselves, so an administrator must select **Grant admin consent** here, once, before anyone signs in. Without it Microsoft stops each person's sign-in at *Need admin approval*. Selecting it approves the app for everyone in your organisation.
 8. **Overview.** Copy the **Application (client) ID** and the **Directory (tenant) ID** into the two fields in Droplet, then select **Sign in with Microsoft**.
 
 Microsoft asks you to sign in and to consent; you land back on Droplet's Settings page, which says whether the connection worked.
@@ -48,11 +48,20 @@ All **Delegated** — the app can only ever act as the person signed in, never a
 | `Mail.Send` | Nothing yet. Requested for sending replies you approve in Droplet. |
 | `Calendars.ReadWrite` | Reads the calendar. Droplet does not create or change events. |
 | `Contacts.ReadWrite` | Reads contacts. Droplet does not change them. |
-| `Files.ReadWrite.All` | Reads the list of files in your OneDrive (names and dates, not contents). |
+| `Files.ReadWrite.All` | Reads the list of files in your OneDrive and, if you turn on SharePoint, in the SharePoint document libraries you can open (names and dates, not contents). |
+| `Sites.Read.All` | Only if you turn on SharePoint: finds the SharePoint sites and document libraries you can open, so Droplet can list their files (names and dates, not contents). |
 
-Droplet asks for the permissions above as one set, and Microsoft's consent screen shows all of them. The table says what each one is used for today, so what you approve and what Droplet actually does are both on record.
+Droplet asks for every permission above except `Sites.Read.All` as one set, and Microsoft's consent screen shows all of them. `Sites.Read.All` is asked for only when a person turns SharePoint on (below), so someone who never does is never asked for it. The table says what each one is used for today, so what you approve and what Droplet actually does are both on record.
 
 Do not add **Tasks** permissions: Droplet does not read Microsoft To Do, and does not ask for them when you sign in.
+
+### SharePoint libraries (optional)
+
+By default Droplet keeps a list of the files in each person's OneDrive. Each person can also switch on **Include SharePoint document libraries** on **Settings → Microsoft 365**. Droplet then keeps the same kind of list for every SharePoint document library that person can open: the names, folders, locations and dates of the files. It never reads what is inside the files, and it never reads anyone else's personal OneDrive.
+
+Droplet reads at most 100 libraries per person; **Settings → Microsoft 365** says how many more were left out. To stop, switch the same setting off: Droplet deletes the list of SharePoint files it kept and stops reading them. Nothing in Microsoft 365 changes.
+
+SharePoint needs `Sites.Read.All`, which on Microsoft's default setting an administrator must approve (step 7). If it has not been approved when someone switches SharePoint on, the card says **Microsoft needs to approve SharePoint access**; once an administrator has approved it, that person selects **Sign in again**.
 
 ## 5. What it costs the customer
 

@@ -259,6 +259,9 @@ const MATRIX: GuardedRoute[] = [
   { method: "get", path: "/api/voice/status", allowed: ["owner", "admin"] },
   { method: "get", path: "/api/voice/devices", allowed: ["owner", "admin"] },
   { method: "post", path: "/api/voice/say", allowed: ["owner", "admin"] },
+  // WARP-3710: mic recovery - same owner+admin posture as the rest of the surface.
+  { method: "post", path: "/api/voice/mic/restart", allowed: ["owner", "admin"] },
+  { method: "post", path: "/api/voice/mic/test", allowed: ["owner", "admin"] },
   // Speaker output volume — same posture as /say: it drives the room
   // speaker, and a mute silences the household's assistant.
   { method: "get", path: "/api/voice/volume", allowed: ["owner", "admin"] },
