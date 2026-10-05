@@ -51,7 +51,7 @@ import {
   releaseStaleHandovers,
   LEAVER_DELETION_LOCK_KEY,
 } from "./services/leaver-deletion.service.js";
-import { createCronRuntime } from "./services/cron-runtime.service.js";
+import { createCronRuntime, type CronJobHandle } from "./services/cron-runtime.service.js";
 import { warnLegacyScimRoleMapping } from "./services/scim.service.js";
 import { recordRotationFoundAtBoot } from "./services/audit-key-rotation.service.js";
 import {
@@ -161,6 +161,12 @@ import { mineToolCallPatterns } from "./services/pattern-miner.service.js";
 import { runTeamChatMeetingReminderSweep } from "./services/team-chat-reminders.service.js";
 import { runActivityNotifySweep } from "./services/activity-notify.service.js";
 import { sweepAttachments } from "./services/pm/pm-attachments.service.js";
+import { registerOutboxConsumer, stopOutbox } from "./services/pm/pm-outbox.js";
+import { createWebhookFanOutConsumer } from "./services/pm/webhook-fanout.js";
+import {
+  pruneWebhookDeliveries,
+  runWebhookDeliveries,
+} from "./services/pm/webhook-delivery.service.js";
 import { runFilingTick } from "./services/filing/worker.js";
 import { runFilingReconcile } from "./services/filing/reconcile.js";
 import { runFilingMaintenance } from "./services/filing/maintenance.js";
@@ -1617,6 +1623,41 @@ async function main() {
     { lockKey: "droplet:pm-attachment-sweep" },
   );
 
+  // WARP-3532 (ADR-069 §7, §9) — work webhooks. Three registrations, all on
+  // cron-runtime, none a hand-rolled loop:
+  //
+  //  1. The `webhooks` consumer on the PmActivity outbox: turns each activity row
+  //     into one PmWebhookDelivery per interested webhook. Its own advisory lock
+  //     (`droplet:pm-outbox:webhooks`) and cursor (SystemFlag `pm-outbox:webhooks`)
+  //     are derived from the name by the framework. WS-9 and WS-19 register
+  //     their consumers beside it.
+  //     When it queues something it wakes the delivery worker (below) instead of
+  //     leaving the delivery to wait out the worker's interval.
+  let webhookDeliveryJob: CronJobHandle | undefined;
+  registerOutboxConsumer(
+    createWebhookFanOutConsumer(prisma, { onQueued: () => webhookDeliveryJob?.runNow() }),
+    { prisma, cronRuntime },
+  );
+  //  2. The delivery worker. The delivery table is the queue; this drains it. Its
+  //     retry ladder lives on the rows, so a restart loses nothing.
+  webhookDeliveryJob = cronRuntime.scheduleInterval(
+    10_000,
+    async () => {
+      const result = await runWebhookDeliveries(prisma);
+      if (result.claimed > 0) logger.info(result, "webhook delivery sweep");
+    },
+    { lockKey: "droplet:pm-webhook-deliveries" },
+  );
+  //  3. The delivery log's retention: finished rows older than 30 days go.
+  cronRuntime.scheduleInterval(
+    6 * 60 * 60_000,
+    async () => {
+      const removed = await pruneWebhookDeliveries(prisma);
+      if (removed > 0) logger.info({ removed }, "webhook delivery log pruned");
+    },
+    { lockKey: "droplet:pm-webhook-delivery-prune" },
+  );
+
   // WARP-2730 (ADR-048) — auto-filing. Two registrations, split on purpose.
   //
   // 🔴 THE TICK CARRIES NO `lockKey`, AND THAT IS THE POINT. `lockKey` wraps
@@ -2153,6 +2194,8 @@ async function main() {
   // Docker's restart policy brings a fresh instance back.
   const shutdown = createShutdownRunner(logger, async () => {
     cronRuntime.stop();
+    // WARP-3532 — a pending outbox wake-up must not fire into a closing process.
+    stopOutbox();
     // WARP-2850 — a boot run that has not fired yet must not fire during
     // shutdown; `.unref()` keeps it from holding the process open, it does not
     // stop it running if something else does. Cleared SYNCHRONOUSLY, in the

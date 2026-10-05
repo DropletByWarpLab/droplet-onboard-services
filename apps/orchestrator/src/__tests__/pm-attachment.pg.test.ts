@@ -106,6 +106,10 @@ describe.skipIf(!RUN)("PmAttachment — the database's own guarantees and the fi
 
   const item = (projectId = projectA) =>
     prisma.pmWorkItem.create({ data: { projectId, sequenceId: ++seq, name: `warp1505-item-${seq}` } });
+  async function deleteArchivedProject(projectId: string) {
+    const project = await prisma.pmProject.update({ where: { id: projectId }, data: { isArchived: true }, select: { identifier: true } });
+    await pm.deleteProject(prisma, projectId, { confirmIdentifier: project.identifier, audit: async () => undefined });
+  }
   const comment = (workItemId: string, authorId = "u-1") =>
     prisma.pmComment.create({ data: { workItemId, authorId, commentHtml: "<p>hi</p>" } });
 
@@ -313,7 +317,7 @@ describe.skipIf(!RUN)("PmAttachment — the database's own guarantees and the fi
       const files = [await row(a1.id), await row(a2.id), await row(a1.id, { commentId: ca.id })];
       const elsewhere = await row(b1.id);
 
-      await pm.deleteProject(prisma, projectA);
+      await deleteArchivedProject(projectA);
 
       for (const f of files) expect(blob(f.storageKey)).toBe(false);
       expect(blob(elsewhere.storageKey)).toBe(true);
@@ -362,7 +366,7 @@ describe.skipIf(!RUN)("PmAttachment — the database's own guarantees and the fi
       rmSync(path);
       mkdirSync(path); // unlink refuses a directory on every platform
       if (target === "item") await pm.deleteWorkItem(prisma, "u-1", it1.id);
-      else await pm.deleteProject(prisma, projectA);
+      else await deleteArchivedProject(projectA);
       expect(await prisma.pmAttachment.count({ where: { id: stuck.id } })).toBe(0);
       const markerKey = cleanup.ATTACHMENT_CLEANUP_PREFIX + stuck.storageKey;
       expect(await prisma.systemFlag.findUnique({ where: { key: markerKey } })).toMatchObject({ valueJson: { storageKey: stuck.storageKey } });
@@ -410,7 +414,7 @@ describe.skipIf(!RUN)("PmAttachment — the database's own guarantees and the fi
               return r;
             };
           }
-          if (name === model && m === "delete") {
+          if (name === model && (m === "delete" || m === "deleteMany")) {
             return async (...a: unknown[]) => {
               await gate;
               return v.apply(t, a);
@@ -455,12 +459,12 @@ describe.skipIf(!RUN)("PmAttachment — the database's own guarantees and the fi
       }
       const base = await prisma.pmProject.findUniqueOrThrow({ where: { id: projectA } });
       const proj = await prisma.pmProject.create({
-        data: { workspaceId: base.workspaceId, name: `warp1505-race-${++seq}`, identifier: `W15R${seq}` },
+        data: { workspaceId: base.workspaceId, name: `warp1505-race-${++seq}`, identifier: `W15R${seq}`, isArchived: true },
       });
       const it1 = await prisma.pmWorkItem.create({ data: { projectId: proj.id, sequenceId: 1, name: `warp1505-race-item-${seq}` } });
       return {
         workItemId: it1.id,
-        remove: (db: unknown) => pm.deleteProject(db as never, proj.id),
+        remove: (db: unknown) => pm.deleteProject(db as never, proj.id, { confirmIdentifier: proj.identifier, audit: async () => undefined }),
         survives: async () => (await prisma.pmProject.count({ where: { id: proj.id } })) === 1,
       };
     }

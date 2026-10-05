@@ -52,10 +52,14 @@ export function SavedViews({
   active,
   onPick,
   counts,
+  partial = false,
 }: {
   active: SavedView;
   onPick: (v: SavedView) => void;
   counts: Record<SavedView, number>;
+  /** More of the list is still arriving (WARP-3371): every count but `all`
+   *  (the server's exact total) is a floor, not an answer, and says so. */
+  partial?: boolean;
 }): JSX.Element {
   const views: Array<[SavedView, string]> = [
     ["all", "All"],
@@ -75,7 +79,10 @@ export function SavedViews({
           onClick={() => onPick(id)}
         >
           {label}
-          <span className="n">{counts[id]}</span>
+          <span className="n">
+            {counts[id]}
+            {partial && id !== "all" ? "+" : ""}
+          </span>
         </button>
       ))}
     </div>

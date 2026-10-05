@@ -81,3 +81,17 @@ describe("WARP-1286 follow-up — ensureCameraRows invalidates cameras:list when
     expect(invalidateCamerasCache).not.toHaveBeenCalled();
   });
 });
+
+describe("WARP-3510 — group membership never mints a discovery candidate", () => {
+  it("creates the rows it needs as ADOPTED: the cameras named here exist in Frigate", async () => {
+    // A CANDIDATE row would be offered back in the discovery list and could be
+    // renamed or merged away by the next discovery event.
+    const prisma = makePrisma([]);
+    await addMembers(prisma as never, "grp-1", ["garage"]);
+    expect(prisma.camera.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({ name: "garage", adoption: "ADOPTED", autoDiscovered: false }),
+      }),
+    );
+  });
+});

@@ -135,16 +135,18 @@ describe("deleteWorkItem unlinks the item's attachment files (WARP-1505)", () =>
 });
 
 describe("deleteProject unlinks every attachment file under the project (WARP-1505)", () => {
-  function setup(opts: { keys?: string[]; deleteError?: unknown; order?: string[] } = {}) {
+  function setup(opts: { keys?: string[]; deleteError?: unknown; auditError?: unknown; restored?: boolean; order?: string[] } = {}) {
     const order = opts.order ?? [];
     const { flags, systemFlag } = cleanupFlags(order);
     const tx = {
       systemFlag,
+      pmWorkItem: { count: async () => 2 },
       pmProject: {
-        delete: async () => {
+        deleteMany: async ({ where }: { where: Row }) => {
+          expect(where).toEqual({ id: "p-1", kind: "PROJECT", isArchived: true });
           order.push("delete");
           if (opts.deleteError) throw opts.deleteError;
-          return {};
+          return { count: opts.restored ? 0 : 1 };
         },
       },
       pmAttachment: {
@@ -158,52 +160,75 @@ describe("deleteProject unlinks every attachment file under the project (WARP-15
       },
     };
     const seam = createTransactionSeam({ client: () => tx, stores: { flags } });
-    const prisma = { systemFlag, pmProject: { findUnique: async () => ({ id: "p-1" }) }, $transaction: seam.$transaction } as never;
+    const prisma = { systemFlag, pmProject: { findUnique: async () => ({ id: "p-1", identifier: "ONE", name: "One", kind: "PROJECT", isArchived: true }) }, $transaction: seam.$transaction } as never;
+    const deletion = {
+      confirmIdentifier: "ONE",
+      audit: vi.fn(async (_tx: unknown, deleted: unknown) => {
+        expect(deleted).toEqual({ id: "p-1", identifier: "ONE", name: "One", workItemCount: 2 });
+        order.push("audit");
+        if (opts.auditError) throw opts.auditError;
+      }),
+    };
     removeAttachmentBlobs.mockImplementation(async () => {
       order.push("unlink");
       return { removed: 0, failed: 0 };
     });
-    return { prisma, seam, order, flags };
+    return { prisma, seam, order, flags, deletion };
   }
 
   it("reads the keys inside a SERIALIZABLE transaction and unlinks them after the delete", async () => {
-    const { prisma, seam, order, flags } = setup({ keys: [K1, K2, K3] });
-    await deleteProject(prisma, "p-1");
-    expect(order).toEqual(["read-keys", "queue", "delete", "unlink", "unlink", "unlink"]);
+    const { prisma, seam, order, flags, deletion } = setup({ keys: [K1, K2, K3] });
+    await deleteProject(prisma, "p-1", deletion);
+    expect(order).toEqual(["read-keys", "queue", "delete", "audit", "unlink", "unlink", "unlink"]);
     expect(removeAttachmentBlobs).toHaveBeenCalledTimes(3);
     for (const key of [K1, K2, K3]) expect(removeAttachmentBlobs).toHaveBeenCalledWith([key], expect.any(String));
     expect(flags.size).toBe(0);
     // An upload committing between the key read and the delete must abort the
     // delete (review probe C: it used to be cascaded with its blob left on disk).
-    expectAllTransactionsAt(seam, SERIALIZABLE_TX);
+    expectAllTransactionsAt(seam, { ...SERIALIZABLE_TX, timeout: 60_000 });
   });
 
   it("the SERIALIZABLE loser is concurrent_mutation, and nothing is unlinked", async () => {
-    const { prisma, flags } = setup({ keys: [K1], deleteError: Object.assign(new Error("ssi"), { code: "P2034" }) });
-    await expect(deleteProject(prisma, "p-1")).rejects.toThrow("concurrent_mutation");
+    const { prisma, flags, deletion } = setup({ keys: [K1], deleteError: Object.assign(new Error("ssi"), { code: "P2034" }) });
+    await expect(deleteProject(prisma, "p-1", deletion)).rejects.toThrow("concurrent_mutation");
     expect(removeAttachmentBlobs).not.toHaveBeenCalled();
     expect(flags.size).toBe(0);
   });
 
   it("does not unlink anything when the delete fails", async () => {
-    const { prisma, flags } = setup({ keys: [K1], deleteError: new Error("boom") });
-    await expect(deleteProject(prisma, "p-1")).rejects.toThrow("boom");
+    const { prisma, flags, deletion } = setup({ keys: [K1], deleteError: new Error("boom") });
+    await expect(deleteProject(prisma, "p-1", deletion)).rejects.toThrow("boom");
     expect(removeAttachmentBlobs).not.toHaveBeenCalled();
     expect(flags.size).toBe(0);
   });
 
   it("does not unlink anything when the project was already deleted by someone else", async () => {
-    const { prisma, flags } = setup({ keys: [K1], deleteError: Object.assign(new Error("gone"), { code: "P2025" }) });
-    await expect(deleteProject(prisma, "p-1")).rejects.toThrow("project_not_found");
+    const { prisma, flags, deletion } = setup({ keys: [K1], deleteError: Object.assign(new Error("gone"), { code: "P2025" }) });
+    await expect(deleteProject(prisma, "p-1", deletion)).rejects.toThrow("project_not_found");
     expect(removeAttachmentBlobs).not.toHaveBeenCalled();
     expect(flags.size).toBe(0);
   });
 
   it("bounds work in the delete request and leaves excess cleanup intents for the sweep", async () => {
     const keys = Array.from({ length: 201 }, () => randomUUID());
-    const { prisma, flags } = setup({ keys });
-    await deleteProject(prisma, "p-1");
+    const { prisma, flags, deletion } = setup({ keys });
+    await deleteProject(prisma, "p-1", deletion);
     expect(removeAttachmentBlobs).toHaveBeenCalledTimes(200);
     expect([...flags.values()]).toEqual([{ key: `pm-attachments:cleanup:${keys[200]}`, valueJson: { storageKey: keys[200] } }]);
+  });
+
+  it("rolls back cleanup intent and leaves bytes alone when the required audit fails", async () => {
+    const { prisma, flags, deletion } = setup({ keys: [K1], auditError: new Error("audit failed") });
+    await expect(deleteProject(prisma, "p-1", deletion)).rejects.toThrow("audit failed");
+    expect(removeAttachmentBlobs).not.toHaveBeenCalled();
+    expect(flags.size).toBe(0);
+  });
+
+  it("rolls back cleanup intent when a restore wins the archived-delete compare-and-set", async () => {
+    const { prisma, flags, deletion } = setup({ keys: [K1], restored: true });
+    await expect(deleteProject(prisma, "p-1", deletion)).rejects.toThrow("project_not_archived");
+    expect(deletion.audit).not.toHaveBeenCalled();
+    expect(removeAttachmentBlobs).not.toHaveBeenCalled();
+    expect(flags.size).toBe(0);
   });
 });
