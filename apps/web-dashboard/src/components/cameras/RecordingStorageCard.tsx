@@ -106,6 +106,12 @@ export function RecordingStorageCard({ style }: { style?: CSSProperties } = {}) 
     setDeleteError(null);
   }, [stale]);
 
+  useEffect(() => {
+    if (recording?.retentionKnown !== false) return;
+    if (pending?.kind === "mode" && pending.mode === "auto_reserved") setPending(null);
+    if (pending?.kind === "drive" && recording.mode !== "full") setPending(null);
+  }, [pending, recording?.mode, recording?.retentionKnown]);
+
   // A role that may not read it sees nothing at all — not an empty frame.
   if (!canManage || state === "forbidden") return null;
 
@@ -122,6 +128,11 @@ export function RecordingStorageCard({ style }: { style?: CSSProperties } = {}) 
     if (stale) {
       toast(staleMessage, "error");
       throw new Error(staleMessage);
+    }
+    if (mode === "auto_reserved" && recording?.retentionKnown === false) {
+      setPending(null);
+      toast("Recording space estimate unavailable while waiting for Frigate retention settings.", "error");
+      return;
     }
     try {
       await updateRecordingStorage({ mode });
@@ -149,6 +160,11 @@ export function RecordingStorageCard({ style }: { style?: CSSProperties } = {}) 
     if (stale) {
       toast(staleMessage, "error");
       throw new Error(staleMessage);
+    }
+    if (recording?.retentionKnown === false && recording.mode !== "full") {
+      setPending(null);
+      toast("Recording space estimate unavailable while waiting for Frigate retention settings.", "error");
+      return;
     }
     try {
       await updateRecordingStorage({ fsUuid });
@@ -271,8 +287,10 @@ export function RecordingStorageCard({ style }: { style?: CSSProperties } = {}) 
             }
             description={
               asked?.kind === "mode" && asked.mode === "auto_reserved"
-                ? `Droplet will cap recordings at the space your cameras need — about ${formatBinaryBytes(recording.needBytes)} for ${Math.round(recording.retentionDays)} days, plus some headroom — and leave the rest of ${driveName} free. Recordings already using more than that are never deleted early.`
-                : `Recordings will be allowed to use all ${formatBinaryBytes(recording.drive?.sizeBytes ?? recording.reservedBytes)} of ${driveName}, not just the space your cameras need. The drive will no longer show up in Files — Droplet stops sharing it there. Older recordings are still deleted after ${Math.round(recording.retentionDays)} days.`
+                ? recording.retentionKnown === false
+                  ? "Recording space estimate unavailable while waiting for Frigate retention settings. Droplet can auto-size the space when those settings are available."
+                  : `Droplet will cap recordings at the space your cameras need — about ${formatBinaryBytes(recording.needBytes)} for their configured retention windows (up to ${Math.round(recording.retentionDays)} days), plus some headroom — and leave the rest of ${driveName} free. Recordings already using more than that are never deleted early.`
+                : `Recordings will be allowed to use all ${formatBinaryBytes(recording.drive?.sizeBytes ?? recording.reservedBytes)} of ${driveName}, not just the space your cameras need. The drive will no longer show up in Files — Droplet stops sharing it there. ${recording.retentionKnown === false ? "Recording space estimate unavailable while waiting for Frigate retention settings." : "Older recordings follow each camera's configured retention windows."}`
             }
             confirmLabel={
               asked?.kind === "mode" && asked.mode === "auto_reserved"
@@ -372,6 +390,7 @@ function Body({
       mode: r.mode,
       eligibleCount: candidates.length,
       retentionDays: Math.round(r.retentionDays),
+      retentionKnown: r.retentionKnown !== false,
     });
     // A near-full fix changes the quota. A read-only drive cannot apply that
     // write, so direct the owner to Storage instead of opening a doomed confirm.
@@ -434,8 +453,10 @@ function Body({
           <p>
             Add a drive in Settings › Storage and prepare it. Droplet encrypts it, then
             sets aside space for recordings on its own.
-            {r.needBytes > 0 &&
-              ` Your cameras need about ${formatBinaryBytes(r.needBytes)} for ${Math.round(r.retentionDays)} days.`}
+            {r.retentionKnown === false
+              ? " Recording space estimate unavailable while waiting for Frigate retention settings."
+              : r.needBytes > 0 &&
+              ` Your cameras need about ${formatBinaryBytes(r.needBytes)} for their configured retention windows (up to ${Math.round(r.retentionDays)} days).`}
           </p>
           <Link className="btn primary" href={SETTINGS_STORAGE_HREF}>
             Open Storage
@@ -462,6 +483,7 @@ function Body({
         <ModeSwitch
           mode={r.mode}
           drive={r}
+          retentionKnown={r.retentionKnown !== false}
           canManage={canManage}
           locked={moving || status === "pending" || readOnly || stale}
           lockedMessage={
@@ -485,6 +507,7 @@ function Body({
         <DrivePicker
           candidates={candidates}
           selectRef={pickerRef}
+          disabled={r.retentionKnown === false && r.mode !== "full"}
           onChoose={onPickDrive}
         />
       )}
@@ -552,6 +575,7 @@ function DriveRow({
 function ModeSwitch({
   mode,
   drive,
+  retentionKnown,
   canManage,
   locked,
   lockedMessage,
@@ -561,6 +585,7 @@ function ModeSwitch({
 }: {
   mode: RecordingStorageMode;
   drive: RecordingStorage;
+  retentionKnown: boolean;
   canManage: boolean;
   locked: boolean;
   lockedMessage?: string;
@@ -577,7 +602,9 @@ function ModeSwitch({
     {
       value: "auto_reserved",
       title: "Auto-sized",
-      hint: "Droplet sets aside only what your cameras need.",
+      hint: retentionKnown
+        ? "Droplet sets aside only what your cameras need."
+        : "Unavailable while waiting for Frigate retention settings.",
     },
     {
       value: "full",
@@ -603,7 +630,7 @@ function ModeSwitch({
               name={name}
               value={o.value}
               checked={mode === o.value}
-              disabled={disabled || (o.value === "full" && wholeBlocked)}
+              disabled={disabled || (!retentionKnown && o.value === "auto_reserved") || (o.value === "full" && wholeBlocked)}
               // Controlled by the SERVER's mode: picking the other one only asks
               // (tier-2 confirm); the radio flips when the orchestrator says so.
               onChange={() => onPick(o.value)}
@@ -615,6 +642,11 @@ function ModeSwitch({
       </div>
       {!canManage && (
         <p className="rs-hint">Only the owner or an admin can change this.</p>
+      )}
+      {canManage && !locked && !retentionKnown && (
+        <p className="rs-hint" data-testid="retention-settings-waiting">
+          Recording space estimate unavailable while waiting for Frigate retention settings. Whole-drive use remains available.
+        </p>
       )}
       {canManage && locked && (
         <p className="rs-hint">
@@ -672,15 +704,21 @@ function Facts({ r }: { r: RecordingStorage }) {
   const days = Math.round(r.retentionDays);
   return (
     <p className="rs-facts" data-testid="recording-facts">
-      <span>
-        Keeping <b>{days} days</b> of recordings
-      </span>
+      {r.retentionKnown === false ? (
+        <span data-testid="recording-estimate-unavailable">
+          Recording space estimate unavailable while waiting for Frigate retention settings.
+        </span>
+      ) : (
+        <span>
+          Storage sized for up to <b>{days} days</b>
+        </span>
+      )}
       <span>
         <b>{formatDays(r.daysStored)}</b> stored so far
       </span>
-      {r.needBytes > 0 && (
+      {r.retentionKnown !== false && r.needBytes > 0 && (
         <span>
-          Needs about <b>{formatBinaryBytes(r.needBytes)}</b> for {days} days
+          Needs about <b>{formatBinaryBytes(r.needBytes)}</b> for the configured retention windows
         </span>
       )}
     </p>
@@ -751,10 +789,12 @@ function Migration({
 function DrivePicker({
   candidates,
   selectRef,
+  disabled,
   onChoose,
 }: {
   candidates: RecordingStorage["eligibleDrives"];
   selectRef: React.RefObject<HTMLSelectElement | null>;
+  disabled: boolean;
   onChoose: (fsUuid: string, name: string) => void;
 }) {
   const id = useId();
@@ -771,6 +811,7 @@ function DrivePicker({
           ref={selectRef}
           className="rs-select"
           value={choice}
+          disabled={disabled}
           onChange={(e) => setChoice(e.target.value)}
         >
           <option value="">Choose a drive…</option>
@@ -784,12 +825,17 @@ function DrivePicker({
         <button
           type="button"
           className="btn"
-          disabled={!chosen}
+          disabled={!chosen || disabled}
           onClick={() => chosen && onChoose(chosen.fsUuid, driveLabel(chosen.label))}
         >
           Use this drive
         </button>
       </div>
+      {disabled && (
+        <p className="rs-hint" data-testid="drive-move-waiting">
+          Waiting for Frigate retention settings before sizing a move to another drive.
+        </p>
+      )}
     </div>
   );
 }
@@ -806,7 +852,7 @@ function CameraTable({ r }: { r: RecordingStorage }) {
       </p>
     );
   }
-  const needHeader = `${Math.round(r.retentionDays)}-day need`;
+  const needHeader = r.retentionKnown === false ? "Need unavailable" : "Recording space needed";
   return (
     // The ARIA roles are explicit on purpose: the phone layer re-lays the table
     // out as stacked cards (display: grid), which makes some screen readers
@@ -828,8 +874,12 @@ function CameraTable({ r }: { r: RecordingStorage }) {
             <td role="cell">{c.displayName}</td>
             <td role="cell" className="rs-num" data-label="MB/h">{formatRate(c.mbPerHour)}</td>
             <td role="cell" className="rs-num" data-label="GB/day">{formatRate(c.gbPerDay)}</td>
-            <td role="cell" className="rs-num" data-label={needHeader}>{formatBinaryBytes(c.needBytes)}</td>
-            <td role="cell" className="rs-num" data-label="Share">{formatShare(c.sharePct)}</td>
+            <td role="cell" className="rs-num" data-label={needHeader}>
+              {r.retentionKnown === false ? "Unavailable" : formatBinaryBytes(c.needBytes)}
+            </td>
+            <td role="cell" className="rs-num" data-label="Share">
+              {r.retentionKnown === false ? "Unavailable" : formatShare(c.sharePct)}
+            </td>
           </tr>
         ))}
       </tbody>

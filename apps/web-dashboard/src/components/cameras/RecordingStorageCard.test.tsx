@@ -17,6 +17,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { RecordingStorage } from "@/lib/types";
 import type { UseRecordingStorage } from "@/lib/hooks/useRecordingStorage";
+import { normalizeRecordingStorage } from "@/lib/recording-storage";
 
 const hook = vi.hoisted(() => ({ value: undefined as unknown, args: [] as unknown[] }));
 vi.mock("@/lib/hooks/useRecordingStorage", () => ({
@@ -195,6 +196,8 @@ describe("RecordingStorageCard — no eligible drive", () => {
       freeBytes: 0,
       cameras: [],
     });
+  const noDriveWithUnknownRetention = () =>
+    makeRecording({ ...noDrive(), retentionKnown: false, retentionDays: 0, needBytes: 0 });
 
   it("explains it and links to Settings → Storage", () => {
     setup(noDrive());
@@ -202,6 +205,49 @@ describe("RecordingStorageCard — no eligible drive", () => {
     const link = screen.getByRole("link", { name: /open storage/i });
     expect(link).toHaveAttribute("href", "/settings/storage");
     expect(screen.getByText("No drive yet")).toBeInTheDocument();
+  });
+
+  it("does not print a fallback retention estimate while Frigate retention is unavailable", () => {
+    setup(noDriveWithUnknownRetention());
+    expect(screen.getByText(/recording space estimate unavailable while waiting for frigate retention/i)).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/7 days|0 days|need/i);
+  });
+
+  it("keeps AUTO_RESERVED moves disabled for unknown retention while allowing FULL moves", () => {
+    const candidate = { fsUuid: "fs-2", label: "Bay 3", sizeBytes: 200 * GIB, freeBytes: 180 * GIB, encrypted: true };
+    setup(makeRecording({ retentionKnown: false, retentionDays: 0, mode: "auto_reserved", eligibleDrives: [candidate] }));
+    expect(screen.getByRole("radio", { name: /auto-sized/i })).toBeDisabled();
+    expect(screen.getByRole("radio", { name: /whole drive/i })).toBeEnabled();
+    expect(screen.getByRole("combobox", { name: /move recordings to/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /use this drive/i })).toBeDisabled();
+
+    cleanup();
+    setup(makeRecording({ retentionKnown: false, retentionDays: 0, mode: null, eligibleDrives: [candidate] }));
+    expect(screen.getByRole("combobox", { name: /move recordings to/i })).toBeDisabled();
+
+    cleanup();
+    setup(makeRecording({ retentionKnown: false, retentionDays: 0, mode: "full", eligibleDrives: [candidate] }));
+    expect(screen.getByRole("radio", { name: /whole drive/i })).toBeChecked();
+    expect(screen.getByRole("combobox", { name: /move recordings to/i })).toBeEnabled();
+    fireEvent.change(screen.getByRole("combobox", { name: /move recordings to/i }), { target: { value: "fs-2" } });
+    expect(screen.getByRole("button", { name: /use this drive/i })).toBeEnabled();
+  });
+
+  it("closes an AUTO_RESERVED confirmation if retention becomes unknown before confirmation", async () => {
+    const view = setup(makeRecording({ mode: "full" }));
+    fireEvent.click(screen.getByRole("radio", { name: /auto-sized/i }));
+    expect(screen.getByRole("dialog")).toHaveTextContent(/up to 7 days/i);
+
+    hook.value = {
+      state: "ready",
+      recording: makeRecording({ mode: "full", retentionKnown: false, retentionDays: 0, needBytes: 0 }),
+      stale: false,
+      refresh,
+    } satisfies UseRecordingStorage;
+    view.rerender(<RecordingStorageCard />);
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(updateMock).not.toHaveBeenCalled();
+    expect(screen.getByRole("radio", { name: /whole drive/i })).toBeEnabled();
   });
 
   it("shows no mode switch, bar or table (there is nothing to size yet)", () => {
@@ -337,9 +383,27 @@ describe("RecordingStorageCard — active, auto-sized", () => {
   it("states retention, days stored and the computed need", () => {
     setup(makeRecording());
     const facts = screen.getByTestId("recording-facts");
-    expect(facts).toHaveTextContent(/keeping 7 days/i);
+    expect(facts).toHaveTextContent(/storage sized for up to 7 days/i);
     expect(facts).toHaveTextContent(/3\.4 days stored so far/i);
     expect(facts).toHaveTextContent(/needs about 96\.0 GiB/i);
+  });
+
+  it("labels unknown retention estimates unavailable and keeps measured storage facts", () => {
+    const normalized = normalizeRecordingStorage({ ...makeRecording(), retentionKnown: false });
+    expect(normalized).not.toBeNull();
+    setup(normalized!);
+    const facts = screen.getByTestId("recording-facts");
+    expect(facts).toHaveTextContent("Recording space estimate unavailable");
+    expect(facts).toHaveTextContent(/waiting for Frigate retention settings/i);
+    expect(facts).toHaveTextContent(/3\.4 days stored so far/i);
+    expect(facts).not.toHaveTextContent(/keeping 0 days|needs about/i);
+    const table = screen.getByRole("table", { name: /recording needs by camera/i });
+    expect(within(table).getAllByRole("columnheader").map((h) => h.textContent)).toContain("Need unavailable");
+    expect(screen.getByTestId("recording-camera-front_door")).toHaveTextContent("Unavailable");
+    expect(screen.getByTestId("recording-camera-front_door")).not.toHaveTextContent("0 B");
+    expect(screen.getByTestId("recording-camera-front_door")).toHaveTextContent("Unavailable");
+    expect(screen.getByTestId("recording-camera-front_door")).not.toHaveTextContent("0%");
+    expect(screen.getByTestId("recording-space-legend")).toHaveTextContent("40.0 GiB used");
   });
 
   it("says 'under a day' rather than '0.0 days' for fresh footage", () => {
@@ -351,7 +415,7 @@ describe("RecordingStorageCard — active, auto-sized", () => {
     setup(makeRecording());
     const table = screen.getByRole("table", { name: /recording needs by camera/i });
     const headers = within(table).getAllByRole("columnheader").map((h) => h.textContent);
-    expect(headers).toEqual(["Camera", "MB/h", "GB/day", "7-day need", "Share"]);
+    expect(headers).toEqual(["Camera", "MB/h", "GB/day", "Recording space needed", "Share"]);
 
     const front = screen.getByTestId("recording-camera-front_door");
     expect(front).toHaveTextContent("Front door");
@@ -363,9 +427,10 @@ describe("RecordingStorageCard — active, auto-sized", () => {
     expect(garage).toHaveTextContent("25%");
   });
 
-  it("names the retention window in the need column header", () => {
+  it("does not label every camera need with the global longest retention", () => {
     setup(makeRecording({ retentionDays: 14 }));
-    expect(screen.getByRole("columnheader", { name: "14-day need" })).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Recording space needed" })).toBeInTheDocument();
+    expect(screen.queryByRole("columnheader", { name: "14-day need" })).not.toBeInTheDocument();
   });
 
   it("says so when no camera has been measured yet", () => {

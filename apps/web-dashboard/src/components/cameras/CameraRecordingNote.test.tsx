@@ -82,7 +82,16 @@ describe("CameraRecordingNote — the drive and this camera's numbers", () => {
     setup(makeRecording());
     const note = screen.getByRole("group");
     expect(note).toHaveTextContent(/about 36 GB a day/i);
-    expect(note).toHaveTextContent(/needs about 75\.0 GiB for 7 days/i);
+    expect(note).toHaveTextContent(/needs about 75\.0 GiB for its retention window/i);
+  });
+
+  it("keeps the measured rate but hides a fallback need when retention is unknown", () => {
+    setup(makeRecording({ retentionKnown: false, retentionDays: 0, needBytes: 0 }));
+    const note = screen.getByRole("group");
+    expect(note).toHaveTextContent(/about 36 GB a day/i);
+    expect(note).toHaveTextContent("Recording space estimate unavailable");
+    expect(note).toHaveTextContent(/waiting for Frigate retention settings/i);
+    expect(note).not.toHaveTextContent(/75\.0 GiB|for 0 days|for 7 days/i);
   });
 
   it("uses the camera's own row, not another's", () => {
@@ -92,9 +101,10 @@ describe("CameraRecordingNote — the drive and this camera's numbers", () => {
     expect(note).not.toHaveTextContent(/36 GB/);
   });
 
-  it("states the retention window it is sized for", () => {
+  it("does not label this camera need with the global longest retention", () => {
     setup(makeRecording({ retentionDays: 14 }));
-    expect(screen.getByRole("group")).toHaveTextContent(/for 14 days/i);
+    expect(screen.getByRole("group")).toHaveTextContent(/for its retention window/i);
+    expect(screen.getByRole("group")).not.toHaveTextContent(/for 14 days/i);
   });
 
   it("says it has not measured this camera yet — without inventing a number", () => {

@@ -190,7 +190,11 @@ export function normalizeRecordingStorage(raw: unknown): RecordingStorage | null
     ? (raw.status as RecordingStorageStatus)
     : "unknown";
   const mode = MODES.has(str(raw.mode)) ? (raw.mode as RecordingStorageMode) : null;
-  const retention = num(raw.retentionDays, DEFAULT_RETENTION_DAYS);
+  const retentionKnown = raw.retentionKnown !== false;
+  const retention = retentionKnown ? num(raw.retentionDays, DEFAULT_RETENTION_DAYS) : 0;
+  const cameras = normalizeCameras(raw.cameras).map((camera) =>
+    retentionKnown ? camera : { ...camera, needBytes: 0 },
+  );
   return {
     status,
     mode,
@@ -198,10 +202,11 @@ export function normalizeRecordingStorage(raw: unknown): RecordingStorage | null
     reservedBytes: num(raw.reservedBytes),
     usedBytes: num(raw.usedBytes),
     freeBytes: num(raw.freeBytes),
-    needBytes: num(raw.needBytes),
-    retentionDays: retention > 0 ? retention : DEFAULT_RETENTION_DAYS,
+    ...(typeof raw.retentionKnown === "boolean" ? { retentionKnown } : {}),
+    needBytes: retentionKnown ? num(raw.needBytes) : 0,
+    retentionDays: retentionKnown && retention > 0 ? retention : 0,
     daysStored: num(raw.daysStored),
-    cameras: normalizeCameras(raw.cameras),
+    cameras,
     migration: normalizeMigration(raw.migration),
     oldFootage: normalizeOldFootage(raw.oldFootage),
     warnings: normalizeWarnings(raw.warnings),
@@ -369,6 +374,7 @@ export interface WarningContext {
   /** Eligible drives other than the current one. */
   eligibleCount: number;
   retentionDays: number;
+  retentionKnown?: boolean;
 }
 
 const OPEN_STORAGE: WarningFix = {
@@ -409,7 +415,9 @@ export function describeWarning(w: RecordingWarning, ctx: WarningContext): Warni
         ...base,
         severity: "warn",
         title: "Recording space is nearly full",
-        detail: `The oldest recordings are deleted first when it fills, so cameras may keep fewer than ${ctx.retentionDays} days.`,
+        detail: ctx.retentionKnown === false
+          ? "The oldest recordings are deleted first when space fills. The retention estimate is unavailable while waiting for Frigate retention settings."
+          : `The oldest recordings are deleted first when it fills, so cameras may keep less than their configured retention windows (up to ${ctx.retentionDays} days).`,
         // On an auto-sized slice the next step up is the whole drive; once it
         // already IS the whole drive the only way to more room is more storage.
         fix:

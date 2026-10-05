@@ -35,7 +35,6 @@ export function CameraRecordingNote({ camera }: { camera: string }) {
 
   const drive = recordingsDriveName(recording.drive);
   const row = recording.cameras.find((c) => c.name === camera);
-  const days = Math.round(recording.retentionDays);
 
   return (
     <div
@@ -48,13 +47,18 @@ export function CameraRecordingNote({ camera }: { camera: string }) {
       {hasLiveDrive(recording) &&
         (row && row.gbPerDay > 0 ? (
           <p className="rs-camera-note-d">
-            About <b>{formatRate(row.gbPerDay)} GB</b> a day &middot; needs about{" "}
-            <b>{formatBinaryBytes(row.needBytes)}</b> for {days} days
+            About <b>{formatRate(row.gbPerDay)} GB</b> a day
+            {recording.retentionKnown === false ? (
+              <> &middot; Recording space estimate unavailable while waiting for Frigate retention settings.</>
+            ) : (
+              <> &middot; needs about <b>{formatBinaryBytes(row.needBytes)}</b> for its retention window</>
+            )}
           </p>
         ) : (
           <p className="rs-camera-note-d">
-            This camera hasn&apos;t been measured yet. Droplet sizes its space once it
-            has recorded for a while.
+            {recording.retentionKnown === false
+              ? "Recording space estimate unavailable while waiting for Frigate retention settings."
+              : "This camera hasn't been measured yet. Droplet sizes its space once it has recorded for a while."}
           </p>
         ))}
 

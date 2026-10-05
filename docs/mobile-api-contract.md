@@ -1043,6 +1043,12 @@ What the dashboard calls: `GET`/`PUT /api/storage/recordings`,
   `migration.state` by the orchestrator's own precedence: `missing` > `migrating` >
   `degraded` > `on_system_disk` > `pending` > `active` > `no_eligible_drive`. An unknown
   status renders neutrally; unknown warning codes render their `message`.
+- **Retention estimate.** The additive `retentionKnown` boolean is omitted by older
+  servers. When it is `false`, `needBytes`, `retentionDays`, and each camera's `needBytes`
+  are numeric `0` unknown sentinels, not zero required storage or zero-day retention.
+  The dashboard says the recording-space estimate is unavailable while waiting for
+  Frigate retention. Measured usage, reserved/free capacity, and `daysStored` remain
+  unchanged. When omitted, older-server behavior is preserved.
 - **Refusals the dashboard recognises.** `409 tpm_required` on Prepare / pool format / pool
   create (matched on `code`, or the text) → "This Droplet has no security chip (TPM);
   drives can't be encrypted." `409` on `{ mode: "full" }` with a files-present reason

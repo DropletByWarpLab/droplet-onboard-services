@@ -140,6 +140,24 @@ describe("normalizeRecordingStorage — the happy path", () => {
   it("keeps mode full", () => {
     expect(normalizeRecordingStorage(fullPayload({ mode: "full" }))!.mode).toBe("full");
   });
+
+  it("preserves unknown retention and zeros estimates without changing recorded facts", () => {
+    const n = normalizeRecordingStorage(fullPayload({
+      retentionKnown: false,
+      retentionDays: 7,
+      needBytes: 96 * GIB,
+      cameras: [
+        { name: "front_door", displayName: "Front door", mbPerHour: 1500, gbPerDay: 36, needBytes: 75 * GIB, usedBytes: 20 * GIB },
+      ],
+    }))!;
+    expect(n.retentionKnown).toBe(false);
+    expect(n.retentionDays).toBe(0);
+    expect(n.needBytes).toBe(0);
+    expect(n.cameras[0]).toMatchObject({ needBytes: 0, usedBytes: 20 * GIB, gbPerDay: 36 });
+    expect(n.usedBytes).toBe(40 * GIB);
+    expect(n.reservedBytes).toBe(120 * GIB);
+    expect(n.daysStored).toBe(3.4);
+  });
 });
 
 describe("normalizeRecordingStorage — tolerance (never crash on a partial payload)", () => {

@@ -31,7 +31,6 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { RecordingStorageCard } from "@/components/cameras/RecordingStorageCard";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { Card, Kpi, Meter } from "@/components/shell/primitives";
-import { formatBinaryBytes as fmtBytes } from "@/lib/format-bytes";
 
 /**
  * /cameras/system — Frigate-wide health surface (Phase 5).

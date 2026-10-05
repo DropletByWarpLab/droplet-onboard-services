@@ -2221,6 +2221,8 @@ export interface RecordingStorage {
   reservedBytes: number;
   usedBytes: number;
   freeBytes: number;
+  /** False when Frigate's resolved retention could not be read; absent on older servers. */
+  retentionKnown?: boolean;
   /** Total the cameras need for `retentionDays` (floor 20 GiB). */
   needBytes: number;
   retentionDays: number;
