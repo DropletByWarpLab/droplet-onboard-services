@@ -59,6 +59,7 @@ import { packagePath } from "../../__tests__/helpers/test-paths.js";
 import { createPmNativeRouter } from "./native.js";
 import { createPmRelationsRouter } from "./relations.js";
 import { createPmAttachmentsRouter } from "./attachments.js";
+import { createPmImportExportRouter } from "./import-export.js";
 import { createPmPlanningRouter } from "./planning.js";
 import { createPmInsightsRouter } from "./insights.js";
 import { createPmTimeRouter } from "./time.js";
@@ -142,8 +143,8 @@ interface PmRouterMount {
 const PRISMA = stubPrisma();
 
 /**
- * Mirrors the six PM mounts in app.ts, base and ORDER. The five native
- * routers mount at `/api`; routes/mobile/pm.ts registers absolute
+ * Mirrors every PM mount in app.ts, base and ORDER. The `/api` routers mount
+ * there; routes/mobile/pm.ts registers absolute
  * `/api/mobile/pm/...` paths and is mounted with no base. The source pin below
  * is what keeps this table honest.
  */
@@ -171,6 +172,12 @@ const PM_ROUTER_MOUNTS: readonly PmRouterMount[] = [
     base: "/api",
     file: "routes/pm/attachments.ts",
     router: createPmAttachmentsRouter(PRISMA),
+  },
+  {
+    factory: "createPmImportExportRouter",
+    base: "/api",
+    file: "routes/pm/import-export.ts",
+    router: createPmImportExportRouter(PRISMA),
   },
   {
     factory: "createPmPlanningRouter",

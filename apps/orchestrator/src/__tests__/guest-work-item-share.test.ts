@@ -42,6 +42,7 @@ import { fullCatalogFeatures, type FeatureLevel } from "../services/access-catal
 import { createPmNativeRouter } from "../routes/pm/native.js";
 import { createPmAttachmentsRouter } from "../routes/pm/attachments.js";
 import { createPmScheduleRouter } from "../routes/pm/schedule.js";
+import { createPmImportExportRouter } from "../routes/pm/import-export.js";
 import { isGuestShareGuard } from "../middleware/guest-share.js";
 import type { AuthUser } from "../middleware/auth.js";
 import type { EffectiveAccessResult } from "../services/effective-access.service.js";
@@ -120,6 +121,7 @@ const PM_ROUTES: RouteRow[] = [
   ...scanRoutes("routes", "pm", "attachments.ts"),
   ...scanRoutes("routes", "pm", "planning.ts"),
   ...scanRoutes("routes", "pm", "schedule.ts"),
+  ...scanRoutes("routes", "pm", "import-export.ts"),
   ...scanRoutes("routes", "mobile", "pm.ts"),
 ];
 
@@ -157,6 +159,7 @@ function appAs(role: Role): Express {
   // Timeline and My Work are not guest shares either: the gates refuse them
   // before a handler or database read runs.
   app.use("/api", createPmScheduleRouter(prisma));
+  app.use("/api", createPmImportExportRouter(prisma));
   // A handler that clears every gate and then meets a prisma double with no PM
   // models fails inside itself: anything but the gates' own 404 is "admitted".
   app.use((_err: unknown, _req: Request, res: Response, _next: NextFunction) => {

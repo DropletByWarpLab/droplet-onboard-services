@@ -59,6 +59,7 @@ import { createPmMobileRouter } from "./routes/mobile/pm.js";
 import { createPmNativeRouter } from "./routes/pm/native.js";
 import { createPmRelationsRouter } from "./routes/pm/relations.js";
 import { createPmAttachmentsRouter } from "./routes/pm/attachments.js";
+import { createPmImportExportRouter } from "./routes/pm/import-export.js";
 import { createPmPlanningRouter } from "./routes/pm/planning.js";
 import { createPmTimeRouter } from "./routes/pm/time.js";
 import { createPmWebhooksRouter } from "./routes/pm/webhooks.js";
@@ -605,6 +606,11 @@ export function createApp(
   // (`/pm/work-items/:id/attachments`, `/pm/attachments/:id`); the `/pm/work-items/:id`
   // route above takes one segment after `work-items`, so it cannot shadow these.
   app.use("/api", createPmAttachmentsRouter(prisma));
+  // WARP-3527 (ADR-069 WS-11) — project import (CSV / Trello JSON → background
+  // job) and export (CSV / JSON, streamed). Its own router on the same prefix;
+  // paths are `/pm/projects/:id/{import,export.*}` and `/pm/import-jobs/*`,
+  // disjoint from native.ts, so neither shadows the other.
+  app.use("/api", createPmImportExportRouter(prisma));
   // WARP-3521 (ADR-069 WS-5) — cycles (sprints) and modules (milestones). Its own
   // router on the same prefix, for the same reason as relations: the paths are
   // disjoint from the native router's (`/pm/cycles/*`, `/pm/modules/*`,
