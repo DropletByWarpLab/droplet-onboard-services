@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { deleteMacro, getDeskSla, listMacros, previewMacro, saveDeskSla, saveMacro } from "./sla-settings.service.js";
 import { getSlaReport } from "./sla-report.service.js";
+import { escalationSchema } from "./sla-schemas.js";
 import { grants } from "../../__tests__/helpers/support-routes.js";
 const viewer = { id: "agent", role: "family" } as const;
 const ticketId = "3fd5b450-a07a-4ad0-afab-5094b08b18cf";
@@ -19,6 +20,28 @@ function fixture() {
   };
   return { db, macro, row };
 }
+describe("SLA escalation configuration", () => {
+  const rule = (actions: Array<Record<string, unknown>>) => ({ on: "AT_RISK", metric: "any", actions });
+
+  it("allows a single reassign action alongside raise-priority and notify actions", () => {
+    expect(escalationSchema.safeParse([rule([
+      { type: "raise_priority" },
+      { type: "notify", userIds: ["agent-1", "agent-2"] },
+      { type: "reassign", userId: "agent-3" },
+    ])]).success).toBe(true);
+  });
+
+  it("rejects multiple reassign actions whether they target the same or different agents", () => {
+    expect(escalationSchema.safeParse([rule([
+      { type: "reassign", userId: "agent-1" },
+      { type: "reassign", userId: "agent-1" },
+    ])]).success).toBe(false);
+    expect(escalationSchema.safeParse([rule([
+      { type: "reassign", userId: "agent-1" },
+      { type: "reassign", userId: "agent-2" },
+    ])]).success).toBe(false);
+  });
+});
 describe("Support SLA settings boundary", () => {
   it("does not expose SLA settings or macros for a native Project", async () => {
     const f = fixture(); f.db.pmProject.findFirst.mockResolvedValue(null);

@@ -19,7 +19,10 @@ export const escalationSchema = z.array(z.object({
     z.object({ type: z.literal("reassign"), userId: id }).strict(),
     z.object({ type: z.literal("notify"), userIds: z.array(id).min(1).max(50) }).strict(),
   ])).min(1).max(10),
-}).strict()).max(20);
+}).strict()).max(20).refine(
+  (rules) => rules.every((rule) => rule.actions.filter((action) => action.type === "reassign").length <= 1),
+  { message: "at most one reassign action is allowed per escalation rule" },
+);
 export const policySchema = z.object({
   enabled: z.boolean(), calendarId: id.nullable(),
   targets: z.object({ urgent: targetSchema.optional(), high: targetSchema.optional(), medium: targetSchema.optional(), low: targetSchema.optional(), none: targetSchema.optional() }).strict(),
