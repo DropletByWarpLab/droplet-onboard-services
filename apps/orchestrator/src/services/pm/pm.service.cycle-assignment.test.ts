@@ -194,6 +194,22 @@ describe("PM_ERRORS carries the cycle codes the work-item routes can raise", () 
 });
 
 describe("createWorkItem with a cycle", () => {
+  it("keeps imported cycle history quiet and preserves the source reporter", async () => {
+    const f = makeFake();
+    await createWorkItem(f.prisma, "u1", "p1", {
+      name: "Imported",
+      cycleId: "cy-active",
+      imported: { jobId: "job1", source: "csv", externalSystem: "tracker", externalId: "42", createdById: "reporter" },
+    });
+    expect(f.items[0]).toMatchObject({ cycleId: "cy-active", createdById: "reporter" });
+    expect(f.activity).toHaveLength(2);
+    expect(f.activity.every((row) => row.notifyStatus === "not_needed")).toBe(true);
+    expect(f.activity).toEqual([
+      expect.objectContaining({ verb: "created", field: "import", newValue: "csv:job1" }),
+      expect.objectContaining({ verb: "cycle_added", newValue: "cy-active" }),
+    ]);
+  });
+
   it("plans the new item into the cycle and records it, locking the cycle before the write", async () => {
     const f = makeFake();
     await createWorkItem(f.prisma, "u1", "p1", { name: "x", cycleId: "cy-active" });
@@ -235,6 +251,19 @@ describe("createWorkItem with a cycle", () => {
 });
 
 describe("updateWorkItem with a cycle", () => {
+  it.each(["cy-active", null])("marks an imported cycle change %s as quiet history and records its provenance", async (cycleId) => {
+    const f = makeFake();
+    const item = f.addItem({ cycleId: "cy-other-active" });
+    await updateWorkItem(f.prisma, "u1", item.id as string, { cycleId }, { imported: { jobId: "job1", source: "csv" } });
+    expect(f.items[0].cycleId).toBe(cycleId);
+    expect(f.activity).toHaveLength(2);
+    expect(f.activity.every((row) => row.notifyStatus === "not_needed")).toBe(true);
+    expect(f.activity).toEqual([
+      expect.objectContaining({ verb: cycleId ? "cycle_added" : "cycle_removed", oldValue: "cy-other-active", newValue: cycleId }),
+      expect.objectContaining({ verb: "updated", field: "import", newValue: "csv:job1" }),
+    ]);
+  });
+
   it("plans an item into a cycle: one cycle_added row, null → cycle", async () => {
     const f = makeFake();
     const it = f.addItem();

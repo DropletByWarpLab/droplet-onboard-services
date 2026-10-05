@@ -16,9 +16,9 @@
  *   GET  /api/me/context-stats/failed       → FailedItem[]         (5min cache)
  *   POST /api/me/context-stats/failed/:id/retry
  *
- * The retry route flips a `failed` row back to `queued_for_transcription`
- * and publishes `droplet/transcription/run-one` so the file-indexer
- * picks it up, mirroring the WARP-218 transcribe-now path. Inherits the
+ * The retry route sends failed media back to `queued_for_transcription`
+ * and failed documents to `indexing`, using each extractor's actual MQTT
+ * topic. Held items must first be approved. Inherits the
  * same per-item rolling-hour retry cap (3/hr → 429 + Retry-After).
  */
 
@@ -43,6 +43,18 @@ const logger = createLogger("me-context-stats-route");
 // click can't burn through the cap by ping-ponging between routes.
 const RETRY_WINDOW_MS = 60 * 60 * 1000;
 const RETRY_CAP = 3;
+
+// Same explicit formats accepted by files-brain upload, backed by extractors/registry.py.
+// Retry must not send a failed document through the ASR-only worker or enqueue unsupported binary data.
+const RETRY_MIMES = new Set([
+  "text/plain", "text/markdown", "text/csv", "text/html", "text/x-markdown", "application/json", "application/xml", "application/pdf",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/msword",
+  "image/jpeg", "image/png", "image/heic", "image/tiff", "image/webp",
+  "audio/mpeg", "audio/mp4", "audio/wav", "audio/x-wav", "audio/ogg", "audio/flac", "audio/webm", "audio/aac",
+  "message/rfc822", "application/vnd.ms-outlook", "application/x-msmail",
+  "application/zip", "application/x-zip-compressed", "application/x-tar", "application/gzip", "application/x-gzip", "application/x-bzip2",
+  "video/mp4", "video/quicktime", "video/x-matroska", "video/webm", "video/x-msvideo", "video/mpeg",
+]);
 
 interface AuthedUser {
   id?: string;
@@ -161,15 +173,16 @@ export function createMeContextStatsRouter(prisma: PrismaClient): Router {
       }
       const ncUsername = getNcUsername(req) ?? userId;
       const data = await getFailed(prisma, userId, ncUsername);
-      res.json({ items: data });
+      // Older appliances route every retry through ASR. Native clients must detect document ingestion support explicitly.
+      res.json({ items: data, retryDocumentSupported: true });
     } catch (e) {
       next(e);
     }
   });
 
   // ── POST /api/me/context-stats/failed/:itemId/retry ──
-  // Flips a 'failed' row back to 'queued_for_transcription' and triggers
-  // the file-indexer's run-one handler. Cross-user → 404 (no leak).
+  // Retry the caller's failed item using its actual extractor pipeline.
+  // Cross-user → 404 (no leak).
   // 429 + Retry-After on cap hit, mirroring the WARP-218 transcribe-now
   // handler so a click on "Retry" shares the same rolling-hour budget.
   router.post(
@@ -200,6 +213,19 @@ export function createMeContextStatsRouter(prisma: PrismaClient): Router {
           return;
         }
 
+        if (row.ingestPolicy === "await_approval") {
+          res.status(409).json({ error: "awaiting_approval", ingestPolicy: row.ingestPolicy });
+          return;
+        }
+        if (!row.mimeType || !RETRY_MIMES.has(row.mimeType)) {
+          res.status(415).json({ error: "unsupported_mime" });
+          return;
+        }
+        if (!row.hasOriginalBytes || !row.storagePath) {
+          res.status(409).json({ error: "original_unavailable" });
+          return;
+        }
+
         const cap = isCapHit({
           windowStartedAt: row.recentAttemptWindowStartedAt,
           attemptCount: row.recentAttemptCount,
@@ -214,16 +240,28 @@ export function createMeContextStatsRouter(prisma: PrismaClient): Router {
           return;
         }
 
-        await prisma.brainMemoryItem.update({
-          where: { id: itemId },
-          data: { status: BrainMemoryItemStatus.queued_for_transcription },
+        const media = row.mimeType.startsWith("audio/") || row.mimeType.startsWith("video/");
+        const status = media ? BrainMemoryItemStatus.queued_for_transcription : BrainMemoryItemStatus.indexing;
+        const now = new Date();
+        const sameWindow = row.recentAttemptWindowStartedAt !== null && now.getTime() - row.recentAttemptWindowStartedAt.getTime() <= RETRY_WINDOW_MS;
+        // Compare-and-set prevents concurrent requests or a policy/state change after the ownership read from publishing stale work.
+        // The ASR worker owns its own attempt claim; document retries need the same rolling-hour counter here.
+        const changed = await prisma.brainMemoryItem.updateMany({
+          where: { id: itemId, userId, status: BrainMemoryItemStatus.failed, ingestPolicy: "auto_embed", mimeType: row.mimeType,
+            hasOriginalBytes: true, storagePath: row.storagePath,
+            recentAttemptCount: row.recentAttemptCount, recentAttemptWindowStartedAt: row.recentAttemptWindowStartedAt },
+          data: { status, ...(!media ? { recentAttemptCount: sameWindow ? row.recentAttemptCount + 1 : 1,
+            recentAttemptWindowStartedAt: sameWindow ? row.recentAttemptWindowStartedAt : now } : {}) },
         });
+        if (changed.count !== 1) { res.status(409).json({ error: "state_changed" }); return; }
 
         try {
-          publishRunOne({ publish: mqttPublish }, { itemId, userId });
+          if (media) { publishRunOne({ publish: mqttPublish }, { itemId, userId }); }
+          else { mqttPublish("droplet/files/brain/uploaded", { itemId, userId, path: row.storagePath,
+            mimeType: row.mimeType, filename: row.filename, originatingChatId: row.originatingChatId }); }
         } catch (e) {
-          // MQTT publish is best-effort — the durable signal is the
-          // queued status; the daily worker will pick it up.
+          // Use the same best-effort publication contract as Brain upload/approval.
+          // The response acknowledges a processing request, not completed extraction.
           logger.warn(
             { err: e, itemId },
             "MQTT publish for retry failed (non-fatal)",
@@ -236,7 +274,7 @@ export function createMeContextStatsRouter(prisma: PrismaClient): Router {
 
         res.status(202).json({
           itemId,
-          status: BrainMemoryItemStatus.queued_for_transcription,
+          status,
         });
       } catch (e) {
         next(e);
