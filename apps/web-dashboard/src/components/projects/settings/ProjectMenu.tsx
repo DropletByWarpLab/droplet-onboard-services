@@ -39,7 +39,7 @@ export function ProjectMenu({
   return (
     <>
       <MenuButton
-        label="Project actions"
+        label="Project settings and archived items"
         className="btn"
         buttonRef={triggerRef}
         items={[

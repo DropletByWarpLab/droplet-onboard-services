@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 import { ChevronDown, Filter, X } from "lucide-react";
 import type { CameraInfo, EventFilter } from "@/lib/types";
+import { BusinessHoursFilter } from "./BusinessHoursFilter";
 
 interface Props {
   cameras: CameraInfo[];
@@ -11,6 +12,7 @@ interface Props {
   knownLabels: string[];
   filter: EventFilter;
   onChange: (next: EventFilter) => void;
+  businessHoursConfigured?: boolean;
 }
 
 const TIME_PRESETS: Array<{ id: string; label: string; secondsAgo: number | null }> = [
@@ -46,7 +48,7 @@ function presetIdFor(after: number | undefined): string {
  * selected without scrolling a dropdown. The accent fill on a pill is
  * the only "I'm in" affordance.
  */
-export function EventFilterBar({ cameras, knownLabels, filter, onChange }: Props) {
+export function EventFilterBar({ cameras, knownLabels, filter, onChange, businessHoursConfigured = false }: Props) {
   const [collapsed, setCollapsed] = useState(false);
 
   const selectedCameras = filter.cameras ?? [];
@@ -115,7 +117,8 @@ export function EventFilterBar({ cameras, knownLabels, filter, onChange }: Props
     (selectedLabels.length > 0 ? 1 : 0) +
     (filter.minScore !== undefined ? 1 : 0) +
     (activePreset !== "any" ? 1 : 0) +
-    (filter.hasClip !== undefined ? 1 : 0);
+    (filter.hasClip !== undefined ? 1 : 0) +
+    (filter.businessHours !== undefined ? 1 : 0);
 
   return (
     <div className="card mb-4 space-y-3">
@@ -149,6 +152,11 @@ export function EventFilterBar({ cameras, knownLabels, filter, onChange }: Props
 
       {!collapsed && (
         <div className="space-y-3">
+          <BusinessHoursFilter
+            value={filter.businessHours}
+            configured={businessHoursConfigured}
+            onChange={(businessHours) => onChange({ ...filter, businessHours })}
+          />
           {/* Cameras */}
           {sortedCameras.length > 0 && (
             <div>

@@ -1,6 +1,8 @@
 // Wire types for the native Projects (PM) surface — mirror the orchestrator's
 // /api/pm/* responses (apps/orchestrator/src/services/pm/pm.service.ts).
 
+import type { PmFilter } from "@droplet/shared-types";
+
 export type Priority = "urgent" | "high" | "medium" | "low" | "none";
 export type StateGroup = "backlog" | "unstarted" | "started" | "completed" | "cancelled";
 
@@ -220,6 +222,33 @@ export interface PmActivity {
   oldValue: string | null;
   newValue: string | null;
   createdAt: string;
+}
+
+/** WARP-3522 — a value a filter named that no longer exists; the server dropped it. */
+export interface PmStaleRef {
+  field: string;
+  value: string;
+}
+
+/** WARP-3537 — one group of a group-by: its id (a state, a person, a priority …; `null` is "none") and how many items. */
+export interface PmQueryGroup {
+  key: string | null;
+  count: number;
+}
+
+/** WARP-3522 — one page of `POST /api/pm/work-items/query`. */
+export interface PmQueryPage {
+  work_items: PmWorkItem[];
+  nextCursor: string | null;
+  /** Exact, for the whole filter — not the page. */
+  total: number;
+  /** One number per named filter, on the first page only. */
+  counts?: Record<string, number>;
+  /** WARP-3537 — exact per-group counts for the whole filter, on the first page, when a group-by was asked for. */
+  groups?: PmQueryGroup[];
+  stale?: PmStaleRef[];
+  /** Present with `stale`: the filter that was actually applied. */
+  filter?: PmFilter;
 }
 
 // ── Cycles and modules (WARP-3521) ──────────────────────────────────────────

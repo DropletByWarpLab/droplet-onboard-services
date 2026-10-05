@@ -178,6 +178,7 @@ describe("EventClipModal clip playback (WARP-3509)", () => {
     render(<EventClipModal event={withClip()} cameraName="Warp Lab Office" onClose={vi.fn()} />);
 
     act(() => h.player.props!.onError!("We couldn't load that recording."));
+    act(() => h.player.props!.onError!("We couldn't load that recording."));
 
     expect(screen.queryByTestId("hls-player")).toBeNull();
     expect(document.querySelector("img")!.getAttribute("src")).toBe(`/api/cameras/events/${ID}/snapshot`);
@@ -188,6 +189,7 @@ describe("EventClipModal clip playback (WARP-3509)", () => {
     render(<EventClipModal event={withClip()} onClose={vi.fn()} />);
 
     act(() => h.player.props!.onError!("manifestLoadError"));
+    act(() => h.player.props!.onError!("manifestLoadError"));
 
     expect(screen.queryByText(/manifestLoadError/)).toBeNull();
     // And not the Recordings page's wording, which talks about segments.
@@ -197,6 +199,7 @@ describe("EventClipModal clip playback (WARP-3509)", () => {
   it("the failure notice is an alert in the shell's error ink, not a quiet status line (WARP-3509)", () => {
     render(<EventClipModal event={withClip()} onClose={vi.fn()} />);
 
+    act(() => h.player.props!.onError!("x"));
     act(() => h.player.props!.onError!("x"));
 
     // Something the person was waiting on just failed: announce it, and paint
@@ -210,6 +213,7 @@ describe("EventClipModal clip playback (WARP-3509)", () => {
 
   it("the failure notice says 'try again', so it offers Retry, which asks for the playlist again", () => {
     render(<EventClipModal event={withClip()} onClose={vi.fn()} />);
+    act(() => h.player.props!.onError!("x"));
     act(() => h.player.props!.onError!("x"));
     expect(screen.queryByTestId("hls-player")).toBeNull();
 
@@ -225,7 +229,9 @@ describe("EventClipModal clip playback (WARP-3509)", () => {
   it("a second failure offers Retry again, with yet another playlist request", () => {
     render(<EventClipModal event={withClip()} onClose={vi.fn()} />);
     act(() => h.player.props!.onError!("x"));
+    act(() => h.player.props!.onError!("x"));
     fireEvent.click(screen.getByRole("button", { name: /Retry/ }));
+    act(() => h.player.props!.onError!("x"));
     act(() => h.player.props!.onError!("x"));
 
     fireEvent.click(screen.getByRole("button", { name: /Retry/ }));
@@ -265,6 +271,7 @@ describe("EventClipModal clip playback (WARP-3509)", () => {
     const { rerender } = render(<EventClipModal event={withClip({ endTime: null })} onClose={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: /Refresh/ }));
     act(() => h.player.props!.onError!("x"));
+    act(() => h.player.props!.onError!("x"));
     expect(screen.queryByTestId("hls-player")).toBeNull();
 
     const other = "1791070000.5-zzzzzz";
@@ -303,6 +310,7 @@ describe("EventClipModal Download (WARP-3103, WARP-3509)", () => {
   it("stays available when the clip cannot play: the file is the way to watch it elsewhere", () => {
     render(<EventClipModal event={withClip()} onClose={vi.fn()} />);
 
+    act(() => h.player.props!.onError!("x"));
     act(() => h.player.props!.onError!("x"));
 
     expect(screen.getByRole("link", { name: /Download/ }).getAttribute("href")).toBe(

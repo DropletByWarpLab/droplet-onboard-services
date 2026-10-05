@@ -145,14 +145,14 @@ function renderMenu(over: { readOnly?: boolean; canDeleteItems?: boolean; canMan
 const writes = () => h.calls.filter((c) => c.method !== "GET");
 const lastWrite = () => writes().at(-1);
 async function openSettings(tab?: string) {
-  fireEvent.click(screen.getByRole("button", { name: "Project actions" }));
+  fireEvent.click(screen.getByRole("button", { name: "Project settings and archived items" }));
   fireEvent.click(screen.getByRole("menuitem", { name: "Project settings" }));
   const dialog = await screen.findByRole("dialog", { name: /Project settings/ });
   if (tab) fireEvent.click(within(dialog).getByRole("tab", { name: tab }));
   return dialog;
 }
 async function openArchived() {
-  fireEvent.click(screen.getByRole("button", { name: "Project actions" }));
+  fireEvent.click(screen.getByRole("button", { name: "Project settings and archived items" }));
   fireEvent.click(screen.getByRole("menuitem", { name: "Archived items" }));
   return screen.findByRole("dialog", { name: "Archived items" });
 }
@@ -166,19 +166,19 @@ beforeEach(() => {
 describe("the project menu", () => {
   it("offers settings and archived items to a writer", () => {
     renderMenu();
-    fireEvent.click(screen.getByRole("button", { name: "Project actions" }));
+    fireEvent.click(screen.getByRole("button", { name: "Project settings and archived items" }));
     expect(screen.getAllByRole("menuitem").map((el) => el.textContent)).toEqual(["Project settings", "Archived items"]);
   });
 
   it("offers only archived items to a reader — settings are absent, not disabled", () => {
     renderMenu({ readOnly: true });
-    fireEvent.click(screen.getByRole("button", { name: "Project actions" }));
+    fireEvent.click(screen.getByRole("button", { name: "Project settings and archived items" }));
     expect(screen.getAllByRole("menuitem").map((el) => el.textContent)).toEqual(["Archived items"]);
   });
 
   it("returns focus to the menu button when a dialog opened from it closes", async () => {
     renderMenu();
-    const trigger = screen.getByRole("button", { name: "Project actions" });
+    const trigger = screen.getByRole("button", { name: "Project settings and archived items" });
     await openSettings();
     fireEvent.keyDown(window, { key: "Escape" });
     await waitFor(() => expect(screen.queryByRole("dialog", { name: /Project settings/ })).toBeNull());

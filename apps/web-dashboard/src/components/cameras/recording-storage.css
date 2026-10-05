@@ -1,0 +1,215 @@
+/* ============================================================
+   WARP-3515 — the Recording storage card on /cameras/system.
+
+   Scoped under `.droplet-shell` like every other shell primitive (the card
+   renders inside ShellPage, and the dialogs it opens are portal-mounted with
+   their own `droplet-shell` backdrop). Shell tokens only: no invented colours.
+
+   - Error TEXT is `--danger-ink` (the AA-clearing red for text — `--danger` is
+     the FILL token and reads ~1.8:1 as text on the dark card).
+   - Amber is only ever a decorative tint/icon (`--color-system-orange`); the
+     words beside it stay `--text`, so no amber text has to clear AA.
+   - The tint behind a danger banner mixes from `--danger-ink` (not `--danger`)
+     so it is visible in BOTH themes.
+
+   Phone layer (<= 720px, the shell's own breakpoint): the mode switch stacks,
+   the per-camera table becomes one stacked card per camera (no horizontal
+   scroll at 375px), and form controls reach the 44px touch target / 16px
+   font-size the rest of the shell phone layer enforces.
+   ============================================================ */
+
+.droplet-shell .rs-card {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  /* The deep link from Settings → Storage and the per-camera settings page
+     lands here; clear the sticky slim bar. */
+  scroll-margin-top: 84px;
+}
+
+/* ── Header ──────────────────────────────────────────────── */
+.droplet-shell .rs-head { display: flex; align-items: center; gap: 11px; flex-wrap: wrap; }
+.droplet-shell .rs-head-ic {
+  width: 30px; height: 30px; border-radius: 9px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--brand-subtle); color: var(--brand);
+}
+.droplet-shell .rs-title { font-size: 14px; font-weight: 600; color: var(--text); letter-spacing: -0.1px; margin: 0; }
+.droplet-shell .rs-sub { font-size: 12.5px; color: var(--text-muted); margin: -8px 0 0; }
+.droplet-shell .rs-note { font-size: 13px; color: var(--text-muted); margin: 0; }
+.droplet-shell .rs-note.is-error { color: var(--danger-ink); }
+
+/* ── Skeleton ────────────────────────────────────────────── */
+.droplet-shell .rs-skel { background: var(--inset); border-radius: 10px; height: 44px; }
+.droplet-shell .rs-skel.is-tall { height: 88px; }
+
+/* ── The recording drive ─────────────────────────────────── */
+.droplet-shell .rs-drive { display: flex; align-items: center; gap: 12px; min-width: 0; flex-wrap: wrap; }
+.droplet-shell .rs-drive-ic {
+  width: 40px; height: 40px; border-radius: 10px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--card-inner); color: var(--text-muted);
+}
+.droplet-shell .rs-drive-tx { flex: 1 1 160px; min-width: 0; }
+.droplet-shell .rs-drive-nm { font-size: 14px; font-weight: 600; color: var(--text); overflow-wrap: anywhere; margin: 0; }
+.droplet-shell .rs-drive-sub { font-size: 12px; color: var(--text-muted); margin: 2px 0 0; font-variant-numeric: tabular-nums; }
+.droplet-shell .rs-badges { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+
+/* ── Mode switch: a two-option radio group, styled as a segmented control.
+      The native radios stay (arrow keys, form semantics, screen readers); the
+      <label> is the visible target and carries the checked/focus/disabled look. */
+.droplet-shell .rs-field-label { display: block; font-size: 12px; font-weight: 600; color: var(--text-muted); margin: 0 0 8px; }
+.droplet-shell .rs-seg { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.droplet-shell .rs-opt {
+  position: relative; display: flex; flex-direction: column; gap: 2px;
+  padding: 12px 14px; min-height: 44px;
+  border: 1px solid var(--border); border-radius: 12px; background: var(--surface);
+  cursor: pointer;
+  transition: border-color 150ms var(--ease), background 150ms var(--ease);
+}
+.droplet-shell .rs-opt input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: inherit; }
+.droplet-shell .rs-opt:has(input:checked) { border-color: var(--brand); background: var(--brand-subtle); }
+.droplet-shell .rs-opt:has(input:focus-visible) { outline: 2px solid var(--brand); outline-offset: 2px; }
+.droplet-shell .rs-opt:has(input:disabled) { cursor: not-allowed; opacity: 0.65; }
+.droplet-shell .rs-opt-t { font-size: 13.5px; font-weight: 600; color: var(--text); }
+.droplet-shell .rs-opt-h { font-size: 12px; color: var(--text-muted); }
+.droplet-shell .rs-hint { font-size: 12px; color: var(--text-muted); margin: 8px 0 0; }
+/* A button that reads as a link inside a sentence ("check again"). */
+.droplet-shell .rs-link {
+  background: none; border: 0; padding: 0; font: inherit; cursor: pointer;
+  color: var(--brand); text-decoration: underline; text-underline-offset: 2px;
+  border-radius: var(--radius-input);
+}
+.droplet-shell .rs-link:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+
+/* ── Reserved / used / free ──────────────────────────────── */
+.droplet-shell .rs-legend {
+  display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px 16px;
+  margin: 8px 0 0; font-size: 12px; color: var(--text-muted); font-variant-numeric: tabular-nums;
+}
+.droplet-shell .rs-legend b { color: var(--text); font-weight: 600; }
+.droplet-shell .rs-facts { display: flex; flex-wrap: wrap; gap: 4px 20px; margin: 0; font-size: 13px; color: var(--text-muted); }
+.droplet-shell .rs-facts b { color: var(--text); font-weight: 600; }
+
+/* ── Move in flight ──────────────────────────────────────── */
+.droplet-shell .rs-migration { padding: 14px; border-radius: 12px; background: var(--inset); display: flex; flex-direction: column; gap: 8px; }
+.droplet-shell .rs-migration-t { display: flex; align-items: center; gap: 8px; font-size: 13.5px; font-weight: 600; color: var(--text); margin: 0; }
+.droplet-shell .rs-migration-d { font-size: 12.5px; color: var(--text-muted); margin: 0; }
+.droplet-shell .rs-migration-n { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.droplet-shell .rs-migration-n b { color: var(--text); font-weight: 600; }
+
+/* ── Warnings ────────────────────────────────────────────── */
+.droplet-shell .rs-warnings { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.droplet-shell .rs-warning {
+  display: flex; align-items: flex-start; gap: 12px; flex-wrap: wrap;
+  padding: 12px 14px; border-radius: 12px; border: 1px solid var(--card-bd);
+}
+.droplet-shell .rs-warning.is-danger {
+  border-color: color-mix(in srgb, var(--danger-ink) 40%, var(--card-bd));
+  background: color-mix(in srgb, var(--danger-ink) 8%, transparent);
+}
+.droplet-shell .rs-warning.is-warn {
+  border-color: color-mix(in srgb, var(--color-system-orange) 45%, var(--card-bd));
+  background: color-mix(in srgb, var(--color-system-orange) 9%, transparent);
+}
+.droplet-shell .rs-warning-ic { flex-shrink: 0; margin-top: 1px; }
+.droplet-shell .rs-warning.is-danger .rs-warning-ic { color: var(--danger-ink); }
+.droplet-shell .rs-warning.is-warn .rs-warning-ic { color: var(--color-system-orange); }
+.droplet-shell .rs-warning-tx { flex: 1 1 220px; min-width: 0; }
+.droplet-shell .rs-warning-t { font-size: 13.5px; font-weight: 600; color: var(--text); margin: 0; }
+.droplet-shell .rs-warning.is-danger .rs-warning-t { color: var(--danger-ink); }
+.droplet-shell .rs-warning-d { font-size: 12.5px; color: var(--text); margin: 2px 0 0; }
+.droplet-shell .rs-warning-m { font-size: 12px; color: var(--text-muted); margin: 4px 0 0; }
+
+/* ── No drive yet ────────────────────────────────────────── */
+.droplet-shell .empty.rs-empty { padding: 24px 12px; }
+.droplet-shell .empty.rs-empty p { margin: 0; max-width: 46ch; font-size: 13px; }
+.droplet-shell .empty.rs-empty .eh { font-size: 16px; }
+
+/* ── Change drive ────────────────────────────────────────── */
+.droplet-shell .rs-picker-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.droplet-shell .rs-select {
+  flex: 1 1 220px; min-width: 0; height: 36px; padding: 0 10px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-input);
+  color: var(--text); font-size: 13.5px;
+}
+.droplet-shell .rs-select:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+
+/* ── Per-camera table ────────────────────────────────────── */
+.droplet-shell .rs-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.droplet-shell .rs-table th {
+  text-align: left; font-size: 10.5px; font-weight: 500; text-transform: uppercase;
+  letter-spacing: 0.06em; color: var(--text-muted); padding: 6px 8px;
+}
+.droplet-shell .rs-table td { padding: 10px 8px; border-top: 1px solid var(--card-bd); color: var(--text); vertical-align: middle; }
+.droplet-shell .rs-table .rs-num { text-align: right; font-family: var(--font-mono); font-size: 12px; font-variant-numeric: tabular-nums; }
+.droplet-shell .rs-table td.rs-num { color: var(--text-muted); }
+
+/* ── Old footage left on the system drive ────────────────── */
+.droplet-shell .rs-old { padding: 14px; border-radius: 12px; border: 1px dashed var(--border); display: flex; flex-direction: column; gap: 8px; }
+.droplet-shell .rs-old-t { font-size: 13.5px; font-weight: 600; color: var(--text); margin: 0; }
+.droplet-shell .rs-old-d { font-size: 12.5px; color: var(--text-muted); margin: 0; }
+.droplet-shell .rs-old .btn { align-self: flex-start; }
+
+/* ── Per-camera settings: where THIS camera records ───────── */
+.droplet-shell .rs-camera-note {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 12px 14px; border-radius: 12px; background: var(--inset);
+}
+.droplet-shell .rs-camera-note-t { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 13px; color: var(--text-muted); }
+.droplet-shell .rs-camera-note-t b { color: var(--text); font-weight: 600; }
+.droplet-shell .rs-camera-note-d { margin: 0; font-size: 12.5px; color: var(--text-muted); }
+.droplet-shell .rs-camera-note-d b { color: var(--text); font-weight: 600; }
+.droplet-shell .rs-camera-note-link {
+  align-self: flex-start; display: inline-flex; align-items: center; gap: 4px;
+  margin-top: 4px; min-height: 24px; font-size: 12.5px; font-weight: 500;
+  color: var(--brand); text-decoration: underline; text-underline-offset: 2px;
+  border-radius: var(--radius-input);
+}
+.droplet-shell .rs-camera-note-link:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+
+/* The budgets summed against the volume (WARP-1851's overAllocation). Amber is a
+   decorative tint/icon only; the words stay --text. */
+.droplet-shell .rs-over {
+  display: flex; align-items: flex-start; gap: 8px; margin: 0;
+  padding: 10px 12px; border-radius: 10px; font-size: 12.5px; color: var(--text);
+  border: 1px solid color-mix(in srgb, var(--color-system-orange) 45%, var(--card-bd));
+  background: color-mix(in srgb, var(--color-system-orange) 9%, transparent);
+}
+.droplet-shell .rs-over b { font-weight: 600; }
+.droplet-shell .rs-over-ic { flex-shrink: 0; margin-top: 1px; color: var(--color-system-orange); }
+
+/* ── Phone layer (the shell's own 720px breakpoint) ──────── */
+@media (max-width: 720px) {
+  .droplet-shell .rs-seg { grid-template-columns: 1fr; }
+
+  /* iOS Safari zooms on focus for any control under 16px and never zooms back
+     (droplet-shell.css §5). Match the 44px target the shell gives `.btn`. */
+  .droplet-shell .rs-select { height: 44px; font-size: 16px; }
+  .droplet-shell .rs-camera-note-link { min-height: 44px; }
+
+  /* One stacked card per camera instead of a five-column table: at 375px the
+     card's content box is ~300px, which a five-column table cannot fit without
+     a horizontal scroll. The header row stays in the accessibility tree
+     (visually clipped, not display:none) and every cell keeps its explicit ARIA
+     role, so the table semantics survive the display change. */
+  .droplet-shell .rs-table thead {
+    position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap;
+  }
+  .droplet-shell .rs-table,
+  .droplet-shell .rs-table tbody { display: block; }
+  .droplet-shell .rs-table tr {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 2px 18px;
+    padding: 12px 0; border-top: 1px solid var(--card-bd);
+  }
+  .droplet-shell .rs-table td {
+    display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+    border: 0; padding: 2px 0;
+  }
+  .droplet-shell .rs-table td::before {
+    content: attr(data-label); font-family: var(--font-ui); font-size: 11.5px; color: var(--text-muted);
+  }
+  .droplet-shell .rs-table td:first-child { grid-column: 1 / -1; font-weight: 600; }
+  .droplet-shell .rs-table td:first-child::before { content: none; }
+  .droplet-shell .rs-table tbody tr:first-child { border-top: 0; padding-top: 4px; }
+}
