@@ -218,10 +218,7 @@ async function upsertLink(
       if (!existing) await writeActivity(tx, { workItemId: workItem.id, actorId: null, verb: "external_link_added", field: provider.toLowerCase(), newValue: `${kind}:${title.slice(0, 180)}` });
       if (targetState && (!existing || existing.state !== state)) {
         const oldItem = await tx.pmWorkItem.findFirst({ where: { id: workItem.id, project: { kind: "PROJECT" } }, select: { stateId: true, completedAt: true, isCompleted: true } });
-        const [oldState, newState] = oldItem?.stateId ? await Promise.all([
-          tx.pmState.findUnique({ where: { id: oldItem.stateId }, select: { name: true } }),
-          tx.pmState.findFirst({ where: { id: targetState, projectId: project.id }, select: { name: true, group: true } }),
-        ]) : [null, await tx.pmState.findFirst({ where: { id: targetState, projectId: project.id }, select: { name: true, group: true } })];
+        const newState = await tx.pmState.findFirst({ where: { id: targetState, projectId: project.id }, select: { group: true } });
         if (oldItem && newState && oldItem.stateId !== targetState) {
           const completed = newState.group === "completed" || newState.group === "cancelled";
           const changed = await tx.pmWorkItem.updateMany({ where: { id: workItem.id, stateId: oldItem.stateId, project: { kind: "PROJECT" } }, data: {
@@ -229,7 +226,7 @@ async function upsertLink(
             isCompleted: completed,
             completedAt: completed ? (oldItem.completedAt ?? new Date()) : null,
           } });
-          if (changed.count) await writeActivity(tx, { workItemId: workItem.id, actorId: null, verb: "state_changed", field: "state", oldValue: oldState?.name ?? oldItem.stateId, newValue: newState.name });
+          if (changed.count) await writeActivity(tx, { workItemId: workItem.id, actorId: null, verb: "state_changed", field: "state", oldValue: oldItem.stateId, newValue: targetState });
         }
       }
     });
