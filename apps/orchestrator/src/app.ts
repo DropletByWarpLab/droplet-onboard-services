@@ -58,6 +58,7 @@ import { createMatterRouter } from "./routes/matter.js";
 import { createPmMobileRouter } from "./routes/mobile/pm.js";
 import { createPmNativeRouter } from "./routes/pm/native.js";
 import { createPmRelationsRouter } from "./routes/pm/relations.js";
+import { createPmPlanningRouter } from "./routes/pm/planning.js";
 import { createPmWebhooksRouter } from "./routes/pm/webhooks.js";
 import { createPmOpenApiRouter } from "./routes/pm/openapi.js";
 import { createSupportRouter } from "./routes/support/support.routes.js";
@@ -598,6 +599,13 @@ export function createApp(
   // (blocks / relates / duplicates). Its own router on the same prefix; the
   // paths are disjoint from the native router's, so neither shadows the other.
   app.use("/api", createPmRelationsRouter(prisma));
+  // WARP-3521 (ADR-069 WS-5) — cycles (sprints) and modules (milestones). Its own
+  // router on the same prefix, for the same reason as relations: the paths are
+  // disjoint from the native router's (`/pm/cycles/*`, `/pm/modules/*`,
+  // `/pm/projects/:id/{cycles,modules,backlog}`, `/pm/work-items/:id/modules`).
+  // Every path starts `/pm/`, so the `projects` module gate and the guest tier
+  // floor already cover it.
+  app.use("/api", createPmPlanningRouter(prisma));
   // WARP-3532 (ADR-069 §9) — work webhooks and chat-app notifications. Owner
   // and admin only. `/pm/webhooks` is a literal second segment and no PM router
   // above owns a `/pm/:param`, so neither shadows the other.

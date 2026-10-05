@@ -59,6 +59,7 @@ vi.mock("@/components/projects/usePm", () => ({
   useProjectItems: () => ({ items: ITEMS, error: undefined, isLoading: false, mutate: mutateItems, key: "k" }),
   usePeople: () => ({ person: (id: string) => ({ id, name: "Tester", initials: "T", tone: 1 }), users: [] }),
   useDepartments: () => ({ departments: undefined }),
+  useProjectCycles: () => ({ cycles: [], mutate: vi.fn() }),
   pmActions: () => ({}),
   PmRequestError: class extends Error {},
 }));
