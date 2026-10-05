@@ -148,6 +148,68 @@ describe.skipIf(!RUN)("PM time tracking — the database's own guarantees (WARP-
     });
   });
 
+  describe("service-desk boundary", () => {
+    it("excludes tickets from direct worklog, timer, timesheet and report paths", async () => {
+      const desk = await prisma.pmProject.create({
+        data: {
+          workspaceId,
+          name: "warp3526-service-desk",
+          identifier: "W36D",
+          kind: "SERVICE_DESK",
+        },
+      });
+      const ticket = await item(desk.id, "ticket");
+      await prisma.pmTicket.create({
+        data: {
+          workItemId: ticket.id,
+          requesterKind: "USER",
+          requesterUserId: ana.id,
+          requesterName: "Ana",
+          channel: "INTERNAL",
+        },
+      });
+      const projectItem = await item(projectA, "project-work");
+      const pmWorklog = await createWorklog(prisma, ana, projectItem.id, { minutes: 37 }, NOW);
+      const deskWorklog = await prisma.pmWorklog.create({
+        data: { workItemId: ticket.id, userId: ana.id, startedAt: NOW, minutes: 91 },
+      });
+
+      await expect(listWorklogs(prisma, ticket.id)).rejects.toThrow("work_item_not_found");
+      await expect(updateWorklog(prisma, ana, deskWorklog.id, { note: "changed" })).rejects.toThrow(
+        "worklog_not_found",
+      );
+      await expect(deleteWorklog(prisma, ana, deskWorklog.id)).rejects.toThrow("worklog_not_found");
+      expect(await prisma.pmWorklog.findUniqueOrThrow({ where: { id: deskWorklog.id } })).toMatchObject({
+        minutes: 91,
+        note: "",
+      });
+
+      await prisma.pmTimer.create({ data: { userId: ana.id, workItemId: ticket.id, startedAt: NOW } });
+      expect(await getTimer(prisma, ana.id)).toBeNull();
+      await expect(stopTimer(prisma, ana.id, NOW)).rejects.toThrow("timer_not_found");
+      await expect(startTimer(prisma, ana.id, projectItem.id, NOW)).rejects.toThrow("timer_not_found");
+      expect(await prisma.pmTimer.findUniqueOrThrow({ where: { userId: ana.id } })).toMatchObject({
+        workItemId: ticket.id,
+      });
+
+      const sheet = await getTimesheet(prisma, { userId: ana.id, weekStart: "2026-10-05" }, NOW);
+      expect(sheet.totalMinutes).toBe(37);
+      expect(sheet.rows.map((r) => r.workItem.id)).toEqual([projectItem.id]);
+      const report = await getTimeReport(prisma, { from: "2026-10-05", to: "2026-10-05", groupBy: "item" });
+      expect(report.total).toEqual({ minutes: 37, entries: 1 });
+      expect(report.rows.map((r) => r.key)).toEqual([projectItem.id]);
+      await expect(
+        getTimeReport(prisma, { projectId: desk.id, from: "2026-10-05", to: "2026-10-05" }),
+      ).rejects.toThrow("project_not_found");
+
+      // Ensure a real PM worklog remains visible after each rejected ticket path.
+      await expect(updateWorklog(prisma, ana, pmWorklog.id, { note: "still PM" })).resolves.toMatchObject({
+        workItemId: projectItem.id,
+        note: "still PM",
+      });
+    });
+  });
+
   // ── one timer per person: the primary key ────────────────────────────────
 
   describe("PmTimer — one running timer per person is the primary key's rule", () => {

@@ -184,7 +184,7 @@ const ITEM_REF_SELECT = {
   sequenceId: true,
   projectId: true,
   isArchived: true,
-  project: { select: { identifier: true, isArchived: true } },
+  project: { select: { identifier: true, isArchived: true, kind: true } },
 } satisfies Prisma.PmWorkItemSelect;
 
 type ItemRefRow = Prisma.PmWorkItemGetPayload<{ select: typeof ITEM_REF_SELECT }>;
@@ -265,10 +265,20 @@ function assertMayChange(actor: TimeActor, entryUserId: string): void {
   }
 }
 
+/** A PM time row can never be a path into the separate service-desk surface. */
+async function loadProjectItem(
+  db: Db,
+  workItemId: string,
+  notFound: string = PM_ERRORS.WORK_ITEM_NOT_FOUND,
+): Promise<ItemRefRow> {
+  const row = await db.pmWorkItem.findUnique({ where: { id: workItemId }, select: ITEM_REF_SELECT });
+  if (!row || row.project.kind !== "PROJECT") throw new Error(notFound);
+  return row;
+}
+
 /** The item exists and neither it nor its project is archived. */
 async function loadTrackableItem(db: Db, workItemId: string): Promise<ItemRefRow> {
-  const row = await db.pmWorkItem.findUnique({ where: { id: workItemId }, select: ITEM_REF_SELECT });
-  if (!row) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
+  const row = await loadProjectItem(db, workItemId);
   if (row.isArchived || row.project.isArchived) throw new Error(PM_TIME_ERRORS.WORK_ITEM_ARCHIVED);
   return row;
 }
@@ -281,7 +291,7 @@ async function loadItemRefs(db: Db, ids: readonly string[]): Promise<Map<string,
   const out = new Map<string, ApiTimeItemRef>();
   for (let i = 0; i < ids.length; i += ID_LOOKUP_CHUNK) {
     const rows = await db.pmWorkItem.findMany({
-      where: { id: { in: ids.slice(i, i + ID_LOOKUP_CHUNK) } },
+      where: { id: { in: ids.slice(i, i + ID_LOOKUP_CHUNK) }, project: { kind: "PROJECT" } },
       select: ITEM_REF_SELECT,
     });
     for (const r of rows) out.set(r.id, mapItemRef(r));
@@ -292,8 +302,7 @@ async function loadItemRefs(db: Db, ids: readonly string[]): Promise<Map<string,
 // ── Worklogs ────────────────────────────────────────────────────────────────
 
 export async function listWorklogs(prisma: PrismaClient, workItemId: string): Promise<ApiWorklogList> {
-  const item = await prisma.pmWorkItem.findUnique({ where: { id: workItemId }, select: { id: true } });
-  if (!item) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
+  await loadProjectItem(prisma, workItemId);
   const [rows, sum] = await Promise.all([
     prisma.pmWorklog.findMany({
       where: { workItemId },
@@ -380,6 +389,7 @@ export async function updateWorklog(
     return await prisma.$transaction(async (tx) => {
       const existing = await tx.pmWorklog.findUnique({ where: { id } });
       if (!existing) throw new Error(PM_TIME_ERRORS.WORKLOG_NOT_FOUND);
+      await loadProjectItem(tx, existing.workItemId, PM_TIME_ERRORS.WORKLOG_NOT_FOUND);
       assertMayChange(actor, existing.userId);
 
       const changed =
@@ -416,6 +426,7 @@ export async function deleteWorklog(prisma: PrismaClient, actor: TimeActor, id: 
     await prisma.$transaction(async (tx) => {
       const existing = await tx.pmWorklog.findUnique({ where: { id } });
       if (!existing) throw new Error(PM_TIME_ERRORS.WORKLOG_NOT_FOUND);
+      await loadProjectItem(tx, existing.workItemId, PM_TIME_ERRORS.WORKLOG_NOT_FOUND);
       assertMayChange(actor, existing.userId);
       await tx.pmWorklog.delete({ where: { id } });
       await writeActivity(tx, {
@@ -491,7 +502,7 @@ export async function getTimer(prisma: PrismaClient, userId: string): Promise<Ap
     where: { userId },
     include: { workItem: { select: ITEM_REF_SELECT } },
   });
-  return row ? mapTimer(row, row.workItem) : null;
+  return row?.workItem.project.kind === "PROJECT" ? mapTimer(row, row.workItem) : null;
 }
 
 /**
@@ -517,6 +528,9 @@ export async function startTimer(
       const running = await tx.pmTimer.findUnique({ where: { userId } });
       if (running && running.workItemId === workItemId) {
         return { timer: mapTimer(running, item), stopped: null };
+      }
+      if (running) {
+        await loadProjectItem(tx, running.workItemId, PM_TIME_ERRORS.TIMER_NOT_FOUND);
       }
       const stopped = running ? (await stopRunningTimer(tx, running, now)).worklog : null;
       const timer = await tx.pmTimer.create({ data: { userId, workItemId, startedAt: now } });
@@ -548,6 +562,7 @@ export async function stopTimer(
       await lockTimerOf(tx, userId);
       const running = await tx.pmTimer.findUnique({ where: { userId } });
       if (!running) throw new Error(PM_TIME_ERRORS.TIMER_NOT_FOUND);
+      await loadProjectItem(tx, running.workItemId, PM_TIME_ERRORS.TIMER_NOT_FOUND);
       return stopRunningTimer(tx, running, now);
     }, READ_COMMITTED_TX);
   } catch (err) {
@@ -578,7 +593,11 @@ export async function getTimesheet(
   const tz = resolveZone(opts.tz);
   const week = resolveWeek(opts.weekStart, tz, now);
   const entries = await prisma.pmWorklog.findMany({
-    where: { userId: opts.userId, startedAt: { gte: week.from, lt: week.to } },
+    where: {
+      userId: opts.userId,
+      startedAt: { gte: week.from, lt: week.to },
+      workItem: { project: { kind: "PROJECT" } },
+    },
     orderBy: [{ startedAt: "desc" }, { id: "desc" }],
   });
   const items = await loadItemRefs(prisma, [...new Set(entries.map((e) => e.workItemId))]);
@@ -642,14 +661,19 @@ export async function getTimeReport(
   if (opts.projectId !== undefined) {
     const project = await prisma.pmProject.findUnique({
       where: { id: opts.projectId },
-      select: { id: true },
+      select: { id: true, kind: true },
     });
-    if (!project) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
+    if (!project || project.kind !== "PROJECT") throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
   }
 
   const where: Prisma.PmWorklogWhereInput = {
     startedAt: { gte: range.from, lt: range.to },
-    ...(opts.projectId !== undefined ? { workItem: { projectId: opts.projectId } } : {}),
+    workItem: {
+      project: {
+        kind: "PROJECT",
+        ...(opts.projectId !== undefined ? { id: opts.projectId } : {}),
+      },
+    },
   };
   const groups = new Map<string, { minutes: number; entries: number }>();
   const total = { minutes: 0, entries: 0 };
