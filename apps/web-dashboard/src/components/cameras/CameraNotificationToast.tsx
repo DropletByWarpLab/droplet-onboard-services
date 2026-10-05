@@ -2,10 +2,12 @@
 
 import { X, User, Car, Dog, Scan } from "lucide-react";
 import type { CameraSSEEvent } from "@/lib/types";
+import { prettifyCameraKey } from "@/lib/camera-display";
 
 interface CameraNotificationToastProps {
   notifications: CameraSSEEvent[];
   onDismiss: (index: number) => void;
+  cameraLabel?: (key: string) => string;
 }
 
 const LABEL_ICONS: Record<string, typeof User> = {
@@ -17,6 +19,7 @@ const LABEL_ICONS: Record<string, typeof User> = {
 export function CameraNotificationToast({
   notifications,
   onDismiss,
+  cameraLabel = prettifyCameraKey,
 }: CameraNotificationToastProps) {
   if (notifications.length === 0) return null;
 
@@ -59,7 +62,7 @@ export function CameraNotificationToast({
                     {notif.label} detected
                   </p>
                   <p className="type-caption-2" style={{ color: "var(--text-muted)" }}>
-                    {notif.camera?.replace(/_/g, " ")}
+                    {notif.camera ? cameraLabel(notif.camera) : ""}
                     {notif.score ? ` \u00B7 ${Math.round(notif.score * 100)}%` : ""}
                   </p>
                 </div>
@@ -105,7 +108,7 @@ export function CameraNotificationToast({
                     className="type-caption-2 truncate"
                     style={{ color: "var(--text-muted)" }}
                   >
-                    {notif.camera?.replace(/_/g, " ")}
+                    {notif.camera ? cameraLabel(notif.camera) : ""}
                   </p>
                 </div>
                 <button

@@ -199,9 +199,23 @@ function camerasIn(body: unknown): string[] {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  vi.stubGlobal("fetch", vi.fn(async (url) => String(url).endsWith("/api/review/rv-front")
-    ? Response.json({ camera: "front_door", thumb_path: "/media/frigate/clips/review/thumb-front_door-rv-front.webp" })
-    : new Response("media")));
+  // Frigate media is opaque bytes here, except the review row: since WARP-3509 a
+  // review's thumbnail is the `thumb_path` file that row names (Frigate 0.17
+  // serves it from /clips/review/, not from an /api/review/<id>/thumbnail
+  // route), so the handler's lookup must get JSON back.
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+      const review = /^\/api\/review\/([^/]+)$/.exec(url.pathname);
+      if (review) {
+        const id = review[1];
+        const camera = REVIEW_CAMERA[id];
+        return Response.json({ id, camera, thumb_path: `/media/frigate/clips/review/thumb-${camera}-${id}.webp` });
+      }
+      return new Response("media");
+    }),
+  );
 });
 afterEach(() => {
   vi.unstubAllGlobals();

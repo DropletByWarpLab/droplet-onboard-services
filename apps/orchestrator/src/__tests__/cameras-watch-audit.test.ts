@@ -33,11 +33,13 @@ vi.mock("../services/camera.service.js", () => ({
 }));
 vi.mock("../services/frigate.client.js", () => ({
   fetchSnapshot: vi.fn(), fetchEventCamera: vi.fn(), fetchReviewCamera: vi.fn(),
+  fetchEventPlaybackSpan: vi.fn(),
+  fetchReviewPreview: vi.fn(async () => new Response("media")),
   fetchEventThumbnail: vi.fn(), fetchKnownFaces: vi.fn(),
   fetchKnownPlates: vi.fn(), fetchFaceImage: vi.fn(), deleteKnownFace: vi.fn(),
   deleteFaceImage: vi.fn(), deleteKnownPlate: vi.fn(), nameKnownPlate: vi.fn(),
   regenerateEventDescription: vi.fn(), tagEventAsFace: vi.fn(), openBirdseyeStream: vi.fn(),
-  openMjpegStream: vi.fn(), enableDetection: vi.fn(), disableDetection: vi.fn(),
+  openMjpegStream: vi.fn(),
   deleteCamera: vi.fn(), deleteEvent: vi.fn(), addCamera: vi.fn(),
   syncCamerasFromDb: vi.fn().mockResolvedValue([]),
   fetchEvents: vi.fn(), buildRecordingClipUrl: vi.fn().mockReturnValue("http://frigate.test/clip.mp4"),
@@ -52,19 +54,26 @@ vi.mock("../services/network-safety.service.js", () => ({
   evaluateNetworkCommand: vi.fn(),
   confirmNetworkCommand: vi.fn(),
 }));
+// WARP-3511: detection is the persisted `detect.enabled` setting, so a
+// confirmed disable goes through the settings service.
+vi.mock("../services/camera-settings.service.js", () => ({
+  getCameraSettings: vi.fn(),
+  updateCameraSettings: vi.fn().mockResolvedValue({}),
+}));
 
 import { createCamerasRouter } from "../routes/cameras.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import {
   fetchEventCamera,
   fetchReviewCamera,
+  fetchEventPlaybackSpan,
   fetchHlsPlaylist,
   openMjpegStream,
-  disableDetection,
   deleteCamera,
   restartFrigate,
 } from "../services/frigate.client.js";
 import { confirmNetworkCommand } from "../services/network-safety.service.js";
+import { updateCameraSettings } from "../services/camera-settings.service.js";
 import {
   auditCameraWatch,
   resetCameraWatchDedupe,
@@ -189,6 +198,16 @@ describe("watching writes one audit row per (actor, camera, kind) per window", (
     expect(rows()[0].refs).toMatchObject({ camera: "front", watch: "clip", saved: false, reviewId: "rv1" });
   });
 
+  it("a member playing an event clip as HLS is audited once as clip against the event's camera, never per segment (WARP-3509)", async () => {
+    vi.mocked(fetchEventPlaybackSpan).mockResolvedValue({ camera: "front", startTime: 1000, endTime: 1012 });
+    const res = await request(appAs(member)).get("/api/cameras/events/ev1/playback.m3u8");
+    expect(res.status).toBe(200);
+    await request(appAs(member)).get("/api/cameras/front/playback.segment?after=980&before=1032&seg=0.ts");
+    await settle();
+    expect(rows()).toHaveLength(1);
+    expect(rows()[0].refs).toMatchObject({ camera: "front", watch: "clip", saved: false, eventId: "ev1" });
+  });
+
   it("a failed write does not arm the window: the next fetch writes again", async () => {
     mockRecord.mockResolvedValueOnce(null);
     await auditCameraWatch({ user: owner }, "front", "live", { now: 0 });
@@ -278,7 +297,7 @@ describe("a member cannot complete a detection-off handshake (WARP-3104)", () =>
       .post("/api/cameras/command/confirm")
       .send({ confirmationToken: "t", operation: "disable_camera" });
     expect(res.status).toBe(403);
-    expect(vi.mocked(disableDetection)).not.toHaveBeenCalled();
+    expect(vi.mocked(updateCameraSettings)).not.toHaveBeenCalled();
   });
 
   it("owner → 200, detection off", async () => {
@@ -286,7 +305,7 @@ describe("a member cannot complete a detection-off handshake (WARP-3104)", () =>
       .post("/api/cameras/command/confirm")
       .send({ confirmationToken: "t", operation: "disable_camera" });
     expect(res.status).toBe(200);
-    expect(vi.mocked(disableDetection)).toHaveBeenCalledWith("front");
+    expect(vi.mocked(updateCameraSettings)).toHaveBeenCalledWith("front", { detectEnabled: false });
   });
 });
 

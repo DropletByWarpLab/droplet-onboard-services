@@ -20,7 +20,7 @@ let eventFilters: EventFilter[] = [];
 let scheduleKeys: Array<string | undefined> = [];
 const loadMore = vi.fn();
 const refresh = vi.fn();
-const rows = [{ id: "outside-result", label: "person", outsideBusinessHours: true, hasBeenReviewed: false }, { id: "inside-result", label: "car", outsideBusinessHours: false, hasBeenReviewed: false }];
+const rows = [{ id: "outside-result", camera: "front_door", label: "person", outsideBusinessHours: true, hasBeenReviewed: false }, { id: "inside-result", camera: "front_door", label: "car", outsideBusinessHours: false, hasBeenReviewed: false }];
 const matching = (scope: "inside" | "outside" | undefined) => rows.filter((r) => !scope || r.outsideBusinessHours === (scope === "outside"));
 vi.mock("@/lib/hooks/useCameraBusinessHours", () => ({ useCameraBusinessHours: () => ({ schedule, error: undefined, isLoading: false, save: vi.fn(), retry: vi.fn() }) }));
 vi.mock("@/lib/hooks/useEvents", () => ({ useEvents: (filter: EventFilter, key?: string) => {

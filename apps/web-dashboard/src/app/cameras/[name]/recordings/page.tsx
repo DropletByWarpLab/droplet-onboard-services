@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import {
   ArrowLeft,
@@ -31,6 +32,8 @@ import {
 import type { CameraInfo } from "@/lib/types";
 import { X } from "lucide-react";
 import { ShellPage } from "@/components/shell/ShellPage";
+import { CameraRelatedLinks } from "@/components/cameras/CameraRelatedLinks";
+import { formatDays, maxRetentionDays } from "@/lib/camera-recording";
 
 /** Playback window — one full hour. With HLS the orchestrator no
  *  longer caps the range, but the per-hour granularity matches the
@@ -303,6 +306,18 @@ export default function RecordingsPage() {
 
   if (!name) return null;
 
+  // WARP-3511: how far back this camera keeps footage comes from its own
+  // retention, not a fixed number. This said "the past 7 days" for every
+  // camera, whatever it kept — and that figure is changing by release.
+  const rec = camera?.recording;
+  const longest = maxRetentionDays(rec);
+  const browseSub =
+    !rec || rec.degraded || !rec.mode
+      ? "Browse your recordings."
+      : rec.mode === "off"
+        ? "This camera isn't saving footage, so only what was kept before is here."
+        : `Footage is kept for up to ${formatDays(longest)}.`;
+
   const actions = (
     <>
       <button
@@ -334,9 +349,13 @@ export default function RecordingsPage() {
       icon={<Video size={15} />}
       label="Recordings"
       title={`${camera?.displayName ?? name} · Recordings`}
-      sub="Browse the past 7 days. Click an hour on the timeline to jump in."
+      sub={`${browseSub} Click an hour on the timeline to jump in.`}
       actions={actions}
     >
+      {/* WARP-3511 — the way to this camera's settings, notifications and
+          storage. Settings only for those who can open it. */}
+      <CameraRelatedLinks camera={name} current="recordings" canManage={canExport} className="mb-3" />
+
       {/* Date picker */}
       <div className="card mb-4 flex items-center gap-2" style={{ padding: 12 }}>
         <button
@@ -427,7 +446,21 @@ export default function RecordingsPage() {
                     <p className="type-subheadline">No footage kept for this hour</p>
                     <p className="type-caption-1 text-white/50">
                       Nothing was recorded, or it has passed this camera&apos;s
-                      retention window. Check Settings to keep footage for longer.
+                      retention window.{" "}
+                      {canExport ? (
+                        <>
+                          Check{" "}
+                          <Link
+                            href={`/cameras/${encodeURIComponent(name)}/settings`}
+                            className="underline underline-offset-2 text-white/80"
+                          >
+                            Settings
+                          </Link>{" "}
+                          to keep footage for longer.
+                        </>
+                      ) : (
+                        "Ask an owner or admin to keep footage for longer."
+                      )}
                     </p>
                   </>
                 )}

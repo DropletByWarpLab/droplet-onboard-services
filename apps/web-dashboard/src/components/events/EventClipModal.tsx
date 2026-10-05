@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
   Bookmark,
@@ -12,23 +12,99 @@ import {
   Tag,
   X,
 } from "lucide-react";
-import { regenerateEventDescription, tagEventAsFace } from "@/lib/api";
+import { getEventHlsUrl, regenerateEventDescription, tagEventAsFace } from "@/lib/api";
+import { prettifyCameraKey } from "@/lib/camera-display";
 import type { EventDetail } from "@/lib/types";
 import { useToast } from "@/components/Toast";
 import { useAuth } from "@/lib/auth";
 import { translateError } from "@/lib/friendly-errors";
 import { Dialog } from "@/components/Dialog";
 import { HlsPlayer } from "@/components/recordings/HlsPlayer";
-import { MediaThumbnail } from "./MediaThumbnail";
+import { ThumbImage } from "./ThumbImage";
 
 interface Props {
   event: EventDetail;
+  /** The name the household gave the camera (WARP-3509). The page resolves it
+   *  from the cameras list; without one the modal shows the prettified key,
+   *  never the raw slug. */
+  cameraName?: string;
   onClose: () => void;
   /** Toggle the retain-indefinitely flag. When wired, the modal
    *  renders a "Save / Saved" button. The handler should call the
    *  /retain route and invalidate the events SWR cache so the badge on
    *  the underlying card flips on close. */
   onToggleRetain?: (event: EventDetail, retain: boolean) => Promise<void>;
+}
+
+const IN_PROGRESS_NOTICE = "In progress — showing footage up to now.";
+const PLAY_FAILED_NOTICE = "This clip can't be played right now. Try again in a moment.";
+
+/**
+ * What the modal shows for an event: its clip, played as HLS, or its picture.
+ *
+ * Frigate's `clip.mp4` is a fragmented mp4 that ffmpeg streams on the fly — no
+ * duration in its header, its index at the END, no Content-Length, Range
+ * ignored — so a `<video src>` pointed at it showed the wrong length (a 12 s
+ * clip read 6.1 s), could not seek, and stalled on a long one (WARP-3509). The
+ * clip plays through the same player and the same footage as the Recordings
+ * page instead; `clip.mp4` is left for the Download button.
+ *
+ * Mounted with `key={event.id}`, so a failure or a Refresh belongs to one event
+ * and cannot follow the modal to another.
+ */
+function EventClipPlayer({ event, cameraDisplay }: { event: EventDetail; cameraDisplay: string }) {
+  const [refresh, setRefresh] = useState(0);
+  const [playback, setPlayback] = useState<"event" | "recording" | "failed">("event");
+  const before = useMemo(() => event.endTime ?? Math.floor(Date.now() / 1000), [event.endTime, refresh]);
+  const recordingUrl = `/api/cameras/${encodeURIComponent(event.camera)}/playback.m3u8?after=${event.startTime}&before=${Math.max(event.startTime + 1, before)}`;
+  const handlePlayerError = useCallback(() => {
+    setPlayback((current) => current === "event" ? "recording" : "failed");
+  }, []);
+  const retry = () => {
+    setPlayback("event");
+    setRefresh((n) => n + 1);
+  };
+  const inProgress = event.endTime === null;
+  const startedAt = new Date(event.startTime * 1000);
+  const date = `${startedAt.getFullYear()}-${String(startedAt.getMonth() + 1).padStart(2, "0")}-${String(startedAt.getDate()).padStart(2, "0")}`;
+
+  if (event.clipUrl && playback !== "failed") {
+    return (
+      <>
+        <HlsPlayer
+          src={playback === "event" ? getEventHlsUrl(event.id, refresh) : recordingUrl}
+          onError={handlePlayerError}
+          className="w-full max-h-[60vh]"
+        />
+        {inProgress && (
+          <div className="flex items-center justify-between gap-3 px-3 py-2" style={{ color: "var(--text-muted)" }}>
+            <p role="status" className="type-footnote">{IN_PROGRESS_NOTICE}</p>
+            <button type="button" className="btn ghost sm" onClick={() => setRefresh((n) => n + 1)}>
+              <RefreshCw size={12} /> Refresh
+            </button>
+          </div>
+        )}
+      </>
+    );
+  }
+  return (
+    <>
+      <ThumbImage
+        src={event.snapshotUrl || event.thumbnail}
+        alt={`${event.label} on ${cameraDisplay}`}
+        className="w-full max-h-[60vh] object-contain"
+        placeholderClassName="w-full aspect-video"
+        iconSize={40}
+      />
+      {event.clipUrl && playback === "failed" && (
+        <div className="flex flex-wrap items-center justify-between gap-3 px-3 py-2">
+          <p role="alert" className="type-footnote text-[color:var(--danger-ink)]">{PLAY_FAILED_NOTICE}</p>
+          <button type="button" className="btn ghost sm" onClick={retry}><RefreshCw size={12} /> Retry</button>
+          <Link className="btn ghost sm" href={`/cameras/${encodeURIComponent(event.camera)}/recordings?date=${date}`}>Browse recordings</Link>
+        </div>
+      )}
+    </>
+  );
 }
 
 /**
@@ -51,12 +127,7 @@ interface Props {
  * `translateError(err, "media")` copy, never the raw err.message —
  * the audit found these were leaking orchestrator-level strings.
  */
-export function EventClipModal({ event, onClose, onToggleRetain }: Props) {
-  const [playback, setPlayback] = useState<"clip" | "recording" | "failed">("clip");
-  const [attempt, setAttempt] = useState(0);
-  useEffect(() => { setPlayback("clip"); setAttempt(0); }, [event.id]);
-  const recordingEnd = useMemo(() => event.endTime ?? Math.floor(Date.now() / 1000), [event.id, event.endTime, attempt]);
-  const recordingUrl = `/api/cameras/${encodeURIComponent(event.camera)}/playback.m3u8?after=${event.startTime}&before=${Math.max(event.startTime + 1, recordingEnd)}`;
+export function EventClipModal({ event, cameraName, onClose, onToggleRetain }: Props) {
   const headingId = useId();
   const { toast } = useToast();
   const { user } = useAuth();
@@ -146,7 +217,7 @@ export function EventClipModal({ event, onClose, onToggleRetain }: Props) {
     }
   };
 
-  const cameraDisplay = event.camera.replace(/_/g, " ");
+  const cameraDisplay = cameraName || prettifyCameraKey(event.camera);
   const startedAt = new Date(event.startTime * 1000);
 
   return (
@@ -176,31 +247,8 @@ export function EventClipModal({ event, onClose, onToggleRetain }: Props) {
 
       <div className="p-4 space-y-3">
         <div className="rounded-lg overflow-hidden" style={{ background: "var(--inset)" }}>
-          {playback === "recording" ? (
-            <HlsPlayer key={`${event.id}-${attempt}`} src={recordingUrl} onError={() => setPlayback("failed")} className="w-full max-h-[60vh]" />
-          ) : event.clipUrl && playback !== "failed" ? (
-            <video
-              key={`${event.id}-${attempt}`}
-              src={event.clipUrl}
-              controls
-              autoPlay
-              onError={() => setPlayback("recording")}
-              className="w-full max-h-[60vh]"
-              style={{ background: "var(--inset)" }}
-            />
-          ) : event.snapshotUrl ? (
-            <MediaThumbnail src={event.snapshotUrl} alt={`${event.label} on ${cameraDisplay}`} className="w-full max-h-[60vh] object-contain" />
-          ) : (
-            <MediaThumbnail src={event.thumbnail} alt={`${event.label} on ${cameraDisplay}`} className="w-full max-h-[60vh] object-contain" />
-          )}
+          <EventClipPlayer key={event.id} event={event} cameraDisplay={cameraDisplay} />
         </div>
-        {playback === "failed" && (
-          <div className="flex flex-wrap items-center justify-between gap-3" role="alert">
-            <p className="type-subheadline">This clip couldn&apos;t be loaded. The recording may have expired or the camera may be unavailable.</p>
-            <button className="btn" onClick={() => { setAttempt((n) => n + 1); setPlayback("clip"); }}><RefreshCw size={14} /> Retry</button>
-            <Link className="btn" href={`/cameras/${encodeURIComponent(event.camera)}/recordings?date=${startedAt.getFullYear()}-${String(startedAt.getMonth() + 1).padStart(2, "0")}-${String(startedAt.getDate()).padStart(2, "0")}`}>Browse recordings</Link>
-          </div>
-        )}
 
         {/* GenAI description (Phase 7.7) — only renders when there is one. */}
         {event.description && (
@@ -231,9 +279,12 @@ export function EventClipModal({ event, onClose, onToggleRetain }: Props) {
           </div>
         )}
 
-        {/* Metadata + actions */}
+        {/* Metadata + actions. The details ask for 16rem before anything may sit
+            beside them: an owner's four actions would otherwise squeeze the details
+            to a ~37px column on a phone (and ~66px at any width, with their labels),
+            so on a row too narrow for both the actions wrap below. */}
         <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="min-w-0 flex-1">
+          <div className="min-w-0 flex-1 basis-[16rem]">
             <p className="type-subheadline" style={{ color: "var(--text-muted)" }}>
               {cameraDisplay} · {startedAt.toLocaleString()} ·{" "}
               {Math.round(event.score * 100)}% confidence
@@ -268,7 +319,7 @@ export function EventClipModal({ event, onClose, onToggleRetain }: Props) {
                 aria-pressed={retained}
                 className={`btn ${
                   retained
-                    ? "!bg-system-orange/15 !text-system-orange !border-transparent hover:!bg-system-orange/25"
+                    ? "!bg-system-yellow !text-black !border-transparent hover:brightness-95"
                     : ""
                 } ${retainBusy ? "opacity-60 cursor-wait" : ""}`}
                 title={retained ? "Unsave (allow normal retention)" : "Save (retain indefinitely)"}

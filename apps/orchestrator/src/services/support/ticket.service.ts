@@ -222,6 +222,7 @@ export async function applyStateChange(
   target: { id: string; group: string },
   actorId: string | null,
   now: Date,
+  opts: { nudge?: boolean } = {},
 ): Promise<void> {
   const toTerminal = isTerminalGroup(target.group);
   const cas = await tx.pmWorkItem.updateMany({
@@ -251,6 +252,7 @@ export async function applyStateChange(
     field: "state",
     oldValue: existing.stateId,
     newValue: target.id,
+    nudge: opts.nudge,
   });
 }
 
