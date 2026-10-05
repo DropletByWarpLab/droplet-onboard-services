@@ -4,15 +4,11 @@
  * Read-only inventory surface over the `FabricMember` rows the reconciler
  * persists. Two things are load-bearing here:
  *
- *  1. **Auth.** The route carries no per-route role gate — same posture as
- *     every other network READ (`/network/status`, `/network/topology`,
- *     `/api/aps`), which are open to any authenticated principal so the
- *     agent's `service` role can read them too. That posture is only safe
- *     because the route sits behind the global `authMiddleware` that
- *     `app.ts` mounts before `createNetworkRouter`. So this file mounts the
- *     PRODUCTION middleware with `AUTH_ENABLED: true` and asserts a
- *     credential-less request never reaches the handler — the regression
- *     that "open to every role" must not be allowed to become.
+ *  1. **Auth.** The route takes `requireNetworkMember` (WARP-3632) behind the
+ *     global `authMiddleware` that `app.ts` mounts before
+ *     `createNetworkRouter`. So this file mounts the PRODUCTION middleware
+ *     with `AUTH_ENABLED: true` and asserts a credential-less request never
+ *     reaches the handler; the MCP principal is the authenticated caller.
  *  2. **Shape.** camelCase rows, most-recently-seen first, `poePorts` /
  *     `poeBudget` present as numbers or null.
  */

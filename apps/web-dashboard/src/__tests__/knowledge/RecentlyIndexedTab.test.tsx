@@ -70,7 +70,7 @@ describe("RecentlyIndexedTab", () => {
     expect(screen.getByText("Yesterday")).toBeInTheDocument();
     // Source badges
     expect(screen.getByText("Brain")).toBeInTheDocument();
-    expect(screen.getByText("Nextcloud")).toBeInTheDocument();
+    expect(screen.getByText("File Store")).toBeInTheDocument();
   });
 
   it("forwards ?source filter to the api", async () => {

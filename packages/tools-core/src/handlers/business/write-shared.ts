@@ -303,7 +303,7 @@ export const LINK_EDGES: readonly LinkEdge[] = [
     status: "not_built",
     blockedBy:
       "the file-link route does not admit the assistant yet - the EntityLink table exists, " +
-      "but /api/crm/entity-links resolves the file through the caller's own Nextcloud session",
+      "but /api/crm/entity-links resolves the file through the caller's own File Store session",
   },
   // Not a missing table — a missing GATE. The route exists and works for a
   // signed-in human; it just does not admit the assistant's own principal,

@@ -12,9 +12,10 @@
  * `confirmed: true` — after the user explicitly approves — mints the
  * share.
  *
- * Guardrails baked into the tool (deliberately tighter than the route):
- *   • expiry is ALWAYS set — 1..90 days, default 7 (the route would
- *     accept a never-expiring link; this tool never mints one);
+ * Guardrails baked into the tool (tighter than the route, which since
+ * WARP-3586 also always sets an expiry — 30-day default, 90-day ceiling —
+ * and requires 8+ characters for a password):
+ *   • expiry is ALWAYS set — 1..90 days, default 7;
  *   • optional password must be 8..64 chars;
  *   • permissions are pinned to the dashboard ShareDialog's presets:
  *     view = 1 (read), edit = 3 (read|update — file-safe, no
@@ -179,7 +180,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     return err("INVALID_SHARE", body?.error ?? "invalid share request");
   }
   if (!res.ok) {
-    return err("SHARE_FAILED", `nextcloud returned ${res.status}`);
+    return err("SHARE_FAILED", `the File Store returned ${res.status}`);
   }
   const share = (await res.json().catch(() => null)) as {
     url?: string | null;
@@ -201,7 +202,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "share_file",
   description:
-    "Create a PUBLIC link to a file on the Droplet's Nextcloud — anyone with the link can open it (view-only unless allow_edit). The link always expires (expires_days 1-90, default 7) and can be password-protected (password 8-64 chars). Two-step: the first call returns confirmation_required stating the link is public, its expiry, and whether it has a password — relay it to the user, and only after they explicitly approve, re-issue the SAME call with confirmed: true.",
+    "Create a PUBLIC link to a file on the Droplet's File Store — anyone with the link can open it (view-only unless allow_edit). The link always expires (expires_days 1-90, default 7) and can be password-protected (password 8-64 chars). Two-step: the first call returns confirmation_required stating the link is public, its expiry, and whether it has a password — relay it to the user, and only after they explicitly approve, re-issue the SAME call with confirmed: true.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

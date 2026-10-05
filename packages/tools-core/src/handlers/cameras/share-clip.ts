@@ -67,7 +67,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "share_clip",
   description:
-    "Generate a short-lived signed URL for a saved clip in the user's Nextcloud. Anyone with the link can watch the clip until it expires. Default TTL 60 minutes; max 24 hours.",
+    "Generate a short-lived signed URL for a saved clip in the user's File Store. Anyone with the link can watch the clip until it expires. Default TTL 60 minutes; max 24 hours.",
   inputSchema,
   requiresWrite: true,
   // Minting a public "anyone with the link" URL to private camera footage

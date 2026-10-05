@@ -118,12 +118,18 @@ const cameras: CategoryRenderer = (can) => {
   if (ground.length === 0) return null;
   return (
     `- For camera questions, ground answers in ${ground.join(" and ")} results` +
+    // WARP-3691 - the chat renders these results as pictures/feeds; the
+    // user already sees them, so the model should call the tool, not paste URLs.
     (can("get_camera_snapshot")
-      ? "; fetch a current view with get_camera_snapshot"
+      ? "; show one with get_camera_snapshot"
       : "") +
     "."
   );
 };
+
+/** WARP-3691 - show_file puts the file in the chat as a card/preview. */
+const showFiles: CategoryRenderer = (can) =>
+  can("show_file") ? "- To show a file or image, call show_file." : null;
 
 const networkSystem: CategoryRenderer = (can) => {
   const status = [
@@ -153,7 +159,7 @@ const memoryWrite: CategoryRenderer = (can) => {
 
 const memoryForget: CategoryRenderer = (can) => {
   if (!can("memory_forget")) return null;
-  return "- When asked to forget or delete a remembered fact, remove it with memory_forget.";
+  return "- To forget a remembered fact, use memory_forget.";
 };
 
 const businessContext: CategoryRenderer = (can) => {
@@ -179,6 +185,7 @@ const CATEGORY_RENDERERS: CategoryRenderer[] = [
   computation,
   smartDevices,
   cameras,
+  showFiles,
   networkSystem,
   memoryPointer,
   memoryWrite,

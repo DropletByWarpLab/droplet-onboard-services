@@ -321,6 +321,21 @@ DEBUG_DOUBLE_TAP_SECONDS = float(
 RAIL_WIFI_QR = os.environ.get("PANEL_RAIL_WIFI_QR", "1") != "0"
 RAIL_WIFI_SECONDS = float(os.environ.get("PANEL_RAIL_WIFI_SECONDS", "45"))
 
+# WARP-3414 — the rail's third face: the certificate KEY fingerprint, as text.
+#
+# A Droplet app that connects to a box which uses its own certificate (the
+# Mac app, on a manual connect) asks an admin to confirm this value. The panel
+# is the channel that makes the confirmation mean something: it is a local
+# screen no attacker on the LAN can rewrite, while the dashboard shows the same
+# value over the very connection being checked. Unlike the Wi-Fi code this is
+# public data (any TLS client sees the certificate), so there is no secrecy
+# argument for hiding it — but the face is still reached by tapping the rail
+# and still reverts to the scannable QR by itself, so the rail never parks on
+# text. PANEL_RAIL_FINGERPRINT_SECONDS sets how long a person has to compare 16
+# groups; PANEL_RAIL_FINGERPRINT=0 removes the face.
+RAIL_FINGERPRINT = os.environ.get("PANEL_RAIL_FINGERPRINT", "1") != "0"
+RAIL_FINGERPRINT_SECONDS = float(os.environ.get("PANEL_RAIL_FINGERPRINT_SECONDS", "120"))
+
 # Mirrors layout_wide.QR_BYTE_BUDGET — the byte count above which the encoder
 # drops below the 4px/module scan floor. Duplicated rather than imported
 # because layout_wide imports THIS module; a test pins the two together. A
@@ -989,6 +1004,8 @@ class TFTDisplay:
         # remembering to fire, so there is no timer to leak and no path where
         # a missed callback strands a credential on the rack's front panel.
         self._rail_wifi_until: float = 0.0
+        # WARP-3414 — same shape for the fingerprint face: a deadline.
+        self._rail_fp_until: float = 0.0
 
         self._init_device()
         self._load_logo()
@@ -3404,43 +3421,73 @@ class TFTDisplay:
             return ""
         return payload
 
+    def cert_fingerprint_groups(self) -> list:
+        """The box's certificate KEY fingerprint as its 16 four-character
+        groups (WARP-3414), or [] when the bridge has not vouched for one.
+
+        Only the bridge's own string is used — never composed here from the
+        pin — and its shape is checked, so a bridge answering something
+        unexpected cannot put arbitrary text on the front of the rack, and a
+        shortened value (which a short prefix would make forgeable) is refused
+        rather than shown. Same gate as the pairing QR: `ok: False` (no LAN
+        address yet, unreadable certificate) takes it down."""
+        join = self._v3.get("pair_join") or {}
+        if join.get("ok") is False:
+            return []
+        fp = str(join.get("fingerprint") or "")
+        if not re.fullmatch(r"[0-9A-F]{4}( [0-9A-F]{4}){15}", fp):
+            return []
+        return fp.split(" ")
+
     def rail_face(self) -> str:
-        """Which QR the rail is showing: "wifi" or "dashboard".
+        """Which face the rail is showing: "wifi", "fingerprint" or "dashboard".
 
         DERIVED, every time it is asked. `dashboard` is therefore the state
         the panel falls back into on its own — after the window, if the Wi-Fi
         feed goes away mid-reveal, or if the face is switched off under the
         panel. Nothing has to run for the credential to leave the glass.
         """
-        if not RAIL_WIFI_QR:
-            return "dashboard"
-        if time.time() >= self._rail_wifi_until:
-            return "dashboard"
-        if not self.wifi_qr_payload():
-            return "dashboard"
-        return "wifi"
+        now = time.time()
+        if RAIL_WIFI_QR and now < self._rail_wifi_until and self.wifi_qr_payload():
+            return "wifi"
+        if (RAIL_FINGERPRINT and now < self._rail_fp_until
+                and self.cert_fingerprint_groups()):
+            return "fingerprint"
+        return "dashboard"
 
     def _tap_rail_qr(self) -> None:
-        """Tap the rail to flip the QR between the dashboard link and the
-        Wi-Fi join code.
+        """Tap the rail to step through its faces: the pairing / dashboard QR,
+        then the Wi-Fi join code, then the certificate fingerprint (WARP-3414),
+        then back to the QR. A face that has nothing to show is skipped.
 
-        A plain toggle, deliberately: unlike the console handback this is
+        A plain step, deliberately: unlike the console handback this is
         reversible, harmless and guest-facing, so making it a two-tap confirm
-        would only make it feel broken. Tapping back is instant — someone who
-        opened the Wi-Fi code by accident should not have to wait out the
-        window to clear it.
+        would only make it feel broken. Leaving the Wi-Fi face is instant —
+        someone who opened the Wi-Fi code by accident should not have to wait
+        out the window to clear it — whichever face comes next.
         """
-        if not RAIL_WIFI_QR:
-            return
-        if self.rail_face() == "wifi":
+        face = self.rail_face()
+        if face == "wifi":
             self._rail_wifi_until = 0.0
-        elif self.wifi_qr_payload():
+            self._arm_fingerprint_face()
+        elif face == "fingerprint":
+            self._rail_fp_until = 0.0
+        elif RAIL_WIFI_QR and self.wifi_qr_payload():
             self._rail_wifi_until = time.time() + RAIL_WIFI_SECONDS
-        else:
+        elif not self._arm_fingerprint_face():
             # Nothing to flip to. Re-render anyway so the tap is not silent —
             # the pager below shows a single dot when the face is unavailable.
-            logger.info("rail Wi-Fi face unavailable — no scannable payload")
+            logger.info("rail has no second face — no scannable Wi-Fi payload "
+                        "and no certificate fingerprint")
         self._render_current()
+
+    def _arm_fingerprint_face(self) -> bool:
+        """Open the fingerprint face for its window; False when there is none
+        to show (disabled, or the bridge has not vouched for a fingerprint)."""
+        if RAIL_FINGERPRINT and self.cert_fingerprint_groups():
+            self._rail_fp_until = time.time() + RAIL_FINGERPRINT_SECONDS
+            return True
+        return False
 
     # --- WARP-1641 / WARP-2149: the panel's debug / recovery screen ---------
 
