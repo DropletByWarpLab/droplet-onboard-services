@@ -216,15 +216,17 @@ export async function resolveBusinessPinTargets(
           },
         })
       : Promise.resolve([]),
+    // WARP-3528 — a service desk (and a ticket in one) is never a pin target: it
+    // resolves as MISSING, so a customer conversation's name cannot reach a prompt.
     byKind.has("project")
       ? prisma.pmProject.findMany({
-          where: { id: { in: idsFor("project") } },
+          where: { id: { in: idsFor("project") }, kind: "PROJECT" },
           select: { id: true, name: true, identifier: true, isArchived: true },
         })
       : Promise.resolve([]),
     byKind.has("work_item")
       ? prisma.pmWorkItem.findMany({
-          where: { id: { in: idsFor("work_item") } },
+          where: { id: { in: idsFor("work_item") }, project: { kind: "PROJECT" } },
           select: {
             id: true,
             name: true,
@@ -308,7 +310,13 @@ export async function checkBusinessPinTarget(
       : kind === "deal"
         ? await prisma.crmDeal.findUnique({ where: { id: ref }, select: { id: true } })
         : kind === "project"
-          ? await prisma.pmProject.findUnique({ where: { id: ref }, select: { id: true } })
-          : await prisma.pmWorkItem.findUnique({ where: { id: ref }, select: { id: true } });
+          ? await prisma.pmProject.findUnique({
+              where: { id: ref, kind: "PROJECT" },
+              select: { id: true },
+            })
+          : await prisma.pmWorkItem.findUnique({
+              where: { id: ref, project: { kind: "PROJECT" } },
+              select: { id: true },
+            });
   return found ? { ok: true } : { ok: false, reason: "not_found" };
 }
