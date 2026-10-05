@@ -1,0 +1,53 @@
+/* WARP-3520 — shared primitives for the editing surfaces of Projects: the action
+ * menu, value-as-button affordance, inline inputs, and the visually-hidden live
+ * region. Scoped under `.pm-scope` like projects.css, and built only from the
+ * tokens it already defines (no new tokens, no new hex). Area-specific styles
+ * live beside their components (detail/*.css, settings/*.css). */
+
+/* ── visually hidden, still announced (aria-live regions) ────────────────── */
+.pm-scope .pm-sr {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden;
+  clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
+
+/* ── action menu (MenuButton) ────────────────────────────────────────────── */
+.pm-scope.pm-menu-wrap, .pm-scope .pm-menu-wrap { position: relative; display: inline-flex; }
+.pm-scope .pm-menu {
+  position: absolute; z-index: 30; top: calc(100% + 4px); min-width: 184px; padding: 4px;
+  background: var(--bg-canvas); border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: 0 14px 30px -16px rgba(30, 30, 60, 0.28), 0 0 0 1px rgba(99, 102, 241, 0.12);
+}
+.pm-scope .pm-menu.align-right { right: 0; }
+.pm-scope .pm-menu.align-left { left: 0; }
+.pm-scope .pm-menu-item {
+  display: flex; align-items: center; gap: 8px; width: 100%; height: 32px; padding: 0 10px;
+  border-radius: 6px; font-size: 13px; color: var(--text); background: transparent; border: none;
+  cursor: pointer; text-align: left; font-family: inherit; white-space: nowrap;
+}
+.pm-scope .pm-menu-item:hover { background: var(--bg-hover); }
+.pm-scope .pm-menu-item:focus-visible { outline: none; background: var(--bg-hover); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent); }
+.pm-scope .pm-menu-item.danger { color: var(--err); }
+
+/* ── value-as-button: reads like text, edits on activate ─────────────────── */
+.pm-scope .pm-valbtn {
+  display: inline-flex; align-items: center; gap: 6px; min-height: 28px; padding: 2px 8px; margin: 0 -8px;
+  border-radius: 6px; background: transparent; border: 1px solid transparent; color: inherit;
+  font: inherit; cursor: pointer; text-align: left; max-width: 100%;
+}
+.pm-scope .pm-valbtn:hover { background: var(--bg-hover); }
+.pm-scope .pm-valbtn:focus-visible { outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent); }
+.pm-scope .pm-valbtn:disabled { cursor: default; }
+
+/* ── compact input / select that sits inside a property row ──────────────── */
+.pm-scope .pm-input.sm { height: 30px; padding: 0 9px; font-size: 13px; }
+.pm-scope select.pm-input.sm { padding-right: 4px; }
+.pm-scope .pm-input.invalid { border-color: var(--err); }
+.pm-scope .pm-field-error { margin-top: 4px; font-size: 11.5px; color: var(--err); }
+
+/* ── work-item kind, estimate, start date (cards, rows, drawer) ──────────── */
+.pm-scope .pm-type { display: inline-flex; align-items: center; flex: none; }
+.pm-scope .pm-estimate {
+  display: inline-flex; align-items: center; height: 20px; padding: 0 7px; border-radius: 999px;
+  font-size: 11px; font-variant-numeric: tabular-nums; color: var(--text-3);
+  background: var(--bg-sunken); border: 1px solid var(--border); white-space: nowrap;
+}

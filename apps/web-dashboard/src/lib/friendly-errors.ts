@@ -674,6 +674,34 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "That label isn't available anymore. Refresh and try again.",
     invalid_parent:
       "That parent item isn't available anymore. Refresh and try again.",
+    // WARP-3520 — the editing surfaces. Each names what happened and the way
+    // out, in the owner's words (column, field, option — never state group,
+    // property or tagged value).
+    work_item_archived: "That item is already archived.",
+    work_item_not_archived: "That item isn't archived.",
+    state_default_terminal:
+      "The default column can't be a done or cancelled one. Pick a column that work starts in.",
+    state_is_default:
+      "That column is where new items land. Make another column the default first, then delete this one.",
+    state_is_last: "A project needs at least one column, so this one can't be deleted.",
+    invalid_order:
+      "The list changed while you were reordering it. Refresh and try again.",
+    property_not_found:
+      "That field isn't available anymore. Refresh and try again.",
+    property_name_taken: "This project already has a field with that name.",
+    property_limit_reached: "A project can have up to 30 custom fields.",
+    invalid_options:
+      "Check the options — each one needs a name that no other option uses.",
+    invalid_value: "That value isn't allowed for this field.",
+    relation_cycle:
+      "That link would close a chain of blockers, so neither item could ever start.",
+    relation_exists: "Those two items are already linked that way.",
+    relation_self: "An item can't be linked to itself.",
+    relation_not_found: "That link is already gone. Refresh and try again.",
+    relation_scan_exhausted:
+      "This project's chain of blockers is too long to check, so the link wasn't added.",
+    concurrent_mutation:
+      "Someone changed this at the same moment, so nothing was applied. Try again.",
     // WARP-3521 — cycles (sprints) and modules (milestones). Each says what
     // happened and what to do, in the owner's words: cycle, module, start, end,
     // item — never state machine, constraint or conflict.
@@ -699,8 +727,6 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "That item belongs to a different project, so it can't go in this module.",
     lead_is_guest:
       "A guest can't lead a module or a project. Pick someone on your team.",
-    concurrent_mutation:
-      "Someone else changed this at the same moment, so nothing was saved. Try again.",
     identifier_taken:
       "That project ID is already in use. Pick a different one.",
     // WARP-3522 — saved views and the filter bar. Each says what to do next.

@@ -47,6 +47,8 @@ export interface PmPageOrder {
 
 /** A project's board: `sortOrder`, then `id`, ascending. */
 export const ORDER_BOARD: PmPageOrder = { name: "board", kind: "number" };
+/** Archived items: archive instant descending, legacy missing instants last. */
+export const ORDER_ARCHIVED: PmPageOrder = { name: "archived", kind: "number" };
 /** Workspace search: newest change first. */
 export const ORDER_SEARCH: PmPageOrder = { name: "search", kind: "date" };
 /** The caller's own assignments: newest change first. */

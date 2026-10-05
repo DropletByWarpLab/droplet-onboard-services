@@ -65,6 +65,7 @@ import { createPmBulkRouter } from "./routes/pm/bulk.js";
 import { createPmImportExportRouter } from "./routes/pm/import-export.js";
 import { createPmPlanningRouter } from "./routes/pm/planning.js";
 import { createPmTimeRouter } from "./routes/pm/time.js";
+import { createPmFieldsRouter } from "./routes/pm/fields.js";
 import { createPmWebhooksRouter } from "./routes/pm/webhooks.js";
 import { createPmOpenApiRouter } from "./routes/pm/openapi.js";
 import { createSupportRouter } from "./routes/support/support.routes.js";
@@ -636,6 +637,11 @@ export function createApp(
   // `/pm/work-items/:id/worklogs`), and the same `/api/pm` module gates as the
   // routers above — no guest share, no MCP write principal; see its header.
   app.use("/api", createPmTimeRouter(prisma));
+  // WARP-3520 (ADR-069 WS-4) — custom fields: per-project definitions and the
+  // values items hold. Its own router for the same reason: disjoint paths
+  // (`/pm/properties/...`, `.../properties/:propertyId`), its own error
+  // vocabulary. `/api/pm` is gated by prefix, so the `projects` gate covers it.
+  app.use("/api", createPmFieldsRouter(prisma));
   // WARP-3532 (ADR-069 §9) — work webhooks and chat-app notifications. Owner
   // and admin only. `/pm/webhooks` is a literal second segment and no PM router
   // above owns a `/pm/:param`, so neither shadows the other.
