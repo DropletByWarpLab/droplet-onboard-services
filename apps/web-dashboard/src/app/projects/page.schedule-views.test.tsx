@@ -95,7 +95,7 @@ vi.mock("@/components/projects/usePm", () => ({
   },
   useWorkItemByKey: () => ({ item: undefined, error: undefined, mutate: vi.fn() }),
   useSavedViews: () => ({ views: queryState.savedViews, error: undefined, isLoading: false, mutate: vi.fn() }),
-  usePeople: () => ({ person: (id: string) => ({ id, name: "Tester", initials: "T", tone: 1 }), users: [] }),
+  usePeople: () => ({ person: (id: string) => ({ id, name: "Tester", initials: "T", tone: 1 }), people: [] }),
   useDepartments: () => ({ departments: undefined }),
   pmActions: () => ({}),
   viewActions: () => ({ create: createView, update: updateView, remove: vi.fn() }),

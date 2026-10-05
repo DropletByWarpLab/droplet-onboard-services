@@ -38,7 +38,7 @@ import { PmIcon } from "@/components/projects/icons";
 import { PeopleContext, EmptyBlock, Skel } from "@/components/projects/bits";
 import { ProjectsDisabled } from "@/components/projects/ProjectsDisabled";
 import { stageRecordPinHandoff } from "@/lib/pin-handoff";
-import { canWrite, type PmProject, type PmWorkItem } from "@/components/projects/types";
+import { canDeleteProject, canWrite, type PmProject, type PmWorkItem } from "@/components/projects/types";
 import {
   useProjects,
   useSummary,
@@ -66,7 +66,12 @@ import { DetailDrawer } from "@/components/projects/detail";
 import { CalendarView } from "@/components/projects/calendar/CalendarView";
 import { TimelineView } from "@/components/projects/timeline/TimelineView";
 import { MyWorkView } from "@/components/projects/mywork/MyWorkView";
-import { NewItemModal, NewProjectModal } from "@/components/projects/modals";
+import {
+  ConfirmArchiveProject,
+  ConfirmDeleteProject,
+  NewItemModal,
+  NewProjectModal,
+} from "@/components/projects/modals";
 
 // ── URL ↔ page vocabulary ───────────────────────────────────────────────────
 
@@ -142,12 +147,14 @@ function ProjectsWorkspace(): JSX.Element {
   const { user } = useAuth();
   const role = user?.role;
   const readOnly = !canWrite(role);
+  // WARP-3370 — members archive and restore; only owner/admin may delete for good.
+  const mayDelete = canDeleteProject(role);
   const { toast } = useToast();
-  const { person, users } = usePeople();
+  const { person, people: roster } = usePeople();
   const { state: url, go, openItem, closeItem } = useProjectsUrl();
 
   const [showArchived, setShowArchived] = useState(false);
-  const [modal, setModal] = useState<"newitem" | "newproject" | null>(null);
+  const [modal, setModal] = useState<"newitem" | "newproject" | "archive" | "delete" | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
   // ── which project, which mode ──
@@ -294,18 +301,18 @@ function ProjectsWorkspace(): JSX.Element {
   // ── labels for the chips, options for the editors ──
   const deptOptions = useMemo(() => departmentOptions(allItems, departments), [allItems, departments]);
   const people = useMemo(
-    () => (users ?? []).filter((u) => u.userId).map((u) => ({ value: u.userId as string, label: u.displayName })),
-    [users],
+    () => (roster ?? []).map((u) => ({ value: u.id, label: u.displayName })),
+    [roster],
   );
   const lookups: ChipLookups = useMemo(
     () => ({
       stateName: (id) => states?.find((s) => s.id === id)?.name,
       labelName: (id) => labels?.find((l) => l.id === id)?.name,
-      personName: (id) => users?.find((u) => u.userId === id)?.displayName,
+      personName: (id) => roster?.find((u) => u.id === id)?.displayName,
       departmentName: (ref) => deptOptions.find((d) => d.id === ref)?.name,
       projectName: (id) => projects?.find((p) => p.id === id)?.name,
     }),
-    [states, labels, users, deptOptions, projects],
+    [states, labels, roster, deptOptions, projects],
   );
   const editorOptions: EditorOptions = useMemo(
     () => ({
@@ -369,6 +376,26 @@ function ProjectsWorkspace(): JSX.Element {
     void mutateViews();
     void byKey.mutate();
     await query.refresh();
+  };
+
+  // WARP-3370 — leaving a project for good (archived or deleted): back to the
+  // index, with the list and the KPIs re-read.
+  const afterProjectGone = () => {
+    backToIndex();
+    void mutateProjects();
+    void mutateSummary();
+  };
+
+  const onRestore = async () => {
+    if (!project) return;
+    try {
+      await pmActions().restoreProject(project.id);
+      toast("Project restored", "success");
+      void mutateProjects();
+      void mutateSummary();
+    } catch (e) {
+      toast(translateError(e, "projects"), "error");
+    }
   };
 
   const onTransition = async (item: PmWorkItem, stateId: string) => {
@@ -639,6 +666,37 @@ function ProjectsWorkspace(): JSX.Element {
                 <PmIcon name="chevL" size={14} /> All projects
               </button>
             )}
+            {mode === "project" && project && !readOnly && !project.archived && (
+              <button className="pm-btn ghost sm" type="button" onClick={() => setModal("archive")} style={{ alignSelf: "flex-start", marginBottom: 14 }}>
+                <PmIcon name="archive" size={14} /> Archive project
+              </button>
+            )}
+
+            {/* WARP-3370 — an archived project says so, and owns the two ways out:
+                put it back, or (owner/admin) delete it for good. */}
+            {mode === "project" && project?.archived && (
+              <div
+                className="pm-surface pm-row"
+                role="status"
+                style={{ justifyContent: "space-between", gap: 12, flexWrap: "wrap", padding: "12px 16px", marginBottom: 14 }}
+              >
+                <span style={{ fontSize: 13, color: "var(--text-2)" }}>
+                  This project is archived. It&apos;s hidden from your project list.
+                </span>
+                <span className="pm-row" style={{ gap: 8 }}>
+                  {!readOnly && (
+                    <button className="pm-btn sm" type="button" onClick={() => void onRestore()}>
+                      <PmIcon name="restore" size={14} /> Restore
+                    </button>
+                  )}
+                  {mayDelete && (
+                    <button className="pm-btn danger sm" type="button" onClick={() => setModal("delete")}>
+                      <PmIcon name="trash" size={14} /> Delete permanently
+                    </button>
+                  )}
+                </span>
+              </div>
+            )}
 
             {mode === "index" && !(namedSavedView && !savedViews && !viewsErr) && (
               <IndexView
@@ -718,6 +776,12 @@ function ProjectsWorkspace(): JSX.Element {
         <NewItemModal project={project} onClose={() => setModal(null)} onCreated={() => void refreshAll()} />
       )}
       {modal === "newproject" && <NewProjectModal onClose={() => setModal(null)} onCreated={() => void refreshAll()} />}
+      {modal === "archive" && project && (
+        <ConfirmArchiveProject project={project} onClose={() => setModal(null)} onArchived={afterProjectGone} />
+      )}
+      {modal === "delete" && project && (
+        <ConfirmDeleteProject project={project} onClose={() => setModal(null)} onDeleted={afterProjectGone} />
+      )}
     </PeopleContext.Provider>
   );
 }
