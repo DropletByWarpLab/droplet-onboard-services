@@ -11,6 +11,7 @@ import {
   disableCamera,
   removeCamera,
 } from "@/lib/api";
+import { isServiceDegraded } from "@/lib/camera-recording";
 import type {
   CameraCandidateList,
   CameraInfo,
@@ -60,6 +61,10 @@ export function useCameras({ enabled = true }: { enabled?: boolean } = {}) {
     discoveryOnline: discovery?.discoveryOnline ?? true,
     recentEvents: recentEvents ?? [],
     totalCameras: cameras?.length ?? 0,
+    // WARP-3511: the camera service could not be read (restarting after a
+    // settings save, or down). Every tile's status is unknown, which is not
+    // the same as every camera being offline.
+    serviceDegraded: isServiceDegraded(cameras ?? []),
     isLoading,
     isRefreshing: isValidating,
     error,
