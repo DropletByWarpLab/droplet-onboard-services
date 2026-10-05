@@ -343,20 +343,20 @@ const MESSAGE_CLASSES: readonly (readonly [string, string])[] = [
   ["other side closed", "other_side_closed"],
   ["Client network socket disconnected", "tls_socket_disconnected"],
   // repo-authored literals — `read_file`'s own READ_FAILED message is
-  // `nextcloud returned ${res.status}`, so the status is a known-static string
+  // `the File Store returned ${res.status}`, so the status is a known-static string
   // and the single most useful class for the failure WARP-1480 is about.
   // Enumerated rather than pattern-matched to keep the value set fixed; the
   // bare prefix is the catch-all below them.
-  ["nextcloud returned 401", "nextcloud_401"],
-  ["nextcloud returned 403", "nextcloud_403"],
-  ["nextcloud returned 404", "nextcloud_404"],
-  ["nextcloud returned 423", "nextcloud_423_locked"],
-  ["nextcloud returned 429", "nextcloud_429"],
-  ["nextcloud returned 500", "nextcloud_500"],
-  ["nextcloud returned 502", "nextcloud_502"],
-  ["nextcloud returned 503", "nextcloud_503"],
-  ["nextcloud returned 504", "nextcloud_504"],
-  ["nextcloud returned ", "nextcloud_http_error"],
+  ["the File Store returned 401", "nextcloud_401"],
+  ["the File Store returned 403", "nextcloud_403"],
+  ["the File Store returned 404", "nextcloud_404"],
+  ["the File Store returned 423", "nextcloud_423_locked"],
+  ["the File Store returned 429", "nextcloud_429"],
+  ["the File Store returned 500", "nextcloud_500"],
+  ["the File Store returned 502", "nextcloud_502"],
+  ["the File Store returned 503", "nextcloud_503"],
+  ["the File Store returned 504", "nextcloud_504"],
+  ["the File Store returned ", "nextcloud_http_error"],
   // repo-authored literals — tools-core `_paths.ts` and the agent loop
   ["path traversal not allowed", "path_traversal"],
   ["malformed percent-encoding in path", "path_bad_percent_encoding"],

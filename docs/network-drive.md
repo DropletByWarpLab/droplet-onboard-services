@@ -68,10 +68,21 @@ Four pieces, all provisioned by `./scripts/setup.sh`:
   dashboard hides the shared-folder section from family/guest sessions.
   Per-user SMB accounts mapped to Nextcloud identities are the natural
   follow-up if per-user permissions over SMB are ever needed.
-- **LAN-only.** smbd binds the host on the Vault's LAN; nothing crosses the
-  WAN boundary (the share is not reachable over the remote-access overlay
-  unless the peer routes the LAN subnet, which is the same posture as every
-  other LAN service).
+- **LAN reach, not LAN binding.** The Samba container runs with host
+  networking and the compose block sets no `interfaces` or
+  `bind interfaces only`, so smbd listens on every host interface, including
+  an uplink where the host has one. Keeping port 445 off the uplink relies on
+  the network layout and the host firewall, not on this configuration.
+  Binding smbd to the LAN interface needs a name that is correct on every
+  supported shape (a stock single-box has no `br-lan`); it is tracked in
+  WARP-3576 and not done yet. The share is not reachable over the
+  remote-access overlay unless the peer routes the LAN subnet, the same
+  posture as every other LAN service.
+- **No rotation yet.** Removing or demoting a member does not change
+  `SMB_PASSWORD`, and SMB writes are not attributed to a person (all map to
+  uid 33). The SMB protocol floor and signing/encryption are the image
+  defaults. Rotation, per-person logins and those settings are tracked in
+  WARP-3576.
 - **Fails closed.** An empty `SMB_PASSWORD` (a `.env` predating the feature,
   before `migrate_env` runs) leaves the account created with an empty
   password, which smbd's `null passwords = no` default refuses — no
@@ -222,6 +233,14 @@ direct-editing links, direct-download links; audit in `docs/SECURITY.md`).
   re-run `./scripts/setup.sh`, then recreate the container
   (`docker compose … up -d --force-recreate samba` — `docker restart` does
   NOT re-read `.env`).
+- **Windows 11: `Windows cannot access \\DROPLET`, no password prompt** —
+  the box must have `map to guest = Never` (`SAMBA_CONF_MAP_TO_GUEST` on the
+  `samba` service, shipped since WARP-3516). Without it Samba answers
+  Windows' first try (the PC's own account) with a guest session, which
+  Windows 11 24H2+ refuses, so it never prompts. With it, Windows asks for
+  the user `droplet` and the password from **Files → Connect drive**; tick
+  **Remember my credentials**. Never enable insecure guest logons on the PC
+  to get around it.
 - **SMB write not visible in the web UI** — the `/Droplet` external mount
   re-stats on access (`filesystem_check_changes=1`); a hard refresh of the
   Files page re-lists. If the mount is missing entirely, the next Nextcloud

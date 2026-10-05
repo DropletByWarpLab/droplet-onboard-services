@@ -61,6 +61,10 @@ if [ -f "$LUKS_SCRIPT" ]; then
   grep -q 'luksRemoveKey' "$LUKS_SCRIPT" && pass "temp install keyslot destroyed" || fail "temp keyslot never removed"
   grep -q 'RequiresMountsFor=/data' "$LUKS_SCRIPT" && pass "docker gated on /data (fail closed)" || fail "no docker RequiresMountsFor gate"
   grep -q 'tpm2-device=auto' "$LUKS_SCRIPT" && pass "crypttab auto-unlock via TPM token" || fail "no tpm2-device=auto crypttab entry"
+  # WARP-3572: the only place the key may be printed is behind a terminal test.
+  grep -nE 'printf .*"\$(recovery|key)"' "$LUKS_SCRIPT" | grep -v '> "\$PENDING_DIR' | wc -l | grep -qx 1 \
+    && pass "recovery key has exactly one print site (the TTY branch) [WARP-3572]" \
+    || fail "unexpected recovery-key print site [WARP-3572]"
 fi
 
 # =============================================================================
@@ -119,7 +123,7 @@ cat > "$STUB_BIN/systemd-cryptenroll" <<'STUB'
 printf 'systemd-cryptenroll %s\n' "$*" >> "$CMD_LOG"
 for a in "$@"; do
   if [ "$a" = "--recovery-key" ]; then
-    printf 'aaaaa-bbbbb-ccccc-ddddd-eeeee-fffff-ggggg-hhhhh\n'
+    printf 'cbdefghi-jklnrtuv-bbcdbefg-hijklnrt-uvcbdefg-hijklnrt-uvbcdefg-hijklnrb\n'
     exit 0
   fi
 done
@@ -148,7 +152,8 @@ luks_env=(
 )
 
 : > "$CMD_LOG"
-if env "${luks_env[@]}" "$LUKS_SCRIPT" provision >/dev/null 2>&1; then
+PROV_OUT="$WORK/provision.out"
+if env "${luks_env[@]}" "$LUKS_SCRIPT" provision >"$PROV_OUT" 2>&1; then
   pass "provision succeeds with a TPM + free extents"
 else
   fail "provision failed under the happy path"
@@ -174,7 +179,51 @@ grep -qE 'droplet-data-crypt .*headless=true' "$ETC/crypttab" 2>/dev/null \
 grep -q '/dev/mapper/droplet-data-crypt /data ext4' "$ETC/fstab" 2>/dev/null && pass "fstab entry written" || fail "fstab wrong"
 grep -q 'RequiresMountsFor=/data' "$ETC/systemd/system/docker.service.d/droplet-data.conf" 2>/dev/null \
   && pass "docker drop-in written" || fail "docker drop-in missing"
-[ -z "$(ls -A "$RUNTIME" 2>/dev/null)" ] && pass "no temp keyfile left behind" || fail "keyfile residue in runtime dir"
+ls -A "$RUNTIME" 2>/dev/null | grep -q '^\.luks-key' && fail "keyfile residue in runtime dir" || pass "no temp keyfile left behind"
+
+# WARP-3572: with no terminal on stdout (the droplet-firstboot.service case) the
+# recovery key must NOT appear in the script output (= the journal / setup.log);
+# it is staged root-only (file 0400, dir 0700) for show-recovery-key instead.
+RK="cbdefghi-jklnrtuv-bbcdbefg-hijklnrt-uvcbdefg-hijklnrt-uvbcdefg-hijklnrb"
+grep -qF "$RK" "$PROV_OUT" && fail "recovery key printed to non-terminal output [WARP-3572]" \
+  || pass "recovery key absent from non-terminal output [WARP-3572]"
+STAGED="$RUNTIME/recovery/recovery-key.pending"
+[ -f "$STAGED" ] && grep -qxF "$RK" "$STAGED" && pass "recovery key staged for the owner [WARP-3572]" \
+  || fail "recovery key not staged (it would be lost) [WARP-3572]"
+[ "$(stat -c %a "$STAGED" 2>/dev/null || stat -f %Lp "$STAGED")" = "400" ] \
+  && [ "$(stat -c %a "$RUNTIME/recovery" 2>/dev/null || stat -f %Lp "$RUNTIME/recovery")" = "700" ] \
+  && pass "staged key is 0400 in a 0700 dir [WARP-3572]" || fail "staged key permissions wrong [WARP-3572]"
+
+# show-recovery-key refuses off a terminal and leaves the key staged.
+if env "${luks_env[@]}" "$LUKS_SCRIPT" show-recovery-key </dev/null >"$WORK/show.out" 2>&1; then
+  fail "show-recovery-key ran without a terminal [WARP-3572]"
+else
+  grep -qF "$RK" "$WORK/show.out" && fail "show-recovery-key leaked the key off a terminal [WARP-3572]" \
+    || { [ -f "$STAGED" ] && pass "show-recovery-key refuses without a terminal, key stays staged [WARP-3572]" \
+         || fail "key vanished after a refused show [WARP-3572]"; }
+fi
+
+# Terminal paths: drive them through a pty with util-linux `script` (CI is
+# Ubuntu; skipped where `script -e` is unavailable, e.g. macOS).
+if command -v script >/dev/null 2>&1 && script -qec true /dev/null >/dev/null 2>&1; then
+  # wrong answer -> key must stay staged
+  printf 'nope\n' | timeout 30 script -qec "env ${luks_env[*]} DROPLET_STATE_DIR=$WORK/state $LUKS_SCRIPT show-recovery-key" /dev/null >/dev/null 2>&1 || true
+  [ -f "$STAGED" ] && pass "key stays staged until the owner types 'stored' [WARP-3572]" || fail "key deleted without acknowledgement [WARP-3572]"
+  # acknowledged -> shown, deleted, ack recorded
+  printf 'stored\n' | timeout 30 script -qec "env ${luks_env[*]} DROPLET_STATE_DIR=$WORK/state $LUKS_SCRIPT show-recovery-key" "$WORK/tty.out" >/dev/null 2>&1 || true
+  grep -qF "$RK" "$WORK/tty.out" 2>/dev/null && pass "show-recovery-key displays the key on a terminal [WARP-3572]" || fail "key not shown on a terminal [WARP-3572]"
+  [ ! -e "$STAGED" ] && [ -s "$WORK/state/recovery-key-acknowledged" ] \
+    && pass "acknowledged: staged key deleted and acknowledgement recorded [WARP-3572]" \
+    || fail "key not deleted / acknowledgement not recorded [WARP-3572]"
+  # interactive provision prints (the person at the console sees it)
+  : > "$CMD_LOG"; rm -rf "$RUNTIME/recovery"
+  timeout 60 script -qec "env ${luks_env[*]} $LUKS_SCRIPT provision" "$WORK/prov-tty.out" >/dev/null 2>&1 || true
+  grep -qF "$RK" "$WORK/prov-tty.out" 2>/dev/null && [ ! -e "$STAGED" ] \
+    && pass "interactive console: key printed, nothing staged [WARP-3572]" \
+    || fail "interactive provision did not print the key / staged it anyway [WARP-3572]"
+else
+  skip "pty-driven recovery-key checks (no util-linux script)"
+fi
 
 # idempotency: second run with the mapper "active" exits 0 with no lvcreate.
 : > "$CMD_LOG"

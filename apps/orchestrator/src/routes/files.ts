@@ -38,6 +38,7 @@ import {
   ncListMyShares,
   ncGetShare,
   ncDirExists,
+  ncIsDirectory,
   ncCommitUpload,
   ncDiscardUpload,
   type NcWriteOutcome,
@@ -68,11 +69,17 @@ import {
 import { readUserEmail } from "../services/user-directory.service.js";
 import { resolveAssertedUser } from "../services/asserted-user.service.js";
 import {
+  defaultPublicLinkExpiry,
   exposesOutside,
+  isPublicLinkType,
   isWorkspacePath,
   libraryOfHomePath,
   mayCreatePublicLink,
+  memberPublicLinkWriteRefused,
+  PUBLIC_LINK_EDIT_REFUSAL,
   PUBLIC_LINK_REFUSAL,
+  publicLinkExpiryViolation,
+  publicLinkPasswordViolation,
   WORKSPACE_SHARE_REFUSAL,
   type ShareLibrary,
 } from "../services/share-policy.js";
@@ -102,7 +109,7 @@ import {
   parseRangeHeader,
 } from "../lib/file-content.js";
 import { recordActivity } from "../services/activity.singleton.js";
-import { actorFromRequest } from "../services/activity.service.js";
+import { actorFromRequest, type ActivityActor } from "../services/activity.service.js";
 import {
   checkSpaceAccess,
   requireSpaceAccess,
@@ -214,7 +221,7 @@ async function resolveUploadLimitMb(
  */
 class MissingNcTokenError extends Error {
   constructor() {
-    super("Nextcloud session is missing — please log in again");
+    super("File Store session is missing — please log in again");
     this.name = "MissingNcTokenError";
   }
 }
@@ -725,6 +732,71 @@ async function resolveSearchCaller(
   const role = req.user?.role;
   if (!id || !role) return null;
   return { id, role };
+}
+
+/**
+ * WARP-3587 — one audit row for a mutating file action, attributed to the
+ * person who did it. A browser or mobile caller is the `user`; the MCP service
+ * principal (which `actorFromRequest` flattens to an anonymous `system`) is the
+ * `ai` actor carrying the asserted person's id, with `refs.principal` saying
+ * it came through the assistant. `refs` holds paths and ids only: never file
+ * contents, share passwords or notes. Best-effort like every other emitter —
+ * the change already landed, so a failed lookup or append is logged, not thrown.
+ */
+async function auditFileChange(
+  req: Request,
+  prisma: PrismaClient,
+  what: string,
+  sub: string | null,
+  refs: Record<string, unknown>,
+  sourceIcon = "folder",
+): Promise<void> {
+  try {
+    const mcp = isMcpService(req);
+    let actor: ActivityActor = actorFromRequest(req);
+    if (mcp) {
+      const caller = await resolveSearchCaller(req, prisma);
+      if (caller) actor = { type: "ai", id: caller.id };
+    }
+    await recordActivity({
+      kind: "file",
+      severity: "info",
+      sourceIcon,
+      what,
+      sub,
+      refs: mcp ? { ...refs, principal: "mcp" } : refs,
+      actor,
+    });
+  } catch (err) {
+    logger.warn({ err, what }, "files: audit row failed");
+  }
+}
+
+/** One row for a bulk action: the paths that succeeded, nothing for an all-failed batch. */
+async function auditBulk(
+  req: Request,
+  prisma: PrismaClient,
+  what: string,
+  results: BulkOperationResult[],
+  refs: Record<string, unknown>,
+  sourceIcon: string,
+): Promise<void> {
+  const paths = results.filter((r) => r.ok).map((r) => r.path);
+  if (paths.length === 0) return;
+  await auditFileChange(
+    req, prisma, what, paths.length === 1 ? paths[0] : `${paths.length} items`,
+    { ...refs, paths, count: paths.length, total: results.length },
+    sourceIcon,
+  );
+}
+
+/** The path a share points at, for its audit row; null when OCS cannot say. */
+async function sharePathForAudit(token: string, shareId: number): Promise<string | null> {
+  try {
+    return (await ncGetShare(token, shareId))?.path ?? null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -2710,6 +2782,12 @@ export function createFilesRouter(
         }
 
         await invalidateListing(req, user, { space, path: targetPath });
+        await auditFileChange(
+          req, prisma, "File uploaded",
+          results.length === 1 ? results[0].path : `${results.length} files`,
+          { paths: results.map((r) => r.path), space, count: results.length },
+          "upload",
+        );
         safePublish(`droplet/files/${user}/uploaded`, {
           path: targetPath,
           files: results.map((r) => r.name),
@@ -2906,6 +2984,9 @@ export function createFilesRouter(
         }
 
         await invalidateListing(req, user, { space, path: targetPath });
+        await auditFileChange(
+          req, prisma, "File uploaded", uploadedPath, { paths: [uploadedPath], space, count: 1 }, "upload",
+        );
         safePublish(`droplet/files/${user}/uploaded`, {
           path: targetPath,
           files: [filename],
@@ -2959,6 +3040,7 @@ export function createFilesRouter(
         await invalidateListing(req, user, { space, path: parentPath });
       }
 
+      await auditFileChange(req, prisma, "File deleted", filePath, { path: filePath, space }, "trash-2");
       safePublish(`droplet/files/${user}/deleted`, { path: filePath });
       res.json({ deleted: filePath });
     } catch (err) {
@@ -3066,6 +3148,27 @@ export function createFilesRouter(
     res.status(403).json(WORKSPACE_SHARE_REFUSAL);
   }
 
+  /**
+   * WARP-3586: the member write cap on a public link. A folder is looked up
+   * only when the update bit is set (create/delete are refused outright), and
+   * an unanswerable lookup is treated as a folder: fail closed.
+   */
+  async function memberLinkWriteRefused(
+    req: Request,
+    role: string | undefined,
+    token: string,
+    path: string,
+    permissions: number,
+  ): Promise<boolean> {
+    if (memberPublicLinkWriteRefused(role, permissions, false)) return true;
+    if (!memberPublicLinkWriteRefused(role, permissions, true)) return false;
+    try {
+      return await ncIsDirectory(token, await getUser(req, prisma), path);
+    } catch {
+      return true;
+    }
+  }
+
   // ── Create a share link ──
   //
   // Accepts the full ShareCreateOptions surface (shareType / permissions /
@@ -3096,7 +3199,13 @@ export function createFilesRouter(
     try {
       const schema = z.object({
         path: z.string().min(1),
-        shareType: z.number().int().min(0).max(6).optional().default(3), // public link
+        // WARP-3622: user (0), group (1), public link (3), email (4). A federated
+        // cloud share (6) makes Nextcloud connect out to a caller-supplied host,
+        // and the rest (2, 5, 7+) are not offered by any client.
+        shareType: z
+          .union([z.literal(0), z.literal(1), z.literal(3), z.literal(4)])
+          .optional()
+          .default(3), // public link
         permissions: z.number().int().min(1).max(31).optional().default(1),
         expireDate: z
           .string()
@@ -3159,10 +3268,30 @@ export function createFilesRouter(
         }
       }
 
+      // WARP-3586: what a public link may be, for every caller. Always an
+      // expiry (30 days when none is sent, never beyond 90), a password of 8+
+      // characters when one is set, and no member write access for anonymous
+      // holders of a folder link.
+      let expireDate = parsed.data.expireDate;
+      if (isPublicLinkType(parsed.data.shareType)) {
+        expireDate ??= defaultPublicLinkExpiry();
+        const violation =
+          publicLinkExpiryViolation(expireDate) ?? publicLinkPasswordViolation(parsed.data.password);
+        if (violation) {
+          res.status(400).json(violation);
+          return;
+        }
+        if (await memberLinkWriteRefused(req, role, shareToken, targetPath, parsed.data.permissions)) {
+          recordAccessDenied(req, "public-link-member-write");
+          res.status(403).json(PUBLIC_LINK_EDIT_REFUSAL);
+          return;
+        }
+      }
+
       const share = await ncCreateShareV2(shareToken, targetPath, {
         shareType: parsed.data.shareType,
         permissions: parsed.data.permissions,
-        expireDate: parsed.data.expireDate,
+        expireDate,
         password: parsed.data.password,
         note: parsed.data.note,
         shareWith: parsed.data.shareWith,
@@ -3193,7 +3322,7 @@ export function createFilesRouter(
           shareType: parsed.data.shareType,
           permissions: parsed.data.permissions,
           shareWith: parsed.data.shareWith ?? null,
-          expireDate: parsed.data.expireDate ?? null,
+          expireDate: expireDate ?? null,
           passwordProtected: parsed.data.password !== undefined,
           departmentId: departmentId ?? null,
         },
@@ -3426,6 +3555,10 @@ export function createFilesRouter(
       await ncMoveFile(await getToken(req), user, filePath, newPath, false);
 
       await invalidateParents(req, user, { space, path: filePath });
+      await auditFileChange(
+        req, prisma, "File renamed", `${filePath} → ${newPath}`,
+        { from: filePath, to: newPath, space }, "pencil",
+      );
       safePublish(`droplet/files/${user}/renamed`, { from: filePath, to: newPath });
       res.json({ renamed: { from: filePath, to: newPath } });
     } catch (err) {
@@ -3496,6 +3629,10 @@ export function createFilesRouter(
         { space: fromSpaceValue, path: from },
         { space: toSpaceValue, path: to },
       );
+      await auditFileChange(
+        req, prisma, "File moved", `${from} → ${to}`,
+        { from, to, fromSpace: fromSpaceValue, toSpace: toSpaceValue, overwrite }, "folder-input",
+      );
       safePublish(`droplet/files/${user}/moved`, { from, to });
       res.json({ moved: { from, to } });
     } catch (err) {
@@ -3554,6 +3691,10 @@ export function createFilesRouter(
       await ncCopyFile(await getToken(req), user, from, to, overwrite);
 
       await invalidateParents(req, user, { space: toSpaceValue, path: to });
+      await auditFileChange(
+        req, prisma, "File copied", `${from} → ${to}`,
+        { from, to, fromSpace: fromSpaceValue, toSpace: toSpaceValue, overwrite }, "copy",
+      );
       safePublish(`droplet/files/${user}/copied`, { from, to });
       res.json({ copied: { from, to } });
     } catch (err) {
@@ -3595,6 +3736,7 @@ export function createFilesRouter(
 
       await invalidateParents(req, user, ...paths.map((p) => ({ space, path: p })));
       const okCount = results.filter((r) => r.ok).length;
+      await auditBulk(req, prisma, "Files deleted", results, { space }, "trash-2");
       safePublish(`droplet/files/${user}/bulk-deleted`, {
         count: okCount,
         total: paths.length,
@@ -3653,6 +3795,7 @@ export function createFilesRouter(
         { space, path: normalizedDir + "/_" },
       );
       const okCount = results.filter((r) => r.ok).length;
+      await auditBulk(req, prisma, "Files moved", results, { space, toDir: normalizedDir, overwrite }, "folder-input");
       safePublish(`droplet/files/${user}/bulk-moved`, {
         toDir: normalizedDir,
         count: okCount,
@@ -3707,6 +3850,7 @@ export function createFilesRouter(
 
       await invalidateParents(req, user, { space, path: normalizedDir + "/_" });
       const okCount = results.filter((r) => r.ok).length;
+      await auditBulk(req, prisma, "Files copied", results, { space, toDir: normalizedDir, overwrite }, "copy");
       safePublish(`droplet/files/${user}/bulk-copied`, {
         toDir: normalizedDir,
         count: okCount,
@@ -3769,6 +3913,10 @@ export function createFilesRouter(
       // The two purge routes below need nothing: a trashed file is already
       // absent from every listing, so removing it permanently changes none.
       await invalidatePrefix(`${CACHE_PREFIX}${user}:`);
+      await auditFileChange(
+        req, prisma, "File restored from trash", parsed.data.name,
+        { name: parsed.data.name, space: resolveSpace(spaceQueryOrBody(req)) }, "rotate-ccw",
+      );
       safePublish(`droplet/files/${user}/trash-restored`, { name: parsed.data.name });
       res.json({ restored: parsed.data.name });
     } catch (err) {
@@ -3791,6 +3939,10 @@ export function createFilesRouter(
       }
       const user = await getUser(req, prisma);
       await ncDeleteTrashItem(await getToken(req), user, name);
+      await auditFileChange(
+        req, prisma, "File purged from trash", name,
+        { name, space: resolveSpace(spaceQueryOrBody(req)) }, "trash-2",
+      );
       safePublish(`droplet/files/${user}/trash-purged`, { name });
       res.json({ deleted: name });
     } catch (err) {
@@ -3808,6 +3960,9 @@ export function createFilesRouter(
     try {
       const user = await getUser(req, prisma);
       await ncEmptyTrash(await getToken(req), user);
+      await auditFileChange(
+        req, prisma, "Trash emptied", null, { space: resolveSpace(spaceQueryOrBody(req)) }, "trash-2",
+      );
       safePublish(`droplet/files/${user}/trash-emptied`, {});
       res.json({ emptied: true });
     } catch (err) {
@@ -3874,6 +4029,9 @@ export function createFilesRouter(
       await ncRestoreVersion(token, user, fileId, versionId);
 
       await invalidateParents(req, user, { space, path: filePath });
+      await auditFileChange(
+        req, prisma, "File version restored", filePath, { path: filePath, versionId, space }, "history",
+      );
       safePublish(`droplet/files/${user}/version-restored`, { path: filePath, versionId });
       res.json({ restored: { path: filePath, versionId } });
     } catch (err) {
@@ -4225,6 +4383,45 @@ export function createFilesRouter(
         }
       }
 
+      // WARP-3586: the create-time public-link rules hold on update too, or a
+      // compliant link could be edited into a permanent, passwordless or
+      // writable one. Only fetched when a policed field is being changed.
+      if (
+        parsed.data.permissions !== undefined ||
+        parsed.data.password !== undefined ||
+        parsed.data.expireDate !== undefined
+      ) {
+        const current = await ncGetShare(token, shareId);
+        const linkType = auth.deptRow?.shareType ?? current?.shareType;
+        if (linkType !== undefined && isPublicLinkType(linkType)) {
+          const violation =
+            (parsed.data.expireDate !== undefined
+              ? publicLinkExpiryViolation(parsed.data.expireDate)
+              : null) ?? publicLinkPasswordViolation(parsed.data.password);
+          if (violation) {
+            res.status(400).json(violation);
+            return;
+          }
+          if (
+            parsed.data.permissions !== undefined &&
+            current &&
+            (await memberLinkWriteRefused(
+              req,
+              req.user?.role,
+              token,
+              current.path,
+              parsed.data.permissions,
+            ))
+          ) {
+            recordAccessDenied(req, "public-link-member-write");
+            res.status(403).json(PUBLIC_LINK_EDIT_REFUSAL);
+            return;
+          }
+        }
+      }
+
+      const sharePath = await sharePathForAudit(token, shareId);
+
       // OCS accepts one field per PUT — apply them sequentially.
       if (parsed.data.permissions !== undefined) {
         await ncUpdateShare(token, shareId, "permissions", String(parsed.data.permissions));
@@ -4238,6 +4435,21 @@ export function createFilesRouter(
       if (parsed.data.note !== undefined) {
         await ncUpdateShare(token, shareId, "note", parsed.data.note);
       }
+      // Which fields changed, never the values of the secret or free-text ones
+      // (the password and the note); permissions and expiry are not secret.
+      await auditFileChange(
+        req, prisma, "Share updated", sharePath ?? String(shareId),
+        {
+          shareId,
+          path: sharePath,
+          departmentId: auth.deptRow?.departmentId ?? null,
+          permissions: parsed.data.permissions ?? null,
+          expireDate: parsed.data.expireDate ?? null,
+          passwordChanged: parsed.data.password !== undefined,
+          noteChanged: parsed.data.note !== undefined,
+        },
+        "share-2",
+      );
       res.json({ updated: shareId });
     } catch (err) {
       handleFileError(err, res, next);
@@ -4257,6 +4469,7 @@ export function createFilesRouter(
       if (!auth.ok) return;
       const { token, deptRow } = auth;
 
+      const sharePath = await sharePathForAudit(token, shareId);
       await ncDeleteShare(token, shareId);
 
       if (deptRow) {
@@ -4266,16 +4479,12 @@ export function createFilesRouter(
           where: { ncShareId: shareId },
           data: { revokedAt: new Date() },
         });
-        await recordActivity({
-          kind: "file",
-          severity: "info",
-          sourceIcon: "share-2",
-          what: "Share revoked",
-          sub: String(shareId),
-          refs: { shareId, departmentId: deptRow.departmentId },
-          actor: actorFromRequest(req),
-        });
       }
+      await auditFileChange(
+        req, prisma, "Share revoked", sharePath ?? String(shareId),
+        { shareId, path: sharePath, departmentId: deptRow?.departmentId ?? null },
+        "share-2",
+      );
 
       res.json({ deleted: shareId });
     } catch (err) {

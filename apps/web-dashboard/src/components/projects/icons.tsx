@@ -43,6 +43,7 @@ import {
   Building2,
   Briefcase,
   Handshake,
+  ChartGantt,
   type LucideIcon,
 } from "lucide-react";
 
@@ -91,6 +92,8 @@ export const ICONS: Record<string, LucideIcon> = {
   building: Building2,
   briefcase: Briefcase,
   handshake: Handshake,
+  // WARP-3523 — the Timeline view tab.
+  gantt: ChartGantt,
 };
 
 export function PmIcon({
