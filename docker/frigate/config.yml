@@ -98,8 +98,12 @@ cameras: {}
   # `T3stCamPw%21` — AND list the bare name under the frigate service's
   # `environment:` in docker/docker-compose.yml: Frigate no longer loads the
   # whole .env (WARP-3193 SEC-DATA-1), so an unlisted name KeyErrors at boot.
-  # The bundled ffmpeg does not URL-decode userinfo before authenticating,
-  # so percent-escapes go on the wire literally and the camera returns 401, then locks the account after ~5 retries.
+  # Never pre-encode it. For a username of [A-Za-z0-9_-] Frigate percent-encodes
+  # the password ITSELF (escape_special_characters, quote_plus) and ffmpeg then
+  # decodes it once, so `%21` is encoded again (`%2521`) and the camera is sent
+  # the literal `%21`: 401, then a lockout after ~5 retries. (A username outside
+  # that set is not touched by Frigate, and then ffmpeg's single decode is the
+  # only layer, so THAT password must be percent-encoded.)
   #
   # front_door:
   #   ffmpeg:
