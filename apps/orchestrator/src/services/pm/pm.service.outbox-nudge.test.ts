@@ -8,6 +8,7 @@ vi.mock("./pm-outbox.js", () => ({ nudgeOutbox: vi.fn() }));
 
 import { nudgeOutbox } from "./pm-outbox.js";
 import { addComment } from "./pm.service.js";
+import { createTransactionSeam } from "../../__tests__/helpers/prisma-tx-harness.js";
 
 const T0 = new Date("2026-10-04T12:00:00.000Z");
 
@@ -20,11 +21,12 @@ function prismaStub() {
     },
     pmActivity: { create: vi.fn(async () => ({})) },
   };
-  return {
+  const prisma = {
     tx,
     pmWorkItem: { findUnique: vi.fn(async () => ({ id: "wi-1" })) },
-    $transaction: vi.fn(async (fn: (t: typeof tx) => Promise<unknown>) => fn(tx)),
   };
+  const seam = createTransactionSeam({ client: () => tx });
+  return { ...prisma, $transaction: seam.$transaction };
 }
 
 beforeEach(() => vi.clearAllMocks());
