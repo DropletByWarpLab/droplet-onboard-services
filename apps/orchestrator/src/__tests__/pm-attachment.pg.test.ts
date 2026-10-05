@@ -528,13 +528,40 @@ describe.skipIf(!RUN)("PmAttachment — the database's own guarantees and the fi
           inserted.resolve();
           await commit.promise;
           return row;
-        });
+        }, { timeout: MAX });
         await inserted.promise;
         plantBlob(key);
-        const removed = t.remove(prisma);
+        const tag = `warp1505-lock-${key}`;
+        const tagged = new Proxy(prisma, {
+          get(client, property) {
+            if (property === "$transaction") {
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              return (fn: any, options: any) => client.$transaction(async (tx) => {
+                await tx.$queryRaw`SELECT set_config('application_name', ${tag}, true)`;
+                return fn(tx);
+              }, options);
+            }
+            const value = Reflect.get(client, property);
+            return typeof value === "function" ? value.bind(client) : value;
+          },
+        });
+        const removed = t.remove(tagged);
+        removed.catch(() => undefined); // judged after releasing the uploader
         // The item lock waits for the upload's FK lock; READ COMMITTED's later
         // key read must include that upload when its transaction finishes.
-        commit.resolve();
+        const blocked = async () => {
+          const rows = await prisma.$queryRaw<Array<{ n: number }>>`
+            SELECT count(*)::int AS n FROM pg_stat_activity
+            WHERE datname = current_database() AND application_name = ${tag} AND wait_event_type = 'Lock'`;
+          return rows[0].n > 0;
+        };
+        try {
+          for (let i = 0; i < 100 && !(await blocked()); i += 1) await sleep(25);
+          expect(await blocked(), "project deletion waits for the uncommitted upload's FK lock").toBe(true);
+        } finally {
+          commit.resolve();
+          await Promise.allSettled([upload, removed]);
+        }
         const row = await upload;
         await removed;
         expect(await t.survives()).toBe(false);
