@@ -162,15 +162,17 @@ const ITEM: PmWorkItem = {
   updatedAt: "2026-06-01T00:00:00.000Z",
 };
 
-function renderDrawer({ strict = false, onClose = () => undefined } = {}) {
-  const tree = (
+function renderDrawer({ strict = false, readOnly = false, onClose = () => undefined } = {}) {
+  const tree = (readonlyMode: boolean) => (
     <SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>
       <PeopleContext.Provider value={(id) => makePerson(id, NAMES[id] ?? "Tester")}>
-        <DetailDrawer item={ITEM} onClose={onClose} onChanged={() => undefined} />
+        <DetailDrawer item={ITEM} readOnly={readonlyMode} onClose={onClose} onChanged={() => undefined} />
       </PeopleContext.Provider>
     </SWRConfig>
   );
-  return render(strict ? <StrictMode>{tree}</StrictMode> : tree);
+  const wrapped = (readonlyMode: boolean) => strict ? <StrictMode>{tree(readonlyMode)}</StrictMode> : tree(readonlyMode);
+  const view = render(wrapped(readOnly));
+  return { ...view, setReadOnly: (readonlyMode: boolean) => view.rerender(wrapped(readonlyMode)) };
 }
 
 const progress = (xhr: FakeXHR, loaded: number, total: number) => act(() => xhr.progress(loaded, total));
@@ -383,6 +385,24 @@ describe("Attachments section — states", () => {
     renderDrawer();
     expect(await within(section()).findByText("No attachments yet.")).toBeInTheDocument();
     expect(within(section()).queryByText(/Drop files here/)).not.toBeInTheDocument();
+  });
+
+  it("an explicitly read-only owner drawer preserves downloads and hides every attachment mutation", async () => {
+    net.user = { id: "u1", role: "owner" };
+    net.attachments = [att("a1", { fileName: "plan.pdf", uploadedById: "u2" })];
+    renderDrawer({ readOnly: true });
+    const link = await within(section()).findByRole("link", { name: "plan.pdf" });
+    expect(link).toHaveAttribute("href", "/api/pm/attachments/a1");
+    expect(link).toHaveAttribute("download");
+    expect(screen.queryByRole("button", { name: "Add files" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Remove / })).not.toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "Add attachments" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Choose files to attach")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Attach files" })).not.toBeInTheDocument();
+    fireEvent.drop(section(), filesDrag([makeFile("readonly.txt")]));
+    fireEvent.paste(section(), { clipboardData: { files: [makeFile("readonly.png", "image/png")] } });
+    expect(FakeXHR.all).toHaveLength(0);
+    expect(net.calls.filter((c) => c.method !== "GET")).toHaveLength(0);
   });
 
   it("has a focusable add area and a real Add files button that opens the picker", async () => {
@@ -648,6 +668,20 @@ describe("Removing an attachment", () => {
     expect(net.calls.some((c) => c.method === "DELETE")).toBe(false);
     // Back where the keyboard user was, not stranded.
     await waitFor(() => expect(screen.getByRole("button", { name: "Remove plan.pdf" })).toHaveFocus());
+  });
+
+  it("rechecks permission when a removal confirmation was opened before the drawer became read-only", async () => {
+    net.user = { id: "u1", role: "owner" };
+    net.attachments = [att("a1", { fileName: "plan.pdf" })];
+    const { setReadOnly } = renderDrawer();
+    fireEvent.click(await screen.findByRole("button", { name: "Remove plan.pdf" }));
+    await screen.findByRole("dialog", { name: "Remove this file?" });
+    setReadOnly(true);
+    const dialog = screen.getByRole("dialog", { name: "Remove this file?" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Remove" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Remove this file?" })).not.toBeInTheDocument());
+    expect(net.calls.filter((c) => c.method === "DELETE")).toHaveLength(0);
+    expect(screen.getByRole("link", { name: "plan.pdf" })).toBeInTheDocument();
   });
 
   it("a failed delete toasts plain copy, keeps the row, and keeps the dialog open to retry", async () => {

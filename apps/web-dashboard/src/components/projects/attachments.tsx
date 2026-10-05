@@ -414,11 +414,13 @@ export function AttachmentsSection({
   att,
   uploads,
   onChanged,
+  readOnly = false,
 }: {
   att: ReturnType<typeof useAttachments>;
   uploads: ReturnType<typeof useAttachmentUploads>;
   /** Refresh whatever a change touches: the list and the activity feed. */
   onChanged: () => Promise<unknown>;
+  readOnly?: boolean;
 }): JSX.Element {
   const { user } = useAuth();
   const { toast } = useToast();
@@ -431,7 +433,7 @@ export function AttachmentsSection({
   const [removing, setRemoving] = useState<PmAttachment | null>(null);
   const picker = useFilePicker((files) => void uploads.addFiles(files), "Choose files to attach");
 
-  const writer = canWrite(user?.role);
+  const writer = !readOnly && canWrite(user?.role);
   const admin = user?.role === "owner" || user?.role === "admin";
   const canRemove = (a: PmAttachment) => writer && (admin || a.uploadedById === user?.id);
 
@@ -442,7 +444,7 @@ export function AttachmentsSection({
   const failed = Boolean(att.error) && !att.attachments;
 
   const remove = async () => {
-    if (!removing) return;
+    if (!removing || !canRemove(removing)) return;
     try {
       await pmActions().deleteAttachment(removing.id);
     } catch (e) {

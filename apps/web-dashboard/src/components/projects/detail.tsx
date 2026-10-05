@@ -271,7 +271,8 @@ function DetailBody({
   const { activity, mutate: mutateActivity } = useActivity(item.id);
   const { links: developmentLinks, isLoading: developmentLoading, error: developmentError } = useDevelopmentLinks(item.id);
   const { toast } = useToast();
-  const writer = !readOnly && canWrite(useAuth().user?.role);
+  const { user } = useAuth();
+  const writer = !readOnly && canWrite(user?.role);
   const att = useAttachments(item.id);
   // A file landing or going changes the list and writes an activity row.
   const refreshFiles = () => Promise.all([att.mutate(), mutateActivity()]);
@@ -383,7 +384,7 @@ function DetailBody({
         )}
       </div>
 
-      <AttachmentsSection att={att} uploads={uploads} onChanged={refreshFiles} />
+      <AttachmentsSection att={att} uploads={uploads} onChanged={refreshFiles} readOnly={readOnly} />
       <TimeSection item={item} />
 
       <div>
