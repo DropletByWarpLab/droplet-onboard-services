@@ -499,9 +499,19 @@ if [[ -f "$REPO_ENV" ]]; then
     log "SERVICE_TOKEN_BRIDGE not in $REPO_ENV yet; run setup.sh, then re-run this script (destructive bridge routes stay closed until then)"
   fi
 
-  if [[ -n "${OPENWRT_PASSWORD:-}" ]]; then
-    set_env_if_blank "OPENWRT_PASS" "$OPENWRT_PASSWORD"
-  fi
+  # WARP-3839: on a box behind an EXTERNAL edge router (same case as
+  # sync_openwrt_password_secret in scripts/lib/secrets.sh) OPENWRT_PASSWORD is
+  # the box-owned bundled-container password, wrong for that router, and the
+  # bridge's use of OPENWRT_PASS is disabled for this setup (device-bridge.py).
+  # Do not make a third copy of a credential that is wrong here.
+  case "${OPENWRT_HOST:-}" in
+    ''|127.0.0.1|localhost|::1)
+      if [[ -n "${OPENWRT_PASSWORD:-}" ]]; then
+        set_env_if_blank "OPENWRT_PASS" "$OPENWRT_PASSWORD"
+      fi
+      ;;
+    *) log "external router (OPENWRT_HOST=$OPENWRT_HOST): not copying OPENWRT_PASSWORD into OPENWRT_PASS (WARP-3839)" ;;
+  esac
 
   # WARP-985: the public-FQDN write-back (droplet-set-public-fqdn.sh, exec'd
   # by the bridge's POST /host/public-fqdn) registers split-horizon DNS via the
