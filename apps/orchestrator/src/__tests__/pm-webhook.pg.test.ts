@@ -10,6 +10,8 @@
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import type { PrismaClient } from "@prisma/client";
+import { fanOutActivity } from "../services/pm/webhook-fanout.js";
+import { getWebhook, listDeliveries, PM_WEBHOOK_ERRORS } from "../services/pm/pm-webhook.service.js";
 
 vi.unmock("@prisma/client");
 
@@ -208,6 +210,30 @@ describe.skipIf(!RUN)("PmWebhook / PmWebhookDelivery — the database's own guar
       await prisma.pmWorkspace.delete({ where: { id: workspaceId } });
       expect(await prisma.pmWebhook.findUnique({ where: { id: hook.id } })).toBeNull();
     });
+  });
+
+  it("a workspace Projects webhook queues a project event without a matching private ticket", async () => {
+    const desk = await prisma.pmProject.create({ data: { workspaceId, kind: "SERVICE_DESK", name: "warp3532-hk-private", identifier: "W32D" } });
+    const hook = await webhook();
+    const events = [];
+    for (const scope of [projectId, desk.id]) {
+      const item = await prisma.pmWorkItem.create({ data: { projectId: scope, sequenceId: 1, name: "same matching subject", createdById: "warp3532-hk-owner" } });
+      events.push(await prisma.pmActivity.create({ data: { workItemId: item.id, verb: "created" } }));
+    }
+    const deps = { origin: async () => "https://droplet.example" };
+    expect(await fanOutActivity(prisma, events[0]!, deps)).toBe(1);
+    expect(await fanOutActivity(prisma, events[1]!, deps)).toBe(0);
+    const rows = await prisma.pmWebhookDelivery.findMany({ where: { webhookId: hook.id } });
+    expect(rows.map((r) => r.sourceKey)).toEqual([`activity:${events[0]!.id}`]);
+    expect(JSON.stringify(rows)).not.toContain(desk.id);
+  });
+
+  it("legacy desk-scoped hooks cannot expose their settings or delivery log through Projects", async () => {
+    const desk = await prisma.pmProject.create({ data: { workspaceId, kind: "SERVICE_DESK", name: "warp3532-hk-private", identifier: "W32D" } });
+    const hook = await webhook({ projectId: desk.id });
+    await delivery(hook.id, { payload: { private: "customer conversation" } });
+    await expect(getWebhook(prisma, hook.id)).rejects.toThrow(PM_WEBHOOK_ERRORS.NOT_FOUND);
+    await expect(listDeliveries(prisma, hook.id)).rejects.toThrow(PM_WEBHOOK_ERRORS.NOT_FOUND);
   });
 
   // ── indexes ──────────────────────────────────────────────────────────────

@@ -30,7 +30,7 @@ const WS = { id: "ws-1", slug: "home", name: "Home", createdAt: T0, updatedAt: T
 beforeEach(() => __setColumnCryptoKeyForTest(KEY));
 afterEach(() => __setColumnCryptoKeyForTest(null));
 
-function makePrisma(opts: { projects?: Record<string, string>; deliveries?: PmWebhookDelivery[] } = {}) {
+function makePrisma(opts: { projects?: Record<string, string>; deskProjects?: string[]; deliveries?: PmWebhookDelivery[] } = {}) {
   const hooks: PmWebhook[] = [];
   const deliveries: PmWebhookDelivery[] = [...(opts.deliveries ?? [])];
   let seq = 0;
@@ -42,8 +42,8 @@ function makePrisma(opts: { projects?: Record<string, string>; deliveries?: PmWe
       findUnique: vi.fn(async ({ where }: { where: { id: string } }) => (where.id === WS.id ? WS : null)),
     },
     pmProject: {
-      findUnique: vi.fn(async ({ where }: { where: { id: string } }) =>
-        opts.projects?.[where.id] ? { workspaceId: opts.projects[where.id] } : null,
+      findFirst: vi.fn(async ({ where }: { where: { id: string; kind: string } }) =>
+        where.kind === "PROJECT" && !opts.deskProjects?.includes(where.id) && opts.projects?.[where.id] ? { workspaceId: opts.projects[where.id] } : null,
       ),
     },
     pmWebhook: {
@@ -58,8 +58,8 @@ function makePrisma(opts: { projects?: Record<string, string>; deliveries?: PmWe
         hooks.push(row);
         return row;
       }),
-      findMany: vi.fn(async () => [...hooks]),
-      findUnique: vi.fn(async ({ where }: { where: { id: string } }) => hooks.find((h) => h.id === where.id) ?? null),
+      findMany: vi.fn(async () => hooks.filter((h) => !h.projectId || !opts.deskProjects?.includes(h.projectId))),
+      findFirst: vi.fn(async ({ where }: { where: { id: string } }) => hooks.find((h) => h.id === where.id && (!h.projectId || !opts.deskProjects?.includes(h.projectId))) ?? null),
       update: vi.fn(async ({ where, data }: { where: { id: string }; data: Record<string, unknown> }) => {
         const row = hooks.find((h) => h.id === where.id) as unknown as Record<string, unknown>;
         for (const [k, v] of Object.entries(data)) {
@@ -121,6 +121,24 @@ const good = {
 };
 
 describe("createWebhook", () => {
+  it("refuses a Service Desk scope before creating a Projects webhook", async () => {
+    const prisma = makePrisma({ projects: { desk: WS.id }, deskProjects: ["desk"] });
+    await expect(createWebhook(prisma as never, "u-1", { ...good, projectId: "desk" })).rejects.toThrow(PM_WEBHOOK_ERRORS.PROJECT_NOT_FOUND);
+    expect(prisma.pmWebhook.create).not.toHaveBeenCalled();
+    expect(prisma.pmProject.findFirst).toHaveBeenCalledWith({ where: { id: "desk", kind: "PROJECT" }, select: { workspaceId: true } });
+  });
+
+  it("hides legacy desk-scoped hooks from reads, delivery logs and updates", async () => {
+    const prisma = makePrisma({ projects: { desk: WS.id }, deskProjects: ["desk"] });
+    const { webhook } = await createWebhook(prisma as never, "u-1", good);
+    prisma.hooks[0]!.projectId = "desk";
+    expect(await listWebhooks(prisma as never)).toEqual([]);
+    await expect(getWebhook(prisma as never, webhook.id)).rejects.toThrow(PM_WEBHOOK_ERRORS.NOT_FOUND);
+    await expect(listDeliveries(prisma as never, webhook.id)).rejects.toThrow(PM_WEBHOOK_ERRORS.NOT_FOUND);
+    await expect(updateWebhook(prisma as never, webhook.id, { name: "Refused" })).rejects.toThrow(PM_WEBHOOK_ERRORS.NOT_FOUND);
+    expect(prisma.pmWebhookDelivery.findMany).not.toHaveBeenCalled();
+    expect(prisma.pmWebhook.update).not.toHaveBeenCalled();
+  });
   it("returns the signing secret once and seals both credentials at rest", async () => {
     const prisma = makePrisma();
     const { webhook, secret } = await createWebhook(prisma as never, "u-1", good);

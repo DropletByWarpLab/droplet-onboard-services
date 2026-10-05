@@ -155,15 +155,15 @@ function vetEvents(events: readonly string[]): string[] {
 }
 
 async function mustFind(prisma: WebhookPrisma, id: string): Promise<PmWebhook> {
-  const row = await prisma.pmWebhook.findUnique({ where: { id } });
+  const row = await prisma.pmWebhook.findFirst({ where: { id, OR: [{ projectId: null }, { project: { is: { kind: "PROJECT" } } }] } });
   if (!row) throw new Error(PM_WEBHOOK_ERRORS.NOT_FOUND);
   return row;
 }
 
 /** The project must exist; its workspace becomes the webhook's. */
 async function workspaceForProject(prisma: WebhookPrisma, projectId: string): Promise<string> {
-  const project = await prisma.pmProject.findUnique({
-    where: { id: projectId },
+  const project = await prisma.pmProject.findFirst({
+    where: { id: projectId, kind: "PROJECT" },
     select: { workspaceId: true },
   });
   if (!project) throw new Error(PM_WEBHOOK_ERRORS.PROJECT_NOT_FOUND);
@@ -173,7 +173,7 @@ async function workspaceForProject(prisma: WebhookPrisma, projectId: string): Pr
 // ── Reads ────────────────────────────────────────────────────────────────────
 
 export async function listWebhooks(prisma: WebhookPrisma): Promise<ApiWebhook[]> {
-  const rows = await prisma.pmWebhook.findMany({ orderBy: [{ createdAt: "asc" }, { id: "asc" }] });
+  const rows = await prisma.pmWebhook.findMany({ where: { OR: [{ projectId: null }, { project: { is: { kind: "PROJECT" } } }] }, orderBy: [{ createdAt: "asc" }, { id: "asc" }] });
   if (rows.length === 0) return [];
   // One query for every webhook's latest delivery, not one each.
   const latest = await prisma.$queryRaw<
@@ -216,7 +216,7 @@ export async function createWebhook(
   const workspaceId = input.projectId
     ? await workspaceForProject(prisma, input.projectId)
     : (await ensureHomeWorkspace(prisma)).id;
-  if ((await prisma.pmWebhook.count({ where: { workspaceId } })) >= PM_WEBHOOK_LIMIT) {
+  if ((await prisma.pmWebhook.count({ where: { workspaceId, OR: [{ projectId: null }, { project: { is: { kind: "PROJECT" } } }] } })) >= PM_WEBHOOK_LIMIT) {
     throw new Error(PM_WEBHOOK_ERRORS.LIMIT_REACHED);
   }
 
