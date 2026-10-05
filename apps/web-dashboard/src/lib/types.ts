@@ -2513,6 +2513,41 @@ export interface CameraInfo {
   status: "recording" | "detecting" | "live" | "idle" | "offline";
   lastSeen: string;
   lastDetection: DetectionEvent | null;
+  /**
+   * WARP-3511 — what this camera is keeping. Optional here because payloads
+   * from before the field existed (and other endpoints that list cameras)
+   * omit it; every consumer must render sensibly without it.
+   */
+  recording?: CameraRecordingState;
+}
+
+/**
+ * How footage is kept, named for the broadest retention window that is open:
+ * `continuous` keeps everything, `motion` keeps segments with motion,
+ * `events` keeps only footage overlapping an alert or detection, `off` keeps
+ * nothing.
+ */
+export type RecordingMode = "continuous" | "motion" | "events" | "off";
+
+/**
+ * `null` always means "not known", never "nothing". `degraded: true` means
+ * the camera service could not be read, so every other field — and `status`
+ * — is unknown: show a "service unavailable" state, never a recording claim.
+ */
+export interface CameraRecordingState {
+  degraded: boolean;
+  /** Null only when `degraded`. */
+  mode: RecordingMode | null;
+  /** Days each window keeps footage, as configured. Null only when `degraded`. */
+  retentionDays: RetentionWindows | null;
+  /** When the newest saved segment ended (ISO), from a recent window; null if unread or none was found. */
+  lastSegmentAt: string | null;
+  /** True when the recent-segment read failed, rather than finding no footage. */
+  lastSegmentReadFailed?: boolean;
+  /** Bytes of footage on disk, or null when the camera has none yet / no figure. */
+  usedBytes: number | null;
+  /** Measured write rate scaled to a day, or null when not yet measured. */
+  bytesPerDay: number | null;
 }
 
 export interface DetectionEvent {
@@ -2708,9 +2743,13 @@ export type PtzAction =
   | "STOP";
 
 export interface PtzCapabilities {
+  /** WARP-3511 — pan/tilt, zoom or at least one preset. Absent on older boxes. */
+  supported?: boolean;
   supportsPanTilt: boolean;
   supportsZoom: boolean;
   presets: string[];
+  /** True when the camera service could not be asked: "unknown", not "no PTZ". */
+  degraded?: boolean;
 }
 
 // --- Camera system status (Phase 5) ---
@@ -2790,11 +2829,56 @@ export interface CameraBudget {
   applied?: RetentionWindows | null;
   /** Operator-facing note — present when there's something to say. */
   note?: string;
-  /** WARP-3515: GET /cameras/:name/budget has always returned this; the type
-   *  simply never carried it, so nothing rendered it. `null` = unknown (the
-   *  camera service was unreachable, or the volume size is not known). Absent on
-   *  the PATCH response. */
-  overAllocation?: CameraOverAllocation | null;
+  /**
+   * WARP-3511 — budgets are per camera but the drive is shared, so one
+   * camera's allocation says nothing on its own: this is every budget added
+   * up against the drive's capacity. Null when the capacity could not be read.
+   */
+  overAllocation?: OverAllocation | null;
+}
+
+export interface OverAllocation {
+  allocatedBytes: number;
+  capacityBytes: number;
+  overAllocated: boolean;
+}
+
+/**
+ * WARP-3511 — what the retention repair would do, camera by camera. Cameras
+ * adopted before retention defaults existed have no retention authored at all;
+ * the repair gives exactly those the standard windows. A camera whose windows
+ * were set to zero on purpose is left alone.
+ */
+export interface RetentionBackfillPlanEntry {
+  camera: string;
+  reason: "no_retention_authored" | "already_authored" | "explicitly_zero" | "not_in_config";
+  willWrite: boolean;
+}
+
+/**
+ * The windows the retention repair would write, as the box reports them. They
+ * are the box's own effective defaults (configurable, and changing by
+ * release), so they are shown from here and never written into copy.
+ */
+export interface RetentionBackfillDefaults {
+  continuousDays: number;
+  motionDays: number;
+  alertsRetainDays: number;
+  detectionsRetainDays: number;
+}
+
+/** The repair's dry run: who it would touch, and what it would write. */
+export interface RetentionBackfillPreview {
+  plan: RetentionBackfillPlanEntry[];
+  /** Absent on a box older than the field; say no figure rather than guess one. */
+  defaults?: RetentionBackfillDefaults;
+}
+
+export interface RetentionBackfillResult {
+  planned: RetentionBackfillPlanEntry[];
+  written: string[];
+  /** True when nothing needed doing. */
+  noop: boolean;
 }
 
 export interface CameraStorageSummary {

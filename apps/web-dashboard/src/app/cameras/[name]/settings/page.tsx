@@ -25,14 +25,23 @@ import {
   setCameraBudget,
   renameCamera,
 } from "@/lib/api";
+import {
+  CAMERA_DETECT_FPS_MAX,
+  CAMERA_DETECT_FPS_MIN,
+  CAMERA_RETENTION_DAYS_MAX,
+} from "@droplet/shared-types";
 import { ZoneEditor } from "@/components/settings/ZoneEditor";
 import { MotionMaskEditor } from "@/components/settings/MotionMaskEditor";
+import { CameraRecordingSummary } from "@/components/cameras/CameraRecordingSummary";
+import { CameraServiceNotice } from "@/components/cameras/CameraServiceNotice";
 import {
   CameraRecordingNote,
   OverAllocationNote,
 } from "@/components/cameras/CameraRecordingNote";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { useAuth } from "@/lib/auth";
+import { formatStorageBytes, isRecordingDegraded } from "@/lib/camera-recording";
+import { isCamerasUnavailableError } from "@/lib/files-unavailable";
 import type {
   CameraInfo,
   CameraSettings,
@@ -87,11 +96,25 @@ export default function CameraSettingsPage() {
   const canManage = user?.role === "owner" || user?.role === "admin";
   const camera: CameraInfo | undefined = cameras.find((c) => c.name === name);
 
+  // WARP-3511: a failed settings read used to be retried forever. Now it is
+  // bounded, and what it waits for depends on why it failed: a camera service
+  // that is restarting (a save does that) gets a minute of patient retries;
+  // anything else gets two quick ones and then stops, showing the error.
   const { data: fetched, error, isLoading, mutate } = useSWR<CameraSettings>(
     name ? ["camera-settings", name] : null,
     () => fetchCameraSettings(name),
-    { revalidateOnFocus: false },
+    {
+      revalidateOnFocus: false,
+      onErrorRetry: (err, _key, _config, revalidate, { retryCount }) => {
+        const restarting = isCamerasUnavailableError(err);
+        // SWR numbers the first retry 1, so `>` gives exactly 12 and 2.
+        if (retryCount > (restarting ? 12 : 2)) return;
+        setTimeout(() => revalidate({ retryCount }), restarting ? 5_000 : 3_000);
+      },
+    },
   );
+  const serviceDown =
+    isCamerasUnavailableError(error) || (camera ? isRecordingDegraded(camera) : false);
 
   // Local draft; populated when the fetch completes. Operator edits
   // mutate this; the diff against `fetched` produces the patch we POST.
@@ -289,7 +312,7 @@ export default function CameraSettingsPage() {
       const next = await patchCameraSettings(name, patch);
       await mutate(next, { revalidate: false });
       setDraft(structuredClone(next));
-      setSaveMsg("Saved. Camera restarting…");
+      setSaveMsg("Saved. Camera service restarting…");
     } catch (e) {
       setSaveMsg(e instanceof Error ? e.message : "Save failed");
     } finally {
@@ -333,11 +356,12 @@ export default function CameraSettingsPage() {
       icon={<Camera size={15} />}
       label="Settings"
       title={`${camera?.displayName ?? name} · Settings`}
-      sub="Detection, objects, retention. Saving restarts the camera so changes take effect."
+      sub="Detection, objects, retention. Saving restarts the camera service, so every camera drops for a few seconds."
       actions={actions}
     >
-      {error && (
-        <div className="card" style={{ color: "#ef4444", marginBottom: 16 }}>
+      {serviceDown && <CameraServiceNotice className="mb-4" />}
+      {error && !isCamerasUnavailableError(error) && (
+        <div className="card" style={{ color: "var(--danger-ink)", marginBottom: 16 }}>
           <p>
             Couldn&apos;t load settings:{" "}
             {error instanceof Error ? error.message : String(error)}
@@ -359,6 +383,20 @@ export default function CameraSettingsPage() {
         </div>
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {/* WARP-3511 — is it keeping footage, and how much? The controls
+              below change it; this says what it is doing now. */}
+          {camera && (
+            <CameraRecordingSummary
+              camera={camera}
+              appearance="card"
+              current="settings"
+              canManage={canManage}
+              cameras={cameras}
+              title="Recording status"
+              onRepaired={refreshCameras}
+            />
+          )}
+
           {/* Name — WARP-1893. Saves through its own endpoint and does NOT
               restart the camera, so it stays off the sticky save bar. */}
           <div className="card space-y-3 lg:col-span-2">
@@ -414,8 +452,8 @@ export default function CameraSettingsPage() {
             />
             <SliderRow
               label="Detection FPS"
-              min={1}
-              max={15}
+              min={CAMERA_DETECT_FPS_MIN}
+              max={CAMERA_DETECT_FPS_MAX}
               step={1}
               value={draft.detectFps}
               onChange={(v) => update("detectFps", v)}
@@ -447,7 +485,7 @@ export default function CameraSettingsPage() {
             <SliderRow
               label="Keep 24/7 footage"
               min={0}
-              max={90}
+              max={CAMERA_RETENTION_DAYS_MAX}
               step={1}
               value={draft.continuousRetainDays}
               onChange={(v) => update("continuousRetainDays", v)}
@@ -457,7 +495,7 @@ export default function CameraSettingsPage() {
             <SliderRow
               label="Keep footage with motion"
               min={0}
-              max={90}
+              max={CAMERA_RETENTION_DAYS_MAX}
               step={1}
               value={draft.motionRetainDays}
               onChange={(v) => update("motionRetainDays", v)}
@@ -472,7 +510,7 @@ export default function CameraSettingsPage() {
             <SliderRow
               label="Keep alert clips"
               min={0}
-              max={90}
+              max={CAMERA_RETENTION_DAYS_MAX}
               step={1}
               value={draft.alertsRetainDays}
               onChange={(v) => update("alertsRetainDays", v)}
@@ -482,7 +520,7 @@ export default function CameraSettingsPage() {
             <SliderRow
               label="Keep other detections"
               min={0}
-              max={90}
+              max={CAMERA_RETENTION_DAYS_MAX}
               step={1}
               value={draft.detectionsRetainDays}
               onChange={(v) => update("detectionsRetainDays", v)}
@@ -502,7 +540,7 @@ export default function CameraSettingsPage() {
             <SliderRow
               label="Snapshot retention"
               min={0}
-              max={90}
+              max={CAMERA_RETENTION_DAYS_MAX}
               step={1}
               value={draft.snapshotRetainDays}
               onChange={(v) => update("snapshotRetainDays", v)}
@@ -523,13 +561,27 @@ export default function CameraSettingsPage() {
               fit, then give the days back if usage drops. Recording modes you
               have switched off stay off.
             </p>
+            {/* WARP-3511 — what it is using now, so the number below is not set
+                blind. Binary maths and binary labels, as on the Camera system
+                page: the field below is multiplied by 1024³, so it is GiB. */}
+            {camera?.recording && !camera.recording.degraded && (
+              <p className="type-caption-1 text-label-secondary" data-testid="budget-usage">
+                {camera.recording.usedBytes === null
+                  ? "Nothing stored for this camera yet."
+                  : `Using ${formatStorageBytes(camera.recording.usedBytes)} now.`}
+              </p>
+            )}
             {/* WARP-3515 — where this camera records and what it needs there,
                 with a link to the Recording storage card; and the budget
                 route's overAllocation advisory (the type never carried it, so
                 nothing rendered it). Both render nothing when there is nothing
                 to say. */}
             <CameraRecordingNote camera={name} />
-            <OverAllocationNote overAllocation={budget?.overAllocation} />
+            {budget?.overAllocation?.overAllocated && (
+              <div data-testid="budget-over-allocation" className="text-system-orange">
+                <OverAllocationNote overAllocation={budget.overAllocation} />
+              </div>
+            )}
             <label className="flex items-center gap-2">
               <input
                 type="number"
@@ -540,10 +592,20 @@ export default function CameraSettingsPage() {
                 placeholder="e.g. 200"
                 className="input"
                 style={{ maxWidth: 140 }}
-                aria-label="Storage budget in gigabytes"
+                aria-label="Storage budget in gibibytes"
               />
-              <span className="type-body text-label-secondary">GB</span>
+              <span className="type-body text-label-secondary">GiB</span>
             </label>
+            {/* Budgets are per camera but the drive is shared: one camera's
+                number says nothing about whether they all fit. */}
+            {budget?.overAllocation && !budget.overAllocation.overAllocated && (
+              <p
+                data-testid="budget-over-allocation"
+                className="type-caption-1 text-label-tertiary"
+              >
+                {`All camera budgets together: ${formatStorageBytes(budget.overAllocation.allocatedBytes)} of the ${formatStorageBytes(budget.overAllocation.capacityBytes)} recordings drive.`}
+              </p>
+            )}
             {budgetMsg && (
               <p className="type-caption-1 text-label-tertiary">{budgetMsg}</p>
             )}
@@ -735,7 +797,7 @@ export default function CameraSettingsPage() {
               </>
             ) : dirty ? (
               <span className="type-caption-1 text-label-tertiary">
-                Unsaved changes — the camera service will restart on save.
+                Unsaved changes. Saving restarts the camera service.
               </span>
             ) : (
               <span className="type-caption-1 text-label-tertiary">

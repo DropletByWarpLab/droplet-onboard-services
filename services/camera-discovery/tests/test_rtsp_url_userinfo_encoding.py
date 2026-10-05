@@ -1,16 +1,10 @@
-"""WARP-1873 — credentials in a discovered stream URL must survive ffmpeg.
+"""WARP-1873 — the prober's INTERNAL stream URL remains parseable and decodable.
 
-The prober writes its RTSP URL into Frigate, whose bundled ffmpeg does NOT
-percent-decode userinfo before authenticating. ``quote(pw, safe="")`` escaped
-every character outside the RFC 3986 *unreserved* set, so `T3stCamPw!` was
-stored as `T3stCamPw%21` and went on the wire that way: the camera answered
-401, ffmpeg retried, and the Hanwha locked the account after ~5 attempts.
-
-The bug survived every existing test because the prober's own verifier reads
-the URL back with ``unquote`` — producer and internal consumer agreed
-perfectly. Only the external consumer disagreed, and nothing asked it. So the
-central test here is `test_naive_consumer_reads_the_real_password`: it parses
-the URL the way ffmpeg does, *without* decoding.
+The internal form leaves userinfo sub-delimiters literal and encodes characters
+that could change the URL's authority. The verifier decodes it once. This is
+separate from the Frigate config form: Frigate re-encodes matching usernames'
+raw passwords before ffmpeg decodes them once. See test_rtsp_url.py for the
+end-to-end assertions on what the camera receives (WARP-3505).
 """
 
 from __future__ import annotations
@@ -54,11 +48,11 @@ class TestSubDelimsTravelLiterally:
         assert f"{USER}:{PW}@" in info["rtsp_url"]
 
     @pytest.mark.asyncio
-    async def test_naive_consumer_reads_the_real_password(self, monkeypatch):
-        """Parse the URL the way ffmpeg does — split userinfo, never decode.
+    async def test_internal_sub_delim_stays_literal(self, monkeypatch):
+        """The INTERNAL representation leaves this legal userinfo sub-delim literal.
 
-        This is the assertion the old code could not satisfy, and the one that
-        maps 1:1 onto the camera returning 200 instead of 401.
+        This checks the stored internal spelling; test_rtsp_url.py checks the
+        Frigate/ffmpeg boundary and the password finally sent to the camera.
         """
         _patch_probe(monkeypatch)
         info = await rtsp_prober.probe_camera("192.168.9.219")
@@ -100,7 +94,7 @@ class TestAmbiguousCharactersStayEncoded:
 
     @pytest.mark.asyncio
     async def test_colon_in_password_is_escaped(self, monkeypatch):
-        """A literal `:` would split user from password on the wrong boundary."""
+        """The INTERNAL form encodes password colons for consistent URL parsing."""
         _patch_probe(monkeypatch, pw="pa:ss")
         info = await rtsp_prober.probe_camera("192.168.9.219")
 

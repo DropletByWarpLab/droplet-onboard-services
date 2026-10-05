@@ -58,10 +58,22 @@ vi.mock("@/lib/hooks/useCameras", () => ({
         status: "live",
         lastSeen: "2026-10-03T10:00:00Z",
         lastDetection: null,
+        recording: {
+          degraded: false,
+          mode: "continuous",
+          retentionDays: { continuous: 7, motion: 7, alerts: 7, detections: 7 },
+          lastSegmentAt: "2026-10-03T10:00:00Z",
+          usedBytes: 20 * 1024 ** 3,
+          bytesPerDay: 36 * 1_000_000_000,
+        },
       } satisfies CameraInfo,
     ],
     refresh: vi.fn(),
   }),
+}));
+
+vi.mock("@/lib/hooks/useRecordings", () => ({
+  useRecordingsSummary: () => ({ days: [], isLoading: false, error: undefined, refresh: vi.fn() }),
 }));
 
 vi.mock("@/components/settings/ZoneEditor", () => ({ ZoneEditor: () => null }));
@@ -145,6 +157,14 @@ afterEach(() => {
 });
 
 describe("/cameras/[name]/settings — where this camera records", () => {
+  it("keeps current recording status and usage alongside the recording-drive allocation", () => {
+    ready();
+    mountPage();
+    expect(screen.getByRole("heading", { name: "Recording status" })).toBeInTheDocument();
+    expect(within(budgetCard()).getByTestId("budget-usage")).toHaveTextContent("Using 20.0 GiB now.");
+    expect(within(budgetCard()).getByRole("group", { name: /where this camera records/i })).toHaveTextContent("Recording drive: Bay 2");
+  });
+
   it("puts the recording drive and this camera's numbers in the Storage budget card", () => {
     ready();
     mountPage();
@@ -169,7 +189,7 @@ describe("/cameras/[name]/settings — where this camera records", () => {
     const card = budgetCard();
     expect(within(card).queryByRole("group")).not.toBeInTheDocument();
     expect(within(card).getByRole("button", { name: /use this budget/i })).toBeInTheDocument();
-    expect(within(card).getByLabelText(/storage budget in gigabytes/i)).toBeInTheDocument();
+    expect(within(card).getByLabelText(/storage budget in gibibytes/i)).toBeInTheDocument();
   });
 
   it("says nothing extra while recording storage is still loading or failed", () => {
@@ -190,6 +210,7 @@ describe("/cameras/[name]/settings — budgets that outgrow the drive (overAlloc
     const warning = within(budgetCard()).getByTestId("over-allocation-warning");
     expect(warning).toHaveTextContent(/add up to 2\.93 TiB/i);
     expect(warning).toHaveTextContent(/drive holds 1\.95 TiB/i);
+    expect(within(budgetCard()).getAllByTestId("over-allocation-warning")).toHaveLength(1);
   });
 
   it.each([

@@ -35,6 +35,8 @@ import type {
   PtzCapabilities,
   RecordingDay,
   RecordingSegment,
+  RetentionBackfillPreview,
+  RetentionBackfillResult,
   ReviewFilter,
   FilteredReviewsResult,
   TimelineEntry,
@@ -3104,6 +3106,9 @@ export async function fetchCameraSettings(
     `${BASE}/api/cameras/${encodeURIComponent(cameraName)}/settings`,
   );
   if (!res.ok) {
+    // WARP-3511: Frigate restarting (a settings save does that) is not a
+    // failure to retry forever; the caller shows a calm state and asks again.
+    if (cameraServiceDown(res)) throw new CamerasUnavailableError();
     const body = await res.json().catch(() => ({}));
     throw new Error((body as { error?: string }).error || `Failed: ${res.status}`);
   }
@@ -3143,6 +3148,37 @@ export async function renameCamera(
     throw new Error(body.error || `Failed to rename camera: ${res.status}`);
   }
   return (await res.json()) as { status: string; camera: string; displayName: string };
+}
+
+/**
+ * WARP-3511 — the box answered 503 with the camera-service marker
+ * (`X-Droplet-Degraded`): Frigate is unreachable or restarting.
+ */
+function cameraServiceDown(res: Response): boolean {
+  return res.status === 503 && !!res.headers?.get("X-Droplet-Degraded");
+}
+
+/**
+ * WARP-3511 — dry run of the retention repair: which cameras have no retention
+ * authored at all and would be given the standard windows, and what those
+ * windows are on this box. A camera whose windows were set to zero on purpose
+ * is not in the repair's reach.
+ */
+export async function fetchRetentionBackfillPlan(): Promise<RetentionBackfillPreview> {
+  const res = await authFetch(`${BASE}/api/cameras/retention/backfill`);
+  if (!res.ok) throw await cameraActionError(res, `Failed to check retention: ${res.status}`);
+  const body = (await res.json()) as Partial<RetentionBackfillPreview>;
+  return { plan: body.plan ?? [], defaults: body.defaults };
+}
+
+/**
+ * WARP-3511 — apply the retention repair (owner/admin). It writes Frigate's
+ * config, so every camera restarts briefly; the caller confirms first.
+ */
+export async function runRetentionBackfill(): Promise<RetentionBackfillResult> {
+  const res = await authFetch(`${BASE}/api/cameras/retention/backfill`, { method: "POST" });
+  if (!res.ok) throw await cameraActionError(res, `Failed to repair retention: ${res.status}`);
+  return (await res.json()) as RetentionBackfillResult;
 }
 
 /** WARP-1851 — read a camera's current storage allocation. */
@@ -3426,7 +3462,12 @@ export async function fetchPtzCapabilities(
   const res = await authFetch(
     `${BASE}/api/cameras/${encodeURIComponent(cameraName)}/ptz`,
   );
-  if (!res.ok) throw new Error(`Failed to fetch PTZ caps: ${res.status}`);
+  // WARP-3511: a camera with nothing to control is not an error. This used to
+  // throw on any non-2xx, and SWR retried that forever — against a camera that
+  // can never have PTZ, since adoption writes no `onvif:` block.
+  if (!res.ok) {
+    return { supported: false, supportsPanTilt: false, supportsZoom: false, presets: [] };
+  }
   return res.json();
 }
 
@@ -3498,6 +3539,7 @@ export async function patchCameraSettings(
     },
   );
   if (!res.ok) {
+    if (cameraServiceDown(res)) throw new CamerasUnavailableError();
     const body = await res.json().catch(() => ({}));
     throw new Error((body as { error?: string }).error || `Failed: ${res.status}`);
   }
@@ -3598,6 +3640,33 @@ export async function acceptDiscoveredCamera(id: string): Promise<void> {
   }
 }
 
+/**
+ * Add a camera we found on the network by typing its username and password
+ * (WARP-3505). The orchestrator hands them to camera-discovery, which re-probes
+ * the camera with them and adds it. The password travels only in the POST body.
+ *
+ * Failures throw an Error whose `code` is one of AUTH_FAILED, LOCKED,
+ * NO_STREAM_PATH, BASIC_AUTH_ONLY, UNREACHABLE, DISCOVERY_UNAVAILABLE, TIMEOUT,
+ * INVALID_CREDENTIALS, UNSUPPORTED_PASSWORD or UNSUPPORTED_STREAM_ADDRESS so
+ * `translateError` can show the matching next step. The error's own message
+ * never contains the password.
+ */
+export async function addDiscoveredCameraWithCredentials(
+  id: string,
+  username: string,
+  password: string,
+): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/cameras/discovered/${encodeURIComponent(id)}/credentials`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    },
+  );
+  if (!res.ok) throw await cameraApiError(res, `Failed to add camera: ${res.status}`);
+}
+
 export async function rejectDiscoveredCamera(id: string): Promise<void> {
   const res = await authFetch(`${BASE}/api/cameras/discovered/${encodeURIComponent(id)}/reject`, {
     method: "POST",
@@ -3608,9 +3677,20 @@ export async function rejectDiscoveredCamera(id: string): Promise<void> {
   }
 }
 
+/**
+ * WARP-3511 — why a camera action failed, in the box's own words. These used
+ * to throw "Failed to enable camera: 500" and nothing else, which a toast
+ * cannot make useful.
+ */
+async function cameraActionError(res: Response, fallback: string): Promise<Error> {
+  if (cameraServiceDown(res)) return new CamerasUnavailableError();
+  const body = (await res.json().catch(() => ({}))) as { error?: string; message?: string };
+  return new Error(body.message || body.error || fallback);
+}
+
 export async function enableCamera(name: string): Promise<void> {
   const res = await authFetch(`${BASE}/api/cameras/${encodeURIComponent(name)}/enable`, { method: "POST" });
-  if (!res.ok) throw new Error(`Failed to enable camera: ${res.status}`);
+  if (!res.ok) throw await cameraActionError(res, `Failed to enable camera: ${res.status}`);
 }
 
 /** Consume a camera-domain Tier-2 confirmation token (WARP-861).
@@ -3626,6 +3706,9 @@ export async function confirmCameraCommand(
     body: JSON.stringify({ confirmationToken, operation }),
   });
   if (!res.ok) {
+    // WARP-3511: the confirm is where a disable is actually written, so a
+    // camera service that is restarting surfaces here as well.
+    if (cameraServiceDown(res)) throw new CamerasUnavailableError();
     const body = await res.json().catch(() => ({}));
     throw new Error((body as { error?: string }).error || `Confirm failed: ${res.status}`);
   }
@@ -3633,7 +3716,7 @@ export async function confirmCameraCommand(
 
 export async function disableCamera(name: string): Promise<void> {
   const res = await authFetch(`${BASE}/api/cameras/${encodeURIComponent(name)}/disable`, { method: "POST" });
-  if (!res.ok) throw new Error(`Failed to disable camera: ${res.status}`);
+  if (!res.ok) throw await cameraActionError(res, `Failed to disable camera: ${res.status}`);
   // disable_camera is Tier 2: the route 202s with a token and does nothing
   // until the token is consumed (WARP-861 — previously this silently
   // no-opped). The user already confirmed in the UI dialog that invoked us,
@@ -3837,21 +3920,60 @@ export async function reorderCameraPins(
   return body.pins;
 }
 
+/**
+ * An Error for a failed camera call that carries the server's machine `code`
+ * (upper-cased, so it indexes friendly-errors' camera table) and the HTTP status.
+ * The message is the server's sentence and is never shown as written — the
+ * translator maps the code to copy — and never contains a credential.
+ */
+async function cameraApiError(
+  res: Response,
+  fallback: string,
+): Promise<Error & { code?: string; status?: number }> {
+  const data = await res.json().catch(() => ({}));
+  const err = new Error(data.error || fallback) as Error & { code?: string; status?: number };
+  err.status = res.status;
+  if (typeof data.code === "string") err.code = data.code.toUpperCase();
+  return err;
+}
+
+/**
+ * `added_no_stream` (WARP-3506): the camera IS added, but Frigate is not
+ * receiving video from it yet — a wrong address or password, or a camera that
+ * did not start. `reason` is operator-facing prose.
+ */
+export interface AddCameraResult {
+  status: "ok" | "added_no_stream";
+  reason?: string;
+}
+
 export async function addCameraManual(
   name: string,
   rtspUrl: string,
   manufacturer?: string,
-  model?: string
-): Promise<void> {
+  model?: string,
+  username?: string,
+  password?: string
+): Promise<AddCameraResult> {
   const res = await authFetch(`${BASE}/api/cameras`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name, rtspUrl, manufacturer, model }),
+    // WARP-3505: the orchestrator merges username/password into the stream URL
+    // server-side. Left out entirely when blank so a URL that already embeds
+    // credentials keeps working untouched.
+    body: JSON.stringify({
+      name,
+      rtspUrl,
+      manufacturer,
+      model,
+      ...(username ? { username, password: password ?? "" } : {}),
+    }),
   });
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || `Failed to add camera: ${res.status}`);
-  }
+  if (!res.ok) throw await cameraApiError(res, `Failed to add camera: ${res.status}`);
+  const data = await res.json().catch(() => ({}));
+  return data?.status === "added_no_stream"
+    ? { status: "added_no_stream", reason: typeof data.reason === "string" ? data.reason : undefined }
+    : { status: "ok" };
 }
 
 /**

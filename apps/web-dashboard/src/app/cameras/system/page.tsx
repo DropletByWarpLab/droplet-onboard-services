@@ -1,12 +1,14 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import useSWR from "swr";
 import {
   Activity,
   AlertTriangle,
   ArrowLeft,
+  Bell,
   Cpu,
   HardDrive,
   Loader2,
@@ -20,6 +22,10 @@ import { fetchCameraSystemStatus, fetchCameraStorage, restartFrigate } from "@/l
 import type { CameraStorageSummary } from "@/lib/types";
 import { confirmCameraCommand } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+// WARP-3511: one byte formatter for every camera surface, so a camera's usage
+// reads the same on its tile, its rail and here. (Binary maths, binary labels —
+// the WARP-1960 rule this page used to carry as its own local function.)
+import { formatStorageBytes as fmtBytes } from "@/lib/camera-recording";
 import type { CameraSystemStatus } from "@/lib/types";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { RecordingStorageCard } from "@/components/cameras/RecordingStorageCard";
@@ -64,6 +70,8 @@ export default function CameraSystemPage() {
   // The restart route is owner-only; nobody else sees the card.
   const { user } = useAuth();
   const isOwner = user?.role === "owner";
+  // WARP-3511: a camera's settings are owner/admin.
+  const canManage = user?.role === "owner" || user?.role === "admin";
   const [restarting, setRestarting] = useState(false);
   const [restartMsg, setRestartMsg] = useState<string | null>(null);
   // WARP-291: holds the tier-2 confirmation token + reason between the
@@ -153,6 +161,10 @@ export default function CameraSystemPage() {
         <ArrowLeft size={15} />
         Cameras
       </button>
+      <Link href="/cameras/notifications" className="btn ghost">
+        <Bell size={15} />
+        Notifications
+      </Link>
       <button
         onClick={() => mutate()}
         disabled={isLoading}
@@ -557,7 +569,29 @@ export default function CameraSystemPage() {
                   {storage.cameras.map((c) => (
                     <li key={c.camera} style={{ display: "flex", flexDirection: "column", gap: 5 }}>
                       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-                        <span className="nm" style={{ minWidth: 0 }}>{c.camera}</span>
+                        {/* WARP-3511: from "what is using my disk" straight to
+                            that camera's footage, and to its settings where
+                            retention is set. */}
+                        <span className="nm" style={{ minWidth: 0 }}>
+                          <Link
+                            href={`/cameras/${encodeURIComponent(c.camera)}/recordings`}
+                            className="hover:underline underline-offset-2"
+                          >
+                            {c.camera}
+                          </Link>
+                          {canManage && (
+                            <>
+                              {" · "}
+                              <Link
+                                href={`/cameras/${encodeURIComponent(c.camera)}/settings`}
+                                className="hover:underline underline-offset-2"
+                                style={{ color: "var(--text-muted)" }}
+                              >
+                                Settings
+                              </Link>
+                            </>
+                          )}
+                        </span>
                         <span className="rmeta mono">
                           {/* null ≠ 0: say we don't know, don't imply empty. */}
                           {c.usedBytes === null ? "not recorded yet" : fmtBytes(c.usedBytes)}
