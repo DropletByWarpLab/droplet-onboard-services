@@ -678,6 +678,21 @@ describe("translateError — projects domain (WARP-1154/1155)", () => {
     ).toContain("refresh");
   });
 
+  // WARP-3370 / WARP-3371 — the refusals this slice added reach the owner as a
+  // reason and a next step, never as the wire code.
+  it.each([
+    ["project_not_archived", /archive it first/i],
+    ["identifier_mismatch", /type it exactly/i],
+    ["parent_cycle", /different parent/i],
+    ["state_required", /pick one/i],
+    ["invalid_assignee", /pick someone else/i],
+  ])("maps %s to plain words", (code, expected) => {
+    const copy = translateError({ code }, "projects");
+    expect(copy).toMatch(expected);
+    expect(copy).not.toContain(code);
+    expect(copy).not.toMatch(/[a-z]+_[a-z]+/);
+  });
+
   // WARP-1593: the mint refusal must reach the owner as its own reason, not as
   // the generic "check the connection" vpn fallback — the connection is fine;
   // the box simply has no internet address yet.

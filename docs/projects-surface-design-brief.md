@@ -52,7 +52,7 @@ The persona is the **non-technical owner/admin of a small business who owns the 
 ### Non-goals
 
 - **No Plane parity and no embedded Plane** — this is a replacement, not a wrapper; the iframe and any second login are removed.
-- **No surfacing of schema-only entities.** Cycles/sprints, modules, custom properties and attachments exist as data models but have **no API** yet — do not design working UI for them, and do not expose a `cycleId` control on the work item (it is not patchable). The same applies to the **per-item activity history**, which is recorded server-side but has no read endpoint yet: no per-item history timeline until a route exists. (See §3.7, §3.8, and the §3.4 activity/attachments treatment for the designed-but-disabled placeholders.)
+- **No surfacing of schema-only entities.** Custom properties and attachments exist as data models but have **no API** yet — do not design working UI for them. The same applies to the **per-item activity history**, which is recorded server-side but has no read endpoint yet: no per-item history timeline until a route exists. (See the §3.4 activity/attachments treatment for the designed-but-disabled placeholders.) **Cycles and modules are no longer in this list:** they shipped with WS-5 (WARP-3521) and are specified in §3.7 and §3.8, and `cycleId` is patchable through the drawer's cycle picker (§3.4).
 - **No multi-workspace UI.** Multi-home is schema-possible but not exposed; design for the single `home` workspace.
 - **No per-user / private projects** — the model is household-shared by design.
 - **No new tokens, no new design system, no Plane-style chrome.**
@@ -290,7 +290,7 @@ This section enumerates every view to design. Every view is wrapped in the shell
    **Work-item card contract** — from the work-item model:
    - Top line: mono `.chip` `key` (`INBOX-42`) · a **priority** glyph/chip (color + lucide signal per §2.4; `none` hidden) — priority is a small left-edge accent, never shouted.
    - Title: `type-subheadline` / `--text`, 2-line clamp (`.clamp2`).
-   - Label row: `labels[]` as small (11px) `.chip`s tinted by each label `color` (overflow collapses to `+N`).
+   - Label row: `labels[]` as small (11px) `.chip`s tinted by each label `color` (overflow collapses to `+N`). When the item is planned into a cycle, a small cycle chip (target glyph + the cycle's name, truncated, `title="Cycle: {name}"`) leads the row; it draws nothing until the cycle is known, and the list row carries the same chip.
    - Foot row: assignee `.ava` avatar stack (resolved from `assignees[]`; "Unassigned" ghost circle when empty) · a due-date chip (mono date; use `.badge.warn` orange when past and the item is not terminal, `.badge.info` blue when upcoming — never red) · footnote counts `subItemCount` (branch glyph) and `commentCount` (message glyph) when > 0.
   - **Drag-to-transition** — dropping into a column fires `POST /api/pm/work-items/:id/transition { state_id }` (the route that runs the `completedAt`-stamping logic), and reordering within a column patches the **Float** `sortOrder` (insert-between, no renumber). Because a transition is a side-effecting write, an **assistant-proposed** move shows a pending card with the **`Write · confirm to apply`** chip until confirmed; a **direct human drag** is the user's own confirm and writes optimistically (card lands instantly, snaps back on reject — the snap-back is a ~200ms `--ease` transition). Reads (the board itself) carry no chip. Full drag mechanics in §4.1.
 
@@ -322,7 +322,7 @@ This section enumerates every view to design. Every view is wrapped in the shell
 **Layout (top → bottom):**
 1. **Header** — mono `key` (`INBOX-42`) + a state pill (color dot + name, click → transition menu; the `completedAt` logic runs server-side) + a kebab `.icon-btn` (Edit, Copy link, Delete via the destructive confirm dialog). `name` as `type-title-2` (22/700), editable-in-place for writers.
 2. **Description** — rich-text rendered from `descriptionHtml` (sanitized); an editable Tiptap region for writers (saves to `description_html` via PATCH; see §4.3). Empty → calm `.empty`-style line "No description yet."
-3. **Properties rail** — a `.card` of labeled rows (label at `type-footnote` `--text-muted` + value): **State** (picker → transition), **Priority** (`urgent|high|medium|low|none` picker), **Assignees** (multi-select of resolved users; full-set replacement on save), **Labels** (multi-select label chips tinted by `color`; full-set replacement), **Start date** / **Due date** (date pickers → `start_date`/`due_date`, mono display, ISO on wire), **Created by** (resolved `createdById`, read-only), **Completed** (`completedAt` if terminal, read-only).
+3. **Properties rail** — a `.card` of labeled rows (label at `type-footnote` `--text-muted` + value): **State** (picker → transition), **Priority** (`urgent|high|medium|low|none` picker), **Assignees** (multi-select of resolved users; full-set replacement on save), **Labels** (multi-select label chips tinted by `color`; full-set replacement), **Cycle** (a select: *No cycle* plus the project's open cycles — a finished cycle is shown on an item that is in it but never offered as a destination; choosing writes `cycle_id`, `null` takes the item out; optimistic, rolled back with a friendly toast on refusal), **Modules** (the item's modules as removable chips plus an *Add to a module…* select; an item may sit in several), **Start date** / **Due date** (date pickers → `start_date`/`due_date`, mono display, ISO on wire), **Created by** (resolved `createdById`, read-only), **Completed** (`completedAt` if terminal, read-only). For read-only roles Cycle and Modules render as text — the writes are hidden, not disabled.
 4. **Sub-issues** — list of children (`subItemCount`; fetched by parent filter), each a mini work-item row. States to design, all of them:
    - **Populated** — the child rows + an "Add sub-issue" affordance (writers only) that creates a child with `parent_id` set.
    - **Empty** — "No sub-issues yet." with the Add affordance still shown for writers.
@@ -356,7 +356,7 @@ This section enumerates every view to design. Every view is wrapped in the shell
 - **Parent** (`parent_id`, optional, same-project picker),
 - **Start / Due date** (`start_date`/`due_date`).
 
-Footer: secondary Cancel (`.btn`) + primary submit (`.btn.primary`, "Create item" / "Save"). Submit → `POST /api/pm/projects/:id/work-items` (`201 { work_item }`) or `PATCH /api/pm/work-items/:id`; the submit handler may return a Promise, so the button shows "Working…" and the dialog stays open on reject. `cycleId` is **not** offered (not patchable). Toast on success; the new item lands in the create-from-column's state.
+Footer: secondary Cancel (`.btn`) + primary submit (`.btn.primary`, "Create item" / "Save"). Submit → `POST /api/pm/projects/:id/work-items` (`201 { work_item }`) or `PATCH /api/pm/work-items/:id`; the submit handler may return a Promise, so the button shows "Working…" and the dialog stays open on reject. Opened from inside a cycle (§3.7), the modal plans the new item into that cycle (`cycle_id`); opened from the board it offers no cycle field — plan an item from the drawer's Cycle row or the Cycles view. Toast on success; the new item lands in the create-from-column's state.
 
 **Responsive** — center card ~520px desktop, full-width sheet mobile. **States:** validating (inline error), submitting (disabled button "Working…"), error (a `.badge.danger` strip with friendly error copy, form stays open).
 
@@ -374,23 +374,45 @@ Submit → `POST /api/pm/projects` (auto-seeds the 5 default states) or `PATCH /
 
 ---
 
-### 3.7 Cycles (sprints) view (`/projects/[identifier]?view=cycles`)
+### 3.7 Cycles (sprints) view (`?view=cycles`)
 
-**Purpose** — sprint planning per project.
+**Purpose** — sprint planning per project: plan a time-boxed set of work, run it, finish it, and see whether it burned down. (WS-5 / WARP-3521 replaced the "Cycles aren't ready yet" placeholder with this view.)
 
-**Reality gate** — Cycles are **schema-only: no service, no `/api/pm/*` route**, and `cycleId` is not settable via the current patch schema. This view renders as a **fully-designed empty/disabled state**, never a broken fetch. Show the tab, a `.sect` "Cycles", and a `.card` `.empty` block: `.ei` calendar icon, `.eh` "Cycles aren't ready yet", body (≤44ch, owner-facing — no implementation detail) "Sprint planning will live here. We'll turn it on in a future update." — no CTA that calls a missing route. (Note for the engineer: the intended contract is `name`, `startDate`/`endDate`, `status: draft|active|completed`, item assignment — documented for when routes ship, not surfaced to the owner.)
+**Data** — `GET /api/pm/projects/:id/cycles`; `/api/pm/cycles/:id` with `/start`, `/complete`, `/burndown`, `/work-items`; `GET /api/pm/projects/:id/backlog`; a work item joins or leaves a cycle through `PATCH /api/pm/work-items/:id { cycle_id }`. A cycle is `draft` (shown **Upcoming**) → `active` → `completed`. **At most one cycle is active per project** — the database enforces it, and a second start is refused in words ("Another cycle is already running. Complete it before you start this one."). Start and end are *calendar dates* (`YYYY-MM-DD`): they are never run through a local-time `Date`, so the date entered is the date shown in every timezone.
 
-**Responsive** — single-column placeholder at all widths; identical light/dark.
+**List** — three `.sect` groups, **Active · Upcoming · Completed** (empty groups omitted), each a grid of cycle cards (`.card.hover`, keyboard-activatable). A card shows: the name; a status badge in the work-item state-chip hues (info Upcoming, amber Active, green Completed); the date range (mono) and, for the active cycle, "5 days left"; a progress bar (8px, `--brand`; `--ok` once completed) with the figure in words beside it — "7 of 12 done · 1 cancelled", and "18 of 30 points done" when anything is estimated. Progress is *done out of what was planned*, cancelled work excluded. A completed card counts the unfinished work it carried over, so a finished sprint does not read as a trivial 100%: "9 of 12 done · Completed Oct 2 · 3 moved on".
+
+**Detail** — a back link ("All cycles"); the name (`type-title-2`), badge, date range and description (plain text, not HTML); the progress bar. Writers get **Start cycle** (a draft; disabled, with the reason in plain sight — "Set a start and end date first." — until both dates are set), **Complete cycle** (the active one), **Edit** and **Delete**. Below, top to bottom:
+
+1. **Burndown panel** (below).
+2. **Work in this cycle** — a *Board | List* toggle reusing the project's board and list on this cycle's items, loaded server-side with an exact total ("Showing N of M" when it is a page). This panel is the drop zone for backlog planning.
+3. **Backlog panel** (not shown on a completed cycle) — the project's *unfinished work that is in no cycle*. Writers drag a row into the cycle panel **or** press **Add to cycle** on the row — the keyboard alternative, with an accessible name ("Add INBOX-12 to Sprint 12") and a polite live-region announcement ("Added INBOX-12 to Sprint 12."). The line "Drag items into the cycle, or use Add to cycle." states both routes up front. Read-only roles see the list with no handles and no buttons.
+
+**Burndown** — remaining work per day, a *scope* line that visibly rises when work is added mid-cycle and falls when it is pulled out, and a dashed *ideal* line from the work open at the end of the first day down to zero on the last day. An *Items | Points* toggle appears only when something in scope is estimated. Days that have not started leave a gap rather than a zero. The history is rebuilt from the activity feed, and the last point always equals the live counts. **Accessibility:** the SVG is decorative (`aria-hidden`); a plain sentence ("6 of 12 items remaining · scope grew by 2") and a visually hidden data table (Date · Scope · Remaining · Ideal) carry the same numbers, and the legend names every line — nothing is colour only.
+
+**Dialogs** (canonical `Dialog`, write chip in the footer) — *New / Edit cycle*: name, description, start date, end date, with inline validation in the brief's words — "Name can't be empty.", "End date can't be before the start date.", "A cycle can run for at most a year."; a completed cycle's dates are fixed and its date inputs say so. *Complete cycle*: says how many unfinished items will move out ("Finished items stay as a record of what it delivered."), and *Move unfinished items to* defaults to **Backlog** or any other open cycle — the destination is always sent explicitly, never defaulted by the server; with nothing unfinished there is no destination to choose. *Delete*: the destructive confirm — "Unfinished work goes back to the backlog. Completed items keep their status and lose the cycle association. This can't be undone."
+
+**States** — loading: skeleton cards; empty: **"No cycles yet."** / "Create one to plan a sprint." with *New cycle* for writers only; error: "Couldn't load cycles." / "Check the appliance connection and try again." + *Try again*. The burndown ("No burndown yet." / "Set a start and end date to see the burndown." — "Couldn't load the burndown.") and the backlog ("The backlog is empty." / "Everything unfinished is already in a cycle." — "Couldn't load the backlog.") carry their own.
+
+**RBAC** — reads for every role; writes (create, edit, start, complete, delete, planning) for owner/admin/family, hidden — not disabled — for everyone else.
+
+**Responsive** — the grid collapses to one column, the header actions wrap, backlog rows wrap, touch targets are at least 44px, and reduced motion removes the bar and chart transitions.
 
 ---
 
-### 3.8 Modules view (`/projects/[identifier]?view=modules`)
+### 3.8 Modules view (`?view=modules`)
 
-**Purpose** — epic/grouping of work items.
+**Purpose** — group work beyond a sprint: a launch, a migration, an epic. A work item may belong to several modules. (WS-5 / WARP-3521 replaced the "Modules aren't ready yet" placeholder with this view.)
 
-**Reality gate** — Modules are **schema-only, no API**. Same treatment as Cycles: a designed empty/disabled tab, a `.card` `.empty` with `.eh` "Modules aren't ready yet" and owner-facing body "Grouping work into bigger efforts will live here. We'll turn it on in a future update." — no live fetch, no CTA. (Engineer note: reserved shape is `name`, `leadId`, `status: backlog|planned|in_progress|paused|completed|cancelled`, `startDate`/`targetDate`, many-to-many to items, so the eventual layout — a grid of module cards with progress bars — can light up later.)
+**Data** — `GET|POST /api/pm/projects/:id/modules`; `/api/pm/modules/:id` with `/work-items` (`GET`, and `POST` / `DELETE` for membership — the dashboard removes one item at a time through `DELETE …/work-items/:workItemId`); `GET /api/pm/work-items/:id/modules` for the drawer. `status` is `backlog | planned | in_progress | paused | completed | cancelled`, moved by hand. `start_date` / `target_date` are calendar dates, like a cycle's.
 
-**Responsive** — placeholder, single column on mobile.
+**List** — a grid of module cards: the name; a status badge (**Backlog · Planned · In progress · Paused · Completed · Cancelled** in the state-chip hues — only *Cancelled* is red); "Lead — {name}" with an avatar, or "No lead"; "Target Dec 1", with an orange "Past target" when the target has passed and the module is neither completed nor cancelled (a soft state — orange, never red); a progress bar with the figure in words, as for a cycle.
+
+**Detail** — header (name, status, lead, dates, description, progress) and the module's **work items** (key, state dot, priority, name → opens the drawer, state name). Writers get **Add work items** (a searchable checklist of the project's items not already in the module, up to 200 at a time), a remove button on every row (`aria-label` "Remove INBOX-12 from {module}", with a polite announcement), **Edit** and **Delete** ("Delete this module? Its work items stay where they are. This can't be undone.").
+
+**Dialogs** — *New / Edit module*: name, description, status, lead (people who have a local account — a guest cannot lead), start date, target date; "Name can't be empty." and "Target date can't be before the start date." inline.
+
+**States / RBAC / responsive** — as §3.7: skeleton cards; empty **"No modules yet."** / "Group work into bigger efforts here."; error "Couldn't load modules." + *Try again*; writes hidden for read-only roles; one column on mobile.
 
 ---
 
@@ -428,10 +450,10 @@ Honesty rules apply throughout: calm copy, no exclamation marks, no emoji; pendi
   - Filtered-to-empty: **"No work items match these filters."** / **"Try clearing a filter."** · `Clear filters` quiet button — distinct from the truly-empty case so users aren't misled.
   - Search no-results: **"No work items match that search."**
   - Comments: **"No comments yet."** · composer still shown.
-  - Cycles/Modules: the "aren't ready yet" states in §3.7/§3.8.
+  - Cycles/Modules: each view's own loading, empty and error states (§3.7/§3.8).
 - **Error** — the same `.empty` block with an error icon and friendly copy, never blaming the user: **"Couldn't load this project. Check the appliance connection and try again."** + a `Try again` `.btn.ghost` that re-fetches. A read-only role renders the surface with write affordances simply absent (not an error). Mutation failures surface as a toast (e.g. **"Couldn't move that item — try again."**), not a full-view error, leaving the optimistic card to roll back.
 
-**Cross-cutting DoD for every view:** pixel-accurate in **light and dark** (bind the dark re-maps), a **mobile width**, real `/api/pm/*` data, **loading + empty + error + all domain states** (per-state columns, terminal/cancelled styling, overdue, unassigned, archived, AI-authored comment, schema-only Cycles/Modules placeholders), full **keyboard navigation** (roving tabindex on cards/rows, `⌘K` search, `⌘↵` send), `prefers-reduced-motion` honored (no drag-lift, no transition), and the **`Write · confirm to apply` chip on every assistant-proposed write** (transition, create, edit) with confirm-before-execute — reads carry none, and direct human edits self-confirm.
+**Cross-cutting DoD for every view:** pixel-accurate in **light and dark** (bind the dark re-maps), a **mobile width**, real `/api/pm/*` data, **loading + empty + error + all domain states** (per-state columns, terminal/cancelled styling, overdue, unassigned, archived, AI-authored comment), full **keyboard navigation** (roving tabindex on cards/rows, `⌘K` search, `⌘↵` send), `prefers-reduced-motion` honored (no drag-lift, no transition), and the **`Write · confirm to apply` chip on every assistant-proposed write** (transition, create, edit) with confirm-before-execute — reads carry none, and direct human edits self-confirm.
 
 ---
 
@@ -461,7 +483,8 @@ Frequent edits happen in place, not in a modal:
 - **Priority** — a small popover of the five values; selection PATCHes `priority`.
 - **Assignees / labels** — popover multi-selects. These are **full-set replacements** on the wire (`assignees: string[]`, `label_ids: string[]`) — the popover holds the complete desired set and sends it whole, not a delta.
 - **Project key prefix / identifier / lead / icon/color** — edited from the project modal (§3.6), not inline on the board.
-- **Not editable today** (schema-only, no route): `cycleId`, modules, custom properties, attachments, per-item activity. The UI must not render affordances that POST to non-existent routes.
+- **Cycle and modules** — selects in the drawer's properties rail (§3.4): choosing a cycle writes `cycle_id` (`null` takes the item out) optimistically, with rollback on refusal; the modules row waits for its membership request and reports failures with a friendly toast.
+- **Not editable today** (schema-only, no route): custom properties, attachments, per-item activity. The UI must not render affordances that POST to non-existent routes.
 
 User references (`leadId`, `assignees`, `authorId`, `createdById`) are plain user-id strings — resolve display names from the people directory separately; never block a write on name resolution.
 
@@ -480,7 +503,7 @@ User references (`leadId`, `assignees`, `authorId`, `createdById`) are plain use
 Built on the SWR cache + mutate, matching the cameras data convention (per-domain hooks, polling refresh).
 
 - **Pattern:** mutate the local cache immediately (card moves / title changes), fire the write, then revalidate. On rejection, roll back to the prior snapshot and raise a toast.
-- **Drag** is optimistic: card lands instantly; a failed `transition`/`sortOrder` PATCH snaps it back and toasts. Because `sortOrder` is a float midpoint and `sequenceId` is server-minted, an optimistic insert never collides.
+- **Board drag** is optimistic: card lands instantly; a failed `transition`/`sortOrder` PATCH snaps it back and toasts. Cycle backlog Add/drag waits for the server and refreshes both lists before removing the row. Because `sortOrder` is a float midpoint and `sequenceId` is server-minted, an optimistic insert never collides.
 - **Create** is optimistic with a temporary card; reconcile to the real `key` (`${identifier}-${sequenceId}`) and `sequenceId` when `201 { work_item }` returns.
 - **Honesty rule:** never show a write as *done* before the server confirms it as anything stronger than optimistic; an assistant-proposed write stays **pending** until accept (§8). Skeletons/inline patterns, not blocking spinners.
 - **Counts** (`commentCount`, `subItemCount`) are server-derived; optimistically bump on create, reconcile on revalidate.
@@ -553,7 +576,7 @@ The persona is the **non-technical owner/admin of a small business who owns the 
 - **Never blame the user.** "No projects yet." not "You haven't created any projects."
 - **Never imply a guarantee that isn't real** — pending/optimistic states use info/blue, never red. Red is reserved for genuine errors and destructive confirmation.
 - **`--font-mono`** (`ui-monospace, "SF Mono", Menlo, Consolas, monospace`) is reserved for ids and identifiers: work-item keys (`INBOX-42`), project `identifier` prefixes, dates/timestamps, and `kbd` hints. **`--font-ui`** for everything else. The Instrument Serif display utility is for premium hero numbers only — not for body, labels, or the standard KPI value (which is the 28px UI font).
-- **No "coming soon."** The schema-only placeholders use the owner-facing "aren't ready yet … we'll turn it on in a future update" phrasing (§3.7/§3.8), never the marketing cliché "coming soon" and never implementation detail like "the data model is ready."
+- **No "coming soon."** A schema-only placeholder (custom fields, attachments) uses the owner-facing "aren't ready yet … we'll turn it on in a future update" phrasing, never the marketing cliché "coming soon" and never implementation detail like "the data model is ready." (Cycles and modules no longer need one — §3.7/§3.8.)
 
 **One verbatim string per concept — these are final; do not produce variants:**
 
@@ -573,13 +596,19 @@ The persona is the **non-technical owner/admin of a small business who owns the 
 | Assistant attribution (pending write) | "Write · confirm to apply" |
 | Assistant-authored content tag | "AI" |
 | Per-item activity placeholder | "Activity history is recorded but you can't view it here yet." |
-| Cycles placeholder | "Cycles aren't ready yet." · "Sprint planning will live here. We'll turn it on in a future update." |
-| Modules placeholder | "Modules aren't ready yet." · "Grouping work into bigger efforts will live here. We'll turn it on in a future update." |
+| Cycles empty | "No cycles yet." (heading) · "Create one to plan a sprint." (body) |
+| Modules empty | "No modules yet." (heading) · "Group work into bigger efforts here." (body) |
+| No burndown | "No burndown yet." (heading) · "Set a start and end date to see the burndown." (body) |
 | No description | "No description yet." |
 | No comments | "No comments yet." |
 | No sub-issues | "No sub-issues yet." |
 | Cross-project sub-issue blocked | "Sub-issues stay in the same project." |
-| Delete-project confirm | "Delete this project? This removes its work items and can't be undone." |
+| Delete-project confirm (owner/admin, archived projects only; the identifier is typed) | "Delete this project? This removes its work items and can't be undone." |
+| Archive-project confirm (quiet, reversible) | "It leaves your project list and its work items stay put. You can restore it any time from Archived." |
+| Archived project banner | "This project is archived. It's hidden from your project list." |
+| Archived filter, nothing archived | "No archived projects." (heading) · "A project you archive shows up here." (body) |
+| Work items still loading | "Showing {n} of {total} work items — loading the rest…" · on failure "Showing {n} of {total} work items. Couldn't load the rest." |
+| Person who is no longer on the box | "Former member" (while the people list loads: "Team member") |
 
 Note on attribution: the assistant's pending-write chip says exactly **"Write · confirm to apply"** — the same string the human-facing Write tier uses, because it *is* the Write tier. There is no separate "Added by AI · confirm to apply" string; the AI authorship is conveyed by the "AI" tag on the actor, and the action's safety is conveyed by the one canonical Write chip. Keep these two signals distinct (who did it = "AI"; what tier = "Write · confirm to apply") and never merge them into a second chip string.
 
@@ -639,4 +668,4 @@ Recreate these in the dashboard using the existing primitives, hooks, and tokens
 
 ### Definition of done
 
-Pixel match in light **and** dark at 1440w + a mobile width (the table layout) · bound to the live `/api/pm/*` contract (single `home` workspace, household-shared reads, `key` like `INBOX-42`, float `sortOrder`, full-set assignee/label replacement, snake_case wire ↔ camelCase model) · every state covered (loading/empty/error + all domain states) · keyboard navigation + screen-reader parity via the table view · `prefers-reduced-motion` respected · the **2-tier** safety chip on every assistant-proposed write with confirm-before-execute and a `--color-label-primary` label · RBAC read-only for members/viewers/guests · reuse over invention, no new tokens, no invented class names · the sidebar entry matched to the shipped `FolderKanban` Workspace slot (not redesigned). Do **not** surface schema-only entities (cycles, modules, custom properties, attachments, `cycleId`, per-item activity history) — they have no API yet.
+Pixel match in light **and** dark at 1440w + a mobile width (the table layout) · bound to the live `/api/pm/*` contract (single `home` workspace, household-shared reads, `key` like `INBOX-42`, float `sortOrder`, full-set assignee/label replacement, snake_case wire ↔ camelCase model) · every state covered (loading/empty/error + all domain states) · keyboard navigation + screen-reader parity via the table view · `prefers-reduced-motion` respected · the **2-tier** safety chip on every assistant-proposed write with confirm-before-execute and a `--color-label-primary` label · RBAC read-only for members/viewers/guests · reuse over invention, no new tokens, no invented class names · the sidebar entry matched to the shipped `FolderKanban` Workspace slot (not redesigned). Do **not** surface schema-only entities (custom properties, attachments, per-item activity history) — they have no API yet. Cycles and modules are real surfaces (§3.7, §3.8) and must meet the same bar: every state, light and dark, a mobile width, keyboard parity for drag, reduced motion, and writes hidden for read-only roles.

@@ -83,7 +83,9 @@ export interface PmWorkItem {
   department: PmDepartmentRef | null;
   assignees: string[];
   labels: PmLabel[];
+  /** WARP-3372 — a calendar date, `YYYY-MM-DD`; read it through ./date-only. */
   startDate: string | null;
+  /** WARP-3372 — a calendar date, `YYYY-MM-DD`; read it through ./date-only. */
   dueDate: string | null;
   sortOrder: number;
   completedAt: string | null;
@@ -115,11 +117,19 @@ export interface Person {
   name: string;
   initials: string;
   tone: number;
+  /** Set only when the box has an image for this person (none does yet). */
+  avatarUrl?: string;
 }
 
 /** Roles that may write PM data (mirrors requireRole on the API). */
 export function canWrite(role: string | undefined): boolean {
   return role === "owner" || role === "admin" || role === "family";
+}
+
+/** Roles that may delete a project for good (WARP-3370, mirrors `DELETE
+ *  /api/pm/projects/:id`). Members can archive and restore; they cannot destroy. */
+export function canDeleteProject(role: string | undefined): boolean {
+  return role === "owner" || role === "admin";
 }
 
 export interface PmActivity {
@@ -131,4 +141,104 @@ export interface PmActivity {
   oldValue: string | null;
   newValue: string | null;
   createdAt: string;
+}
+
+// ── Cycles and modules (WARP-3521) ──────────────────────────────────────────
+// Mirror /api/pm/cycles, /api/pm/modules and the burndown
+// (apps/orchestrator/src/services/pm/pm-cycles.service.ts, pm-modules.service.ts,
+// pm-burndown.ts). Dates are CALENDAR dates, `YYYY-MM-DD`: never put one through
+// `new Date()` — use ./date-only.
+
+export type CycleStatus = "draft" | "active" | "completed";
+export type ModuleStatus = "backlog" | "planned" | "in_progress" | "paused" | "completed" | "cancelled";
+
+/** Counts and estimate sums over the (non-archived) items attached to a cycle or
+ *  module. `completed` is items in a `completed` state group, `cancelled` those in
+ *  a `cancelled` one, everything else is open. Estimates are points; an unset
+ *  estimate weighs nothing. */
+export interface PmPlanningProgress {
+  total: number;
+  completed: number;
+  cancelled: number;
+  totalEstimate: number;
+  completedEstimate: number;
+  cancelledEstimate: number;
+}
+
+export interface PmCycle {
+  id: string;
+  projectId: string;
+  name: string;
+  description: string | null;
+  startDate: string | null;
+  endDate: string | null;
+  /** `draft` is shown as "Upcoming". */
+  status: CycleStatus;
+  /** The instant the cycle was completed, ISO; null until then. */
+  completedAt: string | null;
+  /** How many unfinished items completing the cycle moved out. */
+  carriedOverCount: number;
+  progress: PmPlanningProgress;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PmModule {
+  id: string;
+  projectId: string;
+  name: string;
+  description: string | null;
+  /** A User.id, resolved to a name through `usePerson`. */
+  leadId: string | null;
+  status: ModuleStatus;
+  startDate: string | null;
+  targetDate: string | null;
+  progress: PmPlanningProgress;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** What the drawer needs to render and toggle one of an item's modules. */
+export interface PmModuleRef {
+  id: string;
+  name: string;
+  status: ModuleStatus;
+}
+
+/** One day of a burndown. The actual fields are null for a day that has not
+ *  started yet (the line breaks there); `ideal` / `idealEstimate` are always numbers. */
+export interface PmBurndownPoint {
+  date: string;
+  scope: number | null;
+  remaining: number | null;
+  completed: number | null;
+  /** Items that joined the cycle during the day. */
+  added: number | null;
+  /** Items that left the cycle during the day. */
+  removed: number | null;
+  scopeEstimate: number | null;
+  remainingEstimate: number | null;
+  completedEstimate: number | null;
+  ideal: number;
+  idealEstimate: number;
+}
+
+export interface PmBurndown {
+  cycleId: string;
+  status: CycleStatus;
+  startDate: string | null;
+  endDate: string | null;
+  /** The last day with actual numbers; null when there are none. */
+  through: string | null;
+  /** True when anything in scope carries an estimate. */
+  hasEstimates: boolean;
+  /** Empty when the cycle has no start and end date to chart. */
+  days: PmBurndownPoint[];
+}
+
+/** A scoped work-item list: one cycle, one module, or the planning backlog. */
+export interface PmScopedItems {
+  work_items: PmWorkItem[];
+  /** The exact total — `work_items` may be a page of it. */
+  total: number;
 }

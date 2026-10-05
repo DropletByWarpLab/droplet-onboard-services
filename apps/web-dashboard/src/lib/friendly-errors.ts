@@ -679,8 +679,49 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "That label isn't available anymore. Refresh and try again.",
     invalid_parent:
       "That parent item isn't available anymore. Refresh and try again.",
+    // WARP-3521 — cycles (sprints) and modules (milestones). Each says what
+    // happened and what to do, in the owner's words: cycle, module, start, end,
+    // item — never state machine, constraint or conflict.
+    cycle_not_found:
+      "We couldn't find that cycle anymore. It may have been deleted.",
+    invalid_cycle:
+      "That cycle isn't available for this item. Refresh and try again.",
+    cycle_completed:
+      "That cycle is finished, so it can't take new work. Pick another cycle.",
+    cycle_already_active:
+      "Another cycle is already running. Complete it before you start this one.",
+    cycle_not_draft:
+      "That cycle has already started. Refresh and try again.",
+    cycle_not_active:
+      "That cycle isn't running. Refresh and try again.",
+    cycle_dates_required:
+      "Set a start date and an end date first.",
+    invalid_dates:
+      "Check the dates — the end can't come before the start, and a cycle can run for at most a year.",
+    module_not_found:
+      "We couldn't find that module anymore. It may have been deleted.",
+    invalid_work_item:
+      "That item belongs to a different project, so it can't go in this module.",
+    lead_is_guest:
+      "A guest can't lead a module or a project. Pick someone on your team.",
+    concurrent_mutation:
+      "Someone else changed this at the same moment, so nothing was saved. Try again.",
     identifier_taken:
       "That project ID is already in use. Pick a different one.",
+    // WARP-3371 — the work-item API now refuses what it used to swallow. Each
+    // says what is wrong in the owner's words (item, column, person — never
+    // cycle, state or assignee) and the one thing to do.
+    parent_cycle:
+      "That would make an item a sub-item of one of its own sub-items. Pick a different parent.",
+    state_required:
+      "A work item has to sit in a column. Pick one and try again.",
+    invalid_assignee:
+      "That person isn't available anymore. Refresh and pick someone else.",
+    // WARP-3370 — hard delete. Each says what is wrong and the one thing to do.
+    project_not_archived:
+      "Only an archived project can be deleted for good. Archive it first.",
+    identifier_mismatch:
+      "That doesn't match the project's ID. Type it exactly as shown.",
     // WARP-2730 (ADR-048) — the filing review surface, which lives inside the
     // CRM and therefore inside this domain. Each string says what happened and
     // what to do about it, in the owner's words: file, customer, look, undo —
