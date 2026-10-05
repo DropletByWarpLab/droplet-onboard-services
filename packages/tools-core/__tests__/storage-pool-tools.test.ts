@@ -1,3 +1,4 @@
+// add-llm-tool:not-a-gate — storage safety policy, not an add-a-tool wiring site.
 /**
  * BUG-3 / ADR-019: tools-core storage-pool surface.
  *
@@ -61,10 +62,50 @@ describe("storage pool tools-core surface (ADR-019 D5)", () => {
       "create_storage_pool",
       "destroy_storage_pool",
       "format_storage_pool",
+      // WARP-3513: drive preparation (Erase & adopt, reclaim) — owner-only,
+      // dashboard-only, and now always encrypting.
+      "drive_adopt",
+      "drive_reclaim",
+      // WARP-3513: the one-time reveal of a bay drive's recovery key and the
+      // "Regenerate recovery key" that replaces it. Their host operations, and
+      // every name someone might plausibly give a tool for them. The recovery
+      // key unlocks a drive's data without the TPM: it is shown to the OWNER,
+      // once, in the dashboard — it must never pass through a model, and the
+      // model must not be able to replace it either.
+      "recovery_key_reveal",
+      "recovery_key_regenerate",
+      "get_recovery_key",
+      "reveal_recovery_key",
+      "show_recovery_key",
+      "regenerate_recovery_key",
+      "rotate_recovery_key",
     ];
     for (const name of forbidden) {
       expect(TOOLS.has(name), `${name} must NEVER be an AI tool`).toBe(false);
     }
+  });
+
+  it("registers NO tool whose name mentions a recovery key (WARP-3513)", () => {
+    // A list of names catches the spellings we thought of. This catches the
+    // ones we did not: any tool, however spelled, that names a recovery key.
+    const recoveryKey = /recovery[_-]?key/i;
+    for (const [name, tool] of TOOLS) {
+      expect(recoveryKey.test(name), `registry key '${name}' must not name a recovery key`).toBe(false);
+      expect(
+        recoveryKey.test(tool.name),
+        `tool '${tool.name}' must not name a recovery key`,
+      ).toBe(false);
+    }
+  });
+
+  it("the recovery-key scan is not vacuous: it sees the registry and would catch a bad name", () => {
+    expect(TOOLS.size).toBeGreaterThan(10);
+    const recoveryKey = /recovery[_-]?key/i;
+    for (const bad of ["get_recovery_key", "recovery-key", "RecoveryKey", "show_RECOVERY_KEY", "recoverykey_reveal"]) {
+      expect(recoveryKey.test(bad), bad).toBe(true);
+    }
+    // …and it does not trip on the legitimate storage tool.
+    expect(recoveryKey.test("list_storage_pools")).toBe(false);
   });
 
   it("has no registered storage tool that is a write/confirm op", () => {

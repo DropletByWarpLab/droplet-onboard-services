@@ -7,7 +7,7 @@
 // The storage-pool write path (ADR-019 follow-up) needs exactly ONE narrow
 // grant: `systemctl start droplet-storage-pool-apply.service` — the root
 // oneshot that consumes the bridge's spooled pool request
-// (/var/lib/droplet-bridge/pool-spool/request.json) and runs the repo-tracked
+// (/run/droplet-bridge-pool-spool/request.json, on tmpfs) and runs the repo-tracked
 // droplet-storage-pool.sh as root. mdadm/mkfs are direct binaries with no
 // unit of their own, so the privileged work lives in that dedicated oneshot;
 // the bridge only talks to PID 1 over D-Bus. Start verb ONLY — the bridge

@@ -7,6 +7,12 @@
  * A token minted to destroy `md0` cannot confirm a destroy of `md1`, nor a
  * format of `md0` — both the operation and the resource must match.
  *
+ * WARP-3513: the one-time recovery-key reveal rides the same machinery as a
+ * Tier-2 operation. The tier in every response and CommandAuditLog row is the
+ * classification's (it used to be a hard-coded 3), and a confirmation can be
+ * restricted to the services an endpoint is able to execute, so a token minted
+ * for the reveal can never be spent at the generic confirm route.
+ *
  * Mirrors network-safety.service.ts (same in-memory pending map, same
  * CommandAuditLog dual-write shape, same WARP-41 operation-mismatch defense),
  * specialised for the {service, resourceId} binding.
@@ -16,9 +22,11 @@ import { randomBytes } from "node:crypto";
 import { PrismaClient } from "@prisma/client";
 import {
   classifyStorageCommand,
+  endpointMismatchReason,
   STORAGE_CONFIRMATION_TOKEN_EXPIRY_MS,
   STORAGE_MAX_PENDING_CONFIRMATIONS,
 } from "../config/storage-safety-rules.js";
+import type { SafetyTier } from "../config/safety-rules.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("storage-safety");
@@ -31,6 +39,8 @@ interface PendingConfirmation {
   resourceId: string;
   params?: Record<string, unknown>;
   userId?: string;
+  /** The classification's tier at mint time — what the audit rows record. */
+  tier: SafetyTier;
   expiresAt: number;
 }
 
@@ -38,24 +48,29 @@ interface PendingConfirmation {
 const pendingConfirmations = new Map<string, PendingConfirmation>();
 
 export type EvaluateStorageResult =
-  | { allowed: false; blocked: true; reason: string; tier: number }
+  | { allowed: false; blocked: true; reason: string; tier: SafetyTier }
   | {
       allowed: false;
       requiresConfirmation: true;
       confirmationToken: string;
       reason: string;
-      tier: number;
+      tier: SafetyTier;
     };
 
 /**
- * Evaluate a destructive storage command.
+ * Evaluate a storage command.
  *
- * - `source: "ai"` → BLOCKED. The AI can never destroy storage. (Belt to the
- *   braces of D5: the destructive ops aren't in tools-core at all, so the AI
- *   can't even name them — this is the second layer.)
+ * - `source: "ai"` → BLOCKED, for every storage op (Tier 2 and Tier 3 alike).
+ *   The AI can never destroy storage or read a recovery key. (Belt to the
+ *   braces of D5: those ops aren't in tools-core at all, so the AI can't even
+ *   name them — this is the second layer.)
  * - `source: "api"` (the dashboard owner) → returns a single-use confirm token
  *   bound to {service, resourceId}. Nothing executes here; the caller must
  *   confirm via confirmStorageCommand to run it.
+ *
+ * Every result and audit row carries the operation's OWN tier
+ * (classifyStorageCommand): 3 for the erase ops and for unrecognised ones, 2
+ * for the recovery-key reveal.
  */
 export async function evaluateStorageCommand(
   prisma: PrismaClient,
@@ -66,14 +81,16 @@ export async function evaluateStorageCommand(
   source: "api" | "ai" = "api",
 ): Promise<EvaluateStorageResult> {
   const classification = classifyStorageCommand(service);
+  const tier = classification.tier;
 
-  // Tier 3 + AI → hard block.
+  // AI → hard block, whatever the tier.
   if (source === "ai") {
     await logStorageCommand(prisma, {
       userId,
       resourceId,
       service,
       params,
+      tier,
       confirmed: false,
       blocked: true,
       reason: classification.reason,
@@ -84,7 +101,7 @@ export async function evaluateStorageCommand(
       reason:
         classification.reason ||
         `Storage operation '${service}' is not available via AI`,
-      tier: 3,
+      tier,
     };
   }
 
@@ -95,7 +112,7 @@ export async function evaluateStorageCommand(
       allowed: false,
       blocked: true,
       reason: "Too many pending storage confirmations — try again shortly",
-      tier: 3,
+      tier,
     };
   }
   const confirmationToken = randomBytes(32).toString("hex");
@@ -105,6 +122,7 @@ export async function evaluateStorageCommand(
     resourceId,
     params,
     userId,
+    tier,
     expiresAt: Date.now() + STORAGE_CONFIRMATION_TOKEN_EXPIRY_MS,
   });
 
@@ -113,6 +131,7 @@ export async function evaluateStorageCommand(
     resourceId,
     service,
     params,
+    tier,
     confirmed: false,
     blocked: false,
     reason: classification.reason,
@@ -125,7 +144,7 @@ export async function evaluateStorageCommand(
     requiresConfirmation: true,
     confirmationToken,
     reason: classification.reason || "This storage operation requires confirmation",
-    tier: 3,
+    tier,
   };
 }
 
@@ -134,7 +153,24 @@ export type ConfirmStorageCommandError =
   | "TOKEN_MISSING"
   | "TOKEN_EXPIRED"
   | "TOKEN_USER_MISMATCH"
-  | "TOKEN_OPERATION_MISMATCH";
+  | "TOKEN_OPERATION_MISMATCH"
+  /** WARP-3513: the token is for a service the calling endpoint cannot execute. */
+  | "TOKEN_ENDPOINT_MISMATCH";
+
+/**
+ * What the caller of confirmStorageCommand says it is confirming.
+ *
+ * `service` / `resourceId` are the caller's ECHO of the operation — optional on
+ * the wire, so on their own they cannot stop a token being spent somewhere it
+ * must not be. `allowedServices` is the caller's own, server-side statement of
+ * which services it can execute; a token for any other service is refused (and
+ * burned) whatever the client echoed or omitted.
+ */
+export interface ExpectedStorageConfirmation {
+  service?: string;
+  resourceId?: string;
+  allowedServices?: ReadonlySet<string>;
+}
 
 /**
  * Confirm + consume a storage confirm token.
@@ -144,12 +180,18 @@ export type ConfirmStorageCommandError =
  * rejected with TOKEN_OPERATION_MISMATCH (WARP-41 defense generalised to the
  * {service, resourceId} binding). Single-use: the token is consumed whether or
  * not it matched-and-executed, and is gone on a second call.
+ *
+ * `expected.allowedServices` (WARP-3513) is checked LAST, after the requesting
+ * user: a different user cannot burn the owner's token by presenting it at the
+ * wrong endpoint, but the owner presenting it there loses it (a confused or
+ * forged caller must start over). Nothing is audited as confirmed in that case:
+ * nothing ran.
  */
 export async function confirmStorageCommand(
   prisma: PrismaClient,
   confirmationToken: string,
   userId?: string,
-  expected?: { service?: string; resourceId?: string },
+  expected?: ExpectedStorageConfirmation,
 ): Promise<
   | { confirmed: true; service: string; resourceId: string; params?: Record<string, unknown> }
   | { confirmed: false; code: ConfirmStorageCommandError; reason: string }
@@ -197,6 +239,19 @@ export async function confirmStorageCommand(
     };
   }
 
+  // The endpoint's own list of what it can execute. Same consume-and-reject
+  // posture as a mismatch: the token is for something this endpoint must never
+  // run (WARP-3513: the recovery-key reveal, whose key would otherwise be
+  // relayed by an owner/admin route).
+  if (expected?.allowedServices && !expected.allowedServices.has(pending.service)) {
+    pendingConfirmations.delete(confirmationToken);
+    return {
+      confirmed: false,
+      code: "TOKEN_ENDPOINT_MISMATCH",
+      reason: endpointMismatchReason(pending.service),
+    };
+  }
+
   // Consume (single-use).
   pendingConfirmations.delete(confirmationToken);
 
@@ -205,6 +260,7 @@ export async function confirmStorageCommand(
     resourceId: pending.resourceId,
     service: pending.service,
     params: pending.params,
+    tier: pending.tier,
     confirmed: true,
     blocked: false,
   });
@@ -231,6 +287,7 @@ async function logStorageCommand(
     resourceId: string;
     service: string;
     params?: Record<string, unknown>;
+    tier: SafetyTier;
     confirmed: boolean;
     blocked: boolean;
     reason?: string;
@@ -244,7 +301,7 @@ async function logStorageCommand(
         domain: DOMAIN,
         service: entry.service,
         data: entry.params ? JSON.parse(JSON.stringify(entry.params)) : undefined,
-        tier: 3,
+        tier: entry.tier,
         confirmed: entry.confirmed,
         blocked: entry.blocked,
         reason: entry.reason || null,

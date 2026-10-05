@@ -32,8 +32,8 @@ vi.mock("@/lib/auth", () => ({
     if (url.endsWith("/comments") && method === "POST") {
       return json({ comment: { id: "c-new", workItemId: "w1", authorId: "u1", commentHtml: "<p>hi</p>", createdAt: "2026-06-22T21:16:00.000Z" } });
     }
-    if (url.endsWith("/comments")) return json({ comments: [] });
-    if (url.endsWith("/activity")) return json({ activity: [] });
+    if (url.includes("/comments")) return json({ comments: [], nextCursor: null, total: 0 });
+    if (url.includes("/activity")) return json({ activity: [], nextCursor: null, total: 0 });
     if (url.endsWith("/development")) return json({ links: [{
       id: "dev-1", provider: "GITHUB", kind: "PULL_REQUEST", url: "https://github.com/acme/app/pull/4",
       title: "INBOX-1 fix login", state: "OPEN", author: "octocat", ref: "inbox-1-fix-login",
@@ -95,9 +95,9 @@ describe("DetailDrawer — comment post revalidates activity", () => {
 
     // Wait for the initial activity read so we can count subsequent ones.
     await waitFor(() => {
-      expect(calls.some((c) => c.url.endsWith("/activity") && c.method === "GET")).toBe(true);
+      expect(calls.some((c) => c.url.includes("/activity") && c.method === "GET")).toBe(true);
     });
-    const activityReadsBefore = calls.filter((c) => c.url.endsWith("/activity") && c.method === "GET").length;
+    const activityReadsBefore = calls.filter((c) => c.url.includes("/activity") && c.method === "GET").length;
 
     const textarea = screen.getByLabelText("Write a comment");
     fireEvent.change(textarea, { target: { value: "looks good" } });
@@ -110,7 +110,7 @@ describe("DetailDrawer — comment post revalidates activity", () => {
 
     // … and the activity feed must be revalidated (an extra GET) afterwards.
     await waitFor(() => {
-      const activityReadsAfter = calls.filter((c) => c.url.endsWith("/activity") && c.method === "GET").length;
+      const activityReadsAfter = calls.filter((c) => c.url.includes("/activity") && c.method === "GET").length;
       expect(activityReadsAfter).toBeGreaterThan(activityReadsBefore);
     });
   });
