@@ -26,9 +26,11 @@ const USER = { id: "u1", username: "alice", displayName: "Alice", role: "family"
 let server: Server | undefined;
 
 afterEach(async () => {
-  vi.clearAllMocks();
   await new Promise<void>((r) => (server ? server.close(() => r()) : r()));
   server = undefined;
+  // Clear after closing connections: an accepted socket may have a keepalive
+  // revalidation already in flight while the HTTP server is shutting down.
+  vi.clearAllMocks();
 });
 
 async function connect(headers: Record<string, string>, protocol?: string) {
@@ -42,15 +44,17 @@ async function connect(headers: Record<string, string>, protocol?: string) {
       protocol ? [protocol] : [],
       { headers },
     );
+    const safetyTimer = setTimeout(() => ws.terminate(), 1000);
     ws.on("open", () => {
-      ws.on("close", (code) => resolve({ status: "open", closeCode: code }));
-      // Safety net: if the server never closes, end the test with no code.
-      setTimeout(() => {
-        ws.close();
-        resolve({ status: "open" });
-      }, 1000);
+      ws.on("close", (code) => {
+        clearTimeout(safetyTimer);
+        resolve({ status: "open", closeCode: code });
+      });
     });
-    ws.on("unexpected-response", (_req, res) => resolve({ status: res.statusCode ?? 0 }));
+    ws.on("unexpected-response", (_req, res) => {
+      clearTimeout(safetyTimer);
+      resolve({ status: res.statusCode ?? 0 });
+    });
     ws.on("error", () => undefined);
   });
 }
