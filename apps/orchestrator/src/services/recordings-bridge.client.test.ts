@@ -28,6 +28,12 @@ function reply(status: number, body: unknown): Response {
 describe("recordings bridge client (WARP-3514)", () => {
   const fetchMock = vi.fn<(url: string, init?: RequestInit) => Promise<Response>>();
   const bridge = createRecordingsBridge();
+  const mutations = [
+    ["apply", "/host/nvr-storage", () => bridge.applyNvrTarget({ fsUuid: "0a1b2c3d-1111", mode: "full" })],
+    ["resize", "/host/nvr-storage/resize", () => bridge.resizeNvr(777)],
+    ["migrate", "/host/nvr-storage/migrate", () => bridge.startMigration("0a1b2c3d-1111")],
+    ["delete old footage", "/host/nvr-storage/old/delete", () => bridge.deleteOldFootage()],
+  ] as const;
 
   beforeEach(() => {
     process.env.BRIDGE_AUTH_TOKEN = "unit-test-bridge-secret";
@@ -38,6 +44,67 @@ describe("recordings bridge client (WARP-3514)", () => {
     vi.unstubAllGlobals();
     delete process.env.BRIDGE_AUTH_TOKEN;
     delete process.env.SERVICE_TOKEN_DISPLAY;
+    delete process.env.SERVICE_TOKEN_BRIDGE;
+    delete process.env.DEVICE_SECRET_KEY;
+  });
+
+  it.each(mutations)("%s sends the distinct admin credential, never the panel credential", async (_name, path, invoke) => {
+    process.env.BRIDGE_AUTH_TOKEN = "panel-token";
+    process.env.SERVICE_TOKEN_DISPLAY = "display-token";
+    process.env.SERVICE_TOKEN_BRIDGE = " admin-token ";
+    fetchMock.mockResolvedValueOnce(reply(200, { ok: true }));
+    await invoke();
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toMatch(new RegExp(path+"$"));
+    expect(init?.method).toBe("POST");
+    const token = (init?.headers as Record<string, string>)["X-Droplet-Auth"];
+    expect(token).toBe("admin-token");
+    expect(token).not.toBe("panel-token");
+    expect(token).not.toBe("display-token");
+  });
+
+  it.each([
+    ["status", "/host/nvr-storage", HOST, () => bridge.getNvrStatus()],
+    ["migration status", "/host/nvr-storage/migrate", { state: "idle" }, () => bridge.getMigration()],
+    ["drive inventory", "/drives", { drives: [] }, () => bridge.getDrivesSnapshot()],
+  ] as const)("%s keeps using the panel credential for reads", async (_name, path, body, invoke) => {
+    process.env.BRIDGE_AUTH_TOKEN = "panel-token";
+    process.env.SERVICE_TOKEN_BRIDGE = "admin-token";
+    fetchMock.mockResolvedValueOnce(reply(200, body));
+    await invoke();
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toMatch(new RegExp(path+"$"));
+    expect(init?.method).toBe("GET");
+    const token = (init?.headers as Record<string, string>)["X-Droplet-Auth"];
+    expect(token).toBe("panel-token");
+    expect(token).not.toBe("admin-token");
+  });
+
+  it("reads admin rotation at each call on the same client", async () => {
+    fetchMock.mockResolvedValue(reply(200, { ok: true }));
+    process.env.SERVICE_TOKEN_BRIDGE = "first-admin-token";
+    await bridge.resizeNvr(1);
+    process.env.SERVICE_TOKEN_BRIDGE = "second-admin-token";
+    await bridge.deleteOldFootage();
+    expect(fetchMock.mock.calls.map((c) => (c[1]?.headers as Record<string, string>)["X-Droplet-Auth"])).toEqual([
+      "first-admin-token", "second-admin-token",
+    ]);
+  });
+
+  it("preserves the legacy panel fallback when no admin credential is configured", async () => {
+    process.env.SERVICE_TOKEN_BRIDGE = " ";
+    fetchMock.mockResolvedValueOnce(reply(200, { ok: true }));
+    await bridge.resizeNvr(1);
+    expect((fetchMock.mock.calls[0]![1]?.headers as Record<string, string>)["X-Droplet-Auth"]).toBe("unit-test-bridge-secret");
+  });
+
+  it.each(mutations)("%s fails closed without bridge credentials and never sends the master key", async (_name, _path, invoke) => {
+    delete process.env.BRIDGE_AUTH_TOKEN;
+    delete process.env.SERVICE_TOKEN_DISPLAY;
+    delete process.env.SERVICE_TOKEN_BRIDGE;
+    process.env.DEVICE_SECRET_KEY = "master-key-must-not-be-sent";
+    await expect(invoke()).rejects.toMatchObject({ code: "bridge_unavailable" });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("sends the shared secret on every call and parses the host status", async () => {
