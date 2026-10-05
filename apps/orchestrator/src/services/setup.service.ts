@@ -238,6 +238,24 @@ export async function setSetupStep(
 }
 
 /**
+ * Commit the public read's late-pointer recovery before creating the first
+ * owner. The caller has verified physical claim and checks zero owners inside
+ * this Serializable transaction. A resumed account form may not issue a progress
+ * PATCH before owner creation, which would otherwise expose the old pointer.
+ * Ready appliances and pointers through account are left untouched.
+ */
+export async function recoverSetupStepForFirstOwner(tx: Prisma.TransactionClient): Promise<void> {
+  await tx.applianceSetup.updateMany({
+    where: {
+      id: APPLIANCE_SETUP_ID,
+      state: "unclaimed",
+      setupStep: { in: SETUP_STEPS.slice(SETUP_STEPS.indexOf(STEP_AFTER_CLAIM) + 1) },
+    },
+    data: { setupStep: STEP_AFTER_CLAIM },
+  });
+}
+
+/**
  * WARP-867 — monotonic variant of `setSetupStep` for flows that may legally
  * REPLAY an early wizard step on a box whose persisted pointer is already
  * further along. The claim route is the canonical caller: after a reboot the

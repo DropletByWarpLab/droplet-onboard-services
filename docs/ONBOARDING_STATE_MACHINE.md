@@ -39,7 +39,9 @@ Wizard and workspace writes advance monotonically using a serializable
 transaction with bounded conflict retries. Back/rail navigation never lowers
 progress. A delayed earlier write cannot displace `team` or terminal `done`.
 The exception is a legacy late pointer without an owner: the next legitimate
-claim/account write repairs it durably before owner creation.
+claim/account write repairs it durably. First-owner creation also repairs the
+pointer inside its transaction, covering a resumed account form that sends no
+progress write before creating the owner.
 
 ## HTTP and session contract
 
@@ -62,7 +64,10 @@ claim/account write repairs it durably before owner creation.
   separately. Done owns the flourish and embedded tour; refreshing Done does
   not restart setup.
 - Claimed-device and serializable first-owner checks prevent creating another
-  owner. The owner account auto-signs in before authenticated steps mount.
+  owner. Serialization conflicts retry up to three times; exhaustion returns
+  retryable `503 SETUP_RETRY_REQUIRED`, while `409 OWNER_EXISTS` requires an
+  observed owner. The owner account auto-signs in before authenticated steps
+  mount.
 
 A cold refresh after account creation waits for the session probe. An expired
 session renders a sign-in-only AccountStep with authenticator/recovery support.
