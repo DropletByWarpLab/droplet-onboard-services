@@ -29,7 +29,7 @@ vi.mock("@/lib/api", () => ({
   sendMatterCommand: vi.fn(),
 }));
 
-import { sendMatterCommand, fetchMatterDevices } from "@/lib/api";
+import { sendMatterCommand, fetchMatterDevices, discoverMatterDevices } from "@/lib/api";
 
 const wrapper = ({ children }: { children: ReactNode }) => (
   <SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>
@@ -119,6 +119,73 @@ describe("useSmartHome.command (KAN-5)", () => {
     expect(sendMatterCommand).toHaveBeenCalledWith("31000", "set_temperature", {
       temperature: 31,
     });
+  });
+});
+
+describe("useSmartHome polling gate", () => {
+  it("does not poll device or discovery endpoints when disabled", () => {
+    renderHook(() => useSmartHome({ enabled: false }), { wrapper });
+    expect(fetchMatterDevices).not.toHaveBeenCalled();
+    expect(discoverMatterDevices).not.toHaveBeenCalled();
+  });
+
+  it("makes no device or discovery requests through polling or refresh while disabled", async () => {
+    vi.useFakeTimers();
+    const { result, unmount } = renderHook(() => useSmartHome({ enabled: false }), { wrapper });
+    try {
+      await act(async () => {
+        result.current.refresh();
+        await vi.advanceTimersByTimeAsync(60_001);
+      });
+      expect(fetchMatterDevices).not.toHaveBeenCalled();
+      expect(discoverMatterDevices).not.toHaveBeenCalled();
+    } finally {
+      unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops both active polls when disabled and resumes both when re-enabled", async () => {
+    vi.useFakeTimers();
+    const { result, rerender, unmount } = renderHook(
+      ({ enabled }) => useSmartHome({ enabled }),
+      { wrapper, initialProps: { enabled: true } },
+    );
+    try {
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+      expect(fetchMatterDevices).toHaveBeenCalled();
+      expect(discoverMatterDevices).toHaveBeenCalled();
+      const initialDeviceCalls = vi.mocked(fetchMatterDevices).mock.calls.length;
+      const initialDiscoveryCalls = vi.mocked(discoverMatterDevices).mock.calls.length;
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_001); });
+      expect(vi.mocked(fetchMatterDevices).mock.calls.length).toBeGreaterThan(initialDeviceCalls);
+      expect(vi.mocked(discoverMatterDevices).mock.calls.length).toBeGreaterThan(initialDiscoveryCalls);
+
+      await act(async () => { rerender({ enabled: false }); });
+      vi.mocked(fetchMatterDevices).mockClear();
+      vi.mocked(discoverMatterDevices).mockClear();
+      await act(async () => {
+        result.current.refresh();
+        await vi.advanceTimersByTimeAsync(60_001);
+      });
+      expect(fetchMatterDevices).not.toHaveBeenCalled();
+      expect(discoverMatterDevices).not.toHaveBeenCalled();
+
+      await act(async () => { rerender({ enabled: true }); });
+      // Both cached keys revalidate after the effect commits and SWR's next
+      // animation frame runs.
+      await act(async () => { await vi.advanceTimersByTimeAsync(20); });
+      expect(fetchMatterDevices).toHaveBeenCalled();
+      expect(discoverMatterDevices).toHaveBeenCalled();
+      const resumedDeviceCalls = vi.mocked(fetchMatterDevices).mock.calls.length;
+      const resumedDiscoveryCalls = vi.mocked(discoverMatterDevices).mock.calls.length;
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_001); });
+      expect(vi.mocked(fetchMatterDevices).mock.calls.length).toBeGreaterThan(resumedDeviceCalls);
+      expect(vi.mocked(discoverMatterDevices).mock.calls.length).toBeGreaterThan(resumedDiscoveryCalls);
+    } finally {
+      unmount();
+      vi.useRealTimers();
+    }
   });
 });
 
