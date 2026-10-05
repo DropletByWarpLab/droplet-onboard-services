@@ -422,6 +422,50 @@ droplet_backup_status_field() {
   { grep -o "\"$1\": *\"[^\"]*\"" "$file" 2>/dev/null || true; } | head -n 1 | sed 's/^[^:]*: *"\(.*\)"$/\1/'
 }
 
+# =============================================================================
+# droplet_backup_repository_location — WARP-3610: is the backup repository on
+# the same physical disk as the data it protects? Echoes ONE of:
+#   same_disk   a local path on a disk that also holds the data (does NOT
+#               survive disk failure, theft or a factory reset)
+#   off_device  a remote restic backend (sftp:, s3:, rest:, ...) or a local
+#               path on a different disk (e.g. a USB drive)
+#   unknown     could not be resolved -- never guessed
+# Data path: $DROPLET_BACKUP_DATA_PATH, else docker's root dir, else
+# /var/lib/docker. Same filesystem => same disk; otherwise compare the whole
+# disks lsblk resolves for each (LVM/RAID/partitions all collapse to disks).
+# =============================================================================
+_droplet_backup_disks_of() {
+  local p="$1" src
+  while [ ! -e "$p" ] && [ "$p" != "/" ]; do p="$(dirname "$p")"; done
+  src="$(findmnt -n -o SOURCE -T "$p" 2>/dev/null | head -n 1)" || return 1
+  [ -n "$src" ] || return 1
+  printf 'SRC %s\n' "$src"
+  lsblk -rnso NAME,TYPE "$src" 2>/dev/null | awk '$2=="disk"{print "DISK " $1}'
+}
+
+droplet_backup_repository_location() {
+  local repo="${1:-${RESTIC_REPOSITORY:-}}" data a b
+  case "$repo" in
+    "") echo unknown; return 0 ;;
+    /*) : ;;
+    *) echo off_device; return 0 ;;
+  esac
+  data="${DROPLET_BACKUP_DATA_PATH:-$(timeout 10 docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)}"
+  data="${data:-/var/lib/docker}"
+  a="$(_droplet_backup_disks_of "$repo")" || { echo unknown; return 0; }
+  b="$(_droplet_backup_disks_of "$data")" || { echo unknown; return 0; }
+  if [ "$(printf '%s\n' "$a" | head -n 1)" = "$(printf '%s\n' "$b" | head -n 1)" ]; then
+    echo same_disk; return 0
+  fi
+  if [ -n "$(comm -12 <(printf '%s\n' "$a" | grep '^DISK ' | sort) <(printf '%s\n' "$b" | grep '^DISK ' | sort))" ]; then
+    echo same_disk
+  elif printf '%s\n' "$a" | grep -q '^DISK ' && printf '%s\n' "$b" | grep -q '^DISK '; then
+    echo off_device
+  else
+    echo unknown
+  fi
+}
+
 droplet_backup_write_status() {
   local state="$1" reason="${2:-}" bump="${3:-bump}"
   local dir="${DROPLET_BACKUP_STATUS_DIR:-/var/lib/droplet/backup-status}"
@@ -455,7 +499,8 @@ droplet_backup_write_status() {
   "lastSuccessAt": $(_q "$last_success"),
   "lastFailureAt": $(_q "$last_failure"),
   "lastRekeyAt": $(_q "$last_rekey"),
-  "repository": $(_q "${RESTIC_REPOSITORY:-}")
+  "repository": $(_q "${RESTIC_REPOSITORY:-}"),
+  "repositoryLocation": "$(droplet_backup_repository_location)"
 }
 STATUS
   chmod 644 "$tmp"

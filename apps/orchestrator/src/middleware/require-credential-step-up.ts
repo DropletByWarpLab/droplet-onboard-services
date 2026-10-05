@@ -22,6 +22,8 @@ import type { PrismaClient } from "@prisma/client";
 import { createRequireRecentMfa } from "./require-recent-mfa.js";
 import { verifyPassword } from "../services/password.service.js";
 import { throttledCredentialCheck } from "../services/throttled-credential-check.js";
+import { config } from "../config.js";
+import { hasSecondFactor } from "./admin-mfa-enrollment-gate.js";
 
 /** How recent the MFA stamp must be to enrol a credential. */
 export const CREDENTIAL_STEP_UP_WINDOW_SEC = 300;
@@ -106,6 +108,59 @@ export function createRequireCredentialStepUp(
   return async (req, res, next) => {
     try {
       if (await passCredentialStepUp(prisma, req, res)) next();
+    } catch (err) {
+      next(err);
+    }
+  };
+}
+
+type AdminStepUpPrisma = StepUpPrisma & Pick<PrismaClient, "webAuthnCredential">;
+
+/**
+ * WARP-3630 — the credential step-up on a high-impact admin route, applied only
+ * while the privileged-account two-step policy (`REQUIRE_ADMIN_TWO_STEP`) is
+ * on; a pass-through otherwise (so with the default, off, these routes have no
+ * step-up, exactly as before). Mount AFTER the route's `requireRole`. The flag
+ * is read per request so the policy takes effect without re-mounting.
+ *
+ * With the policy on, EVERY path that is not a confirmed step-up denies:
+ *   - no session user → 401; no database handle → 500;
+ *   - a database error (enrolment lookup, or inside the step-up) → the error
+ *     handler (500), never `next()`;
+ *   - no second factor enrolled (TOTP or passkey) → 403 `MFA_ENROLLMENT_REQUIRED`,
+ *     the code the dashboard turns into "enrol first" (even for an SSO account,
+ *     whose IdP password check would otherwise pass trivially);
+ *   - enrolled: the credential step-up proper — a missing or stale MFA stamp
+ *     → 401 `mfa_required` / `mfa_stale`; a passkey-only person proves their
+ *     current password.
+ * `AUTH_ENABLED=false` (non-production dev, no identity system) is the one
+ * pass-through, the same as the enrolment gate.
+ */
+export function createRequireAdminStepUp(
+  prisma?: AdminStepUpPrisma,
+): (req: Request, res: Response, next: NextFunction) => Promise<void> {
+  const stepUp = createRequireCredentialStepUp(prisma);
+  // Named so a route-table test can find it in a router's handler stack.
+  return async function requireAdminStepUp(req, res, next) {
+    if (!config.REQUIRE_ADMIN_TWO_STEP || !config.AUTH_ENABLED) return next();
+    try {
+      const userId = (req as unknown as { user?: { id?: string } }).user?.id;
+      if (!userId) {
+        res.status(401).json({ error: "Not authenticated" });
+        return;
+      }
+      if (!prisma) {
+        res.status(500).json({ error: "Step-up unavailable: database not wired" });
+        return;
+      }
+      if (!(await hasSecondFactor(prisma, userId))) {
+        res.status(403).json({
+          error: "Set up two-step sign-in to continue.",
+          code: "MFA_ENROLLMENT_REQUIRED",
+        });
+        return;
+      }
+      await stepUp(req, res, next);
     } catch (err) {
       next(err);
     }

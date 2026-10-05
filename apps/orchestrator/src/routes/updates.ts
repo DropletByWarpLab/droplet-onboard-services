@@ -63,6 +63,7 @@ import { randomUUID } from "node:crypto";
 import { Router, type Request, type Response, type NextFunction } from "express";
 import type { PrismaClient } from "@prisma/client";
 import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
+import { createRequireAdminStepUp } from "../middleware/require-credential-step-up.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import { config } from "../config.js";
@@ -170,6 +171,7 @@ export function createUpdatesRouter(
   deps: UpdatesRouterDeps = defaultDeps(),
 ): Router {
   const router = Router();
+  const requireAdminStepUp = createRequireAdminStepUp(prisma);
 
   // Owner/admin across reads AND mutations (see the header comment);
   // `service` is never in the allowlist, so service principals are denied
@@ -485,6 +487,7 @@ export function createUpdatesRouter(
   router.put(
     "/updates/settings",
     guard,
+    requireAdminStepUp,
     async (req: Request, res: Response, next: NextFunction) => {
       const body: unknown = req.body;
       if (typeof body !== "object" || body === null || Array.isArray(body)) {

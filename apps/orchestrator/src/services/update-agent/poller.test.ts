@@ -55,7 +55,7 @@ import path from "node:path";
 import type { PrismaClient } from "@prisma/client";
 import type pino from "pino";
 import { CHANNEL_POINTER_KIND } from "./channel-pointer.js";
-import { checkForUpdate, deriveReleasesListUrl, runApplyWindow } from "./poller.js";
+import { checkForUpdate, deriveReleasesListUrl, onUpdateCheck, runApplyWindow } from "./poller.js";
 import { UPDATE_AGENT_SETTINGS_KEY } from "./settings.js";
 
 const fx = (name: string): Buffer =>
@@ -1263,5 +1263,35 @@ describe("runApplyWindow (WARP-539 stub)", () => {
     await runApplyWindow(prisma as never as PrismaClient, logger as never as pino.Logger);
 
     expect(logger.info).not.toHaveBeenCalled();
+  });
+});
+
+describe("onUpdateCheck (WARP-3504)", () => {
+  it("reports every check outcome, the 15-minute poll and check-now alike", async () => {
+    const seen: string[] = [];
+    const off = onUpdateCheck((r) => seen.push(r.outcome));
+
+    served = null;
+    await checkForUpdate(opts(createPrismaStub(), createLoggerSpy()));
+    served = {
+      tagName: "ota-1-gvalid",
+      manifest: fx("release.valid.json"),
+      signature: fx("release.valid.json.sig"),
+    };
+    await checkForUpdate(opts(createPrismaStub(), createLoggerSpy()));
+    off();
+    await checkForUpdate(opts(createPrismaStub(), createLoggerSpy()));
+
+    expect(seen).toEqual(["no_release", "pending_created"]);
+  });
+
+  it("an observer that throws cannot change the outcome", async () => {
+    served = null;
+    const off = onUpdateCheck(() => {
+      throw new Error("consumer bug");
+    });
+    const res = await checkForUpdate(opts(createPrismaStub(), createLoggerSpy()));
+    off();
+    expect(res.outcome).toBe("no_release");
   });
 });

@@ -9,8 +9,8 @@
  * What a read never returns: the signing secret, and the URL's path. A chat app's
  * incoming-webhook URL IS its credential (anyone holding it can post as the
  * integration), so the owner is shown the destination — scheme, host, port — and
- * the path is write-only, like the secret. Changing the address means pasting it
- * again; every other edit leaves it alone.
+ * the URL is encrypted at rest. Changing the address means pasting it again;
+ * every other edit leaves it alone.
  */
 import { randomUUID } from "node:crypto";
 import type {
@@ -33,6 +33,7 @@ import {
 import { WEBHOOK_TEST_EVENT, isSubscribableEvent } from "./webhook-events.js";
 import { buildTestPayload } from "./webhook-payload.js";
 import { sealWebhookSecret } from "./webhook-secret.js";
+import { openWebhookUrl, sealWebhookUrl } from "./webhook-url.js";
 import { generateWebhookSecret } from "./webhook-signature.js";
 
 export const PM_WEBHOOK_ERRORS = {
@@ -99,7 +100,7 @@ function toApi(row: PmWebhook, lastDelivery: ApiWebhook["lastDelivery"] = null):
     workspaceId: row.workspaceId,
     projectId: row.projectId,
     name: row.name,
-    destination: destinationOf(row.url),
+    destination: destinationOf(openWebhookUrl(row.id, row.urlEnc)),
     format: row.format,
     events: row.events,
     enabled: row.enabled,
@@ -227,7 +228,7 @@ export async function createWebhook(
       workspaceId,
       projectId: input.projectId ?? null,
       name: input.name,
-      url,
+      urlEnc: sealWebhookUrl(id, url),
       format: input.format,
       events,
       secretEnc: sealWebhookSecret(id, secret),
@@ -256,7 +257,7 @@ export async function updateWebhook(
   const existing = await mustFind(prisma, id);
   const data: Prisma.PmWebhookUpdateInput = {};
   if (patch.name !== undefined) data.name = patch.name;
-  if (patch.url !== undefined) data.url = vetUrl(patch.url);
+  if (patch.url !== undefined) data.urlEnc = sealWebhookUrl(id, vetUrl(patch.url));
   if (patch.format !== undefined) data.format = patch.format;
   if (patch.events !== undefined) data.events = vetEvents(patch.events);
   if (patch.projectId !== undefined) {

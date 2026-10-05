@@ -41,6 +41,7 @@ import {
   MessagesSquare,
   Mic,
   Network,
+  Radio,
   KeyRound,
   ScrollText,
   Settings,
@@ -786,6 +787,21 @@ export const NAV_GROUPS: NavGroup[] = [
         hidden: true,
         settingsSection: "System",
         settingsBlurb: "How this box handles your data, in plain terms",
+      },
+      // WARP-3504 (ADR-068): the owner's view of what this Droplet sends to Warp —
+      // the operational telemetry, the last payload of each kind, what is never
+      // sent. Owner/admin, mirroring the server-side requireRole("owner","admin")
+      // on GET /api/telemetry/last. No module gate: telemetry is part of the
+      // managed lease, not a feature a business switches off.
+      {
+        href: "/settings/telemetry",
+        label: "What this Droplet sends",
+        icon: Radio,
+        roles: ["owner", "admin"],
+        keywords: ["telemetry", "privacy", "logs", "data", "warp", "usage"],
+        hidden: true,
+        settingsSection: "System",
+        settingsBlurb: "What this Droplet sends to Warp, and what it never does",
       },
       // WARP-174: customer-facing manual + "How Droplet works" replay modal.
       {

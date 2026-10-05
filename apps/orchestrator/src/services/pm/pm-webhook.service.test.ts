@@ -20,6 +20,7 @@ import {
   updateWebhook,
 } from "./pm-webhook.service.js";
 import { openWebhookSecret } from "./webhook-secret.js";
+import { openWebhookUrl } from "./webhook-url.js";
 import { DELIVERY_LEASE_MS, type DeliveryDeps } from "./webhook-delivery.service.js";
 
 const KEY = Buffer.alloc(32, 5).toString("base64");
@@ -120,15 +121,19 @@ const good = {
 };
 
 describe("createWebhook", () => {
-  it("returns the signing secret once, seals it, and never stores it in the clear", async () => {
+  it("returns the signing secret once and seals both credentials at rest", async () => {
     const prisma = makePrisma();
     const { webhook, secret } = await createWebhook(prisma as never, "u-1", good);
 
     expect(secret).toMatch(/^whsec_[A-Za-z0-9_-]{43}$/);
     const row = prisma.hooks[0]!;
     expect(row.secretEnc.startsWith("dcv1:")).toBe(true);
+    expect(row.urlEnc.startsWith("dcv1:")).toBe(true);
     expect(JSON.stringify(row)).not.toContain(secret);
+    expect(JSON.stringify(row)).not.toContain("very-secret-token");
     expect(openWebhookSecret(row.id, row.secretEnc)).toBe(secret);
+    expect(openWebhookUrl(row.id, row.urlEnc)).toBe(good.url);
+    expect(() => openWebhookUrl("different-webhook", row.urlEnc)).toThrow();
     expect(webhook).not.toHaveProperty("secret");
     expect(webhook).not.toHaveProperty("secretEnc");
     expect(row).toMatchObject({ workspaceId: "ws-1", projectId: null, createdById: "u-1", format: "SLACK" });
@@ -236,12 +241,12 @@ describe("updateWebhook", () => {
     await expect(updateWebhook(prisma as never, id, { url: "http://127.0.0.1/x" })).rejects.toThrow(
       PM_WEBHOOK_ERRORS.BLOCKED_DESTINATION,
     );
-    const before = prisma.hooks[0]!.url;
+    const before = prisma.hooks[0]!.urlEnc;
     await updateWebhook(prisma as never, id, { name: "Renamed" });
-    expect(prisma.hooks[0]!.url).toBe(before);
+    expect(prisma.hooks[0]!.urlEnc).toBe(before);
     expect(prisma.hooks[0]!.name).toBe("Renamed");
     await updateWebhook(prisma as never, id, { url: "https://other.example.com/hook" });
-    expect(destinationOf(prisma.hooks[0]!.url)).toBe("https://other.example.com");
+    expect(destinationOf(openWebhookUrl(id, prisma.hooks[0]!.urlEnc))).toBe("https://other.example.com");
   });
 
   it("validates events on edit too", async () => {

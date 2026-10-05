@@ -1433,6 +1433,10 @@ export interface TlsCertificate {
   expiringSoon: boolean;
   hqConfigured: boolean;
   checkedAt: string | null;
+  /** WARP-3414: SHA-256 of the served leaf's DER SPKI, uppercase hex in 16
+   *  groups of 4 — what the Droplet apps show. Owner/admin only; null when
+   *  the leaf is unreadable. NOT proof when read over this connection. */
+  fingerprint: string | null;
 }
 
 export async function fetchTlsCertificate(): Promise<TlsCertificate> {
@@ -1457,6 +1461,8 @@ export interface BackupStatus {
   lastAttemptAt: string | null;
   lastRekeyAt: string | null;
   windowHours: number;
+  /** WARP-3610: decided on the host; "unknown" is never presented as safe. */
+  repositoryLocation: "same_disk" | "off_device" | "unknown";
 }
 
 export async function fetchBackupStatus(): Promise<BackupStatus> {
@@ -7908,6 +7914,35 @@ export async function getResetStatus(): Promise<ResetStatusResponse> {
   const res = await authFetch(`${BASE}/api/system/reset`);
   if (!res.ok) throw new Error(`Failed to load reset status: ${res.status}`);
   return res.json();
+}
+
+/**
+ * WARP-3640 -- the factory reset's receipt. A reset destroys the audit chain
+ * and the key that signs it, so before dispatching one the owner's browser
+ * saves a sealed export of the activity log (the existing
+ * POST /api/activity/export bundle, verifiable offline per
+ * docs/security/audit-bundle-verification.md). Throws when the bundle cannot be
+ * produced or sealed: the reset must not proceed without the receipt.
+ */
+export async function downloadResetReceipt(): Promise<void> {
+  const res = await authFetch(`${BASE}/api/activity/export`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  if (!res.ok) {
+    throw new Error(
+      "We couldn't save a receipt of this Droplet's activity log, so the reset was not started. Try again, or contact Droplet support.",
+    );
+  }
+  const url = URL.createObjectURL(await res.blob());
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `droplet-reset-receipt-${new Date().toISOString().slice(0, 10)}.jsonl`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 /**

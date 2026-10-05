@@ -3286,6 +3286,10 @@ model ScimGroup {
   // The local Role this group grants. Explicit column (not recomputed from
   // displayName on every read) so an operator override survives re-sync.
   mappedRole  Role     @default(family)
+  // WARP-3631: local User.ids in the group as of the last push, so a person
+  // dropped from a push can be demoted (the group's grant is recomputed from
+  // the groups they remain in).
+  memberUserIds String[] @default([])
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -6068,14 +6072,12 @@ enum PmWebhookDeliveryStatus {
   GIVEN_UP
 }
 
-/// A destination for work events. `url` is bearer-like for the chat apps (a
-/// Slack incoming-webhook URL IS the credential), so it is never written to a
-/// log, an audit row or a notification — only its host is. `secretEnc` is the
-/// HMAC signing secret, sealed with column-crypto's `deriveSaasCredentialKey()`
-/// and the AAD `pm-webhook-secret:<id>` (the same sealing
-/// `IntegrationConnection.providerTokensEnc` uses, under a different AAD so a
-/// blob cannot be opened as the other), and shown to the person once, on
-/// create and on rotate.
+/// A destination for work events. `urlEnc` is bearer-like for chat apps (a
+/// Slack incoming-webhook URL IS the credential), so the full URL is sealed at
+/// rest and never returned, logged, audited or sent in a notification. `urlEnc`
+/// and `secretEnc` use separate AAD labels under the SaaS credential key, so
+/// neither blob can be opened as the other. The URL's host is shown; its path
+/// remains write-only. The HMAC signing secret is shown once on create/rotate.
 model PmWebhook {
   id                  String          @id @default(uuid())
   workspaceId         String
@@ -6086,7 +6088,7 @@ model PmWebhook {
   projectId           String?
   project             PmProject?      @relation(fields: [projectId], references: [id], onDelete: Cascade)
   name                String
-  url                 String
+  urlEnc              String
   format              PmWebhookFormat @default(JSON)
   secretEnc           String
   /// Event names from `WORK_EVENT_NAMES` (services/pm/webhook-events.ts) — a

@@ -323,6 +323,14 @@ EOF
   sudo install -m 0755 "$host_src/droplet-tls-bootstrap-refresh.sh" \
     /usr/local/sbin/droplet-tls-bootstrap-refresh.sh
 
+  # --- certificate key fingerprint CLI (WARP-3414) -------------------------
+  # `droplet-fingerprint`: the box's certificate key fingerprint, in the form
+  # the Droplet apps show, for an admin at the console or in the `support`
+  # shell. One of the channels an attacker on the LAN cannot rewrite (the
+  # dashboard shows it too, but over the connection under question).
+  sudo install -m 0755 "$host_src/usr-local-bin/droplet-fingerprint" \
+    /usr/local/bin/droplet-fingerprint
+
   # --- network self-heal (WARP-1680) --------------------------------------
   # Backstop for a NIC rename / dead uplink leaving the box with no IPv4 and
   # no remote path in. Acts ONLY when nothing holds a usable address, so it is
@@ -1476,7 +1484,7 @@ EOF
     upsert_env DROPLET_TRUSTED_LAN_IPS "$_lan_ips"
     log_info "DROPLET_TRUSTED_LAN_IPS derived from the box's interfaces: $_lan_ips"
   else
-    log_warn "could not enumerate the box's LAN IPv4 addresses — leaving DROPLET_TRUSTED_LAN_IPS unchanged; browsing this box BY IP may answer 400 on Nextcloud legs (the embedded editor included) until the next setup run"
+    log_warn "could not enumerate the box's LAN IPv4 addresses — leaving DROPLET_TRUSTED_LAN_IPS unchanged; browsing this box BY IP may answer 400 on File Store legs (the embedded editor included) until the next setup run"
   fi
   # WARP-1772: the inference runtime is a durable, operator-set property, and
   # upsert_env is an OVERWRITE — before this guard, any re-run of setup on a

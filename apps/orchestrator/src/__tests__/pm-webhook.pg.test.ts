@@ -55,7 +55,7 @@ describe.skipIf(!RUN)("PmWebhook / PmWebhookDelivery — the database's own guar
       data: {
         workspaceId,
         name: "warp3532-hk-hook",
-        url: "https://hooks.example.com/services/abc",
+        urlEnc: "dcv1:sealed-webhook-url",
         secretEnc: "dcv1:test",
         events: ["work_item.created"],
         ...over,
@@ -102,13 +102,11 @@ describe.skipIf(!RUN)("PmWebhook / PmWebhookDelivery — the database's own guar
     await expect(webhook({ events: ["work_item.created", "sla.breached"] })).resolves.toBeTruthy();
   });
 
-  it("PmWebhook_url_is_http — the floor under the SSRF guard", async () => {
-    for (const bad of ["file:///etc/passwd", "gopher://h:70/x", "ftp://h/x", "javascript:alert(1)", "hooks.example.com"]) {
-      await expect(webhook({ url: bad }), bad).rejects.toThrow(/PmWebhook_url_is_http/);
-    }
-    // Scheme case is not significant to a URL.
-    await expect(webhook({ url: "HTTPS://hooks.example.com/x" })).resolves.toBeTruthy();
-    await expect(webhook({ url: "http://192.168.1.20:5678/webhook/x" })).resolves.toBeTruthy();
+  it("PmWebhook_urlEnc_is_encrypted — plaintext destinations cannot be stored", async () => {
+    await expect(webhook({ urlEnc: "https://hooks.example.com/services/plaintext-secret" })).rejects.toThrow(
+      /PmWebhook_urlEnc_is_encrypted/,
+    );
+    await expect(webhook({ urlEnc: "dcv1:sealed-webhook-url" })).resolves.toBeTruthy();
   });
 
   it("PmWebhook_consecutiveFailures_nonnegative", async () => {

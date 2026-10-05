@@ -114,7 +114,7 @@ removes them.
 | `PYPORTAL_BAUD` | `115200` | PyPortal serial baud rate |
 | `DISPLAY_TIMEZONE` | `America/Los_Angeles` | Timezone for the wall-clock pushed to the PyPortal |
 | `SERVICE_SECRET` | _(empty)_ | Bearer token required on all non-`/health` routes |
-| `BRIDGE_AUTH_TOKEN` | falls back to `SERVICE_SECRET` | Token the container sends to `device-bridge` when calling `POST /openwrt/wifi/rotate` |
+| `BRIDGE_AUTH_TOKEN` | falls back to `SERVICE_SECRET` | Panel token the container sends to `device-bridge` for reads and the panel's own writes (`POST /openwrt/wifi/rotate`, `/wifi/connect`, `/panel/console`). The bridge refuses it on destructive routes (WARP-3595); those need `BRIDGE_ADMIN_TOKEN`, which this container never holds |
 | `DROPLET_AP_MODE` | `uci` | Pairing-QR creds source: `uci` (multi-box, read SSID/PSK over SSH), `hostapd` (single-box, read from env / `/etc/hostapd.conf`), or `auto` |
 | `DROPLET_AP_SSID` | _(empty)_ | hostapd-mode AP SSID. When set, used directly (and forces `auto` to hostapd) |
 | `DROPLET_AP_PSK` | _(empty)_ | hostapd-mode AP passphrase (paired with `DROPLET_AP_SSID`) |
@@ -125,8 +125,31 @@ removes them.
 | `SIM_OUTPUT` | `/tmp/tft_preview.png` | Simulated output path (also used as preview cache for PyPortal) |
 | `PANEL_RAIL_WIFI_QR` | `1` | Rack panel only. `0` removes the rail's Wi-Fi QR face — see below |
 | `PANEL_RAIL_WIFI_SECONDS` | `45` | How long the rail's Wi-Fi face stays up before reverting on its own |
+| `PANEL_RAIL_FINGERPRINT` | `1` | Rack panel only. `0` removes the rail's certificate-fingerprint face — see below |
+| `PANEL_RAIL_FINGERPRINT_SECONDS` | `120` | How long the fingerprint face stays up before reverting to the QR |
 | `PANEL_ORCHESTRATOR_URL` | `http://127.0.0.1` | Rack panel only. Orchestrator origin behind the loopback gateway, read for the STORAGE cell (WARP-2668) and the certificate footer (WARP-2944). Distinct from the bridge's own `ORCHESTRATOR_URL`, which defaults to `:3000` |
 | `STORAGE_REFRESH_SECONDS` | `60` | How often those reads happen. Slow on purpose — a capacity total is not a hot-plug event |
+
+## The rail's certificate-fingerprint face (WARP-3414)
+
+When the bridge reports the box's certificate key (`/pair/qr` carries
+`fingerprint`), a third rail face appears: tap the rail past the pairing QR
+(and the Wi-Fi code, if the AP has one) and it shows `Droplet fingerprint` —
+the SHA-256 of the served leaf's DER SubjectPublicKeyInfo, as uppercase hex in
+16 groups of 4, four groups to a line. That is exactly the string the Droplet
+Mac app shows when it asks an admin to confirm a box that uses its own
+certificate on a manual connect.
+
+**Why it is here.** That confirmation only means something against a reference
+a person on the LAN cannot rewrite. The dashboard shows the same value, but
+over the connection being checked, so it proves nothing by itself. This panel
+is a local screen; so are the setup output and `droplet-fingerprint` on the box
+(`scripts/host/usr-local-bin/`). The value is public (any TLS client sees the
+certificate), so there is no secrecy argument for hiding it; the face still
+reverts to the QR after `PANEL_RAIL_FINGERPRINT_SECONDS`, derived from a
+deadline like the Wi-Fi face. The panel draws only the bridge's own string, and
+only when it is the full 16 well-formed groups: a shortened value is refused,
+because a short prefix can be ground out by an impostor.
 
 ## The rack panel's QR rail has two faces (WARP-1782)
 
