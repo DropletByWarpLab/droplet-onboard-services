@@ -78,8 +78,6 @@ vi.mock("../services/frigate.client.js", () => ({
   tagEventAsFace: okAsync(),
   openBirdseyeStream: okAsync(),
   openMjpegStream: okAsync(),
-  enableDetection: okAsync(),
-  disableDetection: okAsync(),
   deleteCamera: okAsync(),
   deleteEvent: okAsync(),
   addCamera: okAsync(),

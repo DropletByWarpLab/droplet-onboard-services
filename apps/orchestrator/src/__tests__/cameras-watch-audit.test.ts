@@ -37,7 +37,7 @@ vi.mock("../services/frigate.client.js", () => ({
   fetchKnownPlates: vi.fn(), fetchFaceImage: vi.fn(), deleteKnownFace: vi.fn(),
   deleteFaceImage: vi.fn(), deleteKnownPlate: vi.fn(), nameKnownPlate: vi.fn(),
   regenerateEventDescription: vi.fn(), tagEventAsFace: vi.fn(), openBirdseyeStream: vi.fn(),
-  openMjpegStream: vi.fn(), enableDetection: vi.fn(), disableDetection: vi.fn(),
+  openMjpegStream: vi.fn(),
   deleteCamera: vi.fn(), deleteEvent: vi.fn(), addCamera: vi.fn(),
   syncCamerasFromDb: vi.fn().mockResolvedValue([]),
   fetchEvents: vi.fn(), buildRecordingClipUrl: vi.fn().mockReturnValue("http://frigate.test/clip.mp4"),
@@ -52,6 +52,12 @@ vi.mock("../services/network-safety.service.js", () => ({
   evaluateNetworkCommand: vi.fn(),
   confirmNetworkCommand: vi.fn(),
 }));
+// WARP-3511: detection is the persisted `detect.enabled` setting, so a
+// confirmed disable goes through the settings service.
+vi.mock("../services/camera-settings.service.js", () => ({
+  getCameraSettings: vi.fn(),
+  updateCameraSettings: vi.fn().mockResolvedValue({}),
+}));
 
 import { createCamerasRouter } from "../routes/cameras.js";
 import { recordActivity } from "../services/activity.singleton.js";
@@ -59,11 +65,11 @@ import {
   fetchEventCamera,
   fetchHlsPlaylist,
   openMjpegStream,
-  disableDetection,
   deleteCamera,
   restartFrigate,
 } from "../services/frigate.client.js";
 import { confirmNetworkCommand } from "../services/network-safety.service.js";
+import { updateCameraSettings } from "../services/camera-settings.service.js";
 import {
   auditCameraWatch,
   resetCameraWatchDedupe,
@@ -268,7 +274,7 @@ describe("a member cannot complete a detection-off handshake (WARP-3104)", () =>
       .post("/api/cameras/command/confirm")
       .send({ confirmationToken: "t", operation: "disable_camera" });
     expect(res.status).toBe(403);
-    expect(vi.mocked(disableDetection)).not.toHaveBeenCalled();
+    expect(vi.mocked(updateCameraSettings)).not.toHaveBeenCalled();
   });
 
   it("owner → 200, detection off", async () => {
@@ -276,7 +282,7 @@ describe("a member cannot complete a detection-off handshake (WARP-3104)", () =>
       .post("/api/cameras/command/confirm")
       .send({ confirmationToken: "t", operation: "disable_camera" });
     expect(res.status).toBe(200);
-    expect(vi.mocked(disableDetection)).toHaveBeenCalledWith("front");
+    expect(vi.mocked(updateCameraSettings)).toHaveBeenCalledWith("front", { detectEnabled: false });
   });
 });
 

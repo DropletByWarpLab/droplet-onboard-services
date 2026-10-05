@@ -14,7 +14,9 @@ import {
   fetchConfig,
   fetchEvents,
   fetchEventsFiltered,
+  fetchLastRecordingEnd,
   fetchRecordings,
+  fetchRecordingsStorage,
   fetchRecordingsSummary,
   fetchReviews,
   fetchStats,
@@ -47,6 +49,7 @@ import { config } from "../config.js";
 import { mqttConnectOptions } from "../lib/internal-tls.js";
 import type {
   CameraInfo,
+  CameraRecordingState,
   DetectionEvent,
   DiscoveredCamera,
   CameraSSEEvent,
@@ -59,6 +62,14 @@ import type {
 } from "../types/camera.js";
 import { createLogger } from "../lib/logger.js";
 import { retainsFootage } from "./camera-retention-defaults.js";
+import { retentionFromFrigateConfig } from "./camera-recording-state.js";
+export { retentionFromFrigateConfig } from "./camera-recording-state.js";
+import {
+  buildRecordingState,
+  degradedRecordingState,
+  indexStorageByCamera,
+  type StorageBytes,
+} from "./camera-recording-state.js";
 
 const logger = createLogger("camera-service");
 
@@ -550,40 +561,24 @@ export function subscribeCameraEvents(
 // --- Camera listing ---
 
 /**
- * Map a camera's RESOLVED Frigate config into the shape `retainsFootage`
- * expects.
- *
- * Reads the resolved tree deliberately: it is what Frigate will actually
- * enforce, inherited defaults included. The authored config is the right
- * source for WRITES (it round-trips; the resolved tree does not), but the
- * wrong one for asking "what is this camera really doing right now".
- *
- * Note the asymmetry in Frigate 0.17's schema — `continuous` and `motion`
- * carry `days` directly, while `alerts` and `detections` nest theirs under
- * `retain`. Reading the wrong depth yields `undefined`, which coerces to
- * "nothing retained" and would put every healthy camera in the warning
- * state. Hence the explicit reads rather than a generic walk.
+ * Per-call budget for the Frigate reads that only ENRICH the camera list
+ * (storage usage, the newest segment). A slow Frigate must not hold the whole
+ * list — and every tile behind it — for the default ten seconds.
  */
-export function retentionFromFrigateConfig(configEntry: unknown): {
-  enabled?: boolean;
-  continuousDays: number;
-  motionDays: number;
-  alertsRetainDays: number;
-  detectionsRetainDays: number;
-} {
-  const record = ((configEntry as Record<string, unknown> | undefined)?.record ??
-    {}) as Record<string, Record<string, Record<string, unknown>>>;
-  const num = (v: unknown): number => {
-    const n = Number(v ?? 0);
-    return Number.isFinite(n) && n > 0 ? n : 0;
-  };
-  return {
-    enabled: (record as unknown as { enabled?: boolean }).enabled,
-    continuousDays: num(record.continuous?.days),
-    motionDays: num(record.motion?.days),
-    alertsRetainDays: num(record.alerts?.retain?.days),
-    detectionsRetainDays: num(record.detections?.retain?.days),
-  };
+const RECORDING_READ_TIMEOUT_MS = 2000;
+
+/** What `/api/stats` reports per camera; only the two rates read here. */
+type CameraStatsEntry = { camera_fps?: number; detection_fps?: number };
+
+type Read<T> = { ok: true; value: T } | { ok: false; err: unknown };
+
+/** Keep a read's failure instead of throwing it away. */
+async function settle<T>(read: Promise<T>): Promise<Read<T>> {
+  try {
+    return { ok: true, value: await read };
+  } catch (err) {
+    return { ok: false, err };
+  }
 }
 
 export async function getCameras(
@@ -592,40 +587,106 @@ export async function getCameras(
   const cached = await cacheGet<CameraInfo[]>(CACHE_KEY_CAMERAS);
   if (cached) return cached;
 
-  // Fetch from Frigate + DB in parallel
-  const [frigateCameras, frigateConfig, dbCameras] = await Promise.all([
-    fetchCameras().catch(() => ({} as Record<string, unknown>)),
-    fetchConfig().catch(() => ({} as Record<string, unknown>)),
+  // Fetch from Frigate + DB in parallel.
+  //
+  // WARP-3511: a failed Frigate read used to be swallowed into `{}`, which is
+  // indistinguishable from "Frigate sees no cameras" — so an outage (or the
+  // seconds Frigate takes to restart after a settings save) served, and
+  // cached, a healthy-looking list with every camera Offline. The failure is
+  // kept now and said on every camera's `recording.degraded`.
+  const [statsRead, configRead, dbCameras, storageUsage] = await Promise.all([
+    settle(fetchCameras()),
+    settle(fetchConfig()),
     prisma.camera.findMany({ orderBy: { createdAt: "desc" } }),
+    // Enrichment, not a basis for the status: if this fails the usage figures
+    // are unknown, and the list is not degraded for it.
+    fetchRecordingsStorage({ timeoutMs: RECORDING_READ_TIMEOUT_MS }).catch((err) => {
+      logger.warn({ err }, "could not read Frigate storage usage; camera usage is unknown");
+      return null;
+    }),
   ]);
 
-  const configCameras = (frigateConfig as any)?.cameras || {};
+  // Status and the recording block both rest on stats AND config.
+  const degraded = !statsRead.ok || !configRead.ok;
+  if (degraded) {
+    logger.warn(
+      { statsFailed: !statsRead.ok, configFailed: !configRead.ok },
+      "Frigate could not be read; serving a degraded camera list",
+    );
+  }
+
+  const frigateCameras = (statsRead.ok ? statsRead.value : {}) as Record<string, CameraStatsEntry>;
+  const configCameras =
+    ((configRead.ok ? configRead.value : {}) as { cameras?: Record<string, unknown> }).cameras || {};
+  const storageByCamera: Map<string, StorageBytes> = storageUsage
+    ? indexStorageByCamera(storageUsage, configCameras)
+    : new Map();
+
+  // 🔴 Frame rate says the camera is ALIVE. It says nothing about whether
+  // anything is being KEPT — and this used to report "recording" on the
+  // strength of `camera_fps > 0` alone. A camera with every retention
+  // window at zero decodes, detects, and stores nothing, while the badge
+  // told the household their footage was safe (WARP-1974).
+  //
+  // The config entry is exactly what answers the question. When the config
+  // could not be read, retention is UNKNOWN — not "keeps nothing", which
+  // would put a false "not saving" warning on every healthy camera — so the
+  // frame rate alone decides and `recording.degraded` carries the caveat.
+  const retentionOf = (name: string) => retentionFromFrigateConfig(configCameras[name]);
+  const retainingOf = (name: string) => (configRead.ok ? retainsFootage(retentionOf(name)) : true);
+
+  // When did each camera last write? Only cameras Frigate can see and that
+  // keep something can have — a bounded read each, in parallel, and a failed
+  // one leaves that camera's time unknown rather than failing the list.
+  const names = [
+    ...dbCameras.map((c) => c.name),
+    ...Object.keys(frigateCameras).filter((n) => !dbCameras.some((c) => c.name === n)),
+  ];
+  const lastSegmentEnd = new Map<string, number | null>();
+  const lastSegmentReadFailed = new Set<string>();
+  if (!degraded) {
+    await Promise.all(
+      names
+        .filter((n) => frigateCameras[n] && retainingOf(n))
+        .map(async (n) => {
+          lastSegmentEnd.set(
+            n,
+            await fetchLastRecordingEnd(n, { timeoutMs: RECORDING_READ_TIMEOUT_MS }).catch((err) => {
+              logger.debug({ err, camera: n }, "could not read when the camera last saved footage");
+              lastSegmentReadFailed.add(n);
+              return null;
+            }),
+          );
+        }),
+    );
+  }
+
+  const recordingOf = (name: string): CameraRecordingState =>
+    degraded
+      ? degradedRecordingState()
+      : buildRecordingState({
+          retention: retentionOf(name),
+          storage: storageByCamera.get(name),
+          lastSegmentEnd: lastSegmentEnd.get(name) ?? null,
+          lastSegmentReadFailed: lastSegmentReadFailed.has(name),
+        });
+
   const cameras: CameraInfo[] = [];
 
   // Merge Frigate status with DB records
   for (const dbCam of dbCameras) {
-    const frigateStatus = (frigateCameras as any)?.[dbCam.name];
-    const configEntry = configCameras[dbCam.name];
-
-    // 🔴 Frame rate says the camera is ALIVE. It says nothing about whether
-    // anything is being KEPT — and this used to report "recording" on the
-    // strength of `camera_fps > 0` alone. A camera with every retention
-    // window at zero decodes, detects, and stores nothing, while the badge
-    // told the household their footage was safe (WARP-1974).
-    //
-    // `configEntry` was declared here and never read. It is exactly what
-    // answers the question, so it is now the thing that does.
-    const retaining = retainsFootage(retentionFromFrigateConfig(configEntry));
+    const frigateStatus = frigateCameras[dbCam.name];
+    const retaining = retainingOf(dbCam.name);
 
     let status: CameraInfo["status"] = "offline";
     if (frigateStatus) {
-      if (frigateStatus.camera_fps > 0 && !retaining) {
+      if ((frigateStatus.camera_fps ?? 0) > 0 && !retaining) {
         // Healthy stream, nothing retained. Deliberately NOT "recording",
         // and deliberately not "idle" either — the camera is working; it
         // just has nowhere to put anything.
         status = "live";
-      } else if (frigateStatus.detection_fps > 0) status = "detecting";
-      else if (frigateStatus.camera_fps > 0) status = "recording";
+      } else if ((frigateStatus.detection_fps ?? 0) > 0) status = "detecting";
+      else if ((frigateStatus.camera_fps ?? 0) > 0) status = "recording";
       else status = "idle";
     }
 
@@ -641,6 +702,7 @@ export async function getCameras(
       status,
       lastSeen: dbCam.lastSeen.toISOString(),
       lastDetection: null, // Populated lazily
+      recording: recordingOf(dbCam.name),
     });
   }
 
@@ -658,18 +720,21 @@ export async function getCameras(
         autoDiscovered: false,
         // Same rule as above: a live stream with nothing retained is
         // "live", never "recording".
-        status: !((stats as any)?.camera_fps > 0)
+        status: !((stats?.camera_fps ?? 0) > 0)
           ? "idle"
-          : retainsFootage(retentionFromFrigateConfig(configCameras[name]))
+          : retainingOf(name)
             ? "recording"
             : "live",
         lastSeen: new Date().toISOString(),
         lastDetection: null,
+        recording: recordingOf(name),
       });
     }
   }
 
-  await cacheSet(CACHE_KEY_CAMERAS, cameras, CACHE_TTL);
+  // A degraded list is not cached: it heals on the next poll instead of
+  // being served as fact for the TTL (same rule as the empty /system status).
+  if (!degraded) await cacheSet(CACHE_KEY_CAMERAS, cameras, CACHE_TTL);
   return cameras;
 }
 
