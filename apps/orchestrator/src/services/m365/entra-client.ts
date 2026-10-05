@@ -41,21 +41,23 @@ import type { DeviceCodeInfo, EntraAuthResult, EntraClient } from "./m365-auth.s
 import type { EntraAppRegistration } from "./state.js";
 
 /**
- * Scopes requested for a Microsoft 365 link (ADR-041 / WARP-2115 v1).
+ * The scopes a Microsoft 365 link asks for (ADR-041 / WARP-2115 v1) are DATA this
+ * client is handed, never a constant it reads: `M365_BASE_SCOPES` is what every
+ * connection has always asked for and `M365_SHAREPOINT_SCOPE` (`Sites.Read.All`)
+ * is added only for a person who opted in to SharePoint (WARP-3538). Which set a
+ * given sign-in or refresh uses is decided where the connection's row is read —
+ * `m365-auth.service.ts` — because asking for a scope the tenant administrator
+ * has not approved fails the WHOLE sign-in, and asking a refresh for a scope the
+ * connection never held fails it into NEEDS_RECONNECT. This module holds no
+ * opinion about either, and does not read the database. They live in
+ * `scopes.ts` (pure, no MSAL) and are re-exported here, where a reader looks for
+ * "what does the connector request".
  *
  * `offline_access` is what earns a refresh token — without it the link dies at
  * the first access-token expiry. No Teams scopes: bulk chat read is
  * application-permission-only protected-API territory and is out of scope.
  */
-export const M365_SCOPES: readonly string[] = [
-  "offline_access",
-  "User.Read",
-  "Mail.ReadWrite",
-  "Mail.Send",
-  "Calendars.ReadWrite",
-  "Contacts.ReadWrite",
-  "Files.ReadWrite.All",
-];
+export { M365_BASE_SCOPES, M365_SHAREPOINT_SCOPE } from "./scopes.js";
 
 /**
  * Identifies this client to Microsoft. Microsoft asks integrators to send a
@@ -124,10 +126,10 @@ function toAuthResult(
 
 export function createEntraClient(): EntraClient {
   return {
-    async getAuthCodeUrl(registration, { redirectUri, state, nonce, codeChallenge }) {
+    async getAuthCodeUrl(registration, { redirectUri, state, nonce, codeChallenge, scopes }) {
       const { app } = buildApp(registration, null);
       return await app.getAuthCodeUrl({
-        scopes: [...M365_SCOPES],
+        scopes: [...scopes],
         redirectUri,
         state,
         nonce,
@@ -142,14 +144,15 @@ export function createEntraClient(): EntraClient {
 
     async acquireByAuthorizationCode(
       registration,
-      { code, redirectUri, codeVerifier, nonce },
+      { code, redirectUri, codeVerifier, nonce, scopes },
     ): Promise<EntraAuthResult> {
       const { app, cache } = buildApp(registration, null);
       // Same scopes and byte-identical redirect URI as the authorize leg, or
-      // Entra refuses the redemption. The nonce makes MSAL check the ID token
+      // Entra refuses the redemption (the caller hands the scopes it sealed when
+      // it built the authorize URL). The nonce makes MSAL check the ID token
       // echoes it; the verifier is what makes an intercepted code worthless.
       const result = await app.acquireTokenByCode({
-        scopes: [...M365_SCOPES],
+        scopes: [...scopes],
         code,
         redirectUri,
         codeVerifier,
@@ -159,11 +162,11 @@ export function createEntraClient(): EntraClient {
       return toAuthResult(result, cache.read());
     },
 
-    async acquireByDeviceCode(registration, { onCode }): Promise<EntraAuthResult> {
+    async acquireByDeviceCode(registration, { onCode, scopes }): Promise<EntraAuthResult> {
       const { app, cache } = buildApp(registration, null);
 
       const result = await app.acquireTokenByDeviceCode({
-        scopes: [...M365_SCOPES],
+        scopes: [...scopes],
         deviceCodeCallback: (response) => {
           const info: DeviceCodeInfo = {
             userCode: response.userCode,
@@ -182,7 +185,7 @@ export function createEntraClient(): EntraClient {
       return toAuthResult(result, cache.read());
     },
 
-    async acquireSilent(registration, serializedCache, homeAccountId): Promise<EntraAuthResult> {
+    async acquireSilent(registration, serializedCache, homeAccountId, scopes): Promise<EntraAuthResult> {
       const { app, cache } = buildApp(registration, serializedCache);
 
       const account = await app.getTokenCache().getAccountByHomeId(homeAccountId);
@@ -198,7 +201,7 @@ export function createEntraClient(): EntraClient {
 
       const result = await app.acquireTokenSilent({
         account,
-        scopes: [...M365_SCOPES],
+        scopes: [...scopes],
       });
 
       if (!result) throw new Error("Microsoft returned no result for the silent refresh.");
