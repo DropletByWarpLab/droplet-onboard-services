@@ -61,6 +61,7 @@ import { createPmRelationsRouter } from "./routes/pm/relations.js";
 import { createPmQueryRouter } from "./routes/pm/query.js";
 import { createPmViewsRouter } from "./routes/pm/views.js";
 import { createPmBulkRouter } from "./routes/pm/bulk.js";
+import { createPmOpenApiRouter } from "./routes/pm/openapi.js";
 import { createSupportRouter } from "./routes/support/support.routes.js";
 import { createPmScheduleRouter } from "./routes/pm/schedule.js";
 import { createCrmRouter } from "./routes/crm.js";
@@ -73,6 +74,8 @@ import { createAgentRunsRouter } from "./routes/agent-runs.js";
 import { createWorkspaceRouter } from "./routes/workspace.js";
 import { createExtensionsRouter } from "./routes/extensions.js";
 import { extensionPrincipalGuard } from "./middleware/extension-principal-guard.js";
+import { pmApiTokenRateLimit, pmApiTokenScopeGuard } from "./middleware/pm-api-token-guard.js";
+import { bindPmApiTokenPrisma } from "./services/pm/pm-api-token.service.js";
 import { createExtensionAttacher, lazyExtensionAttachPort } from "./services/extension-attach.service.js";
 import { bindExtensionPrincipalPrisma } from "./services/extension-principal.js";
 import { createExtensionSandboxClient } from "./services/extension-sandbox.client.js";
@@ -142,6 +145,7 @@ import { detachRemoteMcp, mcpClient, remoteCallPolicy } from "./services/mcp-cli
 import { stepResultValue, type StepDispatcher } from "./services/tool-spec-runner.service.js";
 import { createModelsRouter } from "./routes/models.js";
 import { createLlmAccessRouter, exemptLlmAccessInternalCalls } from "./routes/llm-access.js";
+import { createDeveloperRouter } from "./routes/developer.js";
 import { createHardwareRouter } from "./routes/hardware.js";
 import { createHomeRouter } from "./routes/home.js";
 import { createBriefingsRouter } from "./routes/briefings.js";
@@ -325,6 +329,13 @@ export function createApp(
   // request; unbound, every extension bearer is a 401.
   bindExtensionPrincipalPrisma(prisma);
 
+  // WARP-3533 — the `dpm_` API-token lookup in authMiddleware, and the revoke
+  // hooks in role-mutation-guard.service.ts, read the PmApiToken table through
+  // this one binding (the same shape as the extension bearer above). Bound
+  // before the first request; unbound, every API token is a 401 and no revoke
+  // can run.
+  bindPmApiTokenPrisma(prisma);
+
   // WARP-1527 / ADR-032 §3 — bind the effective-access resolver beside the
   // scope loader (same singleton discipline, same reason): layer-2
   // per-person access resolution (features / tools / cloud / connectors /
@@ -362,6 +373,14 @@ export function createApp(
   // router, so a route with no requireRole of its own is not reachable by
   // an extension either.
   app.use(extensionPrincipalGuard);
+
+  // WARP-3533 — a personal API token (`dpm_…`) authenticates as its holder, so
+  // like the extension principal above it is confined here, right after
+  // authMiddleware and before any router: a per-token rate limit first (so the
+  // denial rows below are bounded by it), then `/api/pm` + `/api/support` only,
+  // narrowed to the token's scopes. Both are no-ops for every other request.
+  app.use(pmApiTokenRateLimit);
+  app.use(pmApiTokenScopeGuard);
 
   // WARP-824 — forced-password-change gate. Mounts AFTER authMiddleware (so
   // req.user is populated) and BEFORE every protected router so an
@@ -566,6 +585,10 @@ export function createApp(
   // factory-reset.sh).
   app.use("/api", createSystemResetRouter(prisma));
   app.use("/api", createMatterRouter(prisma));
+  // WARP-3533 — GET /api/pm/openapi.json, the OpenAPI 3.1 description of the PM
+  // API. First among the PM routers on purpose so a parameterized sibling cannot
+  // shadow this literal route; the /api/pm gates still apply.
+  app.use("/api", createPmOpenApiRouter());
   // WARP-3522 (ADR-069 §8) — the one filter language: `POST /pm/work-items/query`,
   // `GET /pm/work-items/by-key/:key` and saved views (`/pm/views`). Mounted BEFORE
   // the native router because `/pm/work-items/query` is a literal under the
@@ -857,6 +880,11 @@ export function createApp(
   // Settings page's routes, plus the two ai-gateway-only routes behind `/llm/`
   // (introspect on every request, usage after it). No module claims the prefix.
   app.use("/api", createLlmAccessRouter(prisma));
+  // WARP-3533: Settings -> Developer — personal API tokens, their switch, and
+  // the ICS feed links for "my work" and each project. Deliberately NOT under
+  // /api/pm: an API token is confined to /api/pm + /api/support by the guard
+  // above, so it can never mint a token, a feed link or flip the switch.
+  app.use("/api", createDeveloperRouter(prisma));
 
   // WARP-469: F1 home aggregation. Single round-trip backing
   // FEATURES.md §2.1 (greeting + tiles + timeline + suggestions).

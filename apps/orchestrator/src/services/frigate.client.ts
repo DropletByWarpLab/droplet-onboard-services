@@ -9,6 +9,7 @@ import { parseDocument, isMap, isScalar } from "yaml";
 
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
+import { scrubUrlCredentials } from "../lib/rtsp-credentials.js";
 import { FrigateNotFoundError } from "../types/frigate-error.js";
 import {
   buildRecordBlock,
@@ -970,7 +971,7 @@ export async function deleteCamera(cameraName: string): Promise<void> {
   if (!resp.ok) {
     const errBody = await resp.text().catch(() => "");
     logger.warn(
-      { status: resp.status, camera: cameraName, body: errBody.slice(0, 200) },
+      { status: resp.status, camera: cameraName, body: scrubUrlCredentials(errBody).slice(0, 200) },
       "Frigate config/save rejected while deleting camera",
     );
     throw new Error(`Delete camera: ${resp.status}`);
@@ -1019,7 +1020,9 @@ export async function addCamera(
   if (!resp.ok) {
     const errBody = await resp.text().catch(() => "");
     logger.warn(
-      { status: resp.status, camera: safeName, body: errBody.slice(0, 200) },
+      // Frigate echoes the offending config path, which carries the camera's
+      // password (WARP-3505) — scrubbed before it can reach a log.
+      { status: resp.status, camera: safeName, body: scrubUrlCredentials(errBody).slice(0, 200) },
       "Frigate config/set rejected while adding camera",
     );
     return false;
@@ -1074,7 +1077,7 @@ export async function syncCamerasFromDb(
   if (!resp.ok) {
     const errBody = await resp.text().catch(() => "");
     logger.warn(
-      { status: resp.status, removed, body: errBody.slice(0, 200) },
+      { status: resp.status, removed, body: scrubUrlCredentials(errBody).slice(0, 200) },
       "Frigate config/save rejected during camera sync",
     );
     throw new Error(`Frigate rejected the config: ${resp.status}`);
