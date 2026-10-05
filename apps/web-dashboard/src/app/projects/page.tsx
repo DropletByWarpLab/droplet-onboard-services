@@ -53,7 +53,7 @@ import { useInsightsDeepLink, useSyncInsightsParam } from "@/components/projects
 import { CalendarView } from "@/components/projects/calendar/CalendarView";
 import { TimelineView } from "@/components/projects/timeline/TimelineView";
 import { MyWorkView } from "@/components/projects/mywork/MyWorkView";
-import { ProjectMenu } from "@/components/projects/import/ProjectMenu";
+import { ProjectMenu as ImportProjectMenu } from "@/components/projects/import/ProjectMenu";
 import { ImportWizard } from "@/components/projects/import/ImportWizard";
 import {
   ConfirmArchiveProject,
@@ -399,7 +399,7 @@ function ProjectsWorkspace(): JSX.Element {
             <PmIcon name="refresh" size={15} />
           </button>
         )}
-        {project && <ProjectMenu projectId={project.id} canImport={canImport} onImport={() => setModal("import")} />}
+        {project && <ImportProjectMenu projectId={project.id} canImport={canImport} onImport={() => setModal("import")} />}
       </>
     );
 
