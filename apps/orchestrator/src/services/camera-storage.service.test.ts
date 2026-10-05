@@ -35,6 +35,7 @@ vi.mock("./frigate.client.js", () => ({
 
 import {
   getCameraStorage,
+  getCameraStorageSnapshot,
   checkStorageNearFull,
   __resetNearFullState,
   NEAR_FULL_RATIO,
@@ -119,6 +120,44 @@ describe("per-camera breakdown", () => {
 
     const s = await getCameraStorage();
     expect(s.cameras).toHaveLength(2);
+  });
+
+  it("marks resolved retention unknown when config fails while preserving the storage view", async () => {
+    fetchConfigMock.mockRejectedValueOnce(new Error("config unreachable"));
+    const snapshot = await getCameraStorageSnapshot();
+    expect(snapshot.storage.cameras).toHaveLength(2);
+    expect(snapshot.effectiveRetentionByCamera).toBeNull();
+  });
+
+  it("does not treat a partial resolved record block as allocation-grade retention", async () => {
+    fetchConfigMock.mockResolvedValueOnce({
+      cameras: { front_door: { record: { continuous: { days: 90 } } }, hallway: {} },
+    });
+    const snapshot = await getCameraStorageSnapshot();
+    expect(snapshot.storage.cameras).toHaveLength(2);
+    expect(snapshot.effectiveRetentionByCamera).toEqual({});
+  });
+
+  it("keeps prototype-named cameras as own entries and does not inherit phantom policies", async () => {
+    const cameras = Object.fromEntries([
+      ["__proto__", { record: {
+        continuous: { days: 90 },
+        motion: { days: 0 },
+        alerts: { retain: { days: 0 } },
+        detections: { retain: { days: 0 } },
+      } }],
+      ["toString", {}],
+    ]);
+    fetchConfigMock.mockResolvedValueOnce({ cameras });
+
+    const snapshot = await getCameraStorageSnapshot();
+    const policies = snapshot.effectiveRetentionByCamera!;
+
+    expect(Object.getPrototypeOf(policies)).toBeNull();
+    expect(Object.hasOwn(policies, "__proto__")).toBe(true);
+    expect(policies["__proto__"]).toMatchObject({ continuousDays: 90 });
+    expect(Object.hasOwn(policies, "toString")).toBe(false);
+    expect(policies.toString).toBeUndefined();
   });
 });
 

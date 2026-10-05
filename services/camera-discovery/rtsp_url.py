@@ -74,7 +74,8 @@ _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 # A URL carrying userinfo, in free text (a Frigate error, a log line). Greedy to
 # the LAST '@' of the whitespace-delimited token — the same reading Frigate and
 # ffmpeg take — so a password containing '@' or '/' is removed whole.
-_URL_WITH_USERINFO = re.compile(r"(?i)(rtsps?://)\S*@")
+_RTSP_SCHEME = re.compile(r"rtsps?://", re.IGNORECASE)
+_NON_WHITESPACE_TOKEN = re.compile(r"\S+")
 
 
 class UnsafeStreamUrl(ValueError):
@@ -190,4 +191,28 @@ def scrub_credentials(text: str) -> str:
     Frigate echoes the config path in some of its error replies, and that path
     carries the camera's password.
     """
-    return _URL_WITH_USERINFO.sub(r"\1***@", text)
+    # Scan each whitespace-delimited token once. A pattern like
+    # ``(rtsp://)\S*@`` retries from every scheme in a hostile token and can
+    # take quadratic time when the token repeats ``rtsp://`` without an ``@``.
+    # Frigate/ffmpeg use the final ``@`` in a token as the authority boundary,
+    # matching the orchestrator's scrubUrlCredentials implementation.
+    parts: list[str] = []
+    cursor = 0
+    changed = False
+    for token_match in _NON_WHITESPACE_TOKEN.finditer(text):
+        token = token_match.group(0)
+        scheme_match = _RTSP_SCHEME.search(token)
+        if scheme_match is None:
+            continue
+        userinfo_start = scheme_match.end()
+        at = token.rfind("@")
+        if at < userinfo_start:
+            continue
+        parts.append(text[cursor:token_match.start()])
+        parts.append(token[:userinfo_start] + "***@" + token[at + 1:])
+        cursor = token_match.end()
+        changed = True
+    if not changed:
+        return text
+    parts.append(text[cursor:])
+    return "".join(parts)

@@ -28,8 +28,9 @@ let server: Server | undefined;
 afterEach(async () => {
   await new Promise<void>((r) => (server ? server.close(() => r()) : r()));
   server = undefined;
-  // Clear after closing connections: an accepted socket may have a keepalive
-  // revalidation already in flight while the HTTP server is shutting down.
+  // Let shutdown callbacks from upgraded sockets settle before resetting the
+  // auth spy, so a previous test cannot contaminate the next one's assertion.
+  await new Promise((r) => setTimeout(r, 25));
   vi.clearAllMocks();
 });
 
@@ -44,15 +45,18 @@ async function connect(headers: Record<string, string>, protocol?: string) {
       protocol ? [protocol] : [],
       { headers },
     );
-    const safetyTimer = setTimeout(() => ws.terminate(), 1000);
+    let safetyTimer: ReturnType<typeof setTimeout> | undefined;
+    ws.on("close", (code) => {
+      if (safetyTimer) clearTimeout(safetyTimer);
+      resolve({ status: "open", closeCode: code });
+    });
     ws.on("open", () => {
-      ws.on("close", (code) => {
-        clearTimeout(safetyTimer);
-        resolve({ status: "open", closeCode: code });
-      });
+      // The bounded safety timer terminates a healthy connection only after
+      // the test has observed it open; connect resolves on the actual close.
+      safetyTimer = setTimeout(() => ws.terminate(), 1000);
     });
     ws.on("unexpected-response", (_req, res) => {
-      clearTimeout(safetyTimer);
+      if (safetyTimer) clearTimeout(safetyTimer);
       resolve({ status: res.statusCode ?? 0 });
     });
     ws.on("error", () => undefined);

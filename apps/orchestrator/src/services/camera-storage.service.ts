@@ -25,7 +25,12 @@ import { fetchStats, fetchRecordingsStorage, fetchConfig } from "./frigate.clien
 import { extractStorage, recordingsOnBootDisk } from "./camera-system.service.js";
 import { effectiveCapacityBytes } from "./recordings-capacity.js";
 import { recordActivity } from "./activity.singleton.js";
-import { storageKeysFromConfig, toStorageBytes } from "./camera-recording-state.js";
+import {
+  storageKeysFromConfig,
+  toStorageBytes,
+  verifiedRetentionFromFrigateConfig,
+  type FrigateRetention,
+} from "./camera-recording-state.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("camera-storage");
@@ -104,6 +109,13 @@ export interface CameraStorageSummary {
   totalBytesPerHour: number | null;
 }
 
+/** Internal Frigate snapshot. Retention is deliberately excluded from the public storage response. */
+export interface CameraStorageSnapshot {
+  storage: CameraStorageSummary;
+  /** Null means the resolved camera config could not be read. */
+  effectiveRetentionByCamera: Record<string, FrigateRetention> | null;
+}
+
 /**
  * Build the camera→storage-key mapping.
  *
@@ -115,18 +127,30 @@ export interface CameraStorageSummary {
  * Falls back to identity mapping if the config can't be read; the caller
  * still gets usable rows keyed by whatever Frigate returned.
  */
-async function buildStorageKeyToCamera(): Promise<Map<string, string>> {
+async function buildFrigateCameraConfig(): Promise<{
+  keyToCamera: Map<string, string>;
+  effectiveRetentionByCamera: Record<string, FrigateRetention> | null;
+}> {
   try {
     const config = (await fetchConfig()) as Record<string, unknown>;
-    // The rule itself (friendly_name, else the camera name) lives with the
-    // other consumer of this endpoint, the camera list's recording block.
-    return storageKeysFromConfig(config.cameras as Record<string, unknown> | undefined);
+    const cameras = config.cameras as Record<string, unknown> | undefined;
+    const effectiveRetentionByCamera = Object.create(null) as Record<string, FrigateRetention>;
+    for (const [name, entry] of Object.entries(cameras ?? {})) {
+      const retention = verifiedRetentionFromFrigateConfig(entry);
+      if (retention) effectiveRetentionByCamera[name] = retention;
+    }
+    return {
+      // The rule itself (friendly_name, else the camera name) lives with the
+      // other consumer of this endpoint, the camera list's recording block.
+      keyToCamera: storageKeysFromConfig(cameras),
+      effectiveRetentionByCamera,
+    };
   } catch (err) {
     logger.warn(
       { err: (err as Error).message },
       "could not read Frigate config to resolve friendly names; using storage keys as-is",
     );
-    return new Map<string, string>();
+    return { keyToCamera: new Map<string, string>(), effectiveRetentionByCamera: null };
   }
 }
 
@@ -205,17 +229,17 @@ function usedPercentOfCapacity(
  * from "nothing is using disk", which is exactly the misreading that let
  * WARP-1849's dead purge look healthy for its entire life.
  */
-export async function getCameraStorage(opts: CameraStorageOptions = {}): Promise<CameraStorageSummary> {
-  const [stats, usage, keyToCamera] = await Promise.all([
+export async function getCameraStorageSnapshot(opts: CameraStorageOptions = {}): Promise<CameraStorageSnapshot> {
+  const [stats, usage, config] = await Promise.all([
     fetchStats(),
     fetchRecordingsStorage(),
-    buildStorageKeyToCamera(),
+    buildFrigateCameraConfig(),
   ]);
 
   const volume = extractVolume(stats);
 
   const cameras: CameraStorageRow[] = Object.entries(usage).map(([key, raw]) => {
-    const camera = keyToCamera.get(key) ?? key;
+    const camera = config.keyToCamera.get(key) ?? key;
 
     // Units, and null-is-not-zero for a camera with no segments / an
     // unmeasured rate, are decided once in toStorageBytes.
@@ -256,12 +280,20 @@ export async function getCameraStorage(opts: CameraStorageOptions = {}): Promise
   const usedPercent = usedPercentOfCapacity(volume, opts.reservedBytes);
 
   return {
-    volume,
-    cameras,
-    nearFull: usedPercent !== null && usedPercent >= NEAR_FULL_RATIO * 100,
-    recordingsOnBootDisk: onBootDisk,
-    totalBytesPerHour,
+    storage: {
+      volume,
+      cameras,
+      nearFull: usedPercent !== null && usedPercent >= NEAR_FULL_RATIO * 100,
+      recordingsOnBootDisk: onBootDisk,
+      totalBytesPerHour,
+    },
+    effectiveRetentionByCamera: config.effectiveRetentionByCamera,
   };
+}
+
+/** Public storage view; resolved recording policy stays in the internal snapshot. */
+export async function getCameraStorage(opts: CameraStorageOptions = {}): Promise<CameraStorageSummary> {
+  return (await getCameraStorageSnapshot(opts)).storage;
 }
 
 /**

@@ -489,6 +489,27 @@ describe("deriveRecordingsWarnings", () => {
       ).toEqual(["cannot_grow"]);
     });
 
+    it("preserves a reported insufficient-space failure when the retention estimate is unavailable", () => {
+      const unknownFacts = facts({
+        allocation: allocation({ status: "DEGRADED" }),
+        migration: migration({ state: "failed", job: "migrate", errorCode: "insufficient_space" }),
+        sizing: { ...SIZING, retentionKnown: false, retentionDays: 0, needTotalBytes: 0, sumBytes: 0, cameras: [] },
+      });
+      const overview = buildRecordingsOverview(unknownFacts);
+      expect(overview).toMatchObject({ retentionKnown: false, needBytes: 0, retentionDays: 0 });
+      expect(overview.warnings.map((warning) => warning.code)).toEqual(["cannot_grow"]);
+      expect(deriveRecordingsWarnings(unknownFacts).map((warning) => warning.code)).toEqual(["cannot_grow"]);
+    });
+
+    it("does not infer a growth warning from stale need while retention is unavailable", () => {
+      expect(
+        codes({
+          ...NO_ROOM,
+          sizing: { ...SIZING, needTotalBytes: g(300), retentionKnown: false },
+        }),
+      ).toEqual([]);
+    });
+
     it("a migration that failed for another reason is not", () => {
       expect(
         codes({ migration: migration({ state: "failed", job: "migrate", errorCode: "copy_failed" }) }),
@@ -643,6 +664,7 @@ describe("buildRecordingsOverview — the GET /api/storage/recordings body", () 
       reservedBytes: g(200),
       usedBytes: g(50),
       freeBytes: g(150),
+      retentionKnown: true,
       needBytes: 168_453_734_400,
       retentionDays: 7,
       daysStored: 2.8,
@@ -942,6 +964,20 @@ describe("buildRecordingsOverview — the GET /api/storage/recordings body", () 
     const o = buildRecordingsOverview(facts({ sizing: { ...SIZING, retentionDays: 14, needTotalBytes: g(77) } }));
     expect(o.needBytes).toBe(g(77));
     expect(o.retentionDays).toBe(14);
+  });
+
+  it("marks unknown retention and zeros only estimated fields", () => {
+    const o = buildRecordingsOverview(facts({ sizing: { ...SIZING, retentionKnown: false } }));
+    expect(o).toMatchObject({
+      retentionKnown: false,
+      needBytes: 0,
+      retentionDays: 0,
+      usedBytes: g(50),
+      reservedBytes: g(200),
+      freeBytes: g(150),
+      daysStored: 2.8,
+    });
+    expect(o.cameras.map((camera) => camera.needBytes)).toEqual([0, 0, 0]);
   });
 
   it("warnings and status in the body are the derived ones", () => {

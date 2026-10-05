@@ -60,6 +60,17 @@ const HOUR_MS = 3_600_000;
 /** Wait after failure n (1-based) before the automatic retry n. A 4th failure ends the automatic attempts. */
 export const RETRY_DELAYS_MS: readonly number[] = [1 * HOUR_MS, 6 * HOUR_MS, 24 * HOUR_MS];
 export const MAX_AUTO_RETRIES = RETRY_DELAYS_MS.length;
+const WAITING_FOR_RETENTION = "waiting for Frigate's resolved recording retention settings";
+
+function retentionUnavailable(facts: RecordingsFacts): boolean {
+  return facts.sizing.retentionKnown === false;
+}
+
+function requireKnownRetention(facts: RecordingsFacts): void {
+  if (retentionUnavailable(facts)) {
+    throw new RecordingsError("busy", "Frigate's recording retention settings are unavailable; try again when Frigate is reachable");
+  }
+}
 
 export const TITLE_SETTING_ASIDE = "Droplet is setting aside space for your camera recordings";
 export const TITLE_MOVED = "Your camera recordings are now on the protected drive";
@@ -252,6 +263,7 @@ export function createRecordingsAllocator(deps: AllocatorDeps): RecordingsAlloca
 
   // ── the tick ───────────────────────────────────────────────────────────────
   async function createFirst(facts: RecordingsFacts): Promise<ReconcileOutcome> {
+    if (retentionUnavailable(facts)) return { action: "none", detail: WAITING_FOR_RETENTION };
     const drive = pickRecordingsDrive(facts.drives);
     if (!drive) return { action: "no_eligible_drive" };
     let row;
@@ -297,15 +309,18 @@ export function createRecordingsAllocator(deps: AllocatorDeps): RecordingsAlloca
         const waited = cur.lastFailureAt === null ? Infinity : facts.at.getTime() - cur.lastFailureAt.getTime();
         const delay = RETRY_DELAYS_MS[Math.min(Math.max(cur.migrationFailures, 1), MAX_AUTO_RETRIES) - 1] ?? 0;
         if (waited < delay) return { action: "none", detail: "waiting to retry the move" };
+        if (retentionUnavailable(facts)) return { action: "none", detail: WAITING_FOR_RETENTION };
         if (!(await transition(cur.id, ["DEGRADED"], { status: "PENDING" }))) return { action: "none" };
         return startWork({ ...cur, status: "PENDING" });
       }
       case "ACTIVE":
         // The row says bay drive, the host does not record there (a reflash reset .env, a volume fallback…).
         if (!(await transition(cur.id, ["ACTIVE"], { status: "PENDING" }))) return { action: "none" };
+        if (retentionUnavailable(facts)) return { action: "none", detail: WAITING_FOR_RETENTION };
         return startWork({ ...cur, status: "PENDING" });
       case "PENDING":
       default: {
+        if (retentionUnavailable(facts)) return { action: "none", detail: WAITING_FOR_RETENTION };
         const out = await startWork(cur);
         return recovered && out.action === "applied_and_migrating" ? { action: "recovered" } : out;
       }
@@ -332,7 +347,7 @@ export function createRecordingsAllocator(deps: AllocatorDeps): RecordingsAlloca
           await bridge.resizeNvr(fsSize);
           await transition(live.id, [live.status], { reservedBytes: toBig(fsSize) });
         }
-      } else {
+      } else if (!retentionUnavailable(facts)) {
         const g = growthDecision({
           mode: live.mode,
           reservedBytes: live.reservedBytes,
@@ -360,7 +375,11 @@ export function createRecordingsAllocator(deps: AllocatorDeps): RecordingsAlloca
     }
 
     // A failing or read-only drive is DEGRADED + a warning — never auto-moved.
-    const desired: AllocationStatusName = d.readOnly || d.smart === "FAILED" || growthBlocked ? "DEGRADED" : "ACTIVE";
+    const desired: AllocationStatusName = d.readOnly || d.smart === "FAILED" || growthBlocked
+      ? "DEGRADED"
+      : retentionUnavailable(facts) && live.mode === "AUTO_RESERVED"
+        ? live.status
+        : "ACTIVE";
     if (live.status !== desired) {
       await transition(live.id, [live.status], { status: desired });
       if (outcome.action === "none") outcome = { action: desired === "DEGRADED" ? "degraded" : "recovered" };
@@ -441,6 +460,7 @@ export function createRecordingsAllocator(deps: AllocatorDeps): RecordingsAlloca
           throw new RecordingsError("not_eligible", "that drive cannot hold camera recordings");
         }
         const mode: AllocationModeName = wantMode ?? live?.mode ?? "AUTO_RESERVED";
+        if (mode === "AUTO_RESERVED") requireKnownRetention(facts);
         const reserved = mode === "FULL" ? drive.sizeBytes : initialReservedBytes(need, drive.freeBytes);
         const existing = facts.allocations.find((r) => r.fsUuid === req.fsUuid);
         // A superseded TARGET is dropped; the live row stays until the new drive is confirmed.
@@ -479,6 +499,7 @@ export function createRecordingsAllocator(deps: AllocatorDeps): RecordingsAlloca
           // No live row: the first allocation, with the requested mode, on the best drive.
           const drive = pickRecordingsDrive(facts.drives);
           if (!drive) throw new RecordingsError("no_allocation", "there is no eligible drive for camera recordings");
+          if (wantMode === "AUTO_RESERVED") requireKnownRetention(facts);
           const reserved = wantMode === "FULL" ? drive.sizeBytes : initialReservedBytes(need, drive.freeBytes);
           const row = toAllocationRecord(
             await prisma.storageAllocation.create({
@@ -497,6 +518,7 @@ export function createRecordingsAllocator(deps: AllocatorDeps): RecordingsAlloca
         // ── (B) switch the mode of the live drive: a quota change only, no restart ──
         const d = driveOf(facts, live.fsUuid);
         if (!d) throw new RecordingsError("not_eligible", "the recordings drive is not available");
+        if (wantMode === "AUTO_RESERVED") requireKnownRetention(facts);
         const fsSize = facts.host?.fsSizeBytes ?? d.sizeBytes;
         const target =
           wantMode === "FULL"

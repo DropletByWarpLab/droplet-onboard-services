@@ -191,15 +191,31 @@ export function computeSizing(
   now: Date,
   retentionDays: number,
   configuredCameras?: Iterable<string>,
+  retentionDaysByCamera?: ReadonlyMap<string, number>,
+  retentionKnown = true,
 ): RecordingsSizing {
   const configured = configuredCameras === undefined ? null : new Set(configuredCameras);
   const cameras: CameraSizing[] = [];
+  let overviewRetentionDays = retentionDaysByCamera === undefined ? retentionDays : 0;
+  if (retentionDaysByCamera !== undefined && configured !== null) {
+    for (const name of configured) {
+      overviewRetentionDays = Math.max(overviewRetentionDays, retentionDaysByCamera.get(name) ?? retentionDays);
+    }
+  }
   for (const [name, samples] of samplesByCamera) {
     if (configured !== null && !configured.has(name)) continue;
-    cameras.push({ name, ...cameraNeedBytes(samples, now, retentionDays) });
+    const cameraRetentionDays = retentionDaysByCamera?.get(name) ?? retentionDays;
+    overviewRetentionDays = Math.max(overviewRetentionDays, cameraRetentionDays);
+    cameras.push({ name, ...cameraNeedBytes(samples, now, cameraRetentionDays) });
   }
   const sumBytes = cameras.reduce((sum, c) => sum + c.needBytes, 0);
-  return { retentionDays, cameras, sumBytes, needTotalBytes: Math.max(sumBytes, NEED_FLOOR_BYTES) };
+  return {
+    retentionDays: Math.max(1, overviewRetentionDays),
+    ...(retentionKnown ? {} : { retentionKnown: false }),
+    cameras,
+    sumBytes,
+    needTotalBytes: Math.max(sumBytes, NEED_FLOOR_BYTES),
+  };
 }
 
 /**

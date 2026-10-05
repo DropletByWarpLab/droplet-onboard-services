@@ -132,6 +132,8 @@ export interface CameraSizing {
 
 export interface RecordingsSizing {
   retentionDays: number;
+  /** False when the resolved Frigate policy was unavailable or omitted a configured camera. */
+  retentionKnown?: boolean;
   cameras: CameraSizing[];
   /** Σ per-camera need, before the floor. */
   sumBytes: number;
@@ -151,6 +153,8 @@ export interface RecordingsFrigateFacts {
   cameras: Array<{ camera: string; usedBytes: number | null; bytesPerHour: number | null }>;
   totalBytesPerHour: number | null;
   recordingsOnBootDisk: boolean | null;
+  /** Internal resolved policy used for sizing; omitted by legacy injected fixtures. */
+  effectiveRetentionByCamera?: Record<string, import("./camera-recording-state.js").FrigateRetention> | null;
 }
 
 /**
@@ -226,6 +230,8 @@ export interface RecordingsOverview {
   reservedBytes: number;
   usedBytes: number;
   freeBytes: number;
+  /** False when Frigate's resolved retention is unavailable; omitted by older servers. */
+  retentionKnown?: boolean;
   needBytes: number;
   retentionDays: number;
   daysStored: number;

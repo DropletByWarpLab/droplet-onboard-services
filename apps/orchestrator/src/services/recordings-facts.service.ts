@@ -10,7 +10,7 @@
  * while an empty `drives` list with no error means "there really is no drive".
  */
 import type { PrismaClient } from "@prisma/client";
-import { getCameraStorage } from "./camera-storage.service.js";
+import { getCameraStorageSnapshot } from "./camera-storage.service.js";
 import { resolveRetentionDefaults } from "./camera-retention-defaults.js";
 import { loadSamplesByCamera } from "./camera-bitrate-sampler.service.js";
 import { loadRecordingsAllocations, selectSubjectAllocation } from "./recordings-capacity.js";
@@ -30,7 +30,7 @@ type FactsDb = Pick<PrismaClient, "storageAllocation" | "camera" | "cameraBitrat
 export interface FactsDeps {
   prisma: FactsDb;
   bridge: Pick<RecordingsBridge, "getNvrStatus" | "getMigration" | "getDrivesSnapshot">;
-  /** Frigate's view, or null when it cannot be reached. Default: `getCameraStorage()`. */
+  /** Frigate's view, or null when it cannot be reached. Default: the internal camera-storage snapshot. */
   getFrigate?: () => Promise<RecordingsFrigateFacts | null>;
   now?: () => Date;
   /** The retention windows the sizing uses. Default: `resolveRetentionDefaults()` (7 days). */
@@ -49,12 +49,14 @@ async function settle<T>(p: Promise<T>): Promise<Settled<T>> {
 
 async function defaultFrigate(): Promise<RecordingsFrigateFacts | null> {
   try {
-    const s = await getCameraStorage();
+    const snapshot = await getCameraStorageSnapshot();
+    const s = snapshot.storage;
     return {
       volume: s.volume,
       cameras: s.cameras.map((c) => ({ camera: c.camera, usedBytes: c.usedBytes, bytesPerHour: c.bytesPerHour })),
       totalBytesPerHour: s.totalBytesPerHour,
       recordingsOnBootDisk: s.recordingsOnBootDisk,
+      effectiveRetentionByCamera: snapshot.effectiveRetentionByCamera,
     };
   } catch {
     // Frigate down: the facts say so (null); the overview then reports what the DB + host support.
@@ -105,13 +107,34 @@ export function createFactsCollector(deps: FactsDeps): () => Promise<RecordingsF
     const migrationStatus: NvrMigrationStatus | null = migration.ok ? migration.value : null;
     const liveFsUuid = hostStatus !== null && hostStatus.kind === "path" && hostStatus.mounted ? hostStatus.fsUuid : null;
 
-    const cameraNames: Record<string, string> = {};
+    const cameraNames = Object.create(null) as Record<string, string>;
     for (const c of cameras) cameraNames[c.name] = c.displayName;
+    const cameraNamesToSize = cameras.map((c) => c.name);
+    const defaults = resolveDefaults();
+    const defaultDays = sizingRetentionDays(defaults);
+    // Missing metadata from injected callers keeps the historical test seam;
+    // production always sets this field, including explicit null on config failure.
+    const effectiveRetention = frigate?.effectiveRetentionByCamera;
+    const retentionDaysByCamera = new Map<string, number>();
+    if (effectiveRetention) {
+      for (const name of cameraNamesToSize) {
+        const windows = Object.hasOwn(effectiveRetention, name) ? effectiveRetention[name] : undefined;
+        if (windows) retentionDaysByCamera.set(name, sizingRetentionDays(windows));
+      }
+    }
+    const retentionKnown =
+      frigate === null
+        ? false
+        : effectiveRetention === undefined
+          ? true
+          : effectiveRetention !== null && cameraNamesToSize.every((name) => Object.hasOwn(effectiveRetention, name));
     const sizing = computeSizing(
       await loadSamplesByCamera(prisma, at),
       at,
-      sizingRetentionDays(resolveDefaults()),
-      cameras.map((c) => c.name),
+      defaultDays,
+      cameraNamesToSize,
+      effectiveRetention ? retentionDaysByCamera : undefined,
+      retentionKnown,
     );
 
     return {

@@ -387,6 +387,20 @@ async def test_success_adds_the_camera_with_its_credentials(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_typed_credentials_work_while_the_background_ladder_is_paused(monkeypatch):
+    async with _Server() as srv:
+        main, added, _ = _fresh_main(monkeypatch, srv.port)
+        state = rtsp_prober._LadderState(next_credential=2, quiet_until=time.monotonic() + 3600)
+        rtsp_prober._ladder["127.0.0.1"] = state
+        assert main.credential_probing_paused("127.0.0.1")
+        out = await main.submit_camera_credentials(MAC, _Req({"username": USER, "password": PW}))
+    assert out["status"] == "accepted"
+    assert len(added) == 1
+    assert state.next_credential == 2
+    assert rtsp_prober.credential_probing_paused("127.0.0.1")
+
+
+@pytest.mark.asyncio
 async def test_the_record_keeps_a_url_that_parses_and_can_be_redacted(monkeypatch):
     """The orchestrator strips userinfo with a regex that stops at '/' and '@', and
     verify_stream URL-decodes it, so the INTERNAL url must encode those. (What
