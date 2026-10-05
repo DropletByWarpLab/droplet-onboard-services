@@ -1773,6 +1773,100 @@ entries:
     review_by: 2027-09-18
     code_refs: [services/erp-connector/src/rest/vendors/loyverse.ts]
 
+  - id: gocardless-api
+    kind: egress
+    service: erp-connector
+    destination:
+      hosts: [api.gocardless.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      GoCardless API — the Direct Debit payments cloud connector (WARP-3697),
+      on ADR-046's declarative REST track. Read-only, GET only, three
+      datasets: payments, refunds and payouts. Payers, mandates, bank accounts
+      and subscriptions are not requested. Carries the merchant's own
+      collection history, fetched on request under a read-only access token an
+      admin minted in their own GoCardless dashboard (Developers → API
+      settings); never ambient, off until the owner connects. ONE FIXED HOST
+      for live accounts; the sandbox host is never dialled and never
+      registered. The `GoCardless-Version` header is an API-version pin
+      carried in the profile, not a destination. Paced at 60 ms against the
+      lower of GoCardless's two published rate-limit figures.
+    ticket: WARP-3697
+    added: 2026-10-04
+    review_by: 2027-10-04
+    code_refs: [services/erp-connector/src/rest/vendors/gocardless.ts]
+
+  # 🔴 WARP-3698 — three JSON PATHS IN THE CAPSULE FIELD MAP parse as hostnames.
+  # `.name` and `.id` are real ICANN TLDs, so the WARP-2467 bare-host pass reads
+  # the whole string literals `milestone.name`, `owner.id` and `kase.id` as
+  # destinations. Same mechanism as `ref-github-repository-id-path`: each states
+  # the true fact — a path into a response body that appears in source as a
+  # string, never a connection the box makes. Bracket syntax does not apply to a
+  # plain object key, and renaming Capsule's fields is not an option.
+  - id: ref-capsule-milestone-name-path
+    kind: reference
+    service: erp-connector
+    destination:
+      hosts: [milestone.name]
+    purpose: the dotted JSON path `milestone.name` in the Capsule REST profile's deal field map (the pipeline stage's name on an opportunity row) — a path into a response body that parses as a hostname under the `.name` TLD, never a connection the box makes
+    ticket: WARP-3698
+    added: 2026-10-04
+    review_by: 2027-10-04
+    code_refs: [services/erp-connector/src/rest/vendors/capsule.ts]
+
+  - id: ref-capsule-owner-id-path
+    kind: reference
+    service: erp-connector
+    destination:
+      hosts: [owner.id]
+    purpose: the dotted JSON path `owner.id` in the Capsule REST profile's task field map (the task's owner, which is its assignee) — a path into a response body that parses as a hostname under the `.id` TLD, never a connection the box makes
+    ticket: WARP-3698
+    added: 2026-10-04
+    review_by: 2027-10-04
+    code_refs: [services/erp-connector/src/rest/vendors/capsule.ts]
+
+  - id: ref-capsule-kase-id-path
+    kind: reference
+    service: erp-connector
+    destination:
+      hosts: [kase.id]
+    purpose: the dotted JSON path `kase.id` in the Capsule REST profile's task field map (the Capsule project a task hangs off) — a path into a response body that parses as a hostname under the `.id` TLD, never a connection the box makes
+    ticket: WARP-3698
+    added: 2026-10-04
+    review_by: 2027-10-04
+    code_refs: [services/erp-connector/src/rest/vendors/capsule.ts]
+
+  - id: capsule-api
+    kind: egress
+    service: erp-connector
+    destination:
+      hosts: [api.capsulecrm.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      Capsule CRM API v2 — the CRM cloud connector (WARP-3698), on ADR-046's
+      declarative REST track. Read-only, GET only, two datasets: opportunities
+      (pipeline deals) and tasks. People, organisations, notes, e-mails and
+      projects are not requested. Carries the owner's own pipeline, fetched on
+      request under a personal access token the account owner minted in their
+      own Capsule (My Preferences → API Authentication); never ambient, off
+      until the owner connects. ONE FIXED HOST. Opportunities are read
+      incrementally with the documented `since` filter; tasks have none, so
+      each tick is a declared full scan. Paced at 900 ms against the published
+      4,000-requests-per-hour per-user ceiling. Pagination follows the RFC-5988
+      Link header and every next URL is re-run through the exact-host guard.
+      The owner's browser host, the developer-docs host and the OAuth and MCP
+      hosts are never dialled and never registered.
+    ticket: WARP-3698
+    added: 2026-10-04
+    review_by: 2027-10-04
+    code_refs: [services/erp-connector/src/rest/vendors/capsule.ts]
+
   # ── build / setup / ci egress ───────────────────────────────────────────
   - id: build-container-registries
     kind: egress

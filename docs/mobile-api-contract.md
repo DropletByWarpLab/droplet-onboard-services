@@ -411,12 +411,20 @@ Frigate event id, and `thumbnail_url` on `/cameras/clips` points here. Its error
 
 | Method | Path | Auth | Returns / body |
 |---|---|---|---|
-| GET | `/llm/models` | Bearer | `[{ id, name, provider, ... }]` |
+| GET | `/llm/models` | Bearer | `{ models: [{ id, name, provider, ... }], defaultModel?: string \| null, degraded?: boolean, degraded_providers?: string[] }` |
 | GET | `/llm/conversations` | Bearer | `[{ id, title, updatedAt, model }]` |
 | GET | `/llm/conversations/:id` | Bearer | `{ id, title, messages: [...] }` |
 | POST | `/llm/conversations` | Bearer | `{ title?, model? }` → `{ id }` |
 | POST | `/llm/chat` | Bearer | `{ model, messages: [{ role, content }], stream?: true, conversationId? }` → SSE stream OR JSON |
 | DELETE | `/llm/conversations/:id` | Bearer | `{ ok }` |
+
+`GET /llm/models` returns an object, including when its `models` array is
+empty. Decode `models` from that object; the response is never a bare array.
+`defaultModel` is the installed local model selected for chat, or `null` when
+none is selected. `degraded: true` means the local model list may be incomplete
+because the AI service is unreachable or reported a provider failure; an empty
+list in that state does not prove that no model is installed. The optional
+`degraded_providers` names the providers whose model listing failed.
 
 Each message carries `kind` (`message`, or `agent_run_result` for a background run reporting back, WARP-3300) and `meta` (`null`, or `{runId, status, title, summary, artifacts}` on an `agent_run_result`). Its `content` is plain assistant text either way, so a client that ignores `kind` still shows it.
 
@@ -1230,6 +1238,13 @@ the same with `"module": "crm"` / `"money"`, WARP-3365). The one exception
 `POST /work-items/:id/transition` and `GET /projects/:id/states` for an item
 assigned to them (the same 404 for any other item, existing or not). Clients hide
 the entry rather than show the error.
+
+**Service desk (WARP-3528, ADR-069).** A service desk is a project of kind
+`SERVICE_DESK` and a ticket is a work item in one, served by `/api/support/*` and
+never by these routes. Every `/api/mobile/pm/*` and `/api/pm/*` route treats a
+desk, its states and labels, its tickets, their comments, history and links as
+not existing (the same 404 as an unknown id), and no list or summary counts them.
+The contract below is unchanged.
 
 ### `GET /api/mobile/pm/workspaces`
 

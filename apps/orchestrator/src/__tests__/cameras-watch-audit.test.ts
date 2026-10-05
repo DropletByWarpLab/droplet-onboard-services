@@ -208,6 +208,25 @@ describe("watching writes one audit row per (actor, camera, kind) per window", (
   });
 });
 
+describe("the assistant's views are audited as the user's, via = ai (WARP-3692)", () => {
+  it("writes a row with the user as actor and via=ai, in its own dedupe window", async () => {
+    const req = { user: { id: member.id, role: member.role, username: member.username } };
+    await auditCameraWatch(req, "front", "snapshot", { via: "ai" });
+    await auditCameraWatch(req, "front", "snapshot", { via: "ai" }); // deduped
+    await auditCameraWatch(req, "front", "live"); // the user's own watch is not swallowed
+    expect(rows()).toHaveLength(2);
+    expect(rows()[0]).toMatchObject({
+      kind: "camera",
+      sub: "front",
+      what: "Fetched a camera snapshot (inline) for the AI assistant",
+      refs: { surface: "camera_watch", camera: "front", watch: "snapshot", saved: false, via: "ai", actor: "sam" },
+      actor: { type: "user", id: "u-member" },
+    });
+    // A human view carries no `via` key at all (rows are byte-identical to before).
+    expect(rows()[1]!.refs).not.toHaveProperty("via");
+  });
+});
+
 describe("saving footage is custody: attachment for owner/admin, 403 for members, never deduped", () => {
   it("a member asking for the clip as a file is refused before Frigate is called", async () => {
     const res = await request(appAs(member)).get("/api/cameras/clips/event/ev1?download=1");
