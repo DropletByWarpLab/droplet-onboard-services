@@ -305,6 +305,30 @@ describe("AddCameraModal", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
+  it("keeps the modal open and says why when the camera was added but has no video yet (WARP-3506)", async () => {
+    // The server answers 202 `added_no_stream` once Frigate has the camera but
+    // no frame ever arrives (a wrong password, say). It must not read as done.
+    addCameraManual.mockResolvedValue({
+      status: "added_no_stream",
+      reason: "The camera was added, but no video is coming from it.",
+    });
+    const onAdded = vi.fn();
+    const onClose = vi.fn();
+    render(<AddCameraModal onClose={onClose} onAdded={onAdded} />);
+
+    fireEvent.change(screen.getByLabelText(/Camera name/), { target: { value: "front_door" } });
+    fireEvent.change(screen.getByLabelText(/Stream address/), {
+      target: { value: "rtsp://192.168.9.60:554/stream1" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Add camera/ }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/no video is coming from it/);
+    // The camera exists now, so the list refreshes behind the dialog…
+    expect(onAdded).toHaveBeenCalled();
+    // …but the dialog stays, so the address or password can be corrected.
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
   it("offers a scan from the manual form when nothing has been found yet", () => {
     const onScan = vi.fn();
     render(<AddCameraModal onClose={vi.fn()} onAdded={vi.fn()} cameras={[]} onScan={onScan} />);

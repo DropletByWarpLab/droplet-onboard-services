@@ -138,7 +138,7 @@ describe.skipIf(!RUN)("PM department dimension (ADR-045 §5.3)", () => {
       const listed = await pm.listWorkItems(prisma, project.id, {
         departmentId: dept.id,
       });
-      expect(listed.map((i) => i.id)).toContain(item.id);
+      expect(listed.items.map((i) => i.id)).toContain(item.id);
     });
   }
 
@@ -176,7 +176,7 @@ describe.skipIf(!RUN)("PM department dimension (ADR-045 §5.3)", () => {
     const byParent = await pm.listWorkItems(prisma, project.id, {
       departmentId: dept.id,
     });
-    expect(byParent.map((i) => i.id)).toContain(item.id);
+    expect(byParent.items.map((i) => i.id)).toContain(item.id);
     // ...and filtering by the TEAM does not reach up.
     const other = await pm.createWorkItem(prisma, null, project.id, {
       name: "adr045h-ticket-parentowned",
@@ -185,8 +185,8 @@ describe.skipIf(!RUN)("PM department dimension (ADR-045 §5.3)", () => {
     const byTeam = await pm.listWorkItems(prisma, project.id, {
       departmentId: team.id,
     });
-    expect(byTeam.map((i) => i.id)).toContain(item.id);
-    expect(byTeam.map((i) => i.id)).not.toContain(other.id);
+    expect(byTeam.items.map((i) => i.id)).toContain(item.id);
+    expect(byTeam.items.map((i) => i.id)).not.toContain(other.id);
   });
 
   // ── 3. archive ───────────────────────────────────────────────────────
@@ -211,7 +211,7 @@ describe.skipIf(!RUN)("PM department dimension (ADR-045 §5.3)", () => {
     const listed = await pm.listWorkItems(prisma, project.id, {
       departmentId: dept.id,
     });
-    expect(listed.map((i) => i.id)).toContain(item.id);
+    expect(listed.items.map((i) => i.id)).toContain(item.id);
   });
 
   it("refuses a NEW assignment into an archive-intent department", async () => {
@@ -278,7 +278,7 @@ describe.skipIf(!RUN)("PM department dimension (ADR-045 §5.3)", () => {
       name: "adr045h-ticket-activity",
     });
     await pm.updateWorkItem(prisma, null, item.id, { departmentId: dept.id });
-    const feed = await pm.listActivity(prisma, item.id);
+    const feed = (await pm.listActivity(prisma, item.id)).items;
     const row = feed.find((a) => a.field === "department");
     expect(row).toBeDefined();
     expect(row?.oldValue).toBeNull();

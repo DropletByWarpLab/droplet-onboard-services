@@ -138,6 +138,7 @@ describe("changing a property", () => {
     mount();
     fireEvent.change(screen.getByLabelText("Priority"), { target: { value: "urgent" } });
     await waitFor(() => expect(updateTicket).toHaveBeenCalledWith("t-1", { priority: "urgent" }));
+    await waitFor(() => expect(screen.getByLabelText("Assignee")).not.toBeDisabled());
     fireEvent.change(screen.getByLabelText("Assignee"), { target: { value: "u-2" } });
     await waitFor(() => expect(updateTicket).toHaveBeenCalledWith("t-1", { assigneeIds: ["u-2"] }));
   });
@@ -178,6 +179,9 @@ describe("changing a property", () => {
     expect((screen.getByLabelText("Type") as HTMLSelectElement).value).toBe("lb-q");
     fireEvent.change(screen.getByLabelText("Type"), { target: { value: "lb-i" } });
     await waitFor(() => expect(updateTicket).toHaveBeenCalledWith("t-1", { labelIds: ["lb-x", "lb-i"] }));
+    // The save callback disables every property control until its refresh settles.
+    // Waiting for the mutation call alone can fire the next change while disabled.
+    await waitFor(() => expect(screen.getByLabelText("Type")).not.toBeDisabled());
     fireEvent.change(screen.getByLabelText("Type"), { target: { value: "" } });
     await waitFor(() => expect(updateTicket).toHaveBeenLastCalledWith("t-1", { labelIds: ["lb-x"] }));
   });
