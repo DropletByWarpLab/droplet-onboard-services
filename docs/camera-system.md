@@ -155,15 +155,6 @@ written to `$FRIGATE_CONFIG_PREIMAGE_DIR` (default
 mode 0600; skipped when that volume is absent). To undo a bad write, POST the file
 back as `text/plain` to Frigate's `/api/config/save?save_option=restart`.
 
-`POST /api/cameras/discovered/:id/credentials` (`mac:` ids only) takes
-`{ username, password }` for a `needs_credentials` camera. camera-discovery tries
-the RTSP stream paths with them — ONVIF is asked for a path only when RTSP found
-none, so a wrong password costs the camera one failed sign-in, not one per
-protocol (Hanwha locks the account after ~5) — and adds the camera on success.
-Failures carry a `code`: `auth_failed`, `locked`, `no_stream_path`, `unreachable`,
-`timeout`, and `invalid_credentials` / `unsupported_password` (nothing was tried
-on the camera). The password is never logged, published or returned.
-
 ### Manual Flow (Dashboard)
 
 1. Go to **Cameras** page in the dashboard

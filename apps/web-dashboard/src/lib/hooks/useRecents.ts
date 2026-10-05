@@ -5,9 +5,9 @@ import { isFilesUnavailableError } from "../files-unavailable";
 import { fetchRecents } from "../api";
 import type { FileEntryInfo } from "../types";
 
-export function useRecents(limit = 50) {
+export function useRecents(limit = 50, { enabled = true }: { enabled?: boolean } = {}) {
   const { data, error, isLoading, mutate } = useSWR<FileEntryInfo[]>(
-    `/api/files/recents?limit=${limit}`,
+    enabled ? `/api/files/recents?limit=${limit}` : null,
     () => fetchRecents(limit),
     { refreshInterval: 15_000, revalidateOnFocus: true }
   );
