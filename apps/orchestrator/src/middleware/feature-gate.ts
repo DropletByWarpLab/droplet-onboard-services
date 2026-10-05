@@ -141,7 +141,7 @@ export function readFeatureGateMeta(fn: unknown): FeatureGateMeta | null {
  * Romain, 2026-09-30: an external guest gets NOTHING from company-wide business
  * data unless it is explicitly shared with them, and the box enforces it on
  * every route. The catalog says which modules a tier may hold nothing on
- * (`refuseBelowFloor`: crm, projects, money), and this is the one handler
+ * (`refuseBelowFloor`: crm, projects, money, support), and this is the one handler
  * that turns that fact into a refusal at the prefix — by ROLE, straight off the
  * session, so it holds without a database read and where the per-person gate
  * "has nothing to narrow" (a session with no local User row). Same 404

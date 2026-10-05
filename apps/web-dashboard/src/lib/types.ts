@@ -1552,7 +1552,9 @@ export type AccessModuleId =
   | "contacts"
   | "crm"
   /** WARP-2581 — invoices and bills landed from a cloud ledger. */
-  | "money";
+  | "money"
+  /** WARP-3528 — the service desk (tickets, requesters, replies and notes). */
+  | "support";
 
 export interface AccessRoleFeatureGrant {
   moduleId: AccessModuleId;
