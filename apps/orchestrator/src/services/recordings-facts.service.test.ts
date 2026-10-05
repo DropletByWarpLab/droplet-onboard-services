@@ -52,12 +52,18 @@ function deps(over: {
   snapshot?: { drives: unknown[]; os_disk?: string; disks?: unknown[] } | Error;
   frigate?: RecordingsFrigateFacts | null;
   samples?: Array<{ camera: string; sampledAt: Date; mbPerHour: number }>;
+  cameras?: Array<{ name: string; displayName: string; adoption: "CANDIDATE" | "ADOPTED" }>;
 } = {}): FactsDeps {
   const fail = <T>(v: T | Error): Promise<T> => (v instanceof Error ? Promise.reject(v) : Promise.resolve(v));
   return {
     prisma: {
       storageAllocation: { findMany: vi.fn(async () => over.rows ?? []) },
-      camera: { findMany: vi.fn(async () => [{ name: "front", displayName: "Front Door" }, { name: "garage", displayName: "Garage" }]) },
+      camera: { findMany: vi.fn(async (args: { where?: { adoption?: string } }) =>
+        (over.cameras ?? [
+          { name: "front", displayName: "Front Door", adoption: "ADOPTED" },
+          { name: "garage", displayName: "Garage", adoption: "ADOPTED" },
+        ]).filter((camera) => !args.where?.adoption || camera.adoption === args.where.adoption),
+      ) },
       cameraBitrateSample: { findMany: vi.fn(async () => over.samples ?? []) },
     } as never,
     bridge: {
@@ -72,6 +78,22 @@ function deps(over: {
 }
 
 describe("collectRecordingsFacts (WARP-3514)", () => {
+  it("does not reserve space or expose a label for a discovery candidate with stale matching bitrate history", async () => {
+    const facts = await createFactsCollector(deps({
+      cameras: [
+        { name: "front", displayName: "Front Door", adoption: "ADOPTED" },
+        { name: "old_candidate", displayName: "Unadopted candidate", adoption: "CANDIDATE" },
+      ],
+      samples: [
+        { camera: "front", sampledAt: NOW, mbPerHour: 1000 },
+        { camera: "old_candidate", sampledAt: NOW, mbPerHour: 100_000 },
+      ],
+    }))();
+    expect(facts.cameraNames).toEqual({ front: "Front Door" });
+    expect(facts.sizing.cameras.map((camera) => camera.name)).toEqual(["front"]);
+    expect(facts.sizing.sumBytes).toBe(facts.sizing.cameras[0].needBytes);
+  });
+
   it("assembles allocation, host, drives, migration, names and sizing", async () => {
     const samples = [
       { camera: "front", sampledAt: new Date(NOW.getTime() - 3_600_000), mbPerHour: 1000 },

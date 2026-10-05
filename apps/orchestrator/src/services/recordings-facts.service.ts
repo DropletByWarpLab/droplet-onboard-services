@@ -83,7 +83,7 @@ export function createFactsCollector(deps: FactsDeps): () => Promise<RecordingsF
     const at = now();
     const [allocations, cameras, host, migration, snapshot, frigate] = await Promise.all([
       loadRecordingsAllocations(prisma),
-      prisma.camera.findMany({ select: { name: true, displayName: true } }),
+      prisma.camera.findMany({ where: { adoption: "ADOPTED" }, select: { name: true, displayName: true } }),
       settle(bridge.getNvrStatus()),
       settle(bridge.getMigration()),
       settle(bridge.getDrivesSnapshot()),
