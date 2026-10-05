@@ -311,6 +311,7 @@ function ProjectsWorkspace(): JSX.Element {
   const visibleItems = optimistic.apply(allItems);
   const selection = useSelection();
   // WARP-3521 — the project's cycles, so a board card can name its cycle.
+  const projectId = mode === "project" ? (project?.id ?? null) : null;
   const { cycles, mutate: mutateCycles } = useProjectCycles(projectId);
   const cyclesById = useMemo(() => new Map((cycles ?? []).map((c) => [c.id, c])), [cycles]);
 
@@ -765,6 +766,7 @@ function ProjectsWorkspace(): JSX.Element {
           <BoardView
             states={states ?? []}
             items={allItems}
+            cycles={cyclesById}
             domain={boardDomain}
             readOnly={readOnly}
             partial={query.loadingMore || query.truncated}
@@ -779,6 +781,7 @@ function ProjectsWorkspace(): JSX.Element {
           <ListView
             states={states ?? []}
             items={allItems}
+            cycles={cyclesById}
             domain={boardDomain}
             partial={query.loadingMore || query.truncated}
             onOpen={(i) => openItem(i.key)}
@@ -969,7 +972,7 @@ function ProjectsWorkspace(): JSX.Element {
         </div>
       </ShellPage>
 
-      {drawerItem && <DetailDrawer item={drawerItem} onClose={closeItem} onChanged={refreshAll} />}
+      {drawerItem && <DetailDrawer item={drawerItem} readOnly={readOnly} onClose={closeItem} onChanged={refreshAll} />}
       {modal === "newitem" && project && (
         <NewItemModal project={project} onClose={() => setModal(null)} onCreated={() => void refreshAll()} />
       )}

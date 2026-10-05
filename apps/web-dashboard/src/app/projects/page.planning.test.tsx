@@ -32,6 +32,16 @@ vi.mock("@/lib/auth", () => ({
 vi.mock("@/lib/hooks/useAppCapabilities", () => ({ useAppCapabilities: () => ({ projects: true }) }));
 
 const roleRef = { current: "owner" };
+const navigation = vi.hoisted(() => ({
+  state: { p: null as string | null, view: null as string | null, item: null as string | null, v: null as string | null, f: null as string | null },
+}));
+vi.mock("@/components/projects/useProjectsUrl", () => ({
+  useProjectsUrl: () => {
+    const [state, setState] = React.useState(navigation.state);
+    const go = (patch: Partial<typeof navigation.state>) => setState((current) => ({ ...current, ...patch }));
+    return { state, go, openItem: (item: string) => go({ item }), closeItem: () => go({ item: null }) };
+  },
+}));
 
 const PROJECT = {
   id: "p1",
@@ -100,8 +110,10 @@ vi.mock("@/components/projects/usePm", () => ({
   useProjects: () => ({ projects: [PROJECT], ...idle }),
   useSummary: () => ({ summary: undefined, ...idle }),
   useProjectStates: () => ({ states: [STATE], error: undefined, isLoading: false }),
-  useProjectItems: () => ({ items: [ITEM], ...idle, key: null }),
-  usePeople: () => ({ person: (id: string) => ({ id, name: "Tester", initials: "T", tone: 1 }), users: [] }),
+  useWorkItemQuery: (args: { enabled: boolean }) => ({ items: args.enabled ? [ITEM] : undefined, total: 1, counts: { all: 1 }, ...idle, refresh: vi.fn(async () => undefined) }),
+  useWorkItemByKey: () => ({ item: undefined, ...idle }),
+  useSavedViews: () => ({ views: [], ...idle }),
+  usePeople: () => ({ person: (id: string) => ({ id, name: "Tester", initials: "T", tone: 1 }), people: [] }),
   useDepartments: () => ({ departments: undefined }),
   useProjectCycles: () => ({ cycles: cyclesRef.current, ...idle }),
   useCycleItems: () => ({ items: [ITEM], total: 1, ...idle }),
@@ -115,6 +127,7 @@ vi.mock("@/components/projects/usePm", () => ({
   useComments: () => ({ comments: [], mutate: vi.fn() }),
   useActivity: () => ({ activity: [], mutate: vi.fn() }),
   pmActions: () => ({}),
+  viewActions: () => ({}),
   PmRequestError: class extends Error {},
 }));
 
@@ -129,6 +142,7 @@ describe("/projects — planning wiring", () => {
   beforeEach(() => {
     roleRef.current = "owner";
     cyclesRef.current = [CYCLE];
+    navigation.state = { p: null, view: null, item: null, v: null, f: null };
   });
 
   it("the board names the cycle an item is planned into", () => {
@@ -177,6 +191,19 @@ describe("/projects — planning wiring", () => {
     expect(screen.queryByRole("button", { name: /New cycle/ })).toBeNull();
     fireEvent.click(screen.getByRole("tab", { name: /Modules/ }));
     expect(screen.queryByRole("button", { name: /New module/ })).toBeNull();
+  });
+
+  it("a read-only role cannot edit planning fields in the item drawer", () => {
+    roleRef.current = "guest";
+    openProject();
+    fireEvent.click(screen.getByRole("tab", { name: /Cycles/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Sprint 12, Active" }));
+    fireEvent.click(screen.getByRole("button", { name: /INBOX-1, First task/ }));
+    const drawer = screen.getByRole("dialog");
+    expect(within(drawer).getByText("Cycle")).toBeInTheDocument();
+    expect(within(drawer).getByText("Sprint 12")).toBeInTheDocument();
+    expect(within(drawer).queryByRole("combobox", { name: "Cycle" })).toBeNull();
+    expect(within(drawer).queryByRole("combobox", { name: /module/i })).toBeNull();
   });
 
   it("opening a cycle's item from the planning view opens the same drawer as the board", () => {
