@@ -142,6 +142,12 @@ function makeFake(hooks: Hooks = {}) {
     // store and its model methods must exist, because the work-item DETAIL
     // read and deleteWorkItem now both consult it.
     relations: [] as Row[],
+    // WARP-1505: deleteWorkItem / deleteProject read an item's (or a project's)
+    // attachment keys before the cascade, to unlink the files after it. Always
+    // empty in this file — the upload surface has its own suite
+    // (routes/pm/attachments.test.ts) — so the behaviour under test here is
+    // "an item with no attachments deletes exactly as before".
+    attachments: [] as Row[],
     // WARP-3372 — the people roster reads `user`.
     users: [] as Row[],
   };
@@ -166,6 +172,7 @@ function makeFake(hooks: Hooks = {}) {
 
   const prisma: Record<string, unknown> = {
     $transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(prisma),
+    $queryRaw: vi.fn(async () => []),
 
     // WARP-3372 — `where` / `orderBy` are interpreted, so the roster's filter
     // (ACTIVE humans only) is what is under test, not a stub that ignores it.
@@ -526,6 +533,18 @@ function makeFake(hooks: Hooks = {}) {
         for (const row of data) db.activity.push({ id: uid("ac"), createdAt: new Date(), ...row });
         return { count: data.length };
       },
+    },
+
+    pmAttachment: {
+      findMany: async ({ where }: { where: Row }) =>
+        db.attachments.filter((a) => {
+          if (where.workItemId !== undefined && a.workItemId !== where.workItemId) return false;
+          const inProject = (where.workItem as Row | undefined)?.projectId;
+          if (inProject !== undefined) {
+            return db.items.find((i) => i.id === a.workItemId)?.projectId === inProject;
+          }
+          return true;
+        }),
     },
 
     // WARP-2586: consulted by the composed work-item detail read and by

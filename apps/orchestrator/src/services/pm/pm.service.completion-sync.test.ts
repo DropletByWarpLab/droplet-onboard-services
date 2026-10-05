@@ -253,6 +253,9 @@ describe("deleteWorkItem parent-removal audit (WARP-885)", () => {
       // cascade, so it can emit a relation_removed audit row on the SURVIVING
       // end. Empty here: these two cases are about parent_removed.
       pmWorkItemRelation: { findMany: async () => [] },
+      // WARP-1505 — and the item's attachment keys, to unlink the files after
+      // the commit. None here; pm.service.attachments.test.ts covers the hook.
+      pmAttachment: { findMany: async () => [] },
     };
     const prisma = {
       pmWorkItem: { findUnique: async () => ({ id: "parent-1" }) },
@@ -300,6 +303,9 @@ describe("deleteWorkItem parent-removal audit (WARP-885)", () => {
       // cascade, so it can emit a relation_removed audit row on the SURVIVING
       // end. Empty here: these two cases are about parent_removed.
       pmWorkItemRelation: { findMany: async () => [] },
+      // WARP-1505 — and the item's attachment keys, to unlink the files after
+      // the commit. None here; pm.service.attachments.test.ts covers the hook.
+      pmAttachment: { findMany: async () => [] },
     };
     const prisma = {
       pmWorkItem: { findUnique: async () => ({ id: "leaf-1" }) },
@@ -345,6 +351,8 @@ describe("deleteWorkItem parent-removal audit (WARP-885)", () => {
           ];
         },
       },
+      // WARP-1505 — see the two cases above.
+      pmAttachment: { findMany: async () => [] },
     };
     const seam = createTransactionSeam({ client: () => tx });
     const prisma = {

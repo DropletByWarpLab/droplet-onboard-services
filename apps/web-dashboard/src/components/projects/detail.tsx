@@ -14,12 +14,33 @@ import {
   AvatarStack,
   usePerson,
 } from "./bits";
-import { useActivity, useComments, useSubIssues, useDevelopmentLinks, pmActions } from "./usePm";
+import { fmtISODate, isOverdue } from "./config";
+import {
+  useActivity,
+  useAttachments,
+  useDevelopmentLinks,
+  useComments,
+  useSubIssues,
+  useProjectLabels,
+  pmActions,
+} from "./usePm";
+import {
+  AttachmentsSection,
+  CommentAttachments,
+  StagedFiles,
+  UploadRows,
+  pastedFiles,
+  useAttachmentUploads,
+  useFileDrop,
+  useFilePicker,
+  usePreventStrayFileDrops,
+} from "./attachments";
+import { canWrite, type PmAttachment, type PmWorkItem } from "./types";
+import { useAuth } from "@/lib/auth";
+import { CycleField, ModulesField } from "./planning-pickers";
 import { ArrowUpRight, Copy } from "lucide-react";
 import { editActions } from "./useEditing";
-import { CycleField, ModulesField } from "./planning-pickers";
 import { PropRow } from "./detail/PropRow";
-import type { PmWorkItem } from "./types";
 import { TimeSection } from "./time/TimeSection";
 import { escapeHtml } from "@/lib/escape-html";
 import { formatRelativeTime } from "@/lib/relative-time";
@@ -59,7 +80,17 @@ function SubIssueRow({ sub }: { sub: PmWorkItem }): JSX.Element {
   );
 }
 
-function Comment({ authorId, html, when }: { authorId: string | null; html: string; when: string }): JSX.Element {
+function Comment({
+  authorId,
+  html,
+  when,
+  attachments,
+}: {
+  authorId: string | null;
+  html: string;
+  when: string;
+  attachments: PmAttachment[];
+}): JSX.Element {
   const person = usePerson();
   const ai = authorId === null;
   return (
@@ -81,13 +112,19 @@ function Comment({ authorId, html, when }: { authorId: string | null; html: stri
           style={ai ? { padding: "9px 11px", borderRadius: 10 } : undefined}
           dangerouslySetInnerHTML={{ __html: html }}
         />
+        <CommentAttachments files={attachments} />
       </div>
     </div>
   );
 }
 
 
-function humanizeActivity(verb: string, field: string | null): string {
+function humanizeActivity(
+  verb: string,
+  field: string | null,
+  oldValue: string | null,
+  newValue: string | null,
+): string {
   switch (verb) {
     case "created":
       return "created this item";
@@ -103,24 +140,55 @@ function humanizeActivity(verb: string, field: string | null): string {
       // about who owns it, and "updated the item" hides exactly that.
       if (field === "department") return "changed the department";
       return "updated the item";
+    // WARP-1505 - the file name rides on the row: new on add, old on remove.
+    case "attachment_added":
+      return newValue ? `added ${newValue}` : "added an attachment";
+    case "attachment_removed":
+      return oldValue ? `removed ${oldValue}` : "removed an attachment";
     default:
       return verb.replace(/_/g, " ");
   }
 }
 
-function Composer({ itemId, onSent }: { itemId: string; onSent: () => void }): JSX.Element {
+function Composer({
+  itemId,
+  uploads,
+  canAttach,
+  onSent,
+}: {
+  itemId: string;
+  uploads: ReturnType<typeof useAttachmentUploads>;
+  canAttach: boolean;
+  onSent: () => void;
+}): JSX.Element {
   const [text, setText] = useState("");
+  // Files chosen for the comment, uploaded once it exists.
+  const [files, setFiles] = useState<File[]>([]);
   const [busy, setBusy] = useState(false);
   const actions = pmActions();
   const { toast } = useToast();
+  const stage = (picked: File[]) => setFiles((cur) => [...cur, ...picked]);
+  const picker = useFilePicker(stage, "Choose files to attach to the comment");
+  // Nested: a drop here belongs to the comment, not to the item around it.
+  const drop = useFileDrop(stage, { nested: true });
   const submit = async () => {
     const body = text.trim();
-    if (!body || busy) return;
+    if ((!body && files.length === 0) || busy) return;
     setBusy(true);
     try {
-      await actions.addComment(itemId, `<p>${escapeHtml(body)}</p>`);
+      const { comment } = await actions.addComment(itemId, `<p>${escapeHtml(body)}</p>`);
+      const staged = files;
       setText("");
+      setFiles([]);
       onSent();
+      if (staged.length) {
+        // The comment is in; a file that fails leaves it alone.
+        void uploads.addFiles(staged, { commentId: comment.id }).then((failed) => {
+          if (failed) {
+            toast(`Comment sent, but ${failed} ${failed === 1 ? "file" : "files"} couldn't be uploaded.`, "error");
+          }
+        });
+      }
     } catch (e) {
       // DASH-002: a failed comment POST used to surface as an unhandled
       // rejection — the button just reset with no feedback. Toast like the
@@ -131,7 +199,15 @@ function Composer({ itemId, onSent }: { itemId: string; onSent: () => void }): J
     }
   };
   return (
-    <div style={{ marginTop: 14 }}>
+    <div
+      style={{ marginTop: 14 }}
+      className={drop.over ? "pm-drop-over" : undefined}
+      {...(canAttach ? drop.dropProps : {})}
+    >
+      {/* First, not beside the Attach button: the Dialog's focus trap treats the
+          last enabled input as the end of the loop, and a hidden one can never
+          take focus, so placed last it would let Tab walk out of the drawer. */}
+      {canAttach && picker.input}
       <textarea
         className="pm-input"
         placeholder="Write a comment"
@@ -141,15 +217,36 @@ function Composer({ itemId, onSent }: { itemId: string; onSent: () => void }): J
         onKeyDown={(e) => {
           if ((e.metaKey || e.ctrlKey) && e.key === "Enter") submit();
         }}
+        onPaste={(e) => {
+          if (!canAttach) return;
+          const pasted = pastedFiles(e);
+          if (!pasted.length) return; // a plain-text paste is left to the browser
+          e.preventDefault();
+          stage(pasted);
+        }}
         aria-label="Write a comment"
       />
+      <StagedFiles files={files} onRemove={(i) => setFiles((cur) => cur.filter((_, j) => j !== i))} />
+      <UploadRows rows={uploads.queue.filter((r) => r.commentId)} onDismiss={uploads.dismiss} />
       <div className="pm-row" style={{ justifyContent: "space-between", marginTop: 8 }}>
         <SafetyChip tier="write" />
-        <button className="pm-btn primary sm" type="button" onClick={submit} disabled={busy || !text.trim()}>
-          <PmIcon name="send" size={13} />
-          {busy ? "Sending…" : "Send"}
-          <span className="pm-kbd" style={{ marginLeft: 2 }}>⌘↵</span>
-        </button>
+        <span className="pm-row" style={{ gap: 6 }}>
+          {canAttach && (
+            <button type="button" className="pm-iconbtn" aria-label="Attach files" onClick={picker.open}>
+              <PmIcon name="attach" size={16} />
+            </button>
+          )}
+          <button
+            className="pm-btn primary sm"
+            type="button"
+            onClick={submit}
+            disabled={busy || (!text.trim() && files.length === 0)}
+          >
+            <PmIcon name="send" size={13} />
+            {busy ? "Sending…" : "Send"}
+            <span className="pm-kbd" style={{ marginLeft: 2 }}>⌘↵</span>
+          </button>
+        </span>
       </div>
     </div>
   );
@@ -174,12 +271,31 @@ function DetailBody({
   const { activity, mutate: mutateActivity } = useActivity(item.id);
   const { links: developmentLinks, isLoading: developmentLoading, error: developmentError } = useDevelopmentLinks(item.id);
   const { toast } = useToast();
+  const { user } = useAuth();
+  const writer = !readOnly && canWrite(user?.role);
+  const att = useAttachments(item.id);
+  // A file landing or going changes the list and writes an activity row.
+  const refreshFiles = () => Promise.all([att.mutate(), mutateActivity()]);
+  const uploads = useAttachmentUploads(item.id, { maxBytes: att.maxBytes, onUploaded: refreshFiles });
+  // The whole body takes drops for the item (writers only; the composer takes
+  // its own for the comment).
+  const drop = useFileDrop((dropped) => void uploads.addFiles(dropped));
+  usePreventStrayFileDrops();
   const subs = subIssues ?? [];
   const list = comments ?? [];
   const acts = activity ?? [];
+  const files = att.attachments ?? [];
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+    <div
+      style={{ display: "flex", flexDirection: "column", gap: 20, position: "relative" }}
+      {...(writer ? drop.dropProps : {})}
+    >
+      {writer && drop.over && (
+        <div className="pm-dropveil" aria-hidden="true">
+          <span>Drop files to attach</span>
+        </div>
+      )}
       <div>
         <div className="pm-row" style={{ gap: 10, marginBottom: 9 }}>
           <span className="pm-mono" style={{ fontSize: 12, color: "var(--text-4)" }}>{item.key}</span>
@@ -268,6 +384,7 @@ function DetailBody({
         )}
       </div>
 
+      <AttachmentsSection att={att} uploads={uploads} onChanged={refreshFiles} readOnly={readOnly} />
       <TimeSection item={item} />
 
       <div>
@@ -276,13 +393,23 @@ function DetailBody({
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           {list.length ? (
-            list.map((c) => <Comment key={c.id} authorId={c.authorId} html={c.commentHtml} when={formatRelativeTime(c.createdAt)} />)
+            list.map((c) => (
+              <Comment
+                key={c.id}
+                authorId={c.authorId}
+                html={c.commentHtml}
+                when={formatRelativeTime(c.createdAt)}
+                attachments={files.filter((a) => a.commentId === c.id)}
+              />
+            ))
           ) : (
             <div style={{ fontSize: 13, color: "var(--text-4)" }}>No comments yet.</div>
           )}
         </div>
         <Composer
           itemId={item.id}
+          uploads={uploads}
+          canAttach={writer}
           onSent={() => {
             // addComment writes a PmComment AND a verb:commented PmActivity row in
             // the same transaction — revalidate both so the timeline refreshes
@@ -311,7 +438,7 @@ function DetailBody({
                   <span style={{ fontWeight: 600, color: "var(--text)" }}>
                     {a.actorId ? person(a.actorId).name : "Droplet AI"}
                   </span>{" "}
-                  {humanizeActivity(a.verb, a.field)}
+                  {humanizeActivity(a.verb, a.field, a.oldValue, a.newValue)}
                   <span style={{ color: "var(--text-4)", marginLeft: 6 }}>{formatRelativeTime(a.createdAt)}</span>
                 </div>
               </div>

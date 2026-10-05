@@ -48,7 +48,7 @@ OUTPUT_DIR=""
 
 # Data volumes device-backup must capture. These are the REAL top-level volume
 # names from docker/docker-compose.yml — a static check below asserts that.
-VOLUMES=(nextcloud-data aikeys matter-data brain-memory-data nvrdata ops-audit)
+VOLUMES=(nextcloud-data aikeys matter-data brain-memory-data nvrdata ops-audit pm-attachments)
 
 # WARP-1571 / WARP-1575 — readiness probe for the disposable drill Postgres.
 # MUST stay TCP-gated; see the guard in the static-checks section below for
@@ -121,6 +121,16 @@ if [ -f "$BACKUP_SCRIPT" ] && [ -f "$RESTORE_SCRIPT" ]; then
         fail "DATA_VOLUMES '$v' is NOT a top-level volume in docker-compose.yml (would auto-create empty)"
       fi
     done <<< "$script_volumes"
+
+    # WARP-1505: the files customers attach to work items are customer data, and
+    # the pg_dump only carries their metadata rows. Assert against the PARSED
+    # DATA_VOLUMES array rather than the loose `grep -q` above, which a mention
+    # in the header comment would satisfy even if the array lost the entry.
+    if grep -qxF "pm-attachments" <<< "$script_volumes"; then
+      pass "DATA_VOLUMES captures customer-data volume pm-attachments (WARP-1505)"
+    else
+      fail "DATA_VOLUMES OMITS pm-attachments — work-item files would be missing from every backup"
+    fi
   else
     fail "docker-compose.yml not found for volume-name cross-check"
   fi
@@ -300,6 +310,7 @@ services:
       - nextcloud-data:/var/www/html
       - nvrdata:/data/nvr
       - ops-audit:/data/audit
+      - pm-attachments:/data/pm-attachments
     healthcheck:
       # WARP-1571: TCP-gated on purpose — see the cold-volume readiness
       # guard above. Never inline a socket probe here.
@@ -314,6 +325,7 @@ volumes:
   nextcloud-data:
   nvrdata:
   ops-audit:
+  pm-attachments:
 YAML
 }
 
@@ -339,6 +351,7 @@ seed_volume_markers() {
     echo NEXTCLOUD-MARKER > /var/www/html/marker.txt
     echo NVR-MARKER > /data/nvr/marker.txt
     echo AUDIT-MARKER > /data/audit/marker.txt
+    echo PM-ATTACH-MARKER > /data/pm-attachments/marker.txt
   '
 }
 
@@ -404,7 +417,7 @@ else
 
       # --- Mutate ---------------------------------------------------------
       dc exec -T db sh -c 'psql -U droplet -d droplet -c "DELETE FROM t;"' >/dev/null 2>&1
-      dc exec -T db sh -c 'rm -f /keys/marker.txt /data/matter/marker.txt /data/brain/marker.txt /var/www/html/marker.txt /data/nvr/marker.txt /data/audit/marker.txt' >/dev/null 2>&1
+      dc exec -T db sh -c 'rm -f /keys/marker.txt /data/matter/marker.txt /data/brain/marker.txt /var/www/html/marker.txt /data/nvr/marker.txt /data/audit/marker.txt /data/pm-attachments/marker.txt' >/dev/null 2>&1
       [ "$(db_count_main)" = "0" ] && pass "data mutated (rows dropped)" || fail "mutation did not take"
 
       # --- Restore --------------------------------------------------------
@@ -427,6 +440,7 @@ else
       [ "$(marker_present db /var/www/html/marker.txt)" = "yes" ] && pass "nextcloud volume restored"   || fail "nextcloud volume NOT restored"
       [ "$(marker_present db /data/nvr/marker.txt)" = "yes" ]    && pass "nvrdata volume restored"      || fail "nvrdata volume NOT restored"
       [ "$(marker_present db /data/audit/marker.txt)" = "yes" ]  && pass "ops-audit volume restored"    || fail "ops-audit volume NOT restored"
+      [ "$(marker_present db /data/pm-attachments/marker.txt)" = "yes" ] && pass "pm-attachments volume restored" || fail "pm-attachments volume NOT restored"
 
       # --- Rotation -------------------------------------------------------
       info "testing rotation (BACKUP_KEEP=2)"

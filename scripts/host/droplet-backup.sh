@@ -33,6 +33,12 @@
 #                                     snapshotted via a throwaway sibling
 #                                     container so no host bind-mount or
 #                                     /var/lib/docker access is needed
+#   staging/volumes/pm-attachments.tar  the Projects attachments volume
+#                                     (WARP-1505): the files behind every
+#                                     PmAttachment row in droplet.sql.gz. It must
+#                                     travel with that dump, or a restore pairs
+#                                     READY rows with files that are gone and every
+#                                     download answers 404.
 #   <repo>/.env                       device secrets (the repo copy is chmod
 #                                     600; the restic repo itself is encrypted)
 #   config dirs (existence-guarded):  docker/certs, docker/secrets,
@@ -282,6 +288,13 @@ stage_volume() {
 }
 
 stage_volume nextcloud-data
+
+# WARP-1505: files customers attached to Projects work items and comments. The
+# pg_dump above carries only their metadata rows (the bytes live on this
+# orchestrator-owned volume), so without this tar the nightly copy restores a
+# row for every attachment and the file behind none of them. Absent on a box that
+# predates the volume: stage_volume skips it with a warning.
+stage_volume pm-attachments
 
 # Camera footage: EXCLUDED by default (size — see header). The stale-staging
 # rm matters: without it, a box that once opted in would keep re-snapshotting
