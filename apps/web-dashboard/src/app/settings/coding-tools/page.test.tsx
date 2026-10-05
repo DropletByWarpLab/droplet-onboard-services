@@ -190,7 +190,7 @@ describe("tokens", () => {
     const panel = await screen.findByRole("region", { name: /copy your new token now/i });
     expect(within(panel).getByText(SECRET)).toBeInTheDocument();
     expect(panel).toHaveTextContent(/won.t see it again/i);
-    expect(document.activeElement).toBe(panel);
+    await waitFor(() => expect(document.activeElement).toBe(panel));
     expect(authFetch).toHaveBeenCalledWith(
       "/api/llm-access/tokens",
       expect.objectContaining({ method: "POST", body: JSON.stringify({ label: "MacBook" }) }),

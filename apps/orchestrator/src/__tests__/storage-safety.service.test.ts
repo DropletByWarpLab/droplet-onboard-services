@@ -93,6 +93,34 @@ describe("storage safety — AI is blocked from destructive ops", () => {
     expect("requiresConfirmation" in res && res.requiresConfirmation).toBe(true);
     expect("confirmationToken" in res && typeof res.confirmationToken).toBe("string");
   });
+
+  it("keeps recordings allocation at Tier 2 and records that tier in the audit row", async () => {
+    const result = await evaluateStorageCommand(
+      prisma,
+      "recordings_set",
+      "recordings",
+      { mode: "full" },
+      "owner-user",
+      "api",
+    );
+    expect("requiresConfirmation" in result && result.requiresConfirmation).toBe(true);
+    expect(result.tier).toBe(2);
+    expect(prisma.commandAuditLog.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ tier: 2, service: "recordings_set" }) }),
+    );
+  });
+
+  it("keeps deleting old recordings at Tier 3", async () => {
+    const result = await evaluateStorageCommand(
+      prisma,
+      "recordings_old_footage_delete",
+      "recordings",
+      {},
+      "owner-user",
+      "api",
+    );
+    expect(result.tier).toBe(3);
+  });
 });
 
 describe("storage safety — confirm token is single-use + bound to {service, resourceId}", () => {
@@ -146,6 +174,22 @@ describe("storage safety — confirm token is single-use + bound to {service, re
     if (!res.confirmed) expect(res.code).toBe("TOKEN_OPERATION_MISMATCH");
   });
 
+  it("burns a token presented to an endpoint that is not allowed to execute its service", async () => {
+    const token = await mintToken("recordings_set", "recordings");
+    const refused = await confirmStorageCommand(prisma, token, "owner", {
+      service: "recordings_set",
+      resourceId: "recordings",
+      allowedServices: new Set(["pool_destroy"]),
+    });
+    expect(refused).toMatchObject({ confirmed: false, code: "TOKEN_ENDPOINT_MISMATCH" });
+    const replay = await confirmStorageCommand(prisma, token, "owner", {
+      service: "recordings_set",
+      resourceId: "recordings",
+      allowedServices: new Set(["recordings_set"]),
+    });
+    expect(replay).toMatchObject({ confirmed: false, code: "TOKEN_MISSING" });
+  });
+
   it("is single-use — a second confirm of the same token fails", async () => {
     const token = await mintToken("pool_create", "md0");
     const first = await confirmStorageCommand(prisma, token, "owner", {
@@ -168,6 +212,7 @@ describe("storage safety — confirm token is single-use + bound to {service, re
       "pool_set_level",
       "pool_add_spare",
       "pool_remove_disk",
+      "recordings_old_footage_delete",
     ];
     for (const op of ops) {
       const viaAi = await evaluateStorageCommand(
@@ -180,7 +225,7 @@ describe("storage safety — confirm token is single-use + bound to {service, re
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// WARP-3513 — the recovery-key reveal is the one Tier-2 storage action.
+// WARP-3513 — the recovery-key reveal and recording allocation are Tier-2 actions.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const REVEAL = "recovery_key_reveal";
@@ -189,8 +234,16 @@ const REGENERATE = "recovery_key_regenerate";
 const FS_UUID = "1a2b3c4d-5e6f-4a1b-9c2d-3e4f5a6b7c8d";
 
 describe("storage safety rules — Tier 2 reveal, Tier 3 regenerate and erase (WARP-3513)", () => {
-  it("STORAGE_TIER_2_OPERATIONS holds exactly the recovery-key reveal", () => {
-    expect([...STORAGE_TIER_2_OPERATIONS]).toEqual([REVEAL]);
+  it("Tier 2 contains recovery-key reveal and recording allocation", () => {
+    expect([...STORAGE_TIER_2_OPERATIONS].sort()).toEqual([REVEAL, "recordings_set"].sort());
+  });
+
+  it("uses distinct confirmation text for allocation and recovery-key reveal", () => {
+    const allocation = classifyStorageCommand("recordings_set");
+    expect(allocation.tier).toBe(2);
+    expect(allocation.reason).toMatch(/camera recordings.*owner\/admin/);
+    expect(allocation.reason).not.toMatch(/recovery key|permanently erases/);
+    expect(classifyStorageCommand(REVEAL).reason).toMatch(/recovery key.*only the owner/);
   });
 
   it("no operation is in both tiers", () => {
@@ -231,7 +284,7 @@ describe("storage safety rules — Tier 2 reveal, Tier 3 regenerate and erase (W
     expect(c.reason).not.toMatch(/unrecogni[sz]ed|refused/i);
   });
 
-  it("the Tier-3 set is the erase ops plus the recovery-key regenerate", () => {
+  it("the Tier-3 set contains erase operations, old footage deletion and recovery-key regeneration", () => {
     expect([...STORAGE_TIER_3_OPERATIONS].sort()).toEqual(
       [
         "drive_adopt",
@@ -242,6 +295,7 @@ describe("storage safety rules — Tier 2 reveal, Tier 3 regenerate and erase (W
         "pool_format",
         "pool_remove_disk",
         "pool_set_level",
+        "recordings_old_footage_delete",
         REGENERATE,
       ].sort(),
     );
