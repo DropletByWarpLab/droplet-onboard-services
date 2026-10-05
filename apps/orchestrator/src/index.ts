@@ -1642,19 +1642,6 @@ async function main() {
     { lockKey: "droplet:pm-webhook-delivery-prune" },
   );
 
-  // WARP-3536 — authorized live refreshes share the transactional PM outbox.
-  // The audience resolver is initialized by createApp above.
-  registerOutboxConsumer(
-    createPmLiveConsumer({
-      prisma,
-      audience: createPmLiveAudience({
-        prisma,
-        boxModuleIds: () => getEffectiveModuleIds(prisma, config),
-      }),
-    }),
-    { prisma, cronRuntime },
-  );
-
   // WARP-2730 (ADR-048) — auto-filing. Two registrations, split on purpose.
   //
   // 🔴 THE TICK CARRIES NO `lockKey`, AND THAT IS THE POINT. `lockKey` wraps
@@ -2185,6 +2172,19 @@ async function main() {
     logger.info("API server listening on port %d", config.PORT);
     markListening();
   });
+
+  // WARP-3536 — register after createApp(), which initializes the audience's
+  // access resolver, while sharing the transactional PM outbox.
+  registerOutboxConsumer(
+    createPmLiveConsumer({
+      prisma,
+      audience: createPmLiveAudience({
+        prisma,
+        boxModuleIds: () => getEffectiveModuleIds(prisma, config),
+      }),
+    }),
+    { prisma, cronRuntime },
+  );
 
   // Graceful shutdown. `exitCode` defaults to 0 so SIGTERM/SIGINT keep their
   // clean-exit semantics; the uncaughtException path (WARP-572) passes 1 so

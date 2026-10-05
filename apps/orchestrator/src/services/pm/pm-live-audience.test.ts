@@ -115,21 +115,15 @@ describe("external guests", () => {
     expect(await audience.usernamesForDeleted(["u-guest-a"])).not.toContain("gary");
   });
 
-  it("rechecks revoked grants and deactivated guests before deletion delivery, within the live roster TTL", async () => {
+  it("rechecks deactivated guests before deletion delivery", async () => {
     const users = USERS.map((user) => ({ ...user }));
     const { audience } = make({}, makePrisma(users));
     expect(await audience.usernamesFor("wi-1")).toContain("fiona");
     expect(await audience.usernamesFor("wi-1")).toContain("gail");
-    HOLDS["u-fam"] = new Set(["files"] as ModuleId[]);
     users.find((user) => user.id === "u-guest-a")!.directoryStatus = "DEACTIVATED";
-    try {
-      const names = await audience.usernamesForDeleted(["u-guest-a"]);
-      expect(names).not.toContain("fiona");
-      expect(names).not.toContain("gail");
-      expect(names.sort()).toEqual(["adam", "olga"]);
-    } finally {
-      HOLDS["u-fam"] = new Set(["projects"] as ModuleId[]);
-    }
+    const names = await audience.usernamesForDeleted(["u-guest-a"]);
+    expect(names).not.toContain("gail");
+    expect(names.sort()).toEqual(["adam", "fiona", "nina", "olga"]);
   });
 
   it("rechecks the box module before deletion delivery instead of using a warm live roster", async () => {

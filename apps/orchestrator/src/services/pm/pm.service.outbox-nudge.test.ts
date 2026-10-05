@@ -36,10 +36,15 @@ function relationDeleteStub(deleteWorkItemRow: () => Promise<unknown> = async ()
       findMany: vi.fn(async () => []),
       delete: vi.fn(deleteWorkItemRow),
     },
+    pmWorkItemAssignee: { findMany: vi.fn(async () => []) },
+    user: { findMany: vi.fn(async () => []) },
     pmWorkItemRelation: {
       findMany: vi.fn(async () => [{ fromId: "wi-1", toId: "wi-2", kind: "RELATES" }]),
     },
-    pmActivity: { createMany: vi.fn(async () => ({ count: 1 })) },
+    pmActivity: {
+      create: vi.fn(async () => ({})),
+      createMany: vi.fn(async () => ({ count: 1 })),
+    },
   };
   const seam = createTransactionSeam({ client: () => tx });
   const transaction = vi.fn(async (callback: (client: typeof tx) => Promise<unknown>, options?: unknown) => {

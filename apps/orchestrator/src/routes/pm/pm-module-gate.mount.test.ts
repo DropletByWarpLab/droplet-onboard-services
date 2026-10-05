@@ -58,6 +58,8 @@ import type { AuthUser } from "../../middleware/auth.js";
 import { packagePath } from "../../__tests__/helpers/test-paths.js";
 import { createPmNativeRouter } from "./native.js";
 import { createPmRelationsRouter } from "./relations.js";
+import { createPmPresenceRouter } from "./presence.js";
+import { createPmWebhooksRouter } from "./webhooks.js";
 import { createPmScheduleRouter } from "./schedule.js";
 import { createPmOpenApiRouter } from "./openapi.js";
 import { createPmMobileRouter } from "../mobile/pm.js";
@@ -160,6 +162,18 @@ const PM_ROUTER_MOUNTS: readonly PmRouterMount[] = [
     base: "/api",
     file: "routes/pm/relations.ts",
     router: createPmRelationsRouter(PRISMA),
+  },
+  {
+    factory: "createPmPresenceRouter",
+    base: "/api",
+    file: "routes/pm/presence.ts",
+    router: createPmPresenceRouter(PRISMA),
+  },
+  {
+    factory: "createPmWebhooksRouter",
+    base: "/api",
+    file: "routes/pm/webhooks.ts",
+    router: createPmWebhooksRouter(PRISMA),
   },
   {
     factory: "createPmScheduleRouter",
