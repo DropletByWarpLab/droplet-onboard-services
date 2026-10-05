@@ -29,7 +29,10 @@ vi.mock("@/lib/auth", () => ({
 vi.mock("@/lib/hooks/useAppCapabilities", () => ({ useAppCapabilities: () => ({ projects: true }) }));
 
 const paramsRef = { current: new URLSearchParams() as URLSearchParams | null };
-vi.mock("next/navigation", () => ({ useSearchParams: () => paramsRef.current }));
+vi.mock("next/navigation", () => ({
+  useSearchParams: () => paramsRef.current,
+  useRouter: () => ({ replace: vi.fn(), push: vi.fn(), back: vi.fn() }),
+}));
 
 vi.mock("@/components/projects/insights/InsightsView", () => ({
   InsightsView: ({ projectId }: { projectId: string | null }) => (

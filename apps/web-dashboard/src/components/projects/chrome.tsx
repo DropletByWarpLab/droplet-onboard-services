@@ -11,7 +11,7 @@ import {
 
 import type { JSX } from "react";
 
-export type ProjectView = "board" | "list" | "calendar" | "timeline" | "cycles" | "modules" | "insights";
+export type ProjectView = "board" | "list" | "calendar" | "timeline" | "cycles" | "modules" | "insights" | "time";
 export type SavedView = "all" | "mine" | "active" | "overdue" | "noassignee";
 
 export function ViewSwitcher({
@@ -29,6 +29,7 @@ export function ViewSwitcher({
     ["cycles", "Cycles", "target"],
     ["modules", "Modules", "layers"],
     ["insights", "Insights", "chart"],
+    ["time", "Time", "clock"],
   ];
   return (
     <div className="pm-pills" role="tablist" aria-label="View">

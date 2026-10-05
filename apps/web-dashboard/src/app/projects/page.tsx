@@ -9,6 +9,7 @@
 
 import { Suspense, useMemo, useState, type JSX } from "react";
 import Link from "next/link";
+import { useRouter, useSearchParams } from "next/navigation";
 import { FolderKanban } from "lucide-react";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { useToast } from "@/components/Toast";
@@ -58,6 +59,9 @@ import {
   NewItemModal,
   NewProjectModal,
 } from "@/components/projects/modals";
+import { TimeAccessProvider } from "@/components/projects/time/access";
+import { TimerChip } from "@/components/projects/time/TimerChip";
+import { TimeView } from "@/components/projects/time/TimeView";
 
 function matchQuery(item: PmWorkItem, q: string): boolean {
   const needle = q.toLowerCase();
@@ -91,11 +95,22 @@ export default function ProjectsPage(): JSX.Element {
   // why its header renamed itself when a module it does not own flipped. The
   // CRM lives at /customers now.
   // WARP-3524 — `useSearchParams` (the `?view=insights` deep link) has to sit
-  // under a Suspense boundary, or the route cannot be prerendered.
+  // under a Suspense boundary, or the route cannot be prerendered. Time has
+  // the same requirement and receives the current user through its provider.
   return (
     <Suspense fallback={null}>
-      <ProjectsWorkspace />
+      <ProjectsWithTimeAccess />
     </Suspense>
+  );
+}
+
+/** The session, handed to the time surface (see components/projects/time/access.tsx). */
+function ProjectsWithTimeAccess(): JSX.Element {
+  const { user } = useAuth();
+  return (
+    <TimeAccessProvider user={user}>
+      <ProjectsWorkspace />
+    </TimeAccessProvider>
   );
 }
 
@@ -111,7 +126,12 @@ function ProjectsWorkspace(): JSX.Element {
   // WARP-3524 — `/projects?view=insights` opens the workspace-level Insights.
   const insightsLink = useInsightsDeepLink();
   // `my-work` is cross-project (WARP-3523), so it is not a ProjectView tab.
-  const [view, setView] = useState<ProjectView | "index" | "my-work">(insightsLink ? "insights" : "index");
+  // WARP-3526 — the time view is also addressable as `/projects?view=time`.
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const [view, setView] = useState<ProjectView | "index" | "my-work">(
+    searchParams?.get("view") === "time" ? "time" : insightsLink ? "insights" : "index",
+  );
   const [projectId, setProjectId] = useState<string | null>(null);
   const [savedView, setSavedView] = useState<SavedView>("all");
   const [q, setQ] = useState("");
@@ -231,8 +251,15 @@ function ProjectsWorkspace(): JSX.Element {
     setDepartment(DEPARTMENT_ANY);
   };
 
+  const changeView = (next: ProjectView | "index") => {
+    if (next === "time" || view === "time") {
+      router.replace(next === "time" ? "/projects?view=time" : "/projects", { scroll: false });
+    }
+    setView(next);
+  };
+
   const backToIndex = () => {
-    setView("index");
+    changeView("index");
     setProjectId(null);
   };
 
@@ -280,8 +307,9 @@ function ProjectsWorkspace(): JSX.Element {
 
   const isProjectView = view === "board" || view === "list" || view === "calendar" || view === "timeline";
 
+  const timeOnly = view === "time" && !project;
   const headerTitle =
-    view === "index" ? "Projects" : view === "my-work" ? "My work" : project?.name ?? "Projects";
+    view === "index" ? "Projects" : view === "my-work" ? "My work" : timeOnly ? "Time" : project?.name ?? "Projects";
   const headerSub =
     view === "index"
       ? `${summary?.activeProjects ?? projects?.filter((p) => !p.archived).length ?? 0} projects · ${summary?.itemsOpen ?? 0} items open`
@@ -289,12 +317,18 @@ function ProjectsWorkspace(): JSX.Element {
         ? "Your open work across every project"
         : view === "insights" && !project
           ? "Insights across all projects"
-          : project
-            ? `${project.openCount} open · ${project.doneCount} done`
-            : undefined;
+          : timeOnly
+            ? "Timesheet and report"
+            : project
+              ? `${project.openCount} open · ${project.doneCount} done`
+              : undefined;
 
   const actions = view === "index" ? (
       <>
+        <TimerChip />
+        <button className="btn" type="button" onClick={() => changeView("time")}>
+          <PmIcon name="clock" size={14} /> Time
+        </button>
         {!readOnly && (
           <button className="btn primary" type="button" onClick={() => setModal("newproject")}>
             <FolderKanban size={14} /> New project
@@ -312,6 +346,7 @@ function ProjectsWorkspace(): JSX.Element {
       </>
     ) : (
       <>
+        <TimerChip />
         {/* WARP-2582 — record-scoped, and `project` is in hand here, so this
             hands over an identity instead of a bare navigation: the seed line
             names the project on turn 1 and the pin scopes every turn after.
@@ -395,7 +430,7 @@ function ProjectsWorkspace(): JSX.Element {
             {isProjectView && (
               <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: 14 }}>
                 <div className="pm-row" style={{ justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
-                  <ViewSwitcher view={view} onView={(v) => setView(v)} />
+                  <ViewSwitcher view={view} onView={changeView} />
                   <FilterBar
                     q={q}
                     onQ={setQ}
@@ -415,9 +450,9 @@ function ProjectsWorkspace(): JSX.Element {
                 )}
               </div>
             )}
-            {(view === "cycles" || view === "modules" || (view === "insights" && projectId !== null)) && (
+            {(view === "cycles" || view === "modules" || (view === "insights" && projectId !== null) || (view === "time" && projectId !== null)) && (
               <div style={{ marginBottom: 14 }}>
-                <ViewSwitcher view={view} onView={(v) => setView(v)} />
+                <ViewSwitcher view={view} onView={changeView} />
               </div>
             )}
 
@@ -497,6 +532,7 @@ function ProjectsWorkspace(): JSX.Element {
               )}
               {view === "my-work" && <MyWorkView />}
               {view === "insights" && <InsightsView projectId={projectId} />}
+              {view === "time" && <TimeView projects={projects} projectId={projectId} />}
             </div>
           </div>
         </div>
