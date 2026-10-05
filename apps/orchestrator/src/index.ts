@@ -167,6 +167,7 @@ import { createMcpStepDispatcher } from "./services/mcp-step-dispatcher.js";
 import { mineToolCallPatterns } from "./services/pattern-miner.service.js";
 import { runTeamChatMeetingReminderSweep } from "./services/team-chat-reminders.service.js";
 import { runActivityNotifySweep } from "./services/activity-notify.service.js";
+import { runImportTick } from "./services/pm/import/runner.js";
 import { registerOutboxConsumer, stopOutbox } from "./services/pm/pm-outbox.js";
 import { runDevelopmentSync } from "./services/pm/pm-development.service.js";
 import { createWebhookFanOutConsumer } from "./services/pm/webhook-fanout.js";
@@ -1610,6 +1611,28 @@ async function main() {
       }
     },
     { lockKey: "droplet:activity-notify" },
+  );
+
+  // WARP-3527 (ADR-069 WS-11) — the Projects import runner's tick. A job is
+  // normally started by a `setImmediate` kick right after "Run"; THIS is what
+  // makes that safe to lose. Every 15 s it claims a PENDING job (the process
+  // died between Run and the kick), fails a RUNNING job whose heartbeat is
+  // stale (the process restarted mid-run — the file is kept and "Run again"
+  // resumes), and purges uploaded bytes nobody can use any more.
+  //
+  // The handler returns as soon as it has STARTED jobs — it never awaits one —
+  // so the advisory lock is held for milliseconds, not for an import. The claim
+  // itself is a guarded `updateMany`, atomic across replicas on its own; the
+  // lock only keeps two replicas from running the stale sweep at once.
+  cronRuntime.scheduleInterval(
+    15_000,
+    async () => {
+      const result = await runImportTick(prisma);
+      if (result.claimed > 0 || result.failedStale > 0 || result.purged > 0) {
+        logger.info(result, "pm import tick");
+      }
+    },
+    { lockKey: "droplet:pm-import-tick" },
   );
 
   // WARP-3532 (ADR-069 §7, §9) — work webhooks. Three registrations, all on

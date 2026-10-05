@@ -53,6 +53,8 @@ import { useInsightsDeepLink, useSyncInsightsParam } from "@/components/projects
 import { CalendarView } from "@/components/projects/calendar/CalendarView";
 import { TimelineView } from "@/components/projects/timeline/TimelineView";
 import { MyWorkView } from "@/components/projects/mywork/MyWorkView";
+import { ProjectMenu } from "@/components/projects/import/ProjectMenu";
+import { ImportWizard } from "@/components/projects/import/ImportWizard";
 import {
   ConfirmArchiveProject,
   ConfirmDeleteProject,
@@ -145,7 +147,7 @@ function ProjectsWorkspace(): JSX.Element {
   const [department, setDepartment] = useState<string>(DEPARTMENT_ANY);
   const [showArchived, setShowArchived] = useState(false);
   const [drawer, setDrawer] = useState<PmWorkItem | null>(null);
-  const [modal, setModal] = useState<"newitem" | "newproject" | "archive" | "delete" | null>(null);
+  const [modal, setModal] = useState<"newitem" | "newproject" | "import" | "archive" | "delete" | null>(null);
   useSyncInsightsParam(view === "insights" && projectId === null);
 
   const { projects, error: projErr, isLoading: projLoading, mutate: mutateProjects } = useProjects(showArchived);
@@ -306,6 +308,8 @@ function ProjectsWorkspace(): JSX.Element {
   };
 
   const isProjectView = view === "board" || view === "list" || view === "calendar" || view === "timeline";
+  // WARP-3527: the API also enforces owner/admin or the project's lead.
+  const canImport = role === "owner" || role === "admin" || (role === "family" && !!project && project.leadId === user?.id);
 
   const timeOnly = view === "time" && !project;
   const headerTitle =
@@ -381,6 +385,7 @@ function ProjectsWorkspace(): JSX.Element {
             <PmIcon name="refresh" size={15} />
           </button>
         )}
+        {project && <ProjectMenu projectId={project.id} canImport={canImport} onImport={() => setModal("import")} />}
       </>
     );
 
@@ -559,6 +564,7 @@ function ProjectsWorkspace(): JSX.Element {
         <NewItemModal project={project} onClose={() => setModal(null)} onCreated={refreshAll} />
       )}
       {modal === "newproject" && <NewProjectModal onClose={() => setModal(null)} onCreated={refreshAll} />}
+      {modal === "import" && project && <ImportWizard project={project} onClose={() => setModal(null)} onFinished={refreshAll} />}
       {modal === "archive" && project && (
         <ConfirmArchiveProject project={project} onClose={() => setModal(null)} onArchived={afterProjectGone} />
       )}
