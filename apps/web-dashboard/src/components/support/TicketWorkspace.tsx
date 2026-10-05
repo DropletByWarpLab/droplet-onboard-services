@@ -207,7 +207,7 @@ export function TicketWorkspace({
           {ticket.descriptionHtml && (
             <section className="pm-surface sp-card" aria-label="The request">
               <h3>The request</h3>
-              {/* Server-sanitized at the write boundary (cleanHtml). */}
+              {/* nosemgrep: typescript.react.security.audit.react-dangerouslysetinnerhtml.react-dangerouslysetinnerhtml -- ticket create/update call cleanHtml, which enforces the strict sanitizePmHtml allowlist before persistence; ticket-html.test.ts exercises that boundary. */}
               <div className="pm-prose" dangerouslySetInnerHTML={{ __html: ticket.descriptionHtml }} />
             </section>
           )}
