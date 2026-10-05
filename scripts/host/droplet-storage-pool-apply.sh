@@ -56,6 +56,7 @@ set -euo pipefail
 
 SPOOL_DIR="${DROPLET_POOL_SPOOL_DIR:-/run/droplet-bridge-pool-spool}"
 POOL_SCRIPT="${DROPLET_POOL_SCRIPT:-/usr/local/sbin/droplet-storage-pool.sh}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REQ="$SPOOL_DIR/request.json"
 RES="$SPOOL_DIR/result.json"
 
@@ -98,17 +99,8 @@ if [ "$OPERATION" = "recovery_key_reveal" ] && [ -z "${DROPLET_POOL_SPOOL_DIR:-}
     || die "recovery-key result requires a tmpfs spool — refusing to write the key to persistent storage"
 fi
 
-# --- Run the pool script, capturing rc / stdout / stderr -----------------------
-# The pool script's own allow-list + hard pre-flight (typed double-confirm,
-# refuse mounted / has-data / OS-disk) is the real gate — running as root here
-# is precisely what makes those blkid/findmnt probes trustworthy.
-#
-# WARP-3513: the pool script's stdout is where the ONE-TIME LUKS recovery-key
-# reveal (recovery_key_reveal) travels. Hold the capture files on tmpfs (/run,
-# root-only) instead of mktemp's default /tmp — the root LV is not encrypted,
-# so a secret written there would leave remnants on the plain disk.
-# DROPLET_POOL_TMPDIR overrides the directory (tests only). For key reveal the
-# default must be a writable tmpfs; there is deliberately no persistent fallback.
+# WARP-3513: recovery-key results must remain in tmpfs. Set up the capture
+# files before a topology refusal may write into them.
 CAPTURE_DIR="${DROPLET_POOL_TMPDIR:-/run}"
 if [ "$OPERATION" = "recovery_key_reveal" ] && [ -z "${DROPLET_POOL_TMPDIR:-}" ]; then
   CAPTURE_FS="$(findmnt -n -o FSTYPE --target "$CAPTURE_DIR" 2>/dev/null || true)"
@@ -125,10 +117,60 @@ else
   ERR_FILE="$(mktemp)"
 fi
 trap 'rm -f "$OUT_FILE" "$ERR_FILE"' EXIT
-set +e
-"$POOL_SCRIPT" "$OPERATION" "$PARAMS_JSON" >"$OUT_FILE" 2>"$ERR_FILE"
-POOL_RC=$?
-set -e
+
+# Pool/device mutations share one root-owned topology lock with the NVR writer,
+# migration job, and bridge eject path. UUID-only recovery custody never takes
+# this lock: revealing or rotating a key does not change device topology. The
+# final status check runs HERE, under the lock, immediately before the host
+# script; the bridge's earlier read is only a fast refusal, never the last gate.
+TOPOLOGY_REFUSAL_RC=""
+case "$OPERATION" in
+  recovery_key_*) ;;
+  *)
+    # shellcheck source=./droplet-storage-topology-lock.sh
+    . "$SCRIPT_DIR/droplet-storage-topology-lock.sh"
+    set +e
+    storage_topology_lock
+    LOCK_RC=$?
+    set -e
+    if [ "$LOCK_RC" -eq 1 ]; then
+      TOPOLOGY_REFUSAL_RC=79
+      printf '%s\n' "another storage operation is in progress" >"$OUT_FILE"
+      printf '%s\n' "droplet-storage-pool-apply: topology lock is busy" >"$ERR_FILE"
+    elif [ "$LOCK_RC" -ne 0 ]; then
+      TOPOLOGY_REFUSAL_RC=78
+      printf '%s\n' "recording storage could not be verified" >"$OUT_FILE"
+      printf '%s\n' "droplet-storage-pool-apply: topology lock is unavailable" >"$ERR_FILE"
+    else
+      set +e
+      python3 "$SCRIPT_DIR/droplet-recordings-drive-check.py" "$PARAMS_JSON" \
+        >"$OUT_FILE" 2>"$ERR_FILE"
+      GUARD_RC=$?
+      set -e
+      case "$GUARD_RC" in
+        0) ;;
+        77|78) TOPOLOGY_REFUSAL_RC="$GUARD_RC" ;;
+        *)
+          TOPOLOGY_REFUSAL_RC=78
+          printf '%s\n' "recording storage could not be verified" >"$OUT_FILE"
+          printf '%s\n' "droplet-storage-pool-apply: topology check failed" >"$ERR_FILE"
+          ;;
+      esac
+    fi
+    ;;
+esac
+
+# The pool script's own allow-list + hard pre-flight (typed double-confirm,
+# refuse mounted / has-data / OS-disk) remains the last execution gate. Its
+# stdout may carry a one-time recovery key, so capture stays in tmpfs.
+if [ -n "$TOPOLOGY_REFUSAL_RC" ]; then
+  POOL_RC="$TOPOLOGY_REFUSAL_RC"
+else
+  set +e
+  "$POOL_SCRIPT" "$OPERATION" "$PARAMS_JSON" >"$OUT_FILE" 2>"$ERR_FILE"
+  POOL_RC=$?
+  set -e
+fi
 
 # --- Write the result where the sandboxed bridge can read it -------------------
 # Atomic (tmp + mv in the same dir) so the bridge never reads a half-written

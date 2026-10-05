@@ -36,11 +36,28 @@
 // stops or restarts it, and it has no grant over droplet-panel-claim.service
 // (taking the console AWAY from an operator must not be remotely triggerable
 // by the container).
+//
+// WARP-3514 (ADR-070) adds the THIRD and FOURTH narrow grants, for the camera
+// recordings allocation — again the privileged half lives in root oneshots and
+// the bridge only asks PID 1 to start them (start verb ONLY):
+//   droplet-nvr-storage-apply.service  consumes the bridge's spooled apply /
+//     resize request (/var/lib/droplet-bridge/nvr-spool/request.json) and runs
+//     the repo-tracked droplet-set-nvr-media.sh as root (ext4 project quota,
+//     chattr, the NVR_MEDIA_SOURCE write-back). Quick, so the bridge waits.
+//   droplet-nvr-migrate.service        consumes migrate-request.json and moves
+//     (or, owner-confirmed, deletes) the footage as root. Long-running, so the
+//     bridge starts it with --no-block and polls the state file it writes.
+// Deliberately NO grant over the boot-guard units (droplet-nvr-guard.service,
+// droplet-nvr-guard-release.service/.timer): they are never driven on demand,
+// and the bridge must not be able to disarm the "Frigate never records onto the
+// OS disk" guard. Reading a unit's state (systemctl is-active) needs no grant.
 polkit.addRule(function (action, subject) {
   if (
     action.id === "org.freedesktop.systemd1.manage-units" &&
     (action.lookup("unit") === "droplet-storage-pool-apply.service" ||
-      action.lookup("unit") === "droplet-panel-console.service") &&
+      action.lookup("unit") === "droplet-panel-console.service" ||
+      action.lookup("unit") === "droplet-nvr-storage-apply.service" ||
+      action.lookup("unit") === "droplet-nvr-migrate.service") &&
     action.lookup("verb") === "start" &&
     subject.user === "droplet"
   ) {

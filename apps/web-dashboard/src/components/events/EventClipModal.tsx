@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import Link from "next/link";
 import {
   Bookmark,
@@ -12,21 +12,110 @@ import {
   Tag,
   X,
 } from "lucide-react";
-import { regenerateEventDescription, tagEventAsFace } from "@/lib/api";
+import { getEventHlsUrl, regenerateEventDescription, tagEventAsFace } from "@/lib/api";
+import { prettifyCameraKey } from "@/lib/camera-display";
 import type { EventDetail } from "@/lib/types";
 import { useToast } from "@/components/Toast";
 import { useAuth } from "@/lib/auth";
 import { translateError } from "@/lib/friendly-errors";
 import { Dialog } from "@/components/Dialog";
+import { HlsPlayer } from "@/components/recordings/HlsPlayer";
+import { ThumbImage } from "./ThumbImage";
 
 interface Props {
   event: EventDetail;
+  /** The name the household gave the camera (WARP-3509). The page resolves it
+   *  from the cameras list; without one the modal shows the prettified key,
+   *  never the raw slug. */
+  cameraName?: string;
   onClose: () => void;
   /** Toggle the retain-indefinitely flag. When wired, the modal
    *  renders a "Save / Saved" button. The handler should call the
    *  /retain route and invalidate the events SWR cache so the badge on
    *  the underlying card flips on close. */
   onToggleRetain?: (event: EventDetail, retain: boolean) => Promise<void>;
+}
+
+const IN_PROGRESS_NOTICE = "In progress — showing footage up to now.";
+const PLAY_FAILED_NOTICE = "This clip can't be played right now. Try again in a moment.";
+
+/**
+ * What the modal shows for an event: its clip, played as HLS, or its picture.
+ *
+ * Frigate's `clip.mp4` is a fragmented mp4 that ffmpeg streams on the fly — no
+ * duration in its header, its index at the END, no Content-Length, Range
+ * ignored — so a `<video src>` pointed at it showed the wrong length (a 12 s
+ * clip read 6.1 s), could not seek, and stalled on a long one (WARP-3509). The
+ * clip plays through the same player and the same footage as the Recordings
+ * page instead; `clip.mp4` is left for the Download button.
+ *
+ * Mounted with `key={event.id}`, so a failure or a Refresh belongs to one event
+ * and cannot follow the modal to another.
+ */
+function EventClipPlayer({ event, cameraDisplay }: { event: EventDetail; cameraDisplay: string }) {
+  const [refresh, setRefresh] = useState(0);
+  const [failed, setFailed] = useState(false);
+  // Stable on purpose: HlsPlayer tears hls.js down and rebuilds it whenever its
+  // `src` or `onError` changes identity, which would restart the clip from the
+  // beginning on every re-render of the modal.
+  const handlePlayerError = useCallback(() => setFailed(true), []);
+  // Retry asks for the playlist again under a new url (the same trick Refresh
+  // plays), so the player is built afresh rather than handed the one that failed.
+  const retry = () => {
+    setFailed(false);
+    setRefresh((n) => n + 1);
+  };
+
+  const inProgress = event.endTime === null;
+
+  if (event.clipUrl && !failed) {
+    return (
+      <>
+        <HlsPlayer
+          src={getEventHlsUrl(event.id, refresh)}
+          onError={handlePlayerError}
+          className="w-full max-h-[60vh]"
+        />
+        {inProgress && (
+          <div className="flex items-center justify-between gap-3 px-3 py-2" style={{ color: "var(--text-muted)" }}>
+            <p role="status" className="type-footnote">
+              {IN_PROGRESS_NOTICE}
+            </p>
+            <button type="button" className="btn ghost sm" onClick={() => setRefresh((n) => n + 1)}>
+              <RefreshCw size={12} />
+              Refresh
+            </button>
+          </div>
+        )}
+      </>
+    );
+  }
+
+  return (
+    <>
+      <ThumbImage
+        src={event.snapshotUrl || event.thumbnail}
+        alt={`${event.label} on ${cameraDisplay}`}
+        className="w-full max-h-[60vh] object-contain"
+        placeholderClassName="w-full aspect-video"
+        iconSize={40}
+      />
+      {event.clipUrl && failed && (
+        <div className="flex items-center justify-between gap-3 px-3 py-2">
+          {/* Something the person was waiting on failed: an alert, in the error
+              ink (--danger-ink clears 4.5:1 in both themes). The copy says "try
+              again", so there is a control that does. */}
+          <p role="alert" className="type-footnote text-[color:var(--danger-ink)]">
+            {PLAY_FAILED_NOTICE}
+          </p>
+          <button type="button" className="btn ghost sm" onClick={retry}>
+            <RefreshCw size={12} />
+            Retry
+          </button>
+        </div>
+      )}
+    </>
+  );
 }
 
 /**
@@ -49,7 +138,7 @@ interface Props {
  * `translateError(err, "media")` copy, never the raw err.message —
  * the audit found these were leaking orchestrator-level strings.
  */
-export function EventClipModal({ event, onClose, onToggleRetain }: Props) {
+export function EventClipModal({ event, cameraName, onClose, onToggleRetain }: Props) {
   const headingId = useId();
   const { toast } = useToast();
   const { user } = useAuth();
@@ -139,7 +228,7 @@ export function EventClipModal({ event, onClose, onToggleRetain }: Props) {
     }
   };
 
-  const cameraDisplay = event.camera.replace(/_/g, " ");
+  const cameraDisplay = cameraName || prettifyCameraKey(event.camera);
   const startedAt = new Date(event.startTime * 1000);
 
   return (
@@ -169,30 +258,7 @@ export function EventClipModal({ event, onClose, onToggleRetain }: Props) {
 
       <div className="p-4 space-y-3">
         <div className="rounded-lg overflow-hidden" style={{ background: "var(--inset)" }}>
-          {event.clipUrl ? (
-            <video
-              key={event.id}
-              src={event.clipUrl}
-              controls
-              autoPlay
-              className="w-full max-h-[60vh]"
-              style={{ background: "var(--inset)" }}
-            />
-          ) : event.snapshotUrl ? (
-            <img
-              src={event.snapshotUrl}
-              alt={`${event.label} on ${cameraDisplay}`}
-              className="w-full max-h-[60vh] object-contain"
-              style={{ background: "var(--inset)" }}
-            />
-          ) : (
-            <img
-              src={event.thumbnail}
-              alt={`${event.label} on ${cameraDisplay}`}
-              className="w-full max-h-[60vh] object-contain"
-              style={{ background: "var(--inset)" }}
-            />
-          )}
+          <EventClipPlayer key={event.id} event={event} cameraDisplay={cameraDisplay} />
         </div>
 
         {/* GenAI description (Phase 7.7) — only renders when there is one. */}
@@ -224,9 +290,12 @@ export function EventClipModal({ event, onClose, onToggleRetain }: Props) {
           </div>
         )}
 
-        {/* Metadata + actions */}
+        {/* Metadata + actions. The details ask for 16rem before anything may sit
+            beside them: an owner's four actions would otherwise squeeze the details
+            to a ~37px column on a phone (and ~66px at any width, with their labels),
+            so on a row too narrow for both the actions wrap below. */}
         <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="min-w-0 flex-1">
+          <div className="min-w-0 flex-1 basis-[16rem]">
             <p className="type-subheadline" style={{ color: "var(--text-muted)" }}>
               {cameraDisplay} · {startedAt.toLocaleString()} ·{" "}
               {Math.round(event.score * 100)}% confidence
@@ -261,7 +330,7 @@ export function EventClipModal({ event, onClose, onToggleRetain }: Props) {
                 aria-pressed={retained}
                 className={`btn ${
                   retained
-                    ? "!bg-system-orange/15 !text-system-orange !border-transparent hover:!bg-system-orange/25"
+                    ? "!bg-system-yellow !text-black !border-transparent hover:brightness-95"
                     : ""
                 } ${retainBusy ? "opacity-60 cursor-wait" : ""}`}
                 title={retained ? "Unsave (allow normal retention)" : "Save (retain indefinitely)"}

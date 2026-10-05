@@ -18,6 +18,11 @@ import express from "express";
 
 // Mock Nextcloud session resolution so the existing /api/storage path
 // doesn't try to call out — these tests focus on /drives, not quota.
+vi.mock("../services/recordings-drive-guard.service.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../services/recordings-drive-guard.service.js")>(),
+  guardRecordingsDrive: vi.fn(async () => null),
+}));
+
 vi.mock("../services/nextcloud-session.service.js", () => ({
   resolveNcToken: vi.fn(async () => null),
 }));

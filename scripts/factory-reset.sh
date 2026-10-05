@@ -1353,6 +1353,56 @@ if [ -f /usr/local/sbin/droplet-set-nvr-media.sh ]; then
   log_success "Removed NVR recordings-target write-back host executor"
 fi
 
+# Camera-recordings allocation (WARP-3514, ADR-070): the boot guard + its release
+# timer, the two on-demand root units, their host scripts + quota helper, and
+# the root-only state dir. Remove so a reset truly returns to out-of-box;
+# install-device-bridge.sh reinstalls all of it on re-provision. This removes
+# executors and bookkeeping only — never any footage or drive; the bay drives
+# are Phase 3's job. The bridge-side spool lives in /var/lib/droplet-bridge,
+# wiped below.
+#
+# ORDER MATTERS: disarm the boot guard BEFORE removing its script. `disarm` is
+# the only thing that knows how to undo the guard's placeholder — an IMMUTABLE
+# directory it left on the root filesystem at the (absent) bay's recordings path.
+# Remove the script first and that directory is stranded under /mnt/droplet with
+# nothing left that can clear it. The units go before the scripts they exec, and
+# any in-flight on-demand job is stopped so it cannot keep writing into a box
+# that is being wiped.
+if [ -f /usr/local/sbin/droplet-nvr-guard.sh ] || \
+   [ -f /etc/systemd/system/droplet-nvr-guard.service ] || \
+   [ -f /usr/local/sbin/droplet-nvr-migrate.sh ] || \
+   [ -f /usr/local/sbin/droplet-nvr-storage-apply.sh ] || \
+   [ -f /usr/local/sbin/droplet-nvr-quota.py ] || \
+   [ -f /usr/local/sbin/droplet-storage-topology-lock.sh ] || \
+   [ -f /usr/local/sbin/droplet-recordings-drive-check.py ] || \
+   [ -d /var/lib/droplet-nvr ]; then
+  if [ -x /usr/local/sbin/droplet-nvr-guard.sh ]; then
+    sudo /usr/local/sbin/droplet-nvr-guard.sh disarm 2>/dev/null || true
+  fi
+  sudo systemctl disable --now droplet-nvr-guard-release.timer 2>/dev/null || true
+  sudo systemctl disable --now droplet-nvr-guard.service 2>/dev/null || true
+  # Run-to-completion oneshots with no [Install] section: nothing to disable,
+  # but an in-flight run is stopped.
+  sudo systemctl stop droplet-nvr-guard-release.service 2>/dev/null || true
+  sudo systemctl stop droplet-nvr-migrate.service 2>/dev/null || true
+  sudo systemctl stop droplet-nvr-storage-apply.service 2>/dev/null || true
+  sudo rm -f /etc/systemd/system/droplet-nvr-guard.service \
+             /etc/systemd/system/droplet-nvr-guard-release.service \
+             /etc/systemd/system/droplet-nvr-guard-release.timer \
+             /etc/systemd/system/droplet-nvr-storage-apply.service \
+             /etc/systemd/system/droplet-nvr-migrate.service 2>/dev/null || true
+  sudo rm -f /usr/local/sbin/droplet-nvr-guard.sh \
+             /usr/local/sbin/droplet-nvr-storage-apply.sh \
+             /usr/local/sbin/droplet-nvr-migrate.sh \
+             /usr/local/sbin/droplet-nvr-quota.py \
+             /usr/local/sbin/droplet-storage-topology-lock.sh \
+             /usr/local/sbin/droplet-recordings-drive-check.py 2>/dev/null || true
+  # Root-only: the previous-source record (migration.json) and the guard state.
+  sudo rm -rf /var/lib/droplet-nvr 2>/dev/null || true
+  sudo systemctl daemon-reload 2>/dev/null || true
+  log_success "Removed NVR recordings boot guard, root executors, quota helper and state"
+fi
+
 # Device-bridge state + logs (needs sudo because systemd StateDirectory
 # runs as root). Silent if not installed — dev machines won't have this.
 if [ -d /var/lib/droplet-bridge ] || [ -f /etc/droplet/device-bridge.env ]; then
