@@ -159,6 +159,19 @@ function normaliseMac(mac: string | undefined | null): string | null {
   return trimmed ? trimmed.toUpperCase() : null;
 }
 
+/**
+ * The key camera-discovery files a camera under: the MAC, lower-case.
+ *
+ * `normaliseMac` (upper-case) is how this service compares and displays MACs;
+ * this is how it TALKS to camera-discovery. They are deliberately a pair — the
+ * synthetic keys discovery mints for a camera with no DHCP lease (`ip:<addr>`,
+ * `onvif_<addr>`) go through both, so `IP:192.168.9.77` must become
+ * `ip:192.168.9.77` again on the wire.
+ */
+function discoveryKey(mac: string): string {
+  return mac.trim().toLowerCase();
+}
+
 function toCandidate(record: DiscoveryRecord): CameraCandidate | null {
   const ip = record.ip?.trim();
   if (!ip) return null; // nothing actionable without an address
@@ -270,8 +283,12 @@ export async function getCameraCandidates(
   // DB fallback / supplement. These rows carry no stream URL or detection
   // method, so they can only ever be reported as unverified — the live record
   // is the one that knows whether a stream answered.
+  //
+  // A candidate is a row whose `adoption` says so (WARP-3510). It used to be
+  // guessed from `enabled: false, autoDiscovered: true`, which also matched an
+  // operator-DISABLED live camera and offered it back as something to add.
   const dbRows = await prisma.camera.findMany({
-    where: { enabled: false, autoDiscovered: true },
+    where: { adoption: "CANDIDATE" },
     orderBy: { createdAt: "desc" },
   });
   for (const row of dbRows) {
@@ -312,12 +329,43 @@ export function macFromCandidateId(id: string): string | null {
   return isLiveCandidateId(id) ? id.slice("mac:".length) : null;
 }
 
+/**
+ * The camera an accept put into Frigate — what the caller needs to file the DB
+ * row under the key camera-discovery used. Deliberately NOT the stream URL:
+ * that can embed credentials (see NET-05 above) and the row never stores it.
+ */
+export interface AcceptedCamera {
+  /** The Frigate key camera-discovery added the camera under. */
+  name: string;
+  ip: string;
+  mac: string | null;
+  manufacturer: string | null;
+  model: string | null;
+}
+
 export interface DiscoveryMutationResult {
   ok: boolean;
   /** Upstream HTTP status, so the route can mirror a 404/409/422 faithfully. */
   status: number;
   /** Upstream `detail` text when it failed — operator-facing, already prose. */
   message?: string;
+  /** Machine-readable credentials refusal, never a credential value. */
+  code?: string;
+  /** On a successful accept: the camera now in Frigate, when the service says which. */
+  camera?: AcceptedCamera;
+}
+
+function acceptedCameraFrom(body: unknown): AcceptedCamera | undefined {
+  const cam = (body as { camera?: Record<string, unknown> } | null)?.camera;
+  if (!cam || typeof cam.name !== "string" || typeof cam.ip !== "string") return undefined;
+  const text = (v: unknown): string | null => (typeof v === "string" && v ? v : null);
+  return {
+    name: cam.name,
+    ip: cam.ip,
+    mac: text(cam.mac),
+    manufacturer: text(cam.manufacturer),
+    model: text(cam.model),
+  };
 }
 
 /** POST accept/reject for a live candidate to camera-discovery, keyed by MAC. */
@@ -335,8 +383,90 @@ export async function mutateLiveCandidate(
       signal: AbortSignal.timeout(45_000),
     },
   );
-  if (resp.ok) return { ok: true, status: resp.status };
+  if (resp.ok) {
+    const camera = acceptedCameraFrom(await resp.json().catch(() => null));
+    return { ok: true, status: resp.status, ...(camera ? { camera } : {}) };
+  }
   const body = (await resp.json().catch(() => ({}))) as { detail?: unknown };
   const detail = typeof body.detail === "string" ? body.detail : undefined;
   return { ok: false, status: resp.status, message: detail };
+}
+
+/**
+ * Add a live candidate using credentials the operator typed (WARP-3505).
+ *
+ * camera-discovery re-runs ONVIF GetStreamUri + the RTSP path probe with these
+ * credentials and, on success, commits the camera to Frigate itself — it is the
+ * only place that knows the probed path and holds the pending record.
+ *
+ * NET-05: the password travels only in the POST body to the internal service.
+ * It is never logged here, never put in the URL, and the returned result
+ * carries only camera-discovery's operator prose + a code, so a caller can't
+ * accidentally echo it.
+ */
+export interface CredentialMutationResult extends Omit<DiscoveryMutationResult, "camera"> {
+  /** Identifying fields only; older discovery services may omit them. */
+  camera?: { name?: string; ip?: string; mac?: string };
+}
+
+export async function submitLiveCandidateCredentials(
+  mac: string,
+  username: string,
+  password: string,
+): Promise<CredentialMutationResult> {
+  let resp: Response;
+  try {
+    resp = await internalFetch(
+      `${internalBaseUrl(config.CAMERA_DISCOVERY_URL)}/cameras/discovered/${encodeURIComponent(discoveryKey(mac))}/credentials`,
+      {
+        method: "POST",
+        headers: { ...discoveryAuthHeaders(), "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password }),
+        // camera-discovery bounds its own work: the probing phase (RTSP walk
+        // <= 25 s, then ONVIF <= 8 s and one named path <= 10 s, only when RTSP
+        // found no path) has a HARD 45 s deadline, answered as a 504 `timeout`;
+        // the Frigate commit that follows is sub-second. 60 s outlasts that, and
+        // every proxy hop in front of the browser outlasts this
+        // (apps/web-dashboard/next.config.js, docker/nginx/nginx.conf).
+        signal: AbortSignal.timeout(60_000),
+      },
+    );
+  } catch (err) {
+    // Deliberately drop the error object: undici errors can carry request
+    // context, and the body of this request is the password. Only its NAME is
+    // read, to tell "took too long" (the camera may well have been added) from
+    // "camera-discovery is not running".
+    if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) {
+      return {
+        ok: false,
+        status: 504,
+        code: "timeout",
+        message: "The camera took too long to answer. If it was added, it will appear in your cameras shortly.",
+      };
+    }
+    return {
+      ok: false,
+      status: 502,
+      code: "discovery_unavailable",
+      message: "Camera discovery isn't running, so the camera couldn't be checked.",
+    };
+  }
+  const body = (await resp.json().catch(() => ({}))) as {
+    detail?: unknown;
+    code?: unknown;
+    camera?: Record<string, unknown> | null;
+  };
+  if (resp.ok) {
+    const added = body.camera;
+    const pick = (key: string) => (typeof added?.[key] === "string" ? (added[key] as string) : undefined);
+    // Only the three identifying fields are carried, whatever else the reply holds.
+    const camera = added ? { name: pick("name"), ip: pick("ip"), mac: pick("mac") } : undefined;
+    return { ok: true, status: resp.status, ...(camera ? { camera } : {}) };
+  }
+  return {
+    ok: false,
+    status: resp.status,
+    code: typeof body.code === "string" ? body.code : undefined,
+    message: typeof body.detail === "string" ? body.detail : undefined,
+  };
 }

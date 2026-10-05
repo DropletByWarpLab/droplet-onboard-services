@@ -510,6 +510,50 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
     AUTH_REQUIRED:
       "That camera needs a username and password. Check the credentials and try again.",
     NOT_FOUND: "We couldn't find that camera on your network.",
+    // WARP-3505 — status-only failures from the discovered-camera routes (no
+    // machine code on the wire). Without these both fell through to the generic
+    // "check it's powered on" fallback, which is wrong for a camera that has
+    // simply left the discovery list (404) and for the camera system itself
+    // failing rather than the camera (502).
+    "404":
+      "We couldn't find that camera on your network any more. Scan again, then pick it from the list.",
+    "502":
+      "Your Droplet's camera system didn't accept that camera. Try again in a moment.",
+    // WARP-3505 — typing a camera's username/password. The next step differs
+    // for each, so each gets its own copy; the form shows these inline.
+    //
+    // AUTH_FAILED carries the lockout warning: Hanwha, Axis and some Hikvision
+    // firmwares lock the account after ~5 bad passwords, and a person who just
+    // saw "didn't accept" will otherwise retype guesses in a row.
+    AUTH_FAILED:
+      "The camera didn't accept that username and password. Check them and try again. A few wrong tries in a row can lock the camera.",
+    LOCKED:
+      "The camera has locked its account after too many wrong sign-ins. Wait a few minutes, then try again.",
+    // Names the control the form actually shows ("Enter the stream address
+    // instead", under the Add button) — the "Enter details" tab is a different
+    // surface and is not reachable from where this message appears.
+    NO_STREAM_PATH:
+      "We reached the camera but couldn't find its video stream. Choose “Enter the stream address instead” and type the address from your camera's manual.",
+    UNREACHABLE:
+      "We couldn't reach the camera. Check it's powered on and on the same network, then try again.",
+    DISCOVERY_UNAVAILABLE:
+      "Camera discovery isn't running, so we couldn't check the camera. Try again in a moment.",
+    // Discovery was reachable but did not answer in time (the orchestrator's
+    // wait). The camera may in fact have been added, so say that instead of
+    // sending the operator to retry blind with a password that may be right.
+    TIMEOUT:
+      "The camera took too long to answer. If it was added, it will appear in your cameras shortly; otherwise check it's powered on and try again.",
+    // Invalid input is refused before touching the camera. An unsupported
+    // password may also be found once discovery supplies the stream address:
+    // Frigate cannot store it safely, even if the camera accepted it.
+    INVALID_CREDENTIALS:
+      "Check the username and password — one of them has a character that can't be used — and try again.",
+    UNSUPPORTED_PASSWORD:
+      "Droplet can't safely pass this password to the camera's video stream. Change the camera's password to a longer one without spaces or curly braces { }, then try again.",
+    UNSUPPORTED_STREAM_ADDRESS:
+      "Droplet can't safely use this camera's stream address with its account. Check the camera's stream settings or use a different camera account.",
+    BASIC_AUTH_ONLY:
+      "Droplet didn't send your password because this camera only offers an unprotected sign-in. Switch its stream sign-in to Digest, or ask an administrator to allow this camera.",
   },
   device: {
     NETWORK:
