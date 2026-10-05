@@ -227,9 +227,10 @@ describe.skipIf(!RUN)("pm-live — who hears about a change, over real rows (WAR
   describe("through the real outbox framework", () => {
     // A synthetic timeline, far from the real clock, so neither the database's clock
     // nor another suite's rows can land inside it: the consumer's cursor starts at T,
-    // the rows below are written at T + 1 s, and "now" is T + 5 s, well after they settle.
+    // The rows below are written at T + 1 s; T + 10 s is beyond the
+    // transaction ceiling and the consumer's six-second settlement window.
     const T = Date.parse("2031-01-01T00:00:00.000Z");
-    const FRESH = () => new Date(T + 5_000);
+    const FRESH = () => new Date(T + 10_000);
     const rowAt = (ms: number) => new Date(T + ms);
 
     function consumer(sent: Array<{ topic: string; payload: Record<string, unknown> }>) {
@@ -343,7 +344,12 @@ describe.skipIf(!RUN)("pm-live — who hears about a change, over real rows (WAR
 
       const result = await runOutboxSweep(prisma, c, { now: FRESH });
       expect(result).toEqual({ handled: 1, deadLettered: 0 });
-      const topics = sent.map(({ topic }) => topic).sort();
+      // Other PG suites may leave legitimate workspace readers in this shared
+      // database. Assert this suite's complete audience, as the live-row case
+      // above does, without deleting or denying those unrelated readers.
+      const topics = sent.map(({ topic }) => topic)
+        .filter((topic) => topic.startsWith("droplet/pm/warp3536-"))
+        .sort();
       expect(topics).toEqual([
         "droplet/pm/warp3536-admin",
         "droplet/pm/warp3536-family",
