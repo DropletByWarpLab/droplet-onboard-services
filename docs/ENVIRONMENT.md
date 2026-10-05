@@ -148,6 +148,7 @@ trust, PM secrets) are summarized in [`CLAUDE.md`](../CLAUDE.md).
 | `OPENWRT_USERNAME`   | OpenWrt rpcd user (default `droplet-ai`)             |
 | `OPENWRT_PASSWORD`   | OpenWrt rpcd password                                |
 | `FRIGATE_URL`        | Frigate NVR API endpoint (default `http://frigate:5000`) |
+| `FRIGATE_CONFIG_PREIMAGE_DIR` | (orchestrator, WARP-3510) Directory where a timestamped copy of Frigate's authored `config.yml` is kept before every config write (camera add/delete/prune, settings save, retention backfill), newest 20 kept, mode 0600 (the YAML holds camera credentials). Default `/data/migration-snapshots/frigate-config` — on the orchestrator's existing `migration-snapshots` volume. Best-effort: when the volume is not there (dev, CI) it is skipped, never created, and a save is never blocked by it |
 | `CAMERA_SCAN_INTERVAL` | Camera discovery scan interval in seconds (default `30`) |
 | `CAMERA_SUBNET`      | Camera isolation subnet CIDR (default `192.168.100.0/24`; `auto` = resolve from the edge router at scan time — WARP-1805; single-box provisions `auto`) |
 | `CAMERA_DEFAULT_USERNAME` | Operator-supplied admin user for IP cameras; tried before factory defaults |

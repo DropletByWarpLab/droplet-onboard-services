@@ -3631,6 +3631,16 @@ async function cameraApiError(
   return err;
 }
 
+/**
+ * `added_no_stream` (WARP-3506): the camera IS added, but Frigate is not
+ * receiving video from it yet — a wrong address or password, or a camera that
+ * did not start. `reason` is operator-facing prose.
+ */
+export interface AddCameraResult {
+  status: "ok" | "added_no_stream";
+  reason?: string;
+}
+
 export async function addCameraManual(
   name: string,
   rtspUrl: string,
@@ -3638,7 +3648,7 @@ export async function addCameraManual(
   model?: string,
   username?: string,
   password?: string
-): Promise<void> {
+): Promise<AddCameraResult> {
   const res = await authFetch(`${BASE}/api/cameras`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -3654,6 +3664,10 @@ export async function addCameraManual(
     }),
   });
   if (!res.ok) throw await cameraApiError(res, `Failed to add camera: ${res.status}`);
+  const data = await res.json().catch(() => ({}));
+  return data?.status === "added_no_stream"
+    ? { status: "added_no_stream", reason: typeof data.reason === "string" ? data.reason : undefined }
+    : { status: "ok" };
 }
 
 /**

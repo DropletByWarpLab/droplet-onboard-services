@@ -11,6 +11,11 @@
  * merge, the credential redaction, the status derivation and the degrade path
  * are all exercised through the real code path.
  *
+ * WARP-3510 — "a candidate the DB knows about" is the explicit
+ * `adoption = CANDIDATE` column. The `enabled: false, autoDiscovered: true`
+ * guess above made an operator-disabled LIVE camera look like something still
+ * to be added.
+ *
  * WARP-3508 adds the other half of "what is NOT a candidate": a camera the
  * operator already has. camera-discovery only knows what IT adopted, so a camera
  * added by hand (a Camera row with `enabled: true` and no MAC) kept showing as a
@@ -57,13 +62,16 @@ type DbRow = {
   macAddress: string | null;
   enabled: boolean;
   autoDiscovered: boolean;
+  adoption: "CANDIDATE" | "ADOPTED";
   createdAt: Date;
 };
 
-/** `findMany` returns every Camera row; the service decides which are candidates. */
+/** Match the real explicit candidate query as well as the managed-camera read. */
 function makePrisma(rows: DbRow[] = []) {
   return {
-    camera: { findMany: vi.fn().mockResolvedValue(rows) },
+    camera: { findMany: vi.fn().mockImplementation((args: { where?: { adoption?: string } }) =>
+      Promise.resolve(args.where?.adoption ? rows.filter((row) => row.adoption === args.where!.adoption) : rows),
+    ) },
   } as unknown as Parameters<typeof getCameraCandidates>[0];
 }
 
@@ -79,6 +87,7 @@ function dbRow(over: Partial<DbRow> = {}): DbRow {
     macAddress: "AA:BB:CC:DD:EE:FF",
     enabled: false,
     autoDiscovered: true,
+    adoption: "CANDIDATE",
     createdAt: new Date("2026-08-01T00:00:00Z"),
     ...over,
   };
@@ -94,6 +103,7 @@ function manualRow(over: Partial<DbRow> = {}): DbRow {
     macAddress: null,
     enabled: true,
     autoDiscovered: false,
+    adoption: "ADOPTED",
     ...over,
   });
 }
@@ -297,6 +307,18 @@ describe("getCameraCandidates", () => {
     expect(candidates.map((c) => c.source)).toEqual(["live", "database"]);
   });
 
+  it("reads the DB candidates by the explicit adoption column, never by enabled", async () => {
+    discovery({ pending: [] });
+    const prisma = makePrisma([dbRow()]);
+
+    await getCameraCandidates(prisma);
+
+    const findMany = (prisma as unknown as { camera: { findMany: ReturnType<typeof vi.fn> } }).camera.findMany;
+    expect(findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { adoption: "CANDIDATE" } }),
+    );
+  });
+
   it("sends the device secret to camera-discovery", async () => {
     // /cameras/discovered is gated behind DEVICE_SECRET (NET-05) — without the
     // header every call 403s and the list silently reads as empty.
@@ -310,17 +332,11 @@ describe("getCameraCandidates", () => {
 });
 
 describe("isManagedCameraRow", () => {
-  // The one place that decides "the operator already has this camera" from the
-  // columns that exist today. WARP-3506/3510 replaces its body with an explicit
-  // adoption state; every caller goes through here so that stays a one-line swap.
   it.each([
-    // [enabled, autoDiscovered, managed, why]
-    [true, true, true, "adopted through discovery and live in the grid"],
-    [true, false, true, "added by hand"],
-    [false, false, true, "added by hand, then switched off — still the operator's camera"],
-    [false, true, false, "found by discovery and never adopted — the only real candidate shape"],
-  ])("enabled=%s autoDiscovered=%s → managed=%s (%s)", (enabled, autoDiscovered, managed) => {
-    expect(isManagedCameraRow({ enabled, autoDiscovered })).toBe(managed);
+    ["ADOPTED", true],
+    ["CANDIDATE", false],
+  ] as const)("adoption=%s → managed=%s", (adoption, managed) => {
+    expect(isManagedCameraRow({ adoption })).toBe(managed);
   });
 });
 
@@ -408,7 +424,7 @@ describe("managed cameras are never candidates (WARP-3508)", () => {
     discovery({ pending: [PENDING_MANUAL] });
     const { candidates } = await getCameraCandidates(
       makePrisma([
-        dbRow({ ipAddress: "192.168.9.219", macAddress: "e4:30:22:50:2a:fd", enabled: true }),
+        dbRow({ ipAddress: "192.168.9.219", macAddress: "e4:30:22:50:2a:fd", enabled: true, adoption: "ADOPTED" }),
       ]),
     );
     expect(candidates).toEqual([]);
@@ -420,8 +436,16 @@ describe("managed cameras are never candidates (WARP-3508)", () => {
     expect(candidates).toEqual([]);
   });
 
+  it("drops an operator-disabled adopted discovery camera from both live and fallback candidates", async () => {
+    const adopted = dbRow({ ipAddress: "192.168.9.219", macAddress: "e4:30:22:50:2a:fd", enabled: false, adoption: "ADOPTED" });
+    discovery({ pending: [PENDING_MANUAL] });
+    expect((await getCameraCandidates(makePrisma([adopted]))).candidates).toEqual([]);
+    discovery({ pending: new Error("offline"), known: new Error("offline") });
+    expect((await getCameraCandidates(makePrisma([adopted]))).candidates).toEqual([]);
+  });
+
   it("keeps a candidate that only resembles a discovery-only row", async () => {
-    // enabled=false + autoDiscovered=true is a candidate still being probed, not a camera.
+    // Explicit CANDIDATE rows remain candidates until adoption.
     discovery({ pending: [PENDING_MANUAL] });
     const { candidates } = await getCameraCandidates(
       makePrisma([dbRow({ ipAddress: "192.168.9.219", macAddress: null })]),
@@ -560,6 +584,67 @@ describe("candidate id helpers", () => {
   it("treats a uuid as a database id", () => {
     expect(isLiveCandidateId("6f0c7f10-6e5b-4a1e-9a2f-1d3c5b7e9f11")).toBe(false);
     expect(macFromCandidateId("6f0c7f10-6e5b-4a1e-9a2f-1d3c5b7e9f11")).toBeNull();
+  });
+});
+
+describe("mutateLiveCandidate", () => {
+  it("returns the camera camera-discovery just put into Frigate, so the caller can file its row under that key", async () => {
+    internalFetch.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          status: "accepted",
+          camera: {
+            name: "xnv_c8083r_e43022502afd",
+            ip: "192.168.9.219",
+            mac: "E4:30:22:50:2A:FD",
+            manufacturer: "Hanwha",
+            model: "XNV-C8083R",
+            rtsp_url: "rtsp://admin:s3cret%21@192.168.9.219:554/profile2/media.smp",
+            status: "active",
+          },
+        }),
+        { status: 200 },
+      ),
+    );
+
+    const result = await mutateLiveCandidate("E4:30:22:50:2A:FD", "accept");
+
+    // The stream URL — credentials included — is deliberately NOT carried back.
+    expect(result).toEqual({
+      ok: true,
+      status: 200,
+      camera: {
+        name: "xnv_c8083r_e43022502afd",
+        ip: "192.168.9.219",
+        mac: "E4:30:22:50:2A:FD",
+        manufacturer: "Hanwha",
+        model: "XNV-C8083R",
+      },
+    });
+  });
+
+  it("succeeds without a camera when the answer carries none", async () => {
+    internalFetch.mockResolvedValue(new Response(JSON.stringify({ status: "rejected", mac: "AA" }), { status: 200 }));
+
+    expect(await mutateLiveCandidate("AA", "reject")).toEqual({ ok: true, status: 200 });
+  });
+
+  it("succeeds without a camera when the body is not JSON", async () => {
+    internalFetch.mockResolvedValue(new Response("accepted", { status: 200 }));
+
+    expect(await mutateLiveCandidate("AA", "accept")).toEqual({ ok: true, status: 200 });
+  });
+
+  it("surfaces the upstream prose on a failure", async () => {
+    internalFetch.mockResolvedValue(
+      new Response(JSON.stringify({ detail: "Camera stream did not verify" }), { status: 422 }),
+    );
+
+    expect(await mutateLiveCandidate("AA", "accept")).toEqual({
+      ok: false,
+      status: 422,
+      message: "Camera stream did not verify",
+    });
   });
 });
 
