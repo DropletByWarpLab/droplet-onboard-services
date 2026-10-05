@@ -15,9 +15,9 @@
  * SOURCE. Both protect only what somebody listed or a regex recognises. This
  * file reads the REAL routers:
  *
- *  1. The three PM routers are mounted as app.ts mounts them (same bases, same
+ *  1. The PM routers are mounted as app.ts mounts them (same bases, same
  *     order) behind the REAL `mountModuleGates`. A source pin on app.ts fails
- *     if that table drifts, or if a fourth router registers PM routes.
+ *     if that table drifts, or if another router registers PM routes.
  *  2. Each router's `router.stack` is ENUMERATED: every method + path it
  *     actually registers, not the ones anyone remembered. One that sits outside
  *     the registry's `projects` prefixes fails by name.
@@ -59,6 +59,7 @@ import { packagePath } from "../../__tests__/helpers/test-paths.js";
 import { createPmNativeRouter } from "./native.js";
 import { createPmRelationsRouter } from "./relations.js";
 import { createPmScheduleRouter } from "./schedule.js";
+import { createPmOpenApiRouter } from "./openapi.js";
 import { createPmMobileRouter } from "../mobile/pm.js";
 
 // ── the edges ───────────────────────────────────────────────────────────────
@@ -120,7 +121,7 @@ function stubPrisma(): PrismaClient {
   return node("") as PrismaClient;
 }
 
-// ── the app: principal → the REAL module gates → the three REAL PM routers ──
+// ── the app: principal → the REAL module gates → the REAL PM routers ────────
 
 interface PmRouterMount {
   /** The factory app.ts calls. The source pin looks for exactly this name. */
@@ -136,12 +137,18 @@ interface PmRouterMount {
 const PRISMA = stubPrisma();
 
 /**
- * Mirrors the four PM mounts in app.ts, base and ORDER. The three native
+ * Mirrors the five PM mounts in app.ts, base and ORDER. The four native
  * routers mount at `/api`; routes/mobile/pm.ts registers absolute
  * `/api/mobile/pm/...` paths and is mounted with no base. The source pin below
  * is what keeps this table honest.
  */
 const PM_ROUTER_MOUNTS: readonly PmRouterMount[] = [
+  {
+    factory: "createPmOpenApiRouter",
+    base: "/api",
+    file: "routes/pm/openapi.ts",
+    router: createPmOpenApiRouter(),
+  },
   {
     factory: "createPmNativeRouter",
     base: "/api",

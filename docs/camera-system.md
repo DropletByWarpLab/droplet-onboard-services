@@ -74,7 +74,7 @@ the orchestrator's DB rows and labels each one:
 | Status | Means | Operator action |
 |--------|-------|-----------------|
 | `ready` | ONVIF stream URI, or default credentials answered a real `DESCRIBE` | **Add** — adopts it into Frigate |
-| `needs_credentials` | It's a camera, but the stream needs a username/password or a corrected path (includes the `rtsp_port_open` placeholder) | **Set up** — opens the manual form prefilled |
+| `needs_credentials` | It's a camera, but the stream needs a username/password or a corrected path (includes the `rtsp_port_open` placeholder) | **Set up** — asks for the camera's **Username** and **Password** (camera-discovery re-probes with them and adds the camera); a camera discovery holds no live record for opens the manual form prefilled |
 | `unverified` | Something answered on a camera port; no stream confirmed | Investigate, or ignore the device |
 
 The response is an envelope — `{ cameras, discoveryOnline }`. `discoveryOnline`
@@ -92,13 +92,23 @@ Accept/reject accept two id shapes: `mac:<MAC>` routes to camera-discovery (whic
 verifies the stream before committing it to Frigate, answering 422 when it can't),
 and a uuid takes the DB path.
 
+`POST /api/cameras/discovered/:id/credentials` (`mac:` ids only) takes
+`{ username, password }` for a `needs_credentials` camera. camera-discovery tries
+the RTSP stream paths with them — ONVIF is asked for a path only when RTSP found
+none, so a wrong password costs the camera one failed sign-in, not one per
+protocol (Hanwha locks the account after ~5) — and adds the camera on success.
+Failures carry a `code`: `auth_failed`, `locked`, `no_stream_path`, `unreachable`,
+`timeout`, and `invalid_credentials` / `unsupported_password` (nothing was tried
+on the camera). The password is never logged, published or returned.
+
 ### Manual Flow (Dashboard)
 
 1. Go to **Cameras** page in the dashboard
 2. Click **Add Camera** button
-3. Enter camera name and RTSP URL (e.g., `rtsp://192.168.100.101:554/stream1`)
-4. Optionally add manufacturer and model
-5. Click **Add Camera** — it's immediately configured in Frigate
+3. Enter the camera name (lowercase letters, numbers and underscores — it is normalised as you type) and its RTSP stream address. The hint shows the detected manufacturer's real path (a Hanwha is `rtsp://192.168.100.101:554/profile2/media.smp`); your camera's manual lists the exact one, and there is no universal default
+4. If the camera needs a sign-in, enter its **Username** and **Password** in their own fields — they are merged into the address for you, so don't type them into it
+5. Optionally add manufacturer and model
+6. Click **Add Camera** — it's immediately configured in Frigate
 
 ### Manual Flow (Frigate Config)
 
@@ -110,9 +120,19 @@ cameras:
   front_door:
     ffmpeg:
       inputs:
-        - path: rtsp://user:pass@192.168.100.101:554/stream1
+        - path: rtsp://user:pass@192.168.100.101:554/<your camera's stream path>
           roles: ["detect", "record"]
 ```
+
+Write the password **as typed** — never percent-encoded. For a username made of
+letters, digits, `_` and `-`, Frigate percent-encodes the password itself before
+ffmpeg decodes it once, so a pre-encoded `%40` is encoded again and the camera
+receives the literal `%40` (401, then a lockout). The dashboard and
+camera-discovery already do this; only a hand-written entry needs the care. A
+password written inline cannot contain spaces or curly braces (Frigate runs
+`str.format` over the file and its credential pattern stops at whitespace). The
+`{FRIGATE_CAMERA_FRONT_DOOR_PASSWORD}` placeholder from `.env`, as the baseline
+`docker/frigate/config.yml` shows, keeps the password out of the file.
 
 ### Scan Network
 
