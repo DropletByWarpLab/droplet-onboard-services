@@ -141,18 +141,16 @@ describe("motion rides on top of coverage instead of replacing it", () => {
   });
 });
 
-describe("the axis is a real 24-column grid", () => {
-  it("lays the hour labels out in 24 columns", () => {
-    const { container } = renderTimeline();
-    const grids = Array.from(container.querySelectorAll<HTMLElement>("[style*='grid-template-columns']"));
-
-    // `grid-cols-24` is not a Tailwind 3 class and nothing defined it, so
-    // the label row collapsed to ONE column and the labels never sat over
-    // their hours. Both rows must carry the inline 24-column template.
-    expect(grids.length).toBeGreaterThanOrEqual(2);
-    for (const g of grids) {
-      expect(g.style.gridTemplateColumns).toContain("repeat(24");
-    }
+describe("the continuous ruler covers the day", () => {
+  it("positions time labels across the same ruler as the footage", () => {
+    renderTimeline();
+    const ruler = screen.getByTestId("timeline-ruler");
+    expect(ruler).toHaveAttribute("data-view-start", "0");
+    expect(ruler).toHaveAttribute("data-view-span", "86400");
+    const axis = screen.getByTestId("time-axis");
+    expect(axis.textContent).toContain("00:00");
+    expect(axis.textContent).toContain("24:00");
+    expect(axis.querySelector('[style*="left: 50%"]')?.textContent).toContain("12:00");
   });
 
   it("renders one cell per hour of the day", () => {

@@ -199,6 +199,29 @@ _upsert_env_kv() {
   mv "$stage" "$target"
 }
 
+# WARP-3835: `setup.sh --edge-router HOST[:PORT]` — point this box at an
+# EXTERNAL OpenWrt router. Writes the three keys the keep-the-host block in
+# single-box.sh and sync_openwrt_password_secret (WARP-3738) already key off, so
+# it must run before both (before materialize_artifacts). Returns 1 (and writes
+# nothing) on an empty or loopback host.
+configure_edge_router() {
+  local spec="$1" host port=80
+  host="${spec%%:*}"
+  case "$spec" in *:*) port="${spec#*:}" ;; esac
+  case "$host" in
+    ''|127.0.0.1|localhost|::1)
+      log_error "--edge-router needs a non-loopback router host (got '${spec}')"
+      return 1 ;;
+  esac
+  case "$port" in
+    ''|*[!0-9]*) log_error "--edge-router port must be a number (got '${port}')"; return 1 ;;
+  esac
+  _upsert_env_kv OPENWRT_HOST "$host" || return 1
+  _upsert_env_kv OPENWRT_PORT "$port" || return 1
+  _upsert_env_kv OPENWRT_USERNAME droplet-ai || return 1
+  log_info "Edge router: OPENWRT_HOST=$host OPENWRT_PORT=$port (password lives in docker/secrets/openwrt_password)"
+}
+
 # Remove a key from .env entirely (same atomicity/symlink discipline as
 # _upsert_env_kv). WARP-1063 needs this for OPENSSL_MODULES: an env var that
 # is PRESENT BUT EMPTY is not harmless there — OpenSSL treats an empty
@@ -883,6 +906,8 @@ ROUTING_SERVICE_TOKEN=$routing_service_token
 # \`sudo systemctl restart droplet-openwrt-attach.service\` (sets the container
 # root pw + restarts routing together) — NOT a bare \`docker compose restart
 # routing\`, which would present the new pw to a container still on the old one.
+# External edge router (OPENWRT_HOST not loopback): the router owns its password;
+# sync keeps docker/secrets/openwrt_password as the operator wrote it (WARP-3738).
 OPENWRT_PASSWORD=$openwrt_password
 
 # --- Voice service bearer (voice-io → orchestrator /api/llm/chat) ---
@@ -1889,6 +1914,37 @@ sync_openwrt_password_secret() {
   if [ -z "$password" ] && [ -f "$REPO_ROOT/.env" ]; then
     password=$(grep -E '^OPENWRT_PASSWORD=' "$REPO_ROOT/.env" | head -n 1 | cut -d= -f2- || true)
   fi
+
+  # WARP-3738: an EXTERNAL edge router (OPENWRT_HOST not loopback) owns its own
+  # droplet-ai password, which the operator pastes into the secret file itself.
+  # Overwriting it with the box-generated .env value broke routing on the lab
+  # box (2026-10-05, "OpenWrt rejected the rpcd credentials"). Keep a non-empty
+  # file. WARP-3835: an empty/missing one is NOT seeded either (that value can
+  # never match a router that mints its own password; the ROUTER_AUTH it caused
+  # read like a rotation when the truth is "never paired") - write the empty
+  # placeholder compose needs and tell the operator what to paste.
+  local openwrt_host="${OPENWRT_HOST:-}"
+  if [ -z "$openwrt_host" ] && [ -f "$REPO_ROOT/.env" ]; then
+    openwrt_host=$(grep -E '^OPENWRT_HOST=' "$REPO_ROOT/.env" | tail -1 | cut -d= -f2- || true)
+  fi
+  case "$openwrt_host" in
+    ''|127.0.0.1|localhost|::1) ;;
+    *)
+      if [ -s "$secret_file" ]; then
+        if [ "$(cat "$secret_file")" != "$password" ]; then
+          log_info "External router (OPENWRT_HOST=$openwrt_host): keeping its own password in $secret_file."
+          log_info "  To change it, write the new value into that file and run: docker compose up -d --no-deps --force-recreate routing"
+        fi
+        return 0
+      fi
+      mkdir -p "$secret_dir"
+      chmod 700 "$secret_dir"
+      : > "$secret_file"
+      chmod 600 "$secret_file"
+      log_warn "External router (OPENWRT_HOST=$openwrt_host) configured: put the router's /etc/droplet/droplet-ai-password into $secret_file and re-run ./scripts/setup.sh"
+      return 0
+      ;;
+  esac
 
   mkdir -p "$secret_dir"
   chmod 700 "$secret_dir"

@@ -21,6 +21,7 @@ import { useCameras } from "@/lib/hooks/useCameras";
 import { useCameraEvents } from "@/lib/hooks/useCameraEvents";
 import { useCameraGroups } from "@/lib/hooks/useCameraGroups";
 import { useCameraPins } from "@/lib/hooks/useCameraPins";
+import { cameraLabeler } from "@/lib/camera-display";
 import { CameraGrid } from "@/components/cameras/CameraGrid";
 import { CameraEvents } from "@/components/cameras/CameraEvents";
 import { NetworkCameraList } from "@/components/cameras/NetworkCameraList";
@@ -52,6 +53,7 @@ export default function CamerasPage() {
     acceptCamera,
     rejectCamera,
   } = useCameras();
+  const cameraLabel = useMemo(() => cameraLabeler(cameras), [cameras]);
 
   const { notifications, dismissNotification } = useCameraEvents();
 
@@ -435,7 +437,7 @@ export default function CamerasPage() {
       )}
 
       {/* Recent events */}
-      {recentEvents.length > 0 && <CameraEvents events={recentEvents} />}
+      {recentEvents.length > 0 && <CameraEvents events={recentEvents} cameraLabel={cameraLabel} />}
 
       {/* Add Camera Modal — opens on the discovered list when there is one, so
           "Add camera" answers "which camera?" before asking for an RTSP URL. */}
@@ -510,6 +512,7 @@ export default function CamerasPage() {
       <CameraNotificationToast
         notifications={notifications}
         onDismiss={dismissNotification}
+        cameraLabel={cameraLabel}
       />
     </ShellPage>
   );

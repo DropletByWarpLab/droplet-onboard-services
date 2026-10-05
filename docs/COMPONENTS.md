@@ -75,7 +75,7 @@ is deliberately **no separate API gateway service** in front of the orchestrator
 | **orchestrator** | `apps/orchestrator/` | Node + Express + Prisma | Central control plane / agent loop |
 | **web-dashboard** | `apps/web-dashboard/` | Next.js 14 + React | Admin UI |
 | **tools-core** | `packages/tools-core/` | TypeScript | Canonical LLM tool registry (≈78 tools) |
-| **shared-types** | `packages/shared-types/` | TypeScript + Zod | Cross-package `Anchor` types |
+| **shared-types** | `packages/shared-types/` | TypeScript + Zod | Cross-package `Anchor` types + the PM filter language |
 | **fips-selftest** | `packages/fips-selftest/` | TypeScript | FIPS 140-3 boot self-test (Node services) |
 | **mcp-server** | `services/mcp-server/` | TypeScript + MCP SDK | Tool dispatch (stdio + HTTP) |
 | **mcp-bridge** | `services/mcp-bridge/` | TypeScript + MCP SDK | **Outbound** MCP sessions (ADR-043 §5) — profile `remote-mcp`, off by default |
@@ -171,7 +171,9 @@ network. Host-published ports and host-network services are called out.
   `{id, displayName, avatarUrl}` roster that names the ids on PM rows. A project is archived
   with `PATCH {archived}` (members may, audited) and deleted for good only by owner/admin,
   archived-only, with its identifier retyped and its audit row written in the delete's
-  transaction — WARP-3370),
+  transaction — WARP-3370;
+  `GET /api/pm/insights` is its own router, `routes/pm/insights.ts`, counting in SQL in
+  `services/pm/pm-insights.service.ts` and cached in-process for five minutes),
   `support/` (the service desk — `/api/support/*`, ADR-069: tickets are work items in
   `PmProject.kind = SERVICE_DESK` projects, behind the `support` module gate; `/api/pm/*`
   and `/api/mobile/pm/*` answer 404 for a desk and everything under it),
@@ -303,7 +305,15 @@ network. Host-published ports and host-network services are called out.
 ## packages/shared-types (`@droplet/shared-types`)
 
 - **Purpose:** Cross-package `Anchor` types — the positional citation anchors for
-  PDFs, media timestamps, email parts, and (recursive) archive members.
+  PDFs, media timestamps, email parts, and (recursive) archive members. Also the
+  Work Suite's **one filter language** (WARP-3522, ADR-069 §8): `pm-filter.ts`
+  (the field table, a bounded validator, the canonical form and the compact `f=`
+  string), `pm-filter-schema.ts` (its zod adapter), `pm-views.ts` (the five
+  built-in saved views as DSL, and the sort / group-by / column shapes a view
+  persists) and `pm-links.ts` (the `/projects?p=&view=&item=&v=&f=` deep-link
+  contract). The compiler that turns a filter into a Prisma `where` is NOT here —
+  it needs Prisma and department resolution — it is the orchestrator's
+  `services/pm/filter/compile.ts`.
 - **Gotcha:** `src/anchor.ts` is **generated** from `schemas/anchor.schema.json`
   via `npm run gen:anchor-schema`. Edit the JSON schema, then regenerate — don't
   hand-edit the `.ts`. Uses `z.union` (not `discriminatedUnion`) because some

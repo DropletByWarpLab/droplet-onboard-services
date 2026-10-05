@@ -20,6 +20,11 @@ vi.mock("@/components/shell/ShellPage", () => ({
   ShellPage: ({ children }: { children: ReactNode }) => <div>{children}</div>,
 }));
 vi.mock("@/lib/hooks/useCameras", () => ({ useCameras: () => ({ cameras: [] }) }));
+vi.mock("@/lib/hooks/useCameraBusinessHours", () => ({
+  useCameraBusinessHours: () => ({ schedule: undefined, isLoading: false, error: undefined, retry: vi.fn(), save: vi.fn() }),
+}));
+vi.mock("@/components/events/BusinessHoursPanel", () => ({ BusinessHoursPanel: () => null }));
+vi.mock("@/lib/hooks/useMotionActivity", () => ({ useMotionActivity: () => ({ activity: [], coverage: undefined, isLoading: false, isLoadingMore: false, hasMore: false, error: undefined, refresh: vi.fn(), loadMore: vi.fn() }) }));
 
 const refresh = vi.fn();
 let hookError: unknown = undefined;

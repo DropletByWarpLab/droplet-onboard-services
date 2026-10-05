@@ -19,11 +19,11 @@
 # (orchestrator, mcp-server, web-dashboard, file-indexer, ai-gateway)
 # so BuildKit resolves it to ONE compile per builder/arch instead of
 # five. Keep it in lockstep across those five Dockerfiles.
-FROM debian:bookworm-slim AS fips-builder
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS fips-builder
 COPY docker/fips/build-openssl-fips.sh /tmp/build-openssl-fips.sh
 RUN sh /tmp/build-openssl-fips.sh /out
 
-FROM node:20-bookworm-slim AS builder
+FROM node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 AS builder
 
 # openssl + ca-certificates at build time so prisma can generate its
 # client engine binaries. `--no-install-recommends` keeps the layer
@@ -118,7 +118,7 @@ RUN mkdir -p /workspace-node-modules && \
     done
 
 # --- Run stage ---
-FROM node:20-bookworm-slim
+FROM node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0
 
 # Runtime: openssl (FIPS provider) + ca-certificates + wget (healthcheck
 # client used by the Compose `healthcheck` block).

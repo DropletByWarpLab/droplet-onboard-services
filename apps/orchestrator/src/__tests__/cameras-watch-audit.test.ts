@@ -33,6 +33,8 @@ vi.mock("../services/camera.service.js", () => ({
 }));
 vi.mock("../services/frigate.client.js", () => ({
   fetchSnapshot: vi.fn(), fetchEventCamera: vi.fn(), fetchReviewCamera: vi.fn(),
+  fetchEventPlaybackSpan: vi.fn(),
+  fetchReviewPreview: vi.fn(async () => new Response("media")),
   fetchEventThumbnail: vi.fn(), fetchKnownFaces: vi.fn(),
   fetchKnownPlates: vi.fn(), fetchFaceImage: vi.fn(), deleteKnownFace: vi.fn(),
   deleteFaceImage: vi.fn(), deleteKnownPlate: vi.fn(), nameKnownPlate: vi.fn(),
@@ -63,6 +65,8 @@ import { createCamerasRouter } from "../routes/cameras.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import {
   fetchEventCamera,
+  fetchReviewCamera,
+  fetchEventPlaybackSpan,
   fetchHlsPlaylist,
   openMjpegStream,
   deleteCamera,
@@ -115,6 +119,7 @@ beforeEach(() => {
   mockRecord.mockResolvedValue({ id: 1n } as never);
   resetCameraWatchDedupe();
   vi.mocked(fetchEventCamera).mockResolvedValue("front");
+  vi.mocked(fetchReviewCamera).mockResolvedValue("front");
   vi.mocked(openMjpegStream).mockImplementation(async () =>
     // image/jpeg, not multipart: supertest would try to parse a real MJPEG body.
     new globalThis.Response("frame", { headers: { "content-type": "image/jpeg" } }),
@@ -180,6 +185,24 @@ describe("watching writes one audit row per (actor, camera, kind) per window", (
     const res = await request(appAs(member)).get("/api/cameras/clips/event/ev1");
     expect(res.status).toBe(200);
     expect(res.headers["content-disposition"]).toBeUndefined();
+    await settle();
+    expect(rows()).toHaveLength(1);
+    expect(rows()[0].refs).toMatchObject({ camera: "front", watch: "clip", saved: false, eventId: "ev1" });
+  });
+
+  it("a review preview is audited against the review's camera", async () => {
+    const res = await request(appAs(member)).get("/api/cameras/reviews/rv1/preview");
+    expect(res.status).toBe(200);
+    await settle();
+    expect(rows()).toHaveLength(1);
+    expect(rows()[0].refs).toMatchObject({ camera: "front", watch: "clip", saved: false, reviewId: "rv1" });
+  });
+
+  it("a member playing an event clip as HLS is audited once as clip against the event's camera, never per segment (WARP-3509)", async () => {
+    vi.mocked(fetchEventPlaybackSpan).mockResolvedValue({ camera: "front", startTime: 1000, endTime: 1012 });
+    const res = await request(appAs(member)).get("/api/cameras/events/ev1/playback.m3u8");
+    expect(res.status).toBe(200);
+    await request(appAs(member)).get("/api/cameras/front/playback.segment?after=980&before=1032&seg=0.ts");
     await settle();
     expect(rows()).toHaveLength(1);
     expect(rows()[0].refs).toMatchObject({ camera: "front", watch: "clip", saved: false, eventId: "ev1" });

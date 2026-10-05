@@ -1,10 +1,16 @@
 "use client";
 
 import { Bookmark, Film, Image as ImageIcon } from "lucide-react";
+import { prettifyCameraKey } from "@/lib/camera-display";
 import type { EventDetail } from "@/lib/types";
+import { ThumbImage } from "./ThumbImage";
 
 interface Props {
   event: EventDetail;
+  /** The name the household gave the camera (WARP-3509). The page resolves it
+   *  from the cameras list; without one the card shows the prettified key,
+   *  never the raw slug. */
+  cameraName?: string;
   onClick: (event: EventDetail) => void;
 }
 
@@ -34,9 +40,18 @@ function fmtDuration(start: number, end: number | null): string {
  * thumbnail is event-centric: label, score, camera, time-since,
  * duration. Badges in the corners surface saved-clip vs snapshot-only
  * and the retain-indefinitely state ("Saved").
+ *
+ * WARP-3509: an event with no end time is still happening, and says so
+ * ("In progress", where a finished one shows its length) rather than
+ * reading as a finished event with no duration. Its thumbnail may not
+ * exist yet; the picture is tried again when the event ends.
+ *
+ * Badge fills are opaque. A colour from the design tokens is a CSS
+ * variable, and Tailwind cannot put an alpha (`/90`) on one — it emits no
+ * rule, and the badge had no fill at all.
  */
-export function EventCard({ event, onClick }: Props) {
-  const cameraDisplay = event.camera.replace(/_/g, " ");
+export function EventCard({ event, cameraName, onClick }: Props) {
+  const cameraDisplay = cameraName || prettifyCameraKey(event.camera);
   return (
     <button
       onClick={() => onClick(event)}
@@ -44,11 +59,12 @@ export function EventCard({ event, onClick }: Props) {
       style={{ padding: 0 }}
     >
       <div className="relative aspect-video overflow-hidden" style={{ background: "var(--inset)" }}>
-        <img
+        <ThumbImage
           src={event.thumbnail}
           alt={`${event.label} on ${cameraDisplay}`}
           className="w-full h-full object-cover transition-transform group-hover:scale-105"
           loading="lazy"
+          retryKey={event.endTime}
         />
 
         {/* Top-left: media-type pill (clip > snapshot > none) */}
@@ -63,17 +79,23 @@ export function EventCard({ event, onClick }: Props) {
 
         {/* Top-right: retain badge — "Saved" when retain_indefinitely. */}
         {event.retainIndefinitely && (
-          <div className="absolute top-2 right-2 flex items-center gap-1 px-2 py-1 rounded-full bg-system-yellow/90 backdrop-blur-sm text-black">
+          <div className="absolute top-2 right-2 flex items-center gap-1 px-2 py-1 rounded-full bg-system-yellow backdrop-blur-sm text-black">
             <Bookmark size={12} className="fill-current" />
             <span className="type-caption-2 font-medium">Saved</span>
           </div>
         )}
 
-        {/* Bottom-right: duration when there's a clip. */}
-        {event.hasClip && event.endTime && (
+        {/* Bottom-right: how long it ran, or that it still is. */}
+        {event.endTime === null ? (
           <div className="absolute bottom-2 right-2 px-1.5 py-0.5 rounded bg-black/70 text-white type-caption-2">
-            {fmtDuration(event.startTime, event.endTime)}
+            In progress
           </div>
+        ) : (
+          event.hasClip && (
+            <div className="absolute bottom-2 right-2 px-1.5 py-0.5 rounded bg-black/70 text-white type-caption-2">
+              {fmtDuration(event.startTime, event.endTime)}
+            </div>
+          )
         )}
 
         {/* Bottom-left: score chip. */}
@@ -83,6 +105,7 @@ export function EventCard({ event, onClick }: Props) {
       </div>
 
       <div className="p-3">
+        {event.outsideBusinessHours === true && <span className="badge warn mb-1.5">Outside business hours</span>}
         <div className="flex items-center justify-between">
           <span className="type-subheadline font-medium capitalize truncate text-[color:var(--text)]">
             {event.label}

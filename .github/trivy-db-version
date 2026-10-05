@@ -16,5 +16,10 @@
 #     https://ghcr.io/v2/aquasecurity/trivy-db/manifests/2 \
 #     | awk -tolower'/docker-content-digest/{print $2}'
 #
-# Snapshot pinned: 2026-07-05 (schema v2).
-sha256:a8a1af880ecae3a9e4fe74c0351c921b33bc083ed439ff25c9aaac0aa5d6945a
+# Refresh monthly (WARP-3667): scripts/check-vuln-exceptions.sh fails CI when
+# the snapshot below is more than 35 days old, so the pin cannot silently go
+# stale. A refresh PR changes this file AND re-baselines .trivyignore (new
+# entries carry an `exp:` date, 90 days out); it is never a bare pin bump.
+#
+# Snapshot pinned: 2026-10-04 (schema v2; tag `2` created 2026-10-04T14:35:33Z).
+sha256:09425fb5d539fe7ea56daad65a68ae18865ac468f691408b86d0258c50c88d36

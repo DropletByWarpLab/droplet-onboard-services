@@ -251,6 +251,7 @@ All camera access works through the authenticated Nginx HTTPS gateway. The same 
 | Live snapshot | `GET /api/cameras/{name}/snapshot` | Session cookie or Bearer token |
 | Live MJPEG stream | `GET /api/cameras/{name}/live` | Session cookie or Bearer token |
 | HLS recording playback | `GET /api/cameras/{name}/playback.m3u8` | Session cookie or Bearer token |
+| HLS event clip playback | `GET /api/cameras/events/{id}/playback.m3u8` | Session cookie or Bearer token |
 | Detection events | `GET /api/cameras/events/recent` | Session cookie or Bearer token |
 | Real-time alerts | `GET /api/cameras/events/sse` | Session cookie or Bearer token |
 
@@ -390,6 +391,77 @@ the controller converges on, and the UI says so.
 4. **Events timeline** — recent detections with thumbnails, confidence, time
 5. **Detail panel** — larger live view, enable/disable/remove controls, Frigate UI link
 
+### Events Page: Business Hours and Playback (`/events`)
+
+Owners and administrators can save one weekly business-hours schedule and its
+IANA timezone from the Events page. Camera viewers can read it and filter alerts,
+detections and events to activity inside or outside those hours. The schedule is
+stored in the existing `SystemFlag` JSON setting `cameras.business_hours`; it
+does not change Frigate detection or recording settings.
+
+`GET /api/cameras/business-hours` and owner/admin-only `PUT` use
+`{ configured, timezone, days }`. `days` contains all seven lowercase weekday
+names. Each day is either `null` (closed) or `{ open: "09:00", close: "17:00" }`.
+Times use 24-hour `HH:mm`; closing also accepts `24:00`. Equal times are rejected;
+`00:00`–`24:00` means open all day. A close earlier than its open continues into
+the following day, including across Sunday. Configuration writes also require
+the person's `cameras:manage` feature access.
+
+Until configured, list items carry `outsideBusinessHours: null`. After saving,
+`true` means some activity occurred outside the schedule, and `false` means the
+whole span was within it. Opening is inclusive and closing exclusive; a finished
+span is measured as `[startTime, endTime)`, and active activity extends to now.
+The saved timezone handles daylight saving gaps and repeated hours. Editing the
+schedule reclassifies historical items when they are queried.
+
+Event and review listing accept `businessHours=outside|inside`. Filtering occurs
+on the server before pagination. A request scans at most five batches of 1000
+upstream items; `scanLimitReached: true` with `nextCursor` means older activity
+may still match, even when this response contains no matches. Semantic search
+checks a bounded ranked candidate set, exposes `searchLimitReached`, and has no
+time-based continuation cursor; narrow the search when that flag is set.
+
+Review thumbnails use the review's own WebP file under Frigate's
+`/clips/review/` path, validated against the review id and camera. Preview
+playback proxies `/api/review/:id/preview?format=mp4`. The MP4 routes preserve
+browser byte ranges and upstream partial-response headers, and footage is
+authenticated, scoped to the person's cameras and never cached. If a preview or
+event clip cannot play, the dashboard attempts the same activity's HLS recording
+window, then shows a retry and recordings link if footage is unavailable.
+Missing stills show a thumbnail-unavailable placeholder.
+
+### Motion in Retained Recordings
+
+The separate Motion tab reads Frigate's raw per-recording `motion` counts and
+merges contiguous segments with positive counts into activity windows. These
+are independent of detected objects: Frigate 0.17.1 review severities are only
+`alert` and `detection`. The motion count is not a percentage. The normalized
+`/review/activity/motion` endpoint is deliberately avoided because its hourly
+normalization can turn a constant positive count into zero.
+
+`GET /api/cameras/motion` accepts `cameras`, `after`, `before`, `businessHours`,
+`limit` and `cursor`. The default window is the last 24 hours; the maximum is
+26 hours so a calendar day can include a daylight saving transition. Responses
+contain `activity` windows with `id`, `camera`, `startTime`, `endTime`, `motion`,
+`outsideBusinessHours` and an authenticated HLS `playbackUrl`. Keep `after` and
+`before` fixed when sending the returned `nextCursor` as `cursor`.
+
+`coverage` reports the queried bounds and, for each permitted camera,
+`recordedSeconds`, `hasGaps` and `available`; `partial` indicates an unavailable
+camera read. An unavailable read uses `recordedSeconds: null`, distinct from
+zero retained footage. An empty motion result only describes the retained
+recordings in the selected window. Recording gaps cannot establish that no
+movement occurred. All filtering and pagination happens after the bounded
+window's retained data is read, and footage remains scoped per person.
+
+### Recording review
+
+The recording timeline has a continuous time ruler with separate retained
+footage, motion and event lanes. Zoom around the playhead or pointer, pan across
+the day, click an event to seek, or drag an export range. Playback controls add
+event jumps and speed selection. Empty archive gaps remain visible; seeking
+maps archive timestamps to Frigate's concatenated media segments. Local days
+use their actual duration across daylight saving transitions.
 ### Recording state and the camera service restarting (WARP-3511)
 
 `CameraInfo.recording` (see `mobile-api-contract.md`) says what each camera keeps: its

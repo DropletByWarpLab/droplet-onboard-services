@@ -208,6 +208,15 @@ check "watch unit execs the repo-tracked watcher script" \
   "$WATCH_UNIT" '^ExecStart=/usr/local/sbin/droplet-openwrt-watch$'
 check "watch unit restarts always (the docker events stream dies with dockerd)" \
   "$WATCH_UNIT" '^Restart=always$'
+# WARP-3839: 5s flooded the journal on an external-router box (no running
+# droplet-openwrt, so the events stream ends over and over).
+check "watch unit spaces restarts 30s apart (WARP-3839: no journal flood)" \
+  "$WATCH_UNIT" '^RestartSec=30$'
+# WARP-3839: no third copy of a credential that is wrong for an external router.
+check "bridge installer skips the OPENWRT_PASS copy when OPENWRT_HOST is external" \
+  "$BRIDGE_INSTALL" "^    ''\\|127\\.0\\.0\\.1\\|localhost\\|::1\\)\$"
+check "bridge installer's OPENWRT_PASS copy sits only in the bundled-router branch" \
+  "$BRIDGE_INSTALL" 'external router \(OPENWRT_HOST=.*not copying OPENWRT_PASSWORD into OPENWRT_PASS'
 check "watch unit hardening: families pinned to AF_UNIX (docker/systemd sockets) + AF_NETLINK (nft heal)" \
   "$WATCH_UNIT" '^RestrictAddressFamilies=AF_UNIX AF_NETLINK$'
 # CORRECTNESS: PrivateNetwork must stay OFF — the overlay NAT rules live in

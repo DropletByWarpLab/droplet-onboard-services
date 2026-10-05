@@ -60,6 +60,22 @@ Detection sources (in order — see `scripts/lib/single-box.sh::detect_single_bo
 2. **2+ DRM render nodes + dGPU silicon present** → single-box.
 3. **Anything else** → not single-box; setup.sh continues in standard mode.
 
+### External edge router (WARP-3835)
+
+To put the box behind a real OpenWrt router instead of the bundled container:
+
+```bash
+./scripts/setup.sh --edge-router 192.168.9.1      # or HOST:PORT; port defaults to 80
+```
+
+This writes `OPENWRT_HOST`, `OPENWRT_PORT` and `OPENWRT_USERNAME=droplet-ai` to
+`.env` before anything else reads them. Put the router's `droplet-ai` password in
+`docker/secrets/openwrt_password` (the router's `/etc/droplet/droplet-ai-password`); setup keeps a non-empty file (WARP-3738), never seeds an empty one with a box-generated value (it warns instead), and
+a re-run without the flag keeps the host. Setup then runs `verify.sh`, which
+requires routing's `/health` to report `connected: true`. If routing cannot log
+in, setup prints the `ROUTER_AUTH` error and **exits 1** (a failed verify now
+fails setup, and the rescue SSH window stays open). Loopback hosts are refused.
+
 ### Install from the autoinstall ISO (zero keystrokes)
 
 The clone-then-`setup.sh` flow above presumes you've already installed Ubuntu
@@ -178,6 +194,7 @@ installs all three when single-box mode is active:
 > ```bash
 > sudo droplet-host-units check      # read-only; exit 1 if any unit runs stale code
 > sudo systemctl start droplet-host-units.service   # restart only what changed
+> # (also installs changed host files first, through the host-integration heal)
 > ```
 >
 > `setup.sh` runs the refresh itself as its last step, so a provision needs

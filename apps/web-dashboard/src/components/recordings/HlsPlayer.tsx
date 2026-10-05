@@ -7,6 +7,10 @@ interface Props {
   src: string;
   onTimeUpdate?: (currentTime: number) => void;
   onError?: (message: string) => void;
+  onReady?: () => void;
+  onPlayingChange?: (playing: boolean) => void;
+  onEnded?: () => void;
+  playbackRate?: number;
   className?: string;
   autoPlay?: boolean;
   muted?: boolean;
@@ -25,11 +29,28 @@ export interface HlsPlayerHandle {
 }
 
 /**
+ * `MediaError.code` → the hls.js error name the media copy in friendly-errors
+ * is keyed on. Code 1 (MEDIA_ERR_ABORTED) is absent on purpose: it is the page
+ * cancelling its own load (a new `src`, a teardown), not a failure to report.
+ * A code the element does not give — or one this table has not heard of —
+ * reads as the player's own problem.
+ */
+const NATIVE_MEDIA_ERROR: Record<number, string> = {
+  2: "networkError", // MEDIA_ERR_NETWORK: the connection dropped while streaming
+  3: "mediaError", // MEDIA_ERR_DECODE: the stream cannot be decoded
+  4: "manifestLoadError", // MEDIA_ERR_SRC_NOT_SUPPORTED: the playlist did not load
+};
+const MEDIA_ERR_ABORTED = 1;
+
+/**
  * Thin HLS player wrapper.
  *
  * Strategy:
- *   - Native HLS (Safari, iOS) plays the URL directly via the
- *     underlying <video> tag — no JS library needed.
+ *   - Native HLS (Safari, iOS, and Chromium, whose `canPlayType` answers
+ *     "maybe") plays the URL directly via the underlying <video> tag — no JS
+ *     library needed. A <video> reports a failed load only through its `error`
+ *     event, so that is listened to and handed to `onError`: without it a
+ *     playlist that 404s leaves a dead player and a parent that never learns.
  *   - Everywhere else, dynamically import hls.js so the dashboard's
  *     non-recording surfaces don't pay for the bundle. hls.js attaches
  *     to the video element and pushes MSE buffers from the proxied
@@ -37,14 +58,19 @@ export interface HlsPlayerHandle {
  *
  * Re-mounts cleanly when the `src` changes (operator picks a new
  * hour), tearing down the previous Hls instance to free GPU/MSE
- * resources. Errors bubble up via `onError` so the parent can render
- * a recovery message instead of a black box.
+ * resources. Errors bubble up via `onError` — on either path, in plain
+ * language — so the parent can render a recovery message instead of a
+ * black box.
  */
 export const HlsPlayer = forwardRef<HlsPlayerHandle, Props>(function HlsPlayer(
   {
     src,
     onTimeUpdate,
     onError,
+    onReady,
+    onPlayingChange,
+    onEnded,
+    playbackRate = 1,
     className,
     autoPlay = true,
     muted = false,
@@ -56,12 +82,21 @@ export const HlsPlayer = forwardRef<HlsPlayerHandle, Props>(function HlsPlayer(
   // Keep the Hls instance ref-stable across renders so cleanup hits
   // the right object on src change.
   const hlsRef = useRef<{ destroy: () => void } | null>(null);
+  const errorRef = useRef(onError);
+  errorRef.current = onError;
+  const queuedSeek = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (videoRef.current) videoRef.current.playbackRate = playbackRate;
+  }, [playbackRate]);
 
   useImperativeHandle(
     ref,
     () => ({
       seek: (t: number) => {
-        if (videoRef.current) videoRef.current.currentTime = t;
+        const video = videoRef.current;
+        if (!video || video.readyState === 0) queuedSeek.current = t;
+        else video.currentTime = t;
       },
       pause: () => {
         videoRef.current?.pause();
@@ -79,11 +114,26 @@ export const HlsPlayer = forwardRef<HlsPlayerHandle, Props>(function HlsPlayer(
 
     let cancelled = false;
 
-    // Native HLS path — Safari, mobile WebKit. The video tag plays
+    // Native HLS path — Safari, mobile WebKit, Chromium. The video tag plays
     // an .m3u8 source directly, no MSE shimming required.
     if (video.canPlayType("application/vnd.apple.mpegurl")) {
+      // A failed load (the playlist 404s, the box is down) is silent unless
+      // listened for: the element just sits in `error` with its controls up.
+      const handleNativeError = () => {
+        const code = video.error?.code;
+        if (code === MEDIA_ERR_ABORTED) return;
+        // WARP-294: translate, never echo the element's own message.
+        errorRef.current?.(
+          translateError({ code: (code && NATIVE_MEDIA_ERROR[code]) || "mediaError" }, "media"),
+        );
+      };
+      video.addEventListener("error", handleNativeError);
       video.src = src;
       return () => {
+        queuedSeek.current = null;
+        // Listener first: clearing the source below must not be reported
+        // as a failure of the playlist we are leaving.
+        video.removeEventListener("error", handleNativeError);
         // No Hls instance to clean up; clear src so the next mount
         // doesn't briefly hold the old one.
         video.removeAttribute("src");
@@ -101,7 +151,7 @@ export const HlsPlayer = forwardRef<HlsPlayerHandle, Props>(function HlsPlayer(
           // WARP-294: route through translateError so the recordings
           // page receives the same friendly copy idiom for every
           // failure mode (no raw enum, no engineer-speak).
-          onError?.(translateError({ code: "UNSUPPORTED" }, "media"));
+          errorRef.current?.(translateError({ code: "UNSUPPORTED" }, "media"));
           return;
         }
         const hls = new Hls({
@@ -117,13 +167,13 @@ export const HlsPlayer = forwardRef<HlsPlayerHandle, Props>(function HlsPlayer(
         hls.loadSource(src);
         hls.attachMedia(video);
         hls.on(Hls.Events.ERROR, (_event, data) => {
-          if (data.fatal) {
+          if (!cancelled && data.fatal) {
             // WARP-294: hls.js's `data.details` / `data.type` are
             // engineer-facing enum strings (bufferStalledError,
             // manifestLoadError, …). Translate them to plain copy via
             // the media domain before bubbling up to the parent's
             // setPlayerError.
-            onError?.(
+            errorRef.current?.(
               translateError({ code: data.details ?? data.type }, "media"),
             );
           }
@@ -133,13 +183,14 @@ export const HlsPlayer = forwardRef<HlsPlayerHandle, Props>(function HlsPlayer(
           // WARP-294: never echo err.message — dynamic-import failures
           // and Hls instance constructor errors can surface unhelpful
           // strings like "Failed to fetch".
-          onError?.(translateError(err, "media"));
+          errorRef.current?.(translateError(err, "media"));
         }
       }
     })();
 
     return () => {
       cancelled = true;
+      queuedSeek.current = null;
       if (hlsRef.current) {
         hlsRef.current.destroy();
         hlsRef.current = null;
@@ -147,7 +198,7 @@ export const HlsPlayer = forwardRef<HlsPlayerHandle, Props>(function HlsPlayer(
       video.removeAttribute("src");
       video.load();
     };
-  }, [src, onError]);
+  }, [src]);
 
   return (
     <video
@@ -157,6 +208,17 @@ export const HlsPlayer = forwardRef<HlsPlayerHandle, Props>(function HlsPlayer(
       autoPlay={autoPlay}
       muted={muted}
       onTimeUpdate={(e) => onTimeUpdate?.(e.currentTarget.currentTime)}
+      onLoadedMetadata={(e) => {
+        e.currentTarget.playbackRate = playbackRate;
+        if (queuedSeek.current !== null) {
+          e.currentTarget.currentTime = queuedSeek.current;
+          queuedSeek.current = null;
+        }
+        onReady?.();
+      }}
+      onPlay={() => onPlayingChange?.(true)}
+      onPause={() => onPlayingChange?.(false)}
+      onEnded={() => { onPlayingChange?.(false); onEnded?.(); }}
       // No native `src` here — we set it imperatively above so we
       // can switch between native HLS and hls.js.
     />
