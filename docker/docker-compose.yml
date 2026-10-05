@@ -277,6 +277,14 @@ services:
       # volume mount below; override only if you bind-mount a different
       # host path (e.g. an NVMe partition for backup convenience).
       - BRAIN_MEMORY_ROOT=${BRAIN_MEMORY_ROOT:-/data/brain-memory}
+      # WARP-1505: PM work-item attachments. PM_ATTACHMENTS_DIR is a CONTAINER
+      # path (never a host path) and is ALSO the target of the pm-attachments
+      # volume mount below — both read this one variable, so the mount and the
+      # directory the service writes to cannot disagree. The cap (25 MiB) is
+      # enforced while streaming; nginx's /api/ location allows 100M, so a cap
+      # above ~95 MiB also needs client_max_body_size raised in nginx.conf.
+      - PM_ATTACHMENTS_DIR=${PM_ATTACHMENTS_DIR:-/data/pm-attachments}
+      - PM_ATTACHMENT_MAX_BYTES=${PM_ATTACHMENT_MAX_BYTES:-26214400}
       # Routing runs with network_mode: host; host.docker.internal is added
       # via the extra_hosts above so the orchestrator can reach it without
       # bridge-network compose DNS.
@@ -501,6 +509,24 @@ services:
       # so it can write extracted.txt + updated manifest) so a single
       # ingest step covers both write paths.
       - brain-memory-data:/data/brain-memory
+      # WARP-1505 (ADR-026): the bytes of files attached to PM work items and
+      # comments (the Prisma rows hold only the metadata). Mounted into the
+      # orchestrator ALONE, read-write: the files are served exclusively by the
+      # authenticated GET /api/pm/attachments/:id, so no sidecar, no gateway
+      # alias and no indexer may be able to read them.
+      #
+      # A NAMED volume, never a host bind: this is customer data, and a named
+      # volume lives under the Docker data-root, which on a provisioned box is
+      # /data/docker on the LUKS partition (droplet-luks-provision.sh) — so
+      # there it is encrypted at rest with nothing extra to configure. A bind to
+      # some other host path would silently leave that guarantee behind.
+      #
+      # The target comes from PM_ATTACHMENTS_DIR (environment above), not a
+      # second literal: were the two to disagree, the service would write into
+      # the container's ephemeral layer and every file would vanish on recreate.
+      # In the nightly restic backup (droplet-backup.sh), device-backup.sh's
+      # DATA_VOLUMES and factory-reset.sh's wipe list.
+      - pm-attachments:${PM_ATTACHMENTS_DIR:-/data/pm-attachments}
       # WARP-456: HMAC signing key for the append-only activity log.
       # setup.sh writes the 32-byte key to <repo>/data/secrets/audit.key
       # (mode 0600). The orchestrator's loadAuditKeyFromDisk() reads
@@ -1501,6 +1527,9 @@ services:
       dockerfile: services/file-indexer/Dockerfile
     volumes:
       - nextcloud-data:/data/nextcloud:ro
+      # External SMB files use a separate corpus; search checks current
+      # Nextcloud access before returning their text to a caller.
+      - droplet-share:/data/droplet-share:ro
       - ../proto:/app/proto:ro
       # WARP-203: brain-memory shared volume — chat-attached files are
       # written here by the orchestrator and read by file-indexer to
@@ -1524,6 +1553,7 @@ services:
       - DATABASE_URL=postgresql://droplet:${POSTGRES_PASSWORD}@db:5432/droplet?sslmode=${PG_SSLMODE:-require}
       - MQTT_BROKER=${MQTT_BROKER:-mqtts://broker:8883}
       - NEXTCLOUD_DATA_ROOT=/data/nextcloud/data
+      - DROPLET_SHARE_ROOT=/data/droplet-share
       - AI_GATEWAY_GRPC_URL=ai-gateway:50051
       # WARP-1140: shared "Household" groupfolder — display-path prefix for
       # chunks indexed from __groupfolders/. Must match the orchestrator's
@@ -4037,6 +4067,11 @@ volumes:
   # boot entrypoint. Wiped on factory reset (see scripts/factory-reset.sh).
   migration-snapshots:
   brain-memory-data:
+  # WARP-1505 (ADR-026): PM work-item attachment bytes, mounted only into the
+  # orchestrator (see its volumes list). Customer data: captured by the
+  # nightly restic backup (droplet-backup.sh) and by device-backup.sh, and wiped
+  # by factory reset.
+  pm-attachments:
   # WARP-539: OTA per-update rollback backups + staged configs
   # (<id>/{backup,configs.tar.gz}). GC'd by the daily purge cron (terminal
   # updates, 7-day window). Named so backups survive the orchestrator's own

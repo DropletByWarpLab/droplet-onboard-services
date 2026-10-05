@@ -86,6 +86,7 @@ export interface ContextDeps {
    */
   searchHybrid?: (args: {
     userId: string;
+    ncToken?: string;
     query: string;
     limit: number;
     /**
@@ -123,6 +124,7 @@ export interface ContextDeps {
    */
   readDocumentText?: (args: {
     userId: string;
+    ncToken?: string;
     path: string;
     startChunk: number;
     maxChars: number;
@@ -192,6 +194,7 @@ export function buildContext(
         }) =>
           deps.searchHybrid!({
             userId,
+            ncToken,
             query: args.query,
             limit: args.limit,
             _enhancement: args._enhancement ?? metaEnhancement,
@@ -203,7 +206,7 @@ export function buildContext(
   const readDocumentText =
     deps.readDocumentText && userId
       ? async (args: { path: string; startChunk: number; maxChars: number }) =>
-          deps.readDocumentText!({ userId, ...args })
+          deps.readDocumentText!({ ...args, userId, ncToken })
       : undefined;
   return {
     prisma: deps.prisma,

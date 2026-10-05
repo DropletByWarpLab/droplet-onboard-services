@@ -43,6 +43,7 @@ import {
   Building2,
   Briefcase,
   Handshake,
+  Paperclip,
   // WARP-3520 — work-item kinds, the item / project menus, field-type glyphs.
   Bug,
   SquareCheck,
@@ -106,6 +107,8 @@ export const ICONS: Record<string, LucideIcon> = {
   building: Building2,
   briefcase: Briefcase,
   handshake: Handshake,
+  // WARP-1505 — attach a file to a comment.
+  attach: Paperclip,
   // WARP-3520 — one glyph per work-item kind (`feature` reuses `spark`).
   task: SquareCheck,
   bug: Bug,

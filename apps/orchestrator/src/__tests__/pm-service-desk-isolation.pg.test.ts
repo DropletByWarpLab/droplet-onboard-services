@@ -19,6 +19,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import express, { type Router } from "express";
 import type { Server } from "node:http";
+import { tmpdir } from "node:os";
 import request from "supertest";
 import type { PrismaClient } from "@prisma/client";
 
@@ -38,6 +39,8 @@ interface Ids {
   deskStateId: string;
   deskLabelId: string;
   deskItemId: string;
+  deskAttachmentId: string;
+  pmAttachmentId: string;
   deskPropertyId: string;
   deskCycleId: string;
   deskModuleId: string;
@@ -54,6 +57,7 @@ interface Probe {
   method: Method;
   url: (ids: Ids) => string;
   body?: object;
+  uploadFile?: true;
 }
 
 const probes: Probe[] = [
@@ -91,6 +95,10 @@ const probes: Probe[] = [
   { route: "GET /api/pm/work-items/:id/relations", kind: "desk", method: "get", url: (i) => `/api/pm/work-items/${i.deskItemId}/relations` },
   { route: "POST /api/pm/work-items/:id/relations", kind: "desk", method: "post", url: (i) => `/api/pm/work-items/${i.pmItemId}/relations`, body: { to_work_item_id: "DESK_ITEM", kind: "RELATES" } },
   { route: "DELETE /api/pm/relations/:relationId", kind: "desk", method: "delete", url: (i) => `/api/pm/relations/${i.relationId}` },
+  { route: "GET /api/pm/work-items/:id/attachments", kind: "desk", method: "get", url: (i) => `/api/pm/work-items/${i.deskItemId}/attachments` },
+  { route: "POST /api/pm/work-items/:id/attachments", kind: "desk", method: "post", url: (i) => `/api/pm/work-items/${i.deskItemId}/attachments`, uploadFile: true },
+  { route: "GET /api/pm/attachments/:id", kind: "desk", method: "get", url: (i) => `/api/pm/attachments/${i.deskAttachmentId}` },
+  { route: "DELETE /api/pm/attachments/:id", kind: "desk", method: "delete", url: (i) => `/api/pm/attachments/${i.deskAttachmentId}` },
   // ── editing fields share the same project / desk boundary ────────────────
   { route: "GET /api/pm/projects/:id/properties", kind: "desk", method: "get", url: (i) => `/api/pm/projects/${i.deskId}/properties` },
   { route: "POST /api/pm/projects/:id/properties", kind: "desk", method: "post", url: (i) => `/api/pm/projects/${i.deskId}/properties`, body: { name: "Extra", type: "text" } },
@@ -152,6 +160,7 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
     "warp3528i-DESK-NAME",
     "warp3528i-TICKET-SUBJECT",
     "warp3528i-TICKET-BODY",
+    "PRIVATE-ATTACHMENT-NAME.txt",
     "W28IZ",
   ];
   const P = "warp3528i-";
@@ -163,12 +172,13 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
     );
     prisma = new RealPrismaClient();
     await prisma.$connect();
-    const [{ createPmNativeRouter }, { createPmRelationsRouter }, { createPmMobileRouter }, { createPmScheduleRouter }, { createPmFieldsRouter }, { createPmQueryRouter }, { createPmViewsRouter }, { createPmPlanningRouter }] =
+    const [{ createPmNativeRouter }, { createPmRelationsRouter }, { createPmMobileRouter }, { createPmScheduleRouter }, { createPmAttachmentsRouter }, { createPmFieldsRouter }, { createPmQueryRouter }, { createPmViewsRouter }, { createPmPlanningRouter }] =
       await Promise.all([
         import("../routes/pm/native.js"),
         import("../routes/pm/relations.js"),
         import("../routes/mobile/pm.js"),
         import("../routes/pm/schedule.js"),
+        import("../routes/pm/attachments.js"),
         import("../routes/pm/fields.js"),
         import("../routes/pm/query.js"),
         import("../routes/pm/views.js"),
@@ -178,6 +188,12 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
     const relations = createPmRelationsRouter(prisma);
     const mobile = createPmMobileRouter(prisma);
     const schedule = createPmScheduleRouter(prisma);
+    const attachments = createPmAttachmentsRouter(prisma, {
+      // Upload refusal must exercise the real item loader, independently of the
+      // host attachment volume. The guarded request never reaches file storage.
+      root: tmpdir(),
+      statfs: async () => ({ bavail: 1_000_000, bsize: 4096, blocks: 1_000_000 }),
+    });
     const fields = createPmFieldsRouter(prisma);
     const query = createPmQueryRouter(prisma);
     const views = createPmViewsRouter(prisma);
@@ -187,6 +203,7 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
       { router: relations, prefix: "/api" },
       { router: mobile, prefix: "" },
       { router: schedule, prefix: "/api" },
+      { router: attachments, prefix: "/api" },
       { router: fields, prefix: "/api" },
       { router: query, prefix: "/api" },
       { router: views, prefix: "/api" },
@@ -202,6 +219,7 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
     app.use("/api", relations);
     app.use(mobile);
     app.use("/api", schedule);
+    app.use("/api", attachments);
     app.use("/api", fields);
     app.use("/api", query);
     app.use("/api", views);
@@ -296,12 +314,37 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
         channel: "INTERNAL",
       },
     });
-    await prisma.pmComment.createMany({
-      data: [
-        { workItemId: deskItem.id, commentHtml: "<p>note</p>" },
-        { workItemId: deskItem.id, commentHtml: "<p>reply</p>", visibility: "PUBLIC" },
-      ],
+    const deskComment = await prisma.pmComment.create({
+      data: { workItemId: deskItem.id, commentHtml: "<p>reply</p>", visibility: "PUBLIC" },
     });
+    await prisma.pmComment.create({ data: { workItemId: deskItem.id, commentHtml: "<p>note</p>" } });
+    const [deskAttachment, pmAttachment] = await Promise.all([
+      prisma.pmAttachment.create({
+        data: {
+          workItemId: deskItem.id,
+          commentId: deskComment.id,
+          fileName: "PRIVATE-ATTACHMENT-NAME.txt",
+          mimeType: "text/plain",
+          sizeBytes: BigInt(4),
+          sha256: "a".repeat(64),
+          storageKey: `${P}desk-attachment`,
+          status: "READY",
+          uploadedById: owner,
+        },
+      }),
+      prisma.pmAttachment.create({
+        data: {
+          workItemId: pmItem.id,
+          fileName: "PROJECT-ATTACHMENT-NAME.txt",
+          mimeType: "text/plain",
+          sizeBytes: BigInt(4),
+          sha256: "b".repeat(64),
+          storageKey: `${P}project-attachment`,
+          status: "READY",
+          uploadedById: owner,
+        },
+      }),
+    ]);
     await prisma.pmActivity.create({ data: { workItemId: deskItem.id, verb: "created" } });
     const deskProperty = await prisma.pmCustomProperty.create({
       data: { projectId: desk.id, name: "Private", type: "text" },
@@ -335,6 +378,8 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
       deskStateId: desk.states[0]!.id,
       deskLabelId: desk.labels[0]!.id,
       deskItemId: deskItem.id,
+      deskAttachmentId: deskAttachment.id,
+      pmAttachmentId: pmAttachment.id,
       deskPropertyId: deskProperty.id,
       deskCycleId: deskCycle.id,
       deskModuleId: deskModule.id,
@@ -356,6 +401,7 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
           .replaceAll("DESK_ID", ids.deskId)
           .replaceAll("WORKSPACE_SLUG", ids.workspaceSlug));
     const r = request(server)[p.method](url);
+    if (p.uploadFile) return r.attach("file", Buffer.from("test"), "upload.txt");
     return body === undefined ? r : r.send(body);
   };
 
@@ -388,6 +434,12 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
       expect(res.status, JSON.stringify(res.body)).toBe(404);
       const text = JSON.stringify(res.body);
       for (const marker of DESK_MARKERS) expect(text).not.toContain(marker);
+      if (probe.uploadFile) {
+        expect(await prisma.pmAttachment.findMany({
+          where: { workItemId: ids.deskItemId },
+          select: { id: true, status: true },
+        })).toEqual([{ id: ids.deskAttachmentId, status: "READY" }]);
+      }
       // A final getWorkItem guard is too late if the write already committed.
       expect(await prisma.pmWorkItem.findUnique({ where: { id: ids.deskItemId }, select: { isArchived: true } }))
         .toEqual({ isArchived: false });
@@ -475,6 +527,7 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
       ["get", `/api/pm/work-items/${ids.pmItemId}/comments`],
       ["get", `/api/pm/work-items/${ids.pmItemId}/activity`],
       ["get", `/api/pm/work-items/${ids.pmItemId}/relations`],
+      ["get", `/api/pm/work-items/${ids.pmItemId}/attachments`],
       [
         "get",
         `/api/mobile/pm/work-items/${ids.pmItemId}?workspace=${ids.workspaceSlug}&project_id=${ids.pmProjectId}`,
@@ -484,6 +537,23 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
       const res = await request(server)[method](url);
       expect(res.status, `${method} ${url}`).toBe(200);
     }
+    const attachments = await request(server).get(`/api/pm/work-items/${ids.pmItemId}/attachments`);
+    expect(attachments.body.attachments.map((a: { id: string }) => a.id)).toEqual([ids.pmAttachmentId]);
+    expect(JSON.stringify(attachments.body)).toContain("PROJECT-ATTACHMENT-NAME.txt");
+  });
+
+  it("a public-comment attachment on a service-desk ticket is neither listed, downloaded nor deleted through PM", async () => {
+    const requests = [
+      request(server).get(`/api/pm/work-items/${ids.deskItemId}/attachments`),
+      request(server).get(`/api/pm/attachments/${ids.deskAttachmentId}`),
+      request(server).delete(`/api/pm/attachments/${ids.deskAttachmentId}`),
+    ];
+    for (const operation of requests) {
+      const res = await operation;
+      expect(res.status, JSON.stringify(res.body)).toBe(404);
+      expect(JSON.stringify(res.body)).not.toContain("PRIVATE-ATTACHMENT-NAME.txt");
+    }
+    expect(await prisma.pmAttachment.findUnique({ where: { id: ids.deskAttachmentId } })).toMatchObject({ status: "READY" });
   });
 
   it("never shows the escalation link, or the ticket's key, from the PM item's side", async () => {

@@ -52,7 +52,7 @@ The persona is the **non-technical owner/admin of a small business who owns the 
 ### Non-goals
 
 - **No Plane parity and no embedded Plane** — this is a replacement, not a wrapper; the iframe and any second login are removed.
-- **No surfacing of schema-only entities.** Attachments remain schema-only in this slice. Custom fields gained their API with WARP-3520 (WS-4); cycles and modules gained theirs with WARP-3521 (WS-5). Their working surfaces are specified below, including the drawer cycle picker. Per-item activity uses the existing paged read endpoints.
+- **No surfacing of schema-only entities.** Attachments, custom fields, cycles and modules have APIs in this composed slice. Their working surfaces are specified below, including the drawer attachment section (§3.4 item 7) and cycle picker. Per-item activity uses the existing paged read endpoints.
 - **No multi-workspace UI.** Multi-home is schema-possible but not exposed; design for the single `home` workspace.
 - **No per-user / private projects** — the model is household-shared by design.
 - **No new tokens, no new design system, no Plane-style chrome.**
@@ -317,7 +317,7 @@ This section enumerates every view to design. Every view is wrapped in the shell
 
 **Purpose** — the complete record for one work item, reachable two ways: a **right slide-over** from board/list (fast, keeps context) and a **full page** (`/projects/[identifier]/[key]`, deep-linkable, for focused work). Both render the same detail body; the drawer wraps it in the canonical **`Dialog`** with `placement="right"` and `maxWidth="lg"` (portal, focus-trap, Escape, scroll-lock, returns focus to the trigger, respects reduced motion, edge-to-edge `border-l border-separator`); the full page renders it in a narrow centered column (~880px).
 
-**Data** — the single-work-item hook → `GET /api/pm/work-items/:id` (refresh ~15s) + the comments hook → `GET /api/pm/work-items/:id/comments`.
+**Data** — the single-work-item hook → `GET /api/pm/work-items/:id` (refresh ~15s) + the comments hook → `GET /api/pm/work-items/:id/comments` + the attachments hook → `GET /api/pm/work-items/:id/attachments`.
 
 **Layout (top → bottom):**
 1. **Header** — mono `key` (`INBOX-42`) + a state pill (color dot + name, click → transition menu; the `completedAt` logic runs server-side) + a kebab `.icon-btn` (Edit, Copy link, Delete via the destructive confirm dialog). `name` as `type-title-2` (22/700), editable-in-place for writers.
@@ -332,7 +332,13 @@ This section enumerates every view to design. Every view is wrapped in the shell
    - Parent breadcrumb shown when `parentId` is set.
 5. **Comments thread** — `comments[]` (`commentHtml`, resolved `authorId`, `createdAt` mono-relative); a comment with `authorId === null` renders as a system/AI bubble with the aurora-ink avatar (LLM-authored). A composer at the bottom (`POST …/comments { comment_html }`, writer-gated) — sending is `⌘↵`. Comments are append-only (no edit/delete route; see §4.3). Empty: "No comments yet." with the composer still shown.
 6. **Activity history** — **render the section scaffold but show a calm honest placeholder**: "Activity history is recorded but you can't view it here yet." The per-item activity (`created | updated | state_changed | commented`) is written server-side but **has no read route** — do not fabricate entries. (Note: this is the *per-item* history, distinct from the global `/activity` admin surface — see the cross-surface note below.) Verbs/fields are documented for when the route lands.
-7. **Attachments & Custom fields** — **attachments: omit entirely from the live UI. Custom fields are live since WARP-3520** (WS-4): each project field is a row of the properties rail with the editor its type needs. For attachments, do not render a disabled "Coming soon" tile and do not build pickers that call nonexistent routes. The only allowance is layout: leave whitespace in the rail so these can slot in later without a redesign. (This is the one decision — *omit*, not *show-disabled*; pick omit.)
+7. **Attachments** — a designed section that sits **between Sub-issues and Comments** (numbered last here only because it was added last). Heading `Attachments` with the `.sx` count — every file on the item, comment files included. States to design, all of them:
+   - **Rows** — one per file, oldest first: a 36px thumbnail (only when the server marks the file previewable; otherwise a document glyph), the file name as the download link, and `size · uploader · time` as the quiet second line. The uploader, and any owner or admin, also get a remove `.icon-btn` (label `Remove {file name}`) that opens the destructive confirm dialog; nobody else sees one. A comment's files also show under that comment as compact chips, with a thumbnail for images.
+   - **Add area** (writers only — hidden, not disabled, for everyone else) — a dashed, focusable box under the list: an `Add files` `.btn.sm`, a one-line how-to, and paste into the focused box. The whole drawer body also takes a file drop, with a calm dashed outline and the line `Drop files to attach` while a drag is over it; a drop on the comment box attaches to that comment instead.
+   - **Uploading** — one row per file with its own progress bar, at most three at a time. A refused file keeps its row, says why in plain words, and has a `Dismiss` `.btn.ghost`; the limit is stated, never implied.
+   - **Empty** — `No attachments yet.` with the how-to and the size limit beneath it (writers); readers get the line alone.
+   - **Loading** — two skeleton rows. **Error** — a quiet inline line `Couldn't load attachments.` + a `Try again` `.btn.ghost`.
+   - **Custom fields** are live since WARP-3520: each project field is a row of the properties rail with the editor its type needs.
 
 **Cross-surface note (the global Activity surface):** every applied Projects write logs to the household **Activity** log (the admin `/activity` surface). In that surface a Projects write appears as a standard Activity row — actor (the person, or "AI" for an assistant-confirmed write) · a plain-language line (e.g. "moved INBOX-42 to In Progress," "added a comment to INBOX-42," "created project Onboarding") · the mono `key` where relevant · timestamp · the `write · ok` tier marker. You are not redesigning the Activity surface here — you are only ensuring Projects writes produce a legible, ADR-002-voiced row in it. No per-item timeline is built on the Projects surface itself until the per-item route lands (item 6).
 
@@ -483,9 +489,9 @@ Frequent edits happen in place, not in a modal:
 - **Priority** — a small popover of the five values; selection PATCHes `priority`.
 - **Assignees / labels** — popover multi-selects. These are **full-set replacements** on the wire (`assignees: string[]`, `label_ids: string[]`) — the popover holds the complete desired set and sends it whole, not a delta.
 - **Project key prefix / identifier / lead / icon/color** — edited from the project modal (§3.6), not inline on the board.
-- **Cycle and modules** — selects in the drawer’s properties rail (§3.4): choosing a cycle writes `cycle_id` (`null` takes the item out) optimistically, with rollback on refusal; the modules row waits for its membership request and reports failures with a friendly toast.
+- **Cycle and modules** — selects in the drawer's properties rail (§3.4): choosing a cycle writes `cycle_id` (`null` takes the item out) optimistically, with rollback on refusal; the modules row waits for its membership request and reports failures with a friendly toast.
 - **Custom fields** — editable since WARP-3520 through project definitions and per-item values.
-- **Not editable in this slice** (schema-only, no route): attachments. The UI must not render affordances that POST to non-existent routes.
+Attachments are added and removed in the detail (§3.4 item 7), never edited in place.
 
 User references (`leadId`, `assignees`, `authorId`, `createdById`) are plain user-id strings — resolve display names from the people directory separately; never block a write on name resolution.
 
@@ -604,6 +610,12 @@ The persona is the **non-technical owner/admin of a small business who owns the 
 | No comments | "No comments yet." |
 | No sub-issues | "No sub-issues yet." |
 | Cross-project sub-issue blocked | "Sub-issues stay in the same project." |
+| No attachments | "No attachments yet." (heading) · "Drop files here, paste an image, or choose files. Up to {limit} each." (body, writers only; {limit} comes from the server, e.g. "25 MB") |
+| Attachment over the limit | "{file name} is larger than {limit}." |
+| Attachment refused | "{file name} can't be added — executable files aren't allowed." · "{file name} doesn't look like the file type its name says." |
+| Attachments load error | "Couldn't load attachments." (with a `Try again` button) |
+| File drag over the drawer | "Drop files to attach" |
+| Remove-attachment confirm | "Remove this file?" (title) · "It will be deleted from this item and can't be recovered." (body) · "Remove" (button) |
 | Delete-project confirm (owner/admin, archived projects only; the identifier is typed) | "Delete this project? This removes its work items and can't be undone." |
 | Archive-project confirm (quiet, reversible) | "It leaves your project list and its work items stay put. You can restore it any time from Archived." |
 | Archived project banner | "This project is archived. It's hidden from your project list." |
@@ -656,7 +668,7 @@ Recreate these in the dashboard using the existing primitives, hooks, and tokens
 
 1. **Project board (kanban)** — the primary surface. Board: the 5 seeded columns (Backlog · Todo[default] · In Progress · Done · Cancelled) with their group-derived state pills + live dot colors, `sortOrder`-ordered `.card.hover` cards showing `key` (mono), title, priority, assignee `.ava`s, label chips, `commentCount`/`subItemCount`. Header = `Phead` with title (project name), live `sub`, primary "New item" + refresh `.icon-btn`. Saved-view `.chiprow` + segmented filter rail. Drag insertion line shown.
 2. **Project list / table view** — the keyboard- and screen-reader-equivalent of the board (`.rows`/`.lrow`); sortable, groupable, the mobile layout.
-3. **Work-item detail** — right-`placement` `Dialog` drawer **and** the dedicated route: Tiptap `descriptionHtml`, priority/assignees/labels/state inline edits, parent + one-level sub-issue list with counts (with its empty/loading/error states), comments thread (append-only, AI-authored comments in aurora), "Ask AI about this item" affordance, the per-item activity placeholder, attachments/custom-fields **omitted**. Show the assistant-pending Write card variant here.
+3. **Work-item detail** — right-`placement` `Dialog` drawer **and** the dedicated route: Tiptap `descriptionHtml`, priority/assignees/labels/state inline edits, parent + one-level sub-issue list with counts (with its empty/loading/error states), comments thread (append-only, AI-authored comments in aurora), "Ask AI about this item" affordance, the per-item activity placeholder, the attachments section (list, add area, upload progress and every state above), custom fields **omitted**. Show the assistant-pending Write card variant here.
 4. **Projects index** — grid of project cards (icon/color/`identifier`/lead/archived), "New project" primary, archived filter, KPI summary strip (28px UI numbers).
 5. **Create/edit modals** — new project and new work item, both on the canonical `Dialog` (`placement="center"`, `maxWidth="md"`), not a hand-rolled shell.
 
@@ -669,4 +681,4 @@ Recreate these in the dashboard using the existing primitives, hooks, and tokens
 
 ### Definition of done
 
-Pixel match in light **and** dark at 1440w + a mobile width (the table layout) · bound to the live `/api/pm/*` contract (single `home` workspace, household-shared reads, `key` like `INBOX-42`, float `sortOrder`, full-set assignee/label replacement, snake_case wire ↔ camelCase model) · every state covered (loading/empty/error + all domain states) · keyboard navigation + screen-reader parity via the table view · `prefers-reduced-motion` respected · the **2-tier** safety chip on every assistant-proposed write with confirm-before-execute and a `--color-label-primary` label · RBAC read-only for members/viewers/guests · reuse over invention, no new tokens, no invented class names · the sidebar entry matched to the shipped `FolderKanban` Workspace slot (not redesigned). Do **not** surface schema-only attachments — they have no API in this slice. Custom fields, cycles and modules are real surfaces (§3.7, §3.8) and must meet the same bar: every state, light and dark, a mobile width, keyboard parity for drag, reduced motion, and writes hidden for read-only roles.
+Pixel match in light **and** dark at 1440w + a mobile width (the table layout) · bound to the live `/api/pm/*` contract (single `home` workspace, household-shared reads, `key` like `INBOX-42`, float `sortOrder`, full-set assignee/label replacement, snake_case wire ↔ camelCase model) · every state covered (loading/empty/error + all domain states) · keyboard navigation + screen-reader parity via the table view · `prefers-reduced-motion` respected · the **2-tier** safety chip on every assistant-proposed write with confirm-before-execute and a `--color-label-primary` label · RBAC read-only for members/viewers/guests · reuse over invention, no new tokens, no invented class names · the sidebar entry matched to the shipped `FolderKanban` Workspace slot (not redesigned). Attachments, custom fields, cycles and modules are real surfaces (§3.7, §3.8) and must meet the same bar: every state, light and dark, a mobile width, keyboard parity for drag, reduced motion, and writes hidden for read-only roles.

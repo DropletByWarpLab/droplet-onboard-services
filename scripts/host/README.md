@@ -416,7 +416,7 @@ automated restore drill.
 
 | Script | Purpose |
 |--------|---------|
-| `droplet-backup.sh` | restic backup: staged `pg_dump` of the orchestrator Postgres + the `nextcloud-data` volume + `.env` + config dirs. `--full` re-reads every byte (`restic backup --force`, tag `weekly-full`) |
+| `droplet-backup.sh` | restic backup: staged `pg_dump` of the orchestrator Postgres + the `nextcloud-data` and `pm-attachments` volumes + `.env` + config dirs. `--full` re-reads every byte (`restic backup --force`, tag `weekly-full`) |
 | `droplet-restore.sh` | Restore a snapshot into the live stack (DESTRUCTIVE; confirm-gated, `--force` to skip, `--list` / `--snapshot ID` to pick). `.env`/config are staged for operator review, never applied live |
 | `droplet-restore-drill.sh` | Monthly drill: `restic check` (with data re-read) + restore latest into a throwaway sandbox Postgres + smoke query + **explicit** `ok\|failed` status file |
 | `droplet-backup-lib.sh` | Shared lib (sourced): HKDF-SHA256 password derivation + restic env plumbing |
@@ -530,8 +530,9 @@ BACKUP_KEEP=14 ./scripts/host/device-backup.sh
 ```
 
 **Captured surfaces:** orchestrator Postgres (`db`) and the `nextcloud-data`,
-`aikeys`, `matter-data`, `brain-memory-data`, `nvrdata` (NVR recordings), and
-`ops-audit` (WARP-337 audit trail) volumes. These are the real top-level
+`aikeys`, `matter-data`, `brain-memory-data`, `nvrdata` (NVR recordings),
+`ops-audit` (WARP-337 audit trail), and `pm-attachments` (WARP-1505 work-item
+attachments) volumes. These are the real top-level
 volumes in `docker/docker-compose.yml`; the backup script's `DATA_VOLUMES` list
 is kept in lock-step with `factory-reset.sh`'s wipe list, and a static test
 asserts every captured name is a genuine compose volume (a wrong name would

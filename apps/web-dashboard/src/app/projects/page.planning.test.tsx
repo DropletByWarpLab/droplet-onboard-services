@@ -139,6 +139,7 @@ vi.mock("@/components/projects/usePm", () => ({
   useSubIssues: () => ({ subIssues: [] }),
   useComments: () => ({ comments: [], mutate: vi.fn() }),
   useActivity: () => ({ activity: [], mutate: vi.fn() }),
+  useAttachments: () => ({ attachments: [], maxBytes: 26214400, ...idle }),
   useDevelopmentLinks: () => ({ links: [{
     id: "dev-1", provider: "GITHUB", kind: "PULL_REQUEST", state: "OPEN",
     url: "https://github.com/acme/app/pull/4", title: "INBOX-1 fix planning", number: 4,
