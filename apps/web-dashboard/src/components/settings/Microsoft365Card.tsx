@@ -27,12 +27,22 @@
  * 🔴 No hostname literals in this file — the `egress-gate` CI check reads
  * string literals in source and denies anything host-shaped. Microsoft's URL
  * always comes from the server.
+ *
+ * ── Your files (WARP-3538) ────────────────────────────────────────────────
+ *
+ * Once connected, the card also shows what Droplet keeps a list of: OneDrive's
+ * file count, and the person's own switch for SharePoint document libraries
+ * with the libraries it finds. That block is `Microsoft365Files`; this card
+ * only passes it the connection's `sharePoint` block, re-reads the connection
+ * when the switch moves, and lends it its own sign-in for the case where
+ * Microsoft has not approved SharePoint yet.
  */
 
 import { useCallback, useEffect, useState, type JSX } from "react";
 
 import { authFetch, useAuth } from "@/lib/auth";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { Microsoft365Files, SYNC_POLL_MS, type M365SharePointView } from "./Microsoft365Files";
 
 type M365State = "DISCONNECTED" | "PENDING_CONSENT" | "CONNECTED" | "NEEDS_RECONNECT" | "ERROR";
 
@@ -48,6 +58,9 @@ export interface M365ConnectionView {
   lastError: string | null;
   /** The exact URL the owner registers on their app. */
   redirectUri: string;
+  /** The person's own SharePoint switch and whether Microsoft has approved it.
+   *  Absent only from an orchestrator older than this card (a box mid-update). */
+  sharePoint?: M365SharePointView;
 }
 
 /** The outcomes `/api/m365/callback` can land here with. A closed set: the
@@ -137,9 +150,13 @@ function takeOutcome(): Outcome | null {
 
 export function Microsoft365Card({
   navigate = (url: string) => window.location.assign(url),
+  syncPollMs = SYNC_POLL_MS,
 }: {
   /** Where the browser goes to sign in. Injected so tests can observe it. */
   navigate?: (url: string) => void;
+  /** How often the files block re-reads while something is still being read for
+   *  the first time. Injected so tests need not wait half a minute. */
+  syncPollMs?: number;
 } = {}): JSX.Element | null {
   const { user } = useAuth();
   const role = user?.role;
@@ -306,6 +323,17 @@ export function Microsoft365Card({
         <button className="btn" disabled={busy} onClick={() => setConfirmingDisconnect(true)}>
           Disconnect
         </button>
+      )}
+
+      {view && connected && (
+        <Microsoft365Files
+          sharePoint={view.sharePoint}
+          guideHref={SETUP_GUIDE_HREF}
+          onSharePointChanged={load}
+          onSignIn={() => void signIn()}
+          signInBusy={busy}
+          syncPollMs={syncPollMs}
+        />
       )}
 
       {view && !connected && (

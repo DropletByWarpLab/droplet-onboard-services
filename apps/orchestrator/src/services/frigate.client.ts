@@ -403,6 +403,21 @@ export async function fetchEventThumbnail(eventId: string): Promise<Response> {
 }
 
 /**
+ * WARP-3692 — the saved still for an event, resized by Frigate (`height`) so
+ * the AI is handed a bounded image rather than a full-resolution frame. Any
+ * non-2xx (a pruned event included) throws; the one caller degrades to
+ * "could not view".
+ */
+export async function fetchEventSnapshot(eventId: string, height: number): Promise<Response> {
+  const resp = await fetch(
+    `${FRIGATE_URL}/api/events/${encodeURIComponent(eventId)}/snapshot.jpg?height=${Math.trunc(height)}`,
+    { signal: timeout(SNAPSHOT_TIMEOUT) }
+  );
+  if (!resp.ok) throw new Error(`Frigate event snapshot: ${resp.status}`);
+  return resp;
+}
+
+/**
  * Toggle the `retain_indefinitely` flag on a Frigate event. When set,
  * Frigate exempts the event's clip + snapshot from the normal
  * retention sweep — the operator's way of saying "save this, I want
