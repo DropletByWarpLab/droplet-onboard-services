@@ -59,6 +59,19 @@ export interface DueCursor {
  * `getAccessToken`, every tick, and pins the failure on a cursor that did
  * nothing wrong. `M365DeltaCursor.userId` is not a relation, so this is two
  * reads rather than a join.
+ *
+ * 🔴 In a DETERMINISTIC order — least recently synced first, a cursor that has
+ * never synced before all of them (WARP-3538). `take: limit` with no order
+ * returns whichever rows the planner reaches first, which is usually the same
+ * ones every tick. That was harmless while a person had a handful of cursors, but
+ * a mailbox has one per folder and, since SharePoint, a person has one per
+ * document library: past `limit` due cursors the same few are served forever and
+ * the rest NEVER run — no error, no log, the data just never arrives. Serving
+ * the oldest first gives every due cursor its turn: a cursor that runs moves its
+ * `lastSyncedAt` to now and falls behind everyone still waiting. (A cursor that
+ * keeps failing does not advance, so it stays near the front — but its backoff
+ * keeps it out of the due set between attempts, so it takes a slot once per
+ * window, not every tick.) `createdAt` breaks ties, so the order is total.
  */
 export async function claimDueCursors(
   prisma: PrismaClient,
@@ -78,6 +91,7 @@ export async function claimDueCursors(
       // Never attempted, or its backoff window has elapsed.
       OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }],
     },
+    orderBy: [{ lastSyncedAt: { sort: "asc", nulls: "first" } }, { createdAt: "asc" }],
     take: limit,
   });
 

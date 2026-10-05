@@ -41,6 +41,24 @@ function cursor(over: Record<string, unknown> = {}) {
   };
 }
 
+/** Prisma's `orderBy` for the two shapes the engine uses: `{ field: "asc" }` and `{ field: { sort, nulls } }`. */
+function sortRows(rows: Array<Record<string, unknown>>, orderBy: Array<Record<string, any>>) {
+  const at = (v: unknown) => (v instanceof Date ? v.getTime() : (v as number | string | null));
+  return [...rows].sort((x, y) => {
+    for (const term of orderBy) {
+      const [[field, spec]] = Object.entries(term);
+      const dir = typeof spec === "string" ? spec : spec.sort;
+      const nulls = typeof spec === "string" ? (dir === "asc" ? "last" : "first") : spec.nulls;
+      const a = at(x[field!]);
+      const b = at(y[field!]);
+      if (a === b) continue;
+      if (a === null || b === null) return (a === null ? -1 : 1) * (nulls === "first" ? 1 : -1);
+      return (a < b ? -1 : 1) * (dir === "asc" ? 1 : -1);
+    }
+    return 0;
+  });
+}
+
 /**
  * `connected` is the set of users whose M365Connection is CONNECTED — the
  * owners `claimDueCursors` may claim for (WARP-3059). Defaults to USER.
@@ -61,7 +79,7 @@ function fakePrisma(seed: Array<Record<string, unknown>> = [], connected: string
         rows = rows.filter((r) => r.userId !== where.userId);
         return { count: before - rows.length };
       }),
-      findMany: vi.fn(async ({ where, take }: any = {}) => {
+      findMany: vi.fn(async ({ where, take, orderBy }: any = {}) => {
         let out = rows;
         if (where?.userId?.in) out = out.filter((r) => where.userId.in.includes(r.userId));
         if (where?.state?.in) out = out.filter((r) => where.state.in.includes(r.state));
@@ -75,6 +93,7 @@ function fakePrisma(seed: Array<Record<string, unknown>> = [], connected: string
             ),
           );
         }
+        if (orderBy) out = sortRows(out, orderBy);
         return out.slice(0, take ?? out.length).map((r) => ({ ...r }));
       }),
       // Throws on a missing row, as Prisma does (P2025).
@@ -331,6 +350,46 @@ describe("claimDueCursors", () => {
     const prisma = fakePrisma([cursor()], []);
     expect(await claimDueCursors(prisma as never, 10, NOW)).toEqual([]);
     expect(prisma.m365DeltaCursor.findMany).not.toHaveBeenCalled();
+  });
+
+  it("serves the least recently synced first, a never-synced cursor before all of them (WARP-3538)", async () => {
+    const day = (n: number) => new Date(NOW.getTime() - n * 86_400_000);
+    const prisma = fakePrisma([
+      cursor({ id: "recent", lastSyncedAt: day(1), createdAt: day(30) }),
+      cursor({ id: "oldest", lastSyncedAt: day(9), createdAt: day(30) }),
+      cursor({ id: "never-b", lastSyncedAt: null, createdAt: day(2) }),
+      cursor({ id: "never-a", lastSyncedAt: null, createdAt: day(5) }),
+      cursor({ id: "older", lastSyncedAt: day(4), createdAt: day(30) }),
+    ]);
+    // Never-synced first (oldest-created of them first), then by how long ago.
+    expect((await claimDueCursors(prisma as never, 10, NOW)).map((c) => c.id)).toEqual([
+      "never-a",
+      "never-b",
+      "oldest",
+      "older",
+      "recent",
+    ]);
+  });
+
+  it("gives every due cursor its turn when there are more than the tick can take", async () => {
+    // 30 due cursors, 25 per tick. With no order the same 25 are served for ever
+    // and the other five never run — silently. With least-recently-synced first,
+    // serving a cursor moves it to the back, so the second tick reaches the rest.
+    // (Mutation: drop `orderBy` from the claim and the second tick re-serves the
+    // first 25, so the last assertion fails.)
+    const rows = Array.from({ length: 30 }, (_, i) =>
+      cursor({ id: `c${String(i).padStart(2, "0")}`, lastSyncedAt: null, createdAt: new Date(NOW.getTime() - (100 - i) * 1000) }),
+    );
+    const prisma = fakePrisma(rows);
+
+    const first = await claimDueCursors(prisma as never, 25, NOW);
+    expect(first).toHaveLength(25);
+    for (const c of first) await recordSuccess(prisma as never, c.id, "https://g/delta?token=x", NOW);
+
+    const second = await claimDueCursors(prisma as never, 25, NOW);
+    expect(second.slice(0, 5).map((c) => c.id)).toEqual(["c25", "c26", "c27", "c28", "c29"]);
+    const served = new Set([...first, ...second].map((c) => c.id));
+    expect(served.size).toBe(30);
   });
 
   it("hands the resume checkpoint to the run", async () => {
