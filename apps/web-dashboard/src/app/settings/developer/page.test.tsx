@@ -369,7 +369,7 @@ describe("calendar links", () => {
     expect(bodyOf("/api/developer/feeds/rotate", "POST")).toEqual({ kind: "my_work" });
     expect(within(panel).getByText(`${window.location.origin}${FEED_URL_PATH}`)).toBeInTheDocument();
     expect(within(panel).getByRole("button", { name: /copy calendar link/i })).toBeInTheDocument();
-    expect(document.activeElement).toBe(panel);
+    await waitFor(() => expect(document.activeElement).toBe(panel));
     fireEvent.click(within(panel).getByRole("button", { name: /i.ve copied it/i }));
     expect(screen.queryByText(new RegExp(FEED_URL_PATH.split("?")[0]))).toBeNull();
   });
