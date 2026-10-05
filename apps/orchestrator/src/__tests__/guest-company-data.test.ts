@@ -192,6 +192,13 @@ const SURFACES: ReadonlyArray<{ module: ModuleId; label: string; files: string[]
     files: [["routes", "money.ts"]],
     atLeast: 2,
   },
+  // WARP-3528: a ticket is a customer's own words.
+  {
+    module: "support",
+    label: "Support",
+    files: [["routes", "support", "support.routes.ts"]],
+    atLeast: 14,
+  },
 ];
 
 /** The real mount, with a stub standing where each real route answers. */
@@ -258,8 +265,8 @@ describe.each(SURFACES)("$label: every route, through the real module mount", (s
 });
 
 describe("the floor is exactly the catalog's refusal", () => {
-  it("is crm, projects and money — the modules a guest holds nothing on", () => {
-    expect([...tierRefusingModuleIds()].sort()).toEqual(["crm", "money", "projects"]);
+  it("is crm, projects, money and support — the modules a guest holds nothing on", () => {
+    expect([...tierRefusingModuleIds()].sort()).toEqual(["crm", "money", "projects", "support"]);
   });
 
   it("a guest still reaches every OTHER module's prefix (their shared files, Messages, own chats, the rest)", async () => {

@@ -21,6 +21,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { PrismaClient } from "@prisma/client";
+import { grants } from "../__tests__/helpers/support-routes.js";
 
 const { publishMock, recordMock } = vi.hoisted(() => ({
   publishMock: vi.fn(() => ({ channels: ["toast"], errors: [] as string[] })),
@@ -64,6 +65,13 @@ interface PmRow {
   createdAt: Date;
   notifyStatus: "pending" | "sent" | "not_needed";
   notifiedAt: Date | null;
+  /** WARP-3528 — what the row's work item looks like when it is NOT the default
+   *  project item `INBOX-1 — item <id>` (a ticket in a SERVICE_DESK project). */
+  workItem?: {
+    name: string;
+    sequenceId: number;
+    project: { identifier: string; kind: "PROJECT" | "SERVICE_DESK" };
+  };
 }
 
 const NOW = new Date("2026-08-31T12:00:00.000Z").getTime();
@@ -96,7 +104,7 @@ interface CrmRow {
 function makeStub(seed: {
   pm?: PmRow[];
   assignees?: Array<{ workItemId: string; userId: string }>;
-  users?: Array<{ id: string; username: string; role?: string }>;
+  users?: Array<{ id: string; username: string; role?: string; directoryStatus?: string }>;
   crm?: CrmRow[];
   stages?: Array<{ id: string; name: string; kind: "OPEN" | "WON" | "LOST" }>;
   /** WARP-3522 — a work item's project identifier + number, where a case needs
@@ -118,13 +126,14 @@ function makeStub(seed: {
             r.createdAt.getTime() <= args.where.createdAt.lte.getTime(),
         )
         .slice(0, args.take)
-        .map((r) => ({
+        .map(({ workItem: override, ...r }) => ({
           ...r,
           workItem: {
             id: r.workItemId,
             name: `item ${r.workItemId}`,
             sequenceId: seed.items?.[r.workItemId]?.sequenceId ?? 1,
             project: { identifier: seed.items?.[r.workItemId]?.identifier ?? "INBOX" },
+            ...override,
           },
         })),
     ),
@@ -176,7 +185,8 @@ function makeStub(seed: {
     pmState: { findMany: vi.fn(async () => [{ id: "s-done", name: "Done" }]) },
     user: {
       findMany: vi.fn(async (args: any) =>
-        users.filter((u) => args.where.id.in.includes(u.id)),
+        users.filter((u) => args.where.id.in.includes(u.id) &&
+          (!args.where.directoryStatus || (u.directoryStatus ?? "ACTIVE") === args.where.directoryStatus)),
       ),
     },
     notificationLog: { updateMany: vi.fn(async () => ({ count: 0 })) },
@@ -185,10 +195,13 @@ function makeStub(seed: {
   return stub as unknown as PrismaClient & typeof stub;
 }
 
-const opts = { now: () => NOW };
+const resolveAccess = vi.fn(async (_userId: string) => grants([["support", "view"]]));
+const opts = { now: () => NOW, resolveAccess };
 
 beforeEach(() => {
   vi.clearAllMocks();
+  resolveAccess.mockReset();
+  resolveAccess.mockResolvedValue(grants([["support", "view"]]));
   logged.length = 0;
   publishMock.mockReturnValue({ channels: ["toast"], errors: [] });
   // The REAL recipient check, as recordNotification runs it: a refusal inside
@@ -646,5 +659,278 @@ describe("WARP-3365 — external guests and notifications", () => {
       ["c2", "sent"],
     ]);
     expect(res).toMatchObject({ crmNotified: 1, crmSkipped: 1 });
+  });
+});
+
+// WARP-3528 (ADR-069 section 1) — a ticket is a work item in a SERVICE_DESK
+// project. Its subject is a customer's words and the people who handle it hold
+// the `support` grant, not necessarily `pm`, so the PM rules above do not apply
+// to it: no department watchers, no state / comment / due-date interrupt. ONE
+// thing tells somebody -- being assigned the ticket -- and it tells THAT user.
+describe("WARP-3528 — service-desk tickets", () => {
+  const desk = (sequenceId: number, name = "Printer jams on page two") => ({
+    name,
+    sequenceId,
+    project: { identifier: "SUP", kind: "SERVICE_DESK" as const },
+  });
+  const ticketRow = (over: Partial<PmRow> & Pick<PmRow, "id" | "verb">) =>
+    pmRow({ workItemId: "t1", workItem: desk(12), ...over });
+  const bob = { id: "u-bob", username: "bob", role: "family" };
+  const carol = { id: "u-carol", username: "carol", role: "family" };
+  const LEGACY = { id: "0d9c5c1e-2f4a-4b6d-8e10-3a5c7e9b1d2f", username: "5f0c2a1e-7b3d-4c9e-8a21-0e6d4b9c3f70" };
+
+  it("an assignment tells the user it names: the ticket key, its subject and the support link", async () => {
+    const prisma = makeStub({
+      pm: [ticketRow({ id: "a1", verb: "assigned", actorId: "u-dave", newValue: bob.id })],
+      // Carol is also on the ticket. The row names bob, so only bob hears.
+      assignees: [
+        { workItemId: "t1", userId: bob.id },
+        { workItemId: "t1", userId: carol.id },
+      ],
+      users: [bob, carol],
+    });
+    const res = await runActivityNotifySweep(prisma, opts);
+    expect(recordMock).toHaveBeenCalledOnce();
+    expect(recordMock.mock.calls[0][1]).toEqual({
+      username: "bob",
+      kind: "event",
+      title: "Ticket SUP-12 assigned to you",
+      body: "Printer jams on page two",
+      url: "/support?t=SUP-12",
+    });
+    // The toast carries the same link, so a click opens the ticket.
+    expect(publishMock.mock.calls.map((c: any) => c[0])).toEqual([
+      expect.objectContaining({ username: "bob", kind: "event", url: "/support?t=SUP-12" }),
+    ]);
+    expect(prisma.pm[0].notifyStatus).toBe("sent");
+    expect(res).toMatchObject({ pmNotified: 1, pmSkipped: 0, notificationsSent: 1 });
+  });
+
+  it("never tells the actor, and the row whose only recipient IS the actor is terminal", async () => {
+    const prisma = makeStub({
+      pm: [ticketRow({ id: "a1", verb: "assigned", actorId: bob.id, newValue: bob.id })],
+      users: [bob],
+    });
+    const res = await runActivityNotifySweep(prisma, opts);
+    expect(recordMock).not.toHaveBeenCalled();
+    expect(res.pmSkipped).toBe(1);
+    expect(prisma.pm[0].notifyStatus).toBe("not_needed");
+  });
+
+  it("does not disclose a settled ticket assignment after the person's Support grant is revoked or the module is off", async () => {
+    resolveAccess.mockResolvedValue(grants([["projects", "manage"]]));
+    const prisma = makeStub({
+      pm: [ticketRow({ id: "a1", verb: "assigned", newValue: bob.id })],
+      users: [bob],
+    });
+    const res = await runActivityNotifySweep(prisma, opts);
+    expect(resolveAccess).toHaveBeenCalledWith(bob.id);
+    expect(recordMock).not.toHaveBeenCalled();
+    expect(publishMock).not.toHaveBeenCalled();
+    expect(prisma.pm[0].notifyStatus).toBe("not_needed");
+    expect(res.pmSkipped).toBe(1);
+  });
+
+  it("leaves the assignment pending for retry when current access cannot be verified", async () => {
+    resolveAccess.mockRejectedValue(new Error("access snapshot unavailable"));
+    const prisma = makeStub({
+      pm: [ticketRow({ id: "a1", verb: "assigned", newValue: bob.id })],
+      users: [bob],
+    });
+    await expect(runActivityNotifySweep(prisma, opts)).rejects.toThrow("access snapshot unavailable");
+    expect(recordMock).not.toHaveBeenCalled();
+    expect(publishMock).not.toHaveBeenCalled();
+    expect(prisma.pm[0].notifyStatus).toBe("pending");
+  });
+
+  it("does not tell a deactivated agent about a ticket they were assigned before deactivation", async () => {
+    const prisma = makeStub({
+      pm: [ticketRow({ id: "a1", verb: "assigned", newValue: bob.id })],
+      users: [{ ...bob, directoryStatus: "DEACTIVATED" }],
+    });
+    await runActivityNotifySweep(prisma, opts);
+    expect(recordMock).not.toHaveBeenCalled();
+    expect(publishMock).not.toHaveBeenCalled();
+    expect(resolveAccess).not.toHaveBeenCalled();
+    expect(prisma.pm[0].notifyStatus).toBe("not_needed");
+  });
+
+  it("never tells a guest, and the row is terminal rather than pending", async () => {
+    const gina = { id: "u-gina", username: "gina", role: "guest" };
+    const prisma = makeStub({
+      pm: [ticketRow({ id: "a1", verb: "assigned", actorId: "u-dave", newValue: gina.id })],
+      // On a project item an assigned guest IS told (they can open it); a ticket is not theirs to open.
+      assignees: [{ workItemId: "t1", userId: gina.id }],
+      users: [gina],
+    });
+    const res = await runActivityNotifySweep(prisma, opts);
+    expect(recordMock).not.toHaveBeenCalled();
+    expect(res.pmSkipped).toBe(1);
+    expect(prisma.pm[0].notifyStatus).toBe("not_needed");
+  });
+
+  it("drops an account with no deliverable username (deleted, or User.id-shaped) BEFORE the claim, and tells the rest", async () => {
+    const prisma = makeStub({
+      pm: [
+        ticketRow({ id: "a1", workItemId: "t1", verb: "assigned", newValue: LEGACY.id }),
+        ticketRow({ id: "a2", workItemId: "t2", verb: "assigned", newValue: "u-gone", workItem: desk(13) }),
+        ticketRow({ id: "a3", workItemId: "t3", verb: "assigned", newValue: bob.id, workItem: desk(14) }),
+      ],
+      users: [LEGACY, bob],
+    });
+    const res = await runActivityNotifySweep(prisma, opts);
+    expect(recordMock.mock.calls.map((c) => c[1].username)).toEqual(["bob"]);
+    expect(prisma.pm.map((r) => [r.id, r.notifyStatus])).toEqual([
+      ["a1", "not_needed"],
+      ["a2", "not_needed"],
+      ["a3", "sent"],
+    ]);
+    expect(res).toMatchObject({ pmNotified: 1, pmSkipped: 2 });
+    const errors = logged.filter((l) => l.level === "error");
+    expect(errors).toHaveLength(1);
+    expect(errors[0]!.obj).toMatchObject({ userId: LEGACY.id, code: "NOTIFICATION_RECIPIENT_IS_ID" });
+  });
+
+  it("gives every verb but `assigned` the explicit not_needed terminal, whoever is on the ticket", async () => {
+    const verbs = [
+      "commented",
+      "state_changed",
+      "due_date_changed",
+      "unassigned",
+      "created",
+      "updated",
+      "relation_added",
+    ];
+    const prisma = makeStub({
+      pm: verbs.map((verb, i) =>
+        ticketRow({ id: `a${i}`, verb, actorId: "u-dave", newValue: verb === "state_changed" ? "s-done" : bob.id }),
+      ),
+      assignees: [{ workItemId: "t1", userId: bob.id }],
+      users: [bob],
+    });
+    const res = await runActivityNotifySweep(prisma, opts);
+    expect(recordMock).not.toHaveBeenCalled();
+    expect(res.pmSkipped).toBe(verbs.length);
+    expect(prisma.pm.every((r) => r.notifyStatus === "not_needed")).toBe(true);
+    // Nobody is looked up for a ticket that tells nobody.
+    expect(prisma.pmWorkItemAssignee.findMany).not.toHaveBeenCalled();
+    expect(prisma.pmState.findMany).not.toHaveBeenCalled();
+  });
+
+  it("department watchers are not told about a ticket, and the resolver is not even asked about it", async () => {
+    const prisma = makeStub({
+      pm: [
+        pmRow({ id: "a1", workItemId: "w1", verb: "commented", actorId: "u-dave" }),
+        ticketRow({ id: "a2", verb: "assigned", actorId: "u-dave", newValue: "u-erin" }),
+      ],
+      assignees: [{ workItemId: "w1", userId: bob.id }],
+      users: [
+        bob,
+        carol,
+        { id: "u-erin", username: "erin", role: "family" },
+        { id: "u-frank", username: "frank", role: "family" },
+      ],
+    });
+    // A resolver that answers for the ticket anyway: it must change nothing.
+    const departmentWatchers = vi.fn(
+      async (_prisma: unknown, _ids: readonly string[]) =>
+        new Map([
+          ["w1", [carol.id]],
+          ["t1", [carol.id, "u-frank"]],
+        ]),
+    );
+    await runActivityNotifySweep(prisma, { ...opts, departmentWatchers });
+    expect(departmentWatchers.mock.calls[0]![1]).toEqual(["w1"]);
+    expect(recordMock.mock.calls.map((c) => c[1].username).sort()).toEqual(["bob", "carol", "erin"]);
+  });
+
+  it("support is its own coalescing unit: one row per recipient per tick, apart from the PM one", async () => {
+    const prisma = makeStub({
+      pm: [
+        pmRow({ id: "a1", workItemId: "w1", verb: "assigned", actorId: "u-dave" }),
+        ticketRow({ id: "a2", workItemId: "t1", verb: "assigned", actorId: "u-dave", newValue: bob.id, workItem: desk(12) }),
+        ticketRow({ id: "a3", workItemId: "t2", verb: "assigned", actorId: "u-dave", newValue: bob.id, workItem: desk(13) }),
+        ticketRow({ id: "a4", workItemId: "t3", verb: "assigned", actorId: "u-dave", newValue: bob.id, workItem: desk(14) }),
+      ],
+      assignees: [{ workItemId: "w1", userId: bob.id }],
+      users: [bob],
+    });
+    const res = await runActivityNotifySweep(prisma, opts);
+    expect(recordMock.mock.calls.map((c) => c[1])).toEqual([
+      // Projects retain their canonical deep link alongside ticket links.
+      { username: "bob", kind: "event", title: "Assigned to you", body: "INBOX-1 — item w1", url: "/projects?p=INBOX&item=INBOX-1" },
+      {
+        username: "bob",
+        kind: "event",
+        title: "3 tickets assigned to you",
+        body: "SUP-12, SUP-13, SUP-14",
+        url: "/support",
+      },
+    ]);
+    expect(prisma.pm.every((r) => r.notifyStatus === "sent")).toBe(true);
+    expect(res).toMatchObject({ pmNotified: 4, pmSkipped: 0, notificationsSent: 2 });
+  });
+
+  it("one ticket assigned twice in a tick is still ONE ticket, with its own copy", async () => {
+    const prisma = makeStub({
+      pm: [
+        ticketRow({ id: "a1", verb: "assigned", actorId: "u-dave", newValue: bob.id }),
+        ticketRow({ id: "a2", verb: "assigned", actorId: "u-carol", newValue: bob.id }),
+      ],
+      users: [bob],
+    });
+    await runActivityNotifySweep(prisma, opts);
+    expect(recordMock).toHaveBeenCalledOnce();
+    expect(recordMock.mock.calls[0][1]).toMatchObject({
+      title: "Ticket SUP-12 assigned to you",
+      url: "/support?t=SUP-12",
+    });
+    expect(prisma.pm.every((r) => r.notifyStatus === "sent")).toBe(true);
+  });
+
+  it("keeps the claim discipline: guarded pending->sent claim, log row in the same transaction, toast after the commit", async () => {
+    const prisma = makeStub({
+      pm: [ticketRow({ id: "a1", verb: "assigned", actorId: "u-dave", newValue: bob.id })],
+      users: [bob],
+    });
+    await runActivityNotifySweep(prisma, opts);
+    expect(prisma.pmActivity.updateMany).toHaveBeenCalledWith({
+      where: { id: { in: ["a1"] }, notifyStatus: "pending" },
+      data: { notifyStatus: "sent", notifiedAt: expect.any(Date) },
+    });
+    expect(prisma.$transaction).toHaveBeenCalledOnce();
+    const claimAt = prisma.pmActivity.updateMany.mock.invocationCallOrder[0]!;
+    expect(claimAt).toBeLessThan(recordMock.mock.invocationCallOrder[0]!);
+    expect(recordMock.mock.invocationCallOrder[0]!).toBeLessThan(publishMock.mock.invocationCallOrder[0]!);
+  });
+
+  it("a second sweep over the same rows sends nothing", async () => {
+    const prisma = makeStub({
+      pm: [ticketRow({ id: "a1", verb: "assigned", actorId: "u-dave", newValue: bob.id })],
+      users: [bob],
+    });
+    await runActivityNotifySweep(prisma, opts);
+    expect(recordMock).toHaveBeenCalledOnce();
+    recordMock.mockClear();
+    await runActivityNotifySweep(prisma, opts);
+    expect(recordMock).not.toHaveBeenCalled();
+  });
+
+  it("a project item retains its Projects deep link when its row names its kind", async () => {
+    const prisma = makeStub({
+      pm: [
+        pmRow({
+          id: "a1",
+          workItemId: "w1",
+          verb: "assigned",
+          workItem: { name: "item w1", sequenceId: 1, project: { identifier: "INBOX", kind: "PROJECT" } },
+        }),
+      ],
+      assignees: [{ workItemId: "w1", userId: bob.id }],
+      users: [bob],
+    });
+    await runActivityNotifySweep(prisma, opts);
+    expect(recordMock.mock.calls[0][1]).toMatchObject({ url: "/projects?p=INBOX&item=INBOX-1" });
+    expect(publishMock.mock.calls[0][0]).toMatchObject({ url: "/projects?p=INBOX&item=INBOX-1" });
   });
 });
