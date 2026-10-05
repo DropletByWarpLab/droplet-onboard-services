@@ -17,7 +17,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 vi.mock("../config.js", () => ({
   config: {
-    WIREGUARD_ENDPOINT_HOST: "",
+    DROPLET_LAN_HOSTNAME: "",
     corsAllowedOrigins: ["https://droplet-ai.local"],
     agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
@@ -48,7 +48,7 @@ function fakeReq(opts: {
 beforeEach(() => {
   vi.clearAllMocks();
   _resetTrustedOriginCacheForTests();
-  (config as { WIREGUARD_ENDPOINT_HOST: string }).WIREGUARD_ENDPOINT_HOST = "";
+  (config as { DROPLET_LAN_HOSTNAME: string }).DROPLET_LAN_HOSTNAME = "";
   (config as { corsAllowedOrigins: string[] }).corsAllowedOrigins = [
     "https://droplet-ai.local",
   ];
@@ -68,7 +68,7 @@ describe("getRedirectUri (OAuth2 callback redirect_uri)", () => {
   });
 
   it("builds the redirect_uri from the configured canonical origin", async () => {
-    (config as { WIREGUARD_ENDPOINT_HOST: string }).WIREGUARD_ENDPOINT_HOST =
+    (config as { DROPLET_LAN_HOSTNAME: string }).DROPLET_LAN_HOSTNAME =
       "studio.example.com";
     const uri = await getRedirectUri(
       fakeReq({ host: "droplet-ai.local", xForwardedProto: "https" }),
@@ -95,7 +95,7 @@ describe("getRedirectUri (OAuth2 callback redirect_uri)", () => {
     // The OAuth2 round-trip requires the two redirect_uri values to match.
     // Even if the proxy presents different request hosts, the canonical origin
     // pins them to the same value.
-    (config as { WIREGUARD_ENDPOINT_HOST: string }).WIREGUARD_ENDPOINT_HOST =
+    (config as { DROPLET_LAN_HOSTNAME: string }).DROPLET_LAN_HOSTNAME =
       "studio.example.com";
     const authorize = await getRedirectUri(
       fakeReq({ host: "droplet-ai.local", xForwardedProto: "https" }),
