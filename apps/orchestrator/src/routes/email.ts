@@ -688,19 +688,18 @@ export function createEmailRouter(
             { messages: { some: { accountId: req.params.accountId, OR: [{ subject: contains }, { bodyText: contains }, { fromAddr: contains }, { fromName: contains }] } } }];
         }
 
-        const rows = (await prisma.emailThread.findMany({
-          where,
-          orderBy: { lastMessageAt: "desc" },
-          take: limit,
         if (cursor) {
-          where.OR = [
+          const before = [
             { lastMessageAt: { lt: new Date(cursor.at) } },
             { lastMessageAt: new Date(cursor.at), id: { lt: cursor.id } },
           ];
+          // A pagination cursor narrows the search; it never replaces it.
+          where.AND = [...(where.OR ? [{ OR: where.OR }] : []), { OR: before }];
+          delete where.OR;
         }
 
         const rows = (await prisma.emailThread.findMany({
-          where: where as any,
+          where,
           orderBy: [{ lastMessageAt: "desc" }, { id: "desc" }],
           take: limit + 1,
         })) as unknown as ThreadRow[];
