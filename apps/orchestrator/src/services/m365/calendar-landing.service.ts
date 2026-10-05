@@ -6,8 +6,7 @@ import { isValidIanaZone, zonedWallClockToUtc } from "../../lib/zoned-time.js";
 import { upsertExternalCalendarEvents, type ExternalCalendarEvent } from "../cloud-calendar-store.service.js";
 import { GRAPH_API_BASE_URL } from "./graph-client.js";
 import { CALENDAR_WINDOW, calendarWindowResourceId, grantCovers, GRAPH_RESOURCES } from "./graph-resources.js";
-import type { PageHandler } from "./m365-sync.service.js";
-import type { M365GrantGeneration } from "./m365-auth.service.js";
+import type { M365GrantGeneration, PageHandler } from "./m365-contracts.js";
 import { WINDOWS_TIME_ZONES } from "./windows-timezones.js";
 
 type Db = PrismaClient | Prisma.TransactionClient;
