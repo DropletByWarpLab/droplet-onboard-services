@@ -16,6 +16,9 @@ import { useAuth } from "@/lib/auth";
 import { useAppCapabilities } from "@/lib/hooks/useAppCapabilities";
 import { translateError } from "@/lib/friendly-errors";
 import "./projects.css";
+import "./planning.css";
+import "./cycles.css";
+import "./modules.css";
 
 import { PmIcon } from "@/components/projects/icons";
 import { ListProgress, PeopleContext } from "@/components/projects/bits";
@@ -30,6 +33,7 @@ import {
   useProjectItems,
   useDepartments,
   usePeople,
+  useProjectCycles,
   pmActions,
 } from "@/components/projects/usePm";
 import {
@@ -38,7 +42,9 @@ import {
   matchesDepartment,
 } from "@/components/projects/department";
 import { IndexView } from "@/components/projects/IndexView";
-import { BoardView, ListView, PlaceholderView, type Domain } from "@/components/projects/board";
+import { BoardView, ListView, type Domain } from "@/components/projects/board";
+import { CyclesView } from "@/components/projects/cycles";
+import { ModulesView } from "@/components/projects/modules";
 import { ViewSwitcher, SavedViews, FilterBar, type ProjectView, type SavedView } from "@/components/projects/chrome";
 import { DetailDrawer } from "@/components/projects/detail";
 import { CalendarView } from "@/components/projects/calendar/CalendarView";
@@ -127,6 +133,9 @@ function ProjectsWorkspace(): JSX.Element {
     mutate: mutateItems,
   } = useProjectItems(projectId);
   const { departments } = useDepartments();
+  // WARP-3521 — the project's cycles, so a board card can name its cycle.
+  const { cycles, mutate: mutateCycles } = useProjectCycles(projectId);
+  const cyclesById = useMemo(() => new Map((cycles ?? []).map((c) => [c.id, c])), [cycles]);
 
   const project = useMemo(() => projects?.find((p) => p.id === projectId) ?? null, [projects, projectId]);
 
@@ -199,7 +208,10 @@ function ProjectsWorkspace(): JSX.Element {
   const refreshAll = () => {
     void mutateProjects();
     void mutateSummary();
-    if (projectId) void mutateItems();
+    if (projectId) {
+      void mutateItems();
+      void mutateCycles();
+    }
   };
 
   const openProject = (p: PmProject) => {
@@ -420,10 +432,30 @@ function ProjectsWorkspace(): JSX.Element {
                   onOpen={setDrawer}
                   onTransition={onTransition}
                   onNewItem={() => setModal("newitem")}
+                  cycles={cyclesById}
                 />
               )}
               {view === "list" && (
-                <ListView states={states ?? []} items={filtered} domain={boardDomain} partial={partial} onOpen={setDrawer} />
+                <ListView
+                  states={states ?? []}
+                  items={filtered}
+                  domain={boardDomain}
+                  partial={partial}
+                  onOpen={setDrawer}
+                  cycles={cyclesById}
+                />
+              )}
+              {view === "cycles" && project && (
+                <CyclesView
+                  project={project}
+                  states={states ?? []}
+                  readOnly={readOnly}
+                  onOpenItem={setDrawer}
+                  onChanged={refreshAll}
+                />
+              )}
+              {view === "modules" && project && (
+                <ModulesView project={project} readOnly={readOnly} onOpenItem={setDrawer} onChanged={refreshAll} />
               )}
               {view === "calendar" && (
                 <CalendarView
@@ -448,8 +480,6 @@ function ProjectsWorkspace(): JSX.Element {
                 />
               )}
               {view === "my-work" && <MyWorkView />}
-              {view === "cycles" && <PlaceholderView kind="cycles" />}
-              {view === "modules" && <PlaceholderView kind="modules" />}
             </div>
           </div>
         </div>
@@ -458,11 +488,13 @@ function ProjectsWorkspace(): JSX.Element {
       {drawer && (
         <DetailDrawer
           item={drawer}
+          readOnly={readOnly}
           onClose={() => setDrawer(null)}
           onChanged={async () => {
             const fresh = await mutateItems();
             void mutateProjects();
             void mutateSummary();
+            void mutateCycles();
             if (drawer && fresh) {
               const up = fresh.work_items.find((i) => i.id === drawer.id);
               if (up) setDrawer(up);

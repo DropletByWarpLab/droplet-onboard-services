@@ -15,7 +15,8 @@ import {
   Skel,
 } from "./bits";
 import { cardAccent, isOverdue, fmtDate } from "./config";
-import type { PmWorkItem, PmState } from "./types";
+import { CycleTag } from "./planning-bits";
+import type { PmCycle, PmWorkItem, PmState } from "./types";
 
 export type Domain = "populated" | "loading" | "empty" | "error" | "filtered";
 
@@ -31,6 +32,7 @@ export function WorkItemCard({
   onDragStart,
   onDragEnd,
   dragging,
+  cycles,
 }: {
   item: PmWorkItem;
   onOpen?: (i: PmWorkItem) => void;
@@ -39,7 +41,11 @@ export function WorkItemCard({
   onDragStart?: () => void;
   onDragEnd?: () => void;
   dragging?: boolean;
+  /** WARP-3521 — the project's cycles by id, so a card can name the cycle it is
+   *  planned into. Optional: a card shows no chip until the cycle is known. */
+  cycles?: ReadonlyMap<string, PmCycle>;
 }): JSX.Element {
+  const hasCycle = !!item.cycleId && !!cycles?.has(item.cycleId);
   return (
     <div
       className={"pm-card" + (dragging ? " dragging" : "")}
@@ -73,8 +79,9 @@ export function WorkItemCard({
           nothing; an OVERRIDE is a per-item decision, and without the chip it
           is invisible right up until the item disappears from a department
           filter for reasons the board never showed. */}
-      {(item.labels.length > 0 || item.department?.source === "item") && (
+      {(item.labels.length > 0 || item.department?.source === "item" || hasCycle) && (
         <div className="pm-row" style={{ gap: 6, flexWrap: "wrap" }}>
+          <CycleTag cycleId={item.cycleId} cycles={cycles} small />
           {item.department?.source === "item" && (
             <DepartmentTag dept={item.department} small />
           )}
@@ -128,6 +135,7 @@ export function BoardView({
   onOpen,
   onTransition,
   onNewItem,
+  cycles,
 }: {
   states: PmState[];
   items: PmWorkItem[];
@@ -139,6 +147,8 @@ export function BoardView({
   onOpen: (i: PmWorkItem) => void;
   onTransition: (item: PmWorkItem, stateId: string) => void;
   onNewItem: (stateId: string) => void;
+  /** WARP-3521 — see WorkItemCard. */
+  cycles?: ReadonlyMap<string, PmCycle>;
 }): JSX.Element {
   const [dragId, setDragId] = useState<string | null>(null);
   const [overState, setOverState] = useState<string | null>(null);
@@ -252,6 +262,7 @@ export function BoardView({
                 <WorkItemCard
                   key={it.id}
                   item={it}
+                  cycles={cycles}
                   onOpen={onOpen}
                   readOnly={readOnly}
                   draggable
@@ -285,9 +296,11 @@ export function BoardView({
 export function ListRow({
   item,
   onOpen,
+  cycles,
 }: {
   item: PmWorkItem;
   onOpen: (i: PmWorkItem) => void;
+  cycles?: ReadonlyMap<string, PmCycle>;
 }): JSX.Element {
   const overdue = isOverdue(item);
   return (
@@ -322,6 +335,7 @@ export function ListRow({
         {item.name}
       </span>
       <div className="pm-row" style={{ gap: 6, flex: "none" }}>
+        <CycleTag cycleId={item.cycleId} cycles={cycles} small />
         {item.labels.slice(0, 2).map((l) => (
           <LabelTag key={l.id} label={l} small />
         ))}
@@ -345,6 +359,7 @@ export function ListView({
   domain,
   partial = false,
   onOpen,
+  cycles,
 }: {
   states: PmState[];
   items: PmWorkItem[];
@@ -352,6 +367,8 @@ export function ListView({
   /** More of the list is still arriving (WARP-3371): a group's count is a floor. */
   partial?: boolean;
   onOpen: (i: PmWorkItem) => void;
+  /** WARP-3521 — see WorkItemCard. */
+  cycles?: ReadonlyMap<string, PmCycle>;
 }): JSX.Element {
   if (domain === "loading") {
     return (
@@ -417,24 +434,11 @@ export function ListView({
           </div>
           <div style={{ padding: "2px 14px" }}>
             {list.map((it) => (
-              <ListRow key={it.id} item={it} onOpen={onOpen} />
+              <ListRow key={it.id} item={it} onOpen={onOpen} cycles={cycles} />
             ))}
           </div>
         </div>
       ))}
-    </div>
-  );
-}
-
-export function PlaceholderView({ kind }: { kind: "cycles" | "modules" }): JSX.Element {
-  const map = {
-    cycles: ["target", "Cycles aren't ready yet.", "Sprint planning will live here. We'll turn it on in a future update."],
-    modules: ["layers", "Modules aren't ready yet.", "Grouping work into bigger efforts will live here. We'll turn it on in a future update."],
-  } as const;
-  const [icon, heading, body] = map[kind];
-  return (
-    <div className="pm-surface" style={{ padding: 8 }}>
-      <EmptyBlock icon={icon} heading={heading} body={body} />
     </div>
   );
 }
