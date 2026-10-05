@@ -95,7 +95,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   const listing = await readListing(listed);
   if (listing.unavailable) return filesUnavailable();
   if (listing.status === 404) return err("NOT_FOUND", `folder not found: ${v.path}`);
-  if (!listing.ok) return err("LIST_FAILED", `nextcloud returned ${listing.status}`);
+  if (!listing.ok) return err("LIST_FAILED", `the File Store returned ${listing.status}`);
   const entries = listing.entries;
   const plan = planOrganize(v.path, entries, rule, ORGANIZE_MAX_MOVES);
 
@@ -145,7 +145,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
       // answers 200 for "already exists" (see above). Reported once here, and
       // every move into it is skipped with this reason rather than fired and
       // then blamed on a name clash (PR #1985 review).
-      const reason = `could not be created (nextcloud returned ${o.status})`;
+      const reason = `could not be created (the File Store returned ${o.status})`;
       skipped.push({ path: folder, reason });
       uncreatable.set(folder, reason);
     }
@@ -203,7 +203,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
       if (res.ok) return { kind: "moved", to: dest.path };
       return {
         kind: "skipped",
-        reason: `move failed (nextcloud returned ${res.status}); the destination may already hold a file with that name`,
+        reason: `move failed (the File Store returned ${res.status}); the destination may already hold a file with that name`,
       };
     });
     // Fold back into plan order, whichever move answered first.

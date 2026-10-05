@@ -1,3 +1,4 @@
+import { eventsMedia } from "@droplet/shared-types";
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 
 const inputSchema = {
@@ -31,13 +32,16 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   }
   const body = (await res.json()) as { clips?: Array<Record<string, unknown>> };
   const clips = Array.isArray(body?.clips) ? body.clips : [];
-  return { ok: true, data: { count: clips.length, clips } };
+  // WARP-3691: the newest few clips play inline in the chat. /cameras/clips
+  // only returns has_clip events, so each becomes a clip card.
+  const media = eventsMedia(clips.map((c) => ({ ...c, has_clip: true })));
+  return { ok: true, data: { count: clips.length, clips, ...(media.length > 0 ? { media } : {}) } };
 }
 
 const tool: Tool = {
   name: "list_clips",
   description:
-    "List recent camera clips (Frigate events with `has_clip=true`). Each result includes the camera, label, score, time range, and a dashboard URL the user can open.",
+    "List recent camera clips (Frigate events with `has_clip=true`). Each result includes the camera, label, score, time range, and a dashboard URL the user can open. The newest clips also play inline in the chat.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

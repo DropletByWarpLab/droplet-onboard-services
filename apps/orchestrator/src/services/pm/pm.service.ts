@@ -93,7 +93,7 @@ export const DEFAULT_STATES: ReadonlyArray<{
 
 // ── Prisma include shapes + row types ────────────────────────────────────────
 
-const WORK_ITEM_INCLUDE = {
+export const WORK_ITEM_INCLUDE = {
   state: true,
   assignees: true,
   labels: { include: { label: true } },
@@ -296,7 +296,7 @@ function mapLabel(row: LabelRow): ApiLabel {
   return { id: row.id, projectId: row.projectId, name: row.name, color: row.color };
 }
 
-function mapWorkItem(
+export function mapWorkItem(
   row: WorkItemRow,
   identifier: string,
   // ADR-045 §5.3 — the OWNING PROJECT's department, so the override can be
