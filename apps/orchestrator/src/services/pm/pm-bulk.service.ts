@@ -57,6 +57,7 @@ import type { $Enums, Prisma, PrismaClient } from "@prisma/client";
 import { PM_BULK_MAX_IDS, type PmBulkPatch } from "@droplet/shared-types";
 import { SERIALIZABLE_TX } from "../../lib/prisma-tx.js";
 import { DEPARTMENT_SELECT } from "./pm-department.js";
+import { nudgeOutbox } from "./pm-outbox.js";
 import {
   PM_ERRORS,
   WORK_ITEM_INCLUDE,
@@ -321,7 +322,7 @@ export async function bulkUpdateWorkItems(
   const { patch } = input;
 
   try {
-    return await prisma.$transaction(async (tx) => {
+    const result = await prisma.$transaction(async (tx) => {
       const found = await tx.pmWorkItem.findMany({
         // WS-12 stores tickets as PmWorkItems in SERVICE_DESK projects. The PM
         // bulk endpoint must apply the same parent-kind boundary as every other
@@ -429,7 +430,7 @@ export async function bulkUpdateWorkItems(
       }
       // Last, and in this transaction: the history of a change exists exactly when
       // the change does.
-      await writeActivity(tx, plan.activity);
+      await writeActivity(tx, plan.activity.map((entry) => ({ ...entry, nudge: false })));
 
       const rows = await tx.pmWorkItem.findMany({
         where: { id: { in: ids }, project: { kind: "PROJECT" } },
@@ -441,6 +442,8 @@ export async function bulkUpdateWorkItems(
       const mapped = new Map(rows.map((r) => [r.id, mapWorkItem(r, r.project.identifier, r.project.department)]));
       return { changed: plan.changed.length, work_items: ids.flatMap((id) => (mapped.has(id) ? [mapped.get(id)!] : [])) };
     }, SERIALIZABLE_TX);
+    if (result.changed > 0) nudgeOutbox();
+    return result;
   } catch (err) {
     // The SERIALIZABLE loser: somebody else changed one of these rows between our
     // read and our commit. Nothing was applied; the route answers 409 and the
