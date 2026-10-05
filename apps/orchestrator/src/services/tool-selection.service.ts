@@ -295,6 +295,42 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   // asserts those three negatives so the fallback cannot be reintroduced
   // quietly.
   { pattern: /\b(leases?|agreements?|contracts?|statements?|warrant(y|ies)|quotes?|estimates?|reports?|manuals?|certificates?|licen[cs]es?|permits?|insurance|tax returns?)\b/i, domains: ["files"] },
+  // WARP-3538 — FILES NAMED BY THE PLACE THEY LIVE, not by a container word.
+  //
+  // `search_cloud_files` (the person's own cloud-drive file lists: OneDrive and
+  // SharePoint today) is in this domain, and the two rules above list
+  // CONTAINERS and document TYPES. "what did Dana change in the SharePoint this
+  // week" and "anything Sam edited in my OneDrive since Monday" name neither,
+  // so they matched nothing:
+  // the turn advertised the core four and not the one tool that can answer it —
+  // registered, budgeted and advertised on no relevant turn (WARP-2058 / 2454 /
+  // 2497 / 2546, again).
+  //
+  // THE TRADE-OFF, RECORDED. `files` is the largest domain in the catalog, so
+  // this rule is held to the two product names and nothing wider:
+  //   • `one-?drive` — OneDrive and One-Drive. NOT `one drive`: with a space it
+  //     is a disk in an array ("one drive in the raid failed"), a `system`
+  //     question that must not also buy this domain.
+  //   • `share-?point` — SharePoint and Share-Point.
+  //   • NOT `microsoft 365` / `m365` / `office 365`. They are mail and calendar
+  //     as much as files, and a calendar question that names the suite would
+  //     buy a whole domain of file schemas for nothing. A file sentence that
+  //     names the suite still carries a file or document word, and one that
+  //     does not can say OneDrive or SharePoint.
+  //   • NOT `document librar(y|ies)`. The `document` in it is already claimed
+  //     by the first rule, so naming it would be a second spelling that cannot
+  //     change an outcome.
+  //   • NOT `cloud`, `cloud drive` or `cloud files`. The tool is provider-
+  //     agnostic, but "cloud" is a word this product's customers type about
+  //     backups, cameras and "is my data sent to the cloud?" as often as about
+  //     files, and every one of those would buy this whole domain. The product
+  //     names are what a person who wants the tool actually types.
+  //   • Google Drive and Dropbox are not named YET: no connector exists to find
+  //     their files with. Each later connector's PR adds its own product name to
+  //     this rule, with its own whole-sentence positives and negatives, measured
+  //     the same way.
+  // Whole-sentence positives and negatives in tool-selection.service.test.ts.
+  { pattern: /\b(one-?drive|share-?point)\b/i, domains: ["files"] },
   { pattern: /\b(lights?|lamps?|scenes?|thermostat|plugs?|sockets?|outlets?|switch(es)?|heating|cooling|air-?con(ditioning)?|fans?|temperature|dim|brightness|blinds?|curtains?|locks?|unlock|routines?|turn (on|off))\b/i, domains: ["smart-home"] },
   { pattern: /\b(wi-?fi|network|internet|router|dhcp|firewall|ssid|block(ed|s)?|unblock|bandwidth|devices?|online|offline|connected|guest|ethernet|vpn|slow)\b/i, domains: ["network"] },
   // The places a household points cameras, and the things it looks for —

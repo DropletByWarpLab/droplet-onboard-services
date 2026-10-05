@@ -33,6 +33,9 @@ import type { PrismaClient } from "@prisma/client";
 
 import { recordActivity } from "../activity.singleton.js";
 import { purgeCursorsForUser } from "./delta-cursor.service.js";
+import { purgeM365FileDataForUser, purgeSharePointDataForUser } from "./drive-data.service.js";
+import { GRAPH_RESOURCES, grantCovers } from "./graph-resources.js";
+import { scopesForRefresh, scopesForSignIn } from "./scopes.js";
 import {
   sealPendingFlow,
   sealTokenCache,
@@ -89,13 +92,25 @@ export interface EntraClient {
    */
   getAuthCodeUrl(
     app: EntraAppRegistration,
-    opts: { redirectUri: string; state: string; nonce: string; codeChallenge: string },
+    opts: {
+      redirectUri: string;
+      state: string;
+      nonce: string;
+      codeChallenge: string;
+      /** WARP-3538 — what this sign-in asks Microsoft for; see `scopes.ts`. */
+      scopes: readonly string[];
+    },
   ): Promise<string>;
 
-  /** Redeem the code the callback received, with the verifier kept server-side. */
+  /**
+   * Redeem the code the callback received, with the verifier kept server-side.
+   * `scopes` are the ones the authorize leg asked for (sealed with the flow),
+   * never re-derived: Entra wants the redemption's scopes equal to, or a subset
+   * of, the authorize leg's.
+   */
   acquireByAuthorizationCode(
     app: EntraAppRegistration,
-    opts: { code: string; redirectUri: string; codeVerifier: string; nonce: string },
+    opts: { code: string; redirectUri: string; codeVerifier: string; nonce: string; scopes: readonly string[] },
   ): Promise<EntraAuthResult>;
 
   /**
@@ -105,14 +120,19 @@ export interface EntraClient {
    */
   acquireByDeviceCode(
     app: EntraAppRegistration,
-    opts: { onCode: (info: DeviceCodeInfo) => void },
+    opts: { onCode: (info: DeviceCodeInfo) => void; scopes: readonly string[] },
   ): Promise<EntraAuthResult>;
 
-  /** Refresh silently from a stored cache. */
+  /**
+   * Refresh silently from a stored cache. `scopes` are ONLY what the connection
+   * already holds (`scopesForRefresh`): a refresh that asks for a scope never
+   * consented fails into NEEDS_RECONNECT.
+   */
   acquireSilent(
     app: EntraAppRegistration,
     serializedCache: string,
     homeAccountId: string,
+    scopes: readonly string[],
   ): Promise<EntraAuthResult>;
 }
 
@@ -152,6 +172,47 @@ export type M365State =
   | "ERROR";
 
 /**
+ * WARP-3538 — where a person stands on SharePoint: what they chose, whether
+ * Microsoft has allowed it, and whether they have to act.
+ *
+ * Three facts, kept apart because three different things change them. `enabled`
+ * is the PERSON's switch and only they move it. `granted` is MICROSOFT's side:
+ * the grant on the connection covers what finding a person's libraries needs
+ * (`Sites.Read.All`), which an administrator may not have approved and which a
+ * connection made before this existed never asked for. `needsConsent` is the
+ * two together — on, and not allowed — and is what the card turns into "Sign in
+ * again": the box says it so a card cannot disagree with the box about whether
+ * a person has to act.
+ */
+export interface M365SharePointView {
+  enabled: boolean;
+  granted: boolean;
+  needsConsent: boolean;
+}
+
+/**
+ * Build the SharePoint view from the two columns it is made of.
+ *
+ * `enabled` is `=== true`, not truthiness: an absent or malformed flag is OFF
+ * (explicit state, never inferred). `granted` is judged by the SAME function and
+ * the SAME scope discovery uses (`grantCovers` against the sharepoint workload's
+ * `leastPrivilegeScope`), so the view says "needs consent" exactly when
+ * discovery would report the workload `notGranted` — never a second opinion.
+ * A grant that was never recorded (`null`) covers nothing.
+ */
+export function sharePointViewOf(
+  sharePointEnabled: unknown,
+  grantedScopes: string | null | undefined,
+): M365SharePointView {
+  const enabled = sharePointEnabled === true;
+  const granted = grantCovers(
+    (grantedScopes ?? "").split(" ").filter(Boolean),
+    GRAPH_RESOURCES.sharepoint.leastPrivilegeScope,
+  );
+  return { enabled, granted, needsConsent: enabled && !granted };
+}
+
+/**
  * What a route may return. Built field-by-field rather than by spreading the
  * row, so a column added later (another secret, say) cannot leak by default.
  */
@@ -168,6 +229,8 @@ export interface M365ConnectionView {
   lastRefreshOkAt: Date | null;
   /** Redacted, human-readable reason for ERROR / NEEDS_RECONNECT. */
   lastError: string | null;
+  /** WARP-3538 — the person's SharePoint choice and Microsoft's answer to it. */
+  sharePoint: M365SharePointView;
 }
 
 interface ConnectionRow {
@@ -183,6 +246,8 @@ interface ConnectionRow {
   tokenCacheEnc: string | null;
   appClientId?: string | null;
   appTenantId?: string | null;
+  /** WARP-3538 — the person's explicit SharePoint opt-in. Absent reads as OFF. */
+  sharePointEnabled?: boolean;
   pendingStateHash?: string | null;
   pendingFlowEnc?: string | null;
   cursorLinkHash?: string | null;
@@ -299,6 +364,7 @@ const DISCONNECTED_VIEW: M365ConnectionView = {
   connectedAt: null,
   lastRefreshOkAt: null,
   lastError: null,
+  sharePoint: { enabled: false, granted: false, needsConsent: false },
 };
 
 function toView(row: ConnectionRow, now: Date): M365ConnectionView {
@@ -319,6 +385,7 @@ function toView(row: ConnectionRow, now: Date): M365ConnectionView {
     connectedAt: row.connectedAt ?? null,
     lastRefreshOkAt: row.lastRefreshOkAt ?? null,
     lastError: row.lastError ?? null,
+    sharePoint: sharePointViewOf(row.sharePointEnabled, row.grantedScopes),
   };
 }
 
@@ -345,19 +412,31 @@ export interface ConnectOptions {
   app?: EntraAppRegistration;
 }
 
-/** The app a new sign-in uses: the one asked for, else the stored one. */
-async function resolveApp(
+/**
+ * What a new sign-in is made of, off the person's row (read ONCE): the app it
+ * signs in through — the one asked for, else the stored one — and whether the
+ * person has opted in to SharePoint, which decides the scopes it asks for
+ * (WARP-3538).
+ *
+ * `=== true`, not truthiness: an absent or malformed flag is OFF. A first-time
+ * connect has no row and is therefore OFF — a person cannot opt in to SharePoint
+ * before they are connected, and one who has not asked for it is never asked for
+ * its scope (see `scopes.ts` for why a tenant that has not approved it would
+ * otherwise fail the whole sign-in).
+ */
+async function resolveConnect(
   prisma: PrismaClient,
   userId: string,
   requested: EntraAppRegistration | undefined,
-): Promise<EntraAppRegistration> {
-  if (requested) return requested;
+): Promise<{ app: EntraAppRegistration; sharePointEnabled: boolean }> {
   const row = (await prisma.m365Connection.findUnique({
     where: { userId },
   })) as ConnectionRow | null;
+  const sharePointEnabled = row?.sharePointEnabled === true;
+  if (requested) return { app: requested, sharePointEnabled };
   const stored = storedApp(row);
   if (!stored) throw new M365AppRequiredError();
-  return stored;
+  return { app: stored, sharePointEnabled };
 }
 
 /** 32 random bytes, base64url — the RFC 7636 verifier shape (43 chars). */
@@ -405,7 +484,10 @@ export async function beginAuthCodeConnect(
   },
   now: Date = new Date(),
 ): Promise<{ authorizeUrl: string; state: string; expiresAt: Date }> {
-  const app = await resolveApp(prisma, userId, opts.app);
+  const { app, sharePointEnabled } = await resolveConnect(prisma, userId, opts.app);
+  // Decided now, from the row as it is NOW, and sealed with the flow below: the
+  // callback redeems with these exact scopes however the row changes meanwhile.
+  const scopes = scopesForSignIn(sharePointEnabled);
 
   const state = randomToken();
   const nonce = randomToken();
@@ -417,6 +499,7 @@ export async function beginAuthCodeConnect(
     state,
     nonce,
     codeChallenge,
+    scopes,
   });
 
   const expiresAt = new Date(now.getTime() + PENDING_FLOW_TTL_MS);
@@ -430,6 +513,7 @@ export async function beginAuthCodeConnect(
       codeVerifier,
       nonce,
       redirectUri: opts.redirectUri,
+      scopes,
     }),
     pendingFlowExpiresAt: expiresAt,
     lastError: null,
@@ -526,6 +610,9 @@ export async function completeAuthCodeConnect(
       redirectUri: flow.redirectUri,
       codeVerifier: flow.codeVerifier,
       nonce: flow.nonce,
+      // The scopes the authorize leg asked for — sealed with the flow, never
+      // re-read from the row, which the person may have changed since.
+      scopes: flow.scopes,
     });
   } catch (err) {
     return await settleConnectFailure(prisma, userId, err);
@@ -594,7 +681,8 @@ export async function beginDeviceCodeConnect(
   opts: ConnectOptions = {},
   now: Date = new Date(),
 ): Promise<DeviceCodeInfo> {
-  const app = await resolveApp(prisma, userId, opts.app);
+  const { app, sharePointEnabled } = await resolveConnect(prisma, userId, opts.app);
+  const scopes = scopesForSignIn(sharePointEnabled);
   const expiresAt = new Date(now.getTime() + PENDING_FLOW_TTL_MS);
 
   // An authorization-code attempt left open in another tab is superseded:
@@ -620,6 +708,7 @@ export async function beginDeviceCodeConnect(
     let handedBack = false;
 
     const completion = entra.acquireByDeviceCode(app, {
+      scopes,
       onCode: (info) => {
         handedBack = true;
         resolve(info);
@@ -675,8 +764,16 @@ async function persistConnected(
   const prior = (await prisma.m365Connection.findUnique({
     where: { userId },
   })) as ConnectionRow | null;
-  if (prior?.state === "PENDING_CONSENT" && prior.cursorLinkHash !== linkHash) {
+  const relinked = prior?.state === "PENDING_CONSENT" && prior.cursorLinkHash !== linkHash;
+  if (relinked) {
     await purgeCursorsForUser(prisma, userId);
+    // WARP-3538 (ADR-041 §4) — and the files LANDED from the old account: a
+    // person who signs in as somebody else must not search the previous
+    // account's file names, and nothing else would ever remove them (the new
+    // account's sweep only covers drives it reads). After the cursors, like
+    // disconnect: a failure here leaves rows nothing refreshes, never a cursor
+    // still reading for the wrong account.
+    await purgeM365FileDataForUser(prisma, userId);
   }
 
   const { count } = await prisma.m365Connection.updateMany({
@@ -684,6 +781,11 @@ async function persistConnected(
     data: {
       state: "CONNECTED",
       cursorLinkHash: linkHash,
+      // The cap count belongs to the old account's libraries; the new account's
+      // first complete discovery writes its own. (The opt-in itself is the
+      // person's choice at the moment they pressed Connect and is kept: the
+      // scopes this sign-in asked for were decided from it.)
+      ...(relinked ? { sharePointLibrariesCapped: 0 } : {}),
       homeAccountId: result.homeAccountId,
       tenantId: result.tenantId,
       accountUpn: result.accountUpn,
@@ -801,6 +903,108 @@ export async function markNeedsReconnect(
   });
 }
 
+// --- The SharePoint switch ------------------------------------------------
+
+/** What `setSharePointEnabled` did. */
+export type SharePointSwitchResult =
+  | {
+      ok: true;
+      /** True when the person's choice actually changed; false for a repeat. */
+      changed: boolean;
+      /** The connection as it is AFTER the change — what the card should now show. */
+      view: M365ConnectionView;
+    }
+  /** Turning it ON needs a CONNECTED account to ask for the scope on. */
+  | { ok: false; reason: "not_connected" };
+
+/**
+ * WARP-3538 — the person's own SharePoint switch.
+ *
+ * ## On
+ *
+ * Records the choice on a connection that exists and is CONNECTED. It asks
+ * Microsoft for nothing and reads nothing by itself: the NEXT sign-in requests
+ * `Sites.Read.All` (`scopesForSignIn`), and until the grant holds it the view
+ * says `needsConsent` and discovery reports SharePoint `notGranted`. Refused
+ * unless CONNECTED — a person cannot opt in before they have an account to ask
+ * the scope on, and a disconnect resets the choice precisely so that a later
+ * sign-in is never asked for a scope nobody asked for (`disconnect`).
+ *
+ * The write is CONDITIONAL on the row still being CONNECTED. A disconnect that
+ * lands between the read and the write would otherwise be undone into "SharePoint
+ * on" for an account that is gone — and the next sign-in would ask a tenant for a
+ * scope that was never requested. A write that matched nothing is the same
+ * refusal.
+ *
+ * ## Off
+ *
+ * Is the deletion the confirmation dialog promised — "Droplet deletes the list of
+ * SharePoint files it kept and stops reading them" — and so is ONE transaction:
+ * the flag, the cap count, the SharePoint cursors, the library rows and the landed
+ * SharePoint items go together or not at all. Half of it would be the worst case:
+ * the person told it is off while the list is still searchable, or the list gone
+ * while discovery carries on re-reading. OneDrive's cursor, source and items,
+ * every other workload and every other person are untouched
+ * (`purgeSharePointDataForUser`).
+ *
+ * Off is never refused, whatever state the connection is in, and it is
+ * idempotent AND repairing: pressed again — or after a discovery that was already
+ * running re-created a library — it removes whatever is there, and says nothing
+ * to the log when nothing about the person's choice changed.
+ *
+ * Both directions are audited as the other lifecycle events are (`auditM365`):
+ * widening or narrowing what the box reads on a person's behalf belongs in the
+ * log beside connect and disconnect.
+ */
+export async function setSharePointEnabled(
+  prisma: PrismaClient,
+  userId: string,
+  enabled: boolean,
+  now: Date = new Date(),
+): Promise<SharePointSwitchResult> {
+  const row = (await prisma.m365Connection.findUnique({
+    where: { userId },
+  })) as ConnectionRow | null;
+  const was = row?.sharePointEnabled === true;
+
+  if (enabled) {
+    if (!row || row.state !== "CONNECTED") return { ok: false, reason: "not_connected" };
+    if (!was) {
+      const { count } = await prisma.m365Connection.updateMany({
+        where: { userId, state: "CONNECTED" },
+        data: { sharePointEnabled: true },
+      });
+      if (count === 0) return { ok: false, reason: "not_connected" };
+      await auditM365({
+        what: "Microsoft 365 SharePoint turned on",
+        state: "CONNECTED",
+        userId,
+        severity: "info",
+        userInitiated: true,
+      });
+    }
+  } else {
+    await prisma.$transaction(async (tx) => {
+      await tx.m365Connection.updateMany({
+        where: { userId },
+        data: { sharePointEnabled: false, sharePointLibrariesCapped: 0 },
+      });
+      await purgeSharePointDataForUser(tx, userId);
+    });
+    if (was) {
+      await auditM365({
+        what: "Microsoft 365 SharePoint turned off",
+        state: toView(row!, now).state,
+        userId,
+        severity: "info",
+        userInitiated: true,
+      });
+    }
+  }
+
+  return { ok: true, changed: enabled !== was, view: await getConnectionView(prisma, userId, now) };
+}
+
 // --- Disconnect -----------------------------------------------------------
 
 /**
@@ -819,6 +1023,14 @@ export async function disconnect(prisma: PrismaClient, userId: string): Promise<
     data: {
       ...UNLINKED,
       lastError: null,
+      // WARP-3538 — disconnect is a clean slate, including the SharePoint
+      // choice: the person who reconnects next month is asked for the base set
+      // only until they say otherwise, because a scope they did not ask for can
+      // fail the whole sign-in (see `scopes.ts`). Reset HERE and not in UNLINKED:
+      // that constant also describes a sign-in that was merely cancelled, which
+      // must not undo a choice the person made.
+      sharePointEnabled: false,
+      sharePointLibrariesCapped: 0,
       // The cursors go below, so nothing is left for this to name. A cursor a
       // discovery already running re-creates after the purge is then unowned,
       // and the next sign-in purges it rather than adopting it.
@@ -833,6 +1045,12 @@ export async function disconnect(prisma: PrismaClient, userId: string): Promise<
   // and left in place it is claimed and failed on every tick. After the
   // credential purge, so a failure here can only leave residue, never a token.
   await purgeCursorsForUser(prisma, userId);
+
+  // WARP-3538 (ADR-041 §4: "deletion is a real operation") — and the files that
+  // were landed: the person's OneDrive and SharePoint file lists and the sources
+  // that name them. After the cursors, so a failure here leaves rows nothing will
+  // refresh rather than a cursor still reading for a person who has left.
+  await purgeM365FileDataForUser(prisma, userId);
 
   // After the purge, not before: the row is the thing being attested to.
   await auditM365({
@@ -867,6 +1085,10 @@ export async function purgeM365ForUser(
   // WARP-3059 — the deleted person's sync positions go with them. Second, so a
   // failure here leaves residue rather than a live refresh token.
   await purgeCursorsForUser(prisma, userId);
+  // WARP-3538 — and the file names landed from their Microsoft 365: a leaver's
+  // OneDrive file list must not outlive them in a table nobody can reach
+  // through the API.
+  await purgeM365FileDataForUser(prisma, userId);
   return count;
 }
 
@@ -905,6 +1127,15 @@ export async function getAccessToken(
       data: {
         state: "NEEDS_RECONNECT",
         tokenCacheEnc: null,
+        // WARP-3538 — the key that sealed this person's LANDED file names is the
+        // same one that just failed to open their token (DEVICE_SECRET_KEY,
+        // regenerated by a factory reset that kept the rows). Those rows can never
+        // be read again, and the cursors would carry on landing only what changes
+        // from here. Forgetting which link the cursors belong to makes the
+        // reconnect count as "a different account" (NULL means "not known"), so
+        // it purges the cursors and the unreadable files and re-lands everything
+        // under the new key — the re-sync that makes dropping the data safe.
+        cursorLinkHash: null,
         lastError: "The stored Microsoft sign-in could not be read. Please connect again.",
       },
     });
@@ -946,7 +1177,11 @@ export async function getAccessToken(
 
   let result: EntraAuthResult;
   try {
-    result = await entra.acquireSilent(app, cache, row.homeAccountId);
+    // 🔴 Only what this connection already HOLDS (WARP-3538, see `scopes.ts`): a
+    // person who turned SharePoint on after connecting has not consented to
+    // Sites.Read.All yet, and a refresh that asked for it would fail into
+    // NEEDS_RECONNECT — a healthy connection broken by a switch.
+    result = await entra.acquireSilent(app, cache, row.homeAccountId, scopesForRefresh(row.grantedScopes));
   } catch (err) {
     await persistFailure(prisma, userId, err);
     throw err;
