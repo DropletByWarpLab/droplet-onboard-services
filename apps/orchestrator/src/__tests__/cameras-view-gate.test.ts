@@ -85,6 +85,8 @@ vi.mock("../services/frigate.client.js", () => ({
   fetchEvents: okAsync(),
   fetchReviewPreview: okAsync(),
   fetchReviewThumbnail: okAsync(),
+  fetchReview: vi.fn().mockResolvedValue({ camera: "front", thumb_path: "/media/frigate/clips/review/thumb-front-abc.webp" }),
+  reviewThumbnailUrl: vi.fn().mockReturnValue("http://frigate.test:5000/clips/review/thumb-front-abc.webp"),
   // WARP-3509: an event's HLS playback route resolves the event first.
   fetchEventPlaybackSpan: okAsync(),
   buildRecordingClipUrl: vi.fn().mockReturnValue("http://frigate.test/clip.mp4"),

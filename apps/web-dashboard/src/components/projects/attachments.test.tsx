@@ -798,7 +798,8 @@ describe("Comment composer — files", () => {
     // every enabled input, hidden file inputs included, so one placed last would
     // let Tab walk out of the modal instead.
     expect(fireEvent.keyDown(attach, { key: "Tab" })).toBe(false);
-    expect(screen.getByRole("button", { name: "Close" })).toHaveFocus();
+    // Editing places item actions before Close; Tab wraps to that first control.
+    expect(screen.getByRole("button", { name: "Item actions" })).toHaveFocus();
   });
 
   it("a staged file can be removed before sending", async () => {

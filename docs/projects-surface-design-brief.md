@@ -52,7 +52,7 @@ The persona is the **non-technical owner/admin of a small business who owns the 
 ### Non-goals
 
 - **No Plane parity and no embedded Plane** — this is a replacement, not a wrapper; the iframe and any second login are removed.
-- **No surfacing of schema-only entities.** Custom properties exist as data models but have **no API** yet — do not design working UI for them. The same applies to the **per-item activity history**, which is recorded server-side but has no read endpoint yet: no per-item history timeline until a route exists. **Attachments, cycles and modules are real surfaces:** attachments have an API and a designed section (§3.4 item 7); cycles and modules shipped with WS-5 (WARP-3521) and are specified in §3.7 and §3.8, and `cycleId` is patchable through the drawer's cycle picker (§3.4).
+- **No surfacing of schema-only entities.** Attachments, custom fields, cycles and modules have APIs in this composed slice. Their working surfaces are specified below, including the drawer attachment section (§3.4 item 7) and cycle picker. Per-item activity uses the existing paged read endpoints.
 - **No multi-workspace UI.** Multi-home is schema-possible but not exposed; design for the single `home` workspace.
 - **No per-user / private projects** — the model is household-shared by design.
 - **No new tokens, no new design system, no Plane-style chrome.**
@@ -338,7 +338,7 @@ This section enumerates every view to design. Every view is wrapped in the shell
    - **Uploading** — one row per file with its own progress bar, at most three at a time. A refused file keeps its row, says why in plain words, and has a `Dismiss` `.btn.ghost`; the limit is stated, never implied.
    - **Empty** — `No attachments yet.` with the how-to and the size limit beneath it (writers); readers get the line alone.
    - **Loading** — two skeleton rows. **Error** — a quiet inline line `Couldn't load attachments.` + a `Try again` `.btn.ghost`.
-   - **Custom fields** stay **omitted** — they have no route yet. Do not render a disabled "Coming soon" tile and do not build pickers that call nonexistent routes.
+   - **Custom fields** are live since WARP-3520: each project field is a row of the properties rail with the editor its type needs.
 
 **Cross-surface note (the global Activity surface):** every applied Projects write logs to the household **Activity** log (the admin `/activity` surface). In that surface a Projects write appears as a standard Activity row — actor (the person, or "AI" for an assistant-confirmed write) · a plain-language line (e.g. "moved INBOX-42 to In Progress," "added a comment to INBOX-42," "created project Onboarding") · the mono `key` where relevant · timestamp · the `write · ok` tier marker. You are not redesigning the Activity surface here — you are only ensuring Projects writes produce a legible, ADR-002-voiced row in it. No per-item timeline is built on the Projects surface itself until the per-item route lands (item 6).
 
@@ -490,7 +490,7 @@ Frequent edits happen in place, not in a modal:
 - **Assignees / labels** — popover multi-selects. These are **full-set replacements** on the wire (`assignees: string[]`, `label_ids: string[]`) — the popover holds the complete desired set and sends it whole, not a delta.
 - **Project key prefix / identifier / lead / icon/color** — edited from the project modal (§3.6), not inline on the board.
 - **Cycle and modules** — selects in the drawer's properties rail (§3.4): choosing a cycle writes `cycle_id` (`null` takes the item out) optimistically, with rollback on refusal; the modules row waits for its membership request and reports failures with a friendly toast.
-- **Not editable today** (schema-only, no route): custom properties, per-item activity. The UI must not render affordances that POST to non-existent routes.
+- **Custom fields** — editable since WARP-3520 through project definitions and per-item values.
 Attachments are added and removed in the detail (§3.4 item 7), never edited in place.
 
 User references (`leadId`, `assignees`, `authorId`, `createdById`) are plain user-id strings — resolve display names from the people directory separately; never block a write on name resolution.
@@ -681,4 +681,4 @@ Recreate these in the dashboard using the existing primitives, hooks, and tokens
 
 ### Definition of done
 
-Pixel match in light **and** dark at 1440w + a mobile width (the table layout) · bound to the live `/api/pm/*` contract (single `home` workspace, household-shared reads, `key` like `INBOX-42`, float `sortOrder`, full-set assignee/label replacement, snake_case wire ↔ camelCase model) · every state covered (loading/empty/error + all domain states) · keyboard navigation + screen-reader parity via the table view · `prefers-reduced-motion` respected · the **2-tier** safety chip on every assistant-proposed write with confirm-before-execute and a `--color-label-primary` label · RBAC read-only for members/viewers/guests · reuse over invention, no new tokens, no invented class names · the sidebar entry matched to the shipped `FolderKanban` Workspace slot (not redesigned). Do **not** surface schema-only entities (custom properties, per-item activity history) — they have no API yet. Cycles and modules are real surfaces (§3.7, §3.8) and must meet the same bar: every state, light and dark, a mobile width, keyboard parity for drag, reduced motion, and writes hidden for read-only roles.
+Pixel match in light **and** dark at 1440w + a mobile width (the table layout) · bound to the live `/api/pm/*` contract (single `home` workspace, household-shared reads, `key` like `INBOX-42`, float `sortOrder`, full-set assignee/label replacement, snake_case wire ↔ camelCase model) · every state covered (loading/empty/error + all domain states) · keyboard navigation + screen-reader parity via the table view · `prefers-reduced-motion` respected · the **2-tier** safety chip on every assistant-proposed write with confirm-before-execute and a `--color-label-primary` label · RBAC read-only for members/viewers/guests · reuse over invention, no new tokens, no invented class names · the sidebar entry matched to the shipped `FolderKanban` Workspace slot (not redesigned). Attachments, custom fields, cycles and modules are real surfaces (§3.7, §3.8) and must meet the same bar: every state, light and dark, a mobile width, keyboard parity for drag, reduced motion, and writes hidden for read-only roles.

@@ -5743,6 +5743,8 @@ model PmWorkspace {
   createdAt DateTime    @default(now())
   updatedAt DateTime    @default(now()) @updatedAt
   projects  PmProject[]
+  /// WARP-3522 — saved views, project-scoped and cross-project.
+  savedViews PmSavedView[]
   /// WARP-3532 — the workspace's webhook destinations.
   webhooks  PmWebhook[]
 }
@@ -5799,6 +5801,8 @@ model PmProject {
   cycles     PmCycle[]
   modules    PmModule[]
   properties PmCustomProperty[]
+  /// WARP-3522 — views saved against this project (cross-project views have no project).
+  savedViews PmSavedView[]
   /// WARP-3527 — the import runs filed against this project. Cascade: a job is
   /// a record ABOUT the project, with no meaning once it is gone.
   importJobs PmImportJob[]
@@ -5807,6 +5811,10 @@ model PmProject {
   supportChannels PmSupportChannel[]
   /// WARP-3532 — webhooks scoped to this project (cascade with it).
   webhooks   PmWebhook[]
+  /// WARP-3535 — the code repositories whose pull requests, commits and branches
+  /// are matched against this project's work-item keys. The mapping row goes
+  /// with the project; the repository registration does not.
+  devRepositories PmDevRepositoryProject[]
 
   /// WARP-2117 — the deals this project delivers. A won deal becomes a job;
   /// the link is on the deal so deleting the project leaves the commercial
@@ -5895,6 +5903,12 @@ model PmState {
   updatedAt DateTime     @default(now()) @updatedAt
   workItems PmWorkItem[]
 
+  /// WARP-3535 — the rules that move work into this state when a pull request is
+  /// opened or merged. SetNull on the rule side: deleting a state switches the
+  /// rule off, it never deletes the repository mapping.
+  devOnOpenedRules PmDevRepositoryProject[] @relation("PmDevOnOpened")
+  devOnMergedRules PmDevRepositoryProject[] @relation("PmDevOnMerged")
+
   @@unique([projectId, name])
   @@index([projectId, sortOrder])
 }
@@ -5924,6 +5938,19 @@ enum PmPriority {
   none
 }
 
+/// WARP-3520 — what KIND of work an item is. An explicit enum column, never
+/// inferred from a label called "bug" (a label cannot be filtered, counted or
+/// defaulted by the engine, and one customer's "bug" is another's "defect").
+/// `task` is the default so every existing row keeps its meaning.
+enum PmWorkItemType {
+  task
+  bug
+  feature
+  improvement
+  question
+  incident
+}
+
 /// The work item (Plane "issue"). `sequenceId` + project.identifier forms the
 /// human key (INBOX-42). `sortOrder` is a float so a kanban drag can insert
 /// between two cards without renumbering the column. Sub-issues via the
@@ -5949,9 +5976,21 @@ model PmWorkItem {
   sequenceId      Int
   name            String
   descriptionHtml String?
+  /// WARP-3522 — the plain-text projection of `descriptionHtml`: tags stripped,
+  /// entities decoded, whitespace collapsed. NEVER written by application code:
+  /// the `pmworkitem_description_text` trigger (migration 20261004060000)
+  /// recomputes it on every INSERT and on every UPDATE that sets
+  /// `descriptionHtml`, so every write path — this service's, another slice's,
+  /// a raw import — keeps it true. It exists so the filter DSL's `text`
+  /// condition searches what a person typed, not the markup around it (an
+  /// ILIKE over the raw HTML matches "class", "strong" and every href), and so
+  /// that search can use a trigram index. Null when there is no description.
+  descriptionText String?
   stateId         String?
   state           PmState?     @relation(fields: [stateId], references: [id], onDelete: SetNull)
   priority        PmPriority   @default(none)
+  /// WARP-3520 — see `PmWorkItemType`.
+  type            PmWorkItemType @default(task)
   parentId        String?
   parent          PmWorkItem?  @relation("PmSubIssues", fields: [parentId], references: [id], onDelete: SetNull)
   children        PmWorkItem[] @relation("PmSubIssues")
@@ -6009,6 +6048,10 @@ model PmWorkItem {
   activity       PmActivity[]
   modules        PmModuleWorkItem[]
   propertyValues PmWorkItemPropertyValue[]
+  /// WARP-3535 — pull requests, commits and branches from GitHub / GitLab whose
+  /// text names this item's key. Cascade: a link is a pointer with no meaning
+  /// once its item is gone.
+  externalLinks  PmExternalLink[]
 
   /// WARP-2117 — CRM timeline entries that POINT AT this work item (the task
   /// raised off a customer conversation).
@@ -6057,6 +6100,13 @@ model PmWorkItem {
   /// composite. Two columns only: the unfiltered board still orders off the
   /// state index.
   @@index([projectId, departmentId])
+  /// WARP-3522 — the filter DSL's `text` condition is `name ILIKE '%q%' OR
+  /// "descriptionText" ILIKE '%q%'`. A btree cannot serve a leading-wildcard
+  /// pattern at all; a trigram GIN index lets the planner answer each arm with
+  /// a bitmap scan. (A query shorter than three characters has no trigram and
+  /// falls back to a scan, which is correct and, at this table's size, cheap.)
+  @@index([name(ops: raw("gin_trgm_ops"))], type: Gin)
+  @@index([descriptionText(ops: raw("gin_trgm_ops"))], type: Gin)
 }
 
 /// Work-item ↔ assignee join. `userId` is a User.id.
@@ -6298,7 +6348,8 @@ model PmModuleWorkItem {
 }
 
 /// Custom field definition on a project. `options` holds the choice list for
-/// select / multi_select types (array of {id,name,color}); null for scalars.
+/// select / multi_select types (array of {id,label,color}; WARP-3520 settled
+/// the key as `label`, matching the dashboard); null for every other type.
 enum PmPropertyType {
   text
   number
@@ -6325,8 +6376,12 @@ model PmCustomProperty {
   @@index([projectId, sortOrder])
 }
 
-/// A custom-field value on a work item. `value` is type-tagged JSON, e.g.
-/// {"text":"…"} | {"number":3} | {"optionIds":[…]} | {"userIds":[…]}.
+/// A custom-field value on a work item. `value` is type-tagged JSON, one shape
+/// per `PmPropertyType` (validated by pm-properties.service.ts, never trusted
+/// from the client): text → {"text":"…"}, number → {"number":3},
+/// date → {"date":"YYYY-MM-DD"}, boolean → {"boolean":true},
+/// select / multi_select → {"optionIds":[…]} (exactly one id for select),
+/// member → {"userIds":[…]} (exactly one id).
 model PmWorkItemPropertyValue {
   id         String           @id @default(uuid())
   workItemId String
@@ -6478,6 +6533,18 @@ enum PmActivityVerb {
   unassigned
   priority_changed
   due_date_changed
+  /// WARP-3520 — the other half of the date pair. `startDate` used to fall into
+  /// the generic `updated`/`fields` row; it now names itself, as `dueDate` does.
+  start_date_changed
+  /// WARP-3520 — an item's KIND (`PmWorkItemType`) changed.
+  type_changed
+  /// WARP-3520 — story-point estimate set, changed or cleared.
+  estimate_changed
+  /// WARP-3520 — a custom-field value (`PmWorkItemPropertyValue`) was set,
+  /// changed or cleared, or removed because its field/option was deleted.
+  /// `field` is the property NAME at the time, so the history stays readable
+  /// after a rename or delete.
+  property_changed
   title_changed
   description_changed
   label_added
@@ -6510,6 +6577,11 @@ enum PmActivityVerb {
   /// WARP-1505: a file was removed by its uploader or an owner/admin.
   /// `oldValue` is the display file name.
   attachment_removed
+  /// WARP-3535 (ADR-069 §9): a pull request, commit or branch from GitHub or
+  /// GitLab was linked to the item because its text names the item's key.
+  /// Written once per new link, never for an update to an existing one; `field`
+  /// carries the provider and `newValue` a one-line description.
+  external_link_added
   /// WARP-3526 (ADR-069 WS-10): a worklog was written — by hand, or by stopping
   /// a timer. `newValue` is the minutes. A timer START writes no row: a running
   /// timer is one person's transient state, not a change to the item.
@@ -6697,6 +6769,242 @@ model PmWebhookDelivery {
   @@unique([webhookId, sourceKey])
   /// The delivery log: newest first, per webhook.
   @@index([webhookId, createdAt(sort: Desc)])
+}
+
+// ── WARP-3535 (ADR-069 §9): the GitHub / GitLab development panel ────────────
+//
+// The box is not internet-reachable by design, so nothing is pushed to it: it
+// dials the code host on an interval (cron-runtime, every five minutes), asks
+// only for what changed (ETag), and matches work-item keys in branch names,
+// titles, bodies and commit messages. Every dial passes the `work_integrations`
+// off-LAN switch and the pinned SSRF guard (services/pm/pm-dev-egress.ts). The
+// credential is the one the Integrations page already holds
+// (`IntegrationConnection.providerTokensEnc`); nothing here stores a copy.
+
+/// Which code host. Uppercase, like every Work Suite wire enum.
+enum PmExternalProvider {
+  GITHUB
+  GITLAB
+}
+
+/// What a link points at.
+enum PmExternalLinkKind {
+  PULL_REQUEST
+  COMMIT
+  BRANCH
+}
+
+/// How the thing a link points at is doing. A pull request moves through all
+/// four; a commit on the default branch is MERGED; a branch is OPEN while it
+/// exists and CLOSED once it is gone (`PmExternalLink_state_matches_kind`).
+enum PmExternalLinkState {
+  OPEN
+  MERGED
+  CLOSED
+  DRAFT
+}
+
+/// Where ONE repository's sync stands. Explicit, never derived from
+/// `lastSyncedAt` or `lastError` (CLAUDE.md "no guessing"). A condition that
+/// belongs to the whole provider (the egress switch, the credential, the rate
+/// limit) is written to every repository of that provider, so a reader never
+/// has to combine two tables to answer "why is this not syncing".
+///   PENDING          registered, never synced.
+///   OK               the last pass completed, with changes or an all-304 answer.
+///   RATE_LIMITED     the code host asked us to wait; `nextSyncAt` is when.
+///   EGRESS_BLOCKED   the owner's `work_integrations` switch is off.
+///   NEEDS_RECONNECT  the credential is missing or was refused. Retried only
+///                    once the stored credential changes (`credentialSeal`).
+///   INACCESSIBLE     the token can no longer see this repository.
+///   ERROR            a transient failure; retried with backoff.
+///   DISCONNECTED     the integration was disconnected; sync is stopped.
+enum PmDevSyncStatus {
+  PENDING
+  OK
+  RATE_LIMITED
+  EGRESS_BLOCKED
+  NEEDS_RECONNECT
+  INACCESSIBLE
+  ERROR
+  DISCONNECTED
+}
+
+/// A repository an owner or admin chose to sync, plus everything the sweep must
+/// remember about it between ticks. `apiRef` is what the code host's API calls
+/// it in a URL path; the service validates it against the provider profile's
+/// pattern and `PmDevRepository_apiRef_safe` is the floor under that, so a path
+/// is never built from text that could walk out of `/repos/<owner>/<repo>`.
+model PmDevRepository {
+  id                  String             @id @default(uuid())
+  provider            PmExternalProvider
+  /// The host's own id, as text. Stable across a rename or a transfer, which
+  /// `apiRef` and `fullName` are not.
+  externalId          String
+  apiRef              String
+  fullName            String
+  webUrl              String
+  defaultBranch       String?
+  status              PmDevSyncStatus    @default(PENDING)
+  /// The last pass that completed. Audit timestamp pinned to `status` by
+  /// `PmDevRepository_ok_has_sync_time`.
+  lastSyncedAt        DateTime?
+  lastAttemptAt       DateTime?
+  /// The earliest the sweep may look at this repository again: the next tick
+  /// normally, the rate limit's reset or an exponential backoff otherwise.
+  nextSyncAt          DateTime           @default(now())
+  /// A fixed sentence from `DEV_SYNC_ERRORS`, never a response body, a URL or a
+  /// token (the delivery log's rule).
+  lastError           String?
+  consecutiveFailures Int                @default(0)
+  /// Which stored credential `status` refers to: the first 16 hex of the sha256
+  /// of `IntegrationConnection.providerTokensEnc`, which changes whenever the
+  /// owner pastes a new token. A NEEDS_RECONNECT repository is retried only
+  /// when this no longer matches, so a refused token is never re-sent every
+  /// five minutes.
+  credentialSeal      String?
+  /// One ETag per list the sweep polls, each for the FIRST page only: a page
+  /// that did not change is a 304, which the code host does not count against
+  /// the rate limit, and the later pages are fetched only when it did.
+  openPrsEtag         String?
+  recentPrsEtag       String?
+  commitsEtag         String?
+  branchesEtag        String?
+  createdById         String?
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @default(now()) @updatedAt
+
+  projects PmDevRepositoryProject[]
+  links    PmExternalLink[]
+
+  @@unique([provider, externalId])
+  /// The sweep's "what is due" read.
+  @@index([nextSyncAt])
+}
+
+/// Repository → project mapping: the work-item keys of these projects are
+/// looked for in this repository's text. The two optional states are the
+/// per-project automation: "a pull request is opened → move the item to X",
+/// "merged → move it to Y". Null is "no rule".
+model PmDevRepositoryProject {
+  repositoryId    String
+  repository      PmDevRepository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  projectId       String
+  project         PmProject       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  onOpenedStateId String?
+  onOpenedState   PmState?        @relation("PmDevOnOpened", fields: [onOpenedStateId], references: [id], onDelete: SetNull)
+  onMergedStateId String?
+  onMergedState   PmState?        @relation("PmDevOnMerged", fields: [onMergedStateId], references: [id], onDelete: SetNull)
+  createdAt       DateTime        @default(now())
+
+  @@id([repositoryId, projectId])
+  /// WARP-845: an unindexed ON DELETE CASCADE / SET NULL FK makes the parent
+  /// delete a sequential scan of this table.
+  @@index([projectId])
+  @@index([onOpenedStateId])
+  @@index([onMergedStateId])
+}
+
+/// A pull request, commit or branch whose text names a work item's key.
+/// `(provider, kind, externalId, workItemId)` is unique, so a replayed sweep
+/// creates nothing twice. `externalId` is the host's global id for a pull
+/// request (GitHub `id`, GitLab `id` — never the per-project `number`), the full
+/// sha for a commit, and `<repository externalId>:<name>` for a branch, because a
+/// branch name is only unique inside its repository.
+model PmExternalLink {
+  id                String              @id @default(uuid())
+  workItemId        String
+  workItem          PmWorkItem          @relation(fields: [workItemId], references: [id], onDelete: Cascade)
+  repositoryId      String
+  repository        PmDevRepository     @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  provider          PmExternalProvider
+  kind              PmExternalLinkKind
+  externalId        String
+  url               String
+  title             String
+  state             PmExternalLinkState
+  author            String?
+  /// The branch a pull request comes from, the branch's own name, or a
+  /// commit's short sha — what a person looks for when they go to find it.
+  ref               String?
+  /// `#42` / `!42`. Null for a commit or a branch.
+  number            Int?
+  /// When it last changed ON THE CODE HOST — what the panel sorts by. `updatedAt`
+  /// below is this row's own.
+  externalUpdatedAt DateTime
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @default(now()) @updatedAt
+
+  @@unique([provider, kind, externalId, workItemId])
+  /// The drawer's read: this item's links, newest first.
+  @@index([workItemId, externalUpdatedAt(sort: Desc)])
+  /// WARP-845: the ON DELETE CASCADE scan index.
+  @@index([repositoryId])
+}
+/// WARP-3522 — who may see a saved view. PERSONAL is the owner's alone — no role,
+/// not even owner/admin, lists another person's. SHARED is every Projects reader's,
+/// and writable by owner/admin (and the project lead for a project view).
+enum PmViewScope {
+  PERSONAL
+  SHARED
+}
+
+/// WARP-3522 — the layout a saved view opens in. BOARD and LIST exist today;
+/// TABLE (WS-6b), CALENDAR and TIMELINE (WS-7) are accepted now so a view saved
+/// by the API or the assistant does not need a migration when they land, and a
+/// layout the dashboard cannot draw yet opens as the list.
+enum PmViewLayout {
+  BOARD
+  LIST
+  TABLE
+  CALENDAR
+  TIMELINE
+}
+
+/// WARP-3522 — a named, persisted answer to "which work items?" (ADR-069 s8).
+/// `filter` is the filter DSL (packages/shared-types/src/pm-filter.ts),
+/// validated on every write and re-validated on every read — it is data a person
+/// or the assistant typed, never trusted because it came from our own column.
+///
+/// `projectId` null = a cross-project view (the whole workspace, minus archived
+/// projects). `ownerId` is a User.id string, not an FK, like every PM
+/// attribution column: deleting a user must not be able to cascade away a SHARED
+/// view the whole team uses.
+///
+/// `groupBy` / `sortBy` / `columns` are carried now and drawn by WS-6b's table
+/// layout; `columns` is an ordered list of column ids whose vocabulary that
+/// slice owns.
+///
+/// INVARIANTS THE SCHEMA LANGUAGE CANNOT EXPRESS — all in raw migration SQL
+/// (20261004060000_warp_3522_pm_saved_views) and proven against a real Postgres
+/// in `pm-saved-view.pg.test.ts`:
+///   * `PmSavedView_name_length`   — CHECK the trimmed name is 1..60 characters.
+///   * `PmSavedView_filter_is_object` — CHECK `filter` is a JSON object.
+///   * `PmSavedView_name_scope_key` — UNIQUE per (workspace, project-or-none,
+///     scope, owner-if-personal, lower(name)): two shared views cannot both be
+///     called "Overdue", two of one person's personal views cannot, and two
+///     people's personal views can.
+model PmSavedView {
+  id          String       @id @default(uuid())
+  workspaceId String
+  workspace   PmWorkspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  projectId   String?
+  project     PmProject?   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  ownerId     String
+  scope       PmViewScope  @default(PERSONAL)
+  name        String
+  layout      PmViewLayout @default(BOARD)
+  filter      Json
+  groupBy     String?
+  sortBy      Json?
+  columns     Json?
+  sortOrder   Int          @default(0)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @default(now()) @updatedAt
+
+  /// The list endpoint's shape: one workspace, optionally one project, both scopes.
+  @@index([workspaceId, projectId, scope])
+  /// WARP-845 — the ON DELETE CASCADE scan when a project is deleted.
+  @@index([projectId])
 }
 
 /// WARP-3527 (ADR-069 WS-11) — which tracker's export a file is.

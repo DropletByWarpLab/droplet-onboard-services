@@ -59,14 +59,19 @@ import { createPmMobileRouter } from "./routes/mobile/pm.js";
 import { createPmNativeRouter } from "./routes/pm/native.js";
 import { createPmRelationsRouter } from "./routes/pm/relations.js";
 import { createPmAttachmentsRouter } from "./routes/pm/attachments.js";
+import { createPmQueryRouter } from "./routes/pm/query.js";
+import { createPmViewsRouter } from "./routes/pm/views.js";
+import { createPmBulkRouter } from "./routes/pm/bulk.js";
 import { createPmImportExportRouter } from "./routes/pm/import-export.js";
 import { createPmPlanningRouter } from "./routes/pm/planning.js";
 import { createPmTimeRouter } from "./routes/pm/time.js";
+import { createPmFieldsRouter } from "./routes/pm/fields.js";
 import { createPmWebhooksRouter } from "./routes/pm/webhooks.js";
 import { createPmOpenApiRouter } from "./routes/pm/openapi.js";
 import { createSupportRouter } from "./routes/support/support.routes.js";
 import { createPmInsightsRouter } from "./routes/pm/insights.js";
 import { createPmScheduleRouter } from "./routes/pm/schedule.js";
+import { createPmDevelopmentRouter } from "./routes/pm/development.js";
 import { createCrmRouter } from "./routes/crm.js";
 import { createMoneyRouter } from "./routes/money.js";
 import { createCrmEntityLinksRouter } from "./routes/crm-entity-links.js";
@@ -92,6 +97,8 @@ import { createOffLanNetworkRouter } from "./routes/off-lan-network.js";
 import { createEgressAuditRouter } from "./routes/egress-audit.js";
 import { createWebRouter } from "./routes/web.js";
 import { createCamerasRouter, createCameraSharePublicRouter } from "./routes/cameras.js";
+import { createCameraBusinessHoursRouter } from "./routes/camera-business-hours.js";
+import { createCameraMotionRouter } from "./routes/camera-motion.js";
 import { createSignedSegmentRouter } from "./services/segment-url-signing.service.js";
 import { createSwitchRouter } from "./routes/switch.js";
 import { createDisplayRouter } from "./routes/display.js";
@@ -589,11 +596,20 @@ export function createApp(
   app.use("/api", createSystemResetRouter(prisma));
   app.use("/api", createMatterRouter(prisma));
   // WARP-3533 — GET /api/pm/openapi.json, the OpenAPI 3.1 description of the PM
-  // API. First among the PM routers on purpose: a literal path goes ahead of the
-  // `/pm/<thing>/:id` routes below, so no parameterised sibling can ever shadow
-  // it. It sits under /api/pm, so the projects module gate, the tier floor and
-  // (for a token) the pm:read scope all apply to it.
+  // API. First among the PM routers on purpose so a parameterized sibling cannot
+  // shadow this literal route; the /api/pm gates still apply.
   app.use("/api", createPmOpenApiRouter());
+  // WARP-3522 (ADR-069 §8) — the one filter language: `POST /pm/work-items/query`,
+  // `GET /pm/work-items/by-key/:key` and saved views (`/pm/views`). Mounted BEFORE
+  // the native router because `/pm/work-items/query` is a literal under the
+  // `/pm/work-items/:id` prefix it owns — specific paths first
+  // (droplet-pr-review-patterns P16). No route in either router can be shadowed
+  // by, or shadow, a native one; the order is the cheap guarantee.
+  app.use("/api", createPmQueryRouter(prisma));
+  app.use("/api", createPmViewsRouter(prisma));
+  // WARP-3537 — `POST /pm/work-items/bulk`: the same literal-under-`:id` case as
+  // `/pm/work-items/query` above, so the same rule: before the native router.
+  app.use("/api", createPmBulkRouter(prisma));
   // ADR-026 — native PM (projects, work-items, states, labels, comments).
   // The Droplet-owned project-management surface: state in the orchestrator's
   // own Postgres, dashboard session is the auth, no embedded third-party stack.
@@ -624,6 +640,11 @@ export function createApp(
   // `/pm/work-items/:id/worklogs`), and the same `/api/pm` module gates as the
   // routers above — no guest share, no MCP write principal; see its header.
   app.use("/api", createPmTimeRouter(prisma));
+  // WARP-3520 (ADR-069 WS-4) — custom fields: per-project definitions and the
+  // values items hold. Its own router for the same reason: disjoint paths
+  // (`/pm/properties/...`, `.../properties/:propertyId`), its own error
+  // vocabulary. `/api/pm` is gated by prefix, so the `projects` gate covers it.
+  app.use("/api", createPmFieldsRouter(prisma));
   // WARP-3532 (ADR-069 §9) — work webhooks and chat-app notifications. Owner
   // and admin only. `/pm/webhooks` is a literal second segment and no PM router
   // above owns a `/pm/:param`, so neither shadows the other.
@@ -639,6 +660,10 @@ export function createApp(
   // router, disjoint paths (`/pm/projects/:id/timeline`, `/pm/my-work`); the
   // `projects` module gate covers it through the `/api/pm` prefix.
   app.use("/api", createPmScheduleRouter(prisma));
+  // WARP-3535 — code-host development links, under the same Projects module
+  // gate as every other /api/pm route. Item reads apply the guest assignment
+  // guard; repository administration is owner/admin only.
+  app.use("/api", createPmDevelopmentRouter(prisma));
   // WARP-3524 (WS-8) — Insights has its own disjoint `/pm/insights` path.
   // The `projects` module gate covers it through the `/api/pm` prefix.
   app.use("/api", createPmInsightsRouter(prisma));
@@ -726,6 +751,8 @@ export function createApp(
   // `ambient_data` off-LAN channel, Redis-cached, audited per request;
   // proxies the services/web-fetch allowlisted fetcher.
   app.use("/api", createWebRouter(prisma));
+  app.use("/api", createCameraBusinessHoursRouter(prisma));
+  app.use("/api", createCameraMotionRouter(prisma));
   app.use("/api", createCamerasRouter(prisma));
   app.use("/api", createSwitchRouter(prisma));
   app.use("/api", createDisplayRouter(prisma));

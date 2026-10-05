@@ -44,6 +44,19 @@ import {
   Briefcase,
   Handshake,
   Paperclip,
+  // WARP-3520 — work-item kinds, the item / project menus, field-type glyphs.
+  Bug,
+  SquareCheck,
+  TrendingUp,
+  CircleHelp,
+  Siren,
+  Settings,
+  ArrowUp,
+  ArrowDown,
+  Type,
+  Hash,
+  ToggleLeft,
+  ListChecks,
   ChartColumn,
   ChartGantt,
   type LucideIcon,
@@ -96,6 +109,20 @@ export const ICONS: Record<string, LucideIcon> = {
   handshake: Handshake,
   // WARP-1505 — attach a file to a comment.
   attach: Paperclip,
+  // WARP-3520 — one glyph per work-item kind (`feature` reuses `spark`).
+  task: SquareCheck,
+  bug: Bug,
+  improve: TrendingUp,
+  help: CircleHelp,
+  siren: Siren,
+  settings: Settings,
+  arrowUp: ArrowUp,
+  arrowDown: ArrowDown,
+  // WARP-3520 — custom-field types (`date` is `cal`, `member` is `user`).
+  text: Type,
+  hash: Hash,
+  toggle: ToggleLeft,
+  checks: ListChecks,
   // WARP-3524 — the Insights tab.
   chart: ChartColumn,
   // WARP-3523 — the Timeline view tab.

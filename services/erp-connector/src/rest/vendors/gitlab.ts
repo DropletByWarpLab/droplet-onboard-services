@@ -91,6 +91,7 @@
  * here. `REST_MAX_PAGES` (500 pages × 100 rows) is therefore the only ceiling
  * on a first full scan, and it is REPORTED when hit, never silently applied.
  */
+import type { RestDevelopmentSpec } from "../development.js";
 import type { RestVendorProfile } from "../profile.js";
 
 export const GITLAB_PROVIDER = "gitlab";
@@ -119,6 +120,125 @@ export const GITLAB_API_ORIGIN = "https://gitlab.com";
  * connector reacts to those where they arrive.
  */
 export const GITLAB_MIN_REQUEST_INTERVAL_MS = 720;
+
+/**
+ * WARP-3535 — what the development panel reads from gitlab.com: merge requests,
+ * recent commits and branches, over the same `read_api` token the issues read
+ * already holds (or a fine-grained token with the matching Read permissions).
+ *
+ * 🔴 A project is addressed by its NUMERIC id in every path below, never by
+ * `group/project`: the path form needs the slash URL-encoded (`%2F`), which is a
+ * second spelling of the same project and exactly the kind of string a path
+ * guard should not have to reason about. The id is what the project list
+ * returns and it survives a rename or a transfer.
+ *
+ * 🔴 `draft` is the field; `work_in_progress` is the deprecated spelling and is
+ * not read. A MERGED or CLOSED merge request that was once a draft is still
+ * `draft: true`, so rule order is the semantics: merged, closed, draft, opened.
+ * `locked` (a merge in progress) reads as CLOSED rather than a state the panel
+ * has no word for; it resolves to MERGED on the next pass.
+ *
+ * 🔴 No `updated_after` on the recent list, although GitLab has one. The list is
+ * polled with an ETag, and an ETag only holds across passes if the URL does: a
+ * watermark in the query string changes it every time and turns every poll into
+ * a full read. Newest-first with the caller's cutoff gives the same result with
+ * a URL that stays still.
+ *
+ * `simple=true` on the project list returns the handful of fields read here,
+ * not the several-kilobyte full project object, which matters at 100 a page.
+ */
+export const GITLAB_DEVELOPMENT: RestDevelopmentSpec = {
+  repoRef: { pattern: "^[0-9]{1,18}$" },
+  webHosts: ["gitlab.com"],
+  rateLimit: { limit: "ratelimit-limit", remaining: "ratelimit-remaining", reset: "ratelimit-reset" },
+  repositories: {
+    path: "/api/v4/projects",
+    query: { membership: "true", simple: "true", order_by: "last_activity_at", sort: "desc", per_page: "100" },
+    maxPages: 3,
+    fieldMap: {
+      externalId: "id",
+      apiRef: "id",
+      fullName: "path_with_namespace",
+      webUrl: "web_url",
+      defaultBranch: "default_branch",
+    },
+  },
+  repository: {
+    path: "/api/v4/projects/{repo}",
+    single: true,
+    maxPages: 1,
+    fieldMap: {
+      externalId: "id",
+      apiRef: "id",
+      fullName: "path_with_namespace",
+      webUrl: "web_url",
+      defaultBranch: "default_branch",
+    },
+  },
+  pullRequestsOpen: {
+    path: "/api/v4/projects/{repo}/merge_requests",
+    query: { state: "opened", order_by: "updated_at", sort: "desc", per_page: "100" },
+    maxPages: 3,
+    fieldMap: {
+      externalId: "id",
+      number: "iid",
+      url: "web_url",
+      title: "title",
+      body: "description",
+      author: "author.username",
+      branch: "source_branch",
+      updatedAt: "updated_at",
+    },
+    stateRules: [
+      { when: { path: "state", equals: "merged" }, state: "MERGED" },
+      { when: { path: "state", oneOf: ["closed", "locked"] }, state: "CLOSED" },
+      { when: { path: "draft", equals: true }, state: "DRAFT" },
+      { when: { path: "state", equals: "opened" }, state: "OPEN" },
+    ],
+  },
+  pullRequestsRecent: {
+    path: "/api/v4/projects/{repo}/merge_requests",
+    query: { state: "all", order_by: "updated_at", sort: "desc", per_page: "100" },
+    maxPages: 3,
+    newestFirst: true,
+    fieldMap: {
+      externalId: "id",
+      number: "iid",
+      url: "web_url",
+      title: "title",
+      body: "description",
+      author: "author.username",
+      branch: "source_branch",
+      updatedAt: "updated_at",
+    },
+    stateRules: [
+      { when: { path: "state", equals: "merged" }, state: "MERGED" },
+      { when: { path: "state", oneOf: ["closed", "locked"] }, state: "CLOSED" },
+      { when: { path: "draft", equals: true }, state: "DRAFT" },
+      { when: { path: "state", equals: "opened" }, state: "OPEN" },
+    ],
+  },
+  // The default branch, newest first — what GitLab answers with no `ref_name`.
+  commits: {
+    path: "/api/v4/projects/{repo}/repository/commits",
+    query: { per_page: "100" },
+    maxPages: 2,
+    newestFirst: true,
+    fieldMap: {
+      externalId: "id",
+      url: "web_url",
+      message: "message",
+      author: "author_name",
+      committedAt: "committed_date",
+    },
+  },
+  branches: {
+    path: "/api/v4/projects/{repo}/repository/branches",
+    query: { per_page: "100" },
+    maxPages: 3,
+    fieldMap: { name: "name", url: "web_url" },
+  },
+};
 
 export const GITLAB_PROFILE: RestVendorProfile = {
   provider: GITLAB_PROVIDER,
@@ -210,4 +330,5 @@ export const GITLAB_PROFILE: RestVendorProfile = {
       },
     },
   ],
+  development: GITLAB_DEVELOPMENT,
 };

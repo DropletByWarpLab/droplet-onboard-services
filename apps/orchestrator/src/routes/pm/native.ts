@@ -35,6 +35,7 @@ import { isDateOnly, parseDateInput } from "../../services/pm/pm-dates.js";
 import { recordActivity, recordActivityInTx } from "../../services/activity.singleton.js";
 import { actorFromRequest } from "../../services/activity.service.js";
 import { parsePaging } from "./paging.js";
+import { WORK_ITEM_TYPE, ESTIMATE } from "./field-schemas.js";
 
 
 /** Map a service error code to an HTTP response. Returns true if handled. */
@@ -67,12 +68,20 @@ function mapServiceError(err: unknown, res: Response): boolean {
     case "department_not_assignable":
     // WARP-3365 — an external guest cannot lead a project.
     case "lead_is_guest":
+    // WARP-3520 — well-formed requests the DATA refuses: a default that is a
+    // done/cancelled column, a reorder that
+    // does not list every row once.
+    case "state_default_terminal":
+    case "invalid_order":
     // WARP-3521 — a `cycle_id` naming a cycle of ANOTHER project: the row exists
     // and the request is well-formed, the CHOICE is not processable.
     case "invalid_cycle":
       res.status(422).json({ error: msg });
       return true;
     case "identifier_taken":
+    // WARP-3520 — the item is already in the state the request asks for.
+    case "work_item_archived":
+    case "work_item_not_archived":
     case "state_is_last":
     case "state_is_default":
     // ADR-045 §5.3 — the department exists and is a legal owner in principle;
@@ -180,7 +189,15 @@ const statePatchSchema = z.object({
   group: STATE_GROUP.optional(),
   color: z.string().max(32).nullable().optional(),
   sortOrder: z.number().int().min(0).max(9999).optional(),
+  // WARP-3520 — only `true`: a project always has exactly one default, so it
+  // moves by making ANOTHER state the default, never by clearing this one.
+  isDefault: z.literal(true).optional(),
 });
+
+// WARP-3520 — a full ordering: every row exactly once (the service checks that).
+const stateReorderSchema = z.object({ state_ids: z.array(z.string().min(1).max(64)).min(1).max(100) });
+const stateDeleteQuerySchema = z.object({ reassign_to: z.string().min(1).max(64).optional() });
+const workItemArchivedQuerySchema = z.object({ archived: z.literal("only").optional() });
 
 const labelCreateSchema = z.object({
   name: z.string().min(1).max(100),
@@ -229,6 +246,8 @@ const workItemCreateSchema = z.object({
   cycle_id: z.string().min(1).max(64).optional(),
   start_date: dateField.optional(),
   due_date: dateField.optional(),
+  type: WORK_ITEM_TYPE.optional(),
+  estimate: ESTIMATE.optional(),
 });
 
 const workItemPatchSchema = z.object({
@@ -256,6 +275,9 @@ const workItemPatchSchema = z.object({
   // NaN/Infinity) — JSON cannot carry them, but a client-built string or a future
   // coercion could.
   sortOrder: z.number().finite().optional(),
+  type: WORK_ITEM_TYPE.optional(),
+  // `null` clears the estimate; omitting it leaves it alone.
+  estimate: ESTIMATE.nullable().optional(),
 });
 
 const transitionSchema = z.object({ state_id: z.string().min(1).max(64) });
@@ -543,8 +565,26 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
 
   router.delete("/pm/states/:id", requireRole(...WRITE), async (req, res, next) => {
     try {
-      await pm.deleteState(prisma, req.params.id);
+      // WARP-3520 — `?reassign_to=<stateId>` picks where the state's items go;
+      // omitted, they land in the project's default state as before.
+      const query = stateDeleteQuerySchema.safeParse(req.query);
+      if (!query.success) return badRequest(res, query);
+      await pm.deleteState(prisma, req.params.id, { reassignTo: query.data.reassign_to });
       res.json({ deleted: req.params.id });
+    } catch (err) {
+      if (mapServiceError(err, res)) return;
+      next(err);
+    }
+  });
+
+  // WARP-3520 — the whole column order in one transaction. After
+  // `POST /pm/projects/:id/states` and disjoint from every `:id` route above
+  // (the second segment is a literal), so neither can shadow the other.
+  router.post("/pm/projects/:id/states/reorder", requireRole(...WRITE), async (req, res, next) => {
+    try {
+      const parsed = stateReorderSchema.safeParse(req.body);
+      if (!parsed.success) return badRequest(res, parsed);
+      res.json({ states: await pm.reorderStates(prisma, req.params.id, parsed.data.state_ids) });
     } catch (err) {
       if (mapServiceError(err, res)) return;
       next(err);
@@ -603,8 +643,16 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
       // non-numeric limit/page returns a clean 400 instead of NaN → 500.
       const pageParsed = parsePaging(q);
       if (!pageParsed.success) return badRequest(res, pageParsed);
+      // WARP-3520 — `?archived=only` is the "Archived" list; anything else
+      // non-empty is a 400 rather than a silently ignored typo that would show
+      // the live board where the archive was asked for.
+      const archivedParsed = workItemArchivedQuerySchema.safeParse({
+        archived: q.archived === "" ? undefined : q.archived,
+      });
+      if (!archivedParsed.success) return badRequest(res, archivedParsed);
       const parentRaw = q.parent;
       const page = await pm.listWorkItems(prisma, req.params.id, {
+        archived: archivedParsed.data.archived,
         stateId: q.state ? String(q.state) : undefined,
         assignee: q.assignee ? String(q.assignee) : undefined,
         labelId: q.label ? String(q.label) : undefined,
@@ -662,6 +710,8 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
           cycleId: d.cycle_id,
           startDate: d.start_date,
           dueDate: d.due_date,
+          type: d.type,
+          estimate: d.estimate,
         });
         res.status(201).json({ work_item });
       } catch (err) {
@@ -775,6 +825,8 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
           startDate: d.start_date,
           dueDate: d.due_date,
           sortOrder: d.sortOrder,
+          type: d.type,
+          estimate: d.estimate,
         });
         res.json({ work_item });
       } catch (err) {
@@ -806,9 +858,45 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
     },
   );
 
-  router.delete("/pm/work-items/:id", requireRole(...WRITE), async (req, res, next) => {
+  // WARP-3520 — archive hides an item from the board and list and is fully
+  // reversible; both are ordinary writer actions. Hard delete is not: it is
+  // owner/admin only, below.
+  router.post("/pm/work-items/:id/archive", requireRole(...WRITE), async (req, res, next) => {
     try {
+      res.json({ work_item: await pm.archiveWorkItem(prisma, actorOf(req), req.params.id) });
+    } catch (err) {
+      if (mapServiceError(err, res)) return;
+      next(err);
+    }
+  });
+
+  router.post("/pm/work-items/:id/restore", requireRole(...WRITE), async (req, res, next) => {
+    try {
+      res.json({ work_item: await pm.restoreWorkItem(prisma, actorOf(req), req.params.id) });
+    } catch (err) {
+      if (mapServiceError(err, res)) return;
+      next(err);
+    }
+  });
+
+  // WARP-3520 — OWNER/ADMIN only (it was every writer). A hard delete takes the
+  // item's comments, activity and relations with it, so it is the one item action
+  // that also leaves a signed audit row: the PmActivity trail dies with the item.
+  // Ids and the key only — never the title or description (the audit stream is
+  // exported wholesale).
+  router.delete("/pm/work-items/:id", requireRole("owner", "admin"), async (req, res, next) => {
+    try {
+      const item = await pm.getWorkItem(prisma, req.params.id);
       await pm.deleteWorkItem(prisma, actorOf(req), req.params.id);
+      await recordActivity({
+        kind: "system",
+        severity: "info",
+        sourceIcon: "folder-kanban",
+        what: "pm_work_item_delete",
+        sub: item.key,
+        refs: { surface: "projects", workItemId: item.id, projectId: item.projectId, key: item.key },
+        actor: actorFromRequest(req),
+      });
       res.json({ deleted: req.params.id });
     } catch (err) {
       if (mapServiceError(err, res)) return;

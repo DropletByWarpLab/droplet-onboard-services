@@ -59,13 +59,18 @@ import { packagePath } from "../../__tests__/helpers/test-paths.js";
 import { createPmNativeRouter } from "./native.js";
 import { createPmRelationsRouter } from "./relations.js";
 import { createPmAttachmentsRouter } from "./attachments.js";
+import { createPmQueryRouter } from "./query.js";
+import { createPmViewsRouter } from "./views.js";
 import { createPmImportExportRouter } from "./import-export.js";
 import { createPmPlanningRouter } from "./planning.js";
 import { createPmInsightsRouter } from "./insights.js";
 import { createPmTimeRouter } from "./time.js";
+import { createPmFieldsRouter } from "./fields.js";
 import { createPmWebhooksRouter } from "./webhooks.js";
 import { createPmScheduleRouter } from "./schedule.js";
+import { createPmDevelopmentRouter } from "./development.js";
 import { createPmOpenApiRouter } from "./openapi.js";
+import { createPmBulkRouter } from "./bulk.js";
 import { createPmMobileRouter } from "../mobile/pm.js";
 
 // ── the edges ───────────────────────────────────────────────────────────────
@@ -156,6 +161,24 @@ const PM_ROUTER_MOUNTS: readonly PmRouterMount[] = [
     router: createPmOpenApiRouter(),
   },
   {
+    factory: "createPmQueryRouter",
+    base: "/api",
+    file: "routes/pm/query.ts",
+    router: createPmQueryRouter(PRISMA),
+  },
+  {
+    factory: "createPmViewsRouter",
+    base: "/api",
+    file: "routes/pm/views.ts",
+    router: createPmViewsRouter(PRISMA),
+  },
+  {
+    factory: "createPmBulkRouter",
+    base: "/api",
+    file: "routes/pm/bulk.ts",
+    router: createPmBulkRouter(PRISMA),
+  },
+  {
     factory: "createPmNativeRouter",
     base: "/api",
     file: "routes/pm/native.ts",
@@ -192,6 +215,12 @@ const PM_ROUTER_MOUNTS: readonly PmRouterMount[] = [
     router: createPmTimeRouter(PRISMA),
   },
   {
+    factory: "createPmFieldsRouter",
+    base: "/api",
+    file: "routes/pm/fields.ts",
+    router: createPmFieldsRouter(PRISMA),
+  },
+  {
     factory: "createPmWebhooksRouter",
     base: "/api",
     file: "routes/pm/webhooks.ts",
@@ -202,6 +231,12 @@ const PM_ROUTER_MOUNTS: readonly PmRouterMount[] = [
     base: "/api",
     file: "routes/pm/schedule.ts",
     router: createPmScheduleRouter(PRISMA),
+  },
+  {
+    factory: "createPmDevelopmentRouter",
+    base: "/api",
+    file: "routes/pm/development.ts",
+    router: createPmDevelopmentRouter(PRISMA),
   },
   {
     factory: "createPmInsightsRouter",
@@ -499,7 +534,9 @@ describe("WARP-1625 — the walk finds the routes the routers register", () => {
     ["createPmNativeRouter", "POST /api/pm/projects"],
     ["createPmNativeRouter", "DELETE /api/pm/projects/:id"],
     ["createPmRelationsRouter", "GET /api/pm/work-items/:id/relations"],
+    ["createPmDevelopmentRouter", "GET /api/pm/work-items/:id/development"],
     ["createPmWebhooksRouter", "GET /api/pm/webhooks"],
+    ["createPmDevelopmentRouter", "GET /api/pm/development/repositories"],
     ["createPmWebhooksRouter", "POST /api/pm/webhooks/:id/deliveries/:deliveryId/redeliver"],
     ["createPmMobileRouter", "GET /api/mobile/pm/workspaces"],
   ];
