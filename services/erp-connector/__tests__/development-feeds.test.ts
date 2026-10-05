@@ -325,6 +325,18 @@ describe("mapping a commit", () => {
 });
 
 describe("mapping a branch", () => {
+  it("rejects an oversized repository URL before trimming its trailing slashes", () => {
+    expect(mapFeedRow("branches", GITHUB_DEVELOPMENT.branches, { name: "main" }, {
+      ...gh, repoWebUrl: `${gh.repoWebUrl}${"/".repeat(10_000)}`,
+    })).toBeNull();
+  });
+
+  it("trims repository URL suffix slashes while preserving branch path segments", () => {
+    expect(mapFeedRow("branches", GITHUB_DEVELOPMENT.branches, { name: "feature/fix" }, {
+      ...gh, repoWebUrl: `${gh.repoWebUrl}///`,
+    })).toMatchObject({ url: "https://github.com/acme/widgets/tree/feature/fix" });
+  });
+
   it("builds GitHub's branch URL from the repository's web URL, encoding each segment but not the slashes", () => {
     expect(mapFeedRow("branches", GITHUB_DEVELOPMENT.branches, { name: "feature/warp-12 login#1" }, gh)).toBeNull();
     expect(mapFeedRow("branches", GITHUB_DEVELOPMENT.branches, { name: "feature/warp-12-login" }, gh)).toEqual({

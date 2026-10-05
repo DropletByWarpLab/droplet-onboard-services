@@ -501,8 +501,12 @@ function mapBranch(spec: RestFeedSpec, row: unknown, ctx: MapContext): DevBranch
   if (!name || name !== nameRaw || /\s/.test(name)) return null;
   let rawUrl: unknown = f.url ? pick(row, f.url) : undefined;
   if (rawUrl === undefined && spec.urlTemplate && ctx.repoWebUrl) {
+    const repoWebUrl = safeWebUrl(ctx.repoWebUrl, ctx.webHosts);
+    if (!repoWebUrl) return null;
+    let end = repoWebUrl.length;
+    while (end > 0 && repoWebUrl[end - 1] === "/") end--;
     const encoded = name.split("/").map(encodeURIComponent).join("/");
-    rawUrl = spec.urlTemplate.replaceAll("{webUrl}", ctx.repoWebUrl.replace(/\/+$/, "")).replaceAll("{name}", encoded);
+    rawUrl = spec.urlTemplate.replaceAll("{webUrl}", repoWebUrl.slice(0, end)).replaceAll("{name}", encoded);
   }
   const url = safeWebUrl(rawUrl, ctx.webHosts);
   return url ? { type: "branch", name, url } : null;
