@@ -26,9 +26,12 @@ const USER = { id: "u1", username: "alice", displayName: "Alice", role: "family"
 let server: Server | undefined;
 
 afterEach(async () => {
-  vi.clearAllMocks();
   await new Promise<void>((r) => (server ? server.close(() => r()) : r()));
   server = undefined;
+  // Let shutdown callbacks from upgraded sockets settle before resetting the
+  // auth spy, so a previous test cannot contaminate the next one's assertion.
+  await new Promise((r) => setTimeout(r, 25));
+  vi.clearAllMocks();
 });
 
 async function connect(headers: Record<string, string>, protocol?: string) {
@@ -42,15 +45,20 @@ async function connect(headers: Record<string, string>, protocol?: string) {
       protocol ? [protocol] : [],
       { headers },
     );
-    ws.on("open", () => {
-      ws.on("close", (code) => resolve({ status: "open", closeCode: code }));
-      // Safety net: if the server never closes, end the test with no code.
-      setTimeout(() => {
-        ws.close();
-        resolve({ status: "open" });
-      }, 1000);
+    let safetyTimer: ReturnType<typeof setTimeout> | undefined;
+    ws.on("close", (code) => {
+      if (safetyTimer) clearTimeout(safetyTimer);
+      resolve({ status: "open", closeCode: code });
     });
-    ws.on("unexpected-response", (_req, res) => resolve({ status: res.statusCode ?? 0 }));
+    ws.on("open", () => {
+      // The bounded safety timer terminates a healthy connection only after
+      // the test has observed it open; connect resolves on the actual close.
+      safetyTimer = setTimeout(() => ws.terminate(), 1000);
+    });
+    ws.on("unexpected-response", (_req, res) => {
+      if (safetyTimer) clearTimeout(safetyTimer);
+      resolve({ status: res.statusCode ?? 0 });
+    });
     ws.on("error", () => undefined);
   });
 }
