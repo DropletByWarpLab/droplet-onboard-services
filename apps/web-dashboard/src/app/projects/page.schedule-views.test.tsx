@@ -185,7 +185,7 @@ describe("view switcher", () => {
   it("offers Calendar and Timeline between List and Cycles", () => {
     openProject();
     const tabs = within(screen.getByRole("tablist", { name: "View" })).getAllByRole("tab");
-    expect(tabs.map((t) => t.textContent)).toEqual(["Board", "List", "Table", "Calendar", "Timeline", "Cycles", "Modules", "Time"]);
+    expect(tabs.map((t) => t.textContent)).toEqual(["Board", "List", "Table", "Calendar", "Timeline", "Cycles", "Modules", "Insights", "Time"]);
   });
 
   it("shows the table layout without rendering the list underneath it", () => {

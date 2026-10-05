@@ -166,6 +166,7 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 # units already hit exactly that: droplet-egress-audit and droplet-wifi-rotate.
 # If the path ever stops being auto-created, prefix it `-` to make it optional.
 ReadWritePaths=/var/log/droplet-device-bridge.log
+ReadWritePaths=/run/droplet-storage-ops
 # WARP-843: the customer Wi-Fi writes (droplet-set-hostapd.sh /
 # droplet-set-guest-wifi.sh) land in this unit's own StateDirectory
 # (/var/lib/droplet-bridge/openwrt-attach.env), which systemd already makes

@@ -7,7 +7,7 @@ import { PmIcon } from "./icons";
 
 import type { JSX } from "react";
 
-export type ProjectView = "board" | "list" | "table" | "calendar" | "timeline" | "cycles" | "modules" | "time";
+export type ProjectView = "board" | "list" | "table" | "calendar" | "timeline" | "cycles" | "modules" | "insights" | "time";
 export type SavedView = "all" | "mine" | "active" | "overdue" | "noassignee";
 
 export function ViewSwitcher({
@@ -25,6 +25,7 @@ export function ViewSwitcher({
     ["timeline", "Timeline", "gantt"],
     ["cycles", "Cycles", "target"],
     ["modules", "Modules", "layers"],
+    ["insights", "Insights", "chart"],
     ["time", "Time", "clock"],
   ];
   return (

@@ -58,6 +58,11 @@ import {
   saveRawConfig,
   withFrigateConfigLock,
 } from "./frigate.client.js";
+import {
+  CAMERA_DETECT_FPS_MAX,
+  CAMERA_DETECT_FPS_MIN,
+  CAMERA_RETENTION_DAYS_MAX,
+} from "@droplet/shared-types";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("camera-settings");
@@ -282,11 +287,12 @@ export async function getCameraSettings(
 const ZONE_NAME_RE = /^[a-zA-Z0-9_-]{1,40}$/;
 
 /** Range-check one retention window. Frigate stores days as a float
- *  `ge=0`; we cap at 365 so a fat-fingered value can't silently commit
- *  the appliance to years of footage. */
+ *  `ge=0` with no upper bound; the cap is the appliance's own, shared with
+ *  the dashboard's sliders (WARP-3511), so a fat-fingered value can't
+ *  silently commit the box to years of footage. */
 function assertRetentionDays(days: number, field: string): void {
-  if (!Number.isFinite(days) || days < 0 || days > 365) {
-    throw new Error(`${field} must be between 0 and 365`);
+  if (!Number.isFinite(days) || days < 0 || days > CAMERA_RETENTION_DAYS_MAX) {
+    throw new Error(`${field} must be between 0 and ${CAMERA_RETENTION_DAYS_MAX}`);
   }
 }
 
@@ -383,10 +389,12 @@ async function saveCameraSettings(
   if (patch.detectFps !== undefined) {
     if (
       !Number.isFinite(patch.detectFps) ||
-      patch.detectFps < 1 ||
-      patch.detectFps > 30
+      patch.detectFps < CAMERA_DETECT_FPS_MIN ||
+      patch.detectFps > CAMERA_DETECT_FPS_MAX
     ) {
-      throw new Error("detectFps must be between 1 and 30");
+      throw new Error(
+        `detectFps must be between ${CAMERA_DETECT_FPS_MIN} and ${CAMERA_DETECT_FPS_MAX}`,
+      );
     }
   }
   if (patch.continuousRetainDays !== undefined) {
