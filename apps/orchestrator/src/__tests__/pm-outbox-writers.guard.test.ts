@@ -32,9 +32,11 @@ describe("PmActivity writes wake the generic outbox", () => {
       if (_name === "services/pm/pm.service.ts") {
         // Work-item deletion commits one tombstone plus the surviving-end
         // relation audit rows in a single serializable transaction, then wakes
-        // once. Ordinary activity writes retain their own wake.
-        expect(writes).toBe(3);
-        expect(nudges).toBe(2);
+        // once. Ordinary single-row and bulk activity writes each retain
+        // their own wake, including the batch helper introduced by WARP-3537.
+        expect(writes).toBe(4);
+        expect(nudges).toBe(3);
+        expect(text).toMatch(/if \(input\.some\(\(entry\) => entry\.nudge !== false\)\) nudgeOutbox\(\)/);
         expect(text).toMatch(/if \(input\.nudge !== false\) nudgeOutbox\(\)/);
         expect(text).toMatch(/\}, \{ \.\.\.SERIALIZABLE_TX, timeout: 5_000 \}\);\s*nudgeOutbox\(\)/);
       } else if (_name === "services/support/escalation.service.ts") {
