@@ -95,6 +95,15 @@ describe("workspace-nav-config — the map is complete and single-homed", () => 
       expect(set.has(href), `${href} has no home`).toBe(true);
   });
 
+  // WARP-3528 — Support is a child of Customers in the sidebar and a chip of its
+  // own here (rule 2: only the surface differs), beside the destination it is
+  // filed under.
+  it("homes /support in Business, right after Customers (WARP-3528)", () => {
+    const business = SPACES.find((s) => s.id === "business")!.hrefs;
+    expect(business.indexOf("/support")).toBe(business.indexOf("/customers") + 1);
+    expect(spaceHrefs.filter((href) => href === "/support")).toHaveLength(1);
+  });
+
   it("has six spaces, Business between Work and Operations (ADR-044)", () => {
     expect(SPACES.map((s) => s.id)).toEqual([
       "home",
@@ -149,6 +158,28 @@ describe("workspace-nav-config — gates are the sidebar's", () => {
     expect(chips("projects")).not.toContain("/projects");
     expect(chips("network")).toContain("/voice");
     expect(chips("network")).not.toContain("/remote-access");
+  });
+
+  it("keeps Support with CRM off and drops it with Support off (WARP-3528)", () => {
+    // The sidebar's promotion, mirrored: Customers failing only its `crm` gate
+    // does not take a child with a module of its own, and Support off drops
+    // only Support.
+    const chips = (off: string) =>
+      resolveSpaces("owner", ALL_CAPS, (id) => id !== off).flatMap((s) =>
+        s.destinations.map((d) => d.item.href),
+      );
+    expect(chips("crm")).toContain("/support");
+    expect(chips("crm")).not.toContain("/customers");
+    expect(chips("support")).toContain("/customers");
+    expect(chips("support")).not.toContain("/support");
+  });
+
+  it("hides Customers and Support from a guest, whatever is on (WARP-3528)", () => {
+    const hrefs = resolveSpaces("guest", ALL_CAPS, allOn).flatMap((s) =>
+      s.destinations.map((d) => d.item.href),
+    );
+    expect(hrefs).not.toContain("/customers");
+    expect(hrefs).not.toContain("/support");
   });
 
   it("a role gate hides the chip, and an emptied space loses its tab", () => {
@@ -219,6 +250,10 @@ describe("workspace-nav-config — Level 3 views", () => {
     expect(dest("/cameras")?.views).toEqual([]);
   });
 
+  it("Customers has no views — its only child (Support) is a chip (WARP-3528)", () => {
+    expect(dest("/customers")?.views).toEqual([]);
+  });
+
   it("a destination without children has no views", () => {
     expect(dest("/network")?.views).toEqual([]);
   });
@@ -241,6 +276,8 @@ describe("workspace-nav-config — locate() derives space + destination from the
     ["/admin/prompt", "ai", "/admin/prompt", null],
     ["/knowledge", "ai", "/knowledge", null],
     ["/network", "ops", "/network", null],
+    ["/customers", "business", "/customers", null],
+    ["/support", "business", "/support", null],
   ])("%s → %s / %s (view %s)", (path, space, destHref, viewHref) => {
     const loc = locate(spaces, path);
     expect(loc?.space.def.id).toBe(space);

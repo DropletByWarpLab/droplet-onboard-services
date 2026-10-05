@@ -98,7 +98,9 @@ SHARED_PAGE="$DOCS_DIR/credential-handling.md"
 # WARP-2917 — `gitlab` is the fourth REST-track vendor, same obligation.
 # WARP-2918 — `todoist` is the fifth REST-track vendor; same obligation.
 # WARP-2919 — `loyverse`, the sixth REST-track vendor, for the same reason.
-CLOUD_PROVIDERS="stripe hubspot mailchimp shopify xero atlassian brevo klaviyo pipedrive square calcom github gitlab todoist loyverse"
+# WARP-3697 — `gocardless`, the first wave-3 vendor (free-integrations wave 3).
+# WARP-3698 — `capsule`, the second.
+CLOUD_PROVIDERS="stripe hubspot mailchimp shopify xero atlassian brevo klaviyo pipedrive square calcom github gitlab todoist loyverse gocardless capsule"
 
 # The six sections every vendor guide must carry, as exact H2 headings.
 # Dropping any one of them is the mutation this list exists to catch.
@@ -316,6 +318,34 @@ fact_pins() {
       #    guide that sends the owner to the OAuth developer dashboard has
       #    described the wrong credential.
       printf '%s\n' 'unlimited access' 'receipts are not among the things this connection reads' '300 requests every 300 seconds' 'Access tokens'
+      ;;
+    gocardless)
+      # Five facts a customer acts on (WARP-3697, ADR-042 §2 row):
+      #  - 'Developers' and 'API settings' are the screens that hold the token;
+      #    softening them to "your dashboard settings" sends the owner looking
+      #    for a page that is not called that.
+      #  - 'Create access token' is the button that mints it — and the only moment
+      #    GoCardless shows the value, so a guide that loses the verb loses the
+      #    warning that goes with it.
+      #  - 'read-only' is the scope to choose. The box never writes, but the TOKEN
+      #    is only as narrow as the scope picked at creation; a guide that stops
+      #    asking for it hands a read-write token to a read-only product.
+      #  - 'does not revoke' — disabling the admin who made a token does NOT
+      #    revoke it (GoCardless's own article). Softening that to "may stay
+      #    active" turns an offboarding checklist into a standing credential.
+      printf '%s\n' 'Developers' 'API settings' 'Create access token' 'read-only' 'does not revoke'
+      ;;
+    capsule)
+      # Two facts a customer acts on, as four pins (WARP-3698, ADR-042 §2 row):
+      #  - 'My Preferences' and 'API Authentication' are the screens that hold the
+      #    token, and 'Generate new API token' is the button; softening them to
+      #    "your account settings" sends the owner looking for a page that is not
+      #    called that.
+      #  - '4,000 requests' an hour is the per-USER allowance, shared with every
+      #    other tool using that user's tokens. A guide that drops it hides why a
+      #    busy hour can slow the box down, and why a full re-read of the tasks
+      #    list has a cost.
+      printf '%s\n' 'My Preferences' 'API Authentication' 'Generate new API token' '4,000 requests'
       ;;
     *)
       : # no pins declared for this provider

@@ -117,11 +117,18 @@ export const FEATURE_GATED_MODULES: ReadonlySet<ModuleId> = new Set<ModuleId>([
   // so `gateScopeFor` returns null for both and no sibling surface is caught.
   "crm",
   "money",
+  // `support` (WARP-3528, ADR-069 §1) ships WITH its access ladder and its
+  // per-person gate in the same change, so it does not repeat the `crm` /
+  // `money` omission above: a custom role without `support` reads /api/support
+  // as absent from day one. Its prefix nests in nothing (`gateScopeFor` is
+  // null), and it owns no tool domain yet, so `mountMcpActingUserGates` mounts
+  // nothing on it.
+  "support",
 ]);
 
 /**
  * WARP-3365 / WARP-3369 — the modules a human tier may hold NOTHING on, read
- * off the access catalog (`refuseBelowFloor`): crm, projects and money.
+ * off the access catalog (`refuseBelowFloor`): crm, projects, money and support.
  * Derived, not listed, so the role floor cannot drift from the grant floor.
  * `projects` is deliberately NOT in FEATURE_GATED_MODULES (a CRM-only person
  * still reads /api/pm through the browser and the assistant, see

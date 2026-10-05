@@ -88,7 +88,6 @@ import { FrigateNotFoundError } from "../types/frigate-error.js";
  * not the bedroom") is WARP-1962 and needs a schema change; this ships
  * first precisely so the open door does not stay open waiting for it.
  */
-const CAMERA_VIEW_ROLES = ["owner", "admin", "family"] as const;
 
 /**
  * Who may take footage OFF the box or destroy it.
@@ -156,6 +155,7 @@ import {
   narrowCameraFilter,
   principalFromRequest,
   requireCameraAccess,
+  CAMERA_VIEW_ROLES,
   visibleCameraNames,
   setGrantsForUser,
 } from "../services/camera-access.service.js";

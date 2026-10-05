@@ -1,0 +1,118 @@
+/* Support (service desk) surface — WARP-3528.
+ *
+ * Sits INSIDE the Projects scope so /support is visually one system with
+ * /projects: every rule is `.pm-scope`-scoped, `sp-`-prefixed, and built only
+ * from the alias tokens projects.css already defines (--accent, --text*,
+ * --bg-*, --border*, --ok/--warn/--err/--info and their -soft forms, --ease).
+ * No hex literal, no new token. The internal-note tint is --warn-soft.
+ */
+
+/* ── three panes: queues | list | ticket ───────────────────────────────── */
+.pm-scope .sp-layout {
+  display: grid; grid-template-columns: 200px minmax(280px, 360px) minmax(0, 1fr);
+  gap: 16px; align-items: start;
+}
+.pm-scope .sp-pane { min-width: 0; }
+.pm-scope .sp-col { display: flex; flex-direction: column; gap: 10px; }
+
+.pm-scope .sp-rail { display: flex; flex-direction: column; gap: 2px; position: sticky; top: 8px; }
+.pm-scope .sp-q {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;
+  min-height: 34px; padding: 0 10px; border-radius: 8px; border: 1px solid transparent;
+  background: transparent; color: var(--text-2); font-size: 13px; font-family: inherit; cursor: pointer; text-align: left;
+  transition: background 120ms var(--ease), color 120ms var(--ease);
+}
+.pm-scope .sp-q:hover { background: var(--bg-hover); color: var(--text); }
+.pm-scope .sp-q:focus-visible { outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent); }
+.pm-scope .sp-q.on { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); font-weight: 500; }
+.pm-scope .sp-q .n { font-family: var(--font-mono); font-size: 12px; font-variant-numeric: tabular-nums; color: var(--text-3); }
+.pm-scope .sp-q.on .n { color: var(--accent); }
+.pm-scope .sp-rail-h { font-size: 11px; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase; color: var(--text-4); padding: 10px 10px 4px; }
+
+/* ── ticket list ──────────────────────────────────────────────────────── */
+.pm-scope .sp-list { display: flex; flex-direction: column; overflow: hidden; }
+.pm-scope .sp-row {
+  display: flex; flex-direction: column; gap: 5px; width: 100%; padding: 11px 14px;
+  border: none; border-bottom: 1px solid var(--border); background: var(--bg-canvas);
+  text-align: left; font-family: inherit; cursor: pointer; color: var(--text);
+  transition: background 120ms var(--ease);
+}
+.pm-scope .sp-row:last-child { border-bottom: none; }
+.pm-scope .sp-row:hover { background: var(--bg-tint); }
+.pm-scope .sp-row:focus-visible { outline: none; box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent); }
+.pm-scope .sp-row.sel { background: color-mix(in srgb, var(--accent) 8%, transparent); box-shadow: inset 3px 0 0 var(--accent); }
+.pm-scope .sp-row .who { font-size: 13px; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pm-scope .sp-row .sub { font-size: 13px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pm-scope .sp-row .meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 11.5px; color: var(--text-3); }
+.pm-scope .sp-gone { font-weight: 400; color: var(--text-4); font-size: 11.5px; }
+.pm-scope .sp-more { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 14px; font-size: 12px; color: var(--text-3); border-top: 1px solid var(--border); }
+
+/* ── SLA badge ────────────────────────────────────────────────────────── */
+.pm-scope .sp-sla { display: inline-flex; align-items: center; height: 20px; padding: 0 8px; border-radius: 999px; font-size: 11px; font-weight: 500; background: var(--bg-sunken); color: var(--text-3); }
+.pm-scope .sp-sla.ok { background: var(--ok-soft); color: var(--text); }
+.pm-scope .sp-sla.warn { background: var(--warn-soft); color: var(--text); }
+.pm-scope .sp-sla.err { background: var(--err-soft); color: var(--text); }
+
+/* ── ticket workspace ─────────────────────────────────────────────────── */
+.pm-scope .sp-ws { container-type: inline-size; display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.pm-scope .sp-ws-h { padding: 16px 18px; display: flex; flex-direction: column; gap: 10px; }
+.pm-scope .sp-ws-h h2 { margin: 0; font-size: 19px; font-weight: 700; letter-spacing: -0.01em; color: var(--text); overflow-wrap: anywhere; }
+.pm-scope .sp-ws-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; }
+@container (min-width: 780px) {
+  .pm-scope .sp-ws-body { grid-template-columns: minmax(0, 1fr) 250px; }
+}
+.pm-scope .sp-side { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.pm-scope .sp-card { padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+.pm-scope .sp-card h3 { margin: 0; font-size: 13px; font-weight: 600; color: var(--text); }
+.pm-scope .sp-props { display: grid; grid-template-columns: 1fr; gap: 10px; }
+@container (min-width: 520px) and (max-width: 779px) {
+  .pm-scope .sp-props { grid-template-columns: 1fr 1fr; }
+}
+.pm-scope .sp-kv { font-size: 13px; color: var(--text-2); display: flex; flex-direction: column; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
+.pm-scope .sp-kv .k { font-size: 11px; color: var(--text-4); text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600; }
+
+/* ── conversation ─────────────────────────────────────────────────────── */
+.pm-scope .sp-convo { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.pm-scope .sp-entry { padding: 12px 14px; border-radius: 12px; border: 1px solid var(--border); background: var(--bg-canvas); display: flex; flex-direction: column; gap: 6px; }
+.pm-scope .sp-entry.reply { border-left: 3px solid var(--accent); }
+/* An internal note is told from a reply by surface, label and rule — never by
+   colour alone: the tint, a different edge, and the words "Internal note". */
+.pm-scope .sp-entry.note { background: var(--warn-soft); border-color: color-mix(in srgb, var(--warn) 40%, var(--border)); border-left: 3px dashed var(--warn); }
+.pm-scope .sp-entry-h { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12.5px; color: var(--text-3); }
+.pm-scope .sp-entry-h strong { color: var(--text); font-weight: 600; }
+.pm-scope .sp-visibility { font-size: 11px; font-weight: 600; color: var(--text); display: inline-flex; align-items: center; gap: 5px; }
+.pm-scope .sp-activity { font-size: 12.5px; color: var(--text-3); display: flex; align-items: center; gap: 8px; padding: 0 6px; }
+.pm-scope .sp-activity::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--border-strong); flex: none; }
+
+/* ── composer ─────────────────────────────────────────────────────────── */
+.pm-scope .sp-composer { padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; }
+.pm-scope .sp-composer.note { background: var(--warn-soft); border-color: color-mix(in srgb, var(--warn) 40%, var(--border)); }
+.pm-scope .sp-composer-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.pm-scope .sp-hint { font-size: 12px; color: var(--text-2); }
+
+/* ── requester picker ─────────────────────────────────────────────────── */
+.pm-scope .sp-picker { position: relative; }
+.pm-scope .sp-pick-list {
+  position: absolute; z-index: 5; left: 0; right: 0; top: calc(100% + 4px); max-height: 240px; overflow-y: auto;
+  background: var(--bg-canvas); border: 1px solid var(--border-strong); border-radius: 10px; padding: 4px; list-style: none; margin: 0;
+  box-shadow: 0 14px 30px -16px color-mix(in srgb, var(--text) 28%, transparent);
+}
+.pm-scope .sp-pick-item { display: flex; flex-direction: column; gap: 1px; padding: 8px 10px; border-radius: 8px; cursor: pointer; font-size: 13px; color: var(--text); }
+.pm-scope .sp-pick-item[aria-selected="true"] { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.pm-scope .sp-pick-item .sub { font-size: 12px; color: var(--text-3); }
+
+/* ── narrow: rail becomes a chip row; the ticket replaces the list ────── */
+@media (max-width: 1023px) {
+  .pm-scope .sp-layout { grid-template-columns: minmax(0, 1fr); }
+  .pm-scope .sp-hide-narrow { display: none; }
+  .pm-scope .sp-rail { flex-direction: row; overflow-x: auto; position: static; padding-bottom: 4px; gap: 6px; }
+  .pm-scope .sp-rail-h { display: none; }
+  .pm-scope .sp-q { width: auto; flex: none; border-color: var(--border); border-radius: 999px; min-height: 36px; gap: 10px; }
+}
+@media (max-width: 720px) {
+  .pm-scope .sp-q { min-height: 44px; }
+  .pm-scope .sp-row { padding: 13px 14px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pm-scope .sp-q, .pm-scope .sp-row { transition: none !important; }
+}
