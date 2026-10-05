@@ -138,6 +138,7 @@ describe("changing a property", () => {
     mount();
     fireEvent.change(screen.getByLabelText("Priority"), { target: { value: "urgent" } });
     await waitFor(() => expect(updateTicket).toHaveBeenCalledWith("t-1", { priority: "urgent" }));
+    await waitFor(() => expect(screen.getByLabelText("Assignee")).not.toBeDisabled());
     fireEvent.change(screen.getByLabelText("Assignee"), { target: { value: "u-2" } });
     await waitFor(() => expect(updateTicket).toHaveBeenCalledWith("t-1", { assigneeIds: ["u-2"] }));
   });
