@@ -273,6 +273,7 @@ describe.skipIf(!RUN)("the token and feed-link services over real Postgres (WARP
   let prisma: PrismaClient;
   const OURS = { startsWith: "warp3533s-" } as const;
   let user: { id: string; username: string };
+  let workspaceId = "";
   let projectId = "";
   let otherProjectId = "";
   let n = 0;
@@ -307,6 +308,7 @@ describe.skipIf(!RUN)("the token and feed-link services over real Postgres (WARP
     });
     user = { id: u.id, username: u.username };
     const ws = await prisma.pmWorkspace.create({ data: { slug: `warp3533s-ws-${Date.now()}`, name: "warp3533s-ws" } });
+    workspaceId = ws.id;
     projectId = (await prisma.pmProject.create({ data: { workspaceId: ws.id, name: "warp3533s-a", identifier: "S33A" } })).id;
     otherProjectId = (await prisma.pmProject.create({ data: { workspaceId: ws.id, name: "warp3533s-b", identifier: "S33B" } })).id;
   });
@@ -452,14 +454,14 @@ describe.skipIf(!RUN)("the token and feed-link services over real Postgres (WARP
         name: "warp3533-private-ticket",
         stateId: desk.states[0]!.id,
         dueDate: new Date(),
-        assignees: { create: [{ userId }] },
+        assignees: { create: [{ userId: user.id }] },
       },
     });
 
     expect(await findFeedProject(prisma, desk.id)).toBeNull();
     expect((await listFeedProjects(prisma)).some((project) => project.id === desk.id)).toBe(false);
     expect(await listProjectFeedItems(prisma, desk.id)).toEqual([]);
-    expect(await listMyWorkFeedItems(prisma, userId)).toEqual([]);
+    expect(await listMyWorkFeedItems(prisma, user.id)).toEqual([]);
     expect(await prisma.pmWorkItem.findUnique({ where: { id: item.id } })).not.toBeNull();
   });
 });

@@ -597,7 +597,7 @@ describe("WARP-3533 — a hostile name cannot put a line of its own into a colle
     it(`${label}: every separator in an item, project and state name becomes a space and starts no line`, async () => {
       const db = makeDb();
       for (const ch of SEPARATORS) {
-        db.projects.push({ id: `p-h${db.projects.length}`, identifier: "HOS", name: `Proj${ch}BEGIN:VALARM${ch}ACTION:DISPLAY`, isArchived: false });
+        db.projects.push({ id: `p-h${db.projects.length}`, identifier: "HOS", name: `Proj${ch}BEGIN:VALARM${ch}ACTION:DISPLAY`, isArchived: false, kind: "PROJECT" });
         const project = db.projects[db.projects.length - 1];
         db.addItem({
           projectId: project.id,
