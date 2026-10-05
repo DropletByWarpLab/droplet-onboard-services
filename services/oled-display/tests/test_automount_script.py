@@ -201,6 +201,35 @@ printf 'droplet-usb-enroll.sh %s\n' "$*" >> "$CMD_LOG"
 case "${1:-}" in derive) printf 'deadbeefdeadbeef\n' ;; esac
 exit 0
 """
+# WARP-3513 stubs. tune2fs answers `-l` with the superblock summary the
+# project-quota probe parses: $STUB_TUNE2FS_FEATURES replaces the
+# "Filesystem features:" value (the default is an ext4 WITHOUT the project
+# feature — every drive that predates WARP-3513), $STUB_TUNE2FS_EXTRA appends a
+# raw line, $STUB_TUNE2FS_RC makes it fail (a tune2fs that cannot read the
+# device). A stub also keeps every run hermetic: a real tune2fs on the test
+# host must never be pointed at a fake /dev node.
+_STUBS["tune2fs"] = r"""
+printf 'tune2fs %s\n' "$*" >> "$CMD_LOG"
+case " $* " in
+  *" -l "*)
+    printf 'tune2fs 1.47.2 (1-Jan-2025)\n' >&2
+    [ -n "${STUB_TUNE2FS_RC:-}" ] && exit "$STUB_TUNE2FS_RC"
+    printf 'Filesystem volume name:   <none>\n'
+    printf 'Filesystem features:      %s\n' "${STUB_TUNE2FS_FEATURES-has_journal ext_attr resize_inode dir_index filetype extent 64bit flex_bg sparse_super large_file huge_file dir_nlink extra_isize metadata_csum}"
+    [ -n "${STUB_TUNE2FS_EXTRA:-}" ] && printf '%s\n' "$STUB_TUNE2FS_EXTRA"
+    printf 'Default mount options:    user_xattr acl\n'
+    exit 0 ;;
+esac
+exit 0
+"""
+# The bay unlock wraps its single TPM attach in `timeout 60`. Log the call, drop
+# the DURATION and run the rest (a bare `timeout` resolves to Windows' own
+# timeout.exe under Git-Bash otherwise).
+_STUBS["timeout"] = r"""
+printf 'timeout %s\n' "$*" >> "$CMD_LOG"
+shift
+exec "$@"
+"""
 
 
 def _run_add(device: str, fs_type: str, tmp_path: Path, extra_env: dict | None = None,
@@ -243,6 +272,10 @@ def _run_add(device: str, fs_type: str, tmp_path: Path, extra_env: dict | None =
         "DROPLET_AUTOMOUNT_STATE_DIR": _posix(state_dir),
         "DROPLET_AUTOMOUNT_LOG": _posix(script_log),
         "BRIDGE_ENV_FILE": _posix(tmp_path / "no-such.env"),
+        # WARP-3513: never read the test host's real /etc/crypttab or probe its
+        # real /dev/mapper — a bay is a bay only because THIS test says so.
+        "DROPLET_AUTOMOUNT_CRYPTTAB": _posix(tmp_path / "crypttab"),
+        "DROPLET_AUTOMOUNT_DEV_DIR": _posix(tmp_path / "dev"),
         # WARP-232: point the LUKS-unlock helper seam at the stub on PATH.
         "DROPLET_AUTOMOUNT_USB_ENROLL": _posix(stub_dir / "droplet-usb-enroll.sh"),
         "DROPLET_SYSTEMD_CRYPTSETUP_BIN": _posix(stub_dir / "systemd-cryptsetup"),
@@ -878,13 +911,17 @@ class TestReconcile:
                        extra_env: dict | None = None,
                        dev_nodes: list[str] | None = None,
                        node_types: dict[str, str] | None = None,
-                       node_uuids: dict[str, str] | None = None):
+                       node_uuids: dict[str, str] | None = None,
+                       stub_overrides: dict | None = None):
         """mounts: mount-dir name -> backing source device.
 
         WARP-1361: dev_nodes lists md device names to place in the hermetic
         device dir (DROPLET_AUTOMOUNT_DEV_DIR) so the reconcile mount loop
         can enumerate assembled-but-unmounted arrays; node_types/node_uuids
         feed the blkid stub tables for those nodes.
+
+        WARP-3513: stub_overrides replaces stubs by name (the bay tests swap
+        in a device-aware blkid).
         """
         base = tmp_path / "mnt"
         base.mkdir(exist_ok=True)
@@ -937,6 +974,7 @@ class TestReconcile:
         stub_dir.mkdir(exist_ok=True)
         stubs = dict(_STUBS)
         stubs.update(_RECONCILE_STUBS)
+        stubs.update(stub_overrides or {})
         for name, body in stubs.items():
             stub = stub_dir / name
             stub.write_text("#!/usr/bin/env bash\n" + body.lstrip("\n"),
@@ -953,11 +991,24 @@ class TestReconcile:
         log.write_text("", encoding="utf-8")
         run_env = dict(os.environ)
         run_env.update({
+            # Git-Bash (MSYS) rewrites POSIX-looking args when bash crosses
+            # into the NATIVE python the stub execs (see _run_add); ignored
+            # everywhere but Windows.
+            "MSYS2_ARG_CONV_EXCL": "*",
             "CMD_LOG": _posix(log),
             "DROPLET_AUTOMOUNT_BASE": _posix(base),
             "DROPLET_AUTOMOUNT_STATE_DIR": _posix(state_dir),
             "DROPLET_AUTOMOUNT_LOG": _posix(tmp_path / "automount.log"),
             "BRIDGE_ENV_FILE": _posix(tmp_path / "no-such.env"),
+            # WARP-3513: hermetic by default — no crypttab means no bays; the
+            # bay tests point this at a fixture file via extra_env.
+            "DROPLET_AUTOMOUNT_CRYPTTAB": _posix(tmp_path / "crypttab"),
+            # The reconcile spawns real `add` flows (md pools, late-unlocked
+            # bays): their unlock helpers must be the stubs too, never a real
+            # systemd-cryptsetup / cryptsetup on the test host.
+            "DROPLET_AUTOMOUNT_USB_ENROLL": _posix(stub_dir / "droplet-usb-enroll.sh"),
+            "DROPLET_SYSTEMD_CRYPTSETUP_BIN": _posix(stub_dir / "systemd-cryptsetup"),
+            "DROPLET_CRYPTSETUP_BIN": _posix(stub_dir / "cryptsetup"),
             "PATH": str(stub_dir) + os.pathsep + run_env.get("PATH", ""),
         })
         run_env.update(env)
@@ -1116,6 +1167,7 @@ class TestReconcile:
             "STUB_MOUNTED": _posix(tmp_path / "stub-mounted.txt"),
             "STUB_MOUNT_TABLE": _posix(tmp_path / "stub-mount-table.txt"),
             "STUB_BLKID_TABLE": _posix(tmp_path / "stub-blkid-table.txt"),
+            "DROPLET_AUTOMOUNT_CRYPTTAB": _posix(tmp_path / "crypttab"),
             "DROPLET_NC_WAIT_TRIES": "2",
             "DROPLET_NC_WAIT_INTERVAL": "0",
             "PATH": str(stub_dir) + os.pathsep + run_env.get("PATH", ""),
@@ -1532,3 +1584,936 @@ exit 1
         assert not any(c.startswith("mount ") for c in cmds), cmds
         assert "skip md0p1" in logged, logged
         assert "skip mdX" in logged, logged
+
+
+# =====================================================================
+# WARP-3513 — encrypted-at-rest BAY drives.
+#
+# Every drive prepared through the dashboard is LUKS2 (TPM2 + recovery key),
+# has an /etc/crypttab line `droplet-bay-<luks8> UUID=<luks-uuid> ...`, carries
+# an ext4 `-O quota,project` INSIDE the container and is registered with
+# Nextcloud at <mount>/files only. That crypttab line is what makes a LUKS
+# container a BAY here: hot-plugged USB LUKS drives have none and must keep
+# their pre-WARP-3513 behaviour byte for byte (droplet-usb-<luks8> mapper, the
+# derived-passphrase fallback, the `drive-<luks8>` name, the recursive chown).
+# A missing or locked bay is logged and skipped with exit 0 — never a failed
+# unit, never a blocked boot.
+# =====================================================================
+
+BAY_LUKS_UUID = "1a2b3c4d-0000-4000-8000-00000000a001"   # the LUKS container
+BAY_LUKS8 = "1a2b3c4d"
+BAY_FS_UUID = "5e6f7a8b-0000-4000-8000-00000000b002"     # the ext4 INSIDE it
+BAY_FS8 = "5e6f7a8b"
+BAY_MAPPER = "droplet-bay-" + BAY_LUKS8
+BAY_LABEL = "media"
+BAY_TAIL = BAY_LABEL + "-" + BAY_FS8
+# The exact shape droplet-storage-pool.sh writes for a prepared drive.
+BAY_CRYPTTAB_LINE = (
+    BAY_MAPPER + " UUID=" + BAY_LUKS_UUID + " none "
+    "tpm2-device=auto,luks,discard,nofail,headless=true,"
+    "x-systemd.device-timeout=30s\n"
+)
+# /data's own crypttab line: never a bay, must always be ignored.
+DATA_CRYPTTAB_LINE = (
+    "cryptdata UUID=00000000-0000-4000-8000-0000000000dd none "
+    "tpm2-device=auto,luks,discard,nofail,headless=true\n"
+)
+PROJECT_FEATURES = (
+    "has_journal ext_attr resize_inode dir_index filetype needs_recovery "
+    "extent 64bit flex_bg metadata_csum_seed quota project sparse_super "
+    "large_file huge_file dir_nlink extra_isize metadata_csum"
+)
+BAY_ATTACH_ARGS = (
+    "attach " + BAY_MAPPER + " {dev} - tpm2-device=auto,headless=true,tries=1"
+)
+
+# Device-aware blkid: ONE row per node ("<dev> <TYPE> <LABEL|-> <UUID|->") in
+# $STUB_BLKID_DEV_TABLE, and `blkid -U <uuid>` answers from
+# $STUB_BLKID_U_TABLE ("<uuid> <dev>"). The stock stub answers every node the
+# same, which cannot model a LUKS container whose mapper carries a DIFFERENT
+# type, label and uuid.
+_BAY_BLKID_STUB = r"""
+printf 'blkid %s\n' "$*" >> "$CMD_LOG"
+last=; for a in "$@"; do last="$a"; done
+case " $* " in
+  *" -U "*)
+    awk -v u="$last" '$1 == u { print $2; exit }' "${STUB_BLKID_U_TABLE:-/nonexistent}" 2>/dev/null
+    exit 0 ;;
+esac
+field=
+case " $* " in
+  *" -s TYPE "*) field=2 ;;
+  *" -s LABEL "*) field=3 ;;
+  *" -s UUID "*) field=4 ;;
+esac
+if [ -n "$field" ]; then
+  val="$(awk -v s="$last" -v f="$field" '$1 == s { print $f; exit }' "${STUB_BLKID_DEV_TABLE:-/nonexistent}" 2>/dev/null)"
+  if [ -n "$val" ] && [ "$val" != "-" ]; then printf '%s\n' "$val"; exit 0; fi
+  exit 2
+fi
+exit 0
+"""
+# systemd-cryptsetup for the bay tests: logs the attach, exits
+# $STUB_ATTACH_FAILS and — when $STUB_ATTACH_CREATES_NODE=1 — publishes the
+# /dev/mapper node (under $STUB_MAPPER_DIR) the way a real attach does.
+# success + node = a normal TPM unlock; failure + node = a racing
+# systemd-cryptsetup@ unit won.
+_BAY_CRYPTSETUP_STUB = r"""
+printf 'systemd-cryptsetup %s\n' "$*" >> "$CMD_LOG"
+if [ "${STUB_ATTACH_CREATES_NODE:-0}" = "1" ]; then
+  mkdir -p "$STUB_MAPPER_DIR" && : > "$STUB_MAPPER_DIR/$2"
+fi
+exit "${STUB_ATTACH_FAILS:-0}"
+"""
+# chmod only logs: the assertion is on the exact invocation, and the real
+# thing would mean nothing on a Windows test host.
+_LOG_CHMOD_STUB = r"""
+printf 'chmod %s\n' "$*" >> "$CMD_LOG"
+exit 0
+"""
+# chattr only logs (a Windows test host has none): the assertion is on the exact
+# invocation. $STUB_CHATTR_FAILS makes it fail, like a filesystem without the
+# ext4 `project` feature.
+_LOG_CHATTR_STUB = r"""
+printf 'chattr %s\n' "$*" >> "$CMD_LOG"
+exit "${STUB_CHATTR_FAILS:-0}"
+"""
+# mount that refuses any option string containing prjquota (a kernel without
+# project-quota support, or a filesystem whose quota inode is damaged).
+_MOUNT_REFUSES_PRJQUOTA = r"""
+printf 'mount %s\n' "$*" >> "$CMD_LOG"
+opts=; while [ $# -gt 0 ]; do [ "$1" = "-o" ] && { opts="$2"; break; }; shift; done
+case ",$opts," in *,prjquota,*) exit 32 ;; esac
+exit 0
+"""
+# mount that fails its first $STUB_MOUNT_FAIL_N calls (counted in the file
+# $STUB_MOUNT_COUNT), prjquota or not.
+_MOUNT_FAILS_FIRST_N = r"""
+printf 'mount %s\n' "$*" >> "$CMD_LOG"
+n=0; [ -f "$STUB_MOUNT_COUNT" ] && n="$(cat "$STUB_MOUNT_COUNT")"
+n=$((n + 1)); printf '%s' "$n" > "$STUB_MOUNT_COUNT"
+[ "$n" -le "${STUB_MOUNT_FAIL_N:-0}" ] && exit 32
+exit 0
+"""
+_MOUNT_ALWAYS_FAILS = r"""
+printf 'mount %s\n' "$*" >> "$CMD_LOG"
+exit 32
+"""
+_BAY_STUBS = {
+    "blkid": _BAY_BLKID_STUB,
+    "systemd-cryptsetup": _BAY_CRYPTSETUP_STUB,
+    "chmod": _LOG_CHMOD_STUB,
+    "chattr": _LOG_CHATTR_STUB,
+}
+
+
+def _occ_list(*entries: tuple[int, str, str]) -> str:
+    """`occ files_external:list --output=json` in its REAL shape: mount_id
+    FIRST, the backend options nested under `configuration`, every slash
+    escaped (PHP json_encode). entries: (mount_id, mount_point, datadir)."""
+    objs = []
+    for mid, point, datadir in entries:
+        objs.append(
+            '{"mount_id":%d,"mount_point":"%s","storage":"Local",'
+            '"authentication_type":"None","configuration":{"datadir":"%s"},'
+            '"options":{"enable_sharing":false},"applicable_users":[],'
+            '"applicable_groups":[]}' % (
+                mid, point.replace("/", "\\/"), datadir.replace("/", "\\/")))
+    return "[" + ",".join(objs) + "]\n"
+
+
+def _bay_env(tmp_path: Path, *, device: str = "/dev/sdz",
+             write_crypttab: bool = True, in_crypttab: bool = True,
+             crypttab_text: str | None = None, mapper_live: bool = False,
+             fs_label: str | None = BAY_LABEL, inner_type: str = "ext4",
+             drive_present: bool = True) -> dict:
+    """Everything an encrypted-bay add/reconcile run reads, laid out under
+    tmp_path: a crypttab (a comment, the /data line and — when in_crypttab —
+    the bay's own line), the DEV_DIR with an optional live /dev/mapper node,
+    and the device-aware blkid tables. Returns the env additions."""
+    dev_dir = tmp_path / "dev"
+    (dev_dir / "mapper").mkdir(parents=True, exist_ok=True)
+    if mapper_live:
+        (dev_dir / "mapper" / BAY_MAPPER).touch()
+    crypttab = tmp_path / "crypttab"
+    if write_crypttab:
+        crypttab.write_text(
+            crypttab_text if crypttab_text is not None else (
+                "# <name> <device> <password> <options>\n" + DATA_CRYPTTAB_LINE
+                + (BAY_CRYPTTAB_LINE if in_crypttab else "")),
+            encoding="utf-8", newline="\n")
+    dev_table = tmp_path / "blkid-dev-table.txt"
+    dev_table.write_text(
+        "%s crypto_LUKS - %s\n/dev/mapper/%s %s %s %s\n" % (
+            device, BAY_LUKS_UUID, BAY_MAPPER, inner_type,
+            fs_label or "-", BAY_FS_UUID),
+        encoding="utf-8", newline="\n")
+    u_table = tmp_path / "blkid-u-table.txt"
+    u_table.write_text(
+        ("%s %s\n" % (BAY_LUKS_UUID, device)) if drive_present else "",
+        encoding="utf-8", newline="\n")
+    return {
+        "DROPLET_AUTOMOUNT_CRYPTTAB": _posix(crypttab),
+        "DROPLET_AUTOMOUNT_DEV_DIR": _posix(dev_dir),
+        "STUB_BLKID_DEV_TABLE": _posix(dev_table),
+        "STUB_BLKID_U_TABLE": _posix(u_table),
+        "STUB_MAPPER_DIR": _posix(dev_dir / "mapper"),
+    }
+
+
+def _run_bay_add(tmp_path: Path, *, device: str = "/dev/sdz",
+                 extra_env: dict | None = None,
+                 stub_overrides: dict | None = None, **fixture):
+    env = _bay_env(tmp_path, device=device, **fixture)
+    env.update(extra_env or {})
+    stubs = dict(_BAY_STUBS)
+    stubs.update(stub_overrides or {})
+    return _run_add(device, "crypto_LUKS", tmp_path,
+                    extra_env=env, stub_overrides=stubs)
+
+
+def _mount_lines(cmds: list[str]) -> list[str]:
+    return [c for c in cmds if c.startswith("mount ")]
+
+
+def _mount_opts(line: str) -> list[str]:
+    """The option list of a logged `mount -o <opts> <dev> <mountpoint>` line.
+    Always assert on THIS, never on a substring of the whole line: the tmp
+    mount point carries the test's own name (".../test_..._prjquota_.../")."""
+    parts = line.split(" ")
+    assert parts[:2] == ["mount", "-o"], line
+    return parts[2].split(",")
+
+
+def _bay_mount_path(tmp_path: Path) -> str:
+    return _posix(tmp_path / "mnt" / BAY_TAIL)
+
+
+def _trust_default_uuid(tmp_path: Path, uuid: str = "cafef00d-9360") -> None:
+    state_dir = tmp_path / "state"
+    state_dir.mkdir(exist_ok=True)
+    (state_dir / "trusted.list").write_text(uuid + "\n", encoding="utf-8")
+
+
+class TestBayDiscriminator:
+    """A LUKS container is a BAY iff /etc/crypttab names it droplet-bay-<luks8>."""
+
+    def _assert_is_a_usb_drive(self, proc, cmds, mounts_json):
+        assert proc.returncode == 0, proc.stderr
+        # the pre-WARP-3513 TPM attach: droplet-usb mapper, bare options
+        assert ("systemd-cryptsetup attach droplet-usb-%s /dev/sdz - "
+                "tpm2-device=auto" % BAY_LUKS8) in cmds, cmds
+        assert not any(BAY_MAPPER in c for c in cmds), cmds
+        assert not any(c.startswith("timeout ") for c in cmds), cmds
+        state = json.loads(mounts_json)["mounts"][0]
+        assert state["mapper"] == "/dev/mapper/droplet-usb-" + BAY_LUKS8, state
+
+    def test_luks_without_a_bay_line_is_a_usb_drive(self, tmp_path):
+        proc, cmds, _l, mounts_json, _sd = _run_bay_add(
+            tmp_path, in_crypttab=False,
+            extra_env={"STUB_LUKS_ENROLLED": "1"})
+        self._assert_is_a_usb_drive(proc, cmds, mounts_json)
+
+    def test_missing_crypttab_degrades_to_the_usb_path(self, tmp_path):
+        # Item 9: no /etc/crypttab at all (a box that never prepared a bay)
+        # must not break the add flow — it is simply not a bay.
+        proc, cmds, _l, mounts_json, _sd = _run_bay_add(
+            tmp_path, write_crypttab=False,
+            extra_env={"STUB_LUKS_ENROLLED": "1"})
+        self._assert_is_a_usb_drive(proc, cmds, mounts_json)
+
+    @pytest.mark.parametrize("crypttab_text", [
+        "# " + BAY_CRYPTTAB_LINE,                 # commented out
+        "#" + BAY_CRYPTTAB_LINE,
+        # a LONGER name that merely starts with ours
+        BAY_MAPPER + "xx UUID=" + BAY_LUKS_UUID + " none luks\n",
+        # the name alone is not a crypttab entry
+        BAY_MAPPER + "\n",
+        # ours only as a later column of somebody else's line
+        "other UUID=" + BAY_LUKS_UUID + " none " + BAY_MAPPER + "\n",
+    ], ids=["comment-space", "comment", "longer-name", "name-only", "other-column"])
+    def test_near_misses_are_not_a_bay(self, crypttab_text, tmp_path):
+        proc, cmds, _l, mounts_json, _sd = _run_bay_add(
+            tmp_path, crypttab_text=crypttab_text,
+            extra_env={"STUB_LUKS_ENROLLED": "1"})
+        self._assert_is_a_usb_drive(proc, cmds, mounts_json)
+
+    def test_usb_drive_keeps_every_pre_bay_behaviour(self, tmp_path):
+        # Regression pin: TPM attach failing falls back to the DERIVED
+        # passphrase, the mapper is droplet-usb-<luks8>, the drive is named
+        # from the BACKING device (drive-<luks8>), state records the LUKS uuid
+        # and the mount root is chowned recursively — none of it may change.
+        proc, cmds, _l, mounts_json, _sd = _run_bay_add(
+            tmp_path, in_crypttab=False,
+            extra_env={"STUB_LUKS_ENROLLED": "1", "STUB_ATTACH_FAILS": "1"})
+        assert proc.returncode == 0, proc.stderr
+        assert any(c.startswith("droplet-usb-enroll.sh derive ") for c in cmds), cmds
+        assert ("cryptsetup open --key-file - /dev/sdz droplet-usb-%s"
+                % BAY_LUKS8) in cmds, cmds
+        mount = _posix(tmp_path / "mnt" / ("drive-" + BAY_LUKS8))
+        assert any(
+            c.startswith("mount ") and "/dev/mapper/droplet-usb-" + BAY_LUKS8 in c
+            and c.endswith(" " + mount) for c in cmds), cmds
+        assert ("chown -R 1000:1000 " + mount) in cmds, cmds
+        state = json.loads(mounts_json)["mounts"][0]
+        assert state["uuid"] == BAY_LUKS_UUID, state
+        assert state["trust"] == "enrolled", state
+        assert state["device"] == "/dev/sdz", state
+
+
+class TestBayAdd:
+    """The add flow for a crypttab-managed bay (items 2, 3, 4, 5)."""
+
+    def test_live_mapper_is_reused_without_any_unlock_attempt(self, tmp_path):
+        # systemd-cryptsetup unlocked it at boot: the mapper node is live, so
+        # nothing may try to unlock again (attach would race / fail "exists").
+        proc, cmds, _l, _mj, _sd = _run_bay_add(
+            tmp_path, mapper_live=True,
+            extra_env={"STUB_TUNE2FS_FEATURES": PROJECT_FEATURES})
+        assert proc.returncode == 0, proc.stderr
+        for prefix in ("timeout ", "systemd-cryptsetup", "cryptsetup ",
+                       "droplet-usb-enroll.sh"):
+            assert not any(c.startswith(prefix) for c in cmds), (prefix, cmds)
+        assert _mount_lines(cmds) == [
+            "mount -o rw,nosuid,nodev,noatime,nofail,prjquota "
+            "/dev/mapper/%s %s" % (BAY_MAPPER, _bay_mount_path(tmp_path))
+        ], cmds
+
+    def test_bay_is_named_from_the_filesystem_inside_not_the_container(self, tmp_path):
+        # <label>-<fs-uuid8> exactly like creation time — NOT drive-<luks8>.
+        proc, cmds, _l, _mj, _sd = _run_bay_add(tmp_path, mapper_live=True)
+        assert proc.returncode == 0, proc.stderr
+        (line,) = _mount_lines(cmds)
+        assert line.endswith(" " + _bay_mount_path(tmp_path)), line
+        assert "drive-" + BAY_LUKS8 not in "\n".join(cmds), cmds
+
+    def test_state_records_backing_device_mapper_and_the_fs_uuid(self, tmp_path):
+        proc, _cmds, _l, mounts_json, _sd = _run_bay_add(tmp_path, mapper_live=True)
+        assert proc.returncode == 0, proc.stderr
+        assert json.loads(mounts_json)["mounts"] == [{
+            "device": "/dev/sdz",                       # BACKING, for remove
+            "mount": _bay_mount_path(tmp_path),
+            "label": BAY_LABEL,
+            "uuid": BAY_FS_UUID,                        # the fs, not the LUKS uuid
+            "trust": "enrolled",
+            "mapper": "/dev/mapper/" + BAY_MAPPER,      # closed on remove
+        }]
+
+    def test_bay_is_never_chowned(self, tmp_path):
+        # Ownership of files/ is set at format time; a recursive chown would
+        # break Nextcloud's uid-33 files and the root-only nvr directory.
+        proc, cmds, _l, _mj, _sd = _run_bay_add(tmp_path, mapper_live=True)
+        assert proc.returncode == 0, proc.stderr
+        assert not any(c.startswith("chown") for c in cmds), cmds
+
+    def test_hot_plugged_bay_gets_one_bounded_noninteractive_tpm_attach(self, tmp_path):
+        proc, cmds, _l, _mj, _sd = _run_bay_add(
+            tmp_path, extra_env={"STUB_ATTACH_CREATES_NODE": "1"})
+        assert proc.returncode == 0, proc.stderr
+        attach = "systemd-cryptsetup " + BAY_ATTACH_ARGS.format(dev="/dev/sdz")
+        assert [c for c in cmds if c.startswith("systemd-cryptsetup")] == [attach], cmds
+        # bounded: the one attach runs under `timeout 60`, called first
+        (wrapped,) = [c for c in cmds if c.startswith("timeout ")]
+        assert wrapped.startswith("timeout 60 "), wrapped
+        assert wrapped.endswith(" " + BAY_ATTACH_ARGS.format(dev="/dev/sdz")), wrapped
+        assert cmds.index(wrapped) < cmds.index(attach), cmds
+        # a bay NEVER takes the derived-passphrase path
+        assert not any(c.startswith("droplet-usb-enroll.sh") for c in cmds), cmds
+        assert not any(c.startswith("cryptsetup ") for c in cmds), cmds
+        assert _mount_lines(cmds), cmds
+
+    def test_losing_the_race_to_systemd_cryptsetup_still_mounts(self, tmp_path):
+        # Our attach fails ("already exists") because the crypttab unit won in
+        # the meantime — the re-check of the mapper node must notice.
+        proc, cmds, _l, mounts_json, _sd = _run_bay_add(
+            tmp_path, extra_env={"STUB_ATTACH_FAILS": "1",
+                                 "STUB_ATTACH_CREATES_NODE": "1"})
+        assert proc.returncode == 0, proc.stderr
+        assert len(_mount_lines(cmds)) == 1, cmds
+        assert json.loads(mounts_json)["mounts"][0]["mapper"] == "/dev/mapper/" + BAY_MAPPER
+
+    def test_locked_bay_exits_zero_logs_and_never_mounts(self, tmp_path):
+        # TPM cannot open it (PCR change, moved box): the owner needs the
+        # recovery key. That must be a CLEAR log line and a clean exit — a
+        # failed oneshot per locked drive is noise, and a hang would block boot.
+        proc, cmds, logged, mounts_json, _sd = _run_bay_add(
+            tmp_path, extra_env={"STUB_ATTACH_FAILS": "1"})
+        assert proc.returncode == 0, proc.stderr
+        assert not _mount_lines(cmds), cmds
+        assert mounts_json == "", "a locked bay must not be recorded as mounted"
+        assert re.search(r"LOCKED .*needs the recovery key", logged), logged
+        assert BAY_MAPPER in logged, logged
+        # (c) no derived-passphrase fallback, no luksDump/open at all
+        assert not any(c.startswith("droplet-usb-enroll.sh") for c in cmds), cmds
+        assert not any(c.startswith("cryptsetup ") for c in cmds), cmds
+        assert not any(c.startswith("chown") for c in cmds), cmds
+
+    def test_unlocked_bay_without_a_filesystem_skips_cleanly(self, tmp_path):
+        # e.g. a prepare that was interrupted between luksFormat and mkfs.
+        proc, cmds, logged, mounts_json, _sd = _run_bay_add(
+            tmp_path, mapper_live=True, inner_type="-")
+        assert proc.returncode == 0, proc.stderr
+        assert not _mount_lines(cmds), cmds
+        assert mounts_json == "", mounts_json
+        assert "no readable filesystem" in logged, logged
+
+    def test_bay_over_an_md_pool_is_not_given_the_legacy_guid_name(self, tmp_path):
+        # An UNLABELED fs inside a bay over md127 must take the generic
+        # drive-<fs-uuid8> name; the unlabeled-md branch (legacy pools that
+        # mount at their full GUID) is for plain pre-WARP-1338 pools only.
+        proc, cmds, _l, _mj, _sd = _run_bay_add(
+            tmp_path, device="/dev/md127", mapper_live=True, fs_label=None)
+        assert proc.returncode == 0, proc.stderr
+        (line,) = _mount_lines(cmds)
+        assert line.endswith(" " + _posix(tmp_path / "mnt" / ("drive-" + BAY_FS8))), line
+        assert BAY_FS_UUID not in line, line
+
+    def test_bay_over_md_flips_a_read_only_array_and_retries(self, tmp_path):
+        # WARP-1361 AC2 must survive the encryption: the pool filesystem now
+        # sits on a LUKS mapper, so the md array is the BACKING device.
+        proc, cmds, logged, mounts_json, _sd = _run_bay_add(
+            tmp_path, device="/dev/md127", mapper_live=True,
+            stub_overrides={"mount": _MOUNT_FAILS_FIRST_N},
+            extra_env={"STUB_MOUNT_COUNT": _posix(tmp_path / "mount-count"),
+                       "STUB_MOUNT_FAIL_N": "1"})
+        assert proc.returncode == 0, proc.stderr
+        assert "mdadm --readwrite /dev/md127" in cmds, cmds
+        assert len(_mount_lines(cmds)) == 2, cmds
+        assert json.loads(mounts_json)["mounts"][0]["device"] == "/dev/md127"
+
+    def test_bay_already_mounted_by_the_prepare_script_is_adopted(self, tmp_path):
+        # The prepare script mounts the bay at creation time at the very path
+        # this derivation yields: boot/replug must adopt it, not remount.
+        mount = _bay_mount_path(tmp_path)
+        findmnt_stub = r"""
+printf 'findmnt %s\n' "$*" >> "$CMD_LOG"
+last=; for a in "$@"; do last="$a"; done
+case " $* " in
+  *" OPTIONS "*) printf 'rw,nosuid,nodev,noatime,prjquota\n'; exit 0 ;;
+  *" --source "*) printf '%s\n' "$STUB_EXISTING_MOUNT"; exit 0 ;;
+esac
+if [ "$last" = "/" ]; then printf '/dev/nvme0n1p2\n'; exit 0; fi
+if [ "$last" = "$STUB_EXISTING_MOUNT" ]; then printf '%s\n' "$STUB_EXISTING_DEV"; exit 0; fi
+exit 1
+"""
+        mountpoint_stub = (
+            "printf 'mountpoint %s\\n' \"$*\" >> \"$CMD_LOG\"\n"
+            "tgt=; for a in \"$@\"; do tgt=\"$a\"; done\n"
+            "[ \"$tgt\" = \"$STUB_EXISTING_MOUNT\" ] && exit 0\n"
+            "exit 1\n")
+        proc, cmds, logged, mounts_json, _sd = _run_bay_add(
+            tmp_path, mapper_live=True,
+            stub_overrides={"findmnt": findmnt_stub,
+                            "mountpoint": mountpoint_stub},
+            extra_env={"STUB_EXISTING_MOUNT": mount,
+                       "STUB_EXISTING_DEV": "/dev/mapper/" + BAY_MAPPER})
+        assert proc.returncode == 0, proc.stderr
+        assert "already mounted" in logged, logged
+        assert not _mount_lines(cmds), cmds
+        assert not any(c.startswith("chown") for c in cmds), cmds
+        assert json.loads(mounts_json)["mounts"][0]["uuid"] == BAY_FS_UUID
+
+    def test_remove_matches_the_backing_device_and_closes_the_bay_mapper(self, tmp_path):
+        # Eject / unplug: udev's REMOVE carries the BACKING device. The state
+        # entry must drain and the bay mapper be closed, exactly like a USB
+        # LUKS drive, so the next add re-unlocks it cleanly.
+        proc, _c, _l, _mj, state_dir = _run_bay_add(tmp_path, mapper_live=True)
+        assert proc.returncode == 0, proc.stderr
+        stub_dir = tmp_path / "stub-bin"
+        log = tmp_path / "cmd-log.txt"
+        log.write_text("", encoding="utf-8")
+        env = dict(os.environ)
+        env.update({
+            "MSYS2_ARG_CONV_EXCL": "*",  # see _run_add
+            "CMD_LOG": _posix(log),
+            "DROPLET_AUTOMOUNT_BASE": _posix(tmp_path / "mnt"),
+            "DROPLET_AUTOMOUNT_STATE_DIR": _posix(state_dir),
+            "DROPLET_AUTOMOUNT_LOG": _posix(tmp_path / "automount.log"),
+            "BRIDGE_ENV_FILE": _posix(tmp_path / "no-such.env"),
+            "DROPLET_CRYPTSETUP_BIN": _posix(stub_dir / "cryptsetup"),
+            "PATH": str(stub_dir) + os.pathsep + env.get("PATH", ""),
+        })
+        removed = subprocess.run(
+            [BASH, str(SCRIPT), "remove", "/dev/sdz"],
+            env=env, capture_output=True, text=True, timeout=60)
+        assert removed.returncode == 0, removed.stderr
+        cmds = [ln for ln in log.read_text(encoding="utf-8").splitlines() if ln]
+        assert ("cryptsetup close " + BAY_MAPPER) in cmds, cmds
+        state = json.loads((state_dir / "mounts.json").read_text(encoding="utf-8"))
+        assert state["mounts"] == [], state
+
+
+class TestProjectQuotaMount:
+    """Item 4: ext4 carrying the project feature mounts prjquota; nothing
+    else changes, and a refused prjquota mount never leaves the drive dark."""
+
+    def _add(self, tmp_path, fs="ext4", features=PROJECT_FEATURES,
+             stub_overrides=None, extra_env=None, device="/dev/sdz1"):
+        _trust_default_uuid(tmp_path)
+        env = {}
+        if features is not None:
+            env["STUB_TUNE2FS_FEATURES"] = features
+        env.update(extra_env or {})
+        return _run_add(device, fs, tmp_path, extra_env=env,
+                        stub_overrides=stub_overrides)
+
+    def test_ext4_with_the_project_feature_mounts_prjquota(self, tmp_path):
+        proc, cmds, _l, _mj, _sd = self._add(tmp_path)
+        assert proc.returncode == 0, proc.stderr
+        assert "tune2fs -l /dev/sdz1" in cmds, cmds
+        assert _mount_lines(cmds) == [
+            "mount -o rw,nosuid,nodev,noatime,nofail,prjquota /dev/sdz1 %s"
+            % _posix(tmp_path / "mnt" / "drive-cafef00d")], cmds
+
+    def test_ext4_without_the_feature_mounts_exactly_as_before(self, tmp_path):
+        proc, cmds, _l, _mj, _sd = self._add(tmp_path, features=None)
+        assert proc.returncode == 0, proc.stderr
+        assert _mount_lines(cmds) == [
+            "mount -o rw,nosuid,nodev,noatime,nofail /dev/sdz1 %s"
+            % _posix(tmp_path / "mnt" / "drive-cafef00d")], cmds
+
+    def test_only_the_features_line_counts_and_only_as_a_whole_word(self, tmp_path):
+        # "projectquota" is not "project", and a stray "Project quota inode:"
+        # line is not the features line.
+        proc, cmds, _l, _mj, _sd = self._add(
+            tmp_path, features="has_journal quota projectquota extent",
+            extra_env={"STUB_TUNE2FS_EXTRA": "Project quota inode:      4"})
+        assert proc.returncode == 0, proc.stderr
+        assert _mount_lines(cmds), cmds
+        assert all("prjquota" not in _mount_opts(m) for m in _mount_lines(cmds)), cmds
+
+    @pytest.mark.parametrize("fs", ["vfat", "exfat", "ntfs", "xfs", "btrfs"])
+    def test_other_filesystems_never_probe_tune2fs_nor_get_prjquota(self, fs, tmp_path):
+        proc, cmds, _l, _mj, _sd = self._add(tmp_path, fs=fs)
+        assert proc.returncode == 0, proc.stderr
+        assert not any(c.startswith("tune2fs") for c in cmds), cmds
+        assert _mount_lines(cmds), cmds
+        assert all("prjquota" not in _mount_opts(m) for m in _mount_lines(cmds)), cmds
+
+    def test_a_refused_prjquota_mount_retries_once_without_it_and_warns(self, tmp_path):
+        proc, cmds, logged, mounts_json, _sd = self._add(
+            tmp_path, stub_overrides={"mount": _MOUNT_REFUSES_PRJQUOTA})
+        assert proc.returncode == 0, proc.stderr
+        mounts = _mount_lines(cmds)
+        assert len(mounts) == 2, mounts
+        assert _mount_opts(mounts[0])[-1] == "prjquota", mounts
+        assert "prjquota" not in _mount_opts(mounts[1]), mounts
+        assert mounts[1].split(" ")[3] == "/dev/sdz1", mounts
+        # loud: a WARNING line in the log AND at journal priority warning
+        assert re.search(r"WARNING: .*prjquota", logged), logged
+        assert any(c.startswith("logger -p daemon.warning -t droplet-automount")
+                   and "prjquota" in c for c in cmds), cmds
+        # the drive is NOT left dark: it is recorded like any mounted drive
+        assert json.loads(mounts_json)["mounts"][0]["device"] == "/dev/sdz1"
+
+    def test_the_md_retry_mount_also_carries_prjquota(self, tmp_path):
+        # First mount refused (read-only array) -> mdadm --readwrite -> the
+        # retry is the SAME prjquota mount, with no spurious fallback.
+        proc, cmds, logged, _mj, _sd = _run_add(
+            "/dev/md127", "ext4", tmp_path,
+            extra_env={"STUB_FS_LABEL": "pool",
+                       "STUB_TUNE2FS_FEATURES": PROJECT_FEATURES,
+                       "STUB_MOUNT_COUNT": _posix(tmp_path / "mount-count"),
+                       "STUB_MOUNT_FAIL_N": "1"},
+            stub_overrides={"mount": _MOUNT_FAILS_FIRST_N})
+        assert proc.returncode == 0, proc.stderr
+        assert "mdadm --readwrite /dev/md127" in cmds, cmds
+        mounts = _mount_lines(cmds)
+        assert len(mounts) == 2, mounts
+        assert all(_mount_opts(m)[-1] == "prjquota" for m in mounts), mounts
+        assert "WARNING" not in logged, logged
+
+    def test_prjquota_still_refused_after_the_md_retry_falls_back_without_it(self, tmp_path):
+        proc, cmds, logged, _mj, _sd = _run_add(
+            "/dev/md127", "ext4", tmp_path,
+            extra_env={"STUB_FS_LABEL": "pool",
+                       "STUB_TUNE2FS_FEATURES": PROJECT_FEATURES,
+                       "STUB_MOUNT_COUNT": _posix(tmp_path / "mount-count"),
+                       "STUB_MOUNT_FAIL_N": "2"},
+            stub_overrides={"mount": _MOUNT_FAILS_FIRST_N})
+        assert proc.returncode == 0, proc.stderr
+        mounts = _mount_lines(cmds)
+        assert len(mounts) == 3, mounts
+        assert _mount_opts(mounts[0])[-1] == "prjquota", mounts
+        assert _mount_opts(mounts[1])[-1] == "prjquota", mounts
+        assert "prjquota" not in _mount_opts(mounts[2]), mounts
+        assert "WARNING" in logged, logged
+
+    @pytest.mark.parametrize("rc", ["1", "127"], ids=["unreadable", "not-installed"])
+    def test_a_tune2fs_that_fails_or_is_missing_degrades_to_a_plain_mount(self, rc, tmp_path):
+        # exit 127 is what the shell reports for a tune2fs that is not
+        # installed (a box without e2fsprogs): logged, never fatal.
+        proc, cmds, logged, _mj, _sd = self._add(
+            tmp_path, extra_env={"STUB_TUNE2FS_RC": rc})
+        assert proc.returncode == 0, proc.stderr
+        assert "tune2fs -l /dev/sdz1" in cmds, cmds
+        assert _mount_lines(cmds) == [
+            "mount -o rw,nosuid,nodev,noatime,nofail /dev/sdz1 %s"
+            % _posix(tmp_path / "mnt" / "drive-cafef00d")], cmds
+        assert re.search(r"tune2fs -l /dev/sdz1 failed \(exit %s" % rc, logged), logged
+
+    def test_untrusted_media_keeps_its_hostile_media_options(self, tmp_path):
+        # prjquota is appended, never substituted for the hardening options.
+        proc, cmds, _l, _mj, _sd = _run_add(
+            "/dev/sdz1", "ext4", tmp_path,
+            extra_env={"STUB_TUNE2FS_FEATURES": PROJECT_FEATURES})
+        assert proc.returncode == 0, proc.stderr
+        (line,) = _mount_lines(cmds)
+        assert line.startswith("mount -o ro,nosuid,nodev,noexec,noatime,nofail"), line
+
+
+class TestBayNextcloudRegistration:
+    """Item 6: nextcloud_add's optional scope. A bay registers <mount>/files
+    only, and its idempotency recognises BOTH registration forms."""
+
+    def _add(self, tmp_path, *, nc_list=None, extra_env=None, **fixture):
+        env = dict(_REGISTER_ENV)
+        if nc_list is not None:
+            lst = tmp_path / "nc-list.json"
+            lst.write_text(nc_list, encoding="utf-8")
+            env["STUB_NC_LIST"] = _posix(lst)
+        env.update(extra_env or {})
+        fixture.setdefault("mapper_live", True)
+        return _run_bay_add(tmp_path, extra_env=env,
+                            stub_overrides={"docker": _NC_DOCKER_STUB},
+                            **fixture)
+
+    @staticmethod
+    def _creates(cmds):
+        return [c for c in cmds if "files_external:create" in c]
+
+    def test_a_bay_registers_only_its_files_directory(self, tmp_path):
+        proc, cmds, _l, _mj, _sd = self._add(tmp_path)
+        assert proc.returncode == 0, proc.stderr
+        assert self._creates(cmds) == [
+            "docker exec -u 33 droplet-nextcloud-1 php occ files_external:create "
+            "/%s local null::null -c datadir=/host/%s/files" % (BAY_TAIL, BAY_TAIL)
+        ], cmds
+
+    def test_a_missing_files_directory_is_created_33_33_mode_0770(self, tmp_path):
+        proc, cmds, _l, _mj, _sd = self._add(tmp_path)
+        assert proc.returncode == 0, proc.stderr
+        files_dir = tmp_path / "mnt" / BAY_TAIL / "files"
+        assert files_dir.is_dir()
+        # exactly one chown — on files/ itself, never recursive, never the root
+        assert [c for c in cmds if c.startswith("chown")] == [
+            "chown 33:33 " + _posix(files_dir)], cmds
+        chmod = "chmod 0770 " + _posix(files_dir)
+        assert chmod in cmds, cmds
+        # ... and it exists BEFORE Nextcloud is pointed at it
+        assert cmds.index(chmod) < cmds.index(self._creates(cmds)[0]), cmds
+
+    def test_a_missing_files_directory_gets_project_id_4097_before_nextcloud_sees_it(self, tmp_path):
+        # The household files' project id: WARP-3514 puts the recordings' nvr/
+        # at 4096 and the byte limits on both. +P makes everything created
+        # inside inherit it.
+        proc, cmds, _l, _mj, _sd = self._add(tmp_path)
+        assert proc.returncode == 0, proc.stderr
+        files_dir = _posix(tmp_path / "mnt" / BAY_TAIL / "files")
+        chattr = "chattr +P -p 4097 " + files_dir
+        assert [c for c in cmds if c.startswith("chattr")] == [chattr], cmds
+        assert cmds.index(chattr) < cmds.index(self._creates(cmds)[0]), cmds
+
+    def test_an_existing_files_directory_keeps_its_project_id(self, tmp_path):
+        (tmp_path / "mnt" / BAY_TAIL / "files").mkdir(parents=True)
+        proc, cmds, _l, _mj, _sd = self._add(tmp_path)
+        assert proc.returncode == 0, proc.stderr
+        assert not any(c.startswith("chattr") for c in cmds), cmds
+
+    def test_a_failing_chattr_warns_but_the_registration_goes_ahead(self, tmp_path):
+        # Best-effort HERE (the prepare script owns the guarantee and treats the
+        # same failure as fatal): a warning with the remediation, not a refusal.
+        proc, cmds, logged, _mj, _sd = self._add(
+            tmp_path, extra_env={"STUB_CHATTR_FAILS": "1"})
+        assert proc.returncode == 0, proc.stderr
+        assert len(self._creates(cmds)) == 1, cmds
+        (warn,) = [ln for ln in logged.splitlines() if "project id 4097" in ln
+                   and "WARNING" in ln]
+        assert "chattr +P -p 4097" in warn, warn
+
+    def test_an_existing_files_directory_keeps_its_owner_and_mode(self, tmp_path):
+        (tmp_path / "mnt" / BAY_TAIL / "files").mkdir(parents=True)
+        proc, cmds, _l, _mj, _sd = self._add(tmp_path)
+        assert proc.returncode == 0, proc.stderr
+        assert not any(c.startswith("chown") for c in cmds), cmds
+        assert not any(c.startswith("chmod 0770") for c in cmds), cmds
+        assert len(self._creates(cmds)) == 1, cmds
+
+    def test_a_files_scope_registration_is_idempotent(self, tmp_path):
+        # The old check matched `"datadir":"/host/<name>"` — the closing quote
+        # means it never saw /host/<name>/files, so every boot would have
+        # registered a second copy. Real occ shape (escaped slashes, nested).
+        proc, cmds, logged, _mj, _sd = self._add(
+            tmp_path,
+            nc_list=_occ_list((7, "/" + BAY_TAIL, "/host/%s/files" % BAY_TAIL)))
+        assert proc.returncode == 0, proc.stderr
+        assert not self._creates(cmds), cmds
+        assert "already registered" in logged, logged
+
+    def test_an_existing_root_registration_is_not_duplicated(self, tmp_path):
+        # A drive-ROOT registration of the same name: do NOT add a second
+        # entry, and do NOT re-point the existing one (a plain drive keeps its
+        # root registration until it is prepared; there is no migration).
+        proc, cmds, logged, _mj, _sd = self._add(
+            tmp_path, nc_list=_occ_list((7, "/" + BAY_TAIL, "/host/" + BAY_TAIL)))
+        assert proc.returncode == 0, proc.stderr
+        assert not self._creates(cmds), cmds
+        assert "already registered" in logged and "/host/" + BAY_TAIL in logged, logged
+        assert not (tmp_path / "mnt" / BAY_TAIL / "files").exists()
+
+    def test_a_files_directory_that_cannot_be_created_skips_the_registration(self, tmp_path):
+        mount = tmp_path / "mnt" / BAY_TAIL
+        mount.mkdir(parents=True)
+        (mount / "files").write_text("in the way", encoding="utf-8")
+        proc, cmds, logged, _mj, _sd = self._add(tmp_path)
+        assert proc.returncode == 0, proc.stderr
+        assert not self._creates(cmds), cmds
+        assert "cannot create" in logged, logged
+        assert "nextcloud registration skipped" in logged, logged
+
+    def test_a_longer_name_sharing_the_prefix_is_not_this_registration(self, tmp_path):
+        proc, cmds, _l, _mj, _sd = self._add(
+            tmp_path,
+            nc_list=_occ_list(
+                (5, "/%s-old" % BAY_TAIL, "/host/%s-old/files" % BAY_TAIL),
+                (6, "/%s-old" % BAY_TAIL, "/host/%s-old" % BAY_TAIL)))
+        assert proc.returncode == 0, proc.stderr
+        assert len(self._creates(cmds)) == 1, cmds
+
+    def test_a_plain_drive_keeps_the_root_scope_and_gets_no_files_directory(self, tmp_path):
+        _trust_default_uuid(tmp_path)
+        proc, cmds, _l, _mj, _sd = _run_add(
+            "/dev/sdz1", "vfat", tmp_path, extra_env=_REGISTER_ENV,
+            stub_overrides={"docker": _NC_DOCKER_STUB, "chmod": _LOG_CHMOD_STUB})
+        assert proc.returncode == 0, proc.stderr
+        assert self._creates(cmds) == [
+            "docker exec -u 33 droplet-nextcloud-1 php occ files_external:create "
+            "/drive-cafef00d local null::null -c datadir=/host/drive-cafef00d"
+        ], cmds
+        assert not (tmp_path / "mnt" / "drive-cafef00d" / "files").exists()
+        assert not any("33:33" in c for c in cmds), cmds
+
+
+class _BayReconcileHarness:
+    # Reuse the WARP-1338 harness without subclassing TestReconcile
+    # (subclassing would re-collect every one of its tests).
+    _run_reconcile = TestReconcile._run_reconcile
+
+    def _run(self, tmp_path, mounts=None, *, nc_list=None, extra_env=None,
+             stub_overrides=None, dev_nodes=None, **fixture):
+        env = _bay_env(tmp_path, **fixture)
+        if nc_list is not None:
+            lst = tmp_path / "nc-list.json"
+            lst.write_text(nc_list, encoding="utf-8")
+            env["STUB_NC_LIST"] = _posix(lst)
+        env.update(extra_env or {})
+        stubs = dict(_BAY_STUBS)
+        stubs.update(stub_overrides or {})
+        return self._run_reconcile(
+            tmp_path, mounts or {}, extra_env=env, stub_overrides=stubs,
+            dev_nodes=dev_nodes)
+
+
+class TestBayReconcile(_BayReconcileHarness):
+    """Item 7a/7b: the boot reconcile late-unlocks crypttab bays and registers
+    mounted bay mappers at files/."""
+
+    def test_late_unlock_mounts_a_present_but_unmounted_bay(self, tmp_path):
+        proc, cmds, logged = self._run(
+            tmp_path, mapper_live=True,
+            extra_env={"STUB_TUNE2FS_FEATURES": PROJECT_FEATURES})
+        assert proc.returncode == 0, proc.stderr
+        assert "blkid -U " + BAY_LUKS_UUID in cmds, cmds
+        assert _mount_lines(cmds) == [
+            "mount -o rw,nosuid,nodev,noatime,nofail,prjquota /dev/mapper/%s %s"
+            % (BAY_MAPPER, _bay_mount_path(tmp_path))], cmds
+        assert "present but not mounted" in logged, logged
+        # the SAME add flow registered it — at files/ only
+        creates = [c for c in cmds if "files_external:create" in c]
+        assert len(creates) == 1, cmds
+        assert creates[0].endswith("-c datadir=/host/%s/files" % BAY_TAIL), creates
+
+    def test_late_unlock_attaches_a_bay_the_boot_unlock_missed(self, tmp_path):
+        proc, cmds, _l = self._run(
+            tmp_path, mapper_live=False,
+            extra_env={"STUB_ATTACH_CREATES_NODE": "1"})
+        assert proc.returncode == 0, proc.stderr
+        assert ("systemd-cryptsetup " + BAY_ATTACH_ARGS.format(dev="/dev/sdz")) in cmds, cmds
+        assert len(_mount_lines(cmds)) == 1, cmds
+
+    def test_late_unlock_skips_a_bay_whose_drive_is_absent(self, tmp_path):
+        proc, cmds, logged = self._run(tmp_path, drive_present=False)
+        assert proc.returncode == 0, proc.stderr
+        assert "blkid -U " + BAY_LUKS_UUID in cmds, cmds
+        assert not _mount_lines(cmds), cmds
+        assert not any(c.startswith("systemd-cryptsetup") for c in cmds), cmds
+        assert re.search(r"bay %s: .*not present" % BAY_MAPPER, logged), logged
+
+    def test_late_unlock_leaves_an_already_mounted_bay_alone(self, tmp_path):
+        proc, cmds, logged = self._run(
+            tmp_path, {BAY_TAIL: "/dev/mapper/" + BAY_MAPPER}, mapper_live=True)
+        assert proc.returncode == 0, proc.stderr
+        assert any("--source /dev/mapper/" + BAY_MAPPER in c for c in cmds), cmds
+        assert re.search(r"bay %s already mounted" % BAY_MAPPER, logged), logged
+        assert "present but not mounted" not in logged, logged
+        assert not _mount_lines(cmds), cmds
+        assert not any(c.startswith("systemd-cryptsetup") for c in cmds), cmds
+
+    def test_a_failing_add_flow_never_fails_the_unit(self, tmp_path):
+        proc, cmds, logged = self._run(
+            tmp_path, mapper_live=True,
+            stub_overrides={"mount": _MOUNT_ALWAYS_FAILS})
+        assert proc.returncode == 0, proc.stderr
+        assert _mount_lines(cmds), cmds
+        assert re.search(
+            r"add flow failed for bay %s .*will retry next boot" % BAY_MAPPER,
+            logged), logged
+
+    def test_a_still_locked_bay_is_logged_and_the_unit_still_succeeds(self, tmp_path):
+        proc, cmds, logged = self._run(
+            tmp_path, mapper_live=False, extra_env={"STUB_ATTACH_FAILS": "1"})
+        assert proc.returncode == 0, proc.stderr
+        assert not _mount_lines(cmds), cmds
+        assert re.search(r"LOCKED .*needs the recovery key", logged), logged
+
+    def test_non_bay_and_malformed_crypttab_lines_are_ignored(self, tmp_path):
+        crypttab = (
+            "# a comment\n" + DATA_CRYPTTAB_LINE
+            # a bay line that does not name its drive by UUID
+            + "droplet-bay-aaaaaaaa /dev/disk/by-id/ata-FAKE none luks\n"
+            # crafted bytes in the name / the uuid: never expanded, never used
+            + "droplet-bay-ab;rm UUID=1111-2222 none luks\n"
+            + "droplet-bay-cccccccc UUID=zz$(touch-x) none luks\n")
+        proc, cmds, logged = self._run(tmp_path, crypttab_text=crypttab)
+        assert proc.returncode == 0, proc.stderr
+        assert not any(c.startswith("blkid -U") for c in cmds), cmds
+        assert not _mount_lines(cmds), cmds
+        assert "droplet-bay-aaaaaaaa" in logged and "not UUID=" in logged, logged
+        assert logged.count("unexpected characters") == 2, logged
+
+    def test_a_missing_crypttab_is_logged_and_the_rest_of_the_reconcile_runs(self, tmp_path):
+        proc, cmds, logged = self._run(
+            tmp_path, {"pool-cafef00d": "/dev/md127"}, write_crypttab=False)
+        assert proc.returncode == 0, proc.stderr
+        assert "crypttab" in logged, logged
+        assert not any(c.startswith("blkid -U") for c in cmds), cmds
+        assert any("files_external:create /pool-cafef00d" in c for c in cmds), cmds
+
+    def test_late_unlock_runs_before_the_md_loop(self, tmp_path):
+        md_probe = "blkid -o value -s TYPE " + _posix(tmp_path / "dev" / "md127")
+        proc, cmds, _l = self._run(
+            tmp_path, mapper_live=True, dev_nodes=["md127"])
+        assert proc.returncode == 0, proc.stderr
+        assert md_probe in cmds, cmds
+        assert cmds.index("blkid -U " + BAY_LUKS_UUID) < cmds.index(md_probe), cmds
+
+    def test_late_unlock_still_runs_when_registration_is_opted_out(self, tmp_path):
+        # Mounting is not gated on the Nextcloud opt-in — only registration is.
+        proc, cmds, _l = self._run(
+            tmp_path, mapper_live=True,
+            extra_env={"NEXTCLOUD_AUTO_REGISTER": ""})
+        assert proc.returncode == 0, proc.stderr
+        assert len(_mount_lines(cmds)) == 1, cmds
+        assert not any(c.startswith("docker") for c in cmds), cmds
+
+    @pytest.mark.parametrize("in_crypttab", [True, False])
+    def test_a_mounted_bay_mapper_is_registered_at_files(self, in_crypttab, tmp_path):
+        # Eligibility is by mapper name: /dev/mapper/droplet-bay-* registers
+        # with the files scope (no trusted.list entry needed, like usb LUKS).
+        proc, cmds, logged = self._run(
+            tmp_path, {BAY_TAIL: "/dev/mapper/" + BAY_MAPPER},
+            mapper_live=True, in_crypttab=in_crypttab)
+        assert proc.returncode == 0, proc.stderr
+        creates = [c for c in cmds if "files_external:create" in c]
+        assert len(creates) == 1, cmds
+        assert creates[0].endswith(
+            "/%s local null::null -c datadir=/host/%s/files" % (BAY_TAIL, BAY_TAIL)
+        ), creates
+        assert (tmp_path / "mnt" / BAY_TAIL / "files").is_dir()
+        assert "skip untrusted" not in logged, logged
+
+    def test_an_encrypted_pool_is_mounted_by_the_bay_loop_not_the_md_loop(self, tmp_path):
+        # LUKS over md127: blkid on the array says crypto_LUKS. The bay loop
+        # owns it; the md loop must defer (with a reason), not call it an
+        # "unsupported filesystem" and not mount it a second time.
+        md = _posix(tmp_path / "dev" / "md127")
+        proc, cmds, logged = self._run(
+            tmp_path, mapper_live=True, device=md, dev_nodes=["md127"])
+        assert proc.returncode == 0, proc.stderr
+        assert len(_mount_lines(cmds)) == 1, cmds
+        assert "unsupported filesystem" not in logged, logged
+        assert re.search(r"skip md127 .*LUKS container", logged), logged
+
+
+class TestFilesScopedPrune(_BayReconcileHarness):
+    """Item 7d: a files-scoped registration of an unmounted drive is pruned
+    like a root-scoped one (the /files suffix is stripped before the
+    nested-path guard), and nothing else is."""
+
+    def test_prunes_a_dangling_files_scoped_registration(self, tmp_path):
+        dead = "gone-0123abcd"
+        # (the stub shape nextcloud_remove's id lookup is written against)
+        nc_list = (
+            '[{"mount_point":"\\/%s","datadir":"\\/host\\/%s\\/files","mount_id":3},'
+            '{"mount_point":"\\/%s","datadir":"\\/host\\/%s\\/files","mount_id":9},'
+            '{"mount_point":"\\/nested","datadir":"\\/host\\/a\\/b\\/files","mount_id":11},'
+            '{"mount_point":"\\/other","datadir":"\\/media\\/other","mount_id":5}]\n'
+            % (BAY_TAIL, BAY_TAIL, dead, dead))
+        proc, cmds, logged = self._run(
+            tmp_path, {BAY_TAIL: "/dev/mapper/" + BAY_MAPPER},
+            mapper_live=True, nc_list=nc_list)
+        assert proc.returncode == 0, proc.stderr
+        joined = "\n".join(cmds)
+        assert "files_external:delete -y 9" in joined, joined
+        assert re.search(r"pruning dangling registration %s " % dead, logged), logged
+        # the MOUNTED bay's files-scoped registration, a nested path and a
+        # non-/host storage all survive
+        for keep in (3, 11, 5):
+            assert "files_external:delete -y %d" % keep not in joined, joined
+
+
+UNIT_DIR = SCRIPT.parent
+
+
+class TestUnitsOrderAfterCryptsetup:
+    """Item 8: crypttab unlock attempts — including their x-systemd.device-
+    timeout=30s waits — finish before either unit looks for a mapper."""
+
+    UNITS = ["droplet-automount@.service", "droplet-automount-reconcile.service"]
+
+    @staticmethod
+    def _after(text: str) -> list[str]:
+        return [word
+                for line in re.findall(r"^After=(.*)$", text, re.M)
+                for word in line.split()]
+
+    @pytest.mark.parametrize("unit", UNITS)
+    def test_orders_after_cryptsetup_target_and_keeps_its_old_ordering(self, unit):
+        text = (UNIT_DIR / unit).read_text(encoding="utf-8")
+        after = self._after(text)
+        assert "cryptsetup.target" in after, text
+        assert "docker.service" in after and "local-fs.target" in after, after
+
+    def test_the_reconcile_unit_keeps_its_mnt_droplet_ordering(self):
+        text = (UNIT_DIR / "droplet-automount-reconcile.service").read_text(
+            encoding="utf-8")
+        assert "mnt-droplet.mount" in self._after(text), text
+
+    @pytest.mark.parametrize("unit", UNITS)
+    def test_a_bay_that_cannot_unlock_can_never_block_or_fail_these_units(self, unit):
+        # Ordering only — never a hard (or soft) dependency on the unlock.
+        text = (UNIT_DIR / unit).read_text(encoding="utf-8")
+        for key in ("Requires", "Requisite", "BindsTo", "PartOf", "Wants",
+                    "Upholds"):
+            assert not re.search(r"^%s=.*cryptsetup" % key, text, re.M), (key, text)
+
+
+class TestScriptStatics:
+    def test_script_parses_under_bash_n(self):
+        proc = subprocess.run([BASH, "-n", str(SCRIPT)], capture_output=True,
+                              text=True, timeout=60)
+        assert proc.returncode == 0, proc.stderr
+
+    def test_crypttab_seam_defaults_to_etc_crypttab(self):
+        src = SCRIPT.read_text(encoding="utf-8")
+        assert 'CRYPTTAB="${DROPLET_AUTOMOUNT_CRYPTTAB:-/etc/crypttab}"' in src

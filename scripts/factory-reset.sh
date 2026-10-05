@@ -40,6 +40,15 @@
 # metal, but it does not overwrite the platters. A box moving from one customer
 # to another needs a separate full-overwrite pass.
 #
+# WARP-3513 (encrypted bays): every prepared drive is LUKS2. For those the erase
+# is a CRYPTO-ERASE — the droplet-bay-* mapper is closed and `cryptsetup
+# luksErase` destroys the keyslots BEFORE the signature is wiped (wipefs alone
+# leaves the keyslots and the TPM-sealed key recoverable by re-writing the
+# magic) — and the box's crypttab lines and escrowed recovery keys go with them.
+# A drive whose keyslots cannot be erased is NOT wiped and is reported as an
+# error. All of that lives in scripts/lib/storage-wipe.sh and, like the rest of
+# the storage erase, is skipped entirely by --keep-storage.
+#
 # WARP-2629 (the live secrets on /data are factory state too): since the
 # WARP-232 relocation the real .env is /data/droplet/env/.env and the audit /
 # doc-KEK keys are /data/droplet/secrets/, with symlinks left in the repo. This
@@ -211,7 +220,10 @@ What gets deleted:
     names it and leaves it to you
   - Droplet-managed bulk storage: every md pool is stopped and its members'
     superblocks + filesystems wiped, and every drive adopted under
-    /mnt/droplet is wiped (unless --keep-storage is passed)
+    /mnt/droplet is wiped (unless --keep-storage is passed). Encrypted
+    (LUKS) drives are crypto-erased first — their keyslots destroyed, not
+    just their signature — and their crypttab entries and escrowed recovery
+    keys are removed
   - The box extension-signing key (/var/lib/droplet/tpm/extension-signing.sealed)
     is ROTATED: removed, so an extension the previous owner promoted no longer
     verifies. The next owner's first promote mints a new one
@@ -316,7 +328,7 @@ else
   _fr_disks="$(sw_standalone_droplet_disks | tr '\n' ' ')"
   printf "    ${_RED}•${_RESET} Bulk storage: ${_BOLD}%s${_RESET}\n" \
     "${_fr_pools:-no md pools}${_fr_mounts:+ | mounted: $_fr_mounts}${_fr_disks:+ | unmounted adopted: $_fr_disks}"
-  printf "      ${_DIM}(arrays stopped, superblocks zeroed, members wiped — pass --keep-storage to skip)${_RESET}\n"
+  printf "      ${_DIM}(arrays stopped, superblocks zeroed, members wiped, encrypted drives crypto-erased — pass --keep-storage to skip)${_RESET}\n"
 fi
 printf "\n"
 printf "  ${_DIM}This action cannot be undone.${_RESET}\n"
@@ -933,9 +945,18 @@ if [ "$KEEP_STORAGE" = "true" ]; then
 else
   sw_wipe_droplet_storage
   if [ "$SW_WIPED_COUNT" -gt 0 ]; then
-    log_success "Erased Droplet-managed bulk storage ($SW_WIPED_COUNT device(s) wiped)"
+    log_success "Erased Droplet-managed bulk storage ($SW_WIPED_COUNT device(s) wiped, $SW_CRYPTO_ERASED_COUNT encrypted volume(s) crypto-erased)"
   else
     log_info "No Droplet-managed bulk storage found to erase"
+  fi
+  # WARP-3513: a drive whose LUKS keyslots survive is recoverable by re-writing
+  # its signature, and its TPM-sealed key still opens it on this box. That is not
+  # a "skipped" target — it is the previous owner's data on a box about to be
+  # handed on, so it is an error in the reset's own record (the library has
+  # already refused to wipe it and named it above).
+  if [ "$SW_CRYPTO_FAILED_COUNT" -gt 0 ]; then
+    log_error "$SW_CRYPTO_FAILED_COUNT encrypted volume(s) could NOT be crypto-erased — their LUKS keyslots are still intact."
+    log_error "Do not hand this box on until they are erased: cryptsetup luksErase <device> (named above)."
   fi
   if [ "$SW_SKIPPED_COUNT" -gt 0 ]; then
     log_warn "$SW_SKIPPED_COUNT storage target(s) were skipped — see the refusals above"
@@ -1225,6 +1246,20 @@ if [ -f /etc/systemd/system/droplet-panel-claim.service ] || \
   sudo rm -f /run/droplet/panel-released /run/droplet/panel-deadman.fails 2>/dev/null || true
   sudo systemctl daemon-reload 2>/dev/null || true
   log_success "Removed rack-panel console units and host scripts"
+fi
+
+# Bay recovery-key expiry sweep (WARP-3513): the daily timer that shreds the
+# recovery keys the owner never revealed. Stop it BEFORE the host script it runs
+# is removed below; install-device-bridge.sh reinstalls and re-enables it on
+# re-provision. The escrowed keys themselves live on the encrypted /data and
+# are destroyed with it by the wipe above, never here.
+if [ -f /etc/systemd/system/droplet-bay-recovery-expiry.timer ] || \
+   [ -f /etc/systemd/system/droplet-bay-recovery-expiry.service ]; then
+  sudo systemctl disable --now droplet-bay-recovery-expiry.timer 2>/dev/null || true
+  sudo rm -f /etc/systemd/system/droplet-bay-recovery-expiry.service \
+             /etc/systemd/system/droplet-bay-recovery-expiry.timer 2>/dev/null || true
+  sudo systemctl daemon-reload 2>/dev/null || true
+  log_success "Removed bay recovery-key expiry timer"
 fi
 
 # Storage-pool host script (BUG-3 / ADR-019). Remove so a factory reset truly

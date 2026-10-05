@@ -162,7 +162,16 @@ network. Host-published ports and host-network services are called out.
   Highlights: `llm` (chat / agent loop), `auth`, `devices`/`device-clients`
   (pairing), `files`/`files-knowledge` (Nextcloud + RAG), `cameras`, `network*`,
   `switch`, `matter`/`scenes`, `vpn`, `calendar`, `reminders`, `email`, `pm*`
-  (native project management — `/api/pm/*`, ADR-026, behind `authMiddleware`/`requireRole`),
+  (native project management — `/api/pm/*`, ADR-026, behind `authMiddleware`/`requireRole`;
+  every `/api/pm/*` and `/api/mobile/pm*` route sits behind the `projects` module gate, and
+  `routes/pm/pm-module-gate.mount.test.ts` enumerates the mounted routers so a new one cannot
+  ship outside it. Every PM list is a page: `limit` (default 100, max 500) + an opaque
+  `cursor`, answering `nextCursor` and an exact `total` — WARP-3371. Due and start dates are
+  calendar dates, `YYYY-MM-DD` on the wire. `GET /api/pm/people` is the member-readable
+  `{id, displayName, avatarUrl}` roster that names the ids on PM rows. A project is archived
+  with `PATCH {archived}` (members may, audited) and deleted for good only by owner/admin,
+  archived-only, with its identifier retyped and its audit row written in the delete's
+  transaction — WARP-3370),
   `support/` (the service desk — `/api/support/*`, ADR-069: tickets are work items in
   `PmProject.kind = SERVICE_DESK` projects, behind the `support` module gate; `/api/pm/*`
   and `/api/mobile/pm/*` answer 404 for a desk and everything under it),
