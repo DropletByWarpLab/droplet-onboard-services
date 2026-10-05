@@ -104,6 +104,7 @@
 #   DROPLET_WATCHDOG_XVF_HOST            xvf_host stub
 #   DROPLET_WATCHDOG_DOCKER_DAEMON_JSON  daemon.json fixture
 #   DROPLET_WATCHDOG_HOST_UNITS_BIN      droplet-host-units stub
+#   DROPLET_WATCHDOG_ROUTING_URL         routing base URL (router_auth); curl is resolved via PATH
 #   (docker is resolved via PATH, so a stub earlier on PATH intercepts it)
 # =============================================================================
 # Deliberately NOT `set -e`: a supervisor must survive any single probe
@@ -112,7 +113,7 @@ set -u
 
 # --- configuration (no host-specific defaults; everything overridable) -------
 WD_STATE_DIR="${DROPLET_WATCHDOG_STATE_DIR:-/var/lib/droplet/watchdog}"
-WD_CHECKS_ENABLED="${DROPLET_WATCHDOG_CHECKS:-wifi voice_dsp docker_dns container_crashloop host_unit_staleness host_artefacts relay_dns app_downloads}"
+WD_CHECKS_ENABLED="${DROPLET_WATCHDOG_CHECKS:-wifi voice_dsp docker_dns container_crashloop host_unit_staleness host_artefacts relay_dns app_downloads router_auth}"
 WD_ESCALATE_AFTER="${DROPLET_WATCHDOG_ESCALATE_AFTER:-2}"
 WD_RETRY_EVERY="${DROPLET_WATCHDOG_ESCALATED_RETRY_EVERY:-5}"
 
@@ -160,7 +161,11 @@ WD_RELAY_CONTAINER="${DROPLET_WATCHDOG_RELAY_CONTAINER:-droplet-cloudflared}"
 # whose checkout lives somewhere unusual.
 WD_APP_DOWNLOADS_AUDIT="${DROPLET_WATCHDOG_APP_DOWNLOADS_AUDIT:-}"
 
-WD_ALL_CHECKS="wifi voice_dsp docker_dns container_crashloop host_unit_staleness host_artefacts relay_dns app_downloads"
+# WARP-3838 — router_auth reads routing's /health, as scripts/lib/local-dns.sh does.
+WD_ROUTING_URL="${DROPLET_WATCHDOG_ROUTING_URL:-${ROUTING_SERVICE_URL:-http://localhost:8080}}"
+WD_ROUTING_MODE="${ROUTING_MODE:-real}"
+
+WD_ALL_CHECKS="wifi voice_dsp docker_dns container_crashloop host_unit_staleness host_artefacts relay_dns app_downloads router_auth"
 WD_STATUS_FILE="$WD_STATE_DIR/status.json"
 WD_HEAL_LOG="$WD_STATE_DIR/heal.log"
 WD_KV_DIR="$WD_STATE_DIR/state"
@@ -849,6 +854,44 @@ wd_check_app_downloads() {
 
   CHECK_OUTCOME=heal_failed
   CHECK_MESSAGE="/downloads does not carry what this release declares — ${parts}: ${names}a customer opening 'Get the app' is shown nothing for those platforms. Fix: stage the installer (./scripts/app-downloads/stage.sh) — detail: bash $WD_APP_DOWNLOADS_AUDIT"
+  return 0
+}
+
+# --- router_auth ---------------------------------------------------------------
+# WARP-3838. The dashboard already says "Credentials rejected" and /api/health
+# already returns 503, but nothing on the box itself recorded a router-auth
+# failure persistently (the lab box ran unpaired for an unknown time). Routing's
+# auth-exempt /health carries `connected` and the actionable `error` text.
+#
+# Detect-only, deliberately no heal: the fix is a human re-pairing the router
+# credentials, which a 3-minute timer must never guess at. not_applicable when
+# routing is unreachable (nothing to judge) or ROUTING_MODE is not `real`
+# (same gate as scripts/lib/local-dns.sh). ROUTING_MODE and ROUTING_SERVICE_URL
+# are read from this unit's environment (/etc/default/droplet-watchdog).
+wd_check_router_auth() {
+  if [ "$WD_ROUTING_MODE" != "real" ]; then
+    CHECK_OUTCOME=not_applicable
+    CHECK_MESSAGE="ROUTING_MODE=$WD_ROUTING_MODE — no real router to authenticate to"
+    return 0
+  fi
+
+  local body
+  if ! body="$(curl -s --max-time 5 "${WD_ROUTING_URL}/health" 2>/dev/null)" || [ -z "$body" ]; then
+    CHECK_OUTCOME=not_applicable
+    CHECK_MESSAGE="routing service not responding at ${WD_ROUTING_URL}/health — no verdict"
+    return 0
+  fi
+
+  if printf '%s' "$body" | grep -Eq '"connected"[[:space:]]*:[[:space:]]*true'; then
+    CHECK_OUTCOME=ok
+    CHECK_MESSAGE="routing is authenticated to the router"
+    return 0
+  fi
+
+  local err
+  err="$(printf '%s' "$body" | sed -n 's/.*"error"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -c 300)"
+  CHECK_OUTCOME=heal_failed
+  CHECK_MESSAGE="routing is not connected to the router: ${err:-no error text in /health}. Detect-only: re-pair the router credentials (detail: curl ${WD_ROUTING_URL}/health)"
   return 0
 }
 

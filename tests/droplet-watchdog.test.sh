@@ -1181,6 +1181,78 @@ else
 fi
 
 # =============================================================================
+# Phase 10: router_auth (WARP-3838) — detect-only
+# =============================================================================
+echo "--- Phase 10: router_auth ---"
+
+RA='DROPLET_WATCHDOG_CHECKS=router_auth'
+
+# curl stub: logs its URL, prints $WORK/health_body, exits $WORK/curl_exit.
+mk_curl_stub() {
+  cat > "$WORK/bin/curl" <<EOF2
+#!/bin/sh
+printf 'curl %s\n' "\$*" >> "$WORK/curl.log"
+cat "$WORK/health_body" 2>/dev/null
+exit \$(cat "$WORK/curl_exit" 2>/dev/null || echo 0)
+EOF2
+  chmod +x "$WORK/bin/curl"
+}
+
+reset_work
+rm -f "$WORK/curl.log" "$WORK/health_body" "$WORK/curl_exit"
+mk_curl_stub
+printf '{"status":"ok","connected":true,"router_host":"192.168.9.1"}' > "$WORK/health_body"
+run_wd "$RA" >/dev/null || true
+if [ "$(wd_field router_auth status)" = "ok" ]; then
+  pass "router_auth: ok when routing /health says connected:true"
+else
+  fail "expected ok, got $(wd_field router_auth status)"
+fi
+
+reset_work
+rm -f "$WORK/curl.log" "$WORK/health_body" "$WORK/curl_exit"
+mk_curl_stub
+printf '{"status":"disconnected","connected":false,"router_host":"192.168.9.1","error":"Router rejected the droplet-ai credentials"}' > "$WORK/health_body"
+run_wd "$RA" >/dev/null || true
+if [ "$(wd_field router_auth status)" = "heal_failed" ]; then
+  pass "router_auth: heal_failed when routing cannot authenticate"
+else
+  fail "expected heal_failed, got $(wd_field router_auth status)"
+fi
+case "$(wd_field router_auth message)" in
+  *"rejected the droplet-ai credentials"*) pass "router_auth: the message carries the /health error text" ;;
+  *) fail "message lacks the health error: $(wd_field router_auth message)" ;;
+esac
+# Detect-only: the only thing it may ever run is the /health read.
+if grep -v '/health' "$WORK/curl.log" | grep -q .; then
+  fail "router_auth did something besides read /health: $(cat "$WORK/curl.log")"
+else
+  pass "router_auth is detect-only (only /health is read)"
+fi
+
+reset_work
+rm -f "$WORK/curl.log" "$WORK/health_body"
+mk_curl_stub
+echo 7 > "$WORK/curl_exit"
+run_wd "$RA" >/dev/null || true
+if [ "$(wd_field router_auth status)" = "not_applicable" ]; then
+  pass "router_auth: not_applicable when routing /health is unreachable"
+else
+  fail "expected not_applicable for unreachable routing, got $(wd_field router_auth status)"
+fi
+
+reset_work
+rm -f "$WORK/curl.log" "$WORK/curl_exit"
+mk_curl_stub
+printf '{"status":"disconnected","connected":false,"error":"x"}' > "$WORK/health_body"
+run_wd "$RA" ROUTING_MODE=mock >/dev/null || true
+if [ "$(wd_field router_auth status)" = "not_applicable" ] && [ ! -f "$WORK/curl.log" ]; then
+  pass "router_auth: not_applicable (and no probe) when ROUTING_MODE is not real"
+else
+  fail "expected not_applicable without probing for ROUTING_MODE=mock, got $(wd_field router_auth status)"
+fi
+
+# =============================================================================
 echo ""
 echo "  ------------------------------------------------"
 if [ "$FAILURES" -gt 0 ]; then
