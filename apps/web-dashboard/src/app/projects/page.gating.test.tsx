@@ -91,6 +91,9 @@ vi.mock("@/components/projects/usePm", () => ({
   // "this box has no departments" are the same shape, and the page has to
   // render the workspace either way. That is what this suite asserts.
   useDepartments: () => ({ departments: undefined }),
+  // WARP-3521 — the page reads the project's cycles so a card can name its
+  // cycle. Same honest stub: not loaded yet, which the page must survive.
+  useProjectCycles: () => ({ cycles: undefined, error: undefined, isLoading: false, mutate: vi.fn() }),
   pmActions: () => ({}),
   PmRequestError: class extends Error {},
 }));

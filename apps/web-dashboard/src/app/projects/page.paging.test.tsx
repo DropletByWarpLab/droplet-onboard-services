@@ -15,6 +15,25 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { SWRConfig } from "swr";
 import React from "react";
+import { buildPmPath, parsePmUrl, type PmUrlState } from "@droplet/shared-types";
+
+// Model navigation landing through the canonical parser/builder; the real hook
+// is covered separately. These tests exercise the actual merged page and SWR.
+const navigation = { search: "", entries: [] as string[] };
+vi.mock("@/components/projects/useProjectsUrl", () => ({
+  useProjectsUrl: () => {
+    const [, rerender] = React.useState(0);
+    const state = parsePmUrl(new URLSearchParams(navigation.search));
+    const go = (patch: Partial<Required<PmUrlState>>, _mode: string) => {
+      const href = buildPmPath({ ...state, ...patch });
+      navigation.entries.push(href);
+      navigation.search = href.split("?")[1] ?? "";
+      rerender((n) => n + 1);
+    };
+    return { state, go, openItem: (key: string) => go({ item: key }, "push"), closeItem: () => go({ item: null }, "replace") };
+  },
+}));
+
 
 vi.mock("@/components/shell/ShellPage", () => ({
   ShellPage: ({ title, sub, children, actions }: any) => (
@@ -97,17 +116,16 @@ function wireItem(n: number) {
  *  jsdom render of 200 cards). */
 let hold: Promise<void> | null = null;
 let failCursorPages = false;
-const itemRequests: string[] = [];
+let failFilteredFirstPage = false;
+const itemRequests: Array<{ projectId: string | null; limit: number; cursor: string | null }> = [];
 
-function serveItems(url: string) {
-  itemRequests.push(url);
-  const u = new URL(url, "http://box.test");
-  const limit = Number(u.searchParams.get("limit") ?? 100);
-  const cursor = u.searchParams.get("cursor");
+function serveItems(body: { projectId: string | null; limit: number; cursor: string | null }) {
+  itemRequests.push({ projectId: body.projectId, limit: body.limit, cursor: body.cursor });
+  const { limit, cursor } = body;
   const after = cursor ? Number(cursor.replace("after-", "")) : 0;
   const rows = Array.from({ length: Math.min(limit, TOTAL - after) }, (_, i) => wireItem(after + i + 1));
   const last = after + rows.length;
-  return { work_items: rows, nextCursor: last < TOTAL ? `after-${last}` : null, total: TOTAL };
+  return { work_items: rows, nextCursor: last < TOTAL ? `after-${last}` : null, total: TOTAL, counts: cursor ? undefined : { all: TOTAL, mine: 0, overdue: 0, recent: 0 } };
 }
 
 vi.mock("@/lib/auth", () => ({
@@ -115,15 +133,23 @@ vi.mock("@/lib/auth", () => ({
     user: { id: "u1", username: "ada", displayName: "Ada", role: "owner" },
     isLoading: false,
   }),
-  authFetch: vi.fn(async (url: string) => {
+  authFetch: vi.fn(async (url: string, init?: RequestInit) => {
     const json = (body: unknown) => ({ ok: true, status: 200, json: () => Promise.resolve(body) }) as Response;
-    if (url.startsWith("/api/pm/projects/p1/work-items")) {
-      if (url.includes("cursor=")) {
+    if (url === "/api/pm/work-items/query") {
+      expect(init?.method).toBe("POST");
+      const body = JSON.parse(String(init?.body));
+      expect(body.projectId).toBe("p1");
+      if (failFilteredFirstPage && body.cursor === null && body.filter.field === "text") {
+        return { ok: false, status: 503, json: () => Promise.resolve({ error: "boom" }) } as Response;
+      }
+      if (body.cursor) {
         if (hold) await hold;
         if (failCursorPages) return { ok: false, status: 503, json: () => Promise.resolve({ error: "boom" }) } as Response;
       }
-      return json(serveItems(url));
+      return json(serveItems(body));
     }
+    if (url === "/api/pm/people") return json({ people: [] });
+    if (url === "/api/pm/projects/p1/cycles") return json({ cycles: [] });
     if (url === "/api/pm/projects/p1/states") return json({ states: STATES });
     if (url.startsWith("/api/pm/projects")) return json({ projects: [PROJECT] });
     if (url.startsWith("/api/pm/summary")) {
@@ -152,8 +178,11 @@ async function openBoard() {
 }
 
 beforeEach(() => {
+  navigation.search = "";
+  navigation.entries = [];
   hold = null;
   failCursorPages = false;
+  failFilteredFirstPage = false;
   itemRequests.length = 0;
 });
 
@@ -164,10 +193,12 @@ describe("/projects board — every page, progressively (WARP-3371)", () => {
     await waitFor(() => expect(cards()).toHaveLength(TOTAL));
     // No "x of y" noise on a list that is complete.
     expect(screen.queryByRole("status")).toBeNull();
-    // Two requests: 200 + 50, the second driven by the cursor.
+    // The query hook revalidates its first page before fetching the tail.
+    // Both pages remain scoped to the actual POST query, with no missing rows.
     expect(itemRequests).toEqual([
-      "/api/pm/projects/p1/work-items?limit=200",
-      "/api/pm/projects/p1/work-items?limit=200&cursor=after-200",
+      { projectId: "p1", limit: 200, cursor: null },
+      { projectId: "p1", limit: 200, cursor: null },
+      { projectId: "p1", limit: 200, cursor: "after-200" },
     ]);
     // The "All" chip is the exact total, and nothing is marked as a floor.
     const all = screen.getByRole("button", { name: /^All\s*250$/ });
@@ -187,9 +218,10 @@ describe("/projects board — every page, progressively (WARP-3371)", () => {
     expect(status).toHaveTextContent("Showing 200 of 250 work items — loading the rest…");
     // `All` is the server's exact total, never the length of what has arrived…
     expect(screen.getByRole("button", { name: /^All\s*250$/ })).toBeInTheDocument();
-    // …and the counts that cannot be known yet say so.
-    expect(screen.getByRole("button", { name: /^My items\s*0\+$/ })).toBeInTheDocument();
-    expect(screen.getAllByText(/^\d+\+$/).length).toBeGreaterThan(3); // column counts too
+    // Named-filter counts come from the server for the whole query, while
+    // board columns only know the loaded rows and remain marked as floors.
+    expect(screen.getByRole("button", { name: /^My items\s*0$/ })).toBeInTheDocument();
+    expect(screen.getAllByText(/^\d+\+$/).length).toBeGreaterThan(2); // column counts too
 
     release();
     await waitFor(() => expect(cards()).toHaveLength(TOTAL));
@@ -217,6 +249,21 @@ describe("/projects board — every page, progressively (WARP-3371)", () => {
     await waitFor(() => expect(cards()).toHaveLength(TOTAL));
 
     fireEvent.click(screen.getByRole("tab", { name: "List" }));
+    await waitFor(() => expect(cards()).toHaveLength(TOTAL));
+  });
+
+  it("a failed new filter's first page is a query error, not a failed tail with stale matching rows", async () => {
+    await openBoard();
+    await waitFor(() => expect(cards()).toHaveLength(TOTAL));
+    failFilteredFirstPage = true;
+    fireEvent.change(screen.getByLabelText("Search work items"), { target: { value: "Item" } });
+    await screen.findByText("Couldn't load this project.");
+    expect(cards()).toHaveLength(0);
+    expect(screen.queryByText(/Couldn't load the rest/)).toBeNull();
+    expect(screen.queryByText(/250 items match/)).toBeNull();
+    expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
+    failFilteredFirstPage = false;
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(cards()).toHaveLength(TOTAL));
   });
 });

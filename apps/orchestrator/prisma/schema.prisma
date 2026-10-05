@@ -5783,6 +5783,13 @@ model PmWorkItem {
   parentId        String?
   parent          PmWorkItem?  @relation("PmSubIssues", fields: [parentId], references: [id], onDelete: SetNull)
   children        PmWorkItem[] @relation("PmSubIssues")
+  /// WARP-3521 — the cycle (sprint) this item is planned into, at most one.
+  /// SetNull so deleting a cycle never deletes work; `deleteCycle` audits that
+  /// SET NULL with one `cycle_removed` row per item before it runs. The cycle
+  /// MUST belong to the item's own project: the service refuses a cross-project
+  /// cycle (`invalid_cycle`) and the `pmworkitem_cycle_same_project` trigger in
+  /// the warp_3521_pm_cycles_modules migration backstops it (a CHECK cannot — it
+  /// may not contain a subquery; same reasoning as `pmworkitem_parent_same_project`).
   cycleId         String?
   cycle           PmCycle?     @relation(fields: [cycleId], references: [id], onDelete: SetNull)
   /// ADR-045 §5.3 — the department that owns THIS item, OVERRIDING its
@@ -5795,6 +5802,10 @@ model PmWorkItem {
   createdById     String?
   startDate       DateTime?
   dueDate         DateTime?
+  /// Size of the item, in points (WARP-3520 owns the field and its API; WARP-3521
+  /// reads it for cycle / module progress and the burndown). Declared in both
+  /// slices' migrations as `ADD COLUMN IF NOT EXISTS` so either lands first.
+  estimate        Float?
   sortOrder       Float        @default(0)
   /// Canonical "is done" signal (WARP-884) — explicit column, not derived
   /// from `completedAt IS NOT NULL`. Kept in sync with the state's group by
@@ -5999,25 +6010,45 @@ enum PmCycleStatus {
   completed
 }
 
-/// INVARIANT: at most ONE active cycle per project. Enforced by a partial
-/// unique index — `UNIQUE ("projectId") WHERE "status" = 'active'` — in raw
-/// migration SQL (Prisma cannot express a WHERE-filtered unique index),
-/// mirroring `PmState_projectId_isDefault_key`. See the
-/// `PmCycle_projectId_active_key` index in the
-/// warp_884_885_pm_schema_hardening migration (WARP-885). No cycle write
-/// path exists yet (P2/P3) — this is DB-level hardening ahead of it.
+/// A cycle (sprint) — a time-boxed set of work items. Written by
+/// `pm-cycles.service.ts` (WARP-3521): create / edit / start / complete /
+/// delete, `completeCycle` being the one that moves work.
+///
+/// `startDate` / `endDate` are CALENDAR DATES, stored as midnight UTC like
+/// `PmWorkItem.dueDate` and read back as `YYYY-MM-DD`. `completedAt` is the
+/// instant `completeCycle` ran and `carriedOverCount` the number of unfinished
+/// items it moved out — both explicit columns written once, in the completion
+/// transaction, so a completed cycle can still say how much of its scope it
+/// finished (its attached items are all done by construction) and the burndown
+/// knows where to stop.
+///
+/// INVARIANTS THE SCHEMA LANGUAGE CANNOT EXPRESS — all in raw migration SQL and
+/// proven against a real Postgres in `pm-cycles-modules.pg.test.ts`:
+///
+///   * At most ONE active cycle per project — a partial unique index,
+///     `UNIQUE ("projectId") WHERE "status" = 'active'`
+///     (`PmCycle_projectId_active_key`; Prisma cannot express a WHERE-filtered
+///     unique index, mirroring `PmState_projectId_isDefault_key`). Created in
+///     warp_884_885_pm_schema_hardening and re-asserted idempotently in
+///     warp_3521_pm_cycles_modules. `startCycle` maps its P2002 onto
+///     `cycle_already_active`.
+///   * `PmCycle_dates_ordered` — CHECK: `endDate` is never before `startDate`.
+///   * `pmworkitem_cycle_same_project` — trigger on PmWorkItem: an item's cycle
+///     belongs to the item's project.
 model PmCycle {
-  id          String        @id @default(uuid())
-  projectId   String
-  project     PmProject     @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  name        String
-  description String?
-  startDate   DateTime?
-  endDate     DateTime?
-  status      PmCycleStatus @default(draft)
-  createdAt   DateTime      @default(now())
-  updatedAt   DateTime      @default(now()) @updatedAt
-  workItems   PmWorkItem[]
+  id               String        @id @default(uuid())
+  projectId        String
+  project          PmProject     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  name             String
+  description      String?
+  startDate        DateTime?
+  endDate          DateTime?
+  status           PmCycleStatus @default(draft)
+  completedAt      DateTime?
+  carriedOverCount Int           @default(0)
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @default(now()) @updatedAt
+  workItems        PmWorkItem[]
 
   @@index([projectId])
 }
@@ -6033,6 +6064,11 @@ enum PmModuleStatus {
   cancelled
 }
 
+/// Written by `pm-modules.service.ts` (WARP-3521). `startDate` / `targetDate`
+/// are calendar dates (midnight UTC), `PmModule_dates_ordered` CHECKs that the
+/// target is never before the start, and `pmmoduleworkitem_same_project` (a
+/// trigger on the join table) keeps a module's items inside its own project —
+/// both in raw migration SQL, proven in `pm-cycles-modules.pg.test.ts`.
 model PmModule {
   id          String             @id @default(uuid())
   projectId   String

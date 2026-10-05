@@ -34,7 +34,7 @@
  * subject, the module toggle is this file's.
  *
  * The route list is never written down here. When a PM route is added to
- * native.ts, relations.ts or mobile/pm.ts it is enumerated, and proved gated,
+ * any listed router it is enumerated, and proved gated,
  * with no edit to this file.
  */
 import { describe, it, expect, beforeEach } from "vitest";
@@ -60,6 +60,7 @@ import { createPmNativeRouter } from "./native.js";
 import { createPmRelationsRouter } from "./relations.js";
 import { createPmQueryRouter } from "./query.js";
 import { createPmViewsRouter } from "./views.js";
+import { createPmPlanningRouter } from "./planning.js";
 import { createPmWebhooksRouter } from "./webhooks.js";
 import { createPmScheduleRouter } from "./schedule.js";
 import { createPmOpenApiRouter } from "./openapi.js";
@@ -140,7 +141,7 @@ interface PmRouterMount {
 const PRISMA = stubPrisma();
 
 /**
- * Mirrors the five PM mounts in app.ts, base and ORDER. The four native
+ * Mirrors the six PM mounts in app.ts, base and ORDER. The five native
  * routers mount at `/api`; routes/mobile/pm.ts registers absolute
  * `/api/mobile/pm/...` paths and is mounted with no base. The source pin below
  * is what keeps this table honest.
@@ -175,6 +176,12 @@ const PM_ROUTER_MOUNTS: readonly PmRouterMount[] = [
     base: "/api",
     file: "routes/pm/relations.ts",
     router: createPmRelationsRouter(PRISMA),
+  },
+  {
+    factory: "createPmPlanningRouter",
+    base: "/api",
+    file: "routes/pm/planning.ts",
+    router: createPmPlanningRouter(PRISMA),
   },
   {
     factory: "createPmWebhooksRouter",
@@ -470,7 +477,7 @@ describe("WARP-1625 — PM_ROUTER_MOUNTS is the mount app.ts has", () => {
 
 describe("WARP-1625 — the walk finds the routes the routers register", () => {
   /** Known routes, by the router that owns them. Not the route list: a handful
-   *  to prove the walk reads each of the three routers, so an enumeration that
+   *  to prove the walk reads the routers, so an enumeration that
    *  quietly stops matching Express's shape cannot pass over an empty set. */
   const KNOWN: ReadonlyArray<readonly [owner: string, label: string]> = [
     ["createPmNativeRouter", "GET /api/pm/summary"],
@@ -478,6 +485,8 @@ describe("WARP-1625 — the walk finds the routes the routers register", () => {
     ["createPmNativeRouter", "POST /api/pm/projects"],
     ["createPmNativeRouter", "DELETE /api/pm/projects/:id"],
     ["createPmRelationsRouter", "GET /api/pm/work-items/:id/relations"],
+    ["createPmWebhooksRouter", "GET /api/pm/webhooks"],
+    ["createPmWebhooksRouter", "POST /api/pm/webhooks/:id/deliveries/:deliveryId/redeliver"],
     ["createPmMobileRouter", "GET /api/mobile/pm/workspaces"],
   ];
 

@@ -97,6 +97,7 @@ vi.mock("@/components/projects/usePm", () => ({
   useSavedViews: () => ({ views: queryState.savedViews, error: undefined, isLoading: false, mutate: vi.fn() }),
   usePeople: () => ({ person: (id: string) => ({ id, name: "Tester", initials: "T", tone: 1 }), people: [] }),
   useDepartments: () => ({ departments: undefined }),
+  useProjectCycles: () => ({ cycles: [], mutate: vi.fn() }),
   pmActions: () => ({}),
   viewActions: () => ({ create: createView, update: updateView, remove: vi.fn() }),
   PmRequestError: class extends Error {},

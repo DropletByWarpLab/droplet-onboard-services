@@ -4,7 +4,12 @@
 // saved-view chips live in FilterBar.tsx and ViewChips.tsx (WARP-3522).
 
 import { PmIcon } from "./icons";
-import { DEPARTMENT_ANY, DEPARTMENT_NONE, type DepartmentOption } from "./department";
+import type { DepartmentOption } from "./department";
+
+// The legacy FilterBar export retains its own select vocabulary. The Projects
+// page uses FilterBar.tsx and the server filter DSL rather than these sentinels.
+const DEPARTMENT_ANY = "all";
+const DEPARTMENT_NONE = "none";
 
 import type { JSX } from "react";
 

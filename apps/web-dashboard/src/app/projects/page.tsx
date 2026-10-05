@@ -33,6 +33,9 @@ import { useAuth } from "@/lib/auth";
 import { useAppCapabilities } from "@/lib/hooks/useAppCapabilities";
 import { translateError } from "@/lib/friendly-errors";
 import "./projects.css";
+import "./planning.css";
+import "./cycles.css";
+import "./modules.css";
 
 import { PmIcon } from "@/components/projects/icons";
 import { PeopleContext, EmptyBlock, Skel } from "@/components/projects/bits";
@@ -49,19 +52,22 @@ import {
   useSavedViews,
   useDepartments,
   usePeople,
+  useProjectCycles,
   pmActions,
   viewActions,
   type ViewsScope,
 } from "@/components/projects/usePm";
 import { departmentOptions } from "@/components/projects/department";
 import { IndexView } from "@/components/projects/IndexView";
-import { BoardView, ListView, PlaceholderView, type Domain } from "@/components/projects/board";
+import { BoardView, ListView, type Domain } from "@/components/projects/board";
 import { ViewSwitcher, type ProjectView } from "@/components/projects/chrome";
 import { FilterBar, FilterChips, type EditorOptions } from "@/components/projects/FilterBar";
 import { ViewChips, type ViewChipItem } from "@/components/projects/ViewChips";
 import { ViewsIndex } from "@/components/projects/ViewsIndex";
 import { EMPTY_FILTER, type ChipLookups } from "@/components/projects/filter-model";
 import { useProjectsUrl } from "@/components/projects/useProjectsUrl";
+import { CyclesView } from "@/components/projects/cycles";
+import { ModulesView } from "@/components/projects/modules";
 import { DetailDrawer } from "@/components/projects/detail";
 import { CalendarView } from "@/components/projects/calendar/CalendarView";
 import { TimelineView } from "@/components/projects/timeline/TimelineView";
@@ -260,6 +266,9 @@ function ProjectsWorkspace(): JSX.Element {
   const { labels } = useProjectLabels(mode === "project" ? (project?.id ?? null) : null);
   const { departments } = useDepartments();
   const allItems = query.items ?? [];
+  // WARP-3521 — the project's cycles, so a board card can name its cycle.
+  const { cycles, mutate: mutateCycles } = useProjectCycles(mode === "project" ? (project?.id ?? null) : null);
+  const cyclesById = useMemo(() => new Map((cycles ?? []).map((c) => [c.id, c])), [cycles]);
 
   // The server dropped something the filter named that no longer exists
   // (brief §3.9): say so once, and show the filter that was applied. The URL
@@ -376,6 +385,7 @@ function ProjectsWorkspace(): JSX.Element {
     void mutateViews();
     void byKey.mutate();
     await query.refresh();
+    void mutateCycles();
   };
 
   // WARP-3370 — leaving a project for good (archived or deleted): back to the
@@ -467,9 +477,10 @@ function ProjectsWorkspace(): JSX.Element {
   // ── what the body shows ──
   const loading = viewPending || (queryEnabled ? query.items === undefined && !query.error : true);
   const unfilteredTotal = query.counts?.all;
+  const partialFailure = !!query.partialError && allItems.length > 0;
   const boardDomain: Domain = loading
     ? "loading"
-    : query.error
+    : query.error && !partialFailure
       ? "error"
       : allItems.length === 0
         ? filterActive && (unfilteredTotal === undefined || unfilteredTotal > 0)
@@ -478,10 +489,14 @@ function ProjectsWorkspace(): JSX.Element {
         : "populated";
 
   const total = query.total;
-  const status = query.truncated
+  const status = query.error && !partialFailure
+    ? null
+    : partialFailure
+    ? `Showing ${allItems.length} of ${total} work items. Couldn't load the rest.`
+    : query.truncated
     ? `Showing the first ${allItems.length} of ${total}. Narrow the filter to see the rest.`
     : query.loadingMore
-      ? `Showing ${allItems.length} of ${total}…`
+      ? `Showing ${allItems.length} of ${total} work items — loading the rest…`
       : filterActive && total !== undefined && !loading
         ? `${total} ${total === 1 ? "item matches" : "items match"}.`
         : null;
@@ -597,6 +612,7 @@ function ProjectsWorkspace(): JSX.Element {
             {status && (
               <div className="pm-status" role="status" aria-live="polite">
                 {status}
+                {partialFailure && <button className="pm-btn ghost sm" type="button" onClick={() => void refreshAll()}>Retry</button>}
               </div>
             )}
           </>
@@ -615,6 +631,8 @@ function ProjectsWorkspace(): JSX.Element {
             onNewItem={() => setModal("newitem")}
             onRetry={() => void refreshAll()}
             onClearFilters={() => writeFilter(EMPTY_FILTER)}
+            partial={query.loadingMore || query.truncated}
+            cycles={cyclesById}
           />
         )}
         {(tab === "list" || mode === "workspace") && (
@@ -626,6 +644,8 @@ function ProjectsWorkspace(): JSX.Element {
             projects={mode === "workspace" ? (projects ?? []) : undefined}
             onRetry={() => void refreshAll()}
             onClearFilters={() => writeFilter(EMPTY_FILTER)}
+            partial={query.loadingMore || query.truncated}
+            cycles={cyclesById}
           />
         )}
         {tab === "calendar" && mode === "project" && (
@@ -650,8 +670,12 @@ function ProjectsWorkspace(): JSX.Element {
             onNewItem={() => setModal("newitem")}
           />
         )}
-        {tab === "cycles" && mode === "project" && <PlaceholderView kind="cycles" />}
-        {tab === "modules" && mode === "project" && <PlaceholderView kind="modules" />}
+        {tab === "cycles" && mode === "project" && project && (
+          <CyclesView project={project} states={states ?? []} readOnly={readOnly} onOpenItem={(i) => openItem(i.key)} onChanged={refreshAll} />
+        )}
+        {tab === "modules" && mode === "project" && project && (
+          <ModulesView project={project} readOnly={readOnly} onOpenItem={(i) => openItem(i.key)} onChanged={refreshAll} />
+        )}
       </div>
     </>
   );
@@ -771,7 +795,7 @@ function ProjectsWorkspace(): JSX.Element {
         </div>
       </ShellPage>
 
-      {drawerItem && <DetailDrawer item={drawerItem} onClose={closeItem} onChanged={refreshAll} />}
+      {drawerItem && <DetailDrawer item={drawerItem} readOnly={readOnly} onClose={closeItem} onChanged={refreshAll} />}
       {modal === "newitem" && project && (
         <NewItemModal project={project} onClose={() => setModal(null)} onCreated={() => void refreshAll()} />
       )}
