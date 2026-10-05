@@ -95,6 +95,8 @@ export const comment = (over: Partial<CommentEntry> = {}): CommentEntry => ({
   authorKind: "USER",
   author: { id: "u-1", displayName: "Ada" },
   html: "<p>We are on it.</p>",
+  deliveryStatus: "NONE",
+  deliveryFailure: null,
   createdAt: "2026-10-01T10:00:00.000Z",
   ...over,
 });

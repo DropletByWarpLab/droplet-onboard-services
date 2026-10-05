@@ -109,6 +109,9 @@ const VERB_EVENT: Record<PmActivityVerb, WorkItemEvent> = {
   // carries only the provider and `<kind>:<ref>` (`pull_request:#42`), never the
   // title or URL: those are the code host's text, not the work item's.
   external_link_added: "work_item.updated",
+  time_logged: "work_item.updated",
+  time_log_updated: "work_item.updated",
+  time_log_removed: "work_item.updated",
 };
 
 export function eventForVerb(verb: PmActivityVerb): WorkItemEvent {

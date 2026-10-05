@@ -20,6 +20,7 @@ import { fmtISODate, isOverdue } from "./config";
 import { useActivity, useComments, useSubIssues, useProjectLabels, useDevelopmentLinks, pmActions } from "./usePm";
 import { CycleField, ModulesField } from "./planning-pickers";
 import type { PmWorkItem } from "./types";
+import { TimeSection } from "./time/TimeSection";
 import { escapeHtml } from "@/lib/escape-html";
 import { formatRelativeTime } from "@/lib/relative-time";
 import { translateError } from "@/lib/friendly-errors";
@@ -451,6 +452,8 @@ function DetailBody({
           <div style={{ fontSize: 13, color: "var(--text-4)" }}>No sub-issues yet.</div>
         )}
       </div>
+
+      <TimeSection item={item} />
 
       <div>
         <div className="pm-sect" style={{ marginBottom: 12 }}>

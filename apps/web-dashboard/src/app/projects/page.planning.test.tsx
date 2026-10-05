@@ -27,7 +27,12 @@ vi.mock("next/link", () => ({
 vi.mock("@/components/Toast", () => ({ useToast: () => ({ toast: vi.fn() }) }));
 vi.mock("@/lib/auth", () => ({
   useAuth: () => ({ user: { id: "u1", username: "ada", displayName: "Ada", role: roleRef.current }, isLoading: false }),
-  authFetch: vi.fn(),
+  authFetch: vi.fn(async (url: string) => ({
+    ok: true,
+    json: async () => url.endsWith("/timer")
+      ? { timer: null }
+      : { worklogs: [], total_entries: 0, total_minutes: 0 },
+  })),
 }));
 vi.mock("@/lib/hooks/useAppCapabilities", () => ({ useAppCapabilities: () => ({ projects: true }) }));
 
@@ -114,7 +119,10 @@ vi.mock("@/components/projects/usePm", () => ({
   useSubIssues: () => ({ subIssues: [] }),
   useComments: () => ({ comments: [], mutate: vi.fn() }),
   useActivity: () => ({ activity: [], mutate: vi.fn() }),
-  useDevelopmentLinks: () => ({ links: [], ...idle }),
+  useDevelopmentLinks: () => ({ links: [{
+    id: "dev-1", provider: "GITHUB", kind: "PULL_REQUEST", state: "OPEN",
+    url: "https://github.com/acme/app/pull/4", title: "INBOX-1 fix planning", number: 4,
+  }], ...idle }),
   pmActions: () => ({}),
   PmRequestError: class extends Error {},
 }));
@@ -189,5 +197,21 @@ describe("/projects — planning wiring", () => {
     const drawer = screen.getByRole("dialog");
     expect(within(drawer).getByText("Cycle")).toBeInTheDocument();
     expect(within(drawer).getByText("Modules")).toBeInTheDocument();
+  });
+
+  it("a guest drawer keeps development links and time visible while hiding planning and time writes", async () => {
+    roleRef.current = "guest";
+    openProject();
+    fireEvent.click(screen.getByRole("button", { name: "INBOX-1, First task" }));
+    const drawer = within(screen.getByRole("dialog"));
+    expect(drawer.getByRole("link", { name: /INBOX-1 fix planning/ })).toHaveAttribute(
+      "href", "https://github.com/acme/app/pull/4",
+    );
+    expect(drawer.getByText("Sprint 12")).toBeInTheDocument();
+    expect(drawer.queryByRole("combobox", { name: "Cycle" })).toBeNull();
+    expect(drawer.queryByRole("combobox", { name: "Add to a module" })).toBeNull();
+    expect(await drawer.findByText("No time logged yet.")).toBeInTheDocument();
+    expect(drawer.queryByRole("button", { name: "Log time" })).toBeNull();
+    expect(drawer.queryByRole("button", { name: "Start timer" })).toBeNull();
   });
 });

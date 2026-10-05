@@ -48,7 +48,7 @@ export function Composer({
       else await actions.sendReply(ticket.id, html, state);
       setText("");
       setThenState("");
-      toast(note ? "Note added" : bound ? "Reply sent" : "Reply recorded", "success");
+      toast(note ? "Note added" : bound ? "Reply queued" : "Reply recorded", "success");
       onSent();
     } catch (e) {
       toast(translateError(e, "support"), "error");

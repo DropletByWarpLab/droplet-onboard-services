@@ -41,6 +41,7 @@ const svc = vi.hoisted(() => {
     SupportContactExistsError,
     EMPTY_BODY: "empty_body",
     INVALID_CURSOR: "invalid_cursor",
+    EMAIL_CHANNEL_ERRORS: { ACCOUNT_NOT_FOUND: "email_account_not_found", CONTACT_OWNER_NOT_FOUND: "contact_owner_not_found", EMAIL_MODULE_DISABLED: "email_module_disabled", INVALID_TEMPLATE: "invalid_auto_ack_template" },
     listAgents: vi.fn(),
     searchRequesterContacts: vi.fn(),
     createRequesterContact: vi.fn(),
@@ -58,6 +59,10 @@ const svc = vi.hoisted(() => {
     addNote: vi.fn(),
     escalateTicket: vi.fn(),
     listRequesterTickets: vi.fn(),
+    listDeskEmailAccounts: vi.fn(),
+    getDeskEmailChannel: vi.fn(),
+    bindDeskEmailChannel: vi.fn(),
+    retryPublicReply: vi.fn(),
   };
 });
 vi.mock("../../services/support/support.service.js", () => svc);
@@ -84,7 +89,7 @@ function buildApp(): Express {
     if (current) req.user = current;
     next();
   });
-  app.use("/api", createSupportRouter({} as never, { resolveAccess: (id) => resolver(id) }));
+  app.use("/api", createSupportRouter({} as never, { resolveAccess: (id) => resolver(id), isEmailModuleEffective: async () => true }));
   return app;
 }
 
@@ -109,6 +114,10 @@ beforeEach(() => {
   svc.addNote.mockResolvedValue({ entry: {}, ticket: TICKET });
   svc.escalateTicket.mockResolvedValue({ workItem: {}, ticket: TICKET });
   svc.listRequesterTickets.mockResolvedValue({ tickets: [], total: 0, nextCursor: null });
+  svc.listDeskEmailAccounts.mockResolvedValue([]);
+  svc.getDeskEmailChannel.mockResolvedValue(null);
+  svc.bindDeskEmailChannel.mockResolvedValue(null);
+  svc.retryPublicReply.mockResolvedValue({ status: "queued" });
 });
 
 // ── the route table ──────────────────────────────────────────────────────────
@@ -180,7 +189,7 @@ describe("the per-person grant level", () => {
     const app = buildApp();
     for (const c of ROUTES) {
       const res = await send(app, c);
-      if (c.method === "get") expect(res.status, c.url).toBe(c.ok);
+      if (c.method === "get" && !c.adminOnly) expect(res.status, c.url).toBe(c.ok);
       else {
         expect(res.status, `${c.method} ${c.url}`).toBe(404);
         expect(res.body).toEqual({ error: "module_disabled", module: "support" });
