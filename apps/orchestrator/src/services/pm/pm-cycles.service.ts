@@ -41,6 +41,7 @@
  */
 
 import type { Prisma, PrismaClient, PmStateGroup } from "@prisma/client";
+import { nudgeOutbox } from "./pm-outbox.js";
 import { REPEATABLE_READ_TX, SERIALIZABLE_TX } from "../../lib/prisma-tx.js";
 import { PM_ERRORS, isPrismaCode, isServiceDesk, listWorkItemsWhere, type ApiWorkItem } from "./pm.service.js";
 import {
@@ -335,6 +336,7 @@ export async function deleteCycle(
   actorId: string | null,
   cycleId: string,
 ): Promise<void> {
+  let wroteActivity = false;
   try {
     await prisma.$transaction(async (tx) => {
       await loadCycleRow(tx, cycleId);
@@ -359,6 +361,7 @@ export async function deleteCycle(
             newValue: null,
           })),
         });
+        wroteActivity = true;
       }
       await tx.pmCycle.delete({ where: { id: cycleId } });
     });
@@ -366,6 +369,7 @@ export async function deleteCycle(
     if (isPrismaCode(err, "P2025")) throw new Error(PM_PLANNING_ERRORS.CYCLE_NOT_FOUND);
     throw err;
   }
+  if (wroteActivity) nudgeOutbox();
 }
 
 /**
@@ -480,6 +484,7 @@ export async function completeCycle(
     if (isPrismaCode(err, "P2025")) throw new Error(PM_PLANNING_ERRORS.CYCLE_NOT_FOUND);
     throw err;
   }
+  if (movedCount > 0) nudgeOutbox();
   return { cycle: await getCycle(prisma, cycleId), moved: { count: movedCount, to: target } };
 }
 

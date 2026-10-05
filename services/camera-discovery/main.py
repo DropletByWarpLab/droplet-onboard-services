@@ -33,6 +33,7 @@ import os
 import re
 import time
 from datetime import datetime
+from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
@@ -51,6 +52,7 @@ from frigate_client import FrigateClient
 from onvif_scanner import discover_cameras, onvif_stream_uri, probe_onvif_device
 from rtsp_prober import (
     RTSP_PORTS,
+    credential_probing_paused,
     probe_camera,
     probe_with_credentials,
     redact_rtsp_url,
@@ -264,6 +266,126 @@ rejected_macs: set[str] = set()
 # reject (or a second accept) from acting on a MAC that is being committed —
 # preserving the invariant that a MAC is never both accepted AND rejected.
 accepting_macs: set[str] = set()
+# WARP-3508: IPs that are already a Frigate camera input. Frigate is the source of
+# truth for "this host is a camera": a camera added by hand (the orchestrator's
+# POST /cameras) never passes through this service, so without this set it sat in
+# `pending_cameras` as "needs sign-in" and was re-probed — ONVIF as admin/blank,
+# then the default-credential ladder — on every sweep. Refreshed from Frigate's
+# config (see `_refresh_managed_ips`); the sweep skips these IPs entirely.
+managed_ips: set[str] = set()
+
+
+def _already_decided(mac: str, ip: str) -> bool:
+    """True when something has already decided this camera's fate (WARP-3508, F5).
+
+    A sweep awaits for seconds per candidate — ONVIF, the RTSP probe, the
+    credential ladder, Frigate — and writes its result afterwards. In that window
+    an operator can accept the camera (``known_cameras``, or mid-flight in
+    ``accepting_macs``), dismiss it (``rejected_macs``) or add it by hand (its IP
+    becomes a ``managed_ips`` entry). Writing the sweep's now-stale result over any
+    of those undoes the decision: a camera already live in Frigate reappears as
+    "needs credentials", a dismissed one reappears at all.
+
+    So a sweep asks this when it builds its candidate list, again before it spends
+    any probes on a candidate, and once more — with no await between the check and
+    the write — before it adds the camera to Frigate or records what it found.
+    """
+    return (
+        mac in known_cameras
+        or mac in accepting_macs
+        or mac in rejected_macs
+        or ip in managed_ips
+    )
+
+
+# --- Persisted dismissals (WARP-3508) ---
+#
+# ``rejected_macs`` is the one piece of state here that is the OPERATOR'S DECISION
+# rather than something discovery can re-derive from the network, so it is the one
+# piece that must outlive the process. It lived only in memory, so every restart
+# (and every update, which recreates the container) resurrected each dismissed
+# camera as a fresh "Needs sign-in" card.
+#
+# Stored as a small JSON file in a named volume (``camera-discovery-state``).
+# ``known_cameras`` is deliberately NOT persisted: its records embed ``user:pass@``
+# stream URLs, so saving it would put camera credentials in a file — and what
+# Frigate already manages is re-derived from Frigate itself on startup.
+_REJECTED_FILE = "rejected-macs.json"
+
+
+def _rejected_path() -> Path:
+    """Where the dismissed-camera list lives. Resolved per call, like
+    ``services/switch/provision_state.py``, so the directory is overridable
+    without an import-order trap."""
+    base = os.getenv("CAMERA_DISCOVERY_STATE_DIR", "/var/lib/droplet/camera-discovery")
+    return Path(base) / _REJECTED_FILE
+
+
+def _load_rejected_macs() -> None:
+    """Restore the dismissed-camera list written by ``_save_rejected_macs``.
+
+    Runs once at startup and never raises: a missing, unreadable or malformed file
+    means "nothing dismissed yet", never a service that will not start. The file is
+    outside this process's control, so every entry is re-validated, and the
+    ``MAX_REJECTED_MACS`` cap holds on load as it does on reject.
+    """
+    path = _rejected_path()
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return
+    except (OSError, ValueError) as exc:
+        logger.warning("Ignoring unreadable %s (%s) — no dismissed cameras restored", path, exc)
+        return
+    entries = raw.get("rejected_macs") if isinstance(raw, dict) else None
+    if not isinstance(entries, list):
+        logger.warning('Ignoring %s — expected {"rejected_macs": [...]}', path)
+        return
+    for entry in entries:
+        if len(rejected_macs) >= MAX_REJECTED_MACS:
+            logger.warning("%s holds more than %d entries — the rest are ignored", path, MAX_REJECTED_MACS)
+            break
+        key = entry.strip().lower() if isinstance(entry, str) else ""
+        if _CAMERA_KEY.fullmatch(key):
+            rejected_macs.add(key)
+    if rejected_macs:
+        logger.info("Restored %d dismissed camera(s) from %s", len(rejected_macs), path)
+
+
+def _save_rejected_macs() -> bool:
+    """Write the dismissed-camera list to disk. True on success; never raises.
+
+    Best-effort by the same contract as ``services/switch/provision_state.py``: an
+    unwritable state dir must not stop the operator dismissing a camera, and the
+    dismissal still holds for this run. The failure is logged at ERROR and returned,
+    so it is loud rather than silent.
+
+    Atomic: the list is written to a temp file in the SAME directory, flushed to
+    disk, then renamed over the target. A crash or a full disk part-way leaves the
+    previous list intact instead of a truncated file the next startup cannot read.
+    """
+    path = _rejected_path()
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tmp.open("w", encoding="utf-8") as fh:
+            json.dump({"rejected_macs": sorted(rejected_macs)}, fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except OSError as exc:
+        logger.error(
+            "Could not save the dismissed-camera list to %s (%s) — dismissals will not survive a restart",
+            path,
+            exc,
+        )
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return False
+    return True
+
 
 # --- MQTT ---
 
@@ -672,7 +794,11 @@ async def scan_and_discover() -> None:
             continue  # Skip non-LAN IPs (loopback, link-local, public)
         if not is_camera_subnet_ip(ip):
             continue  # Skip IPs outside camera subnet when isolation is active
-        if mac in known_cameras or mac in rejected_macs:
+        if _already_decided(mac, ip):
+            # Accepted, dismissed, or a host Frigate already pulls a stream from
+            # (WARP-3508): a camera the operator has, not a candidate. Probing it
+            # would mean an ONVIF login and the credential ladder against a camera
+            # that is already set up — and Hanwha locks the account after ~5 failures.
             continue
 
         candidates[mac] = {
@@ -697,8 +823,8 @@ async def scan_and_discover() -> None:
             # No DHCP match — use IP as key
             mac = f"onvif_{ip.replace('.', '_')}"
 
-        if mac in known_cameras or mac in rejected_macs:
-            continue
+        if _already_decided(mac, ip):
+            continue  # see the lease loop above
 
         candidates[mac] = {
             **candidates.get(mac, {}),
@@ -719,6 +845,12 @@ async def scan_and_discover() -> None:
     for mac, candidate in candidates.items():
         ip = candidate["ip"]
 
+        # The candidates were listed before any probe ran, and each probe takes
+        # seconds: the operator may have accepted, dismissed or hand-added THIS one
+        # since. Don't spend a login attempt on a camera that is already decided.
+        if _already_decided(mac, ip):
+            continue
+
         # First-run provisioning: Hanwha/Wisenet etc. reject every API
         # call (403 on SUNAPI, 401 on RTSP) until the operator sets the
         # initial admin password. When auto-init is on AND we have a
@@ -730,8 +862,14 @@ async def scan_and_discover() -> None:
         if candidate.get("rtsp_url"):
             camera_info = candidate
         else:
-            # Try ONVIF probe first
-            onvif_info = await probe_onvif_device(ip)
+            # Try ONVIF probe first. It logs in as admin/blank — one more failed
+            # login per sweep — so it stands down with the credential ladder
+            # whenever this camera has been rejecting logins (WARP-3508); on its
+            # own it would spend the camera's lockout budget every 30 s.
+            if credential_probing_paused(ip):
+                onvif_info = None
+            else:
+                onvif_info = await probe_onvif_device(ip)
             if onvif_info:
                 camera_info = {**candidate, **onvif_info}
             else:
@@ -747,9 +885,12 @@ async def scan_and_discover() -> None:
                     # doesn't speak RTSP — probe_camera returns None for it).
                     # Drop any prior pending/known entry so a device that was
                     # mis-classified before this confirmation clears without a
-                    # restart, instead of lingering in the discovered list.
-                    pending_cameras.pop(mac, None)
-                    known_cameras.pop(mac, None)
+                    # restart, instead of lingering in the discovered list. Unless
+                    # an operator decided this camera while it was being probed:
+                    # an accept that landed in that window must survive this.
+                    if not _already_decided(mac, ip):
+                        pending_cameras.pop(mac, None)
+                        known_cameras.pop(mac, None)
                     continue
 
         camera_name = _sanitize_camera_name(
@@ -796,6 +937,17 @@ async def scan_and_discover() -> None:
                 logger.debug("Stream verify raised for %s: %s", ip, exc)
                 verified = False
 
+        # Everything above awaited. If an operator accepted, dismissed or hand-added
+        # this camera in the meantime, what the probes found is stale, and writing it
+        # would undo that decision (WARP-3508, F5). Nothing below awaits between this
+        # check and the state writes except the Frigate add, which holds a claim.
+        if _already_decided(mac, ip):
+            logger.debug(
+                "Dropping stale probe result for %s (%s) — decided while it was being probed",
+                mac, ip,
+            )
+            continue
+
         # Guard the Frigate call: a 5xx / connection-refused / timeout from
         # frigate.add_camera must NOT escape and abort the candidate loop —
         # that would silently skip every remaining candidate this sweep. A
@@ -804,6 +956,12 @@ async def scan_and_discover() -> None:
         # known_cameras (so it can't go stagnant on a stream Frigate refused).
         added = False
         if verified:
+            # PYNET-017, for the sweep: claim the MAC for the add exactly as
+            # accept_camera does, so a reject (or an accept) arriving during the
+            # Frigate round-trip is refused with a 409 instead of leaving the
+            # camera both live and dismissed. The check above and this claim have
+            # no await between them.
+            accepting_macs.add(mac)
             try:
                 added = await frigate.add_camera(camera_name, rtsp_url)
             except Exception as exc:
@@ -815,6 +973,8 @@ async def scan_and_discover() -> None:
                     exc,
                 )
                 added = False
+            finally:
+                accepting_macs.discard(mac)
 
         if added:
             camera_info["status"] = "active"
@@ -864,13 +1024,41 @@ async def scan_and_discover() -> None:
 
 _scan_scheduler: AsyncIOScheduler | None = None
 
+# WARP-3508: how often the scheduled sweeps re-read which hosts Frigate pulls
+# streams from. Startup and an operator-triggered /scan always do. Between those a
+# camera added by hand is invisible to discovery, so it keeps being probed until
+# the next refresh — 10 sweeps is ~5 minutes at the default 30 s SCAN_INTERVAL,
+# which bounds that, for the cost of one small GET to the local Frigate.
+RECONCILE_EVERY_SWEEPS = 10
+_sweeps_since_refresh = 0
+# The longest an operator-triggered /scan waits on Frigate before scanning anyway.
+# Frigate restarts after every adoption and can hold a connection open for the
+# whole httpx timeout (15 s per request); the orchestrator gives the entire /scan
+# call 30 s, so an unbounded wait would turn "a camera was just added" into a
+# "scan_unavailable" the operator reads as "discovery is not running".
+RECONCILE_TIMEOUT_SECONDS = 5.0
+
 
 async def run_scan() -> None:
     """One discovery sweep, with the try/except the old loop body had.
 
     A failing scan is logged and swallowed so a transient sweep error
     never tears down the schedule — the next interval tick retries.
+
+    Every ``RECONCILE_EVERY_SWEEPS``-th sweep first refreshes ``managed_ips``
+    (WARP-3508). Only that half of the Frigate reconcile runs on a schedule: the
+    other half drops ``known_cameras`` that ``/api/stats`` does not list, and a
+    camera added moments ago is not listed until Frigate has restarted — fine
+    once at startup or on an operator's say-so, wrong on a timer.
     """
+    global _sweeps_since_refresh
+    _sweeps_since_refresh += 1
+    if _sweeps_since_refresh >= RECONCILE_EVERY_SWEEPS:
+        _sweeps_since_refresh = 0
+        try:
+            await _refresh_managed_ips()
+        except Exception as e:  # never raises by contract; a bug in it must not cost the sweep
+            logger.error("Managed-host refresh error: %s", e)
     try:
         await scan_and_discover()
     except Exception as e:
@@ -912,38 +1100,83 @@ def build_scan_scheduler() -> AsyncIOScheduler:
 app = FastAPI(title="Droplet Camera Discovery", version="0.1.0")
 
 
-async def _reconcile_with_frigate() -> None:
-    """Drop ``known_cameras`` entries that Frigate no longer has.
+async def _refresh_managed_ips() -> None:
+    """Recompute ``managed_ips``: every host a Frigate camera input pulls from.
 
-    ``known_cameras`` is our in-memory cache of what we told Frigate
-    about. If someone wipes the Frigate config.yml, recreates the
-    container, or manually removes a camera, our cache goes stale and
-    the scan loop skips re-adding because the MAC looks "already
-    known". Reconcile on startup (and after explicit /scan calls) by
-    asking Frigate for its active camera list and dropping any of our
-    records whose Frigate name no longer exists.
+    A camera Frigate already records from is a camera, whoever added it. This
+    service only ever learned about the adoptions it made itself, so a camera added
+    by hand stayed in ``pending_cameras`` as "needs sign-in" and was re-probed every
+    sweep — ONVIF as admin/blank, then the default-credential ladder. Hanwha locks
+    the admin account after ~5 failed logins (HTTP 490), so the service was locking
+    out cameras the operator had already set up.
+
+    The result REPLACES the previous set, so a camera removed from Frigate becomes
+    discoverable again. A failed read changes nothing: Frigate restarts after every
+    adoption, and a refresh that lands in that window must not make a managed
+    camera look new. Pending records on a managed IP are dropped — the sweep no
+    longer probes them, so nothing else would ever clear them. Never raises.
+    """
+    try:
+        hosts = await frigate.get_camera_input_hosts()
+    except Exception as exc:
+        logger.debug("Frigate managed-host refresh skipped (config fetch failed): %s", exc)
+        return
+    if hosts != managed_ips:
+        logger.info("Frigate pulls streams from %d host(s) — discovery leaves them alone", len(hosts))
+    managed_ips.clear()
+    managed_ips.update(hosts)
+    for mac in [m for m, record in pending_cameras.items() if record.get("ip") in managed_ips]:
+        record = pending_cameras.pop(mac)
+        logger.info(
+            "Dropping pending camera %s (%s) — Frigate already pulls a stream from it",
+            mac, record.get("ip"),
+        )
+
+
+async def _reconcile_with_frigate() -> None:
+    """Re-sync discovery's picture of the world with what Frigate actually has.
+
+    Two independent halves; each fails quietly, because Frigate being down for a
+    restart must never take discovery with it.
+
+    1. Drop ``known_cameras`` entries that Frigate no longer has.
+       ``known_cameras`` is our in-memory cache of what we told Frigate
+       about. If someone wipes the Frigate config.yml, recreates the
+       container, or manually removes a camera, our cache goes stale and
+       the scan loop skips re-adding because the MAC looks "already
+       known". Ask Frigate for its active camera list and drop any of our
+       records whose Frigate name no longer exists.
+    2. Refresh ``managed_ips`` (WARP-3508) — see ``_refresh_managed_ips``.
+
+    Runs on startup and before an operator-triggered /scan, so the sweep the
+    operator asked for already knows what Frigate has. The scheduled sweeps run
+    only the second half (``run_scan`` says why).
     """
     try:
         frigate_cams = await frigate.get_cameras()
     except Exception as exc:
-        logger.debug("Frigate reconcile skipped (stats fetch failed): %s", exc)
-        return
-    live_names = set(frigate_cams.keys())
-    stale = [
-        mac for mac, rec in known_cameras.items()
-        if rec.get("name") and rec["name"] not in live_names
-    ]
-    for mac in stale:
-        logger.info(
-            "Dropping stale known-camera %s (%s) — not present in Frigate",
-            mac, known_cameras[mac].get("name"),
-        )
-        known_cameras.pop(mac, None)
+        logger.debug("Frigate reconcile of known cameras skipped (stats fetch failed): %s", exc)
+    else:
+        live_names = set(frigate_cams.keys())
+        stale = [
+            mac for mac, rec in known_cameras.items()
+            if rec.get("name") and rec["name"] not in live_names
+        ]
+        for mac in stale:
+            logger.info(
+                "Dropping stale known-camera %s (%s) — not present in Frigate",
+                mac, known_cameras[mac].get("name"),
+            )
+            known_cameras.pop(mac, None)
+    await _refresh_managed_ips()
 
 
 @app.on_event("startup")
 async def startup():
     global mqtt_client, _scan_scheduler
+    # WARP-3508: restore what the operator dismissed before any scan can run —
+    # the first sweep must already know not to resurrect it.
+    _load_rejected_macs()
     try:
         mqtt_client = _connect_mqtt()
         logger.info("Connected to MQTT broker")
@@ -1030,8 +1263,12 @@ async def accept_camera(mac: str, request: Request):
 
     Gated by DEVICE_SECRET (NET-05): pushing an arbitrary pending camera
     into Frigate is a privileged write, not a public action.
+
+    ``mac`` may be spelled in any case (WARP-3508); it is normalised to the
+    canonical lower-case key before anything is looked up or claimed.
     """
     _require_auth(request)
+    mac = _camera_key(mac)
     # PYNET-014: peek, don't pop — the record stays in pending until the add
     # actually succeeds, so a transient exception from verify_stream/add_camera
     # can't silently drop the camera from the list until the next scan.
@@ -1443,12 +1680,17 @@ async def submit_camera_credentials(mac: str, request: Request):
 
 @app.post("/cameras/discovered/{mac}/reject")
 async def reject_camera(mac: str, request: Request):
-    """Reject a discovered camera — won't be discovered again.
+    """Reject a discovered camera — won't be discovered again, across restarts.
 
     Gated by DEVICE_SECRET (NET-05): mutates the rejected-MAC set, a
     privileged write.
+
+    ``mac`` may be spelled in any case (WARP-3508). The dismissal is saved to the
+    state volume; ``persisted`` in the response says whether that write worked —
+    a ``false`` is still a rejection for this run, not an error.
     """
     _require_auth(request)
+    mac = _camera_key(mac)
     # PYNET-017: refuse to reject a MAC whose accept is mid-flight. Otherwise the
     # in-flight accept could still commit it to Frigate *after* we mark it
     # rejected, leaving a "rejected" camera live. reject_camera has no awaits, so
@@ -1469,10 +1711,17 @@ async def reject_camera(mac: str, request: Request):
         pending_cameras[mac] = camera
         raise HTTPException(
             status_code=507,
-            detail="Rejected-camera list is full; cannot persist this rejection. Clear rejected cameras first.",
+            detail=(
+                "Rejected-camera list is full; cannot persist this rejection. "
+                "Remove entries from rejected-macs.json and restart camera-discovery first."
+            ),
         )
     rejected_macs.add(mac)
-    return {"status": "rejected", "mac": mac}
+    # Synchronous on purpose: this handler's atomicity against an in-flight accept
+    # (PYNET-017) rests on there being no await between the claim check above and
+    # here, and the file is a few hundred bytes.
+    persisted = _save_rejected_macs()
+    return {"status": "rejected", "mac": mac, "persisted": persisted}
 
 
 @app.post("/scan")
@@ -1484,6 +1733,17 @@ async def trigger_scan(request: Request):
     action — an unauthenticated LAN peer must not be able to launch it.
     """
     _require_auth(request)
+    # WARP-3508: the operator asked for a scan NOW — bring discovery's picture of
+    # Frigate up to date first, so it skips cameras added since the last refresh.
+    # Bounded: a slow Frigate costs this refresh (the sweep falls back to the managed
+    # hosts from the last one), never the scan.
+    try:
+        await asyncio.wait_for(_reconcile_with_frigate(), timeout=RECONCILE_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Frigate did not answer within %.0f s — scanning with the managed hosts from the last refresh",
+            RECONCILE_TIMEOUT_SECONDS,
+        )
     await scan_and_discover()
     return {
         "status": "scan_complete",

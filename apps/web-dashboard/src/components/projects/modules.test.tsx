@@ -47,12 +47,11 @@ vi.mock("@/lib/auth", () => ({
       if (/\/modules\/[^/]+\/work-items$/.test(url)) {
         return reply({ work_items: world.moduleItems, total: world.moduleItems.length });
       }
-      if (url.endsWith("/projects/p/work-items")) return reply({ work_items: world.projectItems });
-      if (url.endsWith("/auth/users")) {
+      if (url.split("?")[0].endsWith("/projects/p/work-items")) return reply({ work_items: world.projectItems, total: world.projectItems.length, nextCursor: null });
+      if (url.endsWith("/pm/people")) {
         return reply({
-          users: [
-            { id: "alice", userId: "u-alice", username: "alice", displayName: "Alice Adams" },
-            { id: "bob", userId: null, username: "bob", displayName: "Bob Nolocal" },
+          people: [
+            { id: "u-alice", displayName: "Alice Adams", avatarUrl: null },
           ],
         });
       }
@@ -311,7 +310,7 @@ describe("ModulesView — new module", () => {
     expect(calls.some((c) => c.method === "POST")).toBe(false);
   });
 
-  it("offers as leads only people who have a local account", async () => {
+  it("offers the member-readable PM roster's local people as leads", async () => {
     renderModules();
     await openNew();
     const lead = screen.getByLabelText("Lead") as HTMLSelectElement;

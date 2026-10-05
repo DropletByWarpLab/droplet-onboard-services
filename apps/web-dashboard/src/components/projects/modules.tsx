@@ -145,7 +145,7 @@ function ModuleFormDialog({
   const targetId = useId();
   const { toast } = useToast();
   const person = usePerson();
-  const { users } = usePeople();
+  const { people } = usePeople();
   const [name, setName] = useState(existing?.name ?? "");
   const [desc, setDesc] = useState(existing?.description ?? "");
   const [status, setStatus] = useState<ModuleStatus>(existing?.status ?? "backlog");
@@ -156,9 +156,9 @@ function ModuleFormDialog({
   const [tried, setTried] = useState(false);
   const errors = validateModuleForm({ name, start, target });
 
-  // A lead is a local User.id; a directory entry with no local row cannot be one.
-  const leads = (users ?? []).filter((u) => !!u.userId);
-  const leadMissing = lead !== "" && !leads.some((u) => u.userId === lead);
+  // The member-readable PM roster contains local User ids.
+  const leads = people ?? [];
+  const leadMissing = lead !== "" && !leads.some((u) => u.id === lead);
 
   const submit = async () => {
     setTried(true);
@@ -237,7 +237,7 @@ function ModuleFormDialog({
                 <option value="">No lead</option>
                 {leadMissing && <option value={lead}>{person(lead).name}</option>}
                 {leads.map((u) => (
-                  <option key={u.userId as string} value={u.userId as string}>
+                  <option key={u.id} value={u.id}>
                     {u.displayName}
                   </option>
                 ))}

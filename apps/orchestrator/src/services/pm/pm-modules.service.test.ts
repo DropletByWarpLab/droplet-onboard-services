@@ -13,6 +13,8 @@ import {
   expectAllTransactionsAt,
 } from "../../__tests__/helpers/prisma-tx-harness.js";
 import * as pmService from "./pm.service.js";
+import { nudgeOutbox } from "./pm-outbox.js";
+vi.mock("./pm-outbox.js", () => ({ nudgeOutbox: vi.fn() }));
 import {
   addModuleWorkItems,
   createModule,
@@ -258,6 +260,7 @@ function makeFake() {
 beforeEach(() => {
   seq = 0;
   vi.mocked(pmService.listWorkItemsWhere).mockReset();
+  vi.mocked(nudgeOutbox).mockReset();
 });
 
 describe("createModule", () => {
@@ -357,6 +360,7 @@ describe("deleteModule", () => {
       expect(r).toMatchObject({ actorId: "u1", verb: "module_removed", field: "module", oldValue: m.id, newValue: null });
     }
     expect(f.calls.indexOf("pmActivity.createMany")).toBeLessThan(f.calls.indexOf("pmModule.delete"));
+    expect(nudgeOutbox).toHaveBeenCalledTimes(1);
     expectAllTransactionsAt(f.seam, SERIALIZABLE_TX);
   });
 
@@ -374,6 +378,7 @@ describe("addModuleWorkItems", () => {
     const b = f.addItem();
     const out = await addModuleWorkItems(f.prisma, "u1", m.id, [a.id, b.id]);
     expect(out.added).toBe(2);
+    expect(nudgeOutbox).toHaveBeenCalledTimes(1);
     expect(out.module.progress.total).toBe(2);
     expect(f.links.map((l) => l.workItemId).sort()).toEqual([a.id, b.id].sort());
     expect(f.activity).toHaveLength(2);
@@ -437,6 +442,7 @@ describe("addModuleWorkItems", () => {
       throw prismaError("P2034");
     });
     await expect(addModuleWorkItems(f.prisma, "u1", m.id, [a.id])).rejects.toThrow("concurrent_mutation");
+    expect(nudgeOutbox).not.toHaveBeenCalled();
   });
 
   it("a link somebody else inserted a moment ago (unique violation) is concurrent_mutation, not a 500", async () => {
@@ -464,6 +470,7 @@ describe("removeModuleWorkItems", () => {
     const out = await removeModuleWorkItems(f.prisma, "u1", m.id, [a.id, c.id]);
     // c was never in the module: skipped, not an error, not audited
     expect(out.removed).toBe(1);
+    expect(nudgeOutbox).toHaveBeenCalledTimes(1);
     expect(f.links.map((l) => l.workItemId)).toEqual([b.id]);
     expect(f.activity).toHaveLength(1);
     expect(f.activity[0]).toMatchObject({
@@ -482,6 +489,7 @@ describe("removeModuleWorkItems", () => {
     const a = f.addItem();
     const out = await removeModuleWorkItems(f.prisma, "u1", m.id, [a.id]);
     expect(out.removed).toBe(0);
+    expect(nudgeOutbox).not.toHaveBeenCalled();
     expect(f.activity).toHaveLength(0);
   });
 

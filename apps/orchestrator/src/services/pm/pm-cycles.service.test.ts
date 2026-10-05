@@ -21,6 +21,8 @@ import {
   expectAllTransactionsAt,
 } from "../../__tests__/helpers/prisma-tx-harness.js";
 import * as pmService from "./pm.service.js";
+import { nudgeOutbox } from "./pm-outbox.js";
+vi.mock("./pm-outbox.js", () => ({ nudgeOutbox: vi.fn() }));
 import {
   completeCycle,
   createCycle,
@@ -274,6 +276,7 @@ function makeFake() {
 beforeEach(() => {
   seq = 0;
   vi.mocked(pmService.listWorkItemsWhere).mockReset();
+  vi.mocked(nudgeOutbox).mockReset();
 });
 
 // ── create / update ───────────────────────────────────────────────────────────
@@ -552,6 +555,7 @@ describe("completeCycle", () => {
     await completeCycle(f.prisma, "u1", cycle.id, { moveIncompleteTo: null });
     expect(f.activity).toHaveLength(3);
     expect(f.activity.map((a) => a.workItemId).sort()).toEqual([open1.id, open2.id, archivedOpen.id].sort());
+    expect(nudgeOutbox).toHaveBeenCalledTimes(1);
     for (const a of f.activity) {
       expect(a).toMatchObject({
         actorId: "u1",
@@ -636,6 +640,7 @@ describe("completeCycle", () => {
       throw new Error("disk full");
     };
     await expect(completeCycle(f.prisma, "u1", cycle.id, { moveIncompleteTo: null })).rejects.toThrow("disk full");
+    expect(nudgeOutbox).not.toHaveBeenCalled();
     expect(f.cycles.find((c) => c.id === cycle.id)!.status).toBe("active");
     expect(cycleOf(f, open1.id)).toBe(cycle.id);
     expect(cycleOf(f, open2.id)).toBe(cycle.id);

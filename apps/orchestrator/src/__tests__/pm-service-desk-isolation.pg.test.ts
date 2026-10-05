@@ -58,7 +58,7 @@ const probes: Probe[] = [
   // ── native router: a desk, or a row under one, is 404 ────────────────────
   { route: "GET /api/pm/projects/:id", kind: "desk", method: "get", url: (i) => `/api/pm/projects/${i.deskId}` },
   { route: "PATCH /api/pm/projects/:id", kind: "desk", method: "patch", url: (i) => `/api/pm/projects/${i.deskId}`, body: { name: "renamed" } },
-  { route: "DELETE /api/pm/projects/:id", kind: "desk", method: "delete", url: (i) => `/api/pm/projects/${i.deskId}` },
+  { route: "DELETE /api/pm/projects/:id", kind: "desk", method: "delete", url: (i) => `/api/pm/projects/${i.deskId}`, body: { confirm_identifier: "W28IZ" } },
   { route: "GET /api/pm/projects/:id/states", kind: "desk", method: "get", url: (i) => `/api/pm/projects/${i.deskId}/states` },
   { route: "POST /api/pm/projects/:id/states", kind: "desk", method: "post", url: (i) => `/api/pm/projects/${i.deskId}/states`, body: { name: "Extra", group: "started" } },
   { route: "PATCH /api/pm/states/:id", kind: "desk", method: "patch", url: (i) => `/api/pm/states/${i.deskStateId}`, body: { name: "Renamed" } },
@@ -115,6 +115,7 @@ const probes: Probe[] = [
   { route: "GET /api/mobile/pm/work-items", kind: "collection", method: "get", url: (i) => `/api/mobile/pm/work-items?workspace=${i.workspaceSlug}&project_id=${i.pmProjectId}` },
   // ── controls: nothing to do with a desk ──────────────────────────────────
   { route: "GET /api/pm/workspaces", kind: "control", method: "get", url: () => "/api/pm/workspaces" },
+  { route: "GET /api/pm/people", kind: "control", method: "get", url: () => "/api/pm/people" },
   { route: "GET /api/pm/workspaces/:slug", kind: "control", method: "get", url: (i) => `/api/pm/workspaces/${i.workspaceSlug}` },
   { route: "POST /api/pm/projects", kind: "control", method: "post", url: () => "/api/pm/projects", body: { name: "warp3528i-created", identifier: "W28IC" } },
   { route: "GET /api/mobile/pm/workspaces", kind: "control", method: "get", url: () => "/api/mobile/pm/workspaces" },

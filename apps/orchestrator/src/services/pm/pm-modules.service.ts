@@ -21,6 +21,7 @@
  */
 
 import type { Prisma, PrismaClient, PmStateGroup } from "@prisma/client";
+import { nudgeOutbox } from "./pm-outbox.js";
 import { SERIALIZABLE_TX } from "../../lib/prisma-tx.js";
 import { PM_ERRORS, isPrismaCode, isServiceDesk, listWorkItemsWhere, type ApiWorkItem } from "./pm.service.js";
 import { PM_PLANNING_ERRORS, PmPlanningError, formatDateOnly } from "./pm-planning.js";
@@ -250,6 +251,7 @@ export async function deleteModule(
   actorId: string | null,
   moduleId: string,
 ): Promise<void> {
+  let wroteActivity = false;
   try {
     await prisma.$transaction(async (tx) => {
       await loadModuleRow(tx, moduleId);
@@ -268,6 +270,7 @@ export async function deleteModule(
             newValue: null,
           })),
         });
+        wroteActivity = true;
       }
       await tx.pmModule.delete({ where: { id: moduleId } });
     }, SERIALIZABLE_TX);
@@ -276,6 +279,7 @@ export async function deleteModule(
     if (isPrismaCode(err, "P2025")) throw new Error(PM_PLANNING_ERRORS.MODULE_NOT_FOUND);
     throw err;
   }
+  if (wroteActivity) nudgeOutbox();
 }
 
 /**
@@ -340,6 +344,7 @@ export async function addModuleWorkItems(
     if (isPrismaCode(err, "P2003")) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
     throw err;
   }
+  if (added > 0) nudgeOutbox();
   return { added, module: await getModule(prisma, moduleId) };
 }
 
@@ -378,5 +383,6 @@ export async function removeModuleWorkItems(
     if (isPrismaCode(err, "P2034")) throw new Error(PM_ERRORS.CONCURRENT_MUTATION);
     throw err;
   }
+  if (removed > 0) nudgeOutbox();
   return { removed, module: await getModule(prisma, moduleId) };
 }
