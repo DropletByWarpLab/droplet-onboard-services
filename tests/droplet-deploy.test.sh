@@ -43,8 +43,8 @@ echo "$t \$*" >> "$WORK/calls.log"
 case "$t" in
   docker) echo "-- dump --"; exit 0 ;;
   runuser) # runuser -u USER -- CMD...: git and docker are real/stubbed passthroughs
-    if [ "\$4" = git ]; then shift 3; exec git "\$@"; fi
-    if [ "\$4" = docker ]; then shift 3; exec docker "\$@"; fi
+    if [ "\$4" = git ]; then shift 3; exec "\$@"; fi
+    if [ "\$4" = docker ]; then shift 3; exec "\$@"; fi
     [ -e "$WORK/sudoers" ] && echo grant-present >> "$WORK/calls.log"; [ -f "$WORK/setup_fail" ] && exit 7; exit 0 ;;
   systemctl)
     [ "\$1" = is-active ] && [ -f "$WORK/inactive" ] && exit 3
