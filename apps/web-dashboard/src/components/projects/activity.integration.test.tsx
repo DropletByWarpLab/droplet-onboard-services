@@ -36,11 +36,11 @@ vi.mock("@/lib/auth", () => ({
         total: h.timeline.length,
       });
     }
-    if (url.endsWith("/users")) {
+    if (url.endsWith("/people")) {
       return ok({
-        users: [
-          { id: "ada", userId: "u1", username: "ada", displayName: "Ada Lovelace" },
-          { id: "bea", userId: "u2", username: "bea", displayName: "Bea Bell" },
+        people: [
+          { id: "u1", displayName: "Ada Lovelace", avatarUrl: null },
+          { id: "u2", displayName: "Bea Bell", avatarUrl: null },
         ],
       });
     }
@@ -103,7 +103,7 @@ describe("ActivitySection with the real editor", () => {
     renderSection();
     const box = await screen.findByRole("textbox", { name: "Write a comment" });
     // The directory has to have arrived before the picker has anyone to offer.
-    await waitFor(() => expect(h.calls.some((c) => c.url.endsWith("/users"))).toBe(true));
+    await waitFor(() => expect(h.calls.some((c) => c.url.endsWith("/people"))).toBe(true));
     const send = screen.getByRole("button", { name: /^Send\b/ });
     expect(send).toBeDisabled();
 
