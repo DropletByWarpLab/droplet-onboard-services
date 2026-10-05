@@ -179,6 +179,8 @@ export const SPACES: SpaceDef[] = [
       "/users",
       "/admin/files",
       "/settings",
+      // WARP-3533 — API tokens and calendar links, a Settings page like the row above.
+      "/settings/developer",
       "/admin/audit",
       "/trust",
       "/settings/telemetry",

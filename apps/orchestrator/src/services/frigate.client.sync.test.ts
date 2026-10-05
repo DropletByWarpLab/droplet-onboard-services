@@ -10,6 +10,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { parse } from "yaml";
 
+const { warn, info } = vi.hoisted(() => ({ warn: vi.fn(), info: vi.fn() }));
+vi.mock("../lib/logger.js", () => ({
+  createLogger: () => ({ warn, info }),
+}));
+
 // FRIGATE_URL is read from config at import; stub it deterministically.
 vi.mock("../config.js", () => ({
   config: { FRIGATE_URL: "http://frigate:5000", agentMaxIter: { defaultIter: 5, capIter: 10 } },
@@ -40,13 +45,13 @@ cameras:
  * /api/config/raw returns the authored YAML JSON-string-encoded (as Frigate
  * 0.17 does); /api/config/save 200s. `yaml` is the raw YAML text to serve.
  */
-function stubRaw(yaml = BASE_YAML, saveStatus = 200) {
+function stubRaw(yaml = BASE_YAML, saveStatus = 200, saveBody = "") {
   const fetchMock = vi.fn(async (url: string, _init?: RequestInit) => {
     if (url.endsWith("/api/config/raw")) {
       return new Response(JSON.stringify(yaml), { status: 200 });
     }
     if (url.includes("/api/config/save")) {
-      return new Response("", { status: saveStatus });
+      return new Response(saveBody, { status: saveStatus });
     }
     throw new Error(`unexpected fetch ${url}`);
   });
@@ -72,6 +77,7 @@ function savedConfig(fetchMock: any) {
 
 beforeEach(() => {
   vi.restoreAllMocks();
+  vi.clearAllMocks();
 });
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -119,6 +125,19 @@ describe("syncCamerasFromDb (#11)", () => {
       /Frigate rejected the config: 422/,
     );
   });
+
+  it("scrubs echoed stream credentials from config/save warning logs", async () => {
+    const echoedPath = "rtsp://admin:camera-secret@frigate.local/live";
+    stubRaw(BASE_YAML, 422, `invalid path ${echoedPath}`);
+
+    await expect(syncCamerasFromDb([])).rejects.toThrow(/Frigate rejected the config: 422/);
+
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ body: "invalid path rtsp://***@frigate.local/live" }),
+      "Frigate config/save rejected during camera sync",
+    );
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("camera-secret");
+  });
 });
 
 describe("deleteCamera", () => {
@@ -133,5 +152,18 @@ describe("deleteCamera", () => {
   it("throws on a failed save", async () => {
     stubRaw(BASE_YAML, 500);
     await expect(deleteCamera("good_cam")).rejects.toThrow(/Delete camera: 500/);
+  });
+
+  it("scrubs echoed stream credentials from delete warning logs", async () => {
+    const echoedPath = "rtsp://admin:camera-secret@frigate.local/live";
+    stubRaw(BASE_YAML, 500, `invalid path ${echoedPath}`);
+
+    await expect(deleteCamera("good_cam")).rejects.toThrow(/Delete camera: 500/);
+
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ body: "invalid path rtsp://***@frigate.local/live" }),
+      "Frigate config/save rejected while deleting camera",
+    );
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("camera-secret");
   });
 });
