@@ -413,8 +413,13 @@ async function sweepPm(
   });
   if (rows.length === 0) return { notified: 0, skipped: 0, logs: 0 };
 
-  const candidates = rows.filter((r) => NOTIFIABLE_PM_VERBS.has(r.verb));
-  const skipIds = rows.filter((r) => !NOTIFIABLE_PM_VERBS.has(r.verb)).map((r) => r.id);
+  const candidates = rows.filter(
+    (r): r is (typeof r & { workItemId: string; workItem: NonNullable<typeof r.workItem> }) =>
+      r.workItemId !== null && r.workItem !== null && NOTIFIABLE_PM_VERBS.has(r.verb),
+  );
+  const skipIds = rows
+    .filter((r) => r.workItemId === null || r.workItem === null || !NOTIFIABLE_PM_VERBS.has(r.verb))
+    .map((r) => r.id);
   if (candidates.length === 0) {
     return { notified: 0, skipped: await markNotNeeded(prisma, "pmActivity", skipIds), logs: 0 };
   }

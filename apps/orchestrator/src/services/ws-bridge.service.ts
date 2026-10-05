@@ -8,6 +8,7 @@ import {
 } from "../middleware/auth.js";
 import { subscribeToTopic } from "./mqtt.service.js";
 import { createLogger } from "../lib/logger.js";
+import { config } from "../config.js";
 
 /** Minimal RFC 6265 cookie header parser — we only need name/value lookups. */
 function parseCookieHeader(header: string): Record<string, string> {
@@ -31,6 +32,30 @@ const logger = createLogger("ws-bridge");
 
 const WS_PATH = "/api/ws/events";
 
+/** WARP-3612 — close code for a socket whose session is no longer valid. */
+export const WS_CLOSE_UNAUTHORIZED = 4401;
+
+/**
+ * WARP-3612 — a browser always sends `Origin` on a WebSocket upgrade. Accept it
+ * when it is on the CORS allowlist or is the host the request itself was made
+ * to (same-origin, e.g. the dashboard opened by LAN IP). An absent Origin
+ * (native clients using the bearer subprotocol) is accepted.
+ */
+function isOriginAllowed(req: IncomingMessage): boolean {
+  const origin = req.headers.origin;
+  if (origin === undefined) return true;
+  if (typeof origin !== "string") return false;
+  if (config.corsAllowedOrigins.includes(origin)) return true;
+  try {
+    const fwd = req.headers["x-forwarded-host"];
+    const host = (Array.isArray(fwd) ? fwd[0] : fwd) || req.headers.host;
+    if (!host) return false;
+    return new URL(origin).hostname === new URL(`http://${host.split(",")[0].trim()}`).hostname;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Attach a WebSocket bridge that forwards MQTT events to authenticated
  * browser sessions. Each connection subscribes only to its own user-scoped
@@ -42,7 +67,12 @@ const WS_PATH = "/api/ws/events";
  * plus a keepalive ping every 25s. The client should drop the connection
  * and reconnect with exponential backoff on close.
  */
-export function attachWsBridge(server: HttpServer): WebSocketServer {
+export function attachWsBridge(
+  server: HttpServer,
+  // WARP-3612 — each tick re-validates the session; tests shorten it.
+  opts: { pingIntervalMs?: number } = {},
+): WebSocketServer {
+  const pingIntervalMs = opts.pingIntervalMs ?? 25_000;
   const wss = new WebSocketServer({ noServer: true });
 
   server.on("upgrade", async (req: IncomingMessage, socket: Duplex, head) => {
@@ -51,6 +81,12 @@ export function attachWsBridge(server: HttpServer): WebSocketServer {
       // so reject any other path outright instead of leaving the socket
       // hanging for a non-existent listener to pick up.
       socket.write("HTTP/1.1 404 Not Found\r\n\r\n");
+      socket.destroy();
+      return;
+    }
+
+    if (!isOriginAllowed(req)) {
+      socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
       socket.destroy();
       return;
     }
@@ -79,7 +115,7 @@ export function attachWsBridge(server: HttpServer): WebSocketServer {
       }
 
       wss.handleUpgrade(req, socket, head, (ws) => {
-        wss.emit("connection", ws, req, user);
+        wss.emit("connection", ws, req, user, token);
       });
     } catch (err) {
       logger.warn({ err }, "WebSocket upgrade failed");
@@ -92,7 +128,7 @@ export function attachWsBridge(server: HttpServer): WebSocketServer {
     }
   });
 
-  wss.on("connection", (ws: WebSocket, _req: IncomingMessage, user: AuthUser) => {
+  wss.on("connection", (ws: WebSocket, _req: IncomingMessage, user: AuthUser, token: string | null) => {
     logger.info({ user: user.username }, "WebSocket client connected");
 
     // Subscribe this connection to everything under droplet/{area}/{user}/#
@@ -144,15 +180,23 @@ export function attachWsBridge(server: HttpServer): WebSocketServer {
     // Keepalive: ping every 25s. The client doesn't need to respond — pings
     // are fire-and-forget at the ws protocol level and keep middleboxes
     // from silently closing idle connections.
-    const keepalive = setInterval(() => {
-      if (ws.readyState === WebSocket.OPEN) {
-        try {
-          ws.ping();
-        } catch {
-          // ignore
+    // WARP-3612 — the same tick re-runs the upgrade-time checks (token expiry,
+    // user denylist, session record + idle/absolute limits) without sliding the
+    // session, and closes with 4401 once any fails; the client reconnects with
+    // its refreshed cookie. Redis errors still fail open, as on the HTTP path.
+    const keepalive = setInterval(async () => {
+      if (ws.readyState !== WebSocket.OPEN) return;
+      try {
+        if (!(await validateTokenForWs(token, { touch: false }))) {
+          logger.info({ user: user.username }, "WebSocket session no longer valid; closing");
+          ws.close(WS_CLOSE_UNAUTHORIZED, "session_invalid");
+          return;
         }
+        ws.ping();
+      } catch {
+        // ignore
       }
-    }, 25_000);
+    }, pingIntervalMs);
 
     const cleanup = () => {
       clearInterval(keepalive);

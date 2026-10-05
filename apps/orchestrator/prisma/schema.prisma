@@ -3286,6 +3286,10 @@ model ScimGroup {
   // The local Role this group grants. Explicit column (not recomputed from
   // displayName on every read) so an operator override survives re-sync.
   mappedRole  Role     @default(family)
+  // WARP-3631: local User.ids in the group as of the last push, so a person
+  // dropped from a push can be demoted (the group's grant is recomputed from
+  // the groups they remain in).
+  memberUserIds String[] @default([])
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -5487,6 +5491,7 @@ model PmProject {
   states     PmState[]
   labels     PmLabel[]
   workItems  PmWorkItem[]
+  deletedWorkItemEvents PmActivity[] @relation("PmActivityDeletedProject")
   cycles     PmCycle[]
   modules    PmModule[]
   properties PmCustomProperty[]
@@ -5970,6 +5975,9 @@ enum PmActivityVerb {
   /// mirroring what parent_removed does for orphaned sub-issues.
   relation_added
   relation_removed
+  /// WARP-3536: detached transactional tombstone for a deleted item. This row
+  /// survives the work-item cascade solely so authorized live readers refresh.
+  deleted
 }
 
 /// WARP-2587 (ADR-045 slice I) — the notification claim on an activity row.
@@ -6000,17 +6008,22 @@ enum NotifyStatus {
 /// `PmActivity_notifiedAt_matches_status`, a CHECK in the migration (Prisma
 /// cannot express it — the CrmActivity_subject_exactly_one precedent).
 model PmActivity {
-  id           String         @id @default(uuid())
-  workItemId   String
-  workItem     PmWorkItem     @relation(fields: [workItemId], references: [id], onDelete: Cascade)
-  actorId      String?
-  verb         PmActivityVerb
-  field        String?
-  oldValue     String?
-  newValue     String?
-  notifyStatus NotifyStatus   @default(pending)
-  notifiedAt   DateTime?
-  createdAt    DateTime       @default(now())
+  id                  String         @id @default(uuid())
+  workItemId          String?
+  workItem            PmWorkItem?    @relation(fields: [workItemId], references: [id], onDelete: Cascade)
+  actorId             String?
+  verb                PmActivityVerb
+  field               String?
+  oldValue            String?
+  newValue            String?
+  /// Set only on the detached `deleted` tombstone consumed by pm-live.
+  deletedProjectId    String?
+  deletedProject      PmProject?     @relation("PmActivityDeletedProject", fields: [deletedProjectId], references: [id], onDelete: Cascade)
+  deletedWorkItemId   String?
+  deletedGuestUserIds String[]       @default([])
+  notifyStatus        NotifyStatus   @default(pending)
+  notifiedAt          DateTime?
+  createdAt           DateTime       @default(now())
 
   @@index([workItemId, createdAt])
   @@index([notifyStatus, createdAt])

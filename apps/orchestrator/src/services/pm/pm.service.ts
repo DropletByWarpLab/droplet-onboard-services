@@ -91,7 +91,7 @@ export const DEFAULT_STATES: ReadonlyArray<{
 
 // ── Prisma include shapes + row types ────────────────────────────────────────
 
-const WORK_ITEM_INCLUDE = {
+export const WORK_ITEM_INCLUDE = {
   state: true,
   assignees: true,
   labels: { include: { label: true } },
@@ -274,7 +274,7 @@ function mapLabel(row: LabelRow): ApiLabel {
   return { id: row.id, projectId: row.projectId, name: row.name, color: row.color };
 }
 
-function mapWorkItem(
+export function mapWorkItem(
   row: WorkItemRow,
   identifier: string,
   // ADR-045 §5.3 — the OWNING PROJECT's department, so the override can be
@@ -377,6 +377,7 @@ async function writeActivity(
     field?: string | null;
     oldValue?: string | null;
     newValue?: string | null;
+    nudge?: boolean;
   },
 ): Promise<void> {
   await db.pmActivity.create({
@@ -392,7 +393,7 @@ async function writeActivity(
   // WARP-3532 (ADR-069 §7) — wake the outbox consumers. Runs inside the caller's
   // transaction, which is fine: the wake-up is deferred past the settle window,
   // and the consumers' interval is what guarantees the row is read.
-  nudgeOutbox();
+  if (input.nudge !== false) nudgeOutbox();
 }
 
 /** Re-fetch a work item with all includes and map it. Throws if it vanished
@@ -1588,6 +1589,31 @@ export async function deleteWorkItem(
   if (!existing) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
   try {
     await prisma.$transaction(async (tx) => {
+      const assignees = await tx.pmWorkItemAssignee.findMany({
+        where: { workItemId: id },
+        select: { userId: true },
+      });
+      const assignedUserIds = assignees.map(({ userId }) => userId);
+      const guests = assignedUserIds.length === 0
+        ? []
+        : await tx.user.findMany({
+            where: { id: { in: assignedUserIds }, role: "guest" },
+            select: { id: true },
+          });
+      // A detached PmActivity tombstone is the transactional live-update event
+      // for the deleted leaf. Ordinary activity rows cascade with the item;
+      // this snapshot survives and contains only project/item/user IDs.
+      await tx.pmActivity.create({
+        data: {
+          workItemId: null,
+          actorId,
+          verb: "deleted",
+          deletedProjectId: existing.projectId,
+          deletedWorkItemId: id,
+          deletedGuestUserIds: guests.map(({ id: userId }) => userId),
+          notifyStatus: "not_needed",
+        },
+      });
       // WARP-885: `parentId ON DELETE SET NULL` would otherwise silently
       // promote every sub-issue to a root item with zero audit trail the
       // instant the parent is deleted. Emit one parent_removed activity row
@@ -1605,6 +1631,7 @@ export async function deleteWorkItem(
           field: "parentId",
           oldValue: id,
           newValue: null,
+          nudge: false,
         });
       }
       // WARP-2586: the PmWorkItemRelation FKs cascade on BOTH ends, so this
@@ -1634,11 +1661,13 @@ export async function deleteWorkItem(
             };
           }),
         });
-        nudgeOutbox();
       }
 
       await tx.pmWorkItem.delete({ where: { id } });
-    }, SERIALIZABLE_TX);
+    }, { ...SERIALIZABLE_TX, timeout: 5_000 });
+    // Wake only after the delete and its tombstone have committed. If the
+    // transaction rolls back, no consumer is nudged for an event that vanished.
+    nudgeOutbox();
   } catch (err) {
     if (isPrismaCode(err, "P2025")) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
     // The SERIALIZABLE loser: an edge was committed under us between the audit
@@ -1708,7 +1737,7 @@ export async function listActivity(
   });
   return rows.map((r) => ({
     id: r.id,
-    workItemId: r.workItemId,
+    workItemId: r.workItemId ?? workItemId,
     actorId: r.actorId,
     verb: r.verb,
     field: r.field,

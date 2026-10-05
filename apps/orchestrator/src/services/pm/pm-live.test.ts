@@ -23,6 +23,9 @@ function row(over: Partial<PmActivity> = {}): PmActivity {
     notifyStatus: "pending",
     notifiedAt: null,
     createdAt: T0,
+    deletedProjectId: null,
+    deletedWorkItemId: null,
+    deletedGuestUserIds: [],
     ...over,
   } as PmActivity;
 }
@@ -34,7 +37,10 @@ function logger() {
 function setup(over: { connected?: () => boolean; names?: string[]; item?: { projectId: string } | null } = {}) {
   const sent: Array<{ topic: string; payload: Record<string, unknown> }> = [];
   const send = vi.fn((topic: string, payload: Record<string, unknown>) => void sent.push({ topic, payload }));
-  const audience = { usernamesFor: vi.fn(async () => over.names ?? ["ana", "ben"]) };
+  const audience = {
+    usernamesFor: vi.fn(async () => over.names ?? ["ana", "ben"]),
+    usernamesForDeleted: vi.fn(async () => over.names ?? ["ana", "ben"]),
+  };
   const findUnique = vi.fn(async () => (over.item === undefined ? { projectId: "p-1" } : over.item));
   const log = logger();
   const consumer = createPmLiveConsumer({
@@ -79,6 +85,24 @@ describe("what is published", () => {
     await consumer.handle(row());
     expect(audience.usernamesFor).toHaveBeenCalledWith("wi-1");
     expect(sent).toEqual([]);
+  });
+
+  it("publishes a committed deletion tombstone after the work-item row is gone", async () => {
+    const { consumer, sent, findUnique, audience } = setup({ item: null, names: ["owner", "assigned-guest"] });
+    await consumer.handle(row({
+      workItemId: null,
+      verb: "deleted",
+      deletedProjectId: "p-1",
+      deletedWorkItemId: "wi-gone",
+      deletedGuestUserIds: ["guest-id"],
+    }));
+
+    expect(findUnique).not.toHaveBeenCalled();
+    expect(audience.usernamesForDeleted).toHaveBeenCalledWith(["guest-id"]);
+    expect(sent.map(({ topic, payload }) => [topic, payload])).toEqual([
+      ["droplet/pm/owner", { type: "pm.changed", projectId: "p-1", workItemId: "wi-gone", verb: "deleted" }],
+      ["droplet/pm/assigned-guest", { type: "pm.changed", projectId: "p-1", workItemId: "wi-gone", verb: "deleted" }],
+    ]);
   });
 
   it("builds the topic from the username", () => {
@@ -197,10 +221,9 @@ describe("registration", () => {
     expect(consumer.name).toBe(PM_LIVE_CONSUMER);
     expect(consumer.name).toBe("pm-live");
     expect(consumer.intervalMs).toBe(1_000);
-    // Advisory events accept a rare missed nudge for a much shorter wait than
-    // the 6 s a consumer that ACTS has to give (pm-outbox.ts, "settle window").
-    expect(consumer.settleMs).toBeGreaterThan(0);
-    expect(consumer.settleMs).toBeLessThanOrEqual(1_000);
+    // A later commit must not advance past a tombstone that is still in its
+    // delete transaction; this matches the 5 s transaction limit + margin.
+    expect(consumer.settleMs).toBe(6_000);
 
     const scheduleInterval = vi.fn(() => ({ runNow: vi.fn() }));
     registerOutboxConsumer(consumer, {

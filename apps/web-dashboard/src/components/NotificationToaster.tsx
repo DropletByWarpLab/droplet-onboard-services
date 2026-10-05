@@ -35,6 +35,7 @@ import { useToast, type ToastAction } from "./Toast";
 import { useAuth } from "@/lib/auth";
 import { ackNotification } from "@/lib/api";
 import { publishAgentRunFrame } from "@/lib/agent-run-events";
+import { notifyPmLiveResync, publishPmLiveFrame } from "@/lib/pm-live-events";
 import { refreshNotificationInbox } from "@/lib/hooks/useNotificationInbox";
 
 interface IncomingNotification {
@@ -136,6 +137,7 @@ export function NotificationToaster() {
     let ws: WebSocket | null = null;
     let closed = false;
     let attempt = 0;
+    let opened = false;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
     const connect = () => {
@@ -150,6 +152,11 @@ export function NotificationToaster() {
       }
       ws.onopen = () => {
         attempt = 0;
+        // WARP-3536 — frames are not replayed, so a socket that came BACK may have
+        // missed some: the Projects page re-reads what it shows. Not on the first
+        // connect, when the page has only just read everything.
+        if (opened) notifyPmLiveResync();
+        opened = true;
       };
       ws.onmessage = (event) => {
         let data: { topic?: string; payload?: IncomingNotification };
@@ -161,6 +168,9 @@ export function NotificationToaster() {
         // WARP-3303 — agent-run progress rides this same socket to the run
         // cards and the sidebar badge (lib/agent-run-events.ts). No toast.
         publishAgentRunFrame(data.topic, data.payload);
+        // WARP-3536 — Projects live updates ride this same socket too
+        // (lib/pm-live-events.ts → usePmLive). No toast.
+        publishPmLiveFrame(data.topic, data.payload);
         if (!data.topic || !data.topic.startsWith("droplet/notifications/")) return;
         // WARP-3307 — the inbox bell and list follow this same topic.
         refreshNotificationInbox();

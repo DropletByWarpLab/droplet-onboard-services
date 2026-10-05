@@ -123,6 +123,9 @@ export async function fanOutActivity(
   row: PmActivity,
   deps: FanOutDeps = {},
 ): Promise<number> {
+  // Detached deletion tombstones belong only to pm-live; never turn one into
+  // a webhook event or try to load the deleted work item.
+  if (!row.workItemId) return 0;
   const event = eventForVerb(row.verb);
   const candidates = await subscribedTo(prisma, event);
   if (candidates.length === 0) return 0;

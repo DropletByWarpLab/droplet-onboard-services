@@ -185,6 +185,12 @@ export async function readOutboxBatch(
   return prisma.pmActivity.findMany({
     where: {
       AND: [
+        // Detached deletion tombstones are a private pm-live transport detail.
+        // Existing consumers (webhooks, automation, notifications) only see
+        // ordinary rows still attached to a work item.
+        consumer === "pm-live"
+          ? { OR: [{ workItemId: { not: null } }, { deletedWorkItemId: { not: null } }] }
+          : { workItemId: { not: null } },
         { OR: [{ createdAt: { gt: after } }, { createdAt: after, id: { gt: cursor.id } }] },
         { createdAt: { lte: settledBefore } },
       ],

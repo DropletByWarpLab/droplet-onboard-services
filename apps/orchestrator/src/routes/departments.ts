@@ -524,7 +524,7 @@ export function createDepartmentsRouter(prisma: PrismaClient): Router {
             (f: GroupfolderInfo) => f.mountPoint === name,
           );
           if (existingMount) {
-            ncWarning = `Nextcloud groupfolder with mount point "${name}" already exists (will be reused)`;
+            ncWarning = `File Store group folder with mount point "${name}" already exists (will be reused)`;
           }
         } catch (err) {
           // Warn only; don't block
@@ -790,7 +790,7 @@ export function createDepartmentsRouter(prisma: PrismaClient): Router {
         if (name) {
           return res.status(400).json({
             error:
-              "Department renaming is not supported in v1 (requires Nextcloud mount_point migration)",
+              "Department renaming is not supported in v1 (requires File Store mount_point migration)",
             code: "RENAME_NOT_SUPPORTED",
           });
         }

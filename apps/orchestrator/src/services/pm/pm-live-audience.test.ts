@@ -124,6 +124,18 @@ describe("external guests", () => {
     expect(none).not.toContain("gary");
   });
 
+  it("uses the deletion-time guest snapshot, intersected with active guests now", async () => {
+    const { audience } = make();
+    expect((await audience.usernamesForDeleted(["u-guest-a", "u-gone", "u-not-assigned"])).sort()).toEqual([
+      "adam",
+      "fiona",
+      "gail",
+      "olga",
+    ]);
+    // Gary is assigned to another work item, but not to this deleted item.
+    expect(await audience.usernamesForDeleted(["u-guest-a"])).not.toContain("gary");
+  });
+
   it("are not looked up at all when the box has no guests", async () => {
     const prisma = makePrisma(USERS.filter((u) => u.role !== "guest"));
     const { audience } = make({}, prisma);

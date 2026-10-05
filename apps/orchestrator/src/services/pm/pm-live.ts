@@ -40,13 +40,11 @@
  *
  * ── Timing ─────────────────────────────────────────────────────────────────
  *
- * `settleMs` is the framework's own advice for an advisory consumer: a short
- * window, accepting that a transaction that stays open longer than it (Prisma's
- * own limit is 5 s; PM writes finish in milliseconds) may be missed — the cost
- * is one stale board until the next refresh, never a wrong one. With the nudge
- * (`writeActivity` → `nudgeOutbox`) a change is published about half a second
- * after it commits; with a lost nudge, within `settleMs + intervalMs`. The
- * browser adds its 250 ms debounce and one fetch.
+ * `settleMs` matches Prisma's 5 s interactive-transaction ceiling plus margin,
+ * so a later commit cannot move the cursor past a still-open delete tombstone.
+ * With the nudge, a change is published after roughly 6 s; with a lost nudge,
+ * within `settleMs + intervalMs`. The browser adds its 250 ms debounce and one
+ * fetch.
  *
  * Idempotent, as the framework requires: replaying a row publishes the same
  * frame again, and a repeated frame is one more refetch.
@@ -66,7 +64,10 @@ export const PM_LIVE_CONSUMER = "pm-live";
 const PM_LIVE_INTERVAL_MS = 1_000;
 
 /** Rows are read once they have been still this long. See "Timing". */
-const PM_LIVE_SETTLE_MS = 500;
+// Match the outbox's 5 s interactive transaction ceiling plus margin. A later
+// row must not advance the cursor past a tombstone whose delete transaction is
+// still uncommitted.
+const PM_LIVE_SETTLE_MS = 6_000;
 
 /** Work item → project is remembered, bounded. A work item never changes project. */
 const MAX_REMEMBERED_ITEMS = 2_000;
@@ -147,6 +148,28 @@ export function createPmLiveConsumer(deps: PmLiveDeps): OutboxConsumer {
         brokerDown = false;
         log.debug({}, "pm-live: the broker is back; live updates resumed");
       }
+
+      if (row.deletedWorkItemId && row.deletedProjectId) {
+        const usernames = await deps.audience.usernamesForDeleted(row.deletedGuestUserIds);
+        if (usernames.length === 0) return;
+        let failed = false;
+        publishPmChanged(send, usernames, {
+          projectId: row.deletedProjectId,
+          workItemId: row.deletedWorkItemId,
+          verb: "deleted",
+        }, (err) => {
+          failed = true;
+          if (publishing) {
+            publishing = false;
+            log.warn({ err }, "pm-live: a frame could not be published; live updates are best-effort and the next refresh catches up");
+          }
+        });
+        if (!failed) publishing = true;
+        return;
+      }
+      // Non-tombstone rows always retain their work-item FK. Null is guarded
+      // here as a fail-closed fallback for malformed legacy/manual rows.
+      if (!row.workItemId) return;
 
       let projectId = projectOf.get(row.workItemId);
       if (projectId === undefined) {

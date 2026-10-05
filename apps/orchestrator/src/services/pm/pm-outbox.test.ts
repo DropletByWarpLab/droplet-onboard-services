@@ -35,6 +35,8 @@ type Where = {
   OR?: Where[];
   createdAt?: Date | { gt?: Date; lte?: Date };
   id?: { gt?: string };
+  workItemId?: { not?: null };
+  deletedWorkItemId?: { not?: null };
 };
 
 function matches(row: PmActivity, where: Where): boolean {
@@ -47,6 +49,8 @@ function matches(row: PmActivity, where: Where): boolean {
     if (where.createdAt.lte && !(row.createdAt.getTime() <= where.createdAt.lte.getTime())) return false;
   }
   if (where.id?.gt !== undefined && !(row.id > where.id.gt)) return false;
+  if (where.workItemId?.not === null && row.workItemId === null) return false;
+  if (where.deletedWorkItemId?.not === null && row.deletedWorkItemId == null) return false;
   return true;
 }
 
@@ -62,6 +66,9 @@ function activity(id: string, at: string, over: Partial<PmActivity> = {}): PmAct
     notifyStatus: "pending",
     notifiedAt: null,
     createdAt: new Date(at),
+    deletedProjectId: null,
+    deletedWorkItemId: null,
+    deletedGuestUserIds: [],
     ...over,
   } as PmActivity;
 }
@@ -114,6 +121,27 @@ describe("outboxFlagKey", () => {
 });
 
 describe("readOutboxBatch", () => {
+  it("exposes detached deletion tombstones only to pm-live", async () => {
+    const normal = activity("a-1", "2026-10-04T11:00:00.000Z");
+    const tombstone = activity("a-2", "2026-10-04T11:00:01.000Z", {
+      workItemId: null,
+      verb: "deleted",
+      deletedProjectId: "p-1",
+      deletedWorkItemId: "wi-gone",
+      deletedGuestUserIds: ["guest-id"],
+      notifyStatus: "not_needed",
+    });
+    const live = makePrisma([normal, tombstone]);
+    live.flags.set("pm-outbox:pm-live", { createdAt: "2026-10-04T10:00:00.000Z", id: "" });
+    const liveRows = await readOutboxBatch(live as never, "pm-live", 10, { now: clock(), settleMs: 0 });
+    expect(liveRows.map((r) => r.id)).toEqual(["a-1", "a-2"]);
+
+    const webhooks = makePrisma([normal, tombstone]);
+    webhooks.flags.set("pm-outbox:webhooks", { createdAt: "2026-10-04T10:00:00.000Z", id: "" });
+    const webhookRows = await readOutboxBatch(webhooks as never, "webhooks", 10, { now: clock(), settleMs: 0 });
+    expect(webhookRows.map((r) => r.id)).toEqual(["a-1"]);
+  });
+
   it("starts a brand-new consumer at 'now' and never replays history", async () => {
     const old = activity("a-1", "2026-10-01T00:00:00.000Z");
     const prisma = makePrisma([old]);

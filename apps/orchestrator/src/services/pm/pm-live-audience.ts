@@ -71,6 +71,8 @@ export interface PmLiveAudienceDeps {
 export interface PmLiveAudience {
   /** Usernames of everyone who can read `workItemId`. */
   usernamesFor(workItemId: string): Promise<string[]>;
+  /** Readers of a deleted item; guests are restricted to its deletion-time assignee snapshot. */
+  usernamesForDeleted(guestUserIds: readonly string[]): Promise<string[]>;
 }
 
 interface Roster {
@@ -165,6 +167,15 @@ export function createPmLiveAudience(deps: PmLiveAudienceDeps): PmLiveAudience {
       for (const { userId } of assigned) {
         const username = guests.get(userId);
         if (username) heardAsGuest.push(username);
+      }
+      return [...readers, ...heardAsGuest];
+    },
+    async usernamesForDeleted(guestUserIds) {
+      const { readers, guests } = await roster();
+      const heardAsGuest = new Set<string>();
+      for (const userId of guestUserIds) {
+        const username = guests.get(userId);
+        if (username) heardAsGuest.add(username);
       }
       return [...readers, ...heardAsGuest];
     },

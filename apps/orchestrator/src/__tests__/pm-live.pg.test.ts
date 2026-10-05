@@ -15,6 +15,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import type { ModuleId, PrismaClient } from "@prisma/client";
+import { deleteWorkItem } from "../services/pm/pm.service.js";
 
 // The global unit setup mocks @prisma/client so the DB-less lane never needs
 // Postgres. This file must talk to a REAL one.
@@ -62,6 +63,7 @@ describe.skipIf(!RUN)("pm-live — who hears about a change, over real rows (WAR
   let projectId = "";
   let sharedItem = "";
   let plainItem = "";
+  let otherProjectItem = "";
 
   beforeAll(async () => {
     const { PrismaClient: RealPrismaClient } = await vi.importActual<typeof import("@prisma/client")>("@prisma/client");
@@ -93,7 +95,7 @@ describe.skipIf(!RUN)("pm-live — who hears about a change, over real rows (WAR
   });
 
   async function cleanup(): Promise<void> {
-    await prisma.systemFlag.deleteMany({ where: { key: "pm-outbox:warp3536-live" } });
+    await prisma.systemFlag.deleteMany({ where: { key: "pm-outbox:pm-live" } });
     await prisma.pmProject.deleteMany({ where: { name: OURS } }); // items, assignees, activity cascade
     await prisma.pmWorkspace.deleteMany({ where: { slug: OURS } });
     await prisma.userAccessException.deleteMany({ where: { user: { username: OURS } } });
@@ -148,7 +150,15 @@ describe.skipIf(!RUN)("pm-live — who hears about a change, over real rows (WAR
     const b = await prisma.pmWorkItem.create({ data: { projectId, sequenceId: 2, name: "warp3536-plain" } });
     sharedItem = a.id;
     plainItem = b.id;
+    const otherProject = await prisma.pmProject.create({
+      data: { workspaceId: ws.id, name: "warp3536-other-project", identifier: "W37" },
+    });
+    const c = await prisma.pmWorkItem.create({
+      data: { projectId: otherProject.id, sequenceId: 1, name: "warp3536-other-project-item" },
+    });
+    otherProjectItem = c.id;
     await prisma.pmWorkItemAssignee.create({ data: { workItemId: sharedItem, userId: ids["guest-shared"]! } });
+    await prisma.pmWorkItemAssignee.create({ data: { workItemId: otherProjectItem, userId: ids["guest-other"]! } });
   });
 
   const audience = () =>
@@ -230,7 +240,7 @@ describe.skipIf(!RUN)("pm-live — who hears about a change, over real rows (WAR
         send: (topic, payload) => void sent.push({ topic, payload }),
       });
       // Its own cursor, so this suite never moves the real `pm-live` one.
-      return { ...live, name: "warp3536-live" };
+      return live;
     }
 
     it("tells exactly the readers, once per row, with ids and a kind only, and moves its own cursor", async () => {
@@ -271,7 +281,7 @@ describe.skipIf(!RUN)("pm-live — who hears about a change, over real rows (WAR
       const verbs = new Set(sent.map((s) => `${s.payload.workItemId}:${s.payload.verb}`));
       expect(verbs).toEqual(new Set([`${plainItem}:state_changed`, `${sharedItem}:commented`]));
 
-      const cursor = await prisma.systemFlag.findUnique({ where: { key: outboxFlagKey("warp3536-live") } });
+      const cursor = await prisma.systemFlag.findUnique({ where: { key: outboxFlagKey("pm-live") } });
       expect(cursor).not.toBeNull();
 
       // Nothing is replayed.
@@ -280,10 +290,10 @@ describe.skipIf(!RUN)("pm-live — who hears about a change, over real rows (WAR
       expect(sent).toEqual([]);
     });
 
-    it("leaves a row alone until it has settled for the consumer's own (short) window", async () => {
+    it("leaves a row alone until it has settled past the transaction ceiling", async () => {
       const sent: Array<{ topic: string; payload: Record<string, unknown> }> = [];
       const c = consumer(sent);
-      expect(c.settleMs).toBeLessThanOrEqual(1_000);
+      expect(c.settleMs).toBe(6_000);
       await runOutboxSweep(prisma, c, { now: () => rowAt(0) });
 
       const row = await prisma.pmActivity.create({
@@ -310,6 +320,49 @@ describe.skipIf(!RUN)("pm-live — who hears about a change, over real rows (WAR
 
       expect(await runOutboxSweep(prisma, c, { now: FRESH })).toEqual({ handled: 0, deadLettered: 0 });
       expect(sent).toEqual([]);
+    });
+
+    it("delivers a surviving leaf tombstone after delete, only to current readers and its assigned active guest", async () => {
+      const sent: Array<{ topic: string; payload: Record<string, unknown> }> = [];
+      const c = consumer(sent);
+      // Start just before this test's rows, excluding shared DB history.
+      const cursorKey = outboxFlagKey("pm-live");
+      const cursor = { createdAt: new Date(Date.now() - 1_000).toISOString(), id: "" };
+      await prisma.systemFlag.upsert({
+        where: { key: cursorKey },
+        create: { key: cursorKey, valueJson: cursor },
+        update: { valueJson: cursor },
+      });
+
+      await deleteWorkItem(prisma, ids.family!, sharedItem);
+      expect(await prisma.pmWorkItem.findUnique({ where: { id: sharedItem } })).toBeNull();
+      const tombstone = await prisma.pmActivity.findFirstOrThrow({ where: { deletedWorkItemId: sharedItem } });
+      expect(tombstone.workItemId).toBeNull();
+      expect(tombstone.deletedProjectId).toBe(projectId);
+      expect(tombstone.deletedGuestUserIds).toEqual([ids["guest-shared"]]);
+
+      const result = await runOutboxSweep(prisma, c, { now: FRESH });
+      expect(result).toEqual({ handled: 1, deadLettered: 0 });
+      const topics = sent.map(({ topic }) => topic).sort();
+      expect(topics).toEqual([
+        "droplet/pm/warp3536-admin",
+        "droplet/pm/warp3536-family",
+        "droplet/pm/warp3536-guest-shared",
+        "droplet/pm/warp3536-owner",
+      ]);
+      expect(topics).not.toContain("droplet/pm/warp3536-narrow");
+      expect(topics).not.toContain("droplet/pm/warp3536-denied");
+      expect(topics).not.toContain("droplet/pm/warp3536-gone");
+      expect(topics).not.toContain("droplet/pm/warp3536-guest-other");
+      expect(sent[0]?.payload).toEqual({
+        type: "pm.changed",
+        projectId,
+        workItemId: sharedItem,
+        verb: "deleted",
+      });
+      for (const { payload } of sent) {
+        expect(Object.keys(payload).sort()).toEqual(["projectId", "type", "verb", "workItemId"]);
+      }
     });
   });
 });
