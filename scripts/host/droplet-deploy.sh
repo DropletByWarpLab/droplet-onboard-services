@@ -136,9 +136,11 @@ runuser -u droplet -- tar -chf - -C "$REPO" --exclude=data/secrets/bay-recovery 
 chmod 0600 "$BK/db.sql.gz" "$BK/secrets.tar"
 log "backup written to $BK (${#paths[@]} paths + db dump)"
 
-# Keep the newest $KEEP backup dirs (timestamp names sort chronologically).
-# shellcheck disable=SC2012
-ls -1d "$BACKUP_DIR"/*/ 2>/dev/null | sort | head -n "-$KEEP" | while read -r old; do rm -rf "$old"; done
+# Only successful dump + tar snapshots participate in retention. Leave failed
+# attempts (and legacy unmarked snapshots) available for manual inspection.
+touch "$BK/.complete" || die "cannot mark backup complete"
+find "$BACKUP_DIR" -mindepth 2 -maxdepth 2 -type f -name .complete -printf '%h\n' \
+  | sort | head -n "-$KEEP" | while IFS= read -r old; do rm -rf -- "$old"; done
 
 # --- 3. temporary sudoers grant (as scripts/image/autoinstall/user-data) -----
 printf 'droplet ALL=(ALL) NOPASSWD: ALL\n' > "${SUDOERS}.new"

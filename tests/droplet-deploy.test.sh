@@ -165,6 +165,21 @@ out="$(run_deploy)"; rc=$?; printf '%s\n' "$out" > "$WORK/out.txt"
 check "droplet not in docker: exit 1 naming WARP-2888, no sudoers ever written, nothing run" bash -c \
   "[ $rc -eq 1 ] && grep -q WARP-2888 '$WORK/out.txt' && [ ! -e '$WORK/sudoers' ] && [ ! -e '$WORK/sudoers.new' ] && [ ! -d '$WORK/backups' ] && ! grep -q setup.sh '$WORK/calls.log'"
 
+echo "--- incomplete snapshots never evict complete backups ---"
+new_repo
+for day in 01 02 03; do run_deploy "202601${day}T000000Z" >/dev/null; done
+touch "$WORK/tar_fail"
+for day in 04 05; do
+  run_deploy "202601${day}T000000Z" >/dev/null
+  check "failed backup $day is not complete" test ! -e "$WORK/backups/202601${day}T000000Z/.complete"
+done
+rm "$WORK/tar_fail"
+run_deploy 20260106T000000Z >/dev/null
+check "rotation keeps B/C/F after failed D/E, removes only complete A" bash -c \
+  "[ ! -d '$WORK/backups/20260101T000000Z' ] && [ -f '$WORK/backups/20260102T000000Z/.complete' ] \
+   && [ -f '$WORK/backups/20260103T000000Z/.complete' ] && [ -f '$WORK/backups/20260106T000000Z/.complete' ] \
+   && [ -d '$WORK/backups/20260104T000000Z' ] && [ -d '$WORK/backups/20260105T000000Z' ]"
+
 echo "--- backup location (encrypted /data) ---"
 # Same as run_deploy but WITHOUT the backup-dir override, so step 0b decides.
 run_deploy_auto() {
