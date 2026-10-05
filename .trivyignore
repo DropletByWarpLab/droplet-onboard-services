@@ -264,6 +264,7 @@ CVE-2026-34070 exp:2027-01-02
 # =============================================================================
 
 # brace-expansion: 5 fixable HIGH/CRITICAL [matter-controller, mcp-server, orchestrator, sandbox, web-dashboard].
+# Burn-down: WARP-3848 (package-family remediation under WARP-3667).
 CVE-2026-102276 exp:2027-01-02
 CVE-2026-102278 exp:2027-01-02
 CVE-2026-13149 exp:2027-01-02
@@ -271,9 +272,11 @@ CVE-2026-14257 exp:2027-01-02
 CVE-2026-69152 exp:2027-01-02
 
 # curl / libcurl4: 1 fixable HIGH/CRITICAL [gateway].
+# Burn-down: WARP-3849 (package-family remediation under WARP-3667).
 CVE-2026-5773 exp:2027-01-02
 
 # fast-uri: 5 fixable HIGH/CRITICAL [mcp-server, orchestrator].
+# Burn-down: WARP-3850 (package-family remediation under WARP-3667).
 CVE-2026-75899 exp:2027-01-02
 CVE-2026-75931 exp:2027-01-02
 CVE-2026-75975 exp:2027-01-02
@@ -281,41 +284,51 @@ CVE-2026-76172 exp:2027-01-02
 CVE-2026-84292 exp:2027-01-02
 
 # golang.org/x/crypto: 2 fixable HIGH/CRITICAL [orchestrator].
+# Burn-down: WARP-3851 (package-family remediation under WARP-3667).
 CVE-2026-39831 exp:2027-01-02
 CVE-2026-56854 exp:2027-01-02
 
 # golang.org/x/mod: 2 fixable HIGH/CRITICAL [orchestrator].
+# Burn-down: WARP-3852 (package-family remediation under WARP-3667).
 CVE-2026-56864 exp:2027-01-02
 CVE-2026-56865 exp:2027-01-02
 
 # golang.org/x/net: 1 fixable HIGH/CRITICAL [orchestrator].
+# Burn-down: WARP-3853 (package-family remediation under WARP-3667).
 CVE-2026-46600 exp:2027-01-02
 
 # golang.org/x/text: 1 fixable HIGH/CRITICAL [orchestrator].
+# Burn-down: WARP-3854 (package-family remediation under WARP-3667).
 CVE-2026-56852 exp:2027-01-02
 
 # google.golang.org/grpc: 3 fixable HIGH/CRITICAL [orchestrator].
+# Burn-down: WARP-3855 (package-family remediation under WARP-3667).
 CVE-2026-84304 exp:2027-01-02
 CVE-2026-84445 exp:2027-01-02
 GHSA-hrxh-6v49-42gf exp:2027-01-02
 
 # ip-address: 1 fixable HIGH/CRITICAL [matter-controller, mcp-server, orchestrator, sandbox, web-dashboard].
+# Burn-down: WARP-3856 (package-family remediation under WARP-3667).
 CVE-2026-69192 exp:2027-01-02
 
 # krb5 (libkrb5-3, libgssapi-krb5-2, libk5crypto3, libkrb5support0): 2 fixable HIGH/CRITICAL [gateway].
+# Burn-down: WARP-3857 (package-family remediation under WARP-3667).
 CVE-2026-40355 exp:2027-01-02
 CVE-2026-40356 exp:2027-01-02
 
 # libaom3: 4 fixable HIGH/CRITICAL [gateway].
+# Burn-down: WARP-3858 (package-family remediation under WARP-3667).
 CVE-2026-56208 exp:2027-01-02
 CVE-2026-56209 exp:2027-01-02
 CVE-2026-56210 exp:2027-01-02
 CVE-2026-56211 exp:2027-01-02
 
 # libde265-0: 1 fixable HIGH/CRITICAL [gateway].
+# Burn-down: WARP-3859 (package-family remediation under WARP-3667).
 CVE-2026-33164 exp:2027-01-02
 
 # libexpat1: 7 fixable HIGH/CRITICAL [gateway].
+# Burn-down: WARP-3860 (package-family remediation under WARP-3667).
 CVE-2024-28757 exp:2027-01-02
 CVE-2025-59375 exp:2027-01-02
 CVE-2026-25210 exp:2027-01-02
@@ -325,26 +338,32 @@ CVE-2026-76957 exp:2027-01-02
 CVE-2026-93990 exp:2027-01-02
 
 # libgd3: 1 fixable HIGH/CRITICAL [gateway].
+# Burn-down: WARP-3861 (package-family remediation under WARP-3667).
 CVE-2026-9672 exp:2027-01-02
 
 # libpcre2-8-0: 4 fixable HIGH/CRITICAL [ai-gateway, camera-discovery, device-identity-svc, doc-render, email-indexer, file-indexer, gateway, matter-controller, mcp-server, orchestrator, rag-eval, routing, sandbox, switch, web-dashboard].
+# Burn-down: WARP-3862 (package-family remediation under WARP-3667).
 CVE-2026-103111 exp:2027-01-02
 CVE-2026-86145 exp:2027-01-02
 CVE-2026-89157 exp:2027-01-02
 CVE-2026-89161 exp:2027-01-02
 
 # libssh2-1: 2 fixable HIGH/CRITICAL [gateway].
+# Burn-down: WARP-3863 (package-family remediation under WARP-3667).
 CVE-2026-58050 exp:2027-01-02
 CVE-2026-7598 exp:2027-01-02
 
 # pacote: 1 fixable HIGH/CRITICAL [matter-controller, mcp-server, orchestrator, sandbox, web-dashboard].
+# Burn-down: WARP-3864 (package-family remediation under WARP-3667).
 CVE-2026-9496 exp:2027-01-02
 
 # sharp: 2 fixable HIGH/CRITICAL [web-dashboard].
+# Burn-down: WARP-3865 (package-family remediation under WARP-3667).
 GHSA-f88m-g3jw-g9cj exp:2027-01-02
 GHSA-rgj7-g3m4-5g8c exp:2027-01-02
 
 # stdlib: 7 fixable HIGH/CRITICAL [orchestrator].
+# Burn-down: WARP-3866 (package-family remediation under WARP-3667).
 CVE-2026-33818 exp:2027-01-02
 CVE-2026-39822 exp:2027-01-02
 CVE-2026-56853 exp:2027-01-02
@@ -354,10 +373,12 @@ CVE-2026-56860 exp:2027-01-02
 CVE-2026-56862 exp:2027-01-02
 
 # tar: 3 fixable HIGH/CRITICAL [matter-controller, mcp-server, orchestrator, sandbox, web-dashboard].
+# Burn-down: WARP-3867 (package-family remediation under WARP-3667).
 CVE-2026-59873 exp:2027-01-02
 CVE-2026-59874 exp:2027-01-02
 CVE-2026-73566 exp:2027-01-02
 
 # transformers: 2 fixable HIGH/CRITICAL [ai-gateway].
+# Burn-down: WARP-3868 (package-family remediation under WARP-3667).
 CVE-2026-5241 exp:2027-01-02
 CVE-2026-9856 exp:2027-01-02

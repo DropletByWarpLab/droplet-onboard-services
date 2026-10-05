@@ -69,6 +69,20 @@ check_file() { # $1=compose file; prints FAIL lines, returns the failure count
   return "$bad"
 }
 
+# Automatic .env values override Compose fallbacks just like operator values.
+# Check the sample and both generated document-engine defaults as shipped.
+check_shipped_defaults() { # env sample, single-box helper
+  local image bad=0
+  while IFS= read -r image; do
+    if ! printf '%s' "$image" | grep -Eq '@sha256:[0-9a-f]{64}$'; then
+      printf 'FAIL: generated/sample image "%s" is not pinned by digest\n' "$image" >&2
+      bad=1
+    fi
+  done < <(sed -n -E 's/^(DOCS_ENGINE_IMAGE|FRIGATE_IMAGE)=(.*)/\2/p' "$1";
+           sed -n -E 's/^[[:space:]]*upsert_env DOCS_ENGINE_IMAGE[[:space:]]+"([^"]+)".*/\1/p' "$2")
+  return "$bad"
+}
+
 if [ "${1:-}" = "--selfcheck" ]; then
   t="$(mktemp)"; trap 'rm -f "$t"' EXIT
   D=$(printf 'a%.0s' $(seq 1 64))
@@ -102,6 +116,20 @@ if [ "${1:-}" = "--selfcheck" ]; then
     image: x:1@sha256:$D
   b:
     image: y:2"
+  env_fixture="${t}.env"; setup_fixture="${t}.sh"
+  trap 'rm -f "$t" "$env_fixture" "$setup_fixture"' EXIT
+  printf 'DOCS_ENGINE_IMAGE=engine:1@sha256:%s\nFRIGATE_IMAGE=nvr:1@sha256:%s\n' "$D" "$D" > "$env_fixture"
+  printf 'upsert_env DOCS_ENGINE_IMAGE "engine:1@sha256:%s"\n' "$D" > "$setup_fixture"
+  check_shipped_defaults "$env_fixture" "$setup_fixture" || { echo "self-test FAILED: pinned shipped defaults" >&2; exit 1; }
+  printf 'FRIGATE_IMAGE=nvr:1\n' >> "$env_fixture"
+  if check_shipped_defaults "$env_fixture" "$setup_fixture" >/dev/null 2>&1; then
+    echo "self-test FAILED: floating sample default accepted" >&2; exit 1
+  fi
+  printf 'DOCS_ENGINE_IMAGE=engine:1@sha256:%s\n' "$D" > "$env_fixture"
+  printf 'upsert_env DOCS_ENGINE_IMAGE "engine:1"\n' > "$setup_fixture"
+  if check_shipped_defaults "$env_fixture" "$setup_fixture" >/dev/null 2>&1; then
+    echo "self-test FAILED: floating generated default accepted" >&2; exit 1
+  fi
   echo "check-pinned-images self-test: OK"
   exit 0
 fi
@@ -112,5 +140,6 @@ for f in docker/docker-compose.yml docker/docker-compose.dev.yml; do
   n=$((n + $(extract "$f" | wc -l)))
   check_file "$f" || fail=1
 done
+check_shipped_defaults .env.example scripts/lib/single-box.sh || fail=1
 [ "$fail" -eq 0 ] || { echo "check-pinned-images: FAILED — see the FAIL lines above." >&2; exit 1; }
 echo "check-pinned-images: OK — $n image reference(s) checked, every third-party one pinned by digest."
