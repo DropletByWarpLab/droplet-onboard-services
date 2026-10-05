@@ -58,6 +58,7 @@ import type { AuthUser } from "../../middleware/auth.js";
 import { packagePath } from "../../__tests__/helpers/test-paths.js";
 import { createPmNativeRouter } from "./native.js";
 import { createPmRelationsRouter } from "./relations.js";
+import { createPmScheduleRouter } from "./schedule.js";
 import { createPmMobileRouter } from "../mobile/pm.js";
 
 // ── the edges ───────────────────────────────────────────────────────────────
@@ -135,7 +136,7 @@ interface PmRouterMount {
 const PRISMA = stubPrisma();
 
 /**
- * Mirrors the three PM mounts in app.ts, base and ORDER. The two native
+ * Mirrors the four PM mounts in app.ts, base and ORDER. The three native
  * routers mount at `/api`; routes/mobile/pm.ts registers absolute
  * `/api/mobile/pm/...` paths and is mounted with no base. The source pin below
  * is what keeps this table honest.
@@ -152,6 +153,12 @@ const PM_ROUTER_MOUNTS: readonly PmRouterMount[] = [
     base: "/api",
     file: "routes/pm/relations.ts",
     router: createPmRelationsRouter(PRISMA),
+  },
+  {
+    factory: "createPmScheduleRouter",
+    base: "/api",
+    file: "routes/pm/schedule.ts",
+    router: createPmScheduleRouter(PRISMA),
   },
   {
     factory: "createPmMobileRouter",

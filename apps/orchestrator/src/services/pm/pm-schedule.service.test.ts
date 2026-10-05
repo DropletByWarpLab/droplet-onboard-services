@@ -198,7 +198,7 @@ describe("getProjectTimeline", () => {
     expect(res.relations).toEqual([{ id: "e1", kind: "BLOCKS", fromId: "a", toId: "b" }]);
   });
 
-  it("maps items exactly like the board: key, ISO dates, department inheritance", async () => {
+  it("maps items exactly like the board: key, calendar dates, department inheritance", async () => {
     const dept = { id: "d1", name: "Front Desk", kind: "DEPARTMENT", parentId: null };
     const { db } = makeStub({
       project: { id: "p1", identifier: "INBOX", department: dept },
@@ -207,8 +207,8 @@ describe("getProjectTimeline", () => {
     const res = await getProjectTimeline(db, "p1", range);
     expect(res.items[0]).toMatchObject({
       key: "INBOX-1",
-      startDate: "2026-10-03T00:00:00.000Z",
-      dueDate: "2026-10-05T00:00:00.000Z",
+      startDate: "2026-10-03",
+      dueDate: "2026-10-05",
       department: { id: "d1", name: "Front Desk", source: "project" },
     });
   });
