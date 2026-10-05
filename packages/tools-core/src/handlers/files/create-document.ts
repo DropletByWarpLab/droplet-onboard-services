@@ -111,7 +111,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     );
   }
   if (probe.status !== 404) {
-    return err("WRITE_FAILED", `existence pre-check failed: nextcloud returned ${probe.status}`);
+    return err("WRITE_FAILED", `existence pre-check failed: the File Store returned ${probe.status}`);
   }
 
   const dir = path.posix.dirname(v.path) || "/";
@@ -121,7 +121,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     { headers },
   );
   if (!res.ok) {
-    return err("WRITE_FAILED", `nextcloud returned ${res.status}`);
+    return err("WRITE_FAILED", `the File Store returned ${res.status}`);
   }
   return {
     ok: true,

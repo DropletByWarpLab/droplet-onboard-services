@@ -139,6 +139,22 @@ describe.skipIf(!RUN)("PM custom fields — the database's own guarantees (WARP-
       await expect(field("warp3520b-one-too-many", "text")).rejects.toThrow("property_limit_reached");
     });
 
+    it("serializes concurrent creates at the 30-field limit", async () => {
+      for (let i = 0; i < props.PROPERTIES_PER_PROJECT_LIMIT - 1; i += 1) await field(`warp3520b-c${i}`, "text");
+
+      const results = await Promise.allSettled([
+        field("warp3520b-concurrent-a", "text"),
+        field("warp3520b-concurrent-b", "text"),
+      ]);
+
+      expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+      const rejected = results.find((result) => result.status === "rejected");
+      expect(rejected).toMatchObject({ status: "rejected", reason: expect.objectContaining({ message: "property_limit_reached" }) });
+      const all = await props.listProperties(prisma, projectId);
+      expect(all).toHaveLength(props.PROPERTIES_PER_PROJECT_LIMIT);
+      expect(all.filter((property) => property.sortOrder === props.PROPERTIES_PER_PROJECT_LIMIT - 1)).toHaveLength(1);
+    });
+
     it("stores options with server-minted ids and round-trips them", async () => {
       const created = await field("warp3520b-sev", "select", [{ label: "Low" }, { label: "High", color: "#ef4444" }]);
       expect(created.options).toHaveLength(2);

@@ -400,9 +400,6 @@ export async function createProperty(
   projectId: string,
   input: { name: string; type: ApiPropertyType; options?: readonly PropertyOptionInput[] | null },
 ): Promise<ApiProperty> {
-  const project = await prisma.pmProject.findUnique({ where: { id: projectId }, select: { id: true } });
-  if (!project) throw new Error(PM_PROPERTY_ERRORS.PROJECT_NOT_FOUND);
-
   // Options belong to select fields and ONLY to them; a select field must say
   // its (possibly empty) list. Both are checked before any write.
   let options: ApiPropertyOption[] | null = null;
@@ -415,21 +412,30 @@ export async function createProperty(
     throw new Error(PM_PROPERTY_ERRORS.INVALID_OPTIONS);
   }
 
-  const count = await prisma.pmCustomProperty.count({ where: { projectId } });
-  if (count >= PROPERTIES_PER_PROJECT_LIMIT) throw new Error(PM_PROPERTY_ERRORS.PROPERTY_LIMIT_REACHED);
-  const last = await prisma.pmCustomProperty.aggregate({ where: { projectId }, _max: { sortOrder: true } });
-
   try {
-    const row = await prisma.pmCustomProperty.create({
-      data: {
-        projectId,
-        name: input.name,
-        type: input.type,
-        options: options === null ? Prisma.DbNull : (options as unknown as Prisma.InputJsonValue),
-        sortOrder: (last._max.sortOrder ?? -1) + 1,
-      },
+    return await prisma.$transaction(async (tx) => {
+      // Serialize definition creation for this project. Without the parent-row
+      // lock, two requests at 29 fields can both pass the cap check and choose
+      // the same next sortOrder before either insert commits.
+      const project = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT "id" FROM "PmProject" WHERE "id" = ${projectId} FOR UPDATE
+      `;
+      if (project.length === 0) throw new Error(PM_PROPERTY_ERRORS.PROJECT_NOT_FOUND);
+
+      const count = await tx.pmCustomProperty.count({ where: { projectId } });
+      if (count >= PROPERTIES_PER_PROJECT_LIMIT) throw new Error(PM_PROPERTY_ERRORS.PROPERTY_LIMIT_REACHED);
+      const last = await tx.pmCustomProperty.aggregate({ where: { projectId }, _max: { sortOrder: true } });
+      const row = await tx.pmCustomProperty.create({
+        data: {
+          projectId,
+          name: input.name,
+          type: input.type,
+          options: options === null ? Prisma.DbNull : (options as unknown as Prisma.InputJsonValue),
+          sortOrder: (last._max.sortOrder ?? -1) + 1,
+        },
+      });
+      return mapProperty(row);
     });
-    return mapProperty(row);
   } catch (err) {
     if (isUniqueViolation(err)) throw new Error(PM_PROPERTY_ERRORS.PROPERTY_NAME_TAKEN);
     throw err;

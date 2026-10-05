@@ -40,7 +40,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     { headers },
   );
   if (!res.ok) {
-    return (await routeApprovalRefusal(res)) ?? err("COPY_FAILED", `nextcloud returned ${res.status}`);
+    return (await routeApprovalRefusal(res)) ?? err("COPY_FAILED", `the File Store returned ${res.status}`);
   }
   return { ok: true, data: { copied_from: f.path, copied_to: t.path } };
 }

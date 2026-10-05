@@ -56,6 +56,7 @@ import {
   Hash,
   ToggleLeft,
   ListChecks,
+  ChartGantt,
   type LucideIcon,
 } from "lucide-react";
 
@@ -118,6 +119,8 @@ export const ICONS: Record<string, LucideIcon> = {
   hash: Hash,
   toggle: ToggleLeft,
   checks: ListChecks,
+  // WARP-3523 — the Timeline view tab.
+  gantt: ChartGantt,
 };
 
 export function PmIcon({
