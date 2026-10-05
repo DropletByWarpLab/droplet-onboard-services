@@ -13,6 +13,7 @@ import { cloudMaterialFromRow, connectorForProvider, type CloudConnectionRow } f
 import { createDevelopmentFetch, DevelopmentEgressBlockedError, DevelopmentConnectionChangedError } from "./pm-dev-egress.js";
 import { matchedSequences } from "./pm-dev-match.js";
 import { writeActivity } from "./pm.service.js";
+import { nudgeOutbox } from "./pm-outbox.js";
 import { POLLABLE_CONNECTION_STATUSES } from "../erp-sync/cursor.service.js";
 
 type Provider = "github" | "gitlab";
@@ -207,7 +208,8 @@ async function upsertLink(
     const mapping = mappings.find((row) => row.projectId === project.id);
     const targetState = kind === "PULL_REQUEST" && (state === "OPEN" || state === "MERGED")
       ? (state === "OPEN" ? mapping?.onOpenedStateId : mapping?.onMergedStateId) : null;
-    await prisma.$transaction(async (tx) => {
+    const wroteActivity = await prisma.$transaction(async (tx) => {
+      let wroteActivity = false;
       const unique = { provider_kind_externalId_workItemId: { provider, kind, externalId, workItemId: workItem.id } };
       const existing = await tx.pmExternalLink.findUnique({ where: unique, select: { id: true, state: true } });
       await tx.pmExternalLink.upsert({
@@ -215,7 +217,10 @@ async function upsertLink(
         create: { workItemId: workItem.id, repositoryId, provider, kind, externalId, url, title, state, author, ref, number, externalUpdatedAt: updatedAt },
         update: { repositoryId, url, title, state, author, ref, number, externalUpdatedAt: updatedAt },
       });
-      if (!existing) await writeActivity(tx, { workItemId: workItem.id, actorId: null, verb: "external_link_added", field: provider.toLowerCase(), newValue: `${kind}:${title.slice(0, 180)}` });
+      if (!existing) {
+        await writeActivity(tx, { workItemId: workItem.id, actorId: null, verb: "external_link_added", field: provider.toLowerCase(), newValue: `${kind}:${title.slice(0, 180)}`, nudge: false });
+        wroteActivity = true;
+      }
       if (targetState && (!existing || existing.state !== state)) {
         const oldItem = await tx.pmWorkItem.findFirst({ where: { id: workItem.id, project: { kind: "PROJECT" } }, select: { stateId: true, completedAt: true, isCompleted: true } });
         const newState = await tx.pmState.findFirst({ where: { id: targetState, projectId: project.id }, select: { group: true } });
@@ -226,10 +231,15 @@ async function upsertLink(
             isCompleted: completed,
             completedAt: completed ? (oldItem.completedAt ?? new Date()) : null,
           } });
-          if (changed.count) await writeActivity(tx, { workItemId: workItem.id, actorId: null, verb: "state_changed", field: "state", oldValue: oldItem.stateId, newValue: targetState });
+          if (changed.count) {
+            await writeActivity(tx, { workItemId: workItem.id, actorId: null, verb: "state_changed", field: "state", oldValue: oldItem.stateId, newValue: targetState, nudge: false });
+            wroteActivity = true;
+          }
         }
       }
+      return wroteActivity;
     });
+    if (wroteActivity) nudgeOutbox();
   }
 }
 

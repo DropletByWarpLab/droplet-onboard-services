@@ -15,8 +15,10 @@ vi.mock("./pm-dev-egress.js", () => ({
   DevelopmentConnectionChangedError: class DevelopmentConnectionChangedError extends Error { constructor() { super(); } },
 }));
 vi.mock("./pm.service.js", () => ({ writeActivity: activityMock }));
+vi.mock("./pm-outbox.js", () => ({ nudgeOutbox: vi.fn() }));
 
 import { runDevelopmentSync } from "./pm-development.service.js";
+import { nudgeOutbox } from "./pm-outbox.js";
 import { createTransactionSeam } from "../../__tests__/helpers/prisma-tx-harness.js";
 
 const REPO = {
@@ -49,6 +51,54 @@ function fixture(opts: { branchesTruncated?: boolean; connection?: object | null
 beforeEach(() => { vi.clearAllMocks(); });
 
 describe("WARP-3535 sync completeness", () => {
+  it.each([
+    { name: "committed activity", existing: false, rejectCommit: false, wakes: 1 },
+    { name: "unchanged link", existing: true, rejectCommit: false, wakes: 0 },
+    { name: "rolled-back activity", existing: false, rejectCommit: true, wakes: 0 },
+  ])("wakes the shared outbox only after $name", async ({ existing, rejectCommit, wakes }) => {
+    const prisma = fixture();
+    prisma.pmDevRepositoryProject.findMany.mockResolvedValue([{
+      projectId: "project-1", onOpenedStateId: null, onMergedStateId: null,
+      project: { id: "project-1", identifier: "ABC", kind: "PROJECT" },
+    }]);
+    const tx = {
+      pmExternalLink: {
+        findUnique: vi.fn().mockResolvedValue(existing ? { id: "link-1", state: "OPEN" } : null),
+        upsert: vi.fn().mockResolvedValue({}),
+      },
+    };
+    const seam = createTransactionSeam({ client: () => tx });
+    const transaction = vi.fn(async (...args: Parameters<typeof seam.$transaction>) => {
+      const result = await seam.$transaction(...args);
+      // A transaction may still fail to commit after its last activity write.
+      expect(nudgeOutbox).not.toHaveBeenCalled();
+      if (rejectCommit) throw new Error("commit failed");
+      return result;
+    });
+    connectorMock.readDevelopment.mockImplementation(async ({ feed }: { feed: string }) => output(feed, {
+      items: feed === "pullRequestsOpen" ? [{
+        type: "pull_request", externalId: "pr-42", number: 42, state: "OPEN",
+        url: "https://github.com/acme/widget/pull/42", title: "ABC-1 widget fix",
+        body: null, branch: null, author: "author", updatedAt: new Date(),
+      }] : [],
+    }));
+    await runDevelopmentSync({
+      ...prisma,
+      pmWorkItem: { findFirst: vi.fn().mockResolvedValue({ id: "item-1", stateId: "backlog-id" }) },
+      $transaction: transaction,
+    } as never);
+
+    expect(nudgeOutbox).toHaveBeenCalledTimes(wakes);
+    if (!existing) {
+      expect(activityMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ nudge: false }));
+    }
+    if (rejectCommit) {
+      expect(prisma.pmDevRepository.update).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ status: "ERROR" }),
+      }));
+    }
+  });
+
   it.each(["OPEN", "MERGED"] as const)("records canonical state IDs for %s automation", async (state) => {
     const prisma = fixture();
     prisma.pmDevRepositoryProject.findMany.mockResolvedValue([{
