@@ -65,10 +65,13 @@ export function NewItemModal({
   project,
   onClose,
   onCreated,
+  cycleId,
 }: {
   project: PmProject;
   onClose: () => void;
   onCreated: () => void;
+  /** WARP-3521 — plan the new item into this cycle as it is created. */
+  cycleId?: string;
 }): JSX.Element {
   const titleId = useId();
   const { toast } = useToast();
@@ -95,6 +98,7 @@ export function NewItemModal({
         // `new Date(...)` here read it as UTC midnight and the display read it
         // back in local time, so west of UTC it landed a day early.
         due_date: dueDate || undefined,
+        cycle_id: cycleId,
       });
       toast("Item created", "success");
       onCreated();
