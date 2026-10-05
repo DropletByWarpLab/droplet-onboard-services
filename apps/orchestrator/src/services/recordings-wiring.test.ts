@@ -1,14 +1,12 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { readPackageFile } from "../__tests__/helpers/test-paths.js";
 
 /**
  * WARP-3514 — pin the boot wiring (handbook P13: every comment that promises a sweep
  * needs its `scheduleCron`). index.ts is composed at process start and is not
  * importable in a unit test, so this reads it as text.
  */
-// vitest runs from apps/orchestrator (the package root), like the other source-reading pins.
-const index = readFileSync(join(process.cwd(), "src", "index.ts"), "utf8");
+const index = readPackageFile("src", "index.ts");
 
 describe("recordings allocator wiring in index.ts (WARP-3514)", () => {
   it.each([

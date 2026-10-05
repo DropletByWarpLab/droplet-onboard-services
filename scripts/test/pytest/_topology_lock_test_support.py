@@ -43,7 +43,7 @@ case "$target" in
 esac
 '''
     shim.write_text(source, encoding="utf-8", newline="\n")
-    os.chmod(shim, 0o755)
+    os.chmod(shim, 0o700)
     return shim
 
 

@@ -2132,7 +2132,8 @@ def test_delete_old_refuses_the_new_target_even_if_the_record_says_so(box):
 @posix_world
 def test_delete_old_does_not_trust_a_group_or_world_writable_record(box):
     box.after_migration("volume")
-    os.chmod(box.rootstate / "migration.json", 0o666)
+    # Attack fixture: exercise rejection of a world-writable migration record.
+    os.chmod(box.rootstate / "migration.json", 0o666)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions -- intentionally weak attack input for the guard test
     r = box.run("delete_old")
     assert r.state["state"] == "failed"
     assert not any(c[1:3] == ["volume", "rm"] for c in box.calls("docker"))
@@ -2284,6 +2285,9 @@ def _mutant(box, needle, replacement, name="mutant.sh") -> Path:
     lines[idx : k + 1] = [indent + replacement]
     path = box.tmp / name
     path.write_text("\n".join(lines), encoding="utf-8", newline="\n")
+    (box.tmp / "droplet-storage-topology-lock.sh").write_text(
+        (REPO_ROOT / "scripts" / "host" / "droplet-storage-topology-lock.sh").read_text(
+            encoding="utf-8"), encoding="utf-8", newline="\n")
     return path
 
 

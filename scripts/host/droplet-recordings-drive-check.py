@@ -53,12 +53,16 @@ def main() -> None:
         }
         if not names:
             fail(UNAVAILABLE, "recording storage could not be verified")
+        # The env override is a root-owned deployment/test seam, not a request
+        # field. Production defaults to the absolute helper installed by the
+        # root installer; request.json never supplies this executable path.
         command = os.environ.get(
             "DROPLET_NVR_STATUS_SCRIPT",
             "/usr/local/sbin/droplet-set-nvr-media.sh",
         )
         result = subprocess.run(
-            [command, "--status"], capture_output=True, text=True,
+            [command, "--status"],  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-tainted-env-args.dangerous-subprocess-use-tainted-env-args -- process-environment-only deployment/test seam; production default is fixed root-owned helper and request data cannot set it
+            capture_output=True, text=True,
             timeout=15, check=False,
         )
         if result.returncode != 0:

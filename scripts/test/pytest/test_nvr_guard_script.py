@@ -182,7 +182,7 @@ class Box:
     def shim(self, name: str, body: str):
         path = self.shims / name
         path.write_text(body, encoding="utf-8", newline="\n")
-        os.chmod(path, 0o755)
+        os.chmod(path, 0o700)
 
     def write_env(self, text: str):
         self.env_file.write_text(

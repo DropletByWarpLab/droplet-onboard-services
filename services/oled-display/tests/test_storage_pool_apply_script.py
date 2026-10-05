@@ -379,9 +379,11 @@ def test_stdout_capture_files_live_in_the_tmpfs_dir_not_the_default_tmp(tmp_path
 
 def test_an_unusable_capture_dir_falls_back_instead_of_failing(tmp_path):
     spool = tmp_path / "spool"
+    plain_tmp = tmp_path / "plain-tmp"
+    plain_tmp.mkdir()
     stub = _write_stub(tmp_path, "printf '{\"ok\": true}\n'\nexit 0\n")
     _spool_request(spool)
     proc = _run_apply_with_tmp(spool, stub, tmp_path / "no-such-dir",
-                               tmp_path / "plain-tmp")
+                               plain_tmp)
     assert proc.returncode == 0, proc.stderr
     assert json.loads((spool / "result.json").read_text())["rc"] == 0
