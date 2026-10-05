@@ -3,11 +3,13 @@
 import { useMemo, useState } from "react";
 import { ChevronDown, Filter, X } from "lucide-react";
 import type { CameraInfo, ReviewFilter } from "@/lib/types";
+import { BusinessHoursFilter } from "./BusinessHoursFilter";
 
 interface Props {
   cameras: CameraInfo[];
   filter: ReviewFilter;
   onChange: (next: ReviewFilter) => void;
+  businessHoursConfigured?: boolean;
 }
 
 const TIME_PRESETS: Array<{ id: string; label: string; secondsAgo: number | null }> = [
@@ -40,7 +42,7 @@ function presetIdFor(after: number | undefined): string {
  * pip + clear-all are intentionally identical to EventFilterBar so
  * the two UIs feel like siblings.
  */
-export function ReviewFilterBar({ cameras, filter, onChange }: Props) {
+export function ReviewFilterBar({ cameras, filter, onChange, businessHoursConfigured = false }: Props) {
   const [collapsed, setCollapsed] = useState(false);
 
   const selectedCameras = filter.cameras ?? [];
@@ -91,7 +93,8 @@ export function ReviewFilterBar({ cameras, filter, onChange }: Props) {
   const activeCount =
     (selectedCameras.length > 0 ? 1 : 0) +
     (activePreset !== "any" ? 1 : 0) +
-    (filter.reviewed !== undefined ? 1 : 0);
+    (filter.reviewed !== undefined ? 1 : 0) +
+    (filter.businessHours !== undefined ? 1 : 0);
 
   return (
     <div className="card mb-4 space-y-3">
@@ -125,6 +128,11 @@ export function ReviewFilterBar({ cameras, filter, onChange }: Props) {
 
       {!collapsed && (
         <div className="space-y-3">
+          <BusinessHoursFilter
+            value={filter.businessHours}
+            configured={businessHoursConfigured}
+            onChange={(businessHours) => onChange({ ...filter, businessHours })}
+          />
           {sortedCameras.length > 0 && (
             <div>
               <div className="type-caption-2 text-[color:var(--text-muted)] mb-1.5">Cameras</div>

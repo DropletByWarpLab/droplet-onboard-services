@@ -5743,6 +5743,8 @@ model PmWorkspace {
   createdAt DateTime    @default(now())
   updatedAt DateTime    @default(now()) @updatedAt
   projects  PmProject[]
+  /// WARP-3522 — saved views, project-scoped and cross-project.
+  savedViews PmSavedView[]
   /// WARP-3532 — the workspace's webhook destinations.
   webhooks  PmWebhook[]
 }
@@ -5799,6 +5801,8 @@ model PmProject {
   cycles     PmCycle[]
   modules    PmModule[]
   properties PmCustomProperty[]
+  /// WARP-3522 — views saved against this project (cross-project views have no project).
+  savedViews PmSavedView[]
   /// WARP-3527 — the import runs filed against this project. Cascade: a job is
   /// a record ABOUT the project, with no meaning once it is gone.
   importJobs PmImportJob[]
@@ -5959,6 +5963,16 @@ model PmWorkItem {
   sequenceId      Int
   name            String
   descriptionHtml String?
+  /// WARP-3522 — the plain-text projection of `descriptionHtml`: tags stripped,
+  /// entities decoded, whitespace collapsed. NEVER written by application code:
+  /// the `pmworkitem_description_text` trigger (migration 20261004060000)
+  /// recomputes it on every INSERT and on every UPDATE that sets
+  /// `descriptionHtml`, so every write path — this service's, another slice's,
+  /// a raw import — keeps it true. It exists so the filter DSL's `text`
+  /// condition searches what a person typed, not the markup around it (an
+  /// ILIKE over the raw HTML matches "class", "strong" and every href), and so
+  /// that search can use a trigram index. Null when there is no description.
+  descriptionText String?
   stateId         String?
   state           PmState?     @relation(fields: [stateId], references: [id], onDelete: SetNull)
   priority        PmPriority   @default(none)
@@ -6071,6 +6085,13 @@ model PmWorkItem {
   /// composite. Two columns only: the unfiltered board still orders off the
   /// state index.
   @@index([projectId, departmentId])
+  /// WARP-3522 — the filter DSL's `text` condition is `name ILIKE '%q%' OR
+  /// "descriptionText" ILIKE '%q%'`. A btree cannot serve a leading-wildcard
+  /// pattern at all; a trigram GIN index lets the planner answer each arm with
+  /// a bitmap scan. (A query shorter than three characters has no trigram and
+  /// falls back to a scan, which is correct and, at this table's size, cheap.)
+  @@index([name(ops: raw("gin_trgm_ops"))], type: Gin)
+  @@index([descriptionText(ops: raw("gin_trgm_ops"))], type: Gin)
 }
 
 /// Work-item ↔ assignee join. `userId` is a User.id.
@@ -6834,6 +6855,73 @@ model PmExternalLink {
   /// WARP-845: the ON DELETE CASCADE scan index.
   @@index([repositoryId])
 }
+/// WARP-3522 — who may see a saved view. PERSONAL is the owner's alone — no role,
+/// not even owner/admin, lists another person's. SHARED is every Projects reader's,
+/// and writable by owner/admin (and the project lead for a project view).
+enum PmViewScope {
+  PERSONAL
+  SHARED
+}
+
+/// WARP-3522 — the layout a saved view opens in. BOARD and LIST exist today;
+/// TABLE (WS-6b), CALENDAR and TIMELINE (WS-7) are accepted now so a view saved
+/// by the API or the assistant does not need a migration when they land, and a
+/// layout the dashboard cannot draw yet opens as the list.
+enum PmViewLayout {
+  BOARD
+  LIST
+  TABLE
+  CALENDAR
+  TIMELINE
+}
+
+/// WARP-3522 — a named, persisted answer to "which work items?" (ADR-069 s8).
+/// `filter` is the filter DSL (packages/shared-types/src/pm-filter.ts),
+/// validated on every write and re-validated on every read — it is data a person
+/// or the assistant typed, never trusted because it came from our own column.
+///
+/// `projectId` null = a cross-project view (the whole workspace, minus archived
+/// projects). `ownerId` is a User.id string, not an FK, like every PM
+/// attribution column: deleting a user must not be able to cascade away a SHARED
+/// view the whole team uses.
+///
+/// `groupBy` / `sortBy` / `columns` are carried now and drawn by WS-6b's table
+/// layout; `columns` is an ordered list of column ids whose vocabulary that
+/// slice owns.
+///
+/// INVARIANTS THE SCHEMA LANGUAGE CANNOT EXPRESS — all in raw migration SQL
+/// (20261004060000_warp_3522_pm_saved_views) and proven against a real Postgres
+/// in `pm-saved-view.pg.test.ts`:
+///   * `PmSavedView_name_length`   — CHECK the trimmed name is 1..60 characters.
+///   * `PmSavedView_filter_is_object` — CHECK `filter` is a JSON object.
+///   * `PmSavedView_name_scope_key` — UNIQUE per (workspace, project-or-none,
+///     scope, owner-if-personal, lower(name)): two shared views cannot both be
+///     called "Overdue", two of one person's personal views cannot, and two
+///     people's personal views can.
+model PmSavedView {
+  id          String       @id @default(uuid())
+  workspaceId String
+  workspace   PmWorkspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  projectId   String?
+  project     PmProject?   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  ownerId     String
+  scope       PmViewScope  @default(PERSONAL)
+  name        String
+  layout      PmViewLayout @default(BOARD)
+  filter      Json
+  groupBy     String?
+  sortBy      Json?
+  columns     Json?
+  sortOrder   Int          @default(0)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @default(now()) @updatedAt
+
+  /// The list endpoint's shape: one workspace, optionally one project, both scopes.
+  @@index([workspaceId, projectId, scope])
+  /// WARP-845 — the ON DELETE CASCADE scan when a project is deleted.
+  @@index([projectId])
+}
+
 /// WARP-3527 (ADR-069 WS-11) — which tracker's export a file is.
 ///
 /// UPPERCASE, like PmRelationKind: wire enum, quoted in the dashboard's source

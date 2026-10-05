@@ -24,6 +24,10 @@ import { ReviewClipModal } from "./ReviewClipModal";
 import { ToastProvider } from "@/components/Toast";
 import type { ReviewItem } from "@/lib/types";
 
+vi.mock("@/components/recordings/HlsPlayer", () => ({
+  HlsPlayer: ({ src, onError }: { src: string; onError?: (message: string) => void }) =>
+    <video src={src} onError={() => onError?.("recording unavailable")} />,
+}));
 afterEach(() => cleanup());
 
 const NOW = Math.floor(Date.now() / 1000);
@@ -59,6 +63,12 @@ function renderModal(
 
 const video = () => document.querySelector("video");
 const image = () => document.querySelector("img");
+function failPlayback() {
+  const original = video()!;
+  fireEvent.error(original);
+  const recording = video();
+  if (recording && recording !== original) fireEvent.error(recording);
+}
 
 const IN_PROGRESS_COPY = /In progress/;
 const PREVIEW_FAILED_COPY = /preview clip isn.t available right now/i;
@@ -75,13 +85,11 @@ describe("ReviewClipModal clip", () => {
     expect(screen.queryByText(PREVIEW_FAILED_COPY)).toBeNull();
   });
 
-  it("a review still in progress shows its thumbnail and an 'In progress' notice, not a video", () => {
+  it("a review still in progress plays recordings and shows its notice without loading the preview", () => {
     renderModal(makeReview({ endTime: null }));
 
-    expect(video()).toBeNull();
-    expect(image()!.getAttribute("src")).toBe(
-      "/api/cameras/reviews/1791059989.433851-qrgete/thumbnail",
-    );
+    expect(video()!.getAttribute("src")).toContain("/warp_lab_office/playback.m3u8");
+    expect(image()).toBeNull();
     expect(screen.getByText(IN_PROGRESS_COPY)).toBeInTheDocument();
   });
 
@@ -95,7 +103,7 @@ describe("ReviewClipModal clip", () => {
   it("falls back to the thumbnail, with a notice, when the preview clip fails to load", () => {
     renderModal(makeReview());
 
-    fireEvent.error(video()!);
+    failPlayback();
 
     expect(video()).toBeNull();
     expect(image()).not.toBeNull();
@@ -107,7 +115,7 @@ describe("ReviewClipModal clip", () => {
   it("the failure notice is an alert in the shell's error ink, not a quiet status line", () => {
     renderModal(makeReview());
 
-    fireEvent.error(video()!);
+    failPlayback();
 
     const notice = screen.getByRole("alert");
     expect(notice.textContent).toMatch(PREVIEW_FAILED_COPY);
@@ -117,7 +125,7 @@ describe("ReviewClipModal clip", () => {
 
   it("offers Retry beside the failure, which tries the preview clip again", () => {
     renderModal(makeReview());
-    fireEvent.error(video()!);
+    failPlayback();
     expect(video()).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: /Retry/ }));
@@ -133,16 +141,19 @@ describe("ReviewClipModal clip", () => {
     expect(screen.queryByRole("button", { name: /Retry/ })).toBeNull();
   });
 
-  it("uses the thumbnail when the review has no preview url at all", () => {
+  it("uses recordings then the thumbnail when the review has no preview url at all", () => {
     renderModal(makeReview({ previewUrl: null }));
+    expect(video()!.getAttribute("src")).toContain("playback.m3u8");
+    failPlayback();
 
     expect(video()).toBeNull();
     expect(image()).not.toBeNull();
-    expect(screen.queryByRole("button", { name: /Retry/ })).toBeNull();
+    expect(screen.getByRole("button", { name: /Retry/ })).toBeInTheDocument();
   });
 
   it("a thumbnail that fails to load becomes a placeholder, and no alt text is left to print", () => {
     renderModal(makeReview({ endTime: null }), { cameraName: "Warp Lab Office" });
+    failPlayback();
 
     fireEvent.error(image()!);
 
@@ -156,7 +167,7 @@ describe("ReviewClipModal clip", () => {
   it("re-arms the clip when the modal moves to a different review", () => {
     const first = makeReview();
     const { rerender } = renderModal(first);
-    fireEvent.error(video()!);
+    failPlayback();
     expect(video()).toBeNull();
 
     rerender(
