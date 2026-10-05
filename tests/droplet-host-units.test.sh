@@ -483,6 +483,13 @@ if actions | grep -q '^restart droplet-host-units.service$'; then
 else
   pass "refresh never restarts its own unit"
 fi
+# WARP-3841: the deploy runner is deny-listed by default (restarting it mid-deploy
+# would kill the deploy that is running).
+if grep -q 'DROPLET_HOST_UNITS_NEVER_RESTART:-[^}]*droplet-deploy.service' "$HOST_UNITS"; then
+  pass "droplet-deploy.service is in the default restart deny-list"
+else
+  fail "droplet-deploy.service missing from the default DROPLET_HOST_UNITS_NEVER_RESTART"
+fi
 
 # =============================================================================
 # Phase 4: refresh — only the stale ones, deliberately ordered

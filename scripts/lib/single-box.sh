@@ -547,6 +547,18 @@ EOF
     /etc/systemd/system/droplet-host-integration.service
   log_success "Installed /usr/local/sbin/droplet-reapply-host-integration (+ boot re-apply unit)"
 
+  # --- WARP-3841 on-demand deploy (epic WARP-3834) ----------------------------
+  # droplet-deploy.service is the repo-tracked root deploy (backup, setup.sh as
+  # droplet, host hook, gate). Deliberately NOT enabled (no [Install]): the
+  # `droplet` user starts it through the polkit rule below, start verb only.
+  sudo install -m 0755 "$host_src/droplet-deploy.sh" \
+    /usr/local/sbin/droplet-deploy
+  sudo install -m 0644 "$host_src/etc-systemd-system/droplet-deploy.service" \
+    /etc/systemd/system/droplet-deploy.service
+  sudo install -m 0644 "$host_src/50-droplet-deploy.rules" \
+    /etc/polkit-1/rules.d/50-droplet-deploy.rules
+  log_success "Installed /usr/local/sbin/droplet-deploy (+ on-demand unit, polkit start rule)"
+
   # --- XVF3800 DSP control tool (xvf_host) for voice_dsp self-heal (WARP-1408) -
   # Both the host watchdog (droplet-watchdog.sh) and voice-io's POST
   # /voice/restart-processor shell out to `xvf_host REBOOT 1` to clear a wedged

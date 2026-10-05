@@ -242,6 +242,32 @@ structural closure: the blind spot cannot silently re-open.
 bash tests/host-artefacts.test.sh   # auditor behaviour + the manifest guard
 ```
 
+## Deploying (WARP-3841)
+
+A deploy is one command, run as the unprivileged `droplet` user, no sudo:
+
+```bash
+systemctl start droplet-deploy.service      # blocks until done; exit 1 = failed
+journalctl -u droplet-deploy.service -n 80  # the log, incl. the backup path
+```
+
+`/usr/local/sbin/droplet-deploy` (root, `scripts/host/droplet-deploy.sh`) runs, in
+order: preflight (checkout resolved like the heal wrapper; refuses a dirty tree or a
+held `.data/.setup.lock`) → backup under `/var/lib/droplet/deploy-backups/<UTC ts>/`, or under
+`/data/droplet/deploy-backups/` on a relocated (encrypted) box, where the deploy refuses to run if `/data` is not mounted
+(`db.sql.gz` + a 0600 `secrets.tar` of `.env`, `data/secrets`, `docker/secrets`,
+`docker/certs`, `docker/mosquitto.*`; last 3 complete snapshots kept; failed attempts and legacy unmarked snapshots remain for manual inspection) → a temporary sudoers grant for
+`droplet` (removed by `trap` and `ExecStopPost=+`) → `setup.sh --skip-docker
+--skip-drivers` as `droplet` → `systemctl start droplet-host-units.service` → a gate
+(`droplet-host-units audit`, required units active; failed `droplet-*` units only
+WARN). On failure it prints the backup path and the restore commands; there is no
+automatic rollback. Polkit lets `droplet` **start** this unit only
+(`50-droplet-deploy.rules`).
+
+**One-time bootstrap:** a box installed before this landed has neither the unit nor
+the rule. Run `sudo ./scripts/setup.sh --reapply-host-integration` once (or let the
+next `droplet-host-integration.service` boot heal do it); after that, no sudo.
+
 ### The delivery half — re-apply on refresh (WARP-2574)
 
 `audit` detects; this **re-applies**. It is the symmetric partner of
