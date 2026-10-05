@@ -32,6 +32,16 @@ else
   exit 1
 fi
 
+# Docker is a fixture: missing credentials must stop the container and exit.
+mkdir -p "$WORK/bin"
+cat > "$WORK/bin/docker" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> "$ATTACH_DOCKER_LOG"
+[ "$1" != stop ] || [ "${ATTACH_STOP_FAIL:-0}" != 1 ]
+STUB
+chmod +x "$WORK/bin/docker"
+export PATH="$WORK/bin:$PATH" ATTACH_DOCKER_LOG="$WORK/docker.log"
+
 # run_pw <OPENWRT_HOST> <.env body> -> prints "<ROUTER_EXTERNAL>|<ROOT_PW>|<NOTE>"
 SECRET_VALUE="EXTERNAL-ROUTER-PASSWORD"
 printf '%s\n' "$SECRET_VALUE" > "$WORK/openwrt_password"
@@ -65,33 +75,35 @@ out="$(env -u OPENWRT_HOST -u OPENWRT_PASSWORD REPO_ENV_FILE="$WORK/.env" OPENWR
   || fail "external host from .env: got '$out'"
 
 # External but no OPENWRT_PASSWORD: stays empty, still never the secret file.
-out="$(run_pw 192.168.9.1 $'OPENWRT_HOST=192.168.9.1\n')"
-case "$out" in
-  "1||"*) pass "external host without OPENWRT_PASSWORD: root pw stays empty (no fallback to the secret file)" ;;
-  *) fail "external host without OPENWRT_PASSWORD: got '$out'" ;;
-esac
+out="$(run_pw 192.168.9.1 $'OPENWRT_HOST=192.168.9.1\n' 2>&1)"; rc=$?
+if [ "$rc" = 1 ] && grep -qx 'stop droplet-openwrt' "$WORK/docker.log"; then
+  pass "external host without OPENWRT_PASSWORD: bundled container stopped, attach exits before bring-up"
+else
+  fail "missing password did not stop the container: rc=$rc $out"
+fi
 
 # Fail closed (WARP-834): external router + no box-owned OPENWRT_PASSWORD means
 # stock OpenWrt root has an empty hash. ERROR with the note, flag set, and the
 # secret file is NOT a fallback.
 printf '%s' $'OPENWRT_HOST=192.168.9.1\n' > "$WORK/.env"
 full="$(env -u OPENWRT_PASSWORD OPENWRT_HOST=192.168.9.1 REPO_ENV_FILE="$WORK/.env" OPENWRT_PASSWORD_FILE="$WORK/openwrt_password" \
-  bash -c '. "$1"; . "$2" 2>&1; printf "FLAG=%s PW=[%s]" "$ROOT_PW_FAIL" "$OPENWRT_ROOT_PW"' _ "$WORK/ext.sh" "$WORK/pw.sh" 2>&1)"
+  bash -c '. "$1"; . "$2" 2>&1; printf "CONTINUED PW=[%s]" "$OPENWRT_ROOT_PW"' _ "$WORK/ext.sh" "$WORK/pw.sh" 2>&1)"
 case "$full" in *"ERROR: no box-owned OPENWRT_PASSWORD"*"Network tab"*|*"Network tab"*"ERROR: no box-owned OPENWRT_PASSWORD"*) pass "external + empty OPENWRT_PASSWORD: ERROR line with the external-router note" ;; *) fail "no prefixed ERROR: $full" ;; esac
-case "$full" in *"FLAG=1 PW=[]") pass "external + empty OPENWRT_PASSWORD: unit flagged failed, root pw empty" ;; *) fail "flag/pw wrong: $full" ;; esac
+case "$full" in *"bundled container stopped"*) pass "external + empty OPENWRT_PASSWORD: management is stopped" ;; *) fail "container not stopped: $full" ;; esac
+case "$full" in *"CONTINUED"*) fail "missing-password attach continued after stopping" ;; *) pass "missing-password attach never reaches the management tail" ;; esac
+rm -f "$WORK/docker.log"
+out="$(ATTACH_STOP_FAIL=1 run_pw 192.168.9.1 $'OPENWRT_HOST=192.168.9.1\n' 2>&1)"; rc=$?
+if [ "$rc" = 1 ] && grep -qx 'kill droplet-openwrt' "$WORK/docker.log"; then
+  pass "failed graceful stop falls back to killing the unprotected container"
+else
+  fail "failed graceful stop did not kill the container: $out"
+fi
 case "$full" in *"$SECRET_VALUE"*) fail "secret file leaked on the fail-closed path" ;; *) pass "fail-closed path never reads the secret file" ;; esac
 # A readable-only-if-opened trap: a FIFO would hang a read; unreadable file proves no open.
 chmod 000 "$WORK/openwrt_password"
 out="$(run_pw 192.168.9.1 $'OPENWRT_HOST=192.168.9.1\n')"
 chmod 600 "$WORK/openwrt_password"
-case "$out" in "1||"*) pass "external + empty: same result with the secret file unreadable (never opened)" ;; *) fail "got '$out'" ;; esac
-# The flag must become a non-zero unit result AFTER the container exec resets EXEC_RC.
-if awk '/EXEC_RC=\$\?/{seen=1} seen && /ROOT_PW_FAIL" = 1/{f=1} f && /EXEC_RC=1/{ok=1} END{exit !ok}' "$ATTACH"; then
-  pass "ROOT_PW_FAIL sets EXEC_RC=1 after the container exec (unit shows failed)"
-else
-  fail "ROOT_PW_FAIL does not set EXEC_RC=1 after EXEC_RC=\$?"
-fi
-
+case "$out" in "") pass "external + empty: exits without reading the unreadable external secret" ;; *) fail "got '$out'" ;; esac
 # Bundled container shapes keep the old behavior: secret file wins, no prefix.
 for h in "" 127.0.0.1 localhost ::1; do
   out="$(run_pw "$h" $'OPENWRT_PASSWORD=box-owned-pw\n')"
