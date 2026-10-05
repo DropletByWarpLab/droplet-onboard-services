@@ -88,7 +88,7 @@ function tabOfLayout(layout: PmViewLayout): ProjectView {
 }
 
 /** Brief §3.9, verbatim for one; counted for several. */
-export function staleNoticeText(count: number): string {
+function staleNoticeText(count: number): string {
   return count === 1
     ? "One filter was removed because it no longer exists."
     : `${count} filters were removed because they no longer exist.`;

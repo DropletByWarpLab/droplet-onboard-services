@@ -931,6 +931,6 @@ describe("WARP-3528 — service-desk tickets", () => {
     });
     await runActivityNotifySweep(prisma, opts);
     expect(recordMock.mock.calls[0][1]).toMatchObject({ url: "/projects?p=INBOX&item=INBOX-1" });
-    expect(publishMock.mock.calls[0][0]).toMatchObject({ url: "/projects?p=INBOX&item=INBOX-1" });
+    expect(publishMock).toHaveBeenCalledWith(expect.objectContaining({ url: "/projects?p=INBOX&item=INBOX-1" }));
   });
 });
