@@ -334,8 +334,6 @@ function makeFake(hooks: Hooks = {}) {
     },
 
     pmWorkItemAssignee: {
-      findMany: async ({ where }: { where: Row }) =>
-        db.assignees.filter((a) => a.workItemId === where.workItemId),
       // WARP-3369 — the per-item guard's lookup: "is this item (or, for the
       // state list, an item in this project) assigned to this user".
       findFirst: async ({ where }: { where: Row }) =>
@@ -406,12 +404,6 @@ function makeFake(hooks: Hooks = {}) {
         });
         return take === undefined ? rows : rows.slice(0, take);
       },
-    },
-
-    // deleteWorkItem snapshots assigned guests into its tombstone. The basic
-    // route fixture has no User rows; a queried guest roster is therefore empty.
-    user: {
-      findMany: async () => [],
     },
   };
 
@@ -762,7 +754,7 @@ describe("native PM routes — Prisma race → typed HTTP mapping", () => {
       .send({ name: "Doomed" });
     fake.hooks["pmWorkItem.delete"] = "P2025";
     const res = await request(makeApp(fake.prisma, OWNER)).delete(`/api/pm/work-items/${wi.body.work_item.id}`);
-    expect(res.status, JSON.stringify(res.body)).toBe(404);
+    expect(res.status).toBe(404);
     expect(res.body.error).toBe("work_item_not_found");
   });
 

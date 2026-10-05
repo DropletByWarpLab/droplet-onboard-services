@@ -400,7 +400,6 @@ describe("fabric-member reconciler (WARP-1732)", () => {
         capturedIntervalMs = ms;
         capturedHandler = handler;
         capturedLockKey = opts?.lockKey ?? null;
-        return { runNow: () => undefined };
       },
       scheduleCron: vi.fn(),
       stop: vi.fn(),

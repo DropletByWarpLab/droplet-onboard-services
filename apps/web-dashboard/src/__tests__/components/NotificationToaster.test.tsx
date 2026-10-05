@@ -54,7 +54,6 @@ class FakeWebSocket {
 }
 
 import { NotificationToaster } from "@/components/NotificationToaster";
-import { subscribePmLive, type PmLiveSignal } from "@/lib/pm-live-events";
 
 function deliver(payload: unknown) {
   const ws = FakeWebSocket.instances[FakeWebSocket.instances.length - 1];
@@ -437,85 +436,5 @@ describe("NotificationToaster — alert priority", () => {
   it("without priority, an event keeps its ordinary toast", async () => {
     const [, type] = await toastFor({ ...ALERT, priority: undefined });
     expect(type).toBe("success");
-  });
-});
-
-describe("NotificationToaster — the one socket also carries Projects live frames (WARP-3536)", () => {
-  beforeEach(() => {
-    FakeWebSocket.instances.length = 0;
-    toastSpy.mockReset();
-    (globalThis as unknown as { WebSocket: typeof FakeWebSocket }).WebSocket = FakeWebSocket;
-    Object.defineProperty(window, "location", {
-      configurable: true,
-      value: { protocol: "http:", host: "localhost" } as Location,
-    });
-  });
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  function deliverOn(topic: string, payload: unknown) {
-    const ws = FakeWebSocket.instances[FakeWebSocket.instances.length - 1];
-    ws.onmessage?.({ data: JSON.stringify({ topic, payload }) });
-  }
-
-  function listen() {
-    const seen: PmLiveSignal[] = [];
-    const off = subscribePmLive((s) => void seen.push(s));
-    return { seen, off };
-  }
-
-  const FRAME = { type: "pm.changed", projectId: "p-1", workItemId: "w-1", verb: "state_changed" };
-
-  it("hands a droplet/pm frame to the Projects fan-out and raises no toast", async () => {
-    const l = listen();
-    render(<NotificationToaster />);
-    await act(async () => {
-      await Promise.resolve();
-      deliverOn("droplet/pm/alice", FRAME);
-    });
-    expect(l.seen).toEqual([FRAME]);
-    expect(toastSpy).not.toHaveBeenCalled();
-    l.off();
-  });
-
-  it("opens no second socket for it", async () => {
-    render(<NotificationToaster />);
-    await act(async () => {
-      await Promise.resolve();
-    });
-    expect(FakeWebSocket.instances).toHaveLength(1);
-  });
-
-  it("does not hand notifications to the Projects fan-out", async () => {
-    const l = listen();
-    render(<NotificationToaster />);
-    await act(async () => {
-      await Promise.resolve();
-      deliverOn("droplet/notifications/alice", { kind: "event", title: "Hi" });
-    });
-    expect(l.seen).toEqual([]);
-    expect(toastSpy).toHaveBeenCalledTimes(1);
-    l.off();
-  });
-
-  it("asks for a resync when the socket COMES BACK, not when it first connects", async () => {
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-    const l = listen();
-    render(<NotificationToaster />);
-    await act(async () => {
-      await Promise.resolve();
-    });
-    expect(l.seen).toEqual([]); // the first connect: the page has just loaded everything
-
-    // The socket drops; the toaster reconnects on its own backoff.
-    await act(async () => {
-      FakeWebSocket.instances[0].onclose?.();
-      await vi.advanceTimersByTimeAsync(2_000);
-      await Promise.resolve();
-    });
-    expect(FakeWebSocket.instances).toHaveLength(2);
-    expect(l.seen).toEqual([{ type: "resync" }]);
-    l.off();
   });
 });

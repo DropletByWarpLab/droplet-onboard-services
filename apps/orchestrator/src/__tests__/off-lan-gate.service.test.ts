@@ -1,9 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import {
-  outboundEmailGate,
-  webPushGate,
-  workIntegrationsGate,
-} from "../services/off-lan-gate.service.js";
+import { outboundEmailGate, webPushGate } from "../services/off-lan-gate.service.js";
 
 /**
  * Minimal Prisma mock exposing only offLanAllowlistChannel.findUnique
@@ -92,39 +88,6 @@ describe("webPushGate (off-LAN web_push gate, never throws)", () => {
     await webPushGate(prisma);
     expect(prisma.offLanAllowlistChannel.findUnique).toHaveBeenCalledWith({
       where: { key: "web_push" },
-    });
-  });
-});
-
-// WARP-3532 (ADR-069 §9) — the one switch that lets work data (webhooks and
-// chat-app notifications) leave the box. Same never-throws posture as
-// webPushGate: delivery is retried by the queue, so there is no 503-vs-451
-// split worth surfacing — a gate that cannot be read keeps the event on the box.
-describe("workIntegrationsGate (off-LAN work_integrations gate, never throws)", () => {
-  it("returns true only when the work_integrations channel is enabled", async () => {
-    await expect(workIntegrationsGate(mockPrisma(async () => ({ enabled: true })))).resolves.toBe(true);
-  });
-
-  it("returns false when the channel is disabled", async () => {
-    await expect(workIntegrationsGate(mockPrisma(async () => ({ enabled: false })))).resolves.toBe(false);
-  });
-
-  it("fails CLOSED when the row is missing/unprovisioned", async () => {
-    await expect(workIntegrationsGate(mockPrisma(async () => null))).resolves.toBe(false);
-  });
-
-  it("fails CLOSED (false, not a throw) on a DB error", async () => {
-    const prisma = mockPrisma(async () => {
-      throw new Error("db unreachable");
-    });
-    await expect(workIntegrationsGate(prisma)).resolves.toBe(false);
-  });
-
-  it("reads the channel by the work_integrations enum key", async () => {
-    const prisma = mockPrisma(async () => ({ enabled: true }));
-    await workIntegrationsGate(prisma);
-    expect(prisma.offLanAllowlistChannel.findUnique).toHaveBeenCalledWith({
-      where: { key: "work_integrations" },
     });
   });
 });

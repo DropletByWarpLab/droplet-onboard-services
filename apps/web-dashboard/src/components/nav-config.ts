@@ -58,7 +58,6 @@ import {
   ServerCog,
   Users,
   Video,
-  Webhook,
   Wrench,
 } from "lucide-react";
 
@@ -654,23 +653,6 @@ export const NAV_GROUPS: NavGroup[] = [
         hidden: true,
         settingsSection: "Workspace",
         settingsBlurb: "API keys and sign-ins for connected services",
-      },
-      // WARP-3532 (ADR-069 §9) — Work notifications: webhooks and Slack / Teams /
-      // Discord / Google Chat updates for work. A SIBLING of the two above for the
-      // reason WARP-2968 gave (a page you reach only through another is not in the
-      // nav). `roles` mirrors the server's owner/admin gate on every
-      // /api/pm/webhooks route; `requiresModule: "projects"` mirrors the module
-      // gate on the /api/pm prefix those routes live under, so the entry is hidden
-      // exactly when the API would answer module_disabled.
-      {
-        href: "/integrations/work-notifications",
-        label: "Work notifications",
-        icon: Webhook,
-        roles: ["owner", "admin"],
-        requiresModule: "projects",
-        hidden: true,
-        settingsSection: "Workspace",
-        settingsBlurb: "Send work updates to chat apps and webhooks",
       },
     ],
   },

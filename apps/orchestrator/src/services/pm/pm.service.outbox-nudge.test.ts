@@ -1,5 +1,5 @@
 /**
- * WARP-3532 — `writeActivity` is the choke point every PM mutation goes through
+ * `writeActivity` is the choke point every PM mutation goes through
  * (ADR-069 §7), and the one place the outbox consumers are woken.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";

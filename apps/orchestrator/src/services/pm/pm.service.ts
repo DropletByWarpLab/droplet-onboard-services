@@ -406,7 +406,7 @@ export async function writeActivity(
       newValue: input.newValue ?? null,
     },
   });
-  // WARP-3532 (ADR-069 §7) — wake the outbox consumers. Runs inside the caller's
+  // ADR-069 §7 — wake the outbox consumers. Runs inside the caller's
   // transaction, which is fine: the wake-up is deferred past the settle window,
   // and the consumers' interval is what guarantees the row is read.
   if (input.nudge !== false) nudgeOutbox();

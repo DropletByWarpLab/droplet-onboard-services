@@ -184,9 +184,6 @@ describe("every tucked destination has a way back in (WARP-2967)", () => {
         "/help",
         "/integrations",
         "/integrations/credentials",
-        // WARP-3532 — webhooks and chat-app updates for work, a Settings sibling of
-        // the two above.
-        "/integrations/work-notifications",
         "/knowledge",
         "/models",
         "/routines",

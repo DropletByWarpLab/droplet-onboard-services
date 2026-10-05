@@ -4,9 +4,8 @@
  * "A user who cannot read an item receives no event for it." The unit suites
  * (pm-live-audience.test.ts, pm-live.test.ts) prove the logic with stand-ins; what
  * only Postgres can prove is that the rule holds over the REAL rows it reads:
- * `User.role` and `directoryStatus`, an `AccessRole`'s feature grants, a
- * per-person `UserAccessException`, `PmWorkItemAssignee`, and the §3 resolver
- * (`resolveEffectiveAccess`) that composes them. Then the same audience is driven
+ * `User.role` and `directoryStatus`, the Projects workspace switch, and
+ * `PmWorkItemAssignee`. Then the same audience is driven
  * through the real outbox framework, so the cursor, the settle window and the
  * `(createdAt, id)` read are the ones production runs.
  *
@@ -14,7 +13,7 @@
  * pg-gated suites share one throwaway database.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
-import type { ModuleId, PrismaClient } from "@prisma/client";
+import type { PrismaClient } from "@prisma/client";
 import { deleteWorkItem } from "../services/pm/pm.service.js";
 
 // The global unit setup mocks @prisma/client so the DB-less lane never needs
@@ -27,8 +26,8 @@ const RUN =
   process.env.DATABASE_URL.length > 0;
 
 /**
- * Every module the registry makes available in this process, so the §3
- * resolver's workspace intersection does not drop Projects for want of config.
+ * Every module the registry makes available in this process, so the workspace
+ * module check does not drop Projects for want of config.
  */
 const CFG = {
   AI_GATEWAY_URL: "http://ai-gateway:8000",
@@ -52,14 +51,11 @@ describe.skipIf(!RUN)("pm-live — who hears about a change, over real rows (WAR
   let outboxFlagKey: typeof import("../services/pm/pm-outbox.js").outboxFlagKey;
 
   const OURS = { startsWith: "warp3536-" } as const;
-  const CREATED_BY = "00000000-0000-4000-8000-00000003536a";
 
   /** Projects was off until this suite switched it on; put it back as found. */
   let moduleBefore: { enabled: boolean } | null = null;
 
   const ids: Record<string, string> = {};
-  /** The audience's warning: a person it could not resolve is LEFT OUT and logged — which must never pass for a narrowing. */
-  const warn = vi.fn();
   let projectId = "";
   let sharedItem = "";
   let plainItem = "";
@@ -73,10 +69,6 @@ describe.skipIf(!RUN)("pm-live — who hears about a change, over real rows (WAR
     ({ createPmLiveAudience } = await import("../services/pm/pm-live-audience.js"));
     ({ createPmLiveConsumer } = await import("../services/pm/pm-live.js"));
     ({ runOutboxSweep, outboxFlagKey } = await import("../services/pm/pm-outbox.js"));
-    const { _setEffectiveAccessForTests } = await import("../services/effective-access.service.js");
-
-    _setEffectiveAccessForTests(prisma, CFG);
-
     moduleBefore = await prisma.moduleSetting.findUnique({ where: { moduleId: "projects" }, select: { enabled: true } });
     await prisma.moduleSetting.upsert({
       where: { moduleId: "projects" },
@@ -89,8 +81,6 @@ describe.skipIf(!RUN)("pm-live — who hears about a change, over real rows (WAR
     await cleanup();
     if (moduleBefore === null) await prisma.moduleSetting.deleteMany({ where: { moduleId: "projects" } });
     else await prisma.moduleSetting.update({ where: { moduleId: "projects" }, data: { enabled: moduleBefore.enabled } });
-    const { _setEffectiveAccessForTests } = await import("../services/effective-access.service.js");
-    _setEffectiveAccessForTests(null, null);
     await prisma.$disconnect();
   });
 
@@ -98,9 +88,6 @@ describe.skipIf(!RUN)("pm-live — who hears about a change, over real rows (WAR
     await prisma.systemFlag.deleteMany({ where: { key: "pm-outbox:pm-live" } });
     await prisma.pmProject.deleteMany({ where: { name: OURS } }); // items, assignees, activity cascade
     await prisma.pmWorkspace.deleteMany({ where: { slug: OURS } });
-    await prisma.userAccessException.deleteMany({ where: { user: { username: OURS } } });
-    await prisma.user.updateMany({ where: { username: OURS }, data: { accessRoleId: null } });
-    await prisma.accessRole.deleteMany({ where: { slug: OURS } });
     await prisma.user.deleteMany({ where: { username: OURS } });
   }
 
@@ -113,7 +100,6 @@ describe.skipIf(!RUN)("pm-live — who hears about a change, over real rows (WAR
   };
 
   beforeEach(async () => {
-    warn.mockClear();
     await cleanup();
 
     await mkUser("owner", "owner");
@@ -124,22 +110,6 @@ describe.skipIf(!RUN)("pm-live — who hears about a change, over real rows (WAR
     await mkUser("narrow", "family");
     await mkUser("guest-shared", "guest");
     await mkUser("guest-other", "guest");
-
-    // A custom role that holds Files and nothing else: narrowed away from Projects.
-    const role = await prisma.accessRole.create({
-      data: {
-        name: "Files only",
-        slug: "warp3536-files-only",
-        startingPoint: "family",
-        createdBy: CREATED_BY,
-        featureGrants: { create: [{ moduleId: "files" as ModuleId, level: "view" }] },
-      },
-    });
-    await prisma.user.update({ where: { id: ids.narrow }, data: { accessRoleId: role.id } });
-    // A role-less person with a per-person deny on Projects.
-    await prisma.userAccessException.create({
-      data: { userId: ids.denied, moduleId: "projects", effect: "deny", grantedBy: CREATED_BY },
-    });
 
     const ws = await prisma.pmWorkspace.create({ data: { slug: `warp3536-ws-${Date.now()}`, name: "warp3536-ws" } });
     const project = await prisma.pmProject.create({
@@ -164,7 +134,6 @@ describe.skipIf(!RUN)("pm-live — who hears about a change, over real rows (WAR
   const audience = () =>
     createPmLiveAudience({
       prisma,
-      logger: { warn, debug: vi.fn() },
       boxModuleIds: async () => {
         const { getEffectiveModuleIds } = await import("../services/modules.service.js");
         return getEffectiveModuleIds(prisma, CFG);
@@ -174,32 +143,14 @@ describe.skipIf(!RUN)("pm-live — who hears about a change, over real rows (WAR
   /** Our fixtures only: other suites' users share this database. */
   const ours = (names: string[]) => names.filter((n) => n.startsWith("warp3536-")).sort();
 
-  it("an item nobody shared with a guest is heard by owner, admin and family — and by no one the box has narrowed or deactivated", async () => {
+  it("an unassigned item is heard by active owner, admin and family readers, but not a deactivated person or guest", async () => {
     const names = ours(await audience().usernamesFor(plainItem));
-    expect(names).toEqual(["warp3536-admin", "warp3536-family", "warp3536-owner"]);
-    expect(warn).not.toHaveBeenCalled(); // everyone was RESOLVED; the three left out were refused, not lost
+    expect(names).toEqual(["warp3536-admin", "warp3536-denied", "warp3536-family", "warp3536-narrow", "warp3536-owner"]);
   });
 
-  it("the same people ARE told the moment the grant is theirs: it is the grant, not the person, that decides", async () => {
-    const roleId = (await prisma.accessRole.findUniqueOrThrow({ where: { slug: "warp3536-files-only" } })).id;
-    await prisma.accessRoleFeatureGrant.create({ data: { roleId, moduleId: "projects", level: "view" } });
-    await prisma.userAccessException.deleteMany({ where: { userId: ids.denied } });
-
-    const names = ours(await audience().usernamesFor(plainItem));
-    expect(names).toEqual([
-      "warp3536-admin",
-      "warp3536-denied",
-      "warp3536-family",
-      "warp3536-narrow",
-      "warp3536-owner",
-    ]);
-    expect(warn).not.toHaveBeenCalled();
-  });
-
-  it("a person narrowed by their role, and a person denied by an exception, are not told", async () => {
-    const names = await audience().usernamesFor(plainItem);
-    expect(names).not.toContain("warp3536-narrow");
-    expect(names).not.toContain("warp3536-denied");
+  it("refreshes the audience after a current role change removes the PM tier", async () => {
+    await prisma.user.update({ where: { id: ids.narrow }, data: { role: "guest" } });
+    expect(await audience().usernamesFor(plainItem)).not.toContain("warp3536-narrow");
   });
 
   it("a deactivated person is not told", async () => {
@@ -352,12 +303,12 @@ describe.skipIf(!RUN)("pm-live — who hears about a change, over real rows (WAR
         .sort();
       expect(topics).toEqual([
         "droplet/pm/warp3536-admin",
+        "droplet/pm/warp3536-denied",
         "droplet/pm/warp3536-family",
         "droplet/pm/warp3536-guest-shared",
+        "droplet/pm/warp3536-narrow",
         "droplet/pm/warp3536-owner",
       ]);
-      expect(topics).not.toContain("droplet/pm/warp3536-narrow");
-      expect(topics).not.toContain("droplet/pm/warp3536-denied");
       expect(topics).not.toContain("droplet/pm/warp3536-gone");
       expect(topics).not.toContain("droplet/pm/warp3536-guest-other");
       expect(sent[0]?.payload).toEqual({

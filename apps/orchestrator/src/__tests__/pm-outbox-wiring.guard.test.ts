@@ -1,5 +1,5 @@
 /**
- * WARP-3532 — the outbox is only an outbox if every writer wakes it and the
+ * The outbox is only an outbox if every writer wakes it and the
  * consumers are actually scheduled. Both are conventions a later slice can break
  * silently (a new `pmActivity.create` with no nudge still works, just 6 s late
  * on a quiet box; a consumer registered in a doc and not in index.ts never runs),
@@ -7,8 +7,7 @@
  * pins its convention.
  *
  *   P13 (droplet-pr-review-patterns): "a sweep promised in docs but not wired in
- *   index.ts" — the webhook worker, its retention prune and the fan-out consumer
- *   must each have their `cronRuntime` registration.
+ *   index.ts" — each consumer must have its `cronRuntime` registration.
  */
 import { describe, it, expect } from "vitest";
 import { readFileSync, readdirSync, statSync } from "node:fs";
@@ -69,47 +68,4 @@ describe("every PmActivity writer wakes the outbox", () => {
       }
     },
   );
-});
-
-describe("the webhook machinery is scheduled (index.ts) and mounted (app.ts)", () => {
-  const index = code(read("index.ts"));
-
-  it("registers the `webhooks` outbox consumer on the shared cron runtime", () => {
-    expect(index).toMatch(
-      /registerOutboxConsumer\(\s*createWebhookFanOutConsumer\(prisma, \{[^}]*\}\),\s*\{ prisma, cronRuntime \},?\s*\)/,
-    );
-  });
-
-  it("wakes the delivery worker when the fan-out queues something, instead of waiting out its interval", () => {
-    expect(index).toMatch(/onQueued: \(\) => webhookDeliveryJob\?\.runNow\(\)/);
-    expect(index).toMatch(/webhookDeliveryJob = cronRuntime\.scheduleInterval\(/);
-  });
-
-  it("schedules the delivery worker and the retention prune, each under its own advisory lock", () => {
-    expect(index).toMatch(/runWebhookDeliveries\(prisma\)[\s\S]{0,200}lockKey: "droplet:pm-webhook-deliveries"/);
-    expect(index).toMatch(/pruneWebhookDeliveries\(prisma\)[\s\S]{0,200}lockKey: "droplet:pm-webhook-delivery-prune"/);
-  });
-
-  it("cancels a pending outbox wake-up on shutdown", () => {
-    expect(index).toMatch(/cronRuntime\.stop\(\);\s*stopOutbox\(\);/);
-  });
-
-  it("introduces no timer of its own — every schedule goes through cron-runtime", () => {
-    for (const rel of [
-      "services/pm/pm-outbox.ts",
-      "services/pm/webhook-delivery.service.ts",
-      "services/pm/webhook-fanout.ts",
-      "routes/pm/webhooks.ts",
-    ]) {
-      const text = code(read(rel));
-      // The one exception is the nudge's debounce in pm-outbox.ts: an unref'd,
-      // cancellable, non-recurring setTimeout, never a setInterval.
-      expect(text, rel).not.toMatch(/\bsetInterval\(/);
-      if (rel !== "services/pm/pm-outbox.ts") expect(text, rel).not.toMatch(/\bsetTimeout\(/);
-    }
-  });
-
-  it("mounts the router on /api, owner/admin routes behind the PM prefix", () => {
-    expect(code(read("app.ts"))).toMatch(/app\.use\("\/api", createPmWebhooksRouter\(prisma\)\)/);
-  });
 });

@@ -193,58 +193,6 @@ describe("WARP-3264 — place_lookup is owner-only and audited", () => {
   });
 });
 
-// ADR-069 §9: one owner switch for "may work data leave this box" — webhooks,
-// Slack / Teams / Discord / Google Chat, and (WS-18) the GitHub / GitLab poll.
-describe("WARP-3532 — work_integrations is owner-only and audited", () => {
-  const workRow = (): MockChannelRow => ({
-    key: "work_integrations",
-    enabled: false,
-    requiresAdmin: true,
-    lastChangedBy: null,
-    lastChangedAt: new Date("2026-10-04T00:00:00Z"),
-    reason: null,
-  });
-
-  it("the owner turns it on; one audit row names the channel and the change", async () => {
-    const prisma = createPrismaMock([workRow()]);
-    const res = await request(buildApp(prisma, mkUser("owner", "olga")))
-      .patch("/api/settings/off-lan/work_integrations")
-      .send({ enabled: true, reason: "Turned on from Work notifications" });
-    expect(res.status).toBe(200);
-    expect(res.body.enabled).toBe(true);
-    expect(recordActivityMock).toHaveBeenCalledTimes(1);
-    expect(recordActivityMock.mock.calls[0][0].refs).toMatchObject({
-      channel: "work_integrations",
-      previousEnabled: false,
-      nextEnabled: true,
-      actor: "olga",
-    });
-  });
-
-  it("GET says the channel is owner-only", async () => {
-    const prisma = createPrismaMock([...seedChannels(), workRow()]);
-    const res = await request(buildApp(prisma, mkUser("admin"))).get("/api/settings/off-lan");
-    expect(res.status).toBe(200);
-    const byKey = Object.fromEntries(
-      res.body.channels.map((c: { key: string; requiresOwner: boolean }) => [c.key, c.requiresOwner]),
-    );
-    expect(byKey.work_integrations).toBe(true);
-    expect(byKey.cloud_model_escape).toBe(false);
-  });
-
-  it("an admin or member is refused (403) and nothing changes", async () => {
-    for (const role of ["admin", "family"] as const) {
-      const prisma = createPrismaMock([workRow()]);
-      const res = await request(buildApp(prisma, mkUser(role)))
-        .patch("/api/settings/off-lan/work_integrations")
-        .send({ enabled: true, reason: "x" });
-      expect(res.status, role).toBe(403);
-      expect(prisma.rows.get("work_integrations")?.enabled).toBe(false);
-    }
-    expect(recordActivityMock).not.toHaveBeenCalled();
-  });
-});
-
 describe("WARP-467 — PATCH /api/settings/off-lan/:key", () => {
   it("admin can flip cloud_model_escape on with a reason; activity emitted", async () => {
     const prisma = createPrismaMock();

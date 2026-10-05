@@ -117,26 +117,3 @@ export async function placeLookupGate(
     return false;
   }
 }
-
-/**
- * WARP-3532 (ADR-069 §9) — true only when the `work_integrations` off-LAN
- * channel ("Send work updates to chat apps and webhooks") is explicitly
- * enabled. Read by the webhook delivery worker before it dials ANY destination
- * that is not on the box's own LAN; a LAN destination never reaches this gate.
- * Never throws: a missing row or a DB error keeps the delivery queued on the
- * box, `placeLookupGate`'s posture — the queue retries, so there is no
- * 503-versus-451 split for a caller to act on.
- */
-export async function workIntegrationsGate(
-  prisma: OffLanGatePrisma,
-): Promise<boolean> {
-  try {
-    const row = await prisma.offLanAllowlistChannel.findUnique({
-      where: { key: OffLanChannelKey.work_integrations },
-    });
-    return row?.enabled === true;
-  } catch (err) {
-    logger.warn({ err }, "work_integrations off-LAN gate read failed — failing closed (no egress)");
-    return false;
-  }
-}

@@ -180,7 +180,6 @@ describe("ap-discovery-poller (WARP-446)", () => {
         capturedIntervalMs = ms;
         capturedHandler = handler;
         capturedLockKey = opts?.lockKey ?? null;
-        return { runNow: () => undefined };
       },
       scheduleCron: vi.fn(),
       stop: vi.fn(),

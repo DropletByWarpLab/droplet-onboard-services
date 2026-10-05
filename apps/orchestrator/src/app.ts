@@ -58,7 +58,6 @@ import { createMatterRouter } from "./routes/matter.js";
 import { createPmMobileRouter } from "./routes/mobile/pm.js";
 import { createPmNativeRouter } from "./routes/pm/native.js";
 import { createPmRelationsRouter } from "./routes/pm/relations.js";
-import { createPmWebhooksRouter } from "./routes/pm/webhooks.js";
 import { createPmPresenceRouter } from "./routes/pm/presence.js";
 import { createPmOpenApiRouter } from "./routes/pm/openapi.js";
 import { createSupportRouter } from "./routes/support/support.routes.js";
@@ -598,10 +597,6 @@ export function createApp(
   // (blocks / relates / duplicates). Its own router on the same prefix; the
   // paths are disjoint from the native router's, so neither shadows the other.
   app.use("/api", createPmRelationsRouter(prisma));
-  // WARP-3532 (ADR-069 §9) — work webhooks and chat-app notifications. Owner
-  // and admin only. `/pm/webhooks` is a literal second segment and no PM router
-  // above owns a `/pm/:param`, so neither shadows the other.
-  app.use("/api", createPmWebhooksRouter(prisma));
   // WARP-3536 (WS-19) — "Also viewing": the drawer's heartbeat and the list of
   // other viewers. The `projects` module gate and the guest tier floor come
   // from the `/api/pm` prefix above; the longer paths here shadow nothing.

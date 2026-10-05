@@ -266,16 +266,9 @@ export function createSettingsRouter(prisma: PrismaClient): Router {
     "web_push",
     // WARP-3264 — calendar place suggestions (OpenStreetMap Nominatim).
     "place_lookup",
-    // WARP-3532 — work webhooks and chat-app notifications (ADR-069 §9).
-    "work_integrations",
   ] as const;
   type OffLanKey = (typeof OFF_LAN_CHANNEL_KEYS)[number];
-  // `work_integrations` joins `place_lookup`: both send what employees wrote
-  // (a place, a work item title) off the box, which is the owner's call alone.
-  const OWNER_ONLY_CHANNELS: ReadonlySet<OffLanKey> = new Set([
-    "place_lookup",
-    "work_integrations",
-  ]);
+  const OWNER_ONLY_CHANNELS: ReadonlySet<OffLanKey> = new Set(["place_lookup"]);
   const isOffLanKey = (k: string): k is OffLanKey =>
     (OFF_LAN_CHANNEL_KEYS as readonly string[]).includes(k);
 

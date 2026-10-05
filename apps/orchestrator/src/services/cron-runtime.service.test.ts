@@ -347,7 +347,7 @@ describe("cron-runtime.service", () => {
     rt.stop();
   });
 
-  // WARP-3532 — `scheduleInterval` hands back a handle so a registration can be
+  // `scheduleInterval` hands back a handle so a registration can be
   // run EARLY (the PmActivity outbox wakes its consumers after a write) without
   // growing a second lock/overlap path beside this one.
   describe("scheduleInterval handle: runNow()", () => {

@@ -88,39 +88,3 @@ describe("Integrations is flat (WARP-2968)", () => {
     }
   });
 });
-
-// ── WARP-3532 — Work notifications joins the pair ────────────────────────────
-
-const workNotifications = () => operationsItems().find((i) => i.href === "/integrations/work-notifications");
-
-describe("Work notifications is a third flat sibling (WARP-3532)", () => {
-  it("is its own top-level item, right after Credentials, tucked behind Settings", () => {
-    const item = workNotifications();
-    expect(item).toBeDefined();
-    expect(item?.label).toBe("Work notifications");
-    expect(item?.children).toBeUndefined();
-    expect(item?.hidden).toBe(true);
-    expect(item?.settingsSection).toBe("Workspace");
-    expect(item?.settingsBlurb).toBeTruthy();
-    const hrefs = operationsItems().map((i) => i.href);
-    expect(hrefs.indexOf("/integrations/work-notifications")).toBe(hrefs.indexOf("/integrations/credentials") + 1);
-  });
-
-  it("is owner/admin only, like the server routes behind it", () => {
-    expect(workNotifications()?.roles).toEqual(["owner", "admin"]);
-    expect(settingsHrefs("owner")).toContain("/integrations/work-notifications");
-    expect(settingsHrefs("admin")).toContain("/integrations/work-notifications");
-    expect(settingsHrefs("family")).not.toContain("/integrations/work-notifications");
-    expect(settingsHrefs("guest")).not.toContain("/integrations/work-notifications");
-  });
-
-  it("follows the Projects module: hidden exactly when /api/pm would answer module_disabled", () => {
-    expect(workNotifications()?.requiresModule).toBe("projects");
-    const projectsOff = (id: string) => id !== "projects";
-    const hrefs = settingsGroups("owner", openCapabilities, projectsOff).flatMap((g) => g.items.map((i) => i.href));
-    expect(hrefs).not.toContain("/integrations/work-notifications");
-    // …while the two plumbing pages it sits beside stay (no module of their own).
-    expect(hrefs).toContain("/integrations");
-    expect(hrefs).toContain("/integrations/credentials");
-  });
-});

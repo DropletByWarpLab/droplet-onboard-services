@@ -1,34 +1,32 @@
 /**
  * Who hears that a work item changed (WARP-3536, Work Suite WS-19).
  *
- * Everyone who can READ the item, and nobody else. Three tests, in the order
- * they are cheapest to ask, are the same two axes `tool-module-verdict.service`
- * applies to the assistant's tool list, plus the one exception the guest tier
- * has:
+ * Everyone who can READ the item, and nobody else. The mounted `/api/pm`
+ * policy has a workspace Projects switch and a tier floor; Projects is
+ * deliberately not per-person feature-gated. Guests have one narrow exception:
  *
  *   BOX     the `projects` module is effective: available and switched on. The
  *           set the module gate reads (`getEffectiveModuleIds`), so a toggle
  *           silences this on the tick it 404s the routes (give or take the TTL).
- *   PERSON  they HOLD Projects: the §3 resolver's `features`, which already
- *           carry the role's grants, the per-person exceptions and the tier
- *           floors. An owner is §3's one bypass and gets the box axis alone.
- *   GUEST   an external guest holds nothing in Projects, and `requireModuleTierFloor`
- *           404s the whole prefix for them, with one exception (WARP-3369): a
+ *   ROLE    `requireModuleTierFloor("projects")` admits owner/admin/family;
+ *           Projects is deliberately absent from `FEATURE_GATED_MODULES`, so
+ *           individual feature grants do not narrow this PM route.
+ *   GUEST   `requireModuleTierFloor` 404s the whole prefix for them, with one
+ *           exception (WARP-3369): a
  *           work item ASSIGNED to them is shared with them. So a guest hears
  *           about exactly the items assigned to them.
  *
  * Deactivated people (`directoryStatus`) and the service principal are never in
- * the audience. A person whose grants cannot be resolved is left out, fail
- * closed, and does not stop anyone else being told.
+ * the audience. The role query is current for each roster refresh.
  *
- * "In batch, not per row": the roster (every active person, who holds Projects,
+ * "In batch, not per row": the roster (every active person, who passes the role floor,
  * which of them are guests) is built once per `PM_LIVE_ROSTER_TTL_MS` and shared
  * by every row in between, with usernames read in the same query as the roles.
  * Per row the only lookup is ONE query for which of the box's guests the item is
  * assigned to, and none at all on a box without guests.
  *
- * The TTL is the bound on how long a revoked grant keeps hearing "something
- * changed": the frame carries ids only and the client re-reads through the
+ * The TTL bounds how long a deactivated or role-changed user keeps hearing
+ * "something changed": the frame carries ids only and the client re-reads through the
  * authorized API, so the exposure of a stale roster is a timestamp, not data.
  * It matches the 5-10 s the module gate and the tool verdict already accept.
  *
@@ -37,15 +35,14 @@
  * the Projects audience; this roster is not a Support audience.
  */
 import type { ModuleId, PrismaClient } from "@prisma/client";
-import { resolveEffectiveAccess } from "../effective-access.service.js";
-import { createLogger } from "../../lib/logger.js";
-
-const defaultLogger = createLogger("pm-live-audience");
+import { isGateableModuleId, maxLevelFor } from "../access-catalog.js";
+import type { Role } from "../jwt.service.js";
 
 /** How long a resolved roster is reused. */
 export const PM_LIVE_ROSTER_TTL_MS = 10_000;
 
 /** People who can be told anything. `service` has no browser to tell. */
+const PROJECTS: ModuleId = "projects";
 const READER_ROLES = ["owner", "admin", "family", "guest"] as const;
 
 /** A username is an MQTT topic level: no separator, no wildcard, no NUL, not empty. */
@@ -57,15 +54,9 @@ export interface PmLiveAudienceDeps {
   prisma: AudiencePrisma;
   /** The box's EFFECTIVE module ids — `getEffectiveModuleIds(prisma, config)`. */
   boxModuleIds: () => Promise<ReadonlySet<ModuleId>>;
-  /**
-   * The modules one person holds, or `null` when they cannot be resolved.
-   * Default: the §3 resolver's `features`.
-   */
-  personModuleIds?: (userId: string) => Promise<ReadonlySet<ModuleId> | null>;
   ttlMs?: number;
   /** Clock seam (milliseconds); defaults to the real one. */
   now?: () => number;
-  logger?: { warn(obj: unknown, msg?: string): void; debug(obj: unknown, msg?: string): void };
 }
 
 export interface PmLiveAudience {
@@ -83,18 +74,10 @@ interface Roster {
   guests: ReadonlyMap<string, string>;
 }
 
-async function defaultPersonModuleIds(userId: string): Promise<ReadonlySet<ModuleId> | null> {
-  const access = await resolveEffectiveAccess(userId);
-  return access ? new Set(access.features.map((f) => f.moduleId)) : null;
-}
-
 export function createPmLiveAudience(deps: PmLiveAudienceDeps): PmLiveAudience {
   const { prisma } = deps;
   const ttlMs = deps.ttlMs ?? PM_LIVE_ROSTER_TTL_MS;
   const now = deps.now ?? Date.now;
-  const log = deps.logger ?? defaultLogger;
-  const personModuleIds = deps.personModuleIds ?? defaultPersonModuleIds;
-
   let cached: Roster | null = null;
   let inflight: Promise<Roster> | null = null;
 
@@ -109,34 +92,15 @@ export function createPmLiveAudience(deps: PmLiveAudienceDeps): PmLiveAudience {
 
     const readers: string[] = [];
     const guests = new Map<string, string>();
-    let unresolved = 0;
     for (const person of people) {
       if (!TOPIC_SAFE.test(person.username)) continue;
       if (person.role === "guest") {
         guests.set(person.id, person.username);
         continue;
       }
-      if (person.role === "owner") {
-        readers.push(person.username); // §3's one bypass: the box axis, answered above
-        continue;
+      if (!isGateableModuleId(PROJECTS) || maxLevelFor(person.role as Role, PROJECTS) !== null) {
+        readers.push(person.username);
       }
-      // One at a time: each resolution is its own REPEATABLE READ transaction, and
-      // a box has tens of people, so a refresh costs tens of milliseconds, once per TTL.
-      let held: ReadonlySet<ModuleId> | null = null;
-      try {
-        held = await personModuleIds(person.id);
-      } catch {
-        unresolved += 1;
-        continue;
-      }
-      if (held === null) {
-        unresolved += 1;
-        continue;
-      }
-      if (held.has("projects")) readers.push(person.username);
-    }
-    if (unresolved > 0) {
-      log.warn({ unresolved }, "pm-live: some people's access could not be resolved and are left out until the next refresh");
     }
     return { at: now(), readers, guests };
   }

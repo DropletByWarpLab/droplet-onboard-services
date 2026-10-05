@@ -3123,38 +3123,6 @@ export async function setPlaceLookupChannel(enabled: boolean): Promise<void> {
   }
 }
 
-/**
- * WARP-3532 — the `work_integrations` off-LAN channel: whether work updates
- * (webhooks, Slack / Teams / Discord / Google Chat) may leave this network.
- * Default off; owner-only to change. `null` = unreadable; don't guess.
- */
-export async function fetchWorkIntegrationsChannel(): Promise<{ enabled: boolean } | null> {
-  const res = await authFetch(`${BASE}/api/settings/off-lan`);
-  if (!res.ok) return null;
-  const body = (await res.json()) as { channels?: Array<{ key: string; enabled: boolean }> };
-  const row = body.channels?.find((c) => c.key === "work_integrations");
-  return row ? { enabled: row.enabled === true } : null;
-}
-
-/** WARP-3532 — flip `work_integrations`. Owner only (the route 403s everyone else). */
-export async function setWorkIntegrationsChannel(enabled: boolean): Promise<void> {
-  const res = await authFetch(`${BASE}/api/settings/off-lan/work_integrations`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      enabled,
-      reason: enabled
-        ? "Turned on from Work notifications"
-        : "Turned off from Work notifications",
-    }),
-  });
-  if (!res.ok) {
-    throw Object.assign(new Error(`Failed to change work notifications egress: ${res.status}`), {
-      status: res.status,
-    });
-  }
-}
-
 /** `refused` is set when the `web_push` off-LAN channel is off (WARP-2904). */
 export async function sendTestPush(): Promise<{
   sent: number;

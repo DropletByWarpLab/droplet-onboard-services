@@ -1,12 +1,11 @@
 /**
- * PmActivity outbox consumer framework — ADR-069 §7, WARP-3532.
+ * PmActivity outbox consumer framework — ADR-069 §7.
  *
  * Every PM mutation already writes `PmActivity` inside its own transaction
  * (`writeActivity` in pm.service.ts), and the assignee notification sweep
  * already tails it. A row therefore exists if and only if its change
- * committed: the table IS a transactional outbox. Webhooks (WS-16), automation
- * (WS-9) and live board updates (WS-19) read it through this module instead of
- * adding emit calls throughout the service.
+ * committed: the table IS a transactional outbox. Consumers read it through
+ * this module instead of adding emit calls throughout the service.
  *
  * ── The contract ───────────────────────────────────────────────────────────
  *
@@ -14,16 +13,14 @@
  *     `SystemFlag` under `pm-outbox:<consumer>` — the existing key/value table,
  *     no new model. `readOutboxBatch` returns the rows after it in that order;
  *     `advanceOutboxCursor` moves it.
- *   • A brand-new consumer starts at "now" and never replays history. Turning
- *     on webhooks must not announce a year of old edits.
+ *   • A brand-new consumer starts at "now" and never replays history.
  *   • `registerOutboxConsumer` schedules a `cron-runtime` interval under its
  *     own Postgres advisory-lock key, so only one replica sweeps, and runs once
  *     at registration. `nudgeOutbox()` — which `writeActivity` calls — wakes the
  *     consumers early instead of making a write wait out the interval.
  *   • DELIVERY IS AT-LEAST-ONCE. The cursor moves after the handler returns, so
  *     a crash between the two replays the row. Every handler must be
- *     idempotent; a deterministic key on whatever it creates is the way (the
- *     webhook fan-out's is `PmWebhookDelivery (webhookId, activityId)`).
+ *     idempotent; a deterministic key on whatever it creates is the way.
  *   • Handlers run one row at a time, oldest first, and a failure stops the
  *     sweep at that row (the cursor stays before it) and is rethrown, so
  *     `cron-runtime` logs it and counts it. Order is preserved by refusing to
@@ -45,9 +42,8 @@
  * 6 s (`DEFAULT_OUTBOX_SETTLE_MS`) leaves a second of margin. A writer that
  * raises its transaction timeout above that must raise this too. The cost is
  * stated rather than hidden: an event reaches a default consumer ~6 s after the
- * commit. A consumer whose events are advisory (WS-19's "something changed,
- * refetch") may pass a smaller `settleMs` and accept a rare missed nudge; one
- * that acts (webhooks, automation) keeps the default.
+ * commit. A consumer whose events are advisory may pass a smaller `settleMs`
+ * and accept a rare missed nudge; consumers that act on events keep the default.
  *
  * Postgres can hand out row ids in any order inside one millisecond (they are
  * UUIDs, and `createMany` stamps every row with one timestamp), which is why
@@ -186,8 +182,7 @@ export async function readOutboxBatch(
     where: {
       AND: [
         // Detached deletion tombstones are a private pm-live transport detail.
-        // Existing consumers (webhooks, automation, notifications) only see
-        // ordinary rows still attached to a work item.
+        // Non-live consumers only see ordinary rows still attached to a work item.
         consumer === "pm-live"
           ? { OR: [{ workItemId: { not: null } }, { deletedWorkItemId: { not: null } }] }
           : { workItemId: { not: null } },

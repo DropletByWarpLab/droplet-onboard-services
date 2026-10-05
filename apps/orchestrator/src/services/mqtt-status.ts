@@ -25,9 +25,8 @@ export function recordMqttState(next: MqttConnectionState, error?: string): void
 }
 
 /**
- * True while the broker connection is up. For a publisher that would rather
- * skip the work than ask `publish()` to log a warning per message while the
- * broker is down (WARP-3536: one frame per reader per change adds up).
+ * True while the broker connection is up. Live updates use this to skip a
+ * publish attempt per audience member while MQTT is unavailable.
  */
 export function mqttConnected(): boolean {
   return state === "connected";
