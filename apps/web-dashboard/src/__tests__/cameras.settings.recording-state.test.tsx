@@ -47,6 +47,10 @@ vi.mock("@/lib/hooks/useRecordings", () => ({
   useRecordingsSummary: () => ({ days: [], isLoading: false, error: undefined, refresh: vi.fn() }),
 }));
 
+vi.mock("@/lib/hooks/useRecordingStorage", () => ({
+  useRecordingStorage: () => ({ state: "not_supported", recording: null, stale: false, refresh: vi.fn() }),
+}));
+
 vi.mock("@/lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/api")>();
   return {

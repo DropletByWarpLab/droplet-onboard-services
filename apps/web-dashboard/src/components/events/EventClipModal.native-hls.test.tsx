@@ -82,6 +82,7 @@ describe("EventClipModal in a browser with native HLS", () => {
     render(<EventClipModal event={makeEvent()} cameraName="Warp Lab Office" onClose={vi.fn()} />);
 
     failTheLoad();
+    failTheLoad();
 
     expect(document.querySelector("video")).toBeNull();
     expect(document.querySelector("img")!.getAttribute("src")).toBe(`/api/cameras/events/${ID}/snapshot`);
@@ -92,6 +93,7 @@ describe("EventClipModal in a browser with native HLS", () => {
     render(<EventClipModal event={makeEvent({ endTime: null })} onClose={vi.fn()} />);
 
     failTheLoad();
+    failTheLoad();
 
     expect(document.querySelector("video")).toBeNull();
     expect(document.querySelector("img")).not.toBeNull();
@@ -100,6 +102,7 @@ describe("EventClipModal in a browser with native HLS", () => {
 
   it("Retry plays the clip again, through a fresh playlist request", () => {
     render(<EventClipModal event={makeEvent()} onClose={vi.fn()} />);
+    failTheLoad();
     failTheLoad();
 
     fireEvent.click(screen.getByRole("button", { name: /Retry/ }));
@@ -111,6 +114,7 @@ describe("EventClipModal in a browser with native HLS", () => {
   it("still keeps Download for a clip that will not play", () => {
     render(<EventClipModal event={makeEvent()} onClose={vi.fn()} />);
 
+    failTheLoad();
     failTheLoad();
 
     expect(screen.getByRole("link", { name: /Download/ })).toBeInTheDocument();

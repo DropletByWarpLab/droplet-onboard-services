@@ -129,6 +129,8 @@ export const DEFAULT_STATES: ReadonlyArray<{
 
 // ── Prisma include shapes + row types ────────────────────────────────────────
 
+// Exported for the query API (filter/query.ts), which must return the SAME shape
+// as every other work-item read — one include, one mapper.
 export const WORK_ITEM_INCLUDE = {
   state: true,
   assignees: true,
@@ -540,43 +542,50 @@ export interface PmImportedWrite {
   completedAt?: Date | null;
 }
 
-/** Input to {@link writeActivity}; named so `updateWorkItem`'s wrapper can reuse it. */
-type ActivityInput = Parameters<typeof writeActivity>[1];
+export interface ActivityInput {
+  workItemId: string;
+  actorId: string | null;
+  // PmActivity.verb is the PmActivityVerb enum (schema), so type the helper
+  // to the generated enum rather than a bare string — keeps the call sites
+  // honest and satisfies the Prisma create input.
+  verb: Prisma.PmActivityCreateManyInput["verb"];
+  field?: string | null;
+  oldValue?: string | null;
+  newValue?: string | null;
+  /** WARP-3527: imported history does not produce notifications. */
+  notifyStatus?: Prisma.PmActivityCreateManyInput["notifyStatus"];
+  nudge?: boolean;
+}
 
-/** The one place a PM activity row is written. Exported (WARP-3526) so a sibling
- *  service writes its rows through it instead of re-spelling the insert. */
-export async function writeActivity(
-  db: Db,
-  input: {
-    workItemId: string;
-    actorId: string | null;
-    // PmActivity.verb is the PmActivityVerb enum (schema), so type the helper
-    // to the generated enum rather than a bare string — keeps the call sites
-    // honest and satisfies the Prisma create input.
-    verb: Prisma.PmActivityCreateManyInput["verb"];
-    field?: string | null;
-    oldValue?: string | null;
-    newValue?: string | null;
-    /** WARP-3527 — `not_needed` for rows an import writes (see
-     *  {@link PmImportedWrite}). Omitted = the column default, `pending`. */
-    notifyStatus?: Prisma.PmActivityCreateManyInput["notifyStatus"];
-    nudge?: boolean;
-  },
-): Promise<void> {
-  await db.pmActivity.create({
-    data: {
-      workItemId: input.workItemId,
-      actorId: input.actorId ?? null,
-      verb: input.verb,
-      field: input.field ?? null,
-      oldValue: input.oldValue ?? null,
-      newValue: input.newValue ?? null,
-      ...(input.notifyStatus ? { notifyStatus: input.notifyStatus } : {}),
-    },
-  });
-  // WARP-3532 (ADR-069 §7) — wake the outbox consumers. Runs inside the caller's
-  // transaction, which is fine: the wake-up is deferred past the settle window,
-  // and the consumers' interval is what guarantees the row is read.
+function activityData(input: ActivityInput) {
+  return {
+    workItemId: input.workItemId,
+    actorId: input.actorId ?? null,
+    verb: input.verb,
+    field: input.field ?? null,
+    oldValue: input.oldValue ?? null,
+    newValue: input.newValue ?? null,
+    ...(input.notifyStatus ? { notifyStatus: input.notifyStatus } : {}),
+  };
+}
+
+/**
+ * The one way an activity row is written. Exported (WARP-3537) so a writer that
+ * lives in another file — the bulk edit — appends through the same mapper inside
+ * its own transaction instead of growing a second way to shape a row.
+ *
+ * An ARRAY is one INSERT. A 500-item bulk edit writes thousands of rows, and a
+ * round trip per row inside an open transaction is how a batch outlives Prisma's
+ * 5 s transaction budget; one statement is the same rows, the same mapper.
+ */
+export async function writeActivity(db: Db, input: ActivityInput | ActivityInput[]): Promise<void> {
+  if (Array.isArray(input)) {
+    if (input.length > 0) await db.pmActivity.createMany({ data: input.map(activityData) });
+    if (input.some((entry) => entry.nudge !== false)) nudgeOutbox();
+    return;
+  }
+  await db.pmActivity.create({ data: activityData(input) });
+  // WARP-3532 (ADR-069 §7) — defer the outbox wake until the caller's transaction commits.
   if (input.nudge !== false) nudgeOutbox();
 }
 
@@ -646,7 +655,7 @@ async function assertLabelsInProject(
  * would carry it and the board would render "Former member" for a person who
  * was never one.
  */
-async function assertAssignable(db: Db, userIds: readonly string[]): Promise<void> {
+export async function assertAssignable(db: Db, userIds: readonly string[]): Promise<void> {
   const wanted = uniq(userIds);
   if (wanted.length === 0) return;
   const found = await db.user.findMany({

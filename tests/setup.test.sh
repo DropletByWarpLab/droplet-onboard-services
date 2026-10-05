@@ -188,6 +188,46 @@ else
   fail "migrate_env backfill wrong (lines=${OPENWRT_PASS_LINE_COUNT}, value='${OPENWRT_PASS_MIGRATED:0:4}…')"
 fi
 
+# --- sync_openwrt_password_secret keeps an external router's password (WARP-3738) ---
+# External OPENWRT_HOST: the operator pastes the router's own droplet-ai
+# password into the secret file; sync must not overwrite it with the .env value.
+SYNC_DIR="$TMP_ROOT/docker/secrets"
+SYNC_PW="boxgenerated0123456789abcd"
+SYNC_ROUTER_PW="routerown0123456789abcdef0123"
+SYNC_LOG="$TMP_ROOT/.data/sync-openwrt.log"
+mkdir -p "$SYNC_DIR"
+sync_case() { # <host> <initial file content, or NONE>; sync output goes to $SYNC_LOG
+  rm -f "$SYNC_DIR/openwrt_password"
+  [ "$2" = "NONE" ] || printf '%s' "$2" > "$SYNC_DIR/openwrt_password"
+  ( OPENWRT_HOST="$1" OPENWRT_PASSWORD="$SYNC_PW" sync_openwrt_password_secret ) >"$SYNC_LOG" 2>&1
+}
+
+sync_case 192.168.9.1 "$SYNC_ROUTER_PW"
+if [ "$(cat "$SYNC_DIR/openwrt_password")" = "$SYNC_ROUTER_PW" ]; then
+  pass "sync_openwrt_password_secret keeps an external router's differing password"
+else
+  fail "sync_openwrt_password_secret overwrote the external router's password"
+fi
+if grep -qF "$SYNC_PW" "$SYNC_LOG" || grep -qF "$SYNC_ROUTER_PW" "$SYNC_LOG"; then
+  fail "sync_openwrt_password_secret logged a password"
+else
+  pass "sync_openwrt_password_secret log never contains a password"
+fi
+
+sync_case 127.0.0.1 "$SYNC_ROUTER_PW"
+if [ "$(cat "$SYNC_DIR/openwrt_password")" = "$SYNC_PW" ]; then
+  pass "sync_openwrt_password_secret rewrites from .env for a loopback host"
+else
+  fail "sync_openwrt_password_secret did not rewrite the file for a loopback host"
+fi
+
+sync_case 192.168.9.1 ""
+if [ "$(cat "$SYNC_DIR/openwrt_password")" = "$SYNC_PW" ]; then
+  pass "sync_openwrt_password_secret fills an empty file for an external host"
+else
+  fail "sync_openwrt_password_secret left an empty file empty for an external host"
+fi
+
 # --- DROPLET_TPM_BACKEND scaffold guard (IDX-002) -------------------------
 # The 'real' (tpm2-pytss) device-identity backend is an UNFINISHED scaffold:
 # device-identity-svc (services/device-identity-svc/backends/__init__.py)

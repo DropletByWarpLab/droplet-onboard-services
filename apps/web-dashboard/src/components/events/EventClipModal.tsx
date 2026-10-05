@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
   Bookmark,
@@ -54,43 +54,39 @@ const PLAY_FAILED_NOTICE = "This clip can't be played right now. Try again in a 
  */
 function EventClipPlayer({ event, cameraDisplay }: { event: EventDetail; cameraDisplay: string }) {
   const [refresh, setRefresh] = useState(0);
-  const [failed, setFailed] = useState(false);
-  // Stable on purpose: HlsPlayer tears hls.js down and rebuilds it whenever its
-  // `src` or `onError` changes identity, which would restart the clip from the
-  // beginning on every re-render of the modal.
-  const handlePlayerError = useCallback(() => setFailed(true), []);
-  // Retry asks for the playlist again under a new url (the same trick Refresh
-  // plays), so the player is built afresh rather than handed the one that failed.
+  const [playback, setPlayback] = useState<"event" | "recording" | "failed">("event");
+  const before = useMemo(() => event.endTime ?? Math.floor(Date.now() / 1000), [event.endTime, refresh]);
+  const recordingUrl = `/api/cameras/${encodeURIComponent(event.camera)}/playback.m3u8?after=${event.startTime}&before=${Math.max(event.startTime + 1, before)}`;
+  const handlePlayerError = useCallback(() => {
+    setPlayback((current) => current === "event" ? "recording" : "failed");
+  }, []);
   const retry = () => {
-    setFailed(false);
+    setPlayback("event");
     setRefresh((n) => n + 1);
   };
-
   const inProgress = event.endTime === null;
+  const startedAt = new Date(event.startTime * 1000);
+  const date = `${startedAt.getFullYear()}-${String(startedAt.getMonth() + 1).padStart(2, "0")}-${String(startedAt.getDate()).padStart(2, "0")}`;
 
-  if (event.clipUrl && !failed) {
+  if (event.clipUrl && playback !== "failed") {
     return (
       <>
         <HlsPlayer
-          src={getEventHlsUrl(event.id, refresh)}
+          src={playback === "event" ? getEventHlsUrl(event.id, refresh) : recordingUrl}
           onError={handlePlayerError}
           className="w-full max-h-[60vh]"
         />
         {inProgress && (
           <div className="flex items-center justify-between gap-3 px-3 py-2" style={{ color: "var(--text-muted)" }}>
-            <p role="status" className="type-footnote">
-              {IN_PROGRESS_NOTICE}
-            </p>
+            <p role="status" className="type-footnote">{IN_PROGRESS_NOTICE}</p>
             <button type="button" className="btn ghost sm" onClick={() => setRefresh((n) => n + 1)}>
-              <RefreshCw size={12} />
-              Refresh
+              <RefreshCw size={12} /> Refresh
             </button>
           </div>
         )}
       </>
     );
   }
-
   return (
     <>
       <ThumbImage
@@ -100,18 +96,11 @@ function EventClipPlayer({ event, cameraDisplay }: { event: EventDetail; cameraD
         placeholderClassName="w-full aspect-video"
         iconSize={40}
       />
-      {event.clipUrl && failed && (
-        <div className="flex items-center justify-between gap-3 px-3 py-2">
-          {/* Something the person was waiting on failed: an alert, in the error
-              ink (--danger-ink clears 4.5:1 in both themes). The copy says "try
-              again", so there is a control that does. */}
-          <p role="alert" className="type-footnote text-[color:var(--danger-ink)]">
-            {PLAY_FAILED_NOTICE}
-          </p>
-          <button type="button" className="btn ghost sm" onClick={retry}>
-            <RefreshCw size={12} />
-            Retry
-          </button>
+      {event.clipUrl && playback === "failed" && (
+        <div className="flex flex-wrap items-center justify-between gap-3 px-3 py-2">
+          <p role="alert" className="type-footnote text-[color:var(--danger-ink)]">{PLAY_FAILED_NOTICE}</p>
+          <button type="button" className="btn ghost sm" onClick={retry}><RefreshCw size={12} /> Retry</button>
+          <Link className="btn ghost sm" href={`/cameras/${encodeURIComponent(event.camera)}/recordings?date=${date}`}>Browse recordings</Link>
         </div>
       )}
     </>

@@ -42,6 +42,7 @@ interface Ids {
   deskModuleId: string;
   relationId: string;
   ownerId: string;
+  deskViewId: string;
 }
 interface Probe {
   /** `METHOD /full/path` exactly as the router declares it. */
@@ -55,6 +56,12 @@ interface Probe {
 }
 
 const probes: Probe[] = [
+  { route: "POST /api/pm/work-items/query", kind: "collection", method: "post", url: () => "/api/pm/work-items/query", body: { workspace: "WORKSPACE_SLUG", counts: { all: { and: [] } }, groupBy: "priority" } },
+  { route: "GET /api/pm/work-items/by-key/:key", kind: "desk", method: "get", url: (i) => `/api/pm/work-items/by-key/W28IZ-1?workspace=${i.workspaceSlug}` },
+  { route: "GET /api/pm/views", kind: "collection", method: "get", url: (i) => `/api/pm/views?workspace=${i.workspaceSlug}` },
+  { route: "POST /api/pm/views", kind: "desk", method: "post", url: () => "/api/pm/views", body: { projectId: "DESK_ID", scope: "PERSONAL", name: "Refused", layout: "LIST", filter: { and: [] } } },
+  { route: "PATCH /api/pm/views/:id", kind: "desk", method: "patch", url: (i) => `/api/pm/views/${i.deskViewId}`, body: { name: "Refused" } },
+  { route: "DELETE /api/pm/views/:id", kind: "desk", method: "delete", url: (i) => `/api/pm/views/${i.deskViewId}` },
   // ── native router: a desk, or a row under one, is 404 ────────────────────
   { route: "GET /api/pm/projects/:id", kind: "desk", method: "get", url: (i) => `/api/pm/projects/${i.deskId}` },
   { route: "PATCH /api/pm/projects/:id", kind: "desk", method: "patch", url: (i) => `/api/pm/projects/${i.deskId}`, body: { name: "renamed" } },
@@ -144,24 +151,30 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
     );
     prisma = new RealPrismaClient();
     await prisma.$connect();
-    const [{ createPmNativeRouter }, { createPmRelationsRouter }, { createPmMobileRouter }, { createPmScheduleRouter }, { createPmPlanningRouter }] =
+    const [{ createPmNativeRouter }, { createPmRelationsRouter }, { createPmMobileRouter }, { createPmScheduleRouter }, { createPmQueryRouter }, { createPmViewsRouter }, { createPmPlanningRouter }] =
       await Promise.all([
         import("../routes/pm/native.js"),
         import("../routes/pm/relations.js"),
         import("../routes/mobile/pm.js"),
         import("../routes/pm/schedule.js"),
+        import("../routes/pm/query.js"),
+        import("../routes/pm/views.js"),
         import("../routes/pm/planning.js"),
       ]);
     const native = createPmNativeRouter(prisma);
     const relations = createPmRelationsRouter(prisma);
     const mobile = createPmMobileRouter(prisma);
     const schedule = createPmScheduleRouter(prisma);
+    const query = createPmQueryRouter(prisma);
+    const views = createPmViewsRouter(prisma);
     const planning = createPmPlanningRouter(prisma);
     routers = [
       { router: native, prefix: "/api" },
       { router: relations, prefix: "/api" },
       { router: mobile, prefix: "" },
       { router: schedule, prefix: "/api" },
+      { router: query, prefix: "/api" },
+      { router: views, prefix: "/api" },
       { router: planning, prefix: "/api" },
     ];
     const app = express();
@@ -174,6 +187,8 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
     app.use("/api", relations);
     app.use(mobile);
     app.use("/api", schedule);
+    app.use("/api", query);
+    app.use("/api", views);
     app.use("/api", planning);
     app.use(
       (err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
@@ -287,6 +302,9 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
       data: { fromId, toId, kind: "RELATES" },
     });
 
+    await prisma.pmSavedView.create({ data: { workspaceId: ws.id, projectId: project.id, ownerId: owner, name: `${P}project view`, layout: "LIST", filter: { and: [] } } });
+    const deskView = await prisma.pmSavedView.create({ data: { workspaceId: ws.id, projectId: desk.id, ownerId: owner, name: "warp3528i-DESK-NAME", layout: "LIST", filter: { and: [] } } });
+
     ids = {
       workspaceSlug: ws.slug,
       pmProjectId: project.id,
@@ -299,6 +317,7 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
       deskModuleId: deskModule.id,
       relationId: relation.id,
       ownerId: owner,
+      deskViewId: deskView.id,
     };
   });
 
@@ -307,7 +326,7 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
     const body =
       p.body === undefined
         ? undefined
-        : JSON.parse(JSON.stringify(p.body).replace("DESK_ITEM", ids.deskItemId));
+        : JSON.parse(JSON.stringify(p.body).replaceAll("DESK_ITEM", ids.deskItemId).replaceAll("DESK_ID", ids.deskId).replaceAll("WORKSPACE_SLUG", ids.workspaceSlug));
     const r = request(server)[p.method](url);
     return body === undefined ? r : r.send(body);
   };
@@ -325,6 +344,13 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
 
   it("classifies EVERY route the PM routers mount — a new route fails here until it is decided", () => {
     expect(mountedRoutes()).toEqual(probes.map((p) => p.route).sort());
+  });
+
+  it("refuses desk-specific query and saved-view reads before exposing rows or counts", async () => {
+    const query = await request(server).post("/api/pm/work-items/query").send({ projectId: ids.deskId });
+    const views = await request(server).get(`/api/pm/views?project=${ids.deskId}`);
+    expect(query.status).toBe(404);
+    expect(views.status).toBe(404);
   });
 
   it.each(probes.filter((p) => p.kind === "desk").map((p) => [p.route, p] as const))(
@@ -350,7 +376,7 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
       expect(res.status, JSON.stringify(res.body)).toBe(200);
       const text = JSON.stringify(res.body);
       for (const marker of DESK_MARKERS) expect(text).not.toContain(marker);
-      for (const id of [ids.deskId, ids.deskItemId, ids.deskStateId, ids.deskLabelId, ids.relationId]) {
+      for (const id of [ids.deskId, ids.deskItemId, ids.deskStateId, ids.deskLabelId, ids.relationId, ids.deskViewId]) {
         expect(text).not.toContain(id);
       }
       // The project's own row is there, so the check above is not vacuous.
@@ -363,6 +389,15 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
   it("counts only projects in the summary", async () => {
     const res = await send(probes.find((p) => p.route === "GET /api/pm/summary")!);
     expect(res.body.summary).toMatchObject({ activeProjects: 1, itemsOpen: 1 });
+  });
+
+  it("query rows, total, chip counts and groups exclude a matching ticket", async () => {
+    const res = await send(probes.find((p) => p.route === "POST /api/pm/work-items/query")!);
+    expect(res.status).toBe(200);
+    expect(res.body.work_items.map((w: { id: string }) => w.id)).toEqual([ids.pmItemId]);
+    expect(res.body.total).toBe(1);
+    expect(res.body.counts).toEqual({ all: 1 });
+    expect(res.body.groups.reduce((sum: number, g: { count: number }) => sum + g.count, 0)).toBe(1);
   });
 
   it("lists the owner's assigned work without the ticket assigned to them", async () => {
