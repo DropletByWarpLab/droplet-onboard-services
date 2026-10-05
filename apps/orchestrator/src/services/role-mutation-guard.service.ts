@@ -88,6 +88,7 @@ import {
 import { recordActivity } from "./activity.singleton.js";
 import type { ActivityActor } from "./activity.service.js";
 import { revokeModelAccessTokensForUser } from "./model-access-token.service.js";
+import { revokePmApiTokensForUser } from "./pm/pm-api-token.service.js";
 import {
   revokeDeviceClientsForUser,
   type DeviceClientSweepReason,
@@ -766,6 +767,12 @@ export async function runRoleChangePostEffects(args: {
   if (args.nextRole === "guest" && args.previousRole !== "guest") {
     await revokeModelAccessTokensForUser(args.target.id, "role_guest", args.actor);
   }
+  // WARP-3533: a personal API token acts as its holder, so ANY change of role
+  // ends it — a promotion as much as a demotion: it was minted for the person
+  // they were. Best-effort, never throws; every use re-checks the role anyway.
+  if (args.previousRole !== args.nextRole) {
+    await revokePmApiTokensForUser(args.target.id, "role_changed", args.actor);
+  }
   await syncAdminTierGroup({
     userId: args.target.id,
     nextcloudUsername: args.target.nextcloudUsername,
@@ -934,6 +941,8 @@ export async function runDisablePostEffects(args: {
   // WARP-3452: and their coding-tool tokens (best-effort, never throws).
   if (args.targetUserId) {
     await revokeModelAccessTokensForUser(args.targetUserId, "user_deactivated", args.actor);
+    // WARP-3533: and their personal API tokens (same: best-effort, never throws).
+    await revokePmApiTokensForUser(args.targetUserId, "user_deactivated", args.actor);
   }
   await recordActivity({
     kind: "auth",

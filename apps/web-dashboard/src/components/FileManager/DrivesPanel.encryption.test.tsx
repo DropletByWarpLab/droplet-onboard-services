@@ -19,7 +19,7 @@
  *     (WARP-3513 lands separately): no field → no claim, no crash.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import type { DiskInfo, DriveInfo, PoolInfo } from "@/lib/types";
 
 const useAuthMock = vi.fn();
@@ -406,9 +406,14 @@ describe("DrivesPanel — the one-time recovery key, right after preparing", () 
     });
     setup();
     fireEvent.click(within(cardOf("Wedding Photos")).getByRole("button", { name: /prepare drive/i }));
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await screen.findByRole("dialog", { name: /prepare this drive/i });
     fireEvent.change(within(dialog).getByRole("textbox"), { target: { value: "Wedding Photos" } });
-    fireEvent.click(within(dialog).getByRole("button", { name: /^prepare drive$/i }));
+    const confirm = within(dialog).getByRole("button", { name: /^prepare drive$/i });
+    await waitFor(() => expect(confirm).toBeEnabled());
+    // Flush the async confirmation and its state updates before observing the
+    // second dialog; the Prepare dialog can still be animating out.
+    await act(async () => { fireEvent.click(confirm); });
+    expect(confirmStorageCommand).toHaveBeenCalledOnce();
     // The Prepare dialog is still fading out when the key dialog opens, so two
     // dialogs can be in the DOM for a beat: hand back the KEY dialog itself.
     const heading = await screen.findByRole("heading", { name: /save your recovery key/i });
