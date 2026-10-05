@@ -11,6 +11,7 @@
 import { randomUUID } from "node:crypto";
 import type { Prisma, PrismaClient } from "@prisma/client";
 import { writeActivity } from "../pm/pm.service.js";
+import { nudgeOutbox } from "../pm/pm-outbox.js";
 import { outboundEmailGate } from "../off-lan-gate.service.js";
 import { htmlToPlainText, PLAIN_TEXT_MAX } from "./email-text.js";
 import { ticketSubjectFor } from "./email-headers.js";
@@ -242,7 +243,7 @@ async function addComment(
   const comment = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
     // "Send and set to Pending": the move and the comment are one change.
     if (target && target.id !== row.stateId) {
-      await applyStateChange(tx, row, target, viewer.id, now);
+      await applyStateChange(tx, row, target, viewer.id, now, { nudge: false });
     }
     const created = await tx.pmComment.create({
       data: {
@@ -271,6 +272,7 @@ async function addComment(
       actorId: viewer.id,
       verb: "commented",
       field: visibility === "PUBLIC" ? "reply" : "note",
+      nudge: false,
     });
     // The list's "last update" moves with the conversation, not just the fields.
     await tx.pmWorkItem.update({ where: { id: row.id }, data: { updatedAt: now } });
@@ -292,6 +294,7 @@ async function addComment(
     }
     return created;
   });
+  nudgeOutbox();
 
   const people = await loadPeople(prisma, [viewer.id]);
   const entry: CommentEntry = {
