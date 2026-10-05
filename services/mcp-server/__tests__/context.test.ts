@@ -51,6 +51,32 @@ describe("buildContext", () => {
     expect(ctx.userId).toBeUndefined();
   });
 
+  it("binds search credentials to the authenticated caller", async () => {
+    const deps = buildDeps();
+    deps.searchHybrid = vi.fn(async () => []);
+    const ctx = buildContext(deps, { sub: "alice", role: "admin" }, new AbortController().signal, "alice-token");
+    await ctx.searchHybrid!({ query: "flux", limit: 5, userId: "bob", ncToken: "bob-token" } as never);
+    expect(deps.searchHybrid).toHaveBeenCalledWith({
+      query: "flux", limit: 5, userId: "alice", ncToken: "alice-token", _enhancement: undefined,
+    });
+  });
+
+  it("does not let document args override caller identity or token", async () => {
+    const deps = buildDeps();
+    deps.readDocumentText = vi.fn(async () => ({
+      source: null, chunks: [], totalChunks: 0, unreadableChunks: 0, nextChunk: null,
+    }));
+    const ctx = buildContext(deps, { sub: "alice", role: "admin" }, new AbortController().signal, "alice-token");
+    await ctx.readDocumentText!({
+      path: "/Droplet/flux.pdf", startChunk: 0, maxChars: 1000,
+      userId: "bob", ncToken: "bob-token",
+    } as never);
+    expect(deps.readDocumentText).toHaveBeenCalledWith({
+      path: "/Droplet/flux.pdf", startChunk: 0, maxChars: 1000,
+      userId: "alice", ncToken: "alice-token",
+    });
+  });
+
   // WARP-3299 — the chat turn's ids reach the handler's context.
   it("carries the chat turn ids (conversation, message, tool call) into the context", () => {
     const ctx = buildContext(

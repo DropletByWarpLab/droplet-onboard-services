@@ -29,6 +29,7 @@ on:
       - "tests/droplet-host-units.test.sh"
       - "tests/droplet-host-net-unit.test.sh"
       - "tests/host-artefacts.test.sh"
+      - "tests/droplet-deploy.test.sh"
       - "tests/host-dns-reapply.test.sh"
       # WARP-2647: the log-bundle collector's suite ran in no workflow.
       # `scripts/host/**` above already fires this lane for the collector
@@ -44,6 +45,7 @@ on:
       - "tests/droplet-host-units.test.sh"
       - "tests/droplet-host-net-unit.test.sh"
       - "tests/host-artefacts.test.sh"
+      - "tests/droplet-deploy.test.sh"
       - "tests/host-dns-reapply.test.sh"
       # WARP-2647: the log-bundle collector's suite ran in no workflow.
       # `scripts/host/**` above already fires this lane for the collector
@@ -159,6 +161,12 @@ jobs:
         run: bash tests/host-artefacts.test.sh
       - name: Run focused host DNS preservation regression
         run: bash tests/host-dns-reapply.test.sh
+
+      # WARP-3841: droplet-deploy (static unit/polkit invariants + stubbed flow).
+      - name: shellcheck the deploy script
+        run: shellcheck --severity=warning scripts/host/droplet-deploy.sh
+      - name: Run droplet-deploy tests
+        run: bash tests/droplet-deploy.test.sh
 
       # WARP-2647: WARP-823's collector suite ran in NO workflow.
       # scripts/host/droplet-collect-logs.sh is the host executor behind the

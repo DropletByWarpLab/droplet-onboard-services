@@ -169,6 +169,10 @@ file  scripts/host/etc-systemd-system/droplet-host-units.service             /et
 file  scripts/host/usr-local-sbin/droplet-reapply-host-integration           /usr/local/sbin/droplet-reapply-host-integration                      0755  track
 file  scripts/host/etc-systemd-system/droplet-host-integration.service       /etc/systemd/system/droplet-host-integration.service                  0644  track
 
+file  scripts/host/droplet-deploy.sh                                         /usr/local/sbin/droplet-deploy                                        0755  track
+file  scripts/host/etc-systemd-system/droplet-deploy.service                 /etc/systemd/system/droplet-deploy.service                            0644  track
+file  scripts/host/50-droplet-deploy.rules                                   /etc/polkit-1/rules.d/50-droplet-deploy.rules                         0644  track
+
 # --- egress audit collector (WARP-268) ---------------------------------------
 dir   -                                                                      /usr/local/lib/droplet-egress-audit                                   -     present  the collector payload the launcher execs
 file  scripts/host/usr-local-sbin/droplet-egress-audit                       /usr/local/sbin/droplet-egress-audit                                  0755  track

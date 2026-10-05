@@ -37,8 +37,9 @@ file.
 | `ci.yml` job `semgrep` | semgrep 1.136.0, `p/owasp-top-ten` + `.semgrep/droplet.yaml` | yes (new findings only) — blocks via the required `ci-summary` fan-in since WARP-2481; before that it was red-but-advisory | code, excl. tests (`.semgrepignore`) | diff-aware `--baseline-commit`; `// nosemgrep: <rule-id>` with reviewer sign-off |
 | `ci.yml` job `hadolint` | hadolint 2.14.0 | yes — via the required `ci-summary` fan-in (WARP-2493); previously `hadolint.yml`, red-but-advisory | all tracked Dockerfiles | `.hadolint.yaml` ignored rules (DL3008/DL3059/DL4006, reasons inline) |
 | `docker-build.yml` (Trivy step) | trivy-action 0.36.0, **DB pinned by digest** | **no** — advisory today. Its verdict IS a job exit status (`exit-code: "1"`, no SARIF upload) and it already fans into `docker-build ok`, but that context is **not required** and cannot be as written: `docker-build.yml` is path-filtered, so on an out-of-scope PR it never reports (WARP-2172). See [Trivy is a job status, and still does not block](#trivy-blocking) | every image the PR rebuilds | `.trivyignore` baseline + `.github/trivy-db-version` (see [Trivy determinism](#trivy-determinism)) |
+| `ci.yml` job `gitleaks`, step "Trivy dependency scan" (WARP-3665) | trivy-action 0.36.0 `scan-type: fs`, **same DB pin** | yes (new findings only) — blocks via the required `ci-summary` fan-in; runs on a PR only when a lockfile, requirements file, `.trivyignore`, the DB pin or either scan workflow changed, and on every main push | npm production lockfiles, pinned `requirements.txt` dependencies and Python runtime/dev `requirements*.lock` resolutions (fixable HIGH/CRITICAL) | the same `.trivyignore` baseline, each entry with an `exp:` expiry. Both scans add the `pip:requirements[^/]*\.lock$` file pattern: Trivy's pip default recognizes only `requirements.txt`, while the hash locks contain exact transitive versions. Default detection and version-range handling remain unchanged. The release scan is a step of `publish-release.yml`'s `gate-node` job, so a release dispatch fails before anything is built, pushed or signed |
 | `codeql.yml` | CodeQL (JS/TS + Python + Actions) | no — advisory signal only (not a required check; no `code_scanning` ruleset rule exists — see [CodeQL ownership](#codeql)) | code paths + `.github/workflows/**` | GitHub per-PR alert diffing |
-| `osv-nightly.yml` | osv-scanner 2.3.8 action | no (nightly signal) | lockfiles + requirements | `osv-scanner.toml` |
+| `osv-nightly.yml` | osv-scanner 2.3.8 action | no (nightly signal) | lockfiles + requirements | `osv-scanner.toml` (every ignore has `ignoreUntil`, WARP-3667) |
 | `egress-gate.yml` | `scripts/check-egress-allowlist.py` | yes | outbound destinations | `docs/security/allowed-egress.yaml` (security review required) |
 | Dependabot | `.github/dependabot.yml` | n/a (opens fix PRs) | npm ×2, pip ×13, actions | grouped weekly, limits per ecosystem |
 
@@ -71,6 +72,16 @@ removed under WARP-2493.
 Until one of those lands: **a fixable HIGH/CRITICAL in a rebuilt image turns
 `docker-build ok` red and does not stop the merge.** Treat it as review-blocking
 by convention, not by machine.
+
+**What does block today (WARP-3665).** The image scan above is unchanged. What
+reaches `ci-summary` is a second Trivy pass over the dependency inputs
+(lockfiles and requirements files) with the same pinned DB and the same
+`.trivyignore` baseline, a step of the `gitleaks` job in `ci.yml`, plus the
+same step in `publish-release.yml`'s `gate-node` job. It blocks a new fixable
+HIGH/CRITICAL in a dependency a PR adds or bumps, and a release dispatch on a
+tree carrying one. It does not see OS packages or bundled Go binaries; those
+remain covered only by the image scan, so making `docker-build ok` a required
+context (WARP-2172) is still the open item for them.
 
 ### CodeQL ownership: this repo runs advanced setup only (WARP-2167) {#codeql}
 
@@ -167,6 +178,19 @@ reproducible while still failing a genuinely NEW fixable vuln:
    finding *not* in the baseline, i.e. one a PR introduces or a DB-pin bump
    newly surfaces. `ignore-unfixed` drops un-patchable base CVEs on top.
 
+**Everything frozen has an expiry (WARP-3667).** Each `.trivyignore` entry
+carries `exp:YYYY-MM-DD` (Trivy stops ignoring it that day, so the finding
+fails the build again), each `osv-scanner.toml` ignore carries `ignoreUntil`,
+and `scripts/check-vuln-exceptions.sh` (a `ci.yml` `detect` step) fails a PR
+when an entry has no expiry, is past due, or the pinned DB snapshot is more
+than 35 days old. The same check runs in the release `gate-node` job before
+the dependency scan, so a quiet branch cannot publish with a stale DB pin.
+Extend an exception by editing its date in a reviewed PR;
+never delete one to make a scan pass. The initial dates are 2027-01-02 (90 days
+from 2026-10-04) for every entry, the conservative choice; owners shorten or
+extend per finding. The monthly refresh is a manual PR today; a scheduled job
+that opens it is a CI-spend decision (see the WARP-3667 proposal in the PR).
+
 **Bumping the pin is a reviewable event, not a silent one.** Update the
 digest in `.github/trivy-db-version`, re-run the scan locally, and reconcile
 any newly-surfaced fixable IDs into `.trivyignore` (patch via the dep bump,
@@ -247,6 +271,13 @@ Red-on-findings by design and NOT PR-blocking. The initial baseline
 (2026-07-04) is ~85 vulnerable entries — burning down via Dependabot
 upgrades; watch the trend, not the binary status, until it is green, then
 treat any new red as a same-day fix.
+
+Every ignore in `osv-scanner.toml` has an `ignoreUntil` date (WARP-3667), so an
+accepted advisory reappears on its expiry day instead of staying hidden. The
+nightly stays advisory because its absolute result is not green today (it
+reports advisories that are in no baseline); dependency findings that block a
+merge or a release come from the Trivy dependency scan above, which has a
+reviewed baseline.
 
 ## Known baseline debt (tracked, not blocking)
 
@@ -691,10 +722,24 @@ JSON, fixed key order, UTF-8, trailing newline):
 
 ## Third-party images
 
-Upstream images in the compose file (nginx, Nextcloud, Frigate, Ollama,
-mosquitto, …) are not built or signed by our CI and are out of scope for
-this policy; they are version- or digest-pinned in
-`docker/docker-compose.yml` and never flow through the OTA pull path.
+Upstream images in the compose file (Postgres, Redis, mosquitto, Nextcloud,
+the document server, Frigate, Ollama, the voice and model-runner images, …)
+are not built or signed by our CI and are out of scope for this policy. Each
+is pinned as `name:tag@sha256:<digest>` in `docker/docker-compose.yml` (and
+`docker/docker-compose.dev.yml`), keeping the tag for readability; the digest
+is the multi-architecture index digest, so amd64 and arm64 hosts both resolve.
+They never flow through the OTA pull path: the updater pulls and verifies only
+the first-party images named in the signed release manifest, by digest.
+
+`scripts/check-pinned-images.sh` (a `ci.yml` `detect` step, so it reports under
+the required `ci-summary`) fails any `image:` that is not digest-pinned.
+Services with a `build:` key are exempt. A variable default is checked at its
+default, so the digest lives inside it (`${FRIGATE_IMAGE:-repo:tag@sha256:…}`);
+an operator who overrides the variable in `.env` opts out of the pin on
+purpose. To bump an image, change tag and digest together in one PR.
+
+Not yet done (WARP-3601): recording these digests in the signed release
+manifest, and verifying upstream signatures where a publisher provides them.
 
 ## Key handling
 

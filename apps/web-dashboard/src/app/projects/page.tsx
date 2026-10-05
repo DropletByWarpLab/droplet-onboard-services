@@ -73,6 +73,7 @@ import { InsightsView } from "@/components/projects/insights/InsightsView";
 import { CalendarView } from "@/components/projects/calendar/CalendarView";
 import { TimelineView } from "@/components/projects/timeline/TimelineView";
 import { MyWorkView } from "@/components/projects/mywork/MyWorkView";
+import { ProjectMenu as ImportProjectMenu } from "@/components/projects/import/ProjectMenu";
 import { TableView } from "@/components/projects/table/TableView";
 import type { TableApi } from "@/components/projects/table/TableView";
 import { DisplayControls } from "@/components/projects/table/DisplayControls";
@@ -85,7 +86,6 @@ import { useBulkActions } from "@/components/projects/bulk/useBulkActions";
 import { ProjectsKeyboard } from "@/components/projects/palette/ProjectsKeyboard";
 import type { PaletteLayout } from "@/components/projects/palette/commands";
 import type { PmTableScope } from "@droplet/shared-types";
-import { ProjectMenu } from "@/components/projects/import/ProjectMenu";
 import { ImportWizard } from "@/components/projects/import/ImportWizard";
 import {
   ConfirmArchiveProject,
@@ -93,6 +93,7 @@ import {
   NewItemModal,
   NewProjectModal,
 } from "@/components/projects/modals";
+import { ProjectMenu } from "@/components/projects/settings/ProjectMenu";
 import { TimeAccessProvider } from "@/components/projects/time/access";
 import { TimerChip } from "@/components/projects/time/TimerChip";
 import { TimeView } from "@/components/projects/time/TimeView";
@@ -719,8 +720,21 @@ function ProjectsWorkspace(): JSX.Element {
             <PmIcon name="plus" size={14} /> New item
           </button>
         )}
+        {/* WARP-3520 — Project settings (states, labels, fields, details) and the
+            archived items. Field definitions are owner / admin / the project's lead;
+            deleting an archived item for good is owner / admin. */}
+        {project && (
+          <ProjectMenu
+            project={project}
+            readOnly={readOnly}
+            canDeleteItems={role === "owner" || role === "admin"}
+            canManageFields={role === "owner" || role === "admin" || (!!user?.id && project.leadId === user.id)}
+            onProjectChanged={() => void mutateProjects()}
+            onItemsChanged={refreshAll}
+          />
+        )}
         {refreshButton}
-        {project && <ProjectMenu projectId={project.id} canImport={canImport} onImport={() => setModal("import")} />}
+        {project && <ImportProjectMenu projectId={project.id} canImport={canImport} onImport={() => setModal("import")} />}
       </>
     ) : mode === "my-work" ? null : (
       refreshButton
@@ -1023,7 +1037,15 @@ function ProjectsWorkspace(): JSX.Element {
         </div>
       </ShellPage>
 
-      {drawerItem && <DetailDrawer item={drawerItem} readOnly={readOnly} onClose={closeItem} onChanged={refreshAll} />}
+      {drawerItem && (
+        <DetailDrawer
+          item={drawerItem}
+          readOnly={readOnly}
+          canDelete={role === "owner" || role === "admin"}
+          onClose={closeItem}
+          onChanged={refreshAll}
+        />
+      )}
       {modal === "newitem" && project && (
         <NewItemModal project={project} onClose={() => setModal(null)} onCreated={() => void refreshAll()} />
       )}

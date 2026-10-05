@@ -37,6 +37,8 @@ export const PM_IMPORT_ERRORS = {
   /** Mapping and source can only change while the job is waiting for the owner. */
   NOT_EDITABLE: "import_not_editable",
   NOT_STARTABLE: "import_not_startable",
+  /** The reviewed source, mapping, or progress changed before Run was accepted. */
+  CHANGED: "import_changed",
   /** One import at a time per project (the partial unique index). */
   IN_PROGRESS: "import_in_progress",
   NOT_CANCELLABLE: "import_not_cancellable",
@@ -207,10 +209,14 @@ export async function updateImportJob(
 export async function startImportJob(
   prisma: PrismaClient,
   jobId: string,
-  patch: { mapping?: Partial<ImportMapping> } = {},
+  patch: { mapping?: Partial<ImportMapping>; expectedUpdatedAt?: string } = {},
   opts: { kick?: boolean } = {},
 ): Promise<ApiImportJob> {
   const job = await loadJob(prisma, jobId);
+  const expectedUpdatedAt = patch.expectedUpdatedAt === undefined ? undefined : new Date(patch.expectedUpdatedAt);
+  if (expectedUpdatedAt && (!Number.isFinite(expectedUpdatedAt.getTime()) || job.updatedAt.getTime() !== expectedUpdatedAt.getTime())) {
+    throw new Error(PM_IMPORT_ERRORS.CHANGED);
+  }
   if (job.status !== "PREVIEWED" && job.status !== "FAILED") throw new Error(PM_IMPORT_ERRORS.NOT_STARTABLE);
   const bytes = await loadFile(prisma, jobId);
 
@@ -225,7 +231,7 @@ export async function startImportJob(
 
   try {
     const r = await prisma.pmImportJob.updateMany({
-      where: { id: jobId, status: job.status },
+      where: { id: jobId, status: job.status, ...(expectedUpdatedAt ? { updatedAt: expectedUpdatedAt } : {}) },
       data: {
         status: "PENDING",
         mapping: mapping as unknown as Prisma.InputJsonValue,
@@ -234,7 +240,7 @@ export async function startImportJob(
         heartbeatAt: null,
       },
     });
-    if (r.count === 0) throw new Error(PM_IMPORT_ERRORS.NOT_STARTABLE);
+    if (r.count === 0) throw new Error(expectedUpdatedAt ? PM_IMPORT_ERRORS.CHANGED : PM_IMPORT_ERRORS.NOT_STARTABLE);
   } catch (err) {
     if (isPrismaCode(err, "P2002")) throw new Error(PM_IMPORT_ERRORS.IN_PROGRESS);
     throw err;

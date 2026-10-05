@@ -534,6 +534,18 @@ EOF
     /etc/systemd/system/droplet-host-integration.service
   log_success "Installed /usr/local/sbin/droplet-reapply-host-integration (+ boot re-apply unit)"
 
+  # --- WARP-3841 on-demand deploy (epic WARP-3834) ----------------------------
+  # droplet-deploy.service is the repo-tracked root deploy (backup, setup.sh as
+  # droplet, host hook, gate). Deliberately NOT enabled (no [Install]): the
+  # `droplet` user starts it through the polkit rule below, start verb only.
+  sudo install -m 0755 "$host_src/droplet-deploy.sh" \
+    /usr/local/sbin/droplet-deploy
+  sudo install -m 0644 "$host_src/etc-systemd-system/droplet-deploy.service" \
+    /etc/systemd/system/droplet-deploy.service
+  sudo install -m 0644 "$host_src/50-droplet-deploy.rules" \
+    /etc/polkit-1/rules.d/50-droplet-deploy.rules
+  log_success "Installed /usr/local/sbin/droplet-deploy (+ on-demand unit, polkit start rule)"
+
   # --- XVF3800 DSP control tool (xvf_host) for voice_dsp self-heal (WARP-1408) -
   # Both the host watchdog (droplet-watchdog.sh) and voice-io's POST
   # /voice/restart-processor shell out to `xvf_host REBOOT 1` to clear a wedged
@@ -1375,13 +1387,13 @@ EOF
   case "$docs_engine" in
     onlyoffice)
       upsert_env DOCS_ENGINE        onlyoffice
-      upsert_env DOCS_ENGINE_IMAGE  "onlyoffice/documentserver:8.2"
+      upsert_env DOCS_ENGINE_IMAGE  "onlyoffice/documentserver:8.2@sha256:fb1c76177e578918f0d7ad51eda5006d728b9f2f071f93d18054c1f91edec78b"
       upsert_env DOCS_INTERNAL_URL  http://docserver
       log_info "Document engine: onlyoffice (OEM-licensed SKU posture — AGPLv3 CE otherwise)"
       ;;
     *)
       upsert_env DOCS_ENGINE        collabora
-      upsert_env DOCS_ENGINE_IMAGE  "collabora/code:26.04.2.4.1"
+      upsert_env DOCS_ENGINE_IMAGE  "collabora/code:26.04.2.4.1@sha256:1f864ce3f0c49e867787b6dd303bd6ba989542d3023f6809df558eafd04c1b97"
       upsert_env DOCS_INTERNAL_URL  "http://docserver:9980/docs"
       log_info "Document engine: collabora (Collabora CODE — LibreOffice, no licensing fee)"
       ;;

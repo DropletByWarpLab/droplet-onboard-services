@@ -134,13 +134,13 @@ describe("WARP-3061 — the assistant searches the acting person's departments",
   it("adds the department corpus of a member named by username, keyed by their Nextcloud login", async () => {
     const params = await searchAs(appWith([LENA], { "u-lena": [FINANCE] }), "lena");
     expect(params.userId).toBe("lena.nc");
-    expect(params.additionalUserIds).toEqual(["__dept_dept-finance__"]);
+    expect(params.additionalUserIds).toEqual(["__dept_dept-finance__", "__droplet_share__"]);
   });
 
   it("does the same when the HTTP transport names them by User.id", async () => {
     const params = await searchAs(appWith([LENA], { "u-lena": [FINANCE] }), "u-lena");
     expect(params.userId).toBe("lena.nc");
-    expect(params.additionalUserIds).toEqual(["__dept_dept-finance__"]);
+    expect(params.additionalUserIds).toEqual(["__dept_dept-finance__", "__droplet_share__"]);
   });
 
   it("refuses an SSO person: no Nextcloud login to key the corpus or the name search", async () => {
