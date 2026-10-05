@@ -29,6 +29,7 @@ import { createBusinessOnboardingRouter } from "./routes/business-onboarding.js"
 import { createIntegrationsRouter } from "./routes/integrations.js";
 import { createSaasCredentialsRouter } from "./routes/saas-credentials.js";
 import { createErpDriftRouter } from "./routes/erp-drift.js";
+import { createCloudFilesRouter } from "./routes/cloud-files.js";
 import { createM365CallbackRouter, createM365Router } from "./routes/m365.js";
 import { createErpRouter } from "./routes/erp.js";
 import { createSttRouter } from "./routes/stt.js";
@@ -58,6 +59,7 @@ import { createPmMobileRouter } from "./routes/mobile/pm.js";
 import { createPmNativeRouter } from "./routes/pm/native.js";
 import { createPmRelationsRouter } from "./routes/pm/relations.js";
 import { createPmPlanningRouter } from "./routes/pm/planning.js";
+import { createSupportRouter } from "./routes/support/support.routes.js";
 import { createPmScheduleRouter } from "./routes/pm/schedule.js";
 import { createCrmRouter } from "./routes/crm.js";
 import { createMoneyRouter } from "./routes/money.js";
@@ -529,6 +531,12 @@ export function createApp(
   // Every route is scoped to the requester's OWN link — no :userId parameter,
   // because delegated authorization makes a person's mailbox connection theirs.
   app.use("/api", createM365Router(prisma));
+  // WARP-3538 (D13) — ONE search over every cloud a person has connected: their
+  // OneDrive, their SharePoint libraries and, as those connectors land, Google
+  // Drive and Dropbox. Self-scoped like the connection routes above, and also
+  // the assistant's `search_cloud_files` tool (`_service:mcp` acting for the
+  // person in X-Nextcloud-User). Not under /m365: it is not one cloud's route.
+  app.use("/api", createCloudFilesRouter(prisma));
   // WARP-844 — chat voice input (Wyoming STT proxy). 503s gracefully when
   // the whisper sidecar isn't deployed (macOS dev / non-linux profile).
   app.use("/api", createSttRouter());
@@ -571,6 +579,13 @@ export function createApp(
   // Every path starts `/pm/`, so the `projects` module gate and the guest tier
   // floor already cover it.
   app.use("/api", createPmPlanningRouter(prisma));
+  // WARP-3528 (ADR-069) — the service desk. Its own disjoint prefix
+  // (`/api/support`), so neither PM router shadows it, and its own `support`
+  // module: `mountModuleGates` above already guards the prefix from the registry
+  // (box toggle, the tier floor that refuses an external guest, and the
+  // per-person grant), so nothing here re-implements a gate. Tickets are
+  // PmWorkItem rows in SERVICE_DESK projects that /api/pm answers 404 for.
+  app.use("/api", createSupportRouter(prisma));
   // WARP-3523 (ADR-069 WS-7) — the Timeline window and the My Work lists. Own
   // router, disjoint paths (`/pm/projects/:id/timeline`, `/pm/my-work`); the
   // `projects` module gate covers it through the `/api/pm` prefix.

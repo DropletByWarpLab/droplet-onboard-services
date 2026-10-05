@@ -52,6 +52,9 @@ const MODULE_IDS: readonly AccessModuleId[] = [
   // grows, so a new id cannot reach the nav without someone confirming it is
   // nav-able. /money is gated on it in the Business group.
   "money",
+  // WARP-3528 (ADR-069) — the service desk. /support is gated on it in the
+  // Business group, nested under Customers.
+  "support",
 ];
 
 /** Every `requiresModule` in the tree, parents and children alike. */

@@ -15,10 +15,19 @@
  * There is now, and this is the composition: the SDK-backed factory, with the
  * `clientInfo` upstream #213 makes load-bearing and the protocol version
  * `protocol-pin.ts` refuses to let the server choose.
+ *
+ * WARP-3703 (ADR-043 TC-1.1) — an entry is a {@link SessionProfile}: the factory
+ * AND the fields the wire must carry before it runs. The open contract used to
+ * be a single shape every server shared (`email`, `apiToken`, `cloudId`),
+ * because Atlassian was the only server. A vendor that presents one static
+ * Bearer token has neither an email nor a site, so each profile now declares
+ * its own, and `http-api.ts` validates the body against the profile the URL
+ * names.
  */
 import {
   ATLASSIAN_MCP_CLIENT_INFO,
   ATLASSIAN_MCP_PROTOCOL_VERSION,
+  ATLASSIAN_REQUIRED_FIELDS,
   ATLASSIAN_SERVER_ID,
   createAtlassianMcpSession,
 } from "./atlassian.js";
@@ -27,21 +36,25 @@ import type { RemoteMcpSession } from "./remote-session.js";
 import { createStreamableHttpConnection } from "./streamable-http.js";
 
 /**
- * What `POST /sessions/:serverId/open` carries.
+ * What `POST /sessions/:serverId/open` carries, once the route has checked it
+ * against the profile.
  *
- * `apiToken` is the customer's credential. It reaches
- * {@link createAtlassianMcpSession} → `basicCredential`'s closure and nothing
- * else: it is never stored on a session field, never written to a log line, and
- * never echoed in a response (rule 19). The bridge holds no persistence of any
- * kind, so it is gone when the container stops.
+ * Flat and open ON PURPOSE. The credential and identity fields are NAMED BY THE
+ * PROFILE (`SessionProfile.requiredFields`): Atlassian's are `email`, `apiToken`
+ * and `cloudId`; a bearer-only vendor's is one token field. They keep the flat
+ * JSON keys the wire has always used, so no caller needs a lockstep deploy.
+ *
+ * A secret field (`apiToken`) reaches {@link createAtlassianMcpSession} →
+ * `basicCredential`'s closure and nothing else: it is never stored on a session
+ * field, never written to a log line, and never echoed in a response (rule 19).
+ * The bridge holds no persistence of any kind, so it is gone when the container
+ * stops.
  */
 export interface OpenSessionInput {
-  email: string;
-  apiToken: string;
-  cloudId: string;
+  readonly [field: string]: string | readonly string[] | undefined;
   /** Overridable ONLY so a test can point at an RFC 2606 host. Screened
    *  against the profile's own allowed-host set either way. */
-  url?: string;
+  readonly url?: string;
   /**
    * WARP-2651 — the catalog the caller has already vetted, carried across a
    * restart of THIS container.
@@ -50,10 +63,70 @@ export interface OpenSessionInput {
    * refuse to dispatch (`catalog_changed`), never widen what it will serve. It
    * is absent on a first open, which is why it is optional rather than `[]`.
    */
-  knownTools?: readonly string[];
+  readonly knownTools?: readonly string[];
 }
 
 export type SessionFactory = (input: OpenSessionInput) => RemoteMcpSession;
+
+/**
+ * One server this component can dial: how to build its session, and what the
+ * wire must carry for that to be possible.
+ *
+ * `requiredFields` are the flat JSON field names `POST /sessions/:serverId/open`
+ * must carry as non-empty strings. The route refuses a body missing any of them
+ * with a 400 that names the FIELD, never a value, and only then builds the
+ * session — so a factory may assume them. They are the second half of a wire
+ * contract whose first half is the provider descriptor's required
+ * `credentialFields` in the orchestrator; `adr-043-boundary.test.ts` gates the
+ * pair, because a mismatch would present as "could not open a session" rather
+ * than as the naming error it is.
+ */
+export interface SessionProfile {
+  readonly requiredFields: readonly string[];
+  readonly factory: SessionFactory;
+}
+
+/**
+ * The contract every factory had before profiles existed: the three Atlassian
+ * fields.
+ *
+ * A bare {@link SessionFactory} handed to `BridgeSessionStore` — the form every
+ * harness written before WARP-3703 uses — is held to it, so those harnesses
+ * behave as they always did. Nothing in {@link SESSION_PROFILES} takes this
+ * path: production entries are profiles and declare their own. A constant of its
+ * OWN rather than an alias of `ATLASSIAN_REQUIRED_FIELDS`, so changing
+ * Atlassian's contract cannot silently move this one.
+ */
+export const BARE_FACTORY_REQUIRED_FIELDS: readonly string[] = Object.freeze([
+  "email",
+  "apiToken",
+  "cloudId",
+]);
+
+/** Accept either form a registry entry may take. A profile passes through
+ *  untouched; a bare factory is wrapped with {@link BARE_FACTORY_REQUIRED_FIELDS}. */
+export function toSessionProfile(entry: SessionProfile | SessionFactory): SessionProfile {
+  return typeof entry === "function"
+    ? { requiredFields: BARE_FACTORY_REQUIRED_FIELDS, factory: entry }
+    : entry;
+}
+
+/**
+ * One flat open-input field, as the string it must be.
+ *
+ * The route has already refused a body missing any of the profile's
+ * `requiredFields`, so this throws only for a factory called directly. It names
+ * the FIELD and never a value, and it refuses rather than building half a
+ * session: without it an absent `cloudId` would not fail until the first
+ * `connect()`, inside the guard stack, long after the open had answered.
+ */
+function requireField(input: OpenSessionInput, name: string): string {
+  const value = input[name];
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(`open input is missing: ${name}`);
+  }
+  return value;
+}
 
 /**
  * Build the production Atlassian session factory.
@@ -83,9 +156,9 @@ export function createAtlassianSessionFactory(
   return (input: OpenSessionInput) => {
     const scheduler = makeScheduler();
     return createAtlassianMcpSession({
-      email: input.email,
-      apiToken: input.apiToken,
-      cloudId: input.cloudId,
+      email: requireField(input, "email"),
+      apiToken: requireField(input, "apiToken"),
+      cloudId: requireField(input, "cloudId"),
       scheduler,
       connect: (connectInput) =>
         createStreamableHttpConnection(connectInput, {
@@ -109,20 +182,37 @@ export function createAtlassianSessionFactory(
 }
 
 /**
- * Every server id this component will open a session for.
+ * Every server this component will open a session for.
  *
  * One entry today. A second server is a second entry here plus its own
- * `allowed-egress.yaml` registration — not a config value.
+ * `allowed-egress.yaml` registration — not a config value. Frozen entry by
+ * entry, because a profile's `requiredFields` decides what the route accepts for
+ * a customer's credential.
  */
-export const SESSION_FACTORIES: Readonly<Record<string, SessionFactory>> =
+export const SESSION_PROFILES: Readonly<Record<string, SessionProfile>> =
   Object.freeze({
-    [ATLASSIAN_SERVER_ID]: createAtlassianSessionFactory(),
+    [ATLASSIAN_SERVER_ID]: Object.freeze({
+      requiredFields: ATLASSIAN_REQUIRED_FIELDS,
+      factory: createAtlassianSessionFactory(),
+    }),
   });
 
-/** The ids {@link SESSION_FACTORIES} serves, sorted. Rendered by the
- *  bearer-gated `GET /sessions`, and by the `UNKNOWN_SERVER_ID` refusal. */
+/**
+ * The factories {@link SESSION_PROFILES} serves — a VIEW of it, derived rather
+ * than declared, so the two cannot drift. Kept for the callers that predate
+ * profiles and only ever needed the factory.
+ */
+export const SESSION_FACTORIES: Readonly<Record<string, SessionFactory>> =
+  Object.freeze(
+    Object.fromEntries(
+      Object.entries(SESSION_PROFILES).map(([id, profile]) => [id, profile.factory]),
+    ),
+  );
+
+/** The ids a registry serves, sorted. Rendered by the bearer-gated
+ *  `GET /sessions`, and by the `UNKNOWN_SERVER_ID` refusal. */
 export function knownServerIds(
-  factories: Readonly<Record<string, SessionFactory>> = SESSION_FACTORIES,
+  registry: Readonly<Record<string, unknown>> = SESSION_PROFILES,
 ): string[] {
-  return Object.keys(factories).sort();
+  return Object.keys(registry).sort();
 }

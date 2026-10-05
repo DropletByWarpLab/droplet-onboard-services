@@ -192,12 +192,27 @@ const REST_PROVIDERS_WARP_2918 = ["todoist"] as const;
  * was and a diff shows the addition as an addition.
  */
 const REST_PROVIDERS_WARP_2919 = ["loyverse"] as const;
+/**
+ * WARP-3697 — GoCardless, the first of the free-integrations wave-3 vendors
+ * (WARP-3697..3702). One const per ticket, for the reason every const above is
+ * its own: a diff shows each addition as an addition. They are listed in
+ * DECLARATION order, which is BUILD order — `catalog.order` is RANK order and
+ * is pinned separately, in the hub-order test below.
+ */
+const REST_PROVIDERS_WARP_3697 = ["gocardless"] as const;
+/**
+ * WARP-3698 — Capsule CRM, the second free-integrations wave-3 vendor. Its own
+ * const, in build order, for the reason the one above gives.
+ */
+const REST_PROVIDERS_WARP_3698 = ["capsule"] as const;
 const REST_PROVIDERS = [
   ...REST_PROVIDERS_WARP_2707,
   ...REST_PROVIDERS_WARP_2916,
   ...REST_PROVIDERS_WARP_2917,
   ...REST_PROVIDERS_WARP_2918,
   ...REST_PROVIDERS_WARP_2919,
+  ...REST_PROVIDERS_WARP_3697,
+  ...REST_PROVIDERS_WARP_3698,
 ] as const;
 
 afterEach(() => {
@@ -416,7 +431,24 @@ describe("the descriptor set covers exactly the providers that shipped before", 
     // above proves neither is scheduled on an incomplete watermark. (`order`
     // is not served: receipts carry no currency and the REST profile guard
     // refuses a money dataset without its required column.)
-    expect(unscheduled).toEqual({ square: ["charge", "refund", "payout"] });
+    //
+    // WARP-3697 — GoCardless joins Square HERE, and for Square's reason as well
+    // as its own: `charge` has no `ERP_SYNC_ENTITIES` row (Stripe's
+    // `get_recent_charges` window constraint, keyed by dataset NAME), and
+    // `refund` and `payout` have none either. All three GoCardless watermarks
+    // are `complete: false` — a creation-time filter, pinned by
+    // `gocardless-profile.test.ts` — so they could not be scheduled even if
+    // rows existed, until `RestWatermark.complete` has a reader. They are
+    // reached on demand through `runRead` and nowhere else; the card still
+    // reads CONNECTED, which is why the omission is recorded here.
+    // WARP-3698 — Capsule appears nowhere here: `deal` and `task` each have an
+    // `ERP_SYNC_ENTITIES` row, the `deal` watermark (`since`) is declared complete
+    // and the `task` watermark is null, a declared full scan — neither is a
+    // scheduled-but-incomplete watermark, which the test above refuses.
+    expect(unscheduled).toEqual({
+      square: ["charge", "refund", "payout"],
+      gocardless: ["charge", "refund", "payout"],
+    });
   });
 
   it("keeps the catalog-only placeholder OUT of the buildable set", () => {
@@ -1139,6 +1171,12 @@ describe("the hub catalog is derived from the same descriptors", () => {
       // WARP-2919 — Loyverse, at `catalog.order: 17`, the first point-of-sale
       // card and the third on the declarative REST track.
       "loyverse",
+      // WARP-3697..3702 — free-integrations wave 3, at `catalog.order` 18..23 in
+      // RANK order (Keap 18, GoCardless 19, Capsule 20, Squarespace 21,
+      // JobNimbus 22, Wrike 23), which is NOT the order they were built in.
+      // GoCardless, at 19, is the first to land; Capsule CRM, at 20, is the second.
+      "gocardless",
+      "capsule",
     ]);
   });
 
