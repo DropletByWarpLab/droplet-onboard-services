@@ -92,6 +92,31 @@ export function deriveEmailColumnKey(): Buffer { return hkdf(deviceIkm(), "user-
  *  and unlike User.email, a token need NOT survive a disaster restore, because
  *  the person can simply sign in again. */
 export function deriveM365TokenCacheKey(): Buffer { return hkdf(deviceIkm(), "m365-token-cache"); }
+/** WARP-3538 / ADR-041 §4 — column key for the human-readable columns of the
+ *  landed cloud-file metadata: `CloudFileItem` (name, URL, last modifier) and
+ *  `CloudFileSource` (site name, container name, URL). A file name in a practice
+ *  routinely carries a patient's name, so these are encrypted at rest even
+ *  though the tables make no such promise to inherit.
+ *
+ *  Provider-agnostic on purpose (D13): ONE label for every cloud the store holds
+ *  — Microsoft 365 today, Google Drive and Dropbox in the changes that follow.
+ *  The per-provider separation that matters is in the AAD
+ *  (cloud-file-crypto.ts binds the provider into it), where it is checked on
+ *  every open; a key per provider would add a derivation to keep in step with a
+ *  vocabulary that already lives in the schema, and would buy no blast-radius
+ *  separation that holds up — the three providers' file NAMES are one class of
+ *  data, one blast radius.
+ *
+ *  Its OWN `info` label, not `deriveM365TokenCacheKey`: that key opens a refresh
+ *  token — a long-lived key to the customer's mailbox — and this one opens file
+ *  names, a different class of data with a different blast radius. One compromised
+ *  key must not open the other, in either direction.
+ *
+ *  Rides the DEVICE_SECRET_KEY ikm like its siblings, so a factory reset
+ *  crypto-shreds the landed metadata along with the tokens even if the rows
+ *  survive. Unlike User.email, it need NOT survive a restore: it is a copy of the
+ *  provider's data and re-syncs from scratch once the person reconnects. */
+export function deriveCloudFileMetadataKey(): Buffer { return hkdf(deviceIkm(), "cloud-file-metadata"); }
 /** WARP-2137 / ADR-041 — column key for
  *  `IntegrationConnection.providerTokensEnc`, which holds the OAuth tokens of a
  *  cloud ERP track (QuickBooks Online's rotating refresh token, Dentrix
