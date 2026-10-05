@@ -177,7 +177,6 @@ import {
   type RetentionWindows,
 } from "../services/camera-budget.service.js";
 import { isUpstreamUnavailable } from "../lib/upstream-unavailable.js";
-import { resolveRetentionDefaults } from "../services/camera-retention-defaults.js";
 import { pipeUpstreamBody } from "../lib/pipe-upstream.js";
 import { config } from "../config.js";
 import { internalBaseUrl, internalFetch } from "../lib/internal-tls.js";
