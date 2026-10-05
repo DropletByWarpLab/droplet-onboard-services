@@ -45,6 +45,10 @@ case "$t" in
   runuser) # runuser -u USER -- CMD...: git and docker are real/stubbed passthroughs
     if [ "\$4" = git ]; then shift 3; exec "\$@"; fi
     if [ "\$4" = docker ]; then shift 3; exec "\$@"; fi
+    if [ "\$4" = tar ]; then
+      [ -f "$WORK/tar_fail" ] && { echo "tar: denied" >&2; exit 2; }
+      shift 3; exec "\$@"
+    fi
     [ -e "$WORK/sudoers" ] && echo grant-present >> "$WORK/calls.log"; [ -f "$WORK/setup_fail" ] && exit 7; exit 0 ;;
   systemctl)
     [ "\$1" = is-active ] && [ -f "$WORK/inactive" ] && exit 3
@@ -58,7 +62,7 @@ done
 printf '#!/usr/bin/env bash\nexit 0\n' > "$WORK/hu"; chmod +x "$WORK/hu"
 
 new_repo() {
-  rm -rf "$WORK/repo" "$WORK/backups" "$WORK/sudoers"* "$WORK/calls.log" "$WORK/setup_fail" "$WORK/inactive" "$WORK/nodocker"
+  rm -rf "$WORK/repo" "$WORK/backups" "$WORK/sudoers"* "$WORK/calls.log" "$WORK/setup_fail" "$WORK/inactive" "$WORK/nodocker" "$WORK/tar_fail"
   mkdir -p "$WORK/repo/docker/secrets" "$WORK/repo/docker/certs" "$WORK/repo/data/secrets" "$WORK/repo/.data"
   ( cd "$WORK/repo" && git init -q && git config user.email t@t && git config user.name t
     echo 'name: droplet' > docker/docker-compose.yml
@@ -85,9 +89,9 @@ check "success: sudoers grant removed" test ! -e "$WORK/sudoers"
 bk="$WORK/backups/20260101T000000Z"
 check "backup: 0600 secrets.tar + db dump, 0700 dir" bash -c \
   "[ \"\$(stat -c %a '$bk/secrets.tar')\" = 600 ] && [ -s '$bk/db.sql.gz' ] && [ \"\$(stat -c %a '$bk')\" = 700 ]"
-check "backup: tar holds .env (.env link kept, its in-repo target archived), secrets, certs, mosquitto" bash -c \
-  "t=\$(tar -tf '$bk/secrets.tar'); echo \"\$t\" | grep -qx .env && echo \"\$t\" | grep -qx .env.real && echo \"\$t\" | grep -q data/secrets/k && echo \"\$t\" | grep -q docker/certs/c && echo \"\$t\" | grep -q docker/secrets/s && echo \"\$t\" | grep -q docker/mosquitto.conf \
-"
+check "backup: tar holds .env (symlink dereferenced), secrets, certs, mosquitto" bash -c \
+  "t=\$(tar -tf '$bk/secrets.tar'); echo \"\$t\" | grep -qx .env && echo \"\$t\" | grep -q data/secrets/k && echo \"\$t\" | grep -q docker/certs/c && echo \"\$t\" | grep -q docker/secrets/s && echo \"\$t\" | grep -q docker/mosquitto.conf \
+   && [ \"\$(tar -xOf '$bk/secrets.tar' .env)\" = SECRET=hunter2 ]"
 check "output never prints secret contents" bash -c "! echo '$out' | grep -q hunter2"
 
 new_repo; touch "$WORK/setup_fail"
@@ -120,8 +124,8 @@ check "rotation keeps the last 3 backup dirs" bash -c \
 echo "--- security fixes ---"
 check "git runs as droplet, no safe.directory override" bash -c \
   "grep -q 'runuser -u droplet -- git -C' '$DEPLOY' && ! grep -v '^\s*#' '$DEPLOY' | grep -q safe.directory"
-check "tar never dereferences (no -h) and db dump runs as droplet" bash -c \
-  "! grep -Eq 'tar -c?h' '$DEPLOY' && grep -q 'runuser -u droplet -- docker compose' '$DEPLOY'"
+check "tar runs as droplet with -h (dereference as droplet), db dump runs as droplet" bash -c \
+  "grep -q 'runuser -u droplet -- tar -chf -' '$DEPLOY' && grep -q 'runuser -u droplet -- docker compose' '$DEPLOY'"
 check "unit and polkit header state the WARP-2888 assumption" bash -c \
   "grep -q WARP-2888 '$UNIT' && grep -q WARP-2888 '$RULES'"
 check "sourcing the reapply wrapper does not run its main" bash -c \
@@ -129,12 +133,17 @@ check "sourcing the reapply wrapper does not run its main" bash -c \
 
 new_repo; ln -sf /etc/hostname "$WORK/repo/data/secrets/planted"
 out="$(run_deploy)"; rc=$?
-check "planted symlink in data/secrets is stored as a link, never read" bash -c \
-  "[ $rc -eq 0 ] && tar -tvf '$WORK/backups/20260101T000000Z/secrets.tar' | grep -q 'planted -> /etc/hostname' && ! tar -xOf '$WORK/backups/20260101T000000Z/secrets.tar' data/secrets/planted 2>/dev/null | grep -q ."
+# The stubbed runuser cannot change uid, so this only proves the dereferencing
+# tar is issued through `runuser -u droplet --` (the real privilege drop, which
+# turns a planted link to a root-only file into "permission denied", is the
+# kernel's job and is verified by inspection of the command line).
+check "dereferencing tar is issued as droplet (planted link followed only with droplet's rights)" bash -c \
+  "[ $rc -eq 0 ] && grep -q '^runuser -u droplet -- tar -chf - -C $WORK/repo' '$WORK/calls.log'"
 
-new_repo; ln -sf /etc/hostname "$WORK/repo/.env"
-out="$(run_deploy)"; rc=$?
-check ".env symlink resolving outside the checkout is refused" test "$rc" -eq 1
+new_repo; touch "$WORK/tar_fail"
+out="$(run_deploy)"; rc=$?; printf '%s\n' "$out" > "$WORK/out.txt"
+check "tar failure (file unreadable by droplet): exit 1, chown hint, no setup, grant removed" bash -c \
+  "[ $rc -eq 1 ] && grep -q 'chown' '$WORK/out.txt' && ! grep -q setup.sh '$WORK/calls.log' && [ ! -e '$WORK/sudoers' ]"
 
 new_repo; touch "$WORK/nodocker"
 out="$(run_deploy)"; rc=$?; printf '%s\n' "$out" > "$WORK/out.txt"

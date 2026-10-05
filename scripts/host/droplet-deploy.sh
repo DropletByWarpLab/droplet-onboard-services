@@ -107,21 +107,15 @@ runuser -u droplet -- docker compose -f "$REPO/docker/docker-compose.yml" exec -
 paths=()
 for p in .env data/secrets docker/secrets docker/certs "$REPO"/docker/mosquitto.*; do
   p="${p#"$REPO"/}"
-  [ -e "$REPO/$p" ] || [ -L "$REPO/$p" ] || continue
-  paths+=("$p")
-  if [ -L "$REPO/$p" ]; then
-    if [ "$p" = .env ]; then
-      real="$(readlink -f "$REPO/.env")"
-      case "$real" in
-        "$REPO"/*) paths+=("${real#"$REPO"/}") ;;
-        *) die ".env is a symlink resolving outside the checkout ($real)" ;;
-      esac
-    else
-      log "WARN: $p is a symlink; stored as a link, its target is NOT backed up"
-    fi
-  fi
+  [ -e "$REPO/$p" ] && paths+=("$p")
 done
-tar -cf "$BK/secrets.tar" -C "$REPO" "${paths[@]}" || die "secrets tar failed"
+# The tar is built AS droplet with -h: .env and data/secrets may be links onto
+# the encrypted /data (WARP-232, docker/ota/env-reconcile.sh), so links must be
+# followed, but droplet can only read what droplet can already read. A
+# droplet-planted link to a root-only file therefore fails with "permission
+# denied" instead of leaking. Root only owns the output file (umask 077).
+runuser -u droplet -- tar -chf - -C "$REPO" "${paths[@]}" > "$BK/secrets.tar" \
+  || die "secrets tar failed: a file under ${paths[*]} is not readable by droplet (e.g. a root-owned dir Docker created under data/secrets); chown it to droplet, setup.sh as droplet would hit it too"
 chmod 0600 "$BK/db.sql.gz" "$BK/secrets.tar"
 log "backup written to $BK (${#paths[@]} paths + db dump)"
 
