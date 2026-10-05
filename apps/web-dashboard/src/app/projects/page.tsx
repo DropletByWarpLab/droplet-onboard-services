@@ -73,6 +73,8 @@ import { InsightsView } from "@/components/projects/insights/InsightsView";
 import { CalendarView } from "@/components/projects/calendar/CalendarView";
 import { TimelineView } from "@/components/projects/timeline/TimelineView";
 import { MyWorkView } from "@/components/projects/mywork/MyWorkView";
+import { ProjectMenu } from "@/components/projects/import/ProjectMenu";
+import { ImportWizard } from "@/components/projects/import/ImportWizard";
 import {
   ConfirmArchiveProject,
   ConfirmDeleteProject,
@@ -174,7 +176,7 @@ function ProjectsWorkspace(): JSX.Element {
   const { state: url, go, openItem, closeItem } = useProjectsUrl();
 
   const [showArchived, setShowArchived] = useState(false);
-  const [modal, setModal] = useState<"newitem" | "newproject" | "archive" | "delete" | null>(null);
+  const [modal, setModal] = useState<"newitem" | "newproject" | "import" | "archive" | "delete" | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
   // ── which project, which mode ──
@@ -521,6 +523,8 @@ function ProjectsWorkspace(): JSX.Element {
       : filterActive && total !== undefined && !loading
         ? `${total} ${total === 1 ? "item matches" : "items match"}.`
         : null;
+  // WARP-3527: the API also enforces owner/admin or the project's lead.
+  const canImport = role === "owner" || role === "admin" || (role === "family" && !!project && project.leadId === user?.id);
 
   const headerTitle =
     mode === "project" ? (project?.name ?? "Projects") : mode === "workspace" ? "All projects" : mode === "views" ? "Views" : mode === "my-work" ? "My work" : mode === "time" ? "Time" : mode === "insights" ? "Insights" : "Projects";
@@ -600,6 +604,7 @@ function ProjectsWorkspace(): JSX.Element {
           </button>
         )}
         {refreshButton}
+        {project && <ProjectMenu projectId={project.id} canImport={canImport} onImport={() => setModal("import")} />}
       </>
     ) : mode === "my-work" ? null : (
       refreshButton
@@ -835,6 +840,7 @@ function ProjectsWorkspace(): JSX.Element {
         <NewItemModal project={project} onClose={() => setModal(null)} onCreated={() => void refreshAll()} />
       )}
       {modal === "newproject" && <NewProjectModal onClose={() => setModal(null)} onCreated={() => void refreshAll()} />}
+      {modal === "import" && project && <ImportWizard project={project} onClose={() => setModal(null)} onFinished={refreshAll} />}
       {modal === "archive" && project && (
         <ConfirmArchiveProject project={project} onClose={() => setModal(null)} onArchived={afterProjectGone} />
       )}

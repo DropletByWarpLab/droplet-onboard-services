@@ -22,8 +22,9 @@ vi.mock("next/link", () => ({
   default: ({ children, href, ...props }: any) => React.createElement("a", { href, ...props }, children),
 }));
 vi.mock("@/components/Toast", () => ({ useToast: () => ({ toast: vi.fn() }) }));
+const authRef = { role: "owner" };
 vi.mock("@/lib/auth", () => ({
-  useAuth: () => ({ user: { id: "u1", username: "ada", displayName: "Ada", role: "owner" }, isLoading: false }),
+  useAuth: () => ({ user: { id: "u1", username: "ada", displayName: "Ada", role: authRef.role }, isLoading: false }),
   authFetch: vi.fn(),
 }));
 vi.mock("@/lib/hooks/useAppCapabilities", () => ({ useAppCapabilities: () => ({ projects: true }) }));
@@ -52,7 +53,15 @@ vi.mock("@/components/projects/insights/InsightsView", () => ({
   ),
 }));
 
-const projectsRef = { current: [] as { id: string; identifier: string; name: string; archived: boolean; openCount: number; doneCount: number }[] };
+vi.mock("@/components/projects/import/ImportWizard", () => ({
+  ImportWizard: ({ project, onClose }: any) => (
+    <div role="dialog" aria-label={`Import into ${project.name}`}>
+      <button type="button" onClick={onClose}>Close import</button>
+    </div>
+  ),
+}));
+
+const projectsRef = { current: [] as { id: string; identifier: string; name: string; archived: boolean; openCount: number; doneCount: number; leadId?: string | null }[] };
 const query = vi.fn((_args: unknown) => ({ items: [], error: undefined, isLoading: false, total: 0, counts: {}, refresh: vi.fn() }));
 vi.mock("@/components/projects/usePm", () => ({
   useProjects: () => ({ projects: projectsRef.current, error: undefined, isLoading: false, mutate: vi.fn() }),
@@ -73,6 +82,7 @@ vi.mock("@/components/projects/usePm", () => ({
 import ProjectsPage from "./page";
 
 beforeEach(() => {
+  authRef.role = "owner";
   paramsRef.current = new URLSearchParams();
   projectsRef.current = [];
   query.mockClear();
@@ -145,6 +155,38 @@ describe("/projects?view=insights", () => {
     render(<ProjectsPage />);
     expect(screen.queryByTestId("insights")).toBeNull();
     expect(screen.getByText(/no projects yet/i)).toBeInTheDocument();
+  });
+
+  it("opens the importer for the selected project without changing its saved-view URL", () => {
+    projectsRef.current = [{ id: "p1", identifier: "INBOX", name: "Inbox", archived: false, openCount: 2, doneCount: 1 }];
+    const href = "/projects?p=INBOX&view=insights&v=mine&f=priority.is%3Ahigh";
+    paramsRef.current = new URLSearchParams(href.split("?")[1]);
+    window.history.replaceState(null, "", href);
+    render(<ProjectsPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Project actions" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /Import work items/ }));
+    expect(screen.getByRole("dialog", { name: "Import into Inbox" })).toBeInTheDocument();
+    expect(window.location.search).toBe(href.slice(href.indexOf("?")));
+    expect(query).toHaveBeenLastCalledWith(expect.objectContaining({ enabled: false, projectId: "p1" }));
+    fireEvent.click(screen.getByRole("button", { name: "Close import" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.getByRole("tab", { name: "Insights" })).toHaveAttribute("aria-selected", "true");
+  });
+
+  it.each([
+    ["u1", true],
+    ["another-person", false],
+  ])("offers importing to a family member only when they lead the selected project (%s)", (leadId, mayImport) => {
+    authRef.role = "family";
+    projectsRef.current = [{ id: "p1", identifier: "INBOX", name: "Inbox", archived: false, openCount: 2, doneCount: 1, leadId }];
+    paramsRef.current = new URLSearchParams("p=INBOX&view=insights");
+    window.history.replaceState(null, "", `/projects?${paramsRef.current}`);
+    render(<ProjectsPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Project actions" }));
+    expect(screen.queryByRole("menuitem", { name: /Import work items/ }) !== null).toBe(mayImport);
+    expect(screen.getByRole("menuitem", { name: /Export as CSV/ })).toBeInTheDocument();
   });
 
   it("renders outside the app router, where there are no search params at all", () => {
