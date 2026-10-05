@@ -42,7 +42,7 @@
 
 import type { Prisma, PrismaClient, PmStateGroup } from "@prisma/client";
 import { REPEATABLE_READ_TX, SERIALIZABLE_TX } from "../../lib/prisma-tx.js";
-import { PM_ERRORS, isPrismaCode, listWorkItemsWhere, type ApiWorkItem } from "./pm.service.js";
+import { PM_ERRORS, isPrismaCode, isServiceDesk, listWorkItemsWhere, type ApiWorkItem } from "./pm.service.js";
 import {
   reconstructBurndown,
   utcDayBoundaries,
@@ -170,14 +170,14 @@ async function progressByCycle(
 }
 
 async function loadCycleRow(db: Db, id: string): Promise<CycleRow> {
-  const row = await db.pmCycle.findUnique({ where: { id } });
-  if (!row) throw new Error(PM_PLANNING_ERRORS.CYCLE_NOT_FOUND);
+  const row = await db.pmCycle.findUnique({ where: { id }, include: { project: { select: { kind: true } } } });
+  if (!row || isServiceDesk(row.project)) throw new Error(PM_PLANNING_ERRORS.CYCLE_NOT_FOUND);
   return row;
 }
 
 async function assertProject(db: Db, projectId: string): Promise<void> {
-  const project = await db.pmProject.findUnique({ where: { id: projectId }, select: { id: true } });
-  if (!project) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
+  const project = await db.pmProject.findUnique({ where: { id: projectId }, select: { id: true, kind: true } });
+  if (!project || isServiceDesk(project)) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
 }
 
 // ── Reads ────────────────────────────────────────────────────────────────────
@@ -337,6 +337,7 @@ export async function deleteCycle(
 ): Promise<void> {
   try {
     await prisma.$transaction(async (tx) => {
+      await loadCycleRow(tx, cycleId);
       const claimed = await tx.pmCycle.updateMany({
         where: { id: cycleId },
         data: { updatedAt: new Date() },

@@ -22,7 +22,7 @@
 
 import type { Prisma, PrismaClient, PmStateGroup } from "@prisma/client";
 import { SERIALIZABLE_TX } from "../../lib/prisma-tx.js";
-import { PM_ERRORS, isPrismaCode, listWorkItemsWhere, type ApiWorkItem } from "./pm.service.js";
+import { PM_ERRORS, isPrismaCode, isServiceDesk, listWorkItemsWhere, type ApiWorkItem } from "./pm.service.js";
 import { PM_PLANNING_ERRORS, PmPlanningError, formatDateOnly } from "./pm-planning.js";
 import { emptyProgress, summarizeProgress, type ApiPlanningProgress } from "./pm-progress.js";
 
@@ -97,13 +97,13 @@ async function assertLeadAllowed(db: Db, leadId: string | null | undefined): Pro
 }
 
 async function assertProject(db: Db, projectId: string): Promise<void> {
-  const project = await db.pmProject.findUnique({ where: { id: projectId }, select: { id: true } });
-  if (!project) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
+  const project = await db.pmProject.findUnique({ where: { id: projectId }, select: { id: true, kind: true } });
+  if (!project || isServiceDesk(project)) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
 }
 
 async function loadModuleRow(db: Db, id: string): Promise<ModuleRow> {
-  const row = await db.pmModule.findUnique({ where: { id } });
-  if (!row) throw new Error(PM_PLANNING_ERRORS.MODULE_NOT_FOUND);
+  const row = await db.pmModule.findUnique({ where: { id }, include: { project: { select: { kind: true } } } });
+  if (!row || isServiceDesk(row.project)) throw new Error(PM_PLANNING_ERRORS.MODULE_NOT_FOUND);
   return row;
 }
 
@@ -176,8 +176,8 @@ export async function listModulesForWorkItem(
   prisma: PrismaClient,
   workItemId: string,
 ): Promise<ApiModuleRef[]> {
-  const item = await prisma.pmWorkItem.findUnique({ where: { id: workItemId }, select: { id: true } });
-  if (!item) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
+  const item = await prisma.pmWorkItem.findUnique({ where: { id: workItemId }, select: { id: true, project: { select: { kind: true } } } });
+  if (!item || isServiceDesk(item.project)) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
   const rows = await prisma.pmModuleWorkItem.findMany({
     where: { workItemId },
     select: { module: { select: { id: true, name: true, status: true } } },
@@ -295,7 +295,7 @@ export async function addModuleWorkItems(
     added = await prisma.$transaction(async (tx) => {
       const mod = await loadModuleRow(tx, moduleId);
       const items = await tx.pmWorkItem.findMany({
-        where: { id: { in: ids } },
+          where: { id: { in: ids }, project: { kind: "PROJECT" } },
         select: { id: true, projectId: true },
       });
       if (items.length !== ids.length) {

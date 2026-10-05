@@ -67,6 +67,7 @@ interface ItemRow {
   isArchived: boolean;
   estimate: number | null;
   stateId: string | null;
+  project: { kind: "PROJECT" };
 }
 interface ActRow {
   workItemId: string;
@@ -118,6 +119,7 @@ function makeFake() {
       isArchived: false,
       estimate: null,
       stateId: "s-todo",
+      project: { kind: "PROJECT" },
       ...over,
     };
     items.push(row);
@@ -133,6 +135,7 @@ function makeFake() {
         const o = v as { in?: unknown[]; not?: unknown };
         if (o.in) return o.in.includes(row[k]);
         if ("not" in o) return row[k] !== o.not;
+        return row[k] !== null && typeof row[k] === "object" && matches(row[k] as Row, v as Row);
       }
       return row[k] === v;
     });

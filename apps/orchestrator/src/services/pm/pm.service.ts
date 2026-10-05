@@ -1118,7 +1118,7 @@ export async function listWorkItemsWhere(
     where: { id: projectId },
     include: { department: { select: DEPARTMENT_SELECT } },
   });
-  if (!project) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
+  if (!project || isServiceDesk(project)) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
 
   const where: Prisma.PmWorkItemWhereInput = { AND: [{ projectId, isArchived: false }, extra] };
   const perPage = Math.max(1, Math.min(200, opts.perPage ?? 200));
