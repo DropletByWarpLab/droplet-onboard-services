@@ -61,8 +61,19 @@ class _PiperStubHandler(socketserver.BaseRequestHandler):
             payload = _read_exactly(sock, payload_len) if payload_len else b""
             server.events.append((header, payload))
 
+            if header.get("type") == "describe":
+                if server.malformed_info:
+                    sock.sendall(b'{not-json}\n')
+                    return
+                self._send(sock, "info", server.info)
+                return
+
             if header.get("type") != "synthesize":
                 # We only model the synthesize→audio flow. Drop the connection.
+                return
+
+            if server.error:
+                self._send(sock, "error", server.error)
                 return
 
             # Send the canned response.
@@ -106,6 +117,9 @@ class _PiperStubServer(socketserver.ThreadingTCPServer):
         self.events: list[tuple[dict, bytes]] = []
         self.scripted_chunks = scripted_chunks or [b"\xaa" * 100, b"\xbb" * 100]
         self.sample_rate = sample_rate
+        self.info = {"tts": []}
+        self.error = None
+        self.malformed_info = False
 
 
 @pytest.fixture
@@ -170,6 +184,32 @@ class TestWyomingTTSAvailable:
 # ────────────────────────────────────────────────────────────────────
 
 class TestWyomingTTSSynthesize:
+    def test_server_error_is_raised_immediately(self, piper_stub):
+        srv, port = piper_stub
+        srv.error = {"text": "Unknown voice", "code": "invalid_voice"}
+        client = WyomingTTS(host="127.0.0.1", port=port)
+        with pytest.raises(TTSUnavailable, match="Unknown voice"):
+            client.synthesize("hello")
+
+    def test_describe_reads_actual_server_catalog(self, piper_stub):
+        srv, port = piper_stub
+        srv.info = {"tts": [{"name": "kokoro", "voices": [{"name": "af_heart", "installed": True}]}]}
+        client = WyomingTTS(host="127.0.0.1", port=port)
+        assert client.describe() == srv.info
+        assert srv.events[0][0]["type"] == "describe"
+
+    def test_bad_catalog_wire_data_becomes_tts_unavailable(self, piper_stub):
+        srv, port = piper_stub
+        srv.malformed_info = True
+        client = WyomingTTS(host="127.0.0.1", port=port)
+        with pytest.raises(TTSUnavailable):
+            client.describe()
+
+    def test_explicit_empty_voice_uses_server_default_without_sending_model_name(self, piper_stub):
+        srv, port = piper_stub
+        client = WyomingTTS(host="127.0.0.1", port=port, default_voice="old-config")
+        client.synthesize("hello", voice="")
+        assert "voice" not in srv.events[0][0]["data"]
     def test_returns_concatenated_pcm_with_correct_metadata(self, piper_stub):
         srv, port = piper_stub
         srv.scripted_chunks = [b"\x01\x02" * 50, b"\x03\x04" * 50]
@@ -312,14 +352,22 @@ class TestMockTTS:
 # ────────────────────────────────────────────────────────────────────
 
 class TestBuildTTSFromEnv:
+    def test_cpu_synthesis_timeout_configurable_and_bounded(self, monkeypatch):
+        monkeypatch.delenv("TTS_URL", raising=False)
+        monkeypatch.setenv("TTS_SYNTHESIZE_TIMEOUT_S", "90")
+        assert build_tts_from_env()._synthesize_timeout_s == 90
+        for bad in ("0", "301", "nan"):
+            monkeypatch.setenv("TTS_SYNTHESIZE_TIMEOUT_S", bad)
+            with pytest.raises(ValueError):
+                build_tts_from_env()
     def test_default_is_wyoming_against_compose_dns(self, monkeypatch):
         monkeypatch.delenv("TTS_URL", raising=False)
         monkeypatch.delenv("TTS_VOICE", raising=False)
         tts = build_tts_from_env()
         assert isinstance(tts, WyomingTTS)
-        assert tts._host == "wyoming-piper"
+        assert tts._host == "kokoro-tts"
         assert tts._port == DEFAULT_TTS_PORT
-        assert tts._default_voice == "en_US-ryan-medium"
+        assert tts._default_voice == "af_heart"
 
     def test_mock_when_tts_url_double_underscore_mock(self, monkeypatch):
         monkeypatch.setenv("TTS_URL", "__mock__")
@@ -342,4 +390,21 @@ class TestBuildTTSFromEnv:
         monkeypatch.setenv("TTS_URL", "nonsense")
         tts = build_tts_from_env()
         assert isinstance(tts, WyomingTTS)
-        assert tts._host == "wyoming-piper"
+        assert tts._host == "kokoro-tts"
+
+
+def test_synthesis_total_deadline_bounds_stalled_partial_audio(monkeypatch):
+    import time
+
+    rsock, wsock = socket.socketpair()
+    monkeypatch.setattr(socket, "create_connection", lambda *args, **kwargs: rsock)
+    client = WyomingTTS(synthesize_timeout_s=0.05)
+    try:
+        wsock.sendall(b'{"type":"audio-chunk","payload_length":1024}\n\x00')
+        started = time.monotonic()
+        with pytest.raises(TTSUnavailable, match="wall-clock deadline"):
+            client.synthesize("hello")
+        assert time.monotonic() - started < 0.5
+    finally:
+        rsock.close()
+        wsock.close()

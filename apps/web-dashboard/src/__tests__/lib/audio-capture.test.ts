@@ -3,11 +3,12 @@
  * The PcmRecorder browser glue (getUserMedia/AudioContext) is exercised
  * manually; these helpers carry the correctness-critical conversions.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   concatFloat32,
   downsampleBuffer,
   floatTo16BitPcm,
+  PcmRecorder,
 } from "@/lib/audio-capture";
 
 describe("downsampleBuffer", () => {
@@ -34,6 +35,41 @@ describe("downsampleBuffer", () => {
     expect(() =>
       downsampleBuffer(new Float32Array(4), 8000, 16000),
     ).toThrow(/upsample/);
+  });
+});
+
+describe("PcmRecorder capture limit", () => {
+  it("bounds stored samples when a background tab delays the stop timer", async () => {
+    const stop = vi.fn();
+    let processor: { disconnect: () => void; connect: () => void; onaudioprocess?: (event: unknown) => void };
+    const audioContext = class {
+      sampleRate = 16000;
+      destination = {};
+      createMediaStreamSource() { return { connect: vi.fn(), disconnect: vi.fn() }; }
+      createScriptProcessor() {
+        processor = { disconnect: vi.fn(), connect: vi.fn() };
+        return processor;
+      }
+      close = vi.fn(async () => undefined);
+    };
+    vi.stubGlobal("AudioContext", audioContext);
+    vi.stubGlobal("navigator", {
+      mediaDevices: { getUserMedia: vi.fn(async () => ({ getTracks: () => [{ stop }] })) },
+    });
+    try {
+      const recorder = new PcmRecorder();
+      await recorder.start();
+      const frame = new Float32Array(16000);
+      for (let second = 0; second < 35; second++) {
+        processor!.onaudioprocess!({ inputBuffer: { getChannelData: () => frame } });
+      }
+      const result = await recorder.stop();
+      expect(result.pcm.byteLength).toBe(30 * 16000 * 2);
+      expect(result.rate).toBe(16000);
+      expect(stop).toHaveBeenCalledOnce();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 

@@ -38,8 +38,8 @@ If you only read one thing: the [System map](#system-map) and
 ## System map
 
 The appliance is a **single Docker Compose stack** (`docker/docker-compose.yml`,
-**36 services** — 14 default-on, the rest profile-gated; count taken from the
-compose file on 2026-09-02, when WARP-2627 added `mcp-bridge`) fronted by one
+**39 services** — 16 default-on, the rest profile-gated; count taken from the
+compose file on 2026-10-05, after adding CPU speech sidecars) fronted by one
 nginx `gateway`. The **orchestrator** is the brain —
 every client request and every internal coordination path goes through it. There
 is deliberately **no separate API gateway service** in front of the orchestrator
@@ -87,6 +87,8 @@ is deliberately **no separate API gateway service** in front of the orchestrator
 | **camera-discovery** | `services/camera-discovery/` | Python + FastAPI | ONVIF/RTSP discovery → Frigate |
 | **erp-sql-bridge** | `services/erp-sql-bridge/` | Python + FastAPI + pyodbc | Direct-SQL ERP bridge (SAP SQL Anywhere) |
 | **voice-io** | `services/voice-io/` | Python + FastAPI | Wake → STT → agent → TTS |
+| **qwen-stt** | `services/qwen-stt/` | Python + native C/OpenBLAS | Offline English Qwen3-ASR 1.7B, CPU-only Wyoming :10300 |
+| **kokoro-tts** | `services/kokoro-tts/` | Python + ONNX Runtime | Offline Kokoro speech, eight selectable English voices, CPU-only Wyoming :10200 |
 | **oled-display** | `services/oled-display/` | Python + FastAPI | Front-panel TFT screen |
 | **ops-console** | `services/ops-console/` | Python + FastAPI | Support "what's running" console |
 | **rag-eval** | `services/rag-eval/` | Python + RAGAS | Offline retrieval-quality harness |
