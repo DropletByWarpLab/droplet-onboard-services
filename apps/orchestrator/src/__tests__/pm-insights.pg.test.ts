@@ -453,7 +453,7 @@ describe.skipIf(!RUN)("PM insights (WARP-3524)", () => {
       );
       expect(insight.meta).toMatchObject({ scope: "workspace", itemCount: 1 });
       expect(insight.createdVsCompleted.created).toBe(1);
-      expect(insight.workload.assignees).toEqual([{ userId: null, openItems: 1 }]);
+      expect(insight.workload.assignees).toEqual([{ userId: null, openItems: 1, openEstimate: 0 }]);
       expect(insight.agingWip).toMatchObject({ total: 0, items: [] });
       expect(JSON.stringify(insight)).not.toContain(ticket.id);
       expect(JSON.stringify(insight)).not.toContain(ticket.name);
