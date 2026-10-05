@@ -17,6 +17,7 @@ vi.mock("./pm-dev-egress.js", () => ({
 vi.mock("./pm.service.js", () => ({ writeActivity: activityMock }));
 
 import { runDevelopmentSync } from "./pm-development.service.js";
+import { createTransactionSeam } from "../../__tests__/helpers/prisma-tx-harness.js";
 
 const REPO = {
   id: "repo-1", provider: "GITHUB", externalId: "42", apiRef: "acme/widget", fullName: "acme/widget",
@@ -66,6 +67,7 @@ describe("WARP-3535 sync completeness", () => {
         findFirst: vi.fn().mockResolvedValue({ name: state === "OPEN" ? "Review" : "Done", group: state === "OPEN" ? "started" : "completed" }),
       },
     };
+    const transactionSeam = createTransactionSeam({ client: () => tx });
     connectorMock.readDevelopment.mockImplementation(async ({ feed }: { feed: string }) => output(feed, {
       items: feed === "pullRequestsOpen" ? [{
         type: "pull_request", externalId: "pr-42", number: 42, state,
@@ -76,7 +78,7 @@ describe("WARP-3535 sync completeness", () => {
     await runDevelopmentSync({
       ...prisma,
       pmWorkItem: { findFirst: vi.fn().mockResolvedValue({ id: "item-1", stateId: "backlog-id" }) },
-      $transaction: vi.fn(async (callback: (client: typeof tx) => Promise<unknown>) => callback(tx)),
+      $transaction: transactionSeam.$transaction,
     } as never);
 
     expect(tx.pmWorkItem.updateMany).toHaveBeenCalledWith(expect.objectContaining({
@@ -84,7 +86,11 @@ describe("WARP-3535 sync completeness", () => {
     }));
     // Timeline, notifications and historical charts resolve these values as
     // state IDs; human-readable names break that shared activity contract.
-    expect(activityMock).toHaveBeenCalledWith(tx, expect.objectContaining({
+    expect(activityMock).toHaveBeenCalledWith(expect.objectContaining({
+      pmExternalLink: expect.anything(),
+      pmState: expect.anything(),
+      pmWorkItem: expect.anything(),
+    }), expect.objectContaining({
       workItemId: "item-1", verb: "state_changed", field: "state",
       oldValue: "backlog-id", newValue: targetStateId,
     }));
