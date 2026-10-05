@@ -45,6 +45,20 @@ describe("transactional ticket SLA materialisation", () => {
     await syncTicketSla(f.tx, "t1", at("10:00"), "requester"); await syncTicketSla(f.tx, "t1", at("10:15"), "requester");
     expect(f.ticket.nextResponseDueAt.toISOString()).toBe("2026-10-05T10:30:00.000Z");
   });
+  it("a newly waiting next-response cycle can emit its own risk transition after an on-time first reply", async () => {
+    const f = fixture(); await syncTicketSla(f.tx, "t1", at("09:00"), "create");
+    await syncTicketSla(f.tx, "t1", at("09:45"));
+    f.ticket.firstRespondedAt = at("09:50"); await syncTicketSla(f.tx, "t1", at("09:50"), "reply");
+    expect(f.ticket.slaStatus).toBe("ON_TRACK");
+    await syncTicketSla(f.tx, "t1", at("10:00"), "requester"); await syncTicketSla(f.tx, "t1", at("10:23")); await syncTicketSla(f.tx, "t1", at("10:24"));
+    expect(f.activities.filter((a) => a.verb === "sla_at_risk")).toHaveLength(2);
+    expect(f.activities.at(-1).field).toBe("nextResponse");
+  });
+  it("repeated intake before the first staff response uses only the first-response promise", async () => {
+    const f = fixture(); await syncTicketSla(f.tx, "t1", at("09:00"), "create");
+    await syncTicketSla(f.tx, "t1", at("09:05"), "requester");
+    expect(f.ticket.nextResponseDueAt).toBeNull(); expect(f.ticket.firstResponseDueAt.toISOString()).toBe("2026-10-05T10:00:00.000Z");
+  });
   it("records a late next reply even if no timer ran before the reply", async () => {
     const f = fixture(); await syncTicketSla(f.tx, "t1", at("09:00"), "create");
     f.ticket.firstRespondedAt = at("09:05"); await syncTicketSla(f.tx, "t1", at("09:05"), "reply");

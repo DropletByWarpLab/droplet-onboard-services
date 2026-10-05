@@ -19,7 +19,7 @@ describe("desk assignment cursor", () => {
     expect(await assignNewTicket(f.tx, "desk", null, f.deps)).toEqual(["b"]);
     expect(await assignNewTicket(f.tx, "desk", null, f.deps)).toEqual(["a"]);
     expect(f.events.slice(0, 2)).toEqual(["lock", "read"]);
-    expect(f.tx.user.findMany.mock.calls[0][0].where).toMatchObject({ directoryStatus: "ACTIVE", role: { in: ["owner", "admin", "family"] } });
+    expect(f.tx.user.findMany.mock.calls[0][0].where).toMatchObject({ directoryStatus: "ACTIVE", role: { in: ["owner", "admin", "family"] }, id: { in: ["a", "inactive", "narrowed", "b"] } });
   });
   it("selects least-open and rotates ties using only this desk's open live tickets", async () => {
     const f = fixture("LEAST_OPEN"); expect(await assignNewTicket(f.tx, "desk", null, f.deps)).toEqual(["b"]);

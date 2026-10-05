@@ -7,8 +7,14 @@ import { findTicketRow, updateTicket } from "./ticket.service.js";
 import { lockTicketClock } from "./sla-clock.service.js";
 import { SLA_ERRORS, assignmentSchema, macroSchema, parseCalendar, policySchema, type PolicyInput, type AssignmentInput, type MacroInput } from "./sla-schemas.js";
 import { SUPPORT_ERRORS, type SupportCtx, type SupportViewer, type TicketUpdateInput } from "./support.types.js";
+import { resolveEffectiveAccess } from "../effective-access.service.js";
 
 const isAdmin = (viewer: SupportViewer) => ["owner", "admin"].includes(viewer.role);
+async function requireSharedManage(viewer: SupportViewer, deps: SupportDeps) {
+  if (!isAdmin(viewer)) throw new Error(SLA_ERRORS.MACRO_NOT_FOUND);
+  const access = await (deps.resolveAccess ?? resolveEffectiveAccess)(viewer.id);
+  if (!access?.features.some((f) => f.moduleId === "support" && f.level === "manage")) throw new Error(SLA_ERRORS.MACRO_NOT_FOUND);
+}
 async function deskOf(db: Db, id: string, writable = false) {
   const desk = await db.pmProject.findFirst({ where: { id, kind: "SERVICE_DESK" } });
   if (!desk) throw new Error(SUPPORT_ERRORS.DESK_NOT_FOUND);
@@ -66,7 +72,10 @@ export async function saveDeskSla(prisma: PrismaClient, deskId: string, input: {
     if (policy.calendarId && !await tx.pmBusinessCalendar.findFirst({ where: { id: policy.calendarId, workspaceId: desk.workspaceId } })) throw new Error(SLA_ERRORS.CALENDAR_NOT_FOUND);
     if (assignment.departmentId) await assertAssignableDepartment(tx, assignment.departmentId);
     await tx.pmSlaPolicy.upsert({ where: { projectId: deskId }, create: { ...policy, projectId: deskId }, update: policy });
-    await tx.pmAssignmentRule.upsert({ where: { projectId: deskId }, create: { ...assignment, projectId: deskId }, update: { ...assignment, lastAssignedUserId: null } });
+    await tx.$queryRaw`SELECT "id" FROM "PmAssignmentRule" WHERE "projectId" = ${deskId} FOR UPDATE`;
+    const old = await tx.pmAssignmentRule.findUnique({ where: { projectId: deskId } });
+    const changed = !old || old.mode !== assignment.mode || old.departmentId !== assignment.departmentId || JSON.stringify(old.memberIds) !== JSON.stringify(assignment.memberIds);
+    await tx.pmAssignmentRule.upsert({ where: { projectId: deskId }, create: { ...assignment, projectId: deskId }, update: { ...assignment, ...(changed ? { lastAssignedUserId: null } : {}) } });
   });
   return getDeskSla(prisma, deskId);
 }
@@ -84,19 +93,26 @@ export async function listMacros(prisma: PrismaClient, viewer: SupportViewer, de
   await deskOf(prisma, deskId);
   return prisma.pmMacro.findMany({ where: macroWhere(viewer, deskId), orderBy: [{ name: "asc" }, { id: "asc" }], take: 200 });
 }
-export async function saveMacro(prisma: PrismaClient, viewer: SupportViewer, id: string | null, raw: MacroInput) {
+export async function saveMacro(prisma: PrismaClient, viewer: SupportViewer, id: string | null, raw: MacroInput, deps: SupportDeps = {}) {
   const input = macroSchema.parse(raw);
-  if (input.visibility === "SHARED" && !isAdmin(viewer)) throw new Error(SLA_ERRORS.MACRO_NOT_FOUND);
   if (input.projectId) await deskOf(prisma, input.projectId, true);
   const existing = id ? await prisma.pmMacro.findUnique({ where: { id } }) : null;
   if (id && (!existing || (existing.ownerId !== viewer.id && !(existing.visibility === "SHARED" && isAdmin(viewer))))) throw new Error(SLA_ERRORS.MACRO_NOT_FOUND);
+  if (input.visibility === "SHARED" || existing?.visibility === "SHARED") await requireSharedManage(viewer, deps);
   const data = { ...input, bodyHtml: cleanMacroBody(input.bodyHtml) };
+  if (input.actions.stateId && !await prisma.pmState.findFirst({ where: { id: input.actions.stateId, projectId: input.projectId! } })) throw new Error(SUPPORT_ERRORS.INVALID_STATE);
+  const labelIds = [...new Set([...(input.actions.addLabelIds ?? []), ...(input.actions.removeLabelIds ?? [])])];
+  if (labelIds.length && await prisma.pmLabel.count({ where: { id: { in: labelIds }, projectId: input.projectId! } }) !== labelIds.length) throw new Error(SUPPORT_ERRORS.INVALID_LABEL);
+  if (typeof input.actions.assignee === "object") await assertAgents(prisma, [input.actions.assignee.userId], deps);
   try {
     return id ? await prisma.pmMacro.update({ where: { id }, data }) : await prisma.pmMacro.create({ data: { ...data, ownerId: viewer.id } });
   } catch (error) { if (isPrismaCode(error, "P2025")) throw new Error(SLA_ERRORS.MACRO_NOT_FOUND); throw error; }
 }
-export async function deleteMacro(prisma: PrismaClient, viewer: SupportViewer, id: string) {
-  const result = await prisma.pmMacro.deleteMany({ where: { id, OR: [{ ownerId: viewer.id }, ...(isAdmin(viewer) ? [{ visibility: "SHARED" as const }] : [])] } });
+export async function deleteMacro(prisma: PrismaClient, viewer: SupportViewer, id: string, deps: SupportDeps = {}) {
+  const existing = await prisma.pmMacro.findFirst({ where: { id, OR: [{ ownerId: viewer.id }, ...(isAdmin(viewer) ? [{ visibility: "SHARED" as const }] : [])] } });
+  if (!existing) throw new Error(SLA_ERRORS.MACRO_NOT_FOUND);
+  if (existing.visibility === "SHARED") await requireSharedManage(viewer, deps);
+  const result = await prisma.pmMacro.deleteMany({ where: { id, ownerId: existing.ownerId, visibility: existing.visibility } });
   if (!result.count) throw new Error(SLA_ERRORS.MACRO_NOT_FOUND);
 }
 const escapeHtml = (value: string) => value.replace(/[&<>"']/g, (s) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[s]!);

@@ -11,7 +11,7 @@ export async function assignNewTicket(
   const stored = await tx.pmAssignmentRule.findUnique({ where: { projectId: deskId } });
   if (!stored || stored.mode === "MANUAL" || (stored.departmentId && stored.departmentId !== departmentId)) return [];
   const rule = assignmentSchema.parse({ mode: stored.mode, departmentId: stored.departmentId, memberIds: stored.memberIds });
-  const agents = new Set((await listAgents(tx as unknown as PrismaClient, deps)).map((u) => u.id));
+  const agents = new Set((await listAgents(tx as unknown as PrismaClient, deps, rule.memberIds)).map((u) => u.id));
   const members = rule.memberIds.filter((id) => agents.has(id));
   if (!members.length) return [];
   // Rotate configured order BEFORE choosing the least-open tie, so ties are fair.

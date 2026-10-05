@@ -147,6 +147,14 @@ describe("an external guest", () => {
 });
 
 describe("a member who holds Support", () => {
+  it.each([
+    ["admin", "manage", true], ["admin", "act", false], ["family", "act", false],
+  ] as const)("settings affordances reflect %s's current %s grant", async (role, level, expected) => {
+    const app = appWith({ role, features: [["support", level]] });
+    expect((await request(app).get("/api/support/desks/d1/sla")).body.canManage).toBe(expected);
+    expect((await request(app).get("/api/support/calendars")).body.canManage).toBe(expected);
+    expect((await request(app).get("/api/support/macros?deskId=d1")).body.canManageShared).toBe(expected);
+  });
   it("reaches the routes their level allows, with Projects switched off box-wide (no parent module)", async () => {
     const app = appWith({ disabled: ["projects"], features: [["support", "act"]] });
     for (const c of ROUTES) {

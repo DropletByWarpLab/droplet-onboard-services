@@ -14,6 +14,7 @@ export function registerSupportSlaRuntime(prisma: PrismaClient, cronRuntime: Cro
   // Own writes are already materialised inside their transaction; this is idempotent.
   registerOutboxConsumer({ name: "support-sla", intervalMs: 60_000, handle: async (row) => {
     if (!["created", "state_changed", "updated", "commented"].includes(row.verb)) return;
-    await prisma.$transaction((tx) => syncTicketSla(tx, row.workItemId, deps.now?.() ?? new Date(), "tick", deps));
+    const event = row.verb === "created" ? "create" : row.verb === "updated" && row.field === "priority" ? "priority" : "tick";
+    await prisma.$transaction((tx) => syncTicketSla(tx, row.workItemId, deps.now?.() ?? new Date(), event, deps));
   } }, { prisma, cronRuntime, now: deps.now });
 }

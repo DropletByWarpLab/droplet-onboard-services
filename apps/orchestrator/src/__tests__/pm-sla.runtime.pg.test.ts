@@ -2,7 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import type { PrismaClient } from "@prisma/client";
 import { createTicket, updateTicket } from "../services/support/ticket.service.js";
 import { addNote, addReply } from "../services/support/conversation.service.js";
-import { applyMacro, getDeskSla, listMacros } from "../services/support/sla-settings.service.js";
+import { applyMacro, getDeskSla, listMacros, saveDeskSla } from "../services/support/sla-settings.service.js";
 import { syncTicketSla } from "../services/support/sla-clock.service.js";
 import { grants } from "./helpers/support-routes.js";
 vi.unmock("@prisma/client");
@@ -60,10 +60,27 @@ describe.skipIf(!RUN)("SLA transactions and concurrent assignment (real PostgreS
     expect(assignments.some((a) => a.userId === inactiveId)).toBe(false);
     expect(new Set(tickets.map((t) => t.key)).size).toBe(6);
   });
+  it("editing SLA targets preserves the live rotation cursor when assignment terms did not change", async () => {
+    await prisma.pmAssignmentRule.create({ data: { projectId: deskId, mode: "ROUND_ROBIN", memberIds: [agentId, secondId], lastAssignedUserId: agentId } });
+    await saveDeskSla(prisma, deskId, { policy: { enabled: true, calendarId: null, targets: { high: { resolutionMins: 600 } }, atRiskPercent: 75, escalation: [] }, assignment: { mode: "ROUND_ROBIN", departmentId: null, memberIds: [agentId, secondId] } }, deps);
+    expect((await prisma.pmAssignmentRule.findUniqueOrThrow({ where: { projectId: deskId } })).lastAssignedUserId).toBe(agentId);
+    expect((await ticket()).assignees.map((a) => a.id)).toEqual([secondId]);
+  });
   it("serialises competing clock ticks so exactly one transition activity commits", async () => {
     const created = await ticket(); now = new Date("2026-10-05T09:45:00Z");
     await Promise.all(Array.from({ length: 4 }, () => prisma.$transaction((tx) => syncTicketSla(tx, created.id, now, "tick", deps))));
     expect(await prisma.pmActivity.count({ where: { workItemId: created.id, verb: "sla_at_risk" } })).toBe(1);
+  });
+  it("an unverifiable escalation rolls back the transition and is safely retryable", async () => {
+    const created = await ticket();
+    await prisma.pmSlaPolicy.update({ where: { projectId: deskId }, data: { escalation: [{ on: "AT_RISK", metric: "any", actions: [{ type: "reassign", userId: secondId }] }] } });
+    now = new Date("2026-10-05T09:45:00Z");
+    await expect(prisma.$transaction((tx) => syncTicketSla(tx, created.id, now, "tick", { resolveAccess: async () => { throw new Error("access offline"); } }))).rejects.toThrow("access offline");
+    expect((await prisma.pmTicket.findUniqueOrThrow({ where: { workItemId: created.id } })).slaStatus).toBe("ON_TRACK");
+    expect(await prisma.pmActivity.count({ where: { workItemId: created.id, verb: "sla_at_risk" } })).toBe(0);
+    await prisma.$transaction((tx) => syncTicketSla(tx, created.id, now, "tick", deps));
+    expect(await prisma.pmActivity.count({ where: { workItemId: created.id, verb: "sla_at_risk" } })).toBe(1);
+    expect((await prisma.pmWorkItemAssignee.findMany({ where: { workItemId: created.id } })).map((a) => a.userId)).toEqual([secondId]);
   });
   it("applies a macro's fields and audit in one transaction and leaves sending the reply explicit", async () => {
     const created = await ticket();

@@ -23,15 +23,19 @@ export async function syncTicketSla(
   const policy = policyRow?.enabled ? policySchema.parse({ enabled: policyRow.enabled, calendarId: policyRow.calendarId,
     targets: policyRow.targets, atRiskPercent: policyRow.atRiskPercent, escalation: policyRow.escalation }) : null;
   let terms = ticket.slaTargets === null ? null : parseSlaTerms(ticket.slaTargets);
-  if (event === "create" || event === "priority") {
+  if ((event === "create" && terms === null) || (event === "priority" && terms?.priority !== row.priority)) {
     const target = policy?.targets[row.priority as keyof typeof policy.targets];
     terms = target && policy ? {
+      priority: row.priority,
       firstResponseMins: target.firstResponseMins ?? null, nextResponseMins: target.nextResponseMins ?? null,
       resolutionMins: target.resolutionMins ?? null, atRiskPercent: policy.atRiskPercent,
-      calendar: policyRow?.calendar ? validateCalendarForSave(policyRow.calendar) : null,
+      // Accumulated paused milliseconds were measured in this calendar. Keep it
+      // for the ticket's lifetime, including a priority change after a policy edit.
+      calendar: terms ? terms.calendar : policyRow?.calendar ? validateCalendarForSave(policyRow.calendar) : null,
       nextResponseStartedAt: terms?.nextResponseStartedAt ?? null,
       nextResponsePausedMs: terms?.nextResponsePausedMs ?? 0,
-      notified: terms?.notified ?? [],
+      // Retargeting starts a new risk window; a breached promise stays breached.
+      notified: terms?.notified?.filter((s) => s === "BREACHED") ?? [],
     } : null;
   }
   if (!terms) {
@@ -45,10 +49,11 @@ export async function syncTicketSla(
     terms, previousStatus: ticket.slaStatus as SlaStatus };
   const beforeReply = event === "reply" ? evaluateSla(input) : null;
   if (event === "reply") terms = { ...terms, nextResponseStartedAt: null };
-  if (event === "requester" && terms.nextResponseStartedAt === null) terms = { ...terms, nextResponseStartedAt: now.toISOString(),
+  if (event === "requester" && ticket.firstRespondedAt !== null && terms.nextResponseStartedAt === null) terms = { ...terms, nextResponseStartedAt: now.toISOString(),
     nextResponsePausedMs: Number(ticket.slaPausedMs) + (ticket.slaPausedAt ? businessMsBetween(ticket.slaPausedAt, now, terms.calendar) : 0) };
   const result = evaluateSla({ ...input, terms });
   if (beforeReply?.slaStatus === "BREACHED") { result.slaStatus = "BREACHED"; result.metric = beforeReply.metric; }
+  if (event === "reply" && result.slaStatus === "ON_TRACK") terms = { ...terms, notified: terms.notified?.filter((s) => s === "BREACHED") ?? [] };
   const transition = (result.slaStatus === "AT_RISK" || result.slaStatus === "BREACHED") && !terms.notified?.includes(result.slaStatus);
   if (transition) terms = { ...terms, notified: [...(terms.notified ?? []), result.slaStatus as "AT_RISK" | "BREACHED"] };
   await tx.pmTicket.update({ where: { workItemId: id }, data: {
@@ -63,16 +68,18 @@ export async function syncTicketSla(
     field: result.metric, oldValue: ticket.slaStatus, newValue: result.slaStatus });
   // Actions run once in the transaction that changes the explicit status.
   let raised = false;
+  let effectivePriority = row.priority;
   for (const escalation of policy?.escalation ?? []) {
     if (escalation.on !== result.slaStatus || (escalation.metric !== "any" && escalation.metric !== result.metric)) continue;
     for (const action of escalation.actions) {
       if (action.type === "raise_priority") {
         const order = ["none", "low", "medium", "high", "urgent"] as const;
-        const priority = order[Math.min(order.indexOf(row.priority) + 1, 4)]!;
-        if (priority !== row.priority) {
+        const priority = order[Math.min(order.indexOf(effectivePriority) + 1, 4)]!;
+        if (priority !== effectivePriority) {
           raised = true;
           await tx.pmWorkItem.update({ where: { id }, data: { priority } });
-          await writeActivity(tx, { workItemId: id, actorId: null, verb: "updated", field: "priority", oldValue: row.priority, newValue: priority });
+          await writeActivity(tx, { workItemId: id, actorId: null, verb: "updated", field: "priority", oldValue: effectivePriority, newValue: priority });
+          effectivePriority = priority;
         }
       } else if (action.type === "reassign") {
         // Revalidate current eligibility; a withdrawn grant cannot gain a private ticket.

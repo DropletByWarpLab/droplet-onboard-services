@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { deleteMacro, getDeskSla, listMacros, previewMacro, saveDeskSla, saveMacro } from "./sla-settings.service.js";
 import { getSlaReport } from "./sla-report.service.js";
+import { grants } from "../../__tests__/helpers/support-routes.js";
 const viewer = { id: "agent", role: "family" } as const;
 const ticketId = "3fd5b450-a07a-4ad0-afab-5094b08b18cf";
 function fixture() {
@@ -35,12 +36,22 @@ describe("Support SLA settings boundary", () => {
     const f = fixture(); f.macro.ownerId = "another";
     await expect(saveMacro(f.db, { id: "admin", role: "admin" }, "m1", { projectId: "desk", name: "X", bodyHtml: "<p>x</p>", actions: {}, visibility: "PERSONAL" })).rejects.toThrow("macro_not_found");
     expect(f.db.pmMacro.update).not.toHaveBeenCalled();
+    f.db.pmMacro.findFirst.mockResolvedValue(null);
     await expect(deleteMacro(f.db, viewer, "m1")).rejects.toThrow("macro_not_found");
-    expect(f.db.pmMacro.deleteMany.mock.calls[0][0].where).toEqual({ id: "m1", OR: [{ ownerId: "agent" }] });
+    expect(f.db.pmMacro.findFirst.mock.calls[0][0].where).toEqual({ id: "m1", OR: [{ ownerId: "agent" }] });
+    expect(f.db.pmMacro.deleteMany).not.toHaveBeenCalled();
   });
   it("an agent cannot turn their own macro into a shared administrator macro", async () => {
     const f = fixture(); await expect(saveMacro(f.db, viewer, null, { projectId: "desk", name: "X", bodyHtml: "<p>x</p>", actions: {}, visibility: "SHARED" })).rejects.toThrow("macro_not_found");
     expect(f.db.pmMacro.create).not.toHaveBeenCalled();
+  });
+  it("shared macro changes require Support manage, including deletion and changing its visibility", async () => {
+    const f = fixture(); f.macro.visibility = "SHARED";
+    const admin = { id: "admin", role: "admin" } as const;
+    const deps = { resolveAccess: async () => grants([["support", "act"]]) };
+    await expect(saveMacro(f.db, admin, "m1", { projectId: "desk", name: "X", bodyHtml: "Hi", actions: {}, visibility: "PERSONAL" }, deps)).rejects.toThrow("macro_not_found");
+    await expect(deleteMacro(f.db, admin, "m1", deps)).rejects.toThrow("macro_not_found");
+    expect(f.db.pmMacro.update).not.toHaveBeenCalled(); expect(f.db.pmMacro.deleteMany).not.toHaveBeenCalled();
   });
   it("escapes substituted person/desk data and keeps preview read-only", async () => {
     const f = fixture(); const result = await previewMacro(f.db, viewer, ticketId, "m1");
@@ -55,6 +66,14 @@ describe("Support SLA settings boundary", () => {
     const f = fixture();
     await expect(saveMacro(f.db, viewer, null, { projectId: "desk", name: "Bad", bodyHtml: "{{requester.email}}", actions: {}, visibility: "PERSONAL" })).rejects.toThrow("invalid_sla_configuration");
     await expect(saveMacro(f.db, viewer, null, { projectId: null, name: "Bad", bodyHtml: "Hi", actions: { stateId: "desk-only" }, visibility: "PERSONAL" })).rejects.toThrow();
+    expect(f.db.pmMacro.create).not.toHaveBeenCalled();
+  });
+  it("validates state and label ownership when saving, before storing a macro", async () => {
+    const f = fixture(); f.db.pmState = { findFirst: vi.fn(async () => null) }; f.db.pmLabel = { count: vi.fn(async () => 0) };
+    const input = { projectId: "desk", name: "Bad references", bodyHtml: "Hi", visibility: "PERSONAL" as const };
+    await expect(saveMacro(f.db, viewer, null, { ...input, actions: { stateId: "project-state" } })).rejects.toThrow("invalid_state");
+    await expect(saveMacro(f.db, viewer, null, { ...input, actions: { addLabelIds: ["other-desk-label"] } })).rejects.toThrow("invalid_label");
+    expect(f.db.pmState.findFirst.mock.calls[0][0].where).toEqual({ id: "project-state", projectId: "desk" });
     expect(f.db.pmMacro.create).not.toHaveBeenCalled();
   });
 });

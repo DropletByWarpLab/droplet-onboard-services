@@ -267,9 +267,9 @@ async function holdingSupport(
 
 /** The members a ticket can be assigned to: active staff who hold Support. A
  *  guest never does, and a person narrowed away from Support is not offered. */
-export async function listAgents(prisma: PrismaClient, deps: SupportDeps = {}): Promise<ApiPerson[]> {
+export async function listAgents(prisma: PrismaClient, deps: SupportDeps = {}, userIds?: readonly string[]): Promise<ApiPerson[]> {
   const users = await prisma.user.findMany({
-    where: { directoryStatus: "ACTIVE", role: { in: [...STAFF_ROLES] } },
+    where: { directoryStatus: "ACTIVE", role: { in: [...STAFF_ROLES] }, ...(userIds ? { id: { in: [...userIds] } } : {}) },
     select: { id: true, displayName: true },
     orderBy: { displayName: "asc" },
   });

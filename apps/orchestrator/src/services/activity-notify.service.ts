@@ -79,10 +79,10 @@
  * is not told like the above. Its subject is a customer's words and the people
  * who handle it hold the `support` grant, not necessarily `pm`, so a department
  * WATCHER is never a recipient and `state_changed` / `commented` /
- * `due_date_changed` interrupt nobody. Exactly one verb tells anyone -- `assigned`
- * -- and it tells the user the row NAMES (`newValue`), never the actor, a guest,
- * or an account with no deliverable username. Every other ticket verb takes the
- * explicit `not_needed` terminal. See `sweepTickets`.
+ * `due_date_changed` interrupt nobody. `assigned` tells the named user;
+ * `sla_at_risk` / `sla_breached` tell current assignees, administrators and
+ * configured escalation recipients. Every recipient must still be active
+ * staff with current Support access. Other ticket verbs are `not_needed`.
  *
  * ── COALESCING, AND ITS WINDOW ─────────────────────────────────────────────
  *
@@ -621,7 +621,8 @@ async function sweepProjectItems(
  *
  * Its own coalescing unit and its own claim: one NotificationLog row per
  * recipient per tick, apart from the PM one. The claim keeps the same
- * exactly-once discipline as every other phase (`claimAndNotify`).
+ * exactly-once discipline as every other phase (`claimAndNotify`). SLA
+ * transition rows use that same claim, with the current Support audience.
  */
 async function sweepTickets(
   prisma: PrismaClient,

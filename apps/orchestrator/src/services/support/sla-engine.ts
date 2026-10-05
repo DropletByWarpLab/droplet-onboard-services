@@ -5,6 +5,7 @@ import { z } from "zod";
 export type SlaMetric = "firstResponse" | "nextResponse" | "resolution";
 export type SlaStatus = "NONE" | "ON_TRACK" | "AT_RISK" | "BREACHED" | "MET" | "PAUSED";
 export interface SlaTerms {
+  priority?: "urgent" | "high" | "medium" | "low" | "none";
   firstResponseMins: number | null; nextResponseMins: number | null; resolutionMins: number | null;
   atRiskPercent: number; calendar: BusinessCalendar | null;
   nextResponseStartedAt: string | null; nextResponsePausedMs: number;
@@ -25,6 +26,7 @@ const ranks = { NONE: -1, ON_TRACK: 0, AT_RISK: 1, BREACHED: 2 };
 export function parseSlaTerms(input: unknown): SlaTerms {
   const minutes = z.number().int().min(1).max(525600).nullable();
   const terms = z.object({ firstResponseMins: minutes, nextResponseMins: minutes, resolutionMins: minutes,
+    priority: z.enum(["urgent", "high", "medium", "low", "none"]).optional(),
     atRiskPercent: z.number().int().min(1).max(99), calendar: z.unknown().nullable().default(null),
     nextResponseStartedAt: z.string().datetime().nullable().default(null), nextResponsePausedMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).default(0),
     notified: z.array(z.enum(["AT_RISK", "BREACHED"])).max(2).default([]),

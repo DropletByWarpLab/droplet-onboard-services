@@ -208,7 +208,7 @@ async function addComment(
     await lockTicketClock(tx, row.id);
     // "Send and set to Pending": the move and the comment are one change.
     if (target && target.id !== row.stateId) {
-      await applyStateChange(tx, row, target, viewer.id, now);
+      await applyStateChange(tx, row, target, viewer.id, now, deps);
     }
     const created = await tx.pmComment.create({
       data: {

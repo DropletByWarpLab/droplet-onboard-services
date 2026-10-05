@@ -224,6 +224,7 @@ export async function applyStateChange(
   target: { id: string; group: string },
   actorId: string | null,
   now: Date,
+  deps: SupportDeps = {},
 ): Promise<void> {
   const toTerminal = isTerminalGroup(target.group);
   await lockTicketClock(tx, existing.id);
@@ -255,7 +256,7 @@ export async function applyStateChange(
     oldValue: existing.stateId,
     newValue: target.id,
   });
-  await syncTicketSla(tx, existing.id, now, "state");
+  await syncTicketSla(tx, existing.id, now, "state", deps);
 }
 
 /** Sanitised HTML, or null when nothing survives the allowlist. */
@@ -473,7 +474,7 @@ export async function updateTicket(
       // The state move goes first: a lost compare-and-set aborts the whole
       // change before anything else is written.
       if (target && target.id !== existing.stateId) {
-        await applyStateChange(tx, existing, target, actorId, now);
+        await applyStateChange(tx, existing, target, actorId, now, deps);
       }
 
       const data: Prisma.PmWorkItemUpdateInput = { updatedAt: now };
