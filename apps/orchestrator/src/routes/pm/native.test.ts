@@ -185,7 +185,6 @@ function makeFake(hooks: Hooks = {}) {
         throw error;
       }
     },
-    $transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(prisma),
     $queryRaw: vi.fn(async () => []),
 
     // WARP-3372 — `where` / `orderBy` are interpreted, so the roster's filter

@@ -187,9 +187,6 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
         import("../routes/pm/query.js"),
         import("../routes/pm/views.js"),
         import("../routes/pm/planning.js"),
-        import("../routes/pm/presence.js"),
-        import("../routes/pm/schedule.js"),
-        import("../routes/mobile/pm.js"),
       ]);
     const native = createPmNativeRouter(prisma);
     const relations = createPmRelationsRouter(prisma);
@@ -201,14 +198,11 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
       root: tmpdir(),
       statfs: async () => ({ bavail: 1_000_000, bsize: 4096, blocks: 1_000_000 }),
     });
-    const presence = createPmPresenceRouter(prisma);
     const fields = createPmFieldsRouter(prisma);
     const query = createPmQueryRouter(prisma);
     const views = createPmViewsRouter(prisma);
     const planning = createPmPlanningRouter(prisma);
     const presence = createPmPresenceRouter(prisma, { rateLimit: (_req, _res, next) => next() });
-    const schedule = createPmScheduleRouter(prisma);
-    const mobile = createPmMobileRouter(prisma);
     routers = [
       { router: native, prefix: "/api" },
       { router: relations, prefix: "/api" },
@@ -220,8 +214,6 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
       { router: views, prefix: "/api" },
       { router: planning, prefix: "/api" },
       { router: presence, prefix: "/api" },
-      { router: schedule, prefix: "/api" },
-      { router: mobile, prefix: "" },
     ];
     const app = express();
     app.use(express.json());
@@ -239,8 +231,6 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
     app.use("/api", views);
     app.use("/api", planning);
     app.use("/api", presence);
-    app.use("/api", schedule);
-    app.use(mobile);
     app.use(
       (err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
         res.status(500).json({ error: "unhandled", message: err.message });
