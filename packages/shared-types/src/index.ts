@@ -12,3 +12,7 @@ export * from "./provider-descriptor";
 export * from "./provider-registry";
 export * from "./saas-connection-state";
 export * from "./ssh-login";
+export * from "./pm-filter";
+export * from "./pm-filter-schema";
+export * from "./pm-links";
+export * from "./pm-views";

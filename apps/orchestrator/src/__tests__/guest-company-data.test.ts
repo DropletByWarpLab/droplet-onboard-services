@@ -178,6 +178,9 @@ const SURFACES: ReadonlyArray<{ module: ModuleId; label: string; files: string[]
     files: [
       ["routes", "pm", "native.ts"],
       ["routes", "pm", "relations.ts"],
+      // WARP-3522 — the query API, by-key lookup and saved views.
+      ["routes", "pm", "query.ts"],
+      ["routes", "pm", "views.ts"],
       ["routes", "pm", "planning.ts"],
       ["routes", "mobile", "pm.ts"],
     ],

@@ -10,6 +10,25 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, within } from "@testing-library/react";
 import React from "react";
+import { buildPmPath, parsePmUrl, type PmUrlState } from "@droplet/shared-types";
+
+// Model navigation landing through the canonical parser/builder; the real hook
+// is covered separately. These tests exercise the actual merged page and SWR.
+const navigation = { search: "", entries: [] as string[] };
+vi.mock("@/components/projects/useProjectsUrl", () => ({
+  useProjectsUrl: () => {
+    const [, rerender] = React.useState(0);
+    const state = parsePmUrl(new URLSearchParams(navigation.search));
+    const go = (patch: Partial<Required<PmUrlState>>, _mode: string) => {
+      const href = buildPmPath({ ...state, ...patch });
+      navigation.entries.push(href);
+      navigation.search = href.split("?")[1] ?? "";
+      rerender((n) => n + 1);
+    };
+    return { state, go, openItem: (key: string) => go({ item: key }, "push"), closeItem: () => go({ item: null }, "replace") };
+  },
+}));
+
 
 vi.mock("@/components/shell/ShellPage", () => ({
   ShellPage: ({ title, sub, children, actions }: any) => (
@@ -100,8 +119,11 @@ vi.mock("@/components/projects/usePm", () => ({
   useProjects: () => ({ projects: [PROJECT], ...idle }),
   useSummary: () => ({ summary: undefined, ...idle }),
   useProjectStates: () => ({ states: [STATE], error: undefined, isLoading: false }),
-  useProjectItems: () => ({ items: [ITEM], ...idle, key: null }),
-  usePeople: () => ({ person: (id: string) => ({ id, name: "Tester", initials: "T", tone: 1 }), users: [] }),
+  useWorkItemQuery: ({ enabled }: { enabled: boolean }) => ({ items: enabled ? [ITEM] : undefined, total: 1, counts: { all: 1 }, refresh: vi.fn(), ...idle }),
+  useWorkItemByKey: () => ({ item: undefined, ...idle }),
+  useSavedViews: () => ({ views: [], ...idle }),
+  viewActions: () => ({}),
+  usePeople: () => ({ person: (id: string) => ({ id, name: "Tester", initials: "T", tone: 1 }), people: [] }),
   useDepartments: () => ({ departments: undefined }),
   useProjectCycles: () => ({ cycles: cyclesRef.current, ...idle }),
   useCycleItems: () => ({ items: [ITEM], total: 1, ...idle }),
@@ -127,8 +149,22 @@ function openProject() {
 
 describe("/projects — planning wiring", () => {
   beforeEach(() => {
+  navigation.search = "";
+  navigation.entries = [];
     roleRef.current = "owner";
     cyclesRef.current = [CYCLE];
+  });
+
+  it("a direct Cycles or Modules URL restores its surface and browser navigation changes it", () => {
+    navigation.search = "p=INBOX&view=cycles";
+    const { rerender } = render(<ProjectsPage />);
+    expect(screen.getByRole("button", { name: "Sprint 12, Active" })).toBeInTheDocument();
+    navigation.search = "p=INBOX&view=modules";
+    rerender(<ProjectsPage />);
+    expect(screen.getByText("No modules yet.")).toBeInTheDocument();
+    navigation.search = "p=INBOX&view=cycles";
+    rerender(<ProjectsPage />);
+    expect(screen.getByRole("button", { name: "Sprint 12, Active" })).toBeInTheDocument();
   });
 
   it("the board names the cycle an item is planned into", () => {
@@ -158,6 +194,8 @@ describe("/projects — planning wiring", () => {
     const card = screen.getByRole("button", { name: "Sprint 12, Active" });
     expect(within(card).getByText("Oct 5 – Oct 16")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /New cycle/ })).toBeInTheDocument();
+    expect(navigation.entries.at(-1)).toBe("/projects?p=INBOX&view=cycles");
+    expect(screen.queryByLabelText("Search work items")).toBeNull();
   });
 
   it("the Modules tab is the real view — the placeholder is gone", () => {
@@ -167,6 +205,7 @@ describe("/projects — planning wiring", () => {
     expect(screen.queryByText(/Grouping work into bigger efforts will live here/)).toBeNull();
     expect(screen.getByText("No modules yet.")).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: /New module/ }).length).toBeGreaterThan(0);
+    expect(navigation.entries.at(-1)).toBe("/projects?p=INBOX&view=modules");
   });
 
   it("a read-only role sees the planning views without any write affordance", () => {
@@ -185,6 +224,7 @@ describe("/projects — planning wiring", () => {
     fireEvent.click(screen.getByRole("button", { name: "Sprint 12, Active" }));
     fireEvent.click(screen.getByRole("button", { name: /INBOX-1, First task/ }));
     // the drawer shows the planning rows ("Modules" is also a tab label, so look inside the drawer)
+    expect(navigation.entries.at(-1)).toBe("/projects?p=INBOX&view=cycles&item=INBOX-1");
     const drawer = screen.getByRole("dialog");
     expect(within(drawer).getByText("Cycle")).toBeInTheDocument();
     expect(within(drawer).getByText("Modules")).toBeInTheDocument();

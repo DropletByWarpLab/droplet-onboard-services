@@ -4,6 +4,7 @@
 import useSWR from "swr";
 import useSWRInfinite from "swr/infinite";
 import { useCallback, useEffect, useMemo, useRef } from "react";
+import { serializePmFilter, type PmFilter, type PmSavedViewDto, type PmViewLayout } from "@droplet/shared-types";
 import { authFetch } from "@/lib/auth";
 import type { Department } from "@/lib/types";
 import { makePerson } from "./config";
@@ -16,6 +17,7 @@ import type {
   PmComment,
   PmSummary,
   PmActivity,
+  PmQueryPage,
   PmCycle,
   PmModule,
   PmModuleRef,
@@ -137,6 +139,162 @@ export function useProjectLabels(projectId: string | null) {
     (u: string) => getJson<{ labels: PmLabel[] }>(u),
   );
   return { labels: data?.labels };
+}
+
+/** The browser's IANA zone. Relative dates in a filter ("today", "-7d") are
+ *  resolved by the SERVER in this zone — the browser never computes one. */
+export function browserTimeZone(): string | undefined {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Rows asked for per request. The server allows 500; a project of a few
+ *  hundred items arrives in one or two requests. */
+const QUERY_PAGE_SIZE = 200;
+/** Pages the board chases on its own — 10 000 items — before it stops and says so. */
+export const QUERY_MAX_PAGES = 50;
+
+export interface WorkItemQueryArgs {
+  enabled: boolean;
+  /** One project, or `null` for the whole workspace. */
+  projectId: string | null;
+  filter: PmFilter;
+  /** Named filters whose match counts come back on the first page (the saved-view chips). */
+  counts?: Record<string, PmFilter>;
+}
+
+/**
+ * WARP-3522 — the board and the list read through the query API, so the filter
+ * runs on the server and the page never filters what it holds. Pages load one
+ * after another on their own (`useSWRInfinite`), the first renders at once, and
+ * the caller is told while more remain ("Showing 200 of 530"). Items repeated
+ * across a page boundary (offset paging; see the server's `cursor.ts`) are
+ * de-duplicated by id.
+ *
+ * `refresh` revalidates every loaded page and resolves to the fresh items, which
+ * is what the drawer needs to pick up its own item after an edit.
+ */
+export function useWorkItemQuery({ enabled, projectId, filter, counts }: WorkItemQueryArgs) {
+  const tz = useMemo(browserTimeZone, []);
+  const failedPage = useRef<{ error: unknown; cursor: string | null } | null>(null);
+  const filterKey = serializePmFilter(filter);
+  const countsKey = counts
+    ? Object.entries(counts)
+        .map(([name, f]) => name + "=" + serializePmFilter(f))
+        .join("|")
+    : "";
+
+  // Editing a filter must not flash the board to a skeleton, so the previous
+  // answer stays up while the next one loads — but only WITHIN one project:
+  // another project's items under this project's header, even for a moment,
+  // would be wrong (their states are not this board's columns).
+  const lastProject = useRef(projectId);
+  const sameScope = lastProject.current === projectId;
+  useEffect(() => {
+    lastProject.current = projectId;
+  }, [projectId]);
+
+  const { data, error, isLoading, isValidating, size, setSize, mutate } = useSWRInfinite<PmQueryPage>(
+    (_index, prev: PmQueryPage | null) => {
+      if (!enabled) return null;
+      if (prev && prev.nextCursor === null) return null;
+      return ["pm-query", projectId ?? "*", filterKey, tz ?? "", countsKey, prev ? prev.nextCursor : null];
+    },
+    (key: unknown[]) => {
+      const cursor = key[5] as string | null;
+      return send<PmQueryPage>("/api/pm/work-items/query", "POST", {
+        projectId,
+        filter,
+        tz,
+        limit: QUERY_PAGE_SIZE,
+        cursor,
+        ...(cursor === null && counts ? { counts } : {}),
+      }).catch((error: unknown) => {
+        failedPage.current = { error, cursor };
+        throw error;
+      });
+    },
+    { revalidateAll: true, revalidateFirstPage: true, parallel: false, keepPreviousData: sameScope },
+  );
+
+  const last = data?.[data.length - 1];
+  const hasMore = !!last && last.nextCursor !== null;
+  useEffect(() => {
+    if (hasMore && !error && !isValidating && size < QUERY_MAX_PAGES) void setSize(size + 1);
+  }, [hasMore, error, isValidating, size, setSize]);
+
+  const items = useMemo(() => {
+    if (!data) return undefined;
+    const seen = new Set<string>();
+    const out: PmWorkItem[] = [];
+    for (const page of data) {
+      for (const it of page.work_items) {
+        if (seen.has(it.id)) continue;
+        seen.add(it.id);
+        out.push(it);
+      }
+    }
+    return out;
+  }, [data]);
+
+  const refresh = useCallback(async () => {
+    const fresh = await mutate();
+    return fresh?.flatMap((p) => p.work_items);
+  }, [mutate]);
+
+  const first = data?.[0];
+  return {
+    items,
+    total: first?.total,
+    counts: first?.counts,
+    stale: first?.stale,
+    effectiveFilter: first?.filter,
+    /** More pages remain and are on their way. */
+    loadingMore: hasMore && size < QUERY_MAX_PAGES,
+    /** More pages remain and will not be fetched: the cap was reached. */
+    truncated: hasMore && size >= QUERY_MAX_PAGES,
+    /** Distinguish a failed tail from a new filter whose first request failed. */
+    partialError: !!error && failedPage.current?.error === error && failedPage.current?.cursor !== null,
+    error,
+    isLoading,
+    refresh,
+  };
+}
+
+/** `INBOX-42` → the item. For a deep link to an item that is not in the loaded list. */
+export function useWorkItemByKey(key: string | null, enabled: boolean) {
+  const { data, error, mutate } = useSWR(
+    key && enabled ? `/api/pm/work-items/by-key/${encodeURIComponent(key)}` : null,
+    (u: string) => getJson<{ work_item: PmWorkItem }>(u),
+    // A key that answers 404 will not answer differently in five seconds.
+    { shouldRetryOnError: false },
+  );
+  return { item: data?.work_item, error, mutate };
+}
+
+/** Where saved views are listed from: one project's, or every view the caller can see. */
+export type ViewsScope = { kind: "project"; projectId: string } | { kind: "all" } | null;
+
+/**
+ * Saved views the CALLER can see: shared ones and their own personal ones. The
+ * built-ins are not fetched — they are constants in shared-types, needed before
+ * any request could return — so `views` is only the saved ones. A `null` scope
+ * is "do not fetch".
+ */
+export function useSavedViews(scope: ViewsScope) {
+  const url =
+    scope === null
+      ? null
+      : scope.kind === "project"
+        ? `/api/pm/views?project=${encodeURIComponent(scope.projectId)}`
+        : "/api/pm/views";
+  const { data, error, isLoading, mutate } = useSWR(url, (u: string) =>
+    getJson<{ builtin: PmSavedViewDto[]; views: PmSavedViewDto[] }>(u),
+  );
+  return { views: data?.views, error, isLoading, mutate };
 }
 
 /** Rows asked for per request. The server's own default is 100 and its ceiling
@@ -517,5 +675,24 @@ export function pmActions() {
         `/api/pm/modules/${moduleId}/work-items/${workItemId}`,
         "DELETE",
       ),
+  };
+}
+
+export interface SaveViewInput {
+  projectId: string | null;
+  scope: "PERSONAL" | "SHARED";
+  name: string;
+  layout: PmViewLayout;
+  filter: PmFilter;
+}
+
+/** WARP-3522 — saved-view writes. Errors carry the orchestrator's stable codes
+ *  (`view_name_taken`, `view_limit_reached`, …), which `translateError` words. */
+export function viewActions() {
+  return {
+    create: (input: SaveViewInput) => send<{ view: PmSavedViewDto }>("/api/pm/views", "POST", input),
+    update: (id: string, patch: Partial<{ name: string; layout: PmViewLayout; filter: PmFilter }>) =>
+      send<{ view: PmSavedViewDto }>(`/api/pm/views/${encodeURIComponent(id)}`, "PATCH", patch),
+    remove: (id: string) => send<{ deleted: string }>(`/api/pm/views/${encodeURIComponent(id)}`, "DELETE"),
   };
 }

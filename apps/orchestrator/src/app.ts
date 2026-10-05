@@ -58,6 +58,8 @@ import { createMatterRouter } from "./routes/matter.js";
 import { createPmMobileRouter } from "./routes/mobile/pm.js";
 import { createPmNativeRouter } from "./routes/pm/native.js";
 import { createPmRelationsRouter } from "./routes/pm/relations.js";
+import { createPmQueryRouter } from "./routes/pm/query.js";
+import { createPmViewsRouter } from "./routes/pm/views.js";
 import { createPmImportExportRouter } from "./routes/pm/import-export.js";
 import { createPmPlanningRouter } from "./routes/pm/planning.js";
 import { createPmTimeRouter } from "./routes/pm/time.js";
@@ -595,6 +597,14 @@ export function createApp(
   // it. It sits under /api/pm, so the projects module gate, the tier floor and
   // (for a token) the pm:read scope all apply to it.
   app.use("/api", createPmOpenApiRouter());
+  // WARP-3522 (ADR-069 §8) — the one filter language: `POST /pm/work-items/query`,
+  // `GET /pm/work-items/by-key/:key` and saved views (`/pm/views`). Mounted BEFORE
+  // the native router because `/pm/work-items/query` is a literal under the
+  // `/pm/work-items/:id` prefix it owns — specific paths first
+  // (droplet-pr-review-patterns P16). No route in either router can be shadowed
+  // by, or shadow, a native one; the order is the cheap guarantee.
+  app.use("/api", createPmQueryRouter(prisma));
+  app.use("/api", createPmViewsRouter(prisma));
   // ADR-026 — native PM (projects, work-items, states, labels, comments).
   // The Droplet-owned project-management surface: state in the orchestrator's
   // own Postgres, dashboard session is the auth, no embedded third-party stack.

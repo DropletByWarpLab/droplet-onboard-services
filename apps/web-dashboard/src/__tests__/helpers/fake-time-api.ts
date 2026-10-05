@@ -203,6 +203,8 @@ export function createFakeTimeApi(initial: Partial<FakeTimeState> = {}) {
     if (path === "/api/auth/users") return reply(200, { users: state.users });
     if (path === "/api/pm/people") return reply(200, { people: state.users.filter((u) => u.userId).map((u) => ({ id: u.userId, displayName: u.displayName, avatarUrl: null })) });
     if (path === "/api/pm/projects") return reply(200, { projects: state.projects });
+    if (path === "/api/pm/work-items/query" && method === "POST") return reply(200, { work_items: [], total: 0, nextCursor: null, counts: { all: 0 } });
+    if (path.endsWith("/cycles")) return reply(200, { cycles: [] });
     if (path === "/api/pm/summary") {
       return reply(200, { summary: { activeProjects: state.projects.length, itemsOpen: 0, doneThisWeek: 0, overdue: 0 } });
     }

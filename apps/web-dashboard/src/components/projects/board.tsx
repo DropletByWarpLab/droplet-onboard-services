@@ -16,7 +16,7 @@ import {
 } from "./bits";
 import { cardAccent, isOverdue, fmtDate } from "./config";
 import { CycleTag } from "./planning-bits";
-import type { PmCycle, PmWorkItem, PmState } from "./types";
+import type { PmCycle, PmWorkItem, PmState, PmProject } from "./types";
 
 export type Domain = "populated" | "loading" | "empty" | "error" | "filtered";
 
@@ -126,6 +126,15 @@ function StateColumnEmpty({ name }: { name: string }): JSX.Element {
   );
 }
 
+/** The Try again / Clear filters buttons of the error and filtered-to-empty states (brief §3.10). */
+function StateAction({ label, onClick }: { label: string; onClick: () => void }): JSX.Element {
+  return (
+    <button className="pm-btn ghost" type="button" onClick={onClick}>
+      {label}
+    </button>
+  );
+}
+
 export function BoardView({
   states,
   items,
@@ -135,6 +144,8 @@ export function BoardView({
   onOpen,
   onTransition,
   onNewItem,
+  onRetry,
+  onClearFilters,
   cycles,
 }: {
   states: PmState[];
@@ -147,6 +158,8 @@ export function BoardView({
   onOpen: (i: PmWorkItem) => void;
   onTransition: (item: PmWorkItem, stateId: string) => void;
   onNewItem: (stateId: string) => void;
+  onRetry?: () => void;
+  onClearFilters?: () => void;
   /** WARP-3521 — see WorkItemCard. */
   cycles?: ReadonlyMap<string, PmCycle>;
 }): JSX.Element {
@@ -180,6 +193,7 @@ export function BoardView({
           tone="error"
           heading="Couldn't load this project."
           body="Check the appliance connection and try again."
+          cta={onRetry ? <StateAction label="Try again" onClick={onRetry} /> : undefined}
         />
       </div>
     );
@@ -205,7 +219,12 @@ export function BoardView({
   if (domain === "filtered") {
     return (
       <div className="pm-surface" style={{ padding: 8 }}>
-        <EmptyBlock icon="filter" heading="No work items match these filters." body="Try clearing a filter." />
+        <EmptyBlock
+          icon="filter"
+          heading="No work items match these filters."
+          body="Try clearing a filter."
+          cta={onClearFilters ? <StateAction label="Clear filters" onClick={onClearFilters} /> : undefined}
+        />
       </div>
     );
   }
@@ -359,6 +378,9 @@ export function ListView({
   domain,
   partial = false,
   onOpen,
+  projects,
+  onRetry,
+  onClearFilters,
   cycles,
 }: {
   states: PmState[];
@@ -367,6 +389,11 @@ export function ListView({
   /** More of the list is still arriving (WARP-3371): a group's count is a floor. */
   partial?: boolean;
   onOpen: (i: PmWorkItem) => void;
+  /** Present for a workspace-wide list: rows group by PROJECT, because states
+   *  belong to a project and there is no one set of columns across them. */
+  projects?: PmProject[];
+  onRetry?: () => void;
+  onClearFilters?: () => void;
   /** WARP-3521 — see WorkItemCard. */
   cycles?: ReadonlyMap<string, PmCycle>;
 }): JSX.Element {
@@ -388,7 +415,13 @@ export function ListView({
   if (domain === "error") {
     return (
       <div className="pm-surface" style={{ padding: 8 }}>
-        <EmptyBlock icon="alert" tone="error" heading="Couldn't load this project." body="Check the appliance connection and try again." />
+        <EmptyBlock
+          icon="alert"
+          tone="error"
+          heading="Couldn't load this project."
+          body="Check the appliance connection and try again."
+          cta={onRetry ? <StateAction label="Try again" onClick={onRetry} /> : undefined}
+        />
       </div>
     );
   }
@@ -402,14 +435,25 @@ export function ListView({
   if (domain === "filtered") {
     return (
       <div className="pm-surface" style={{ padding: 8 }}>
-        <EmptyBlock icon="filter" heading="No work items match these filters." body="Try clearing a filter." />
+        <EmptyBlock
+          icon="filter"
+          heading="No work items match these filters."
+          body="Try clearing a filter."
+          cta={onClearFilters ? <StateAction label="Clear filters" onClick={onClearFilters} /> : undefined}
+        />
       </div>
     );
   }
 
-  const groups = sortStates(states)
-    .map((s) => [s, items.filter((it) => it.stateId === s.id)] as const)
-    .filter(([, list]) => list.length);
+  // One set of rows, grouped by state — or, workspace-wide, by project.
+  type Group = { id: string; name: string; color: string | null; key?: string };
+  const groups: Array<readonly [Group, PmWorkItem[]]> = projects
+    ? projects
+        .map((p) => [{ id: p.id, name: p.name, color: p.color, key: p.identifier } as Group, items.filter((it) => it.projectId === p.id)] as const)
+        .filter(([, list]) => list.length)
+    : sortStates(states)
+        .map((st) => [st as Group, items.filter((it) => it.stateId === st.id)] as const)
+        .filter(([, list]) => list.length);
 
   return (
     <div className="pm-surface" style={{ overflow: "hidden" }}>
@@ -427,6 +471,7 @@ export function ListView({
           >
             <span className="pm-dot" style={{ background: s.color ?? "var(--text-4)" }} />
             <span style={{ fontSize: 12.5, fontWeight: 600 }}>{s.name}</span>
+            {s.key && <span className="pm-linechip">{s.key}</span>}
             <span style={{ fontSize: 12, color: "var(--text-4)" }}>
               {list.length}
               {partial ? "+" : ""}

@@ -58,6 +58,8 @@ import type { AuthUser } from "../../middleware/auth.js";
 import { packagePath } from "../../__tests__/helpers/test-paths.js";
 import { createPmNativeRouter } from "./native.js";
 import { createPmRelationsRouter } from "./relations.js";
+import { createPmQueryRouter } from "./query.js";
+import { createPmViewsRouter } from "./views.js";
 import { createPmImportExportRouter } from "./import-export.js";
 import { createPmPlanningRouter } from "./planning.js";
 import { createPmInsightsRouter } from "./insights.js";
@@ -153,6 +155,18 @@ const PM_ROUTER_MOUNTS: readonly PmRouterMount[] = [
     base: "/api",
     file: "routes/pm/openapi.ts",
     router: createPmOpenApiRouter(),
+  },
+  {
+    factory: "createPmQueryRouter",
+    base: "/api",
+    file: "routes/pm/query.ts",
+    router: createPmQueryRouter(PRISMA),
+  },
+  {
+    factory: "createPmViewsRouter",
+    base: "/api",
+    file: "routes/pm/views.ts",
+    router: createPmViewsRouter(PRISMA),
   },
   {
     factory: "createPmNativeRouter",

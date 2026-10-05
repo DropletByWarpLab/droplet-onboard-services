@@ -126,6 +126,8 @@ export const DEFAULT_STATES: ReadonlyArray<{
 
 // ── Prisma include shapes + row types ────────────────────────────────────────
 
+// Exported for the query API (filter/query.ts), which must return the SAME shape
+// as every other work-item read — one include, one mapper.
 export const WORK_ITEM_INCLUDE = {
   state: true,
   assignees: true,
