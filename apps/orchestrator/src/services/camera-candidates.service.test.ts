@@ -15,8 +15,15 @@
  * `adoption = CANDIDATE` column. The `enabled: false, autoDiscovered: true`
  * guess above made an operator-disabled LIVE camera look like something still
  * to be added.
+ *
+ * WARP-3508 adds the other half of "what is NOT a candidate": a camera the
+ * operator already has. camera-discovery only knows what IT adopted, so a camera
+ * added by hand (a Camera row with `enabled: true` and no MAC) kept showing as a
+ * "Needs sign-in" card forever. The orchestrator is the one place that knows
+ * about manual adds and about Frigate's own camera inputs, so the exclusion has
+ * to happen here.
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("../config.js", () => ({
   config: { CAMERA_DISCOVERY_URL: "http://camera-discovery.test:8085" },
@@ -28,10 +35,17 @@ vi.mock("../lib/internal-tls.js", () => ({
   internalBaseUrl: (url: string) => url,
 }));
 
+const fetchConfig = vi.fn();
+vi.mock("./frigate.client.js", () => ({
+  fetchConfig: (...args: unknown[]) => fetchConfig(...args),
+}));
+
 import {
   deriveCandidateStatus,
+  frigateInputHosts,
   getCameraCandidates,
   isLiveCandidateId,
+  isManagedCameraRow,
   macFromCandidateId,
   mutateLiveCandidate,
   redactRtspCredentials,
@@ -46,15 +60,22 @@ type DbRow = {
   model: string | null;
   ipAddress: string;
   macAddress: string | null;
+  enabled: boolean;
+  autoDiscovered: boolean;
+  adoption: "CANDIDATE" | "ADOPTED";
   createdAt: Date;
 };
 
+/** Match the real explicit candidate query as well as the managed-camera read. */
 function makePrisma(rows: DbRow[] = []) {
   return {
-    camera: { findMany: vi.fn().mockResolvedValue(rows) },
+    camera: { findMany: vi.fn().mockImplementation((args: { where?: { adoption?: string } }) =>
+      Promise.resolve(args.where?.adoption ? rows.filter((row) => row.adoption === args.where!.adoption) : rows),
+    ) },
   } as unknown as Parameters<typeof getCameraCandidates>[0];
 }
 
+/** A discovery-only row: what `upsertCameraRecord` writes for a candidate still being probed. */
 function dbRow(over: Partial<DbRow> = {}): DbRow {
   return {
     id: "db-1",
@@ -64,8 +85,35 @@ function dbRow(over: Partial<DbRow> = {}): DbRow {
     model: null,
     ipAddress: "192.168.9.50",
     macAddress: "AA:BB:CC:DD:EE:FF",
+    enabled: false,
+    autoDiscovered: true,
+    adoption: "CANDIDATE",
     createdAt: new Date("2026-08-01T00:00:00Z"),
     ...over,
+  };
+}
+
+/** A camera the operator added by hand: live in the grid, never seen a MAC. */
+function manualRow(over: Partial<DbRow> = {}): DbRow {
+  return dbRow({
+    id: "manual-1",
+    name: "front_door",
+    displayName: "Front Door",
+    ipAddress: "192.168.9.219",
+    macAddress: null,
+    enabled: true,
+    autoDiscovered: false,
+    adoption: "ADOPTED",
+    ...over,
+  });
+}
+
+/** The resolved Frigate config shape: cameras.<name>.ffmpeg.inputs[].path. */
+function frigateConfigWith(...paths: string[]) {
+  return {
+    cameras: Object.fromEntries(
+      paths.map((path, i) => [`cam_${i}`, { ffmpeg: { inputs: [{ path, roles: ["detect"] }] } }]),
+    ),
   };
 }
 
@@ -94,6 +142,13 @@ const HANWHA = {
 
 beforeEach(() => {
   internalFetch.mockReset();
+  // Frigate with no cameras unless a test says otherwise.
+  fetchConfig.mockReset();
+  fetchConfig.mockResolvedValue({ cameras: {} });
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 describe("redactRtspCredentials", () => {
@@ -273,6 +328,250 @@ describe("getCameraCandidates", () => {
     const [, init] = internalFetch.mock.calls[0] as [string, { headers: Record<string, string> }];
     expect(init.headers.Authorization).toBe("Bearer test-secret");
     delete process.env.DEVICE_SECRET;
+  });
+});
+
+describe("isManagedCameraRow", () => {
+  it.each([
+    ["ADOPTED", true],
+    ["CANDIDATE", false],
+  ] as const)("adoption=%s → managed=%s", (adoption, managed) => {
+    expect(isManagedCameraRow({ adoption })).toBe(managed);
+  });
+});
+
+describe("frigateInputHosts", () => {
+  it("collects the host of every camera input, credentials and port stripped", () => {
+    const hosts = frigateInputHosts(
+      frigateConfigWith(
+        "rtsp://admin:T3stCamPw%21@192.168.9.219:554/profile2/media.smp",
+        "rtsp://192.168.9.50/stream1",
+        "rtsps://10.0.0.7:322/live",
+      ),
+    );
+    expect([...hosts].sort()).toEqual(["10.0.0.7", "192.168.9.219", "192.168.9.50"]);
+  });
+
+  it("reads every input of a camera that has more than one", () => {
+    const hosts = frigateInputHosts({
+      cameras: {
+        patio: {
+          ffmpeg: {
+            inputs: [
+              { path: "rtsp://192.168.9.60/main", roles: ["record"] },
+              { path: "rtsp://192.168.9.60/sub", roles: ["detect"] },
+              { path: "rtsp://192.168.9.61/main", roles: ["audio"] },
+            ],
+          },
+        },
+      },
+    });
+    expect([...hosts].sort()).toEqual(["192.168.9.60", "192.168.9.61"]);
+  });
+
+  it("copes with an unencoded @ inside the password", () => {
+    expect([...frigateInputHosts(frigateConfigWith("rtsp://admin:p@ss@192.168.9.219/s"))]).toEqual([
+      "192.168.9.219",
+    ]);
+  });
+
+  it("skips anything that is not a URL with a host, and never throws on odd shapes", () => {
+    expect(frigateInputHosts(frigateConfigWith("/dev/video0", "ffmpeg:rtsp://x#video=copy")).size).toBe(0);
+    expect(frigateInputHosts(null).size).toBe(0);
+    expect(frigateInputHosts({}).size).toBe(0);
+    expect(frigateInputHosts({ cameras: null }).size).toBe(0);
+    expect(frigateInputHosts({ cameras: { a: null, b: {}, c: { ffmpeg: {} }, d: { ffmpeg: { inputs: "x" } } } }).size).toBe(0);
+    expect(
+      frigateInputHosts({ cameras: { a: { ffmpeg: { inputs: [null, {}, { path: 7 }] } } } }).size,
+    ).toBe(0);
+  });
+});
+
+describe("managed cameras are never candidates (WARP-3508)", () => {
+  // The live repro: 192.168.9.219 was added by hand (Camera row enabled, no MAC),
+  // while camera-discovery's pending map still held it as needs_setup.
+  const PENDING_MANUAL = {
+    ip: "192.168.9.219",
+    mac: "e4:30:22:50:2a:fd",
+    status: "needs_setup",
+    rtsp_url: "rtsp://192.168.9.219:554/stream1",
+    name: "xnv_c8083r_e43022502afd",
+  };
+
+  it("drops a candidate whose IP matches a camera added by hand", async () => {
+    discovery({ pending: [PENDING_MANUAL] });
+    const { candidates } = await getCameraCandidates(makePrisma([manualRow()]));
+    expect(candidates).toEqual([]);
+  });
+
+  it("drops a candidate whose MAC matches a managed row, in any letter case, at any IP", async () => {
+    discovery({ pending: [PENDING_MANUAL] });
+    const { candidates } = await getCameraCandidates(
+      makePrisma([
+        manualRow({ ipAddress: "192.168.9.10", macAddress: "E4:30:22:50:2A:FD" }),
+      ]),
+    );
+    expect(candidates).toEqual([]);
+
+    discovery({ pending: [{ ...PENDING_MANUAL, mac: "E4:30:22:50:2A:FD" }] });
+    const lower = await getCameraCandidates(
+      makePrisma([manualRow({ ipAddress: "192.168.9.10", macAddress: "e4:30:22:50:2a:fd" })]),
+    );
+    expect(lower.candidates).toEqual([]);
+  });
+
+  it("drops a candidate matching a camera discovery itself adopted (enabled, autoDiscovered)", async () => {
+    discovery({ pending: [PENDING_MANUAL] });
+    const { candidates } = await getCameraCandidates(
+      makePrisma([
+        dbRow({ ipAddress: "192.168.9.219", macAddress: "e4:30:22:50:2a:fd", enabled: true, adoption: "ADOPTED" }),
+      ]),
+    );
+    expect(candidates).toEqual([]);
+  });
+
+  it("drops a candidate matching a hand-added camera that was switched off", async () => {
+    discovery({ pending: [PENDING_MANUAL] });
+    const { candidates } = await getCameraCandidates(makePrisma([manualRow({ enabled: false })]));
+    expect(candidates).toEqual([]);
+  });
+
+  it("drops an operator-disabled adopted discovery camera from both live and fallback candidates", async () => {
+    const adopted = dbRow({ ipAddress: "192.168.9.219", macAddress: "e4:30:22:50:2a:fd", enabled: false, adoption: "ADOPTED" });
+    discovery({ pending: [PENDING_MANUAL] });
+    expect((await getCameraCandidates(makePrisma([adopted]))).candidates).toEqual([]);
+    discovery({ pending: new Error("offline"), known: new Error("offline") });
+    expect((await getCameraCandidates(makePrisma([adopted]))).candidates).toEqual([]);
+  });
+
+  it("keeps a candidate that only resembles a discovery-only row", async () => {
+    // Explicit CANDIDATE rows remain candidates until adoption.
+    discovery({ pending: [PENDING_MANUAL] });
+    const { candidates } = await getCameraCandidates(
+      makePrisma([dbRow({ ipAddress: "192.168.9.219", macAddress: null })]),
+    );
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0].source).toBe("live");
+  });
+
+  it("keeps a candidate on a different IP and MAC from every managed row", async () => {
+    discovery({ pending: [PENDING_MANUAL] });
+    const { candidates } = await getCameraCandidates(
+      makePrisma([manualRow({ ipAddress: "192.168.9.10", macAddress: "99:88:77:66:55:44" })]),
+    );
+    expect(candidates).toHaveLength(1);
+  });
+
+  it("does not offer a stale discovery-only row for a camera the operator already has", async () => {
+    // Discovery is down, so only DB rows are left to offer. The discovery-only
+    // row shares its IP with the managed camera — a leftover duplicate, not a
+    // second camera.
+    discovery({ pending: new Error("fetch failed"), known: new Error("fetch failed") });
+    const { candidates, discoveryOnline } = await getCameraCandidates(
+      makePrisma([
+        manualRow({ ipAddress: "192.168.9.219" }),
+        dbRow({ id: "dup", ipAddress: "192.168.9.219", macAddress: "aa:aa:aa:aa:aa:aa" }),
+        dbRow({ id: "other", ipAddress: "192.168.9.60", macAddress: "bb:bb:bb:bb:bb:bb" }),
+      ]),
+    );
+    expect(discoveryOnline).toBe(false);
+    expect(candidates.map((c) => c.id)).toEqual(["other"]);
+  });
+
+  it("drops a candidate whose IP is the host of a Frigate camera input", async () => {
+    fetchConfig.mockResolvedValue(
+      frigateConfigWith("rtsp://admin:secret@192.168.9.219:554/stream1"),
+    );
+    discovery({ pending: [PENDING_MANUAL] });
+    // No Camera row at all — Frigate alone says this address is a camera.
+    const { candidates } = await getCameraCandidates(makePrisma());
+    expect(candidates).toEqual([]);
+  });
+
+  it("keeps a candidate on a host no Frigate camera input uses", async () => {
+    fetchConfig.mockResolvedValue(frigateConfigWith("rtsp://192.168.9.50/stream1"));
+    discovery({ pending: [PENDING_MANUAL] });
+    const { candidates } = await getCameraCandidates(makePrisma());
+    expect(candidates).toHaveLength(1);
+  });
+
+  it("also hides a discovery-only DB row that sits on a Frigate camera host", async () => {
+    fetchConfig.mockResolvedValue(frigateConfigWith("rtsp://192.168.9.50/stream1"));
+    discovery({ pending: [] });
+    const { candidates } = await getCameraCandidates(
+      makePrisma([dbRow({ ipAddress: "192.168.9.50" })]),
+    );
+    expect(candidates).toEqual([]);
+  });
+
+  it("treats a failed Frigate read as non-fatal and still lists the candidate", async () => {
+    fetchConfig.mockRejectedValue(new Error("Frigate config: 502"));
+    discovery({ pending: [PENDING_MANUAL] });
+    const { candidates, discoveryOnline } = await getCameraCandidates(makePrisma());
+    expect(discoveryOnline).toBe(true);
+    expect(candidates).toHaveLength(1);
+  });
+
+  it("does not let a stalled Frigate stall the candidate list", async () => {
+    // A restarting Frigate can hold the connection open. The list is polled by
+    // the dashboard, so the Frigate read gets a short leash.
+    vi.useFakeTimers();
+    fetchConfig.mockReturnValue(new Promise(() => undefined));
+    discovery({ pending: [PENDING_MANUAL] });
+
+    const pending = getCameraCandidates(makePrisma());
+    await vi.advanceTimersByTimeAsync(3_000);
+    const { candidates } = await pending;
+
+    expect(candidates).toHaveLength(1);
+  });
+});
+
+describe("mutateLiveCandidate — what camera-discovery is sent", () => {
+  // camera-discovery keys its pending map by LOWER-case MAC and looks it up
+  // exactly. A candidate id carries the upper-case form (normaliseMac), and the
+  // old code forwarded it verbatim — so every ✕ and Add on a discovered camera
+  // answered 404 (WARP-3508). The matching test on the other side of this
+  // contract is services/camera-discovery/tests/test_camera_key_contract.py.
+  /** URL of the most recent request camera-discovery received. */
+  function calledUrl(): string {
+    return (internalFetch.mock.calls.at(-1) as [string])[0];
+  }
+
+  it.each(["accept", "reject"] as const)(
+    "sends the MAC lower-case on %s, whatever case the candidate id carried",
+    async (action) => {
+      internalFetch.mockResolvedValue(new Response("{}", { status: 200 }));
+
+      const result = await mutateLiveCandidate("E4:30:22:50:2A:FD", action);
+
+      expect(result).toEqual({ ok: true, status: 200 });
+      expect(calledUrl()).toBe(
+        `http://camera-discovery.test:8085/cameras/discovered/e4%3A30%3A22%3A50%3A2a%3Afd/${action}`,
+      );
+    },
+  );
+
+  it("lower-cases the synthetic keys discovery mints for a camera with no lease", async () => {
+    // normaliseMac upper-cases these too: `ip:192.168.9.77` arrives as `IP:…`.
+    internalFetch.mockResolvedValue(new Response("{}", { status: 200 }));
+    await mutateLiveCandidate("IP:192.168.9.77", "reject");
+    expect(calledUrl()).toContain("/cameras/discovered/ip%3A192.168.9.77/reject");
+
+    internalFetch.mockResolvedValue(new Response("{}", { status: 200 }));
+    await mutateLiveCandidate("ONVIF_192_168_9_77", "accept");
+    expect(calledUrl()).toContain("/cameras/discovered/onvif_192_168_9_77/accept");
+  });
+
+  it("still mirrors the upstream status and prose on failure", async () => {
+    internalFetch.mockResolvedValue(
+      new Response(JSON.stringify({ detail: "Camera not found" }), { status: 404 }),
+    );
+    expect(await mutateLiveCandidate("E4:30:22:50:2A:FD", "accept")).toEqual({
+      ok: false,
+      status: 404,
+      message: "Camera not found",
+    });
   });
 });
 

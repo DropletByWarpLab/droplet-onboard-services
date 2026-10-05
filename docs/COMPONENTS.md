@@ -460,7 +460,15 @@ network. Host-published ports and host-network services are called out.
 - **Gotchas:** fails closed if `DEVICE_SECRET` empty (`/drivers/fix` needs auth);
   subnet sweep is throttled (concurrency cap) to respect the inference host FD limit; RTSP
   URLs validated as RFC-1918 before reaching Frigate; `ONVIF_WS_DISCOVERY_ENABLED`
-  defaults off (FD leak on Python 3.12+).
+  defaults off (FD leak on Python 3.12+). WARP-3508: a host Frigate already pulls a
+  stream from is *managed* — never probed or published (re-read at startup, before
+  `/scan`, every 10th sweep); dismissed cameras persist in `rejected-macs.json` under
+  `CAMERA_DISCOVERY_STATE_DIR` (named volume `camera-discovery-state`; `known_cameras`
+  is deliberately not persisted — it embeds stream credentials); the default-credential
+  ladder has a per-IP failed-login budget because Hanwha-class cameras lock the admin
+  account after ~5 failures; `{mac}` routes take any letter case (pending is keyed
+  lower-case); a sweep re-checks `_already_decided` before writing so it never undoes an
+  accept/reject made while it was probing.
 
 ## services/erp-sql-bridge
 

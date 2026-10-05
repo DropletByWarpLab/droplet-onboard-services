@@ -22,6 +22,19 @@
  * camera-discovery is unreachable (it's profile-gated — `full` / `single-box`),
  * so the surface degrades to its old behaviour instead of 5xx-ing.
  *
+ * ── What is NOT a candidate (WARP-3508) ───────────────────────────────────
+ * A camera the operator already has. camera-discovery can only exclude what IT
+ * committed (`/cameras/known`); a camera added by hand never passes through it,
+ * so its pending record — and the "Needs sign-in" card built from it — lingered
+ * forever. The orchestrator is the one place that sees all three signals, so
+ * the exclusion lives here: a Camera row that is live/adopted
+ * (`isManagedCameraRow`), and any host a Frigate camera input already pulls from.
+ *
+ * The MAC is lower-cased on the way back to camera-discovery. It keys its
+ * pending map by lower-case MAC and looks it up exactly; the candidate ids built
+ * here carry the upper-case form for display, and forwarding that verbatim made
+ * every ✕ and Add answer 404.
+ *
  * ── Credential handling (NET-05) ──────────────────────────────────────────
  * camera-discovery gates `/cameras/discovered` behind DEVICE_SECRET precisely
  * because a pending record's `rtsp_url` can embed `user:pass@` (the prober's
@@ -34,8 +47,16 @@ import type { PrismaClient } from "@prisma/client";
 import { config } from "../config.js";
 import { internalBaseUrl, internalFetch } from "../lib/internal-tls.js";
 import { createLogger } from "../lib/logger.js";
+import { fetchConfig } from "./frigate.client.js";
 
 const logger = createLogger("camera-candidates");
+
+/**
+ * Longest the candidate list waits on Frigate. The list is polled by the
+ * dashboard, and a Frigate that is restarting (every adoption restarts it) can
+ * hold the connection open — that must cost the exclusion, never the list.
+ */
+const FRIGATE_CONFIG_TIMEOUT_MS = 3_000;
 
 /** How far along a found device is toward being a usable camera. */
 export type CameraCandidateStatus =
@@ -229,20 +250,98 @@ async function fetchDiscoveryList(path: string): Promise<DiscoveryRecord[]> {
 }
 
 /**
+ * Is this Camera row a camera the operator already HAS — live in the grid or
+ * adopted — as opposed to a discovery-only row the fallback list may still offer?
+ *
+ * Adoption is explicit (WARP-3506/3510). An operator-disabled ADOPTED camera
+ * remains managed; neither its enabled toggle nor discovery origin changes
+ * whether it is owned by the operator.
+ */
+export function isManagedCameraRow(row: {
+  adoption: "CANDIDATE" | "ADOPTED";
+}): boolean {
+  return row.adoption === "ADOPTED";
+}
+
+/** Host of a stream URL, or null when it has none (a device path, `ffmpeg:` source…). */
+function hostOfStreamUrl(url: string): string | null {
+  try {
+    // rtsp: is not a WHATWG "special" scheme, so its host stays opaque; parse it
+    // as http(s) to get a real hostname, the way POST /cameras does.
+    const host = new URL(
+      url.replace(/^rtsp:\/\//i, "http://").replace(/^rtsps:\/\//i, "https://"),
+    ).hostname;
+    return host || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Every host a Frigate camera input pulls from — `cameras.<name>.ffmpeg.inputs[].path`
+ * in Frigate's config. A camera Frigate already records from is a camera,
+ * whichever service added it and whatever the Camera table says.
+ *
+ * Reads defensively: this is Frigate's config, not ours, and it is parsed on a
+ * list endpoint that must never throw over a shape it did not expect.
+ */
+export function frigateInputHosts(frigateConfig: unknown): Set<string> {
+  const hosts = new Set<string>();
+  const cameras = (frigateConfig as { cameras?: unknown } | null)?.cameras;
+  if (!cameras || typeof cameras !== "object") return hosts;
+  for (const camera of Object.values(cameras as Record<string, unknown>)) {
+    const inputs = (camera as { ffmpeg?: { inputs?: unknown } } | null)?.ffmpeg?.inputs;
+    if (!Array.isArray(inputs)) continue;
+    for (const input of inputs) {
+      const path = (input as { path?: unknown } | null)?.path;
+      if (typeof path !== "string") continue;
+      const host = hostOfStreamUrl(path);
+      if (host) hosts.add(host);
+    }
+  }
+  return hosts;
+}
+
+/** `frigateInputHosts` of the live Frigate config. Rejects when Frigate cannot answer in time. */
+async function fetchFrigateInputHosts(): Promise<Set<string>> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const stalled = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`Frigate config not read within ${FRIGATE_CONFIG_TIMEOUT_MS} ms`)),
+      FRIGATE_CONFIG_TIMEOUT_MS,
+    );
+  });
+  try {
+    return frigateInputHosts(await Promise.race([fetchConfig(), stalled]));
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * The candidate list the dashboard renders.
  *
  * Live pending records first; DB rows are appended only when they don't
  * duplicate a live record (matched on MAC, then IP) so an operator never sees
- * the same physical camera twice. Cameras camera-discovery has already
- * committed to Frigate — its `known_cameras` — are excluded outright: they are
- * real cameras in the grid, not things left to add.
+ * the same physical camera twice.
+ *
+ * A camera the operator already has is excluded outright — it is a real camera
+ * in the grid, not something left to add. "Already has" is any of:
+ *   - camera-discovery committed it to Frigate (its `known_cameras`),
+ *   - a managed Camera row carries its MAC or IP (`isManagedCameraRow` — covers a
+ *     camera added by hand, which discovery never sees),
+ *   - a Frigate camera input pulls from its IP.
  */
 export async function getCameraCandidates(
   prisma: PrismaClient,
 ): Promise<CameraCandidateList> {
-  const [pendingResult, knownResult] = await Promise.allSettled([
-    fetchDiscoveryList("/cameras/discovered"),
-    fetchDiscoveryList("/cameras/known"),
+  const [[pendingResult, knownResult, frigateResult], rows] = await Promise.all([
+    Promise.allSettled([
+      fetchDiscoveryList("/cameras/discovered"),
+      fetchDiscoveryList("/cameras/known"),
+      fetchFrigateInputHosts(),
+    ]),
+    prisma.camera.findMany({ orderBy: { createdAt: "desc" } }),
   ]);
 
   const discoveryOnline = pendingResult.status === "fulfilled";
@@ -260,17 +359,28 @@ export async function getCameraCandidates(
           .filter((c): c is CameraCandidate => c !== null)
       : [];
 
-  // Already-adopted cameras must not appear as things to add. A failed
-  // /cameras/known read is not fatal: worst case an adopted camera lingers in
-  // the list for one poll, which is far better than hiding the whole list.
+  // Cameras the operator already has must not appear as things to add. Neither
+  // the /cameras/known read nor the Frigate read is allowed to be fatal: worst
+  // case an existing camera lingers in the list for one poll, which is far
+  // better than hiding the whole list.
   const adoptedMacs = new Set<string>();
   const adoptedIps = new Set<string>();
+  const markAdopted = (mac: string | null | undefined, ip: string | null | undefined) => {
+    const normalisedMac = normaliseMac(mac);
+    if (normalisedMac) adoptedMacs.add(normalisedMac);
+    const trimmedIp = ip?.trim();
+    if (trimmedIp) adoptedIps.add(trimmedIp);
+  };
   if (knownResult.status === "fulfilled") {
-    for (const record of knownResult.value) {
-      const mac = normaliseMac(record.mac);
-      if (mac) adoptedMacs.add(mac);
-      if (record.ip) adoptedIps.add(record.ip);
-    }
+    for (const record of knownResult.value) markAdopted(record.mac, record.ip);
+  }
+  for (const row of rows) {
+    if (isManagedCameraRow(row)) markAdopted(row.macAddress, row.ipAddress);
+  }
+  if (frigateResult.status === "fulfilled") {
+    for (const host of frigateResult.value) adoptedIps.add(host);
+  } else {
+    logger.debug({ err: frigateResult.reason }, "Frigate config unreadable — not excluding by stream host");
   }
 
   const candidates = live.filter(
@@ -368,13 +478,18 @@ function acceptedCameraFrom(body: unknown): AcceptedCamera | undefined {
   };
 }
 
-/** POST accept/reject for a live candidate to camera-discovery, keyed by MAC. */
+/**
+ * POST accept/reject for a live candidate to camera-discovery, keyed by MAC.
+ *
+ * `mac` is whatever case the candidate id carried; camera-discovery's lookup is
+ * exact and lower-case, so it is lower-cased here at the boundary (WARP-3508).
+ */
 export async function mutateLiveCandidate(
   mac: string,
   action: "accept" | "reject",
 ): Promise<DiscoveryMutationResult> {
   const resp = await internalFetch(
-    `${internalBaseUrl(config.CAMERA_DISCOVERY_URL)}/cameras/discovered/${encodeURIComponent(mac)}/${action}`,
+    `${internalBaseUrl(config.CAMERA_DISCOVERY_URL)}/cameras/discovered/${encodeURIComponent(discoveryKey(mac))}/${action}`,
     {
       method: "POST",
       headers: discoveryAuthHeaders(),
