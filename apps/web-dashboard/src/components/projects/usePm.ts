@@ -3,6 +3,7 @@
 
 import useSWR from "swr";
 import useSWRInfinite from "swr/infinite";
+import { usePmLivePagedRead } from "./usePmLive";
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import { authFetch } from "@/lib/auth";
 import type { Department } from "@/lib/types";
@@ -255,6 +256,7 @@ function usePages<T extends { id: string }>(url: string | null, field: string) {
     const fresh = await mutate();
     return fresh ? flatten(fresh) : undefined;
   }, [mutate, flatten]);
+  usePmLivePagedRead(url, refresh);
 
   return {
     rows,

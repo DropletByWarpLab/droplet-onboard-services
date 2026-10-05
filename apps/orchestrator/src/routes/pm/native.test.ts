@@ -551,11 +551,6 @@ function makeFake(hooks: Hooks = {}) {
       },
     },
 
-    // deleteWorkItem snapshots assigned guests into its tombstone. The basic
-    // route fixture has no User rows; a queried guest roster is therefore empty.
-    user: {
-      findMany: async () => [],
-    },
   };
 
   return { prisma, db, hooks };
