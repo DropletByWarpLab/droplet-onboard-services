@@ -16,7 +16,7 @@ import {
   TRELLO_JSON,
   sha256,
 } from "./import.fixtures.js";
-import { ImportParseError } from "./csv.js";
+import { IMPORT_MAX_BYTES, ImportParseError } from "./csv.js";
 import { normalizeTable, orderForProcessing, textToHtml } from "./normalize.js";
 import { guessGroup, planRows, type PlanContext, type PlanUser } from "./plan.js";
 import { SOURCES, autoColumns, detectCsvSource, effectiveMapping, normHeader, normKey } from "./sources.js";
@@ -54,6 +54,22 @@ function run(buf: Buffer, source?: ImportSource, saved: Partial<ImportMapping> |
 const byRow = (records: ImportRecord[], n: number): ImportRecord => records.find((r) => r.row === n) as ImportRecord;
 
 describe("source detection", () => {
+  it.each(["csv", "json"])("refuses oversized %s bytes at the parser boundary", (format) => {
+    const bytes = Buffer.alloc(IMPORT_MAX_BYTES + 1, 32);
+    bytes.write(format === "json" ? '{"cards":[],"lists":[]}' : "Title\nItem");
+    expect(() => parseUpload(bytes)).toThrowError(expect.objectContaining({ code: "file_too_large" }));
+  });
+
+  it.each([
+    { cards: [null], lists: [] },
+    { cards: [], lists: [null] },
+    { cards: [{ labels: {} }], lists: [] },
+    { cards: [{ idMembers: "user" }], lists: [] },
+    { cards: [], lists: [], members: {} },
+    { cards: [], lists: [], checklists: [{ checkItems: [null] }] },
+  ])("reports malformed Trello entries as an import error rather than crashing", (value) => {
+    expect(() => parseUpload(Buffer.from(JSON.stringify(value)))).toThrowError(expect.objectContaining({ code: "not_a_trello_export" }));
+  });
   it("recognises each tool by its headers, and a JSON board by content", () => {
     expect(parseUpload(JIRA_CSV).detected).toBe("JIRA_CSV");
     expect(parseUpload(ASANA_CSV).detected).toBe("ASANA_CSV");

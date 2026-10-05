@@ -77,7 +77,8 @@ describe("projects come from the customer, not from the deals", () => {
     ).pmProject.findMany.mock.calls[0][0].where;
     // Mutation: drop isArchived → an archived project reappears on the record
     // the owner archived it off.
-    expect(where).toEqual({ companyId: "co1", isArchived: false });
+    // WARP-3528: and only PROJECT-kind ones — a service desk is not listed here.
+    expect(where).toEqual({ companyId: "co1", isArchived: false, kind: "PROJECT" });
   });
 
   it("carries the deals that named a project, so the edge can be walked back", async () => {

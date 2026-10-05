@@ -24,7 +24,7 @@
 
 import { createHash } from "node:crypto";
 import type { PmImportJob, Prisma, PrismaClient } from "@prisma/client";
-import { PM_ERRORS, isPrismaCode } from "./pm.service.js";
+import { PM_ERRORS, getProject, isPrismaCode } from "./pm.service.js";
 import { buildAnalysis, type ImportAnalysis } from "./import/analysis.js";
 import { loadPlanContext, toApiJob, type ApiImportJob } from "./import/context.js";
 import type { PlanContext } from "./import/plan.js";
@@ -90,6 +90,12 @@ export function validateMapping(
 async function loadJob(prisma: PrismaClient, jobId: string): Promise<PmImportJob> {
   const row = await prisma.pmImportJob.findUnique({ where: { id: jobId } });
   if (!row) throw new Error(PM_IMPORT_ERRORS.JOB_NOT_FOUND);
+  try {
+    await getProject(prisma, row.projectId);
+  } catch (err) {
+    if (err instanceof Error && err.message === PM_ERRORS.PROJECT_NOT_FOUND) throw new Error(PM_IMPORT_ERRORS.JOB_NOT_FOUND);
+    throw err;
+  }
   return row;
 }
 
@@ -104,6 +110,7 @@ export async function getImportJob(prisma: PrismaClient, jobId: string): Promise
 }
 
 export async function listImportJobs(prisma: PrismaClient, projectId: string, limit = 10): Promise<ApiImportJob[]> {
+  await getProject(prisma, projectId);
   const rows = await prisma.pmImportJob.findMany({
     where: { projectId },
     orderBy: { createdAt: "desc" },
@@ -124,8 +131,7 @@ export async function createImportJob(
   projectId: string,
   upload: { fileName: string; buffer: Buffer; source?: ImportSource },
 ): Promise<{ job: ApiImportJob; analysis: ImportAnalysis }> {
-  const project = await prisma.pmProject.findUnique({ where: { id: projectId }, select: { id: true } });
-  if (!project) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
+  await getProject(prisma, projectId);
 
   const parsed = parseUpload(upload.buffer, upload.source);
   const sha = createHash("sha256").update(upload.buffer).digest("hex");
@@ -243,6 +249,7 @@ export async function startImportJob(
  * already written stay — a cancel stops an import, it does not undo one.
  */
 export async function cancelImportJob(prisma: PrismaClient, jobId: string): Promise<ApiImportJob> {
+  await loadJob(prisma, jobId);
   const r = await prisma.pmImportJob.updateMany({
     where: { id: jobId, status: { in: ["PREVIEWED", "PENDING", "RUNNING", "FAILED"] } },
     data: { status: "CANCELLED", finishedAt: new Date() },
@@ -254,4 +261,3 @@ export async function cancelImportJob(prisma: PrismaClient, jobId: string): Prom
   await prisma.pmImportJobFile.deleteMany({ where: { jobId } });
   return getImportJob(prisma, jobId);
 }
-

@@ -9,6 +9,7 @@ import { createLogger } from "../../../lib/logger.js";
 import { readUserEmail } from "../../user-directory.service.js";
 import type { PlanContext, PlanUser } from "./plan.js";
 import type { ImportMapping, ImportSource } from "./types.js";
+import { getProject } from "../pm.service.js";
 
 const logger = createLogger("pm-import");
 
@@ -18,6 +19,7 @@ const ASSIGNABLE_ROLES = new Set(["owner", "admin", "family"]);
 const USER_CAP = 5000;
 
 export async function loadPlanContext(prisma: PrismaClient, projectId: string): Promise<PlanContext> {
+  await getProject(prisma, projectId);
   const [states, labels, users] = await Promise.all([
     prisma.pmState.findMany({ where: { projectId }, orderBy: { sortOrder: "asc" } }),
     prisma.pmLabel.findMany({ where: { projectId }, select: { id: true, name: true } }),

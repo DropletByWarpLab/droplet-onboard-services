@@ -19,7 +19,7 @@
  *     commas, and the Trello preset's list separator is a newline.
  */
 
-import { IMPORT_MAX_ROWS, ImportParseError } from "./csv.js";
+import { IMPORT_MAX_ROWS, ImportParseError, assertImportSize } from "./csv.js";
 import type { ImportTable } from "./types.js";
 
 interface TrelloLabel {
@@ -60,6 +60,10 @@ interface TrelloBoard {
 
 const str = (v: unknown): string => (typeof v === "string" ? v : "");
 
+const objectRows = (value: unknown): boolean => Array.isArray(value) && value.every(
+  (row) => row !== null && typeof row === "object" && !Array.isArray(row),
+);
+
 /** Creation time from a Trello card id (a Mongo ObjectId), or "". */
 export function trelloCreatedFromId(id: string): string {
   if (!/^[0-9a-f]{24}$/i.test(id)) return "";
@@ -80,6 +84,7 @@ function checklistText(lists: TrelloChecklist[]): string {
 }
 
 export function trelloToTable(buf: Buffer): ImportTable {
+  assertImportSize(buf);
   let text = buf.toString("utf8");
   if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
   let board: TrelloBoard;
@@ -99,6 +104,17 @@ export function trelloToTable(buf: Buffer): ImportTable {
       "This JSON isn't a Trello board export (it needs both cards and lists).",
     );
   }
+  if (
+    !objectRows(board.cards) || !objectRows(board.lists) ||
+    (board.members != null && !objectRows(board.members)) ||
+    (board.checklists != null && !objectRows(board.checklists)) ||
+    board.cards.some((card) =>
+      (card.labels != null && !objectRows(card.labels)) ||
+      (card.idMembers != null && (!Array.isArray(card.idMembers) || !card.idMembers.every((id) => typeof id === "string")))) ||
+    (board.checklists ?? []).some((list) => list.checkItems != null && !objectRows(list.checkItems))
+  ) {
+    throw new ImportParseError("not_a_trello_export", "This JSON contains invalid Trello board entries.");
+  }
   if (board.cards.length > IMPORT_MAX_ROWS) {
     throw new ImportParseError(
       "too_many_rows",
@@ -114,7 +130,11 @@ export function trelloToTable(buf: Buffer): ImportTable {
   const checklistsByCard = new Map<string, TrelloChecklist[]>();
   for (const cl of board.checklists ?? []) {
     const id = str(cl.idCard);
-    if (id) checklistsByCard.set(id, [...(checklistsByCard.get(id) ?? []), cl]);
+    if (id) {
+      const group = checklistsByCard.get(id);
+      if (group) group.push(cl);
+      else checklistsByCard.set(id, [cl]);
+    }
   }
 
   const headers = [

@@ -35,6 +35,7 @@ const MAX_COLUMNS = 500;
 const MAX_RECORD_BYTES = 2 * 1024 * 1024;
 
 export type ImportParseErrorCode =
+  | "file_too_large"
   | "empty_file"
   | "not_text"
   | "too_many_rows"
@@ -54,6 +55,12 @@ export class ImportParseError extends Error {
   ) {
     super(message);
     this.name = "ImportParseError";
+  }
+}
+
+export function assertImportSize(buf: Buffer): void {
+  if (buf.length > IMPORT_MAX_BYTES) {
+    throw new ImportParseError("file_too_large", "The file is larger than 10 MiB. Split it and import in parts.", { max: IMPORT_MAX_BYTES });
   }
 }
 
@@ -93,6 +100,7 @@ function friendlyCsvError(err: unknown): string {
 
 /** Parse an uploaded CSV (UTF-8, optional BOM, any of `, ; TAB`). */
 export function parseCsvTable(buf: Buffer): ImportTable {
+  assertImportSize(buf);
   if (buf.length === 0) throw new ImportParseError("empty_file", "The file is empty.");
   if (buf.subarray(0, 8192).includes(0)) {
     throw new ImportParseError(

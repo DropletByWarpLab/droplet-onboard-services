@@ -41,7 +41,12 @@ import { IndexView } from "@/components/projects/IndexView";
 import { BoardView, ListView, PlaceholderView, type Domain } from "@/components/projects/board";
 import { ViewSwitcher, SavedViews, FilterBar, type ProjectView, type SavedView } from "@/components/projects/chrome";
 import { DetailDrawer } from "@/components/projects/detail";
+import { CalendarView } from "@/components/projects/calendar/CalendarView";
+import { TimelineView } from "@/components/projects/timeline/TimelineView";
+import { MyWorkView } from "@/components/projects/mywork/MyWorkView";
 import { NewItemModal, NewProjectModal } from "@/components/projects/modals";
+import { ProjectMenu } from "@/components/projects/import/ProjectMenu";
+import { ImportWizard } from "@/components/projects/import/ImportWizard";
 
 function matchQuery(item: PmWorkItem, q: string): boolean {
   const needle = q.toLowerCase();
@@ -84,7 +89,8 @@ function ProjectsWorkspace(): JSX.Element {
   const { toast } = useToast();
   const { person } = usePeople();
 
-  const [view, setView] = useState<ProjectView | "index">("index");
+  // `my-work` is cross-project (WARP-3523), so it is not a ProjectView tab.
+  const [view, setView] = useState<ProjectView | "index" | "my-work">("index");
   const [projectId, setProjectId] = useState<string | null>(null);
   const [savedView, setSavedView] = useState<SavedView>("all");
   const [q, setQ] = useState("");
@@ -98,7 +104,7 @@ function ProjectsWorkspace(): JSX.Element {
   const [department, setDepartment] = useState<string>(DEPARTMENT_ANY);
   const [showArchived, setShowArchived] = useState(false);
   const [drawer, setDrawer] = useState<PmWorkItem | null>(null);
-  const [modal, setModal] = useState<"newitem" | "newproject" | null>(null);
+  const [modal, setModal] = useState<"newitem" | "newproject" | "import" | null>(null);
 
   const { projects, error: projErr, isLoading: projLoading, mutate: mutateProjects } = useProjects(showArchived);
   // ProjectsWorkspace only mounts behind the `projects` capability gate above.
@@ -149,6 +155,23 @@ function ProjectsWorkspace(): JSX.Element {
           ? "filtered"
           : "populated";
 
+  // WARP-3523 — what the timeline needs from the page's filters: the ids they
+  // admit (null = no filter, show everything it returns), and a revision that
+  // changes when the board data does, so an edit in the drawer reaches it.
+  const visibleIds = useMemo(
+    () => (filterActive ? new Set(filtered.map((i) => i.id)) : null),
+    [filtered, filterActive],
+  );
+  const itemsRevision = useMemo(
+    () => `${allItems.length}:${allItems.reduce((m, i) => (i.updatedAt > m ? i.updatedAt : m), "")}`,
+    [allItems],
+  );
+  const refreshAfterSchedule = async () => {
+    await mutateItems();
+    void mutateProjects();
+    void mutateSummary();
+  };
+
   const refreshAll = () => {
     void mutateProjects();
     void mutateSummary();
@@ -185,14 +208,18 @@ function ProjectsWorkspace(): JSX.Element {
     }
   };
 
-  const isProjectView = view === "board" || view === "list";
+  const isProjectView = view === "board" || view === "list" || view === "calendar" || view === "timeline";
+  // WARP-3527: the API also enforces owner/admin or the project's lead.
+  const canImport = role === "owner" || role === "admin" || (role === "family" && !!project && project.leadId === user?.id);
 
   const headerTitle =
-    view === "index" ? "Projects" : project?.name ?? "Projects";
+    view === "index" ? "Projects" : view === "my-work" ? "My work" : project?.name ?? "Projects";
   const headerSub =
     view === "index"
       ? `${summary?.activeProjects ?? projects?.filter((p) => !p.archived).length ?? 0} projects · ${summary?.itemsOpen ?? 0} items open`
-      : project
+      : view === "my-work"
+        ? "Your open work across every project"
+        : project
         ? `${project.openCount} open · ${project.doneCount} done`
         : undefined;
 
@@ -203,6 +230,9 @@ function ProjectsWorkspace(): JSX.Element {
             <FolderKanban size={14} /> New project
           </button>
         )}
+        <button className="btn" type="button" onClick={() => setView("my-work")}>
+          <PmIcon name="user" size={14} /> My work
+        </button>
         <button className="btn" type="button" onClick={refreshAll} aria-label="Refresh">
           <PmIcon name="refresh" size={15} />
         </button>
@@ -238,9 +268,12 @@ function ProjectsWorkspace(): JSX.Element {
             <PmIcon name="plus" size={14} /> New item
           </button>
         )}
-        <button className="btn" type="button" onClick={refreshAll} aria-label="Refresh">
-          <PmIcon name="refresh" size={15} />
-        </button>
+        {view !== "my-work" && (
+          <button className="btn" type="button" onClick={refreshAll} aria-label="Refresh">
+            <PmIcon name="refresh" size={15} />
+          </button>
+        )}
+        {project && <ProjectMenu projectId={project.id} canImport={canImport} onImport={() => setModal("import")} />}
       </>
     );
 
@@ -307,6 +340,29 @@ function ProjectsWorkspace(): JSX.Element {
               {view === "list" && (
                 <ListView states={states ?? []} items={filtered} domain={boardDomain} onOpen={setDrawer} />
               )}
+              {view === "calendar" && (
+                <CalendarView
+                  items={filtered}
+                  domain={boardDomain}
+                  readOnly={readOnly}
+                  onOpen={setDrawer}
+                  onChanged={refreshAfterSchedule}
+                  onNewItem={() => setModal("newitem")}
+                />
+              )}
+              {view === "timeline" && project && (
+                <TimelineView
+                  projectId={project.id}
+                  visibleIds={visibleIds}
+                  revision={itemsRevision}
+                  domain={boardDomain}
+                  readOnly={readOnly}
+                  onOpen={setDrawer}
+                  onChanged={refreshAfterSchedule}
+                  onNewItem={() => setModal("newitem")}
+                />
+              )}
+              {view === "my-work" && <MyWorkView />}
               {view === "cycles" && <PlaceholderView kind="cycles" />}
               {view === "modules" && <PlaceholderView kind="modules" />}
             </div>
@@ -333,6 +389,7 @@ function ProjectsWorkspace(): JSX.Element {
         <NewItemModal project={project} onClose={() => setModal(null)} onCreated={refreshAll} />
       )}
       {modal === "newproject" && <NewProjectModal onClose={() => setModal(null)} onCreated={refreshAll} />}
+      {modal === "import" && project && <ImportWizard project={project} onClose={() => setModal(null)} onFinished={refreshAll} />}
     </PeopleContext.Provider>
   );
 }

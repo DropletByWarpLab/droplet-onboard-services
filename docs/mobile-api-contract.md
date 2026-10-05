@@ -340,6 +340,17 @@ Sign-in + optional enrollment sequence:
    leaf; unknown parameters are ignored by older clients. Reference
    implementation: the native Windows client's C# trust code in `droplet-windows`
    (a port of the retired Rust `trust.rs`, WARP-2953; WARP-3236).
+   **Manual connect (WARP-3414).** A client that is given only an address (no
+   scanned `spki`) and finds a box with its own certificate MAY show the key's
+   fingerprint and ask the admin to compare it. Format, shared by every channel:
+   the same SHA-256 as uppercase hex in 4-character groups separated by single
+   spaces, 16 groups (`F017 AFA8 6AD7 8BED …`). The reference must come from a
+   channel a LAN attacker cannot rewrite, so the box shows it on its own front
+   screen (the rail's `Droplet fingerprint` face), in the `setup.sh` output and
+   from `droplet-fingerprint` on the box. Settings → Device information and
+   Devices → Pair show it too (`fingerprint` on the owner/admin-only
+   `GET /api/tls/certificate`), but that is the same connection under
+   question, so the dashboard copy says it proves nothing on its own.
 2. App POSTs `/auth/login?return=body` → stores JWT pair + user. On
    `401 TOTP_REQUIRED`, prompt for `totp` and resubmit.
 3. (Optional) If a pair `code` is present, app POSTs `/devices/pair/claim`
@@ -1218,6 +1229,13 @@ the same with `"module": "crm"` / `"money"`, WARP-3365). The one exception
 `POST /work-items/:id/transition` and `GET /projects/:id/states` for an item
 assigned to them (the same 404 for any other item, existing or not). Clients hide
 the entry rather than show the error.
+
+**Service desk (WARP-3528, ADR-069).** A service desk is a project of kind
+`SERVICE_DESK` and a ticket is a work item in one, served by `/api/support/*` and
+never by these routes. Every `/api/mobile/pm/*` and `/api/pm/*` route treats a
+desk, its states and labels, its tickets, their comments, history and links as
+not existing (the same 404 as an unknown id), and no list or summary counts them.
+The contract below is unchanged.
 
 ### `GET /api/mobile/pm/workspaces`
 

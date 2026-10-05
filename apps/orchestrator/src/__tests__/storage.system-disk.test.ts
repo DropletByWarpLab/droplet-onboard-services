@@ -252,6 +252,15 @@ describe("GET /api/storage/drives — system disk passthrough (WARP-2098)", () =
     expect(res.body.totals.size_bytes).toBe(2000 * GB);
   });
 
+  it("forwards the bridge's at-rest encryption enum verbatim (WARP-3608)", async () => {
+    stubBridge({
+      ...bootDiskSnapshot,
+      system_disk: { ...SYSTEM_DISK, encryption: "not_encrypted" },
+    });
+    const res = await request(buildApp()).get("/api/storage/drives");
+    expect(res.body.system_disk.encryption).toBe("not_encrypted");
+  });
+
   it("the system disk names the same disk the filter excluded", async () => {
     stubBridge(bootDiskSnapshot);
     const res = await request(buildApp()).get("/api/storage/drives");

@@ -121,7 +121,7 @@ export async function* exportCsvChunks(
     const unknownParents = [...new Set(items.flatMap((i) => (i.parentId && !keyById.has(i.parentId) ? [i.parentId] : [])))];
     if (unknownParents.length > 0) {
       const rows = await prisma.pmWorkItem.findMany({
-        where: { id: { in: unknownParents } },
+        where: { projectId, id: { in: unknownParents } },
         select: { id: true, sequenceId: true },
       });
       for (const r of rows) keyById.set(r.id, `${project.identifier}-${r.sequenceId}`);
@@ -170,7 +170,7 @@ export async function* exportJsonChunks(prisma: PrismaClient, projectId: string)
     where: { id: projectId },
     include: { department: { select: { name: true } } },
   });
-  if (!project) throw new Error(pm.PM_ERRORS.PROJECT_NOT_FOUND);
+  if (!project || pm.isServiceDesk(project)) throw new Error(pm.PM_ERRORS.PROJECT_NOT_FOUND);
 
   const [states, labels, fields] = await Promise.all([
     prisma.pmState.findMany({ where: { projectId }, orderBy: { sortOrder: "asc" } }),
@@ -225,7 +225,7 @@ export async function* exportJsonChunks(prisma: PrismaClient, projectId: string)
     const unknownParents = [...new Set(rows.flatMap((r) => (r.parentId && !keyById.has(r.parentId) ? [r.parentId] : [])))];
     if (unknownParents.length > 0) {
       const parents = await prisma.pmWorkItem.findMany({
-        where: { id: { in: unknownParents } },
+        where: { projectId, id: { in: unknownParents } },
         select: { id: true, sequenceId: true },
       });
       for (const p of parents) keyById.set(p.id, `${project.identifier}-${p.sequenceId}`);
@@ -289,6 +289,10 @@ export async function* exportJsonChunks(prisma: PrismaClient, projectId: string)
   for (let page = 0; page < MAX_PAGES; page += 1) {
     const rels = await prisma.pmWorkItemRelation.findMany({
       where: {
+        // A Project-only grant cannot serialize the desk on the other end of
+        // an escalation link, even when exporting a native engineering project.
+        from: { project: { kind: "PROJECT" } },
+        to: { project: { kind: "PROJECT" } },
         OR: [{ from: { projectId } }, { to: { projectId } }],
         ...(afterId ? { id: { gt: afterId } } : {}),
       },

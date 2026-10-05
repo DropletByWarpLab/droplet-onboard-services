@@ -13,6 +13,8 @@ import express from "express";
 import request from "supertest";
 import type { NextFunction, Request, Response } from "express";
 import type { AuthUser } from "../../middleware/auth.js";
+import http from "node:http";
+import type { AddressInfo } from "node:net";
 
 const svc = vi.hoisted(() => ({
   createImportJob: vi.fn(),
@@ -103,7 +105,10 @@ beforeEach(() => {
   svc.updateImportJob.mockResolvedValue({ job: JOB, analysis: { totalRows: 1 } });
   svc.startImportJob.mockResolvedValue({ ...JOB, status: "PENDING" });
   svc.cancelImportJob.mockResolvedValue({ ...JOB, status: "CANCELLED" });
-  svc.getProject.mockResolvedValue({ id: "p1", identifier: "INBOX" });
+  svc.getProject.mockImplementation(async () => {
+    if (!projectExists) throw new Error("project_not_found");
+    return { id: "p1", identifier: "INBOX", leadId };
+  });
   svc.exportCsvChunks.mockImplementation(async function* () {
     yield "key,title\r\n";
     yield "INBOX-1,One\r\n";
@@ -121,6 +126,15 @@ const upload = (over: { name?: string; body?: Buffer; fields?: Record<string, st
 };
 
 describe("who may import", () => {
+  it("an owner cannot import into a Service Desk, and the guard runs before multipart parsing", async () => {
+    as(OWNER, "owner");
+    svc.getProject.mockRejectedValue(new Error("project_not_found"));
+    const res = await request(app()).post("/api/pm/projects/p1/import")
+      .set("Content-Type", "multipart/form-data").send("missing boundary");
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: "project_not_found" });
+    expect(svc.createImportJob).not.toHaveBeenCalled();
+  });
   it.each([
     ["owner", OWNER, "owner"],
     ["admin", "u-admin", "admin"],
@@ -318,6 +332,31 @@ describe("the job routes", () => {
 });
 
 describe("export", () => {
+  it("releases a backpressured export generator when its client disconnects", async () => {
+    as("u-reader", "family");
+    const released = vi.fn();
+    svc.exportCsvChunks.mockImplementation(async function* () {
+      try {
+        for (let i = 0; i < 100; i += 1) yield "x".repeat(2 * 1024 * 1024);
+      } finally { released(); }
+    });
+    const server = app().listen(0, "127.0.0.1");
+    try {
+      await new Promise<void>((resolve) => server.once("listening", resolve));
+      const { port } = server.address() as AddressInfo;
+      await new Promise<void>((resolve, reject) => {
+        const req = http.get(`http://127.0.0.1:${port}/api/pm/projects/p1/export.csv`, (res) => {
+          res.once("data", () => { res.destroy(); req.destroy(); resolve(); });
+        });
+        req.on("error", reject);
+      });
+      await vi.waitFor(() => expect(released).toHaveBeenCalledTimes(1));
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
   it("CSV: any reader gets the file, streamed, with download headers", async () => {
     as("u-reader", "family"); // not owner, not lead
     const res = await request(app()).get("/api/pm/projects/p1/export.csv");

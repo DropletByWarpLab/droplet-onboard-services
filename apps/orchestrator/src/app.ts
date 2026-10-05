@@ -10,6 +10,7 @@ import {
   authMiddleware,
   requirePasswordChangeGate,
 } from "./middleware/auth.js";
+import { requireAdminMfaEnrollmentGate } from "./middleware/admin-mfa-enrollment-gate.js";
 import { errorHandler } from "./middleware/error-handler.js";
 import { createRateLimit } from "./middleware/rate-limit.js";
 import { createHealthRouter } from "./routes/health.js";
@@ -57,6 +58,8 @@ import { createPmMobileRouter } from "./routes/mobile/pm.js";
 import { createPmNativeRouter } from "./routes/pm/native.js";
 import { createPmRelationsRouter } from "./routes/pm/relations.js";
 import { createPmImportExportRouter } from "./routes/pm/import-export.js";
+import { createSupportRouter } from "./routes/support/support.routes.js";
+import { createPmScheduleRouter } from "./routes/pm/schedule.js";
 import { createCrmRouter } from "./routes/crm.js";
 import { createMoneyRouter } from "./routes/money.js";
 import { createCrmEntityLinksRouter } from "./routes/crm-entity-links.js";
@@ -124,6 +127,7 @@ import { initToolModuleVerdict } from "./services/tool-module-verdict.service.js
 import { createSettingsRouter } from "./routes/settings.js";
 import { createTlsCertificateRouter } from "./routes/tls-certificate.js";
 import { createBackupStatusRouter } from "./routes/backup-status.js";
+import { createBackupKeyRouter } from "./routes/backup-key.js";
 import { createSettingsEmailRouter } from "./routes/settings-email.js";
 import { createUpdatesRouter } from "./routes/updates.js";
 import { createTelemetryRouter } from "./routes/telemetry.js";
@@ -363,6 +367,9 @@ export function createApp(
   // one. Reads the explicit `User.mustChangePassword` flag FRESH from the
   // DB on every request — server enforcement, not a client-trusted redirect.
   app.use(requirePasswordChangeGate(prisma));
+  // WARP-3630 — owners and admins with no second factor can only enrol while
+  // REQUIRE_ADMIN_TWO_STEP is on (pass-through otherwise).
+  app.use(requireAdminMfaEnrollmentGate(prisma));
 
   // Protected routes — auth middleware has populated req.user
   app.use("/api", createProtectedAuthRouter(prisma));
@@ -563,6 +570,17 @@ export function createApp(
   // paths are `/pm/projects/:id/{import,export.*}` and `/pm/import-jobs/*`,
   // disjoint from native.ts, so neither shadows the other.
   app.use("/api", createPmImportExportRouter(prisma));
+  // WARP-3528 (ADR-069) — the service desk. Its own disjoint prefix
+  // (`/api/support`), so neither PM router shadows it, and its own `support`
+  // module: `mountModuleGates` above already guards the prefix from the registry
+  // (box toggle, the tier floor that refuses an external guest, and the
+  // per-person grant), so nothing here re-implements a gate. Tickets are
+  // PmWorkItem rows in SERVICE_DESK projects that /api/pm answers 404 for.
+  app.use("/api", createSupportRouter(prisma));
+  // WARP-3523 (ADR-069 WS-7) — the Timeline window and the My Work lists. Own
+  // router, disjoint paths (`/pm/projects/:id/timeline`, `/pm/my-work`); the
+  // `projects` module gate covers it through the `/api/pm` prefix.
+  app.use("/api", createPmScheduleRouter(prisma));
   // WARP-2117 — the CRM, which lives inside the Projects surface. Mounted
   // AFTER the PM router but on a disjoint prefix (`/api/crm`), so neither
   // shadows the other; the `crm` module gate comes from the registry.
@@ -769,6 +787,8 @@ export function createApp(
   // WARP-1405: backup health for Settings → Device information (last success,
   // last failure, reason, overdue / key-mismatch). Owner + admin, read-only.
   app.use("/api", createBackupStatusRouter());
+  // WARP-3610: the owner takes the backup repository key off the box, once.
+  app.use("/api", createBackupKeyRouter(prisma));
 
   // WARP-540: OTA update operator surface (/api/updates/*) — status,
   // history, check-now, apply-now, skip, and the WARP-538 settings knobs.

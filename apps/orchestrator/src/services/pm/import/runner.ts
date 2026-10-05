@@ -46,6 +46,7 @@ import {
   createLabel,
   createState,
   createWorkItem,
+  getProject,
   isPrismaCode,
   updateState,
   updateWorkItem,
@@ -207,13 +208,13 @@ export async function awaitRunningImports(): Promise<void> {
 export async function claimJob(prisma: PrismaClient, only?: string): Promise<PmImportJob | null> {
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const candidate = await prisma.pmImportJob.findFirst({
-      where: { status: "PENDING", ...(only ? { id: only } : {}) },
+      where: { status: "PENDING", project: { kind: "PROJECT" }, ...(only ? { id: only } : {}) },
       orderBy: { createdAt: "asc" },
     });
     if (!candidate) return null;
     const now = new Date();
     const r = await prisma.pmImportJob.updateMany({
-      where: { id: candidate.id, status: "PENDING" },
+      where: { id: candidate.id, status: "PENDING", project: { kind: "PROJECT" } },
       data: { status: "RUNNING", startedAt: candidate.startedAt ?? now, heartbeatAt: now },
     });
     if (r.count === 1) {
@@ -528,8 +529,11 @@ async function loadExisting(
   return byExternal;
 }
 
-/** Run one claimed (RUNNING) job to its end. Never throws. */
+/** Run one claimed (RUNNING) native Project job to its end. */
 export async function executeImportJob(prisma: PrismaClient, job: PmImportJob): Promise<void> {
+  // A directly invoked or stale queued job must pass the same native Projects
+  // boundary before its file/context is read or any state/label/item is written.
+  await getProject(prisma, job.projectId);
   const stats = readStats(job.stats);
   const fail = async (message: string): Promise<void> => {
     const r = await prisma.pmImportJob.updateMany({

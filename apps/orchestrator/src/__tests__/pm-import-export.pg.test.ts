@@ -129,6 +129,62 @@ describe.skipIf(!RUN)("PM import and export — the database's own guarantees (W
     await freshProject();
   });
 
+  describe("Projects and Service Desk isolation", () => {
+    async function desk() {
+      const native = await prisma.pmProject.findUniqueOrThrow({ where: { id: projectId } });
+      return prisma.pmProject.create({ data: {
+        workspaceId: native.workspaceId, name: `warp3527-desk-${++seq}`,
+        identifier: `W35D${seq}`, kind: "SERVICE_DESK",
+      } });
+    }
+
+    it("refuses desk import/export/job reads and transitions, and never claims its queued file", async () => {
+      const hidden = await desk();
+      const bytes = csv(["Title", "Private customer conversation"]);
+      const job = await prisma.pmImportJob.create({ data: {
+        projectId: hidden.id, source: "CSV", status: "PENDING", fileName: "private.csv",
+        fileBytes: bytes.length, fileSha256: "seeded", createdById: users.owner,
+        file: { create: { bytes } },
+      } });
+      await expect(imp.createImportJob(prisma, users.owner, hidden.id, { fileName: "x.csv", buffer: bytes })).rejects.toThrow("project_not_found");
+      await expect(imp.listImportJobs(prisma, hidden.id)).rejects.toThrow("project_not_found");
+      await expect(imp.getImportJob(prisma, job.id)).rejects.toThrow("import_job_not_found");
+      await expect(imp.updateImportJob(prisma, job.id, {})).rejects.toThrow("import_job_not_found");
+      await expect(imp.startImportJob(prisma, job.id, {}, { kick: false })).rejects.toThrow("import_job_not_found");
+      await expect(imp.cancelImportJob(prisma, job.id)).rejects.toThrow("import_job_not_found");
+      await expect(exp.exportCsvChunks(prisma, hidden.id).next()).rejects.toThrow("project_not_found");
+      await expect(exp.exportJsonChunks(prisma, hidden.id).next()).rejects.toThrow("project_not_found");
+      expect(await runner.claimJob(prisma)).toBeNull();
+      expect(await runner.runImportJob(prisma, job.id)).toBe(false);
+      await expect(runner.executeImportJob(prisma, job)).rejects.toThrow("project_not_found");
+      expect(await prisma.pmImportJob.findUnique({ where: { id: job.id } })).toMatchObject({ status: "PENDING", heartbeatAt: null });
+      expect(await prisma.pmImportJobFile.count({ where: { jobId: job.id } })).toBe(1);
+      expect(await prisma.pmWorkItem.count({ where: { projectId: hidden.id } })).toBe(0);
+      expect(await prisma.pmState.count({ where: { projectId: hidden.id } })).toBe(0);
+      expect(await prisma.pmLabel.count({ where: { projectId: hidden.id } })).toBe(0);
+    });
+
+    it("exports native relations while excluding both directions of a Service Desk escalation", async () => {
+      const first = await pm.createWorkItem(prisma, users.owner, projectId, { name: "Engineering" });
+      const second = await pm.createWorkItem(prisma, users.owner, projectId, { name: "Follow-up" });
+      const hidden = await desk();
+      const ticket = await prisma.pmWorkItem.create({ data: { projectId: hidden.id, sequenceId: 1, name: "Private customer conversation" } });
+      const native = await prisma.pmWorkItemRelation.create({ data: { fromId: first.id, toId: second.id, kind: "BLOCKS", createdById: users.owner } });
+      await prisma.pmWorkItemRelation.createMany({ data: [
+        { fromId: first.id, toId: ticket.id, kind: "BLOCKS", createdById: users.owner },
+        { fromId: ticket.id, toId: second.id, kind: "BLOCKS", createdById: users.owner },
+      ] });
+      let text = "";
+      for await (const chunk of exp.exportJsonChunks(prisma, projectId)) text += chunk;
+      const doc = JSON.parse(text);
+      expect(doc.items).toHaveLength(2);
+      expect(doc.relations.map((r: { id: string }) => r.id)).toEqual([native.id]);
+      expect(text).not.toContain(ticket.id);
+      expect(text).not.toContain(hidden.identifier);
+      expect(text).not.toContain("Private customer conversation");
+    });
+  });
+
   // ── the migration's invariants ────────────────────────────────────────────
 
   describe("schema invariants", () => {

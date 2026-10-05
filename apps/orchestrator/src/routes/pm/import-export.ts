@@ -27,7 +27,6 @@
  * the connection is cut rather than a truncated file being presented as whole.
  */
 
-import { once } from "node:events";
 import { Router, type NextFunction, type Request, type Response } from "express";
 import multer, { MulterError } from "multer";
 import { z } from "zod";
@@ -52,6 +51,19 @@ import * as pm from "../../services/pm/pm.service.js";
 import { actorOf } from "./actor.js";
 
 const logger = createLogger("pm-import-export");
+
+/** A disconnected reader never drains; release the generator on close too. */
+function waitForExportDrain(res: Response): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const cleanup = () => { res.off("drain", done); res.off("close", done); res.off("error", failed); };
+    const done = () => { cleanup(); resolve(); };
+    const failed = (err: Error) => { cleanup(); reject(err); };
+    res.once("drain", done);
+    res.once("close", done);
+    res.once("error", failed);
+    if (res.destroyed || res.writableEnded) done();
+  });
+}
 
 const WRITE = ["owner", "admin", "family"] as const;
 
@@ -189,11 +201,9 @@ export function createPmImportExportRouter(prisma: PrismaClient): Router {
 
   /** owner/admin, or the project's lead. Answers 403/404 itself and returns false. */
   async function mayImport(req: Request, res: Response, projectId: string): Promise<boolean> {
-    const project = await prisma.pmProject.findUnique({ where: { id: projectId }, select: { leadId: true } });
-    if (!project) {
-      res.status(404).json({ error: pm.PM_ERRORS.PROJECT_NOT_FOUND });
-      return false;
-    }
+    // The shared Projects loader refuses Service Desk containers before lead
+    // authorization, multipart parsing, or any import job write.
+    const project = await pm.getProject(prisma, projectId);
     const role = req.user?.role;
     if (role === "owner" || role === "admin") return true;
     if (role === "family" && project.leadId !== null && project.leadId === req.user?.id) return true;
@@ -220,7 +230,10 @@ export function createPmImportExportRouter(prisma: PrismaClient): Router {
     try {
       for await (const chunk of chunks) {
         if (res.destroyed || res.writableEnded) return;
-        if (!res.write(chunk)) await once(res, "drain");
+        if (!res.write(chunk)) {
+          await waitForExportDrain(res);
+          if (res.destroyed || res.writableEnded) return;
+        }
       }
       res.end();
     } catch (err) {
@@ -292,6 +305,7 @@ export function createPmImportExportRouter(prisma: PrismaClient): Router {
     try {
       if (await mayImport(req, res, req.params.id)) next();
     } catch (err) {
+      if (mapImportError(err, res)) return;
       next(err);
     }
   };

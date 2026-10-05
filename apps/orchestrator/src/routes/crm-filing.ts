@@ -59,6 +59,7 @@ import { listSkipped } from "../services/filing/skipped.service.js";
 import { readFilingHealth } from "../services/filing/digest.js";
 import { createLogger } from "../lib/logger.js";
 import { internalBaseUrl, internalFetch } from "../lib/internal-tls.js";
+import { serviceBearerHeader, RAG_EVAL_TOKEN_ENV } from "../lib/service-bearer.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import { filingPauseState } from "../services/filing/worker.js";
@@ -514,7 +515,12 @@ export function createCrmFilingRouter(prisma: PrismaClient): Router {
     try {
       const upstream = await internalFetch(
         `${base}/runs/${encodeURIComponent(parsed.data.runId)}`,
-        { method: "GET", headers: { Accept: "application/json" }, signal: AbortSignal.timeout(CANARY_TIMEOUT_MS) },
+        {
+          method: "GET",
+          // WARP-3625: rag-eval fails closed without the shared service bearer.
+          headers: { Accept: "application/json", ...serviceBearerHeader(RAG_EVAL_TOKEN_ENV) },
+          signal: AbortSignal.timeout(CANARY_TIMEOUT_MS),
+        },
       );
       if (!upstream.ok) {
         res.status(503).json({ error: "rag_eval_unavailable" });
