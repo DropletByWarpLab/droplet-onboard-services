@@ -968,7 +968,7 @@ describe("business_timeline", () => {
     // Mutation: drop `if (c.deleted) continue` → an empty COMMENT entry;
     // drop the `mentioned` skip → a "comment: <id> → <id>" line of raw ids.
     get.mockImplementation(async (url: string) =>
-      url.endsWith("/activity")
+      url.split("?", 1)[0].endsWith("/activity")
         ? res(true, 200, {
             activity: [
               { id: "a1", verb: "mentioned", field: "comment", oldValue: "cm1", newValue: "u-bob", createdAt: "2026-08-02T00:00:00.000Z" },
