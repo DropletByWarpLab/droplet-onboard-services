@@ -61,6 +61,7 @@ import { createPmRelationsRouter } from "./relations.js";
 import { createPmDevelopmentRouter } from "./development.js";
 import { createPmWebhooksRouter } from "./webhooks.js";
 import { createPmScheduleRouter } from "./schedule.js";
+import { createPmDevelopmentRouter } from "./development.js";
 import { createPmOpenApiRouter } from "./openapi.js";
 import { createPmMobileRouter } from "../mobile/pm.js";
 
@@ -473,6 +474,7 @@ describe("WARP-1625 — the walk finds the routes the routers register", () => {
     ["createPmRelationsRouter", "GET /api/pm/work-items/:id/relations"],
     ["createPmDevelopmentRouter", "GET /api/pm/work-items/:id/development"],
     ["createPmWebhooksRouter", "GET /api/pm/webhooks"],
+    ["createPmDevelopmentRouter", "GET /api/pm/development/repositories"],
     ["createPmWebhooksRouter", "POST /api/pm/webhooks/:id/deliveries/:deliveryId/redeliver"],
     ["createPmMobileRouter", "GET /api/mobile/pm/workspaces"],
   ];
