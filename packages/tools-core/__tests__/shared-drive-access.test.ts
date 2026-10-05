@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { authorizeSharedDriveHits, isSharedDrivePath } from "./shared-drive-access.js";
+import { authorizeSharedDriveHits, isSharedDrivePath } from "../src/shared-drive-access.js";
 
 describe("shared-drive per-file authorization", () => {
   const hit = { path: "/Droplet/report.pdf", source: "nextcloud", externalFileId: 42, snippet: "private" };
