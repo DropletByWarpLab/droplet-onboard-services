@@ -136,6 +136,8 @@ run_wd() {
       DROPLET_WATCHDOG_HOST_UNITS_BIN="$WORK/bin/droplet-host-units" \
       DROPLET_WATCHDOG_RELAY_DNS_BIN="$WORK/bin/droplet-relay-dns" \
       DROPLET_WATCHDOG_APP_DOWNLOADS_AUDIT="$WORK/bin/app-downloads-audit" \
+      DROPLET_WATCHDOG_ROUTING_URL="http://127.0.0.1:1" \
+      ROUTING_MODE=real \
       "$@" \
       bash "$WATCHDOG" 2>&1
 }
