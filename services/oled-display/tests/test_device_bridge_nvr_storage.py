@@ -32,6 +32,7 @@ import os
 import stat
 import sys
 import threading
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -241,12 +242,16 @@ def nvr(monkeypatch, tmp_path):
     })
     host = FakeHost(spool)
     monkeypatch.setattr(bridge, "_run", host)
+    # Most route tests isolate topology semantics from Linux flock. The lock
+    # contract itself and writer/eject interleaving are covered below.
+    ns_lock = bridge._recordings_topology_lock
+    monkeypatch.setattr(bridge, "_recordings_topology_lock", nullcontext)
     invalidations: list[bool] = []
     monkeypatch.setattr(
         bridge, "drives_snapshot",
         lambda invalidate=False: invalidations.append(invalidate) or {})
     ns = SimpleNamespace(bridge=bridge, host=host, spool=spool,
-                         invalidations=invalidations, tmp=tmp_path)
+                         invalidations=invalidations, tmp=tmp_path, real_topology_lock=ns_lock)
     yield ns
     # A command the bridge was never allowed to run may have been swallowed by
     # a fail-open path — the fake remembers it regardless.
@@ -582,6 +587,20 @@ def test_apply_writer_refusal_maps_on_the_machine_code(nvr, code):
     assert body == {"ok": False, "code": code, "error": msg}
     assert nvr.invalidations == []           # a refusal changed nothing
     assert _spool_files(nvr) == []
+
+
+@pytest.mark.parametrize("path,payload", [
+    ("/host/nvr-storage", {"fsUuid": _FS_UUID, "mode": "full"}),
+    ("/host/nvr-storage/resize", {"limitBytes": 5}),
+])
+@pytest.mark.parametrize("code,expected", [("busy", 409), ("recordings_status_unavailable", 503)])
+def test_nvr_writer_topology_refusal_keeps_typed_status_and_fixed_copy(nvr, path, payload, code, expected):
+    nvr.host.writer = {"rc": 1, "stdout": json.dumps({"ok": False, "code": code,
+                       "message": "internal /dev/sdb mount details"}), "stderr": "internal details"}
+    status, body = _post(nvr.bridge, path, payload)
+    assert status == expected and body["code"] == code
+    assert "internal" not in body["error"] and "/dev/sdb" not in body["error"]
+    assert nvr.invalidations == [] and _spool_files(nvr) == []
 
 
 def test_apply_refusal_without_a_message_still_has_an_error_text(nvr):
@@ -1248,8 +1267,7 @@ def test_eject_of_another_drive_still_works(automount, monkeypatch):
     pytest.param(lambda h: setattr(h, "status_rc", 1), id="status-script-fails"),
     pytest.param(lambda h: setattr(h, "status_stdout", "garbage"), id="status-not-json"),
     pytest.param(lambda h: setattr(h, "status_stdout", "[]"), id="status-not-object"),
-    pytest.param(lambda h: setattr(h, "status", {**_STATUS_ACTIVE, "kind": "volume"}),
-                 id="source-is-the-named-volume"),
+
     pytest.param(lambda h: setattr(h, "status", {**_STATUS_ACTIVE, "mounted": False}),
                  id="bay-not-mounted"),
     pytest.param(lambda h: setattr(h, "status", {**_STATUS_ACTIVE, "mounted": "yes"}),
@@ -1257,18 +1275,18 @@ def test_eject_of_another_drive_still_works(automount, monkeypatch):
     pytest.param(lambda h: setattr(h, "status", {"kind": "path", "mounted": True}),
                  id="no-mount-path-no-devices"),
 ])
-def test_eject_guard_fails_open_when_the_active_drive_is_unknown(automount, monkeypatch,
+def test_eject_guard_refuses_when_the_active_drive_cannot_be_verified(automount, monkeypatch,
                                                                  configure):
     nvr = automount
     configure(nvr.host)
     monkeypatch.setattr(nvr.bridge.os.path, "ismount", lambda p: True)
     status, body = _eject(nvr, _BAY_UUID)
-    # Not blocked by the guard: the normal flow ran (and, here, succeeded).
-    assert status == 200 and body["ok"] is True
+    assert status == 503 and body["code"] == "recordings_status_unavailable"
+    assert not any(cmd[0] in ("sync", "umount") for cmd, _timeout in nvr.host.calls)
 
 
 @_NEEDS_POSIX
-def test_eject_guard_fails_open_when_the_status_read_raises(automount, monkeypatch):
+def test_eject_guard_refuses_when_the_status_read_raises(automount, monkeypatch):
     nvr = automount
     real_host = nvr.host
 
@@ -1280,7 +1298,8 @@ def test_eject_guard_fails_open_when_the_status_read_raises(automount, monkeypat
     monkeypatch.setattr(nvr.bridge, "_run", flaky)
     monkeypatch.setattr(nvr.bridge.os.path, "ismount", lambda p: True)
     status, body = _eject(nvr, _BAY_UUID)
-    assert status == 200 and body["ok"] is True
+    assert status == 503 and body["code"] == "recordings_status_unavailable"
+    assert not any(cmd[0] in ("sync", "umount") for cmd, _timeout in nvr.host.calls)
 
 
 @_NEEDS_POSIX
@@ -1413,8 +1432,7 @@ def test_pool_guard_reads_nothing_when_no_device_is_named(nvr, monkeypatch):
 @pytest.mark.parametrize("configure", [
     pytest.param(lambda h: setattr(h, "status_rc", 1), id="status-script-fails"),
     pytest.param(lambda h: setattr(h, "status_stdout", "garbage"), id="status-not-json"),
-    pytest.param(lambda h: setattr(h, "status", {**_STATUS_ACTIVE, "kind": "volume"}),
-                 id="source-is-the-named-volume"),
+
     pytest.param(lambda h: setattr(h, "status", {**_STATUS_ACTIVE, "mounted": False}),
                  id="bay-not-mounted"),
     pytest.param(lambda h: setattr(h, "status", {**_STATUS_ACTIVE, "backingDevices": None}),
@@ -1422,21 +1440,132 @@ def test_pool_guard_reads_nothing_when_no_device_is_named(nvr, monkeypatch):
     pytest.param(lambda h: setattr(h, "status", {**_STATUS_ACTIVE, "backingDevices": "sdb"}),
                  id="backing-devices-not-a-list"),
 ])
-def test_pool_guard_fails_open_when_the_active_drive_is_unknown(nvr, monkeypatch, configure):
-    # The orchestrator layer is the fail-closed one; the bridge must never turn
-    # a flaky status read into a refusal of an owner-confirmed operation.
+def test_pool_guard_refuses_when_the_active_drive_cannot_be_verified(nvr, monkeypatch, configure):
+    # ADR-070 section 7: an unreadable status never proves the disk safe to erase.
     called = _stub_executor(nvr, monkeypatch)
     configure(nvr.host)
-    ok, _info = nvr.bridge.run_pool_command("drive_adopt", {"device": "sdb"})
-    assert ok is True and len(called) == 1
+    ok, info = nvr.bridge.run_pool_command("drive_adopt", {"device": "sdb"})
+    assert ok is False and info.code == "recordings_status_unavailable"
+    assert called == []
 
 
-def test_pool_guard_fails_open_when_the_status_read_raises(nvr, monkeypatch):
+def test_pool_guard_refuses_when_the_status_read_raises(nvr, monkeypatch):
     called = _stub_executor(nvr, monkeypatch)
     monkeypatch.setattr(nvr.bridge, "_run",
                         lambda *a, **k: (_ for _ in ()).throw(OSError("no writer")))
-    ok, _info = nvr.bridge.run_pool_command("drive_adopt", {"device": "sdb"})
-    assert ok is True and len(called) == 1
+    ok, info = nvr.bridge.run_pool_command("drive_adopt", {"device": "sdb"})
+    assert ok is False and info.code == "recordings_status_unavailable"
+    assert called == []
+
+
+def test_verified_named_volume_allows_a_non_recordings_drive_operation(nvr, monkeypatch):
+    called = _stub_executor(nvr, monkeypatch)
+    nvr.host.status = {"kind": "volume", "source": "nvrdata"}
+    assert nvr.bridge.run_pool_command("drive_adopt", {"device": "sdb"})[0] is True
+    assert called == [("drive_adopt", {"device": "sdb"})]
+
+
+@pytest.mark.parametrize("change", [
+    {"source": "relative/nvr"}, {"source": None}, {"source": "/other/nvr"},
+    {"source": _BAY_MOUNT + "/nvr/../escape"}, {"mountPath": "/"},
+    {"mountPath": "/mnt/droplet/../bay"}, {"fsUuid": "not-a-uuid"},
+    {"fsUuid": _FS_UUID + "\n"}, {"backingDevices": ["sdb;rm"]},
+    {"backingDevices": ["/dev/sdb"]}, {"physicalDisk": "sdd"},
+    {"physicalDisk": ""}, {"physicalDisk": None},
+])
+def test_malformed_topology_never_authorizes_pool_or_eject(nvr, monkeypatch, change):
+    called = _stub_executor(nvr, monkeypatch)
+    nvr.host.status = {**_STATUS_ACTIVE, **change}
+    ok, info = nvr.bridge.run_pool_command("drive_adopt", {"device": "sdc"})
+    assert ok is False and info.code == "recordings_status_unavailable"
+    assert called == []
+    refusal = nvr.bridge._eject_recordings_refusal({"device": "/dev/sdc"}, "/mnt/droplet/usb")
+    assert refusal.code == "recordings_status_unavailable"
+
+
+def test_custom_mount_base_and_generic_mapper_names_are_valid(nvr, monkeypatch):
+    called = _stub_executor(nvr, monkeypatch)
+    nvr.host.status = {**_STATUS_ACTIVE, "mountPath": "/srv/camera-storage",
+                       "source": "/srv/camera-storage/nvr", "physicalDisk": "nvme2n1",
+                       "backingDevices": ["nvme2n1", "crypt.data-1+mirror"]}
+    assert nvr.bridge.run_pool_command("drive_adopt", {"device": "sdc"})[0] is True
+    ok, info = nvr.bridge.run_pool_command("drive_adopt", {"device": "/dev/mapper/crypt.data-1+mirror"})
+    assert ok is False and info.code == "recordings_drive_active"
+    assert called == [("drive_adopt", {"device": "sdc"})]
+
+
+def test_missing_topology_lock_refuses_eject_before_read_or_mutation(automount, monkeypatch):
+    bridge = automount.bridge
+    monkeypatch.setattr(bridge.os.path, "ismount", lambda _p: True)
+    monkeypatch.setattr(bridge.os.path, "realpath", lambda p: p)
+    monkeypatch.setattr(bridge, "_device_at_mountpoint", lambda _p: "/dev/sdc1")
+    monkeypatch.setattr(bridge, "_recordings_topology_lock", automount.real_topology_lock)
+    monkeypatch.setattr(bridge, "_RECORDINGS_TOPOLOGY_LOCK_PATH", str(automount.tmp / "missing.lock"))
+    status, body = _eject(automount, _USB_UUID)
+    assert status == 503 and body["code"] == "recordings_status_unavailable"
+    assert automount.host.calls == []
+    assert len(json.loads(automount.state_path.read_text())["mounts"]) == 2
+
+
+def _trust_fixture_lock(bridge, monkeypatch):
+    # Model the installer's root ownership without requiring pytest to run as
+    # root. Keep the actual inode type, link count and permissions checks.
+    fstat = os.fstat
+    def root_owned_fixture(fd):
+        info = fstat(fd)
+        return SimpleNamespace(st_mode=info.st_mode, st_uid=0, st_nlink=info.st_nlink)
+    monkeypatch.setattr(bridge.os, "fstat", root_owned_fixture)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Linux flock contract")
+def test_transition_lock_blocks_eject_then_rechecks_the_changed_recordings_drive(automount, monkeypatch):
+    """A writer changes topology while holding the SAME inode as eject."""
+    bridge = automount.bridge
+    path = automount.tmp / "recordings-topology.lock"
+    path.touch(mode=0o660)
+    _trust_fixture_lock(bridge, monkeypatch)
+    monkeypatch.setattr(bridge, "_RECORDINGS_TOPOLOGY_LOCK_PATH", str(path))
+    monkeypatch.setattr(bridge, "_recordings_topology_lock", automount.real_topology_lock)
+    monkeypatch.setattr(bridge.os.path, "ismount", lambda _p: True)
+    monkeypatch.setattr(bridge.os.path, "realpath", lambda p: p)
+    monkeypatch.setattr(bridge, "_device_at_mountpoint", lambda _p: "/dev/sdc1")
+    # A separate open file description models the root NVR migration writer.
+    with path.open("r+") as writer:
+        bridge.fcntl.flock(writer, bridge.fcntl.LOCK_EX | bridge.fcntl.LOCK_NB)
+        automount.host.status = {**_STATUS_ACTIVE, "mountPath": "/mnt/droplet/usb-ffff0000",
+                                "source": "/mnt/droplet/usb-ffff0000/nvr",
+                                "physicalDisk": "sdc", "backingDevices": ["sdc", "sdc1"]}
+        status, body = _eject(automount, _USB_UUID)
+        assert status == 503 and body["code"] == "recordings_status_unavailable"
+        assert automount.host.calls == []
+        bridge.fcntl.flock(writer, bridge.fcntl.LOCK_UN)
+    status, body = _eject(automount, _USB_UUID)
+    assert status == 409 and body["code"] == "recordings_drive_active"
+    assert automount.host.commands() == [[_SCRIPT, "--status"]]
+    assert len(json.loads(automount.state_path.read_text())["mounts"]) == 2
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Linux no-follow lock contract")
+def test_topology_lock_refuses_a_symlink(automount, monkeypatch):
+    target = automount.tmp / "real.lock"
+    target.touch(mode=0o660)
+    link = automount.tmp / "symlink.lock"
+    link.symlink_to(target)
+    _trust_fixture_lock(automount.bridge, monkeypatch)
+    monkeypatch.setattr(automount.bridge, "_RECORDINGS_TOPOLOGY_LOCK_PATH", str(link))
+    with pytest.raises(OSError):
+        with automount.real_topology_lock():
+            pytest.fail("a symlink must never acquire the topology lock")
+
+
+def test_pool_http_unreadable_status_refuses_before_any_executor_or_spool(nvr, monkeypatch):
+    called = _stub_executor(nvr, monkeypatch)
+    nvr.host.status_rc = 1
+    status, body = _post(nvr.bridge, "/pools/command", {
+        "operation": "drive_adopt", "params": {"device": "sdb"}})
+    assert status == 503 and body["code"] == "recordings_status_unavailable"
+    assert called == []
+    assert not (Path(nvr.bridge.POOL_SPOOL_DIR) / "request.json").exists()
 
 
 def test_unknown_pool_op_is_refused_before_the_guard_reads_anything(nvr, monkeypatch):

@@ -19,6 +19,11 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import request from "supertest";
 import express from "express";
 
+vi.mock("../services/recordings-drive-guard.service.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../services/recordings-drive-guard.service.js")>(),
+  guardRecordingsDrive: vi.fn(async () => null),
+}));
+
 vi.mock("../services/nextcloud-session.service.js", () => ({
   resolveNcToken: vi.fn(async () => null),
 }));

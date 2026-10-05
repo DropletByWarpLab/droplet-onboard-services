@@ -54,7 +54,9 @@ NVR_SCRIPTS = (
     "droplet-nvr-storage-apply.sh",
     "droplet-nvr-migrate.sh",
     "droplet-nvr-guard.sh",
+    "droplet-storage-topology-lock.sh",
 )
+NVR_CHECKER = "droplet-recordings-drive-check.py"
 ON_DEMAND_UNITS = ("droplet-nvr-storage-apply.service", "droplet-nvr-migrate.service")
 GUARD_UNITS = (
     "droplet-nvr-guard.service",
@@ -241,6 +243,27 @@ def test_installer_keeps_the_existing_writer_install():
     assert 'install -m 0755 "$SET_NVR_MEDIA_SCRIPT_SRC" "$SET_NVR_MEDIA_SCRIPT_DST"' in code
 
 
+def test_installer_places_the_recordings_checker_and_provisions_shared_lock():
+    code = _code(INSTALLER)
+    assert '"$REPO_ROOT/scripts/host/droplet-recordings-drive-check.py"' in code
+    assert 'install -m 0755 "$REPO_ROOT/scripts/host/droplet-recordings-drive-check.py" /usr/local/sbin/droplet-recordings-drive-check.py' in code
+    tmpfiles = _code(HOST_DIR / "etc-tmpfiles.d" / "droplet.conf")
+    assert "f /run/droplet-storage-ops/recordings-topology.lock 0660 root droplet - -" in tmpfiles
+    assert "install -m 0644 \"$TMPFILES_SRC\" /etc/tmpfiles.d/droplet.conf" in code
+    assert "systemd-tmpfiles --create /etc/tmpfiles.d/droplet.conf" in code
+
+
+def test_shared_lock_is_writable_by_bridge_and_root_pool_uses_same_repo_env():
+    bridge_unit = BRIDGE_UNIT.read_text(encoding="utf-8")
+    pool_unit = _unit_text("droplet-storage-pool-apply.service")
+    lock_helper = _code(HOST_DIR / "droplet-storage-topology-lock.sh")
+    assert re.search(r"^ReadWritePaths=/run/droplet-storage-ops$", bridge_unit, re.M)
+    assert "Environment=REPO_ROOT=@REPO_ROOT@" in pool_unit
+    assert "/run/droplet-storage-ops/recordings-topology.lock" in lock_helper
+    assert '"/proc/$$/fd/7"' in lock_helper and '"/proc/$$/fd/8"' in lock_helper
+    assert "flock -n -E 75 -x 8" in lock_helper
+
+
 def test_installer_creates_the_root_only_state_dir():
     assert "install -d -m 0700 {}".format(STATE_DIR) in _code(INSTALLER)
 
@@ -343,6 +366,7 @@ def test_script_block_installs_each_script_and_the_state_dir(tmp_path):
     (repo / "scripts" / "host").mkdir(parents=True)
     for name in NVR_SCRIPTS:
         (repo / "scripts" / "host" / name).write_text("#!/bin/sh\n")
+    (repo / "scripts" / "host" / NVR_CHECKER).write_text("#!/usr/bin/env python3\n")
     shims = tmp_path / "shims"
     shims.mkdir()
     shim_log = tmp_path / "install.log"
@@ -356,8 +380,10 @@ def test_script_block_installs_each_script_and_the_state_dir(tmp_path):
     for name in NVR_SCRIPTS:
         assert "-m 0755 {} /usr/local/sbin/{}".format(
             repo / "scripts" / "host" / name, name) in calls
+    assert "-m 0755 {} /usr/local/sbin/{}".format(
+        repo / "scripts" / "host" / NVR_CHECKER, NVR_CHECKER) in calls
     assert "-d -m 0700 {}".format(STATE_DIR) in calls
-    assert len(calls) == len(NVR_SCRIPTS) + 1, calls
+    assert len(calls) == len(NVR_SCRIPTS) + 2, calls
 
 
 @_posix_only
@@ -503,6 +529,7 @@ def test_factory_reset_removes_every_script_the_installer_adds():
     code = _code(FACTORY_RESET)
     for script in NVR_SCRIPTS:
         assert "/usr/local/sbin/{}".format(script) in code, script
+    assert "/usr/local/sbin/{}".format(NVR_CHECKER) in code
     # ...and the list really is the installer's (not a stale copy of it).
     assert set(_installer_scripts()) == set(NVR_SCRIPTS)
 

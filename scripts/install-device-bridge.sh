@@ -74,6 +74,18 @@ for unit in droplet-device-bridge.service \
   log "installed $dst"
 done
 
+# The recordings topology lock must exist before the bridge enters its
+# ProtectSystem=strict mount namespace. systemd-tmpfiles provisions a root-owned
+# directory and a root:droplet lock inode; the bridge gets access to the file,
+# never write access to its parent directory.
+TMPFILES_SRC="$REPO_ROOT/scripts/host/etc-tmpfiles.d/droplet.conf"
+if [[ ! -f "$TMPFILES_SRC" ]]; then
+  log "missing source: $TMPFILES_SRC"
+  exit 1
+fi
+install -m 0644 "$TMPFILES_SRC" /etc/tmpfiles.d/droplet.conf
+systemd-tmpfiles --create /etc/tmpfiles.d/droplet.conf
+
 # --- 1b) Install the shutdown-screen host script ---
 # droplet-shutdown-screen.service's ExecStop runs this on teardown to push
 # the "Shutting down" frame to the front panel. It belongs on the host (not
@@ -365,7 +377,8 @@ log "installed $SET_NVR_MEDIA_SCRIPT_DST"
 #   droplet-nvr-guard.sh          the boot guard: arm / release / disarm / status
 # (droplet-set-nvr-media.sh, the writer they all lean on, is installed above.)
 for nvr_script in droplet-nvr-quota.py droplet-nvr-storage-apply.sh \
-                  droplet-nvr-migrate.sh droplet-nvr-guard.sh; do
+                  droplet-nvr-migrate.sh droplet-nvr-guard.sh \
+                  droplet-storage-topology-lock.sh; do
   nvr_src="$REPO_ROOT/scripts/host/$nvr_script"
   if [[ ! -f "$nvr_src" ]]; then
     log "missing source: $nvr_src"
@@ -374,6 +387,9 @@ for nvr_script in droplet-nvr-quota.py droplet-nvr-storage-apply.sh \
   install -m 0755 "$nvr_src" "/usr/local/sbin/$nvr_script"
   log "installed /usr/local/sbin/$nvr_script"
 done
+install -m 0755 "$REPO_ROOT/scripts/host/droplet-recordings-drive-check.py" \
+  /usr/local/sbin/droplet-recordings-drive-check.py
+log "installed /usr/local/sbin/droplet-recordings-drive-check.py"
 # Root-only state: the previous-source record the migration's old-footage delete
 # acts on, and the boot guard's state. NEVER droplet-readable or -writable —
 # these files decide what root deletes (WARP-843 invariant), unlike the bridge's

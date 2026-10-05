@@ -1371,6 +1371,8 @@ if [ -f /usr/local/sbin/droplet-nvr-guard.sh ] || \
    [ -f /usr/local/sbin/droplet-nvr-migrate.sh ] || \
    [ -f /usr/local/sbin/droplet-nvr-storage-apply.sh ] || \
    [ -f /usr/local/sbin/droplet-nvr-quota.py ] || \
+   [ -f /usr/local/sbin/droplet-storage-topology-lock.sh ] || \
+   [ -f /usr/local/sbin/droplet-recordings-drive-check.py ] || \
    [ -d /var/lib/droplet-nvr ]; then
   if [ -x /usr/local/sbin/droplet-nvr-guard.sh ]; then
     sudo /usr/local/sbin/droplet-nvr-guard.sh disarm 2>/dev/null || true
@@ -1390,7 +1392,9 @@ if [ -f /usr/local/sbin/droplet-nvr-guard.sh ] || \
   sudo rm -f /usr/local/sbin/droplet-nvr-guard.sh \
              /usr/local/sbin/droplet-nvr-storage-apply.sh \
              /usr/local/sbin/droplet-nvr-migrate.sh \
-             /usr/local/sbin/droplet-nvr-quota.py 2>/dev/null || true
+             /usr/local/sbin/droplet-nvr-quota.py \
+             /usr/local/sbin/droplet-storage-topology-lock.sh \
+             /usr/local/sbin/droplet-recordings-drive-check.py 2>/dev/null || true
   # Root-only: the previous-source record (migration.json) and the guard state.
   sudo rm -rf /var/lib/droplet-nvr 2>/dev/null || true
   sudo systemctl daemon-reload 2>/dev/null || true

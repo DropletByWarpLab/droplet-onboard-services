@@ -47,6 +47,7 @@ import time
 from pathlib import Path
 
 import pytest
+from _topology_lock_test_support import add_trusted_stat_env, install_trusted_stat_shim
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = REPO_ROOT / "scripts" / "host" / "droplet-nvr-migrate.sh"
@@ -80,7 +81,7 @@ STATE_KEYS = {
 }
 ERROR_CODES = {
     "insufficient_space", "rsync_missing", "docker_unavailable", "target_not_applied",
-    "bad_source", "copy_failed", "verify_failed", "flip_failed", "interrupted",
+    "bad_source", "copy_failed", "verify_failed", "flip_failed", "interrupted", "busy",
     "no_old_footage", "delete_failed", "internal",
 }
 PHASES = {"preflight", "copy", "stop", "delta", "verify", "flip", "start", "cleanup", None}
@@ -453,12 +454,15 @@ class Box:
         self.fake = tmp / "fake"
         self.spool = tmp / "spool"
         self.rootstate = tmp / "rootstate"
+        self.topology_lock = tmp / "recordings-topology.lock"
         self.mnt = tmp / "mnt" / "droplet"
         self.vol_root = tmp / "dockerroot" / "volumes"
         self.envfile = tmp / "repo.env"
         self.compose = tmp / "docker-compose.yml"
         for d in (self.bin, self.fake, self.spool, self.rootstate, self.mnt, self.vol_root):
             d.mkdir(parents=True)
+        self.topology_lock.touch()
+        install_trusted_stat_shim(self.bin / "topology-lock-stat", self.topology_lock)
         self.spool.chmod(0o700)
         self.rootstate.chmod(0o700)
         for tool in SHIM_TOOLS:
@@ -655,6 +659,9 @@ class Box:
         for tool in REAL_TOOLS:
             if tool in exclude:
                 continue
+            if tool == "stat":
+                os.symlink(self.bin / "topology-lock-stat" / "stat", rbin / tool)
+                continue
             real = shutil.which(tool)
             if real and not (rbin / tool).exists():
                 os.symlink(real, rbin / tool)
@@ -671,6 +678,7 @@ class Box:
             "FAKE_STATE_PATH": str(self.spool / "migrate-state.json"),
             "DROPLET_NVR_SPOOL_DIR": str(self.spool),
             "DROPLET_NVR_ROOT_STATE_DIR": str(self.rootstate),
+            "DROPLET_STORAGE_TOPOLOGY_LOCK_FILE": str(self.topology_lock),
             "DROPLET_NVR_MEDIA_ENV_FILE": str(self.envfile),
             "DROPLET_NVR_MEDIA_COMPOSE_FILE": str(self.compose),
             "DROPLET_NVR_MOUNT_BASE": str(self.mnt),
@@ -680,7 +688,7 @@ class Box:
             "REPO_ROOT": str(REPO_ROOT),
         })
         env.update({k: str(v) for k, v in extra.items()})
-        return env
+        return add_trusted_stat_env(env, self.bin, self.topology_lock)
 
     def write_request(self, operation="migrate", params=None, request_id="req-1", raw=None):
         path = self.spool / "migrate-request.json"
@@ -839,6 +847,24 @@ def test_unit_file_shape():
 # ==========================================================================
 # migrate: happy paths
 # ==========================================================================
+
+@posix_world
+def test_shared_topology_lock_contention_fails_closed_without_host_commands(box):
+    import fcntl
+
+    box.write_request()
+    fd = os.open(box.topology_lock, os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result = box.run(write_request=False)
+    finally:
+        os.close(fd)
+
+    assert result.rc == 0, result.err
+    assert result.state["state"] == "failed"
+    assert result.state["errorCode"] == "busy"
+    assert not box.calls(), "migration issued a host command while topology was locked"
+
 
 @posix_world
 def test_happy_path_volume_source_exact_ordered_sequence(box):

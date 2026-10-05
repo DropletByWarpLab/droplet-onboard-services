@@ -101,6 +101,13 @@ describe("recordings bridge client (WARP-3514)", () => {
     expect(err).toMatchObject({ code: "host_refused", hostCode: "files_not_empty" });
   });
 
+  it("503 topology refusal remains unavailable with its machine code", async () => {
+    fetchMock.mockResolvedValueOnce(reply(503, { ok: false, code: "recordings_status_unavailable", error: "Recording storage could not be verified" }));
+    await expect(bridge.applyNvrTarget({ fsUuid: "0a1b2c3d-1111", mode: "full" })).rejects.toMatchObject({
+      code: "bridge_unavailable", hostCode: "recordings_status_unavailable",
+    });
+  });
+
   it("any other failure status is a plain error with the status attached", async () => {
     fetchMock.mockResolvedValueOnce(reply(502, { ok: false, code: "executor_failed", error: "unit failed" }));
     const err = (await bridge.getNvrStatus().catch((e: unknown) => e)) as Error & { status?: number };
