@@ -3380,6 +3380,33 @@ export async function acceptDiscoveredCamera(id: string): Promise<void> {
   }
 }
 
+/**
+ * Add a camera we found on the network by typing its username and password
+ * (WARP-3505). The orchestrator hands them to camera-discovery, which re-probes
+ * the camera with them and adds it. The password travels only in the POST body.
+ *
+ * Failures throw an Error whose `code` is one of AUTH_FAILED, LOCKED,
+ * NO_STREAM_PATH, BASIC_AUTH_ONLY, UNREACHABLE, DISCOVERY_UNAVAILABLE, TIMEOUT,
+ * INVALID_CREDENTIALS, UNSUPPORTED_PASSWORD or UNSUPPORTED_STREAM_ADDRESS so
+ * `translateError` can show the matching next step. The error's own message
+ * never contains the password.
+ */
+export async function addDiscoveredCameraWithCredentials(
+  id: string,
+  username: string,
+  password: string,
+): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/cameras/discovered/${encodeURIComponent(id)}/credentials`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    },
+  );
+  if (!res.ok) throw await cameraApiError(res, `Failed to add camera: ${res.status}`);
+}
+
 export async function rejectDiscoveredCamera(id: string): Promise<void> {
   const res = await authFetch(`${BASE}/api/cameras/discovered/${encodeURIComponent(id)}/reject`, {
     method: "POST",
@@ -3619,21 +3646,46 @@ export async function reorderCameraPins(
   return body.pins;
 }
 
+/**
+ * An Error for a failed camera call that carries the server's machine `code`
+ * (upper-cased, so it indexes friendly-errors' camera table) and the HTTP status.
+ * The message is the server's sentence and is never shown as written — the
+ * translator maps the code to copy — and never contains a credential.
+ */
+async function cameraApiError(
+  res: Response,
+  fallback: string,
+): Promise<Error & { code?: string; status?: number }> {
+  const data = await res.json().catch(() => ({}));
+  const err = new Error(data.error || fallback) as Error & { code?: string; status?: number };
+  err.status = res.status;
+  if (typeof data.code === "string") err.code = data.code.toUpperCase();
+  return err;
+}
+
 export async function addCameraManual(
   name: string,
   rtspUrl: string,
   manufacturer?: string,
-  model?: string
+  model?: string,
+  username?: string,
+  password?: string
 ): Promise<void> {
   const res = await authFetch(`${BASE}/api/cameras`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name, rtspUrl, manufacturer, model }),
+    // WARP-3505: the orchestrator merges username/password into the stream URL
+    // server-side. Left out entirely when blank so a URL that already embeds
+    // credentials keeps working untouched.
+    body: JSON.stringify({
+      name,
+      rtspUrl,
+      manufacturer,
+      model,
+      ...(username ? { username, password: password ?? "" } : {}),
+    }),
   });
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || `Failed to add camera: ${res.status}`);
-  }
+  if (!res.ok) throw await cameraApiError(res, `Failed to add camera: ${res.status}`);
 }
 
 /**
