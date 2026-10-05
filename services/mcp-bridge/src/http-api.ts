@@ -46,10 +46,11 @@ import {
 } from "./remote-session.js";
 import type { RemoteMcpSessionHealth } from "./session-state.js";
 import {
-  SESSION_FACTORIES,
-  knownServerIds,
+  SESSION_PROFILES,
+  toSessionProfile,
   type OpenSessionInput,
   type SessionFactory,
+  type SessionProfile,
 } from "./session-profiles.js";
 
 /** Same pattern the multiplexer enforces on a server id, so a name this
@@ -136,14 +137,45 @@ export interface BridgeSessionsBody {
  */
 export class BridgeSessionStore {
   readonly #sessions = new Map<string, RemoteMcpSession>();
-  readonly #factories: Readonly<Record<string, SessionFactory>>;
+  readonly #profiles: ReadonlyMap<string, SessionProfile>;
 
-  constructor(factories: Readonly<Record<string, SessionFactory>> = SESSION_FACTORIES) {
-    this.#factories = factories;
+  /**
+   * WARP-3703 — a registry of PROFILES, each the factory plus the fields the
+   * wire must carry for it. A bare {@link SessionFactory} is still accepted for
+   * an entry (every harness written before profiles passes one) and is held to
+   * the contract factories had then — see `toSessionProfile`.
+   */
+  constructor(
+    registry: Readonly<Record<string, SessionProfile | SessionFactory>> = SESSION_PROFILES,
+  ) {
+    this.#profiles = new Map(
+      Object.entries(registry).map(
+        ([id, entry]): [string, SessionProfile] => [id, toSessionProfile(entry)],
+      ),
+    );
   }
 
   knows(serverId: string): boolean {
-    return Object.prototype.hasOwnProperty.call(this.#factories, serverId);
+    return this.#profiles.has(serverId);
+  }
+
+  /** The ids THIS store serves, sorted — the registry it was built with, not
+   *  the process-wide one, so a refusal never names a server it cannot open. */
+  knownServerIds(): string[] {
+    return [...this.#profiles.keys()].sort();
+  }
+
+  /**
+   * The flat fields `POST /sessions/:id/open` must carry for this server.
+   *
+   * Throws for an id the store does not serve rather than answering "none": an
+   * empty contract is the one answer that would let an unvalidated body reach a
+   * factory. The route asks only after {@link knows} has said yes.
+   */
+  requiredFieldsOf(serverId: string): readonly string[] {
+    const profile = this.#profiles.get(serverId);
+    if (!profile) throw new Error(`no session factory for "${serverId}"`);
+    return profile.requiredFields;
   }
 
   get(serverId: string): RemoteMcpSession | undefined {
@@ -165,10 +197,10 @@ export class BridgeSessionStore {
    */
   async open(serverId: string, input: OpenSessionInput): Promise<RemoteMcpSessionHealth> {
     return this.#serialize(serverId, async () => {
-      const factory = this.#factories[serverId];
-      if (!factory) throw new Error(`no session factory for "${serverId}"`);
+      const profile = this.#profiles.get(serverId);
+      if (!profile) throw new Error(`no session factory for "${serverId}"`);
       await this.#closeNow(serverId);
-      const session = factory(input);
+      const session = profile.factory(input);
       this.#sessions.set(serverId, session);
       return session.connect();
     });
@@ -360,7 +392,7 @@ async function route(
     return {
       status: 200,
       body: {
-        knownServers: knownServerIds(),
+        knownServers: opts.store.knownServerIds(),
         sessions: opts.store.healthAll(),
       } satisfies BridgeSessionsBody,
     };
@@ -376,7 +408,7 @@ async function route(
     return err(
       404,
       "UNKNOWN_SERVER_ID",
-      `"${serverId}" is not a server this bridge implements. Known: ${knownServerIds().join(", ")}.`,
+      `"${serverId}" is not a server this bridge implements. Known: ${opts.store.knownServerIds().join(", ")}.`,
     );
   }
 
@@ -423,18 +455,22 @@ async function openSession(
     return err(400, "INVALID_REQUEST", "Body must be a JSON object.");
   }
   const body = rawBody as Record<string, unknown>;
-  const email = requiredString(body, "email");
-  const apiToken = requiredString(body, "apiToken");
-  const cloudId = requiredString(body, "cloudId");
-  if (!email || !apiToken || !cloudId) {
+  // WARP-3703 — the contract is the PROFILE's, not one every server shares: a
+  // vendor that presents a single Bearer token has no email and no site. Only
+  // the fields the profile names are read, and only those are forwarded, so an
+  // Atlassian-shaped body sent to a bearer-only vendor hands its factory
+  // nothing it did not ask for.
+  const fields: Record<string, string> = {};
+  const missing: string[] = [];
+  for (const name of opts.store.requiredFieldsOf(serverId)) {
+    const value = requiredString(body, name);
+    if (value === null) missing.push(name);
+    else fields[name] = value;
+  }
+  if (missing.length > 0) {
     // Names the MISSING FIELD, never a value — a message that echoed the body
     // back would put the credential in the orchestrator's log the first time
     // somebody mistyped a key.
-    const missing = [
-      email ? null : "email",
-      apiToken ? null : "apiToken",
-      cloudId ? null : "cloudId",
-    ].filter((f): f is string => f !== null);
     return err(400, "INVALID_REQUEST", `Missing or empty: ${missing.join(", ")}.`);
   }
   const url = requiredString(body, "url");
@@ -451,9 +487,7 @@ async function openSession(
   }
   try {
     const state = await opts.store.open(serverId, {
-      email,
-      apiToken,
-      cloudId,
+      ...fields,
       ...(url ? { url } : {}),
       ...(knownTools !== undefined ? { knownTools } : {}),
     });

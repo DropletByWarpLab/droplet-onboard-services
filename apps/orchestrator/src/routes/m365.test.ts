@@ -81,6 +81,9 @@ function fakePrisma(seed: Record<string, unknown> | null = null) {
     m365DeltaCursor: {
       deleteMany: vi.fn(async () => ({ count: 0 })),
     },
+    // WARP-3538 — disconnect also removes the files landed from the account.
+    cloudFileItem: { deleteMany: vi.fn(async () => ({ count: 0 })) },
+    cloudFileSource: { deleteMany: vi.fn(async () => ({ count: 0 })) },
   };
 }
 
@@ -318,7 +321,9 @@ describe("GET /api/m365/callback", () => {
     const authed = (createM365Router(fakePrisma() as never, fakeEntra()) as unknown as { stack: Layer[] }).stack
       .map((l) => l.route)
       .filter(Boolean) as NonNullable<Layer["route"]>[];
-    expect(authed.length).toBe(4);
+    // connection, connect, connect/device-code, disconnect — and, since WARP-3538,
+    // the SharePoint switch and the sync status (m365.sharepoint.test.ts).
+    expect(authed.length).toBe(6);
     for (const r of authed) expect(guarded(r)).toBe(true);
 
     const open = (createM365CallbackRouter(fakePrisma() as never, fakeEntra()) as unknown as { stack: Layer[] }).stack
