@@ -38,7 +38,7 @@ import {
 } from "../services/brain-memory.service.js";
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
-import { inlinePreviewContentType } from "../lib/file-content.js";
+import { contentDispositionAttachment, inlinePreviewContentType } from "../lib/file-content.js";
 import { publish as mqttPublish } from "../services/mqtt.service.js";
 import { publishRunOne } from "../services/transcription-bus.service.js";
 import { createLogger } from "../lib/logger.js";
@@ -605,14 +605,10 @@ export function createFilesBrainRouter(prisma: PrismaClient): Router {
         req.query.disposition === "inline"
           ? inlinePreviewContentType(item.filename)
           : null;
-      // RFC 6266 quoted-string: strip what would break out of the quoted
-      // filename parameter.
-      const dispositionFilename = item.filename.replace(/[\\"]/g, "");
-
       if (inlineType) {
         res.setHeader(
           "Content-Disposition",
-          `inline; filename="${dispositionFilename}"`,
+          contentDispositionAttachment(item.filename, "inline"),
         );
         res.setHeader("Content-Type", inlineType);
         // `nosniff` stops a browser re-interpreting safelisted bytes as
@@ -631,7 +627,7 @@ export function createFilesBrainRouter(prisma: PrismaClient): Router {
       } else {
         res.writeHead(200, {
           "Content-Type": item.mimeType ?? "application/octet-stream",
-          "Content-Disposition": `attachment; filename="${dispositionFilename}"`,
+          "Content-Disposition": contentDispositionAttachment(item.filename),
         });
       }
       createReadStream(item.storagePath).pipe(res);
