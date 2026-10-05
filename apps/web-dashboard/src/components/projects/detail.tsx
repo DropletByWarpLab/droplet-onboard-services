@@ -41,7 +41,6 @@ import { usePresence } from "./usePresence";
 import { editActions } from "./useEditing";
 import { CycleField, ModulesField } from "./planning-pickers";
 import { ArrowUpRight, Copy } from "lucide-react";
-import { editActions } from "./useEditing";
 import { PropRow } from "./detail/PropRow";
 import { TimeSection } from "./time/TimeSection";
 import { escapeHtml } from "@/lib/escape-html";
