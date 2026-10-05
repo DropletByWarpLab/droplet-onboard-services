@@ -21,25 +21,26 @@
 import path from "node:path";
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
-import { createAtlassianRemoteCallPolicy } from "./atlassian-tool-policy.js";
 import { McpBridgeClient } from "./mcp-bridge.client.js";
 import { McpClientService } from "./mcp-client.service.js";
-import { DENY_ALL_REMOTE_TOOLS, McpToolMultiplexer } from "./mcp-multiplexer.service.js";
+import { McpToolMultiplexer } from "./mcp-multiplexer.service.js";
 import {
   composeRemoteCallPolicy,
   createRecordBackedRemoteCallPolicy,
   remoteToolClassificationCache,
 } from "./remote-tool-classification.service.js";
+import { remoteToolTablePolicy } from "./remote-tool-tables.js";
 import type { RemoteCallPolicy } from "./mcp-multiplexer.service.js";
 import { installedExtensionIds } from "./extension-lifecycle.service.js";
 import { EXTENSION_SERVER_PREFIX } from "./extension-token.js";
 import {
-  ATLASSIAN_REMOTE_SERVER_ID,
-  attachAtlassianRemote,
+  attachRemoteServer,
   detachRemoteServer,
   parseRemoteMcpAllowlist,
-  type AttachAtlassianDeps,
+  registeredRemoteServers,
+  type AttachRemoteDeps,
   type RemoteAttachResult,
+  type RemoteServerRegistration,
 } from "./remote-mcp-servers.js";
 import type { RemoteMcpReconcilerDeps } from "./remote-mcp-reconciler.service.js";
 
@@ -87,11 +88,13 @@ const localClient = new McpClientService({
  * configured `attachRemote` refuses every server.
  *
  * WARP-2316 — the remote call policy is no longer the bare deny-everything
- * default. It is the ATLASSIAN policy, layered OVER that default: a name in
- * `atlassian-tool-policy.ts`'s explicit read list is allowed, and everything
- * else — every Atlassian write, every Atlassian tool nobody classified, and
- * every tool of every other server — falls through to
- * {@link DENY_ALL_REMOTE_TOOLS}.
+ * default. It is the compiled TABLES, layered OVER that default: a name in a
+ * server's explicit read list is allowed (today `atlassian-tool-policy.ts`'s),
+ * and everything else — every write, every tool nobody classified, and every
+ * tool of a server no table speaks for — falls through to
+ * {@link DENY_ALL_REMOTE_TOOLS}. WARP-3703: which table speaks for which server
+ * is `remote-tool-tables.ts`'s registry, so a second vendor is a data entry
+ * there and no change here.
  *
  * That is ADR-043 §3 read as written rather than relaxed: *"Read-only
  * invocation of tools an operator has explicitly demoted to read status under
@@ -121,22 +124,19 @@ export function isRemoteServerAllowed(serverId: string): boolean {
 }
 
 // WARP-2426 — the operator-owned classification record, layered over the
-// reviewed Atlassian table: the record's `denied` wins over everything; its
+// reviewed per-server tables: the record's `denied` wins over everything; its
 // reviewed reads fill only the table's holes; the table's write-blocks are
 // a floor no demotion reaches around. Read from a cache the attach path and
 // the owner route refresh — a row the cache has not seen is "not
 // classified", never "allowed".
+//
+// WARP-3703 — the table is the registry's, by server id. Atlassian's reviewed
+// table is registered there exactly as it was built here (API-token mode, deny-all
+// fallback), and a server with NO table is DENIED by default: the shipping
+// deny-all, which the record may then fill one reviewed read at a time.
 const vendorRemoteCallPolicy: RemoteCallPolicy = composeRemoteCallPolicy({
   lookup: remoteToolClassificationCache.lookup,
-  // `api-token` because that is the only credential a v1 box can hold: ADR-043
-  // §7 classifies Atlassian as the customer-created-credential model and the
-  // OAuth endpoint (`/v1/mcp/authv2`) is an explicit non-goal. The mode is a
-  // parameter rather than an assumption so the Compass half of the auth-mode
-  // matrix is expressible and testable.
-  table: createAtlassianRemoteCallPolicy({
-    authMode: "api-token",
-    fallback: DENY_ALL_REMOTE_TOOLS,
-  }),
+  table: remoteToolTablePolicy,
 });
 
 /**
@@ -184,32 +184,32 @@ export async function stopMcp(): Promise<void> {
 }
 
 /**
- * WARP-2627 — attach the outbound Atlassian session, if this box is entitled.
+ * WARP-3703 (ADR-043 TC-1.2) — attach ONE registered server, and keep what this
+ * process needs of it afterwards.
  *
- * Called once from `index.ts` after the stdio child is up. On the SHIPPING
- * default — `REMOTE_MCP_SERVER_ALLOWLIST` empty — this returns
- * `not_allowlisted` having touched no network and constructed no client, so the
- * boot path is byte-identical to before this PR on every unconfigured box.
- *
- * The socket lives in `services/mcp-bridge` (ADR-043 §5); what is constructed
- * here is an HTTP client for it, wrapped by the gate → audit front.
+ * What `ensureRemoteMcpAttached` did for Atlassian alone, per registration, and
+ * shared by the boot loop and the reconciler's re-open: a re-open is the SAME
+ * gated attach the boot path runs, not a second implementation of "open a
+ * session" that could drift from it (WARP-2651).
  */
-export async function ensureRemoteMcpAttached(
-  prisma: AttachAtlassianDeps["prisma"],
+async function attachRegistered(
+  prisma: AttachRemoteDeps["prisma"],
+  server: RemoteServerRegistration,
   /** WARP-2651 — the catalog a previous attach vetted. Absent at boot: this
    *  process has vetted nothing yet, and an empty baseline is not the same
    *  claim as no baseline. */
   knownTools?: readonly string[],
 ): Promise<RemoteAttachResult> {
-  const result = await attachAtlassianRemote({
+  const result = await attachRemoteServer({
+    ...server,
     mux: mcpClient,
     prisma,
     allowlist: remoteAllowlist,
-    createClient: () => createBridgeClient(ATLASSIAN_REMOTE_SERVER_ID),
+    createClient: () => createBridgeClient(server.serverId),
     // WARP-2426 — the same client, seen through the classification surface.
     // `prisma` here is typed to the gate's narrow row shape; at runtime it is
     // the process-wide PrismaClient, which carries the model.
-    classificationPrisma: prisma as unknown as Parameters<typeof attachAtlassianRemote>[0]["classificationPrisma"],
+    classificationPrisma: prisma as unknown as AttachRemoteDeps["classificationPrisma"],
     ...(knownTools !== undefined ? { knownTools } : {}),
   });
   if (result.attached) {
@@ -230,6 +230,46 @@ export async function ensureRemoteMcpAttached(
     );
   }
   return result;
+}
+
+/**
+ * WARP-2627 — attach every outbound MCP session this box is entitled to.
+ *
+ * Called once from `index.ts` after the stdio child is up, and answers one
+ * result per registered server (WARP-3703: it used to answer Atlassian's alone).
+ * On the SHIPPING default — `REMOTE_MCP_SERVER_ALLOWLIST` empty — every server
+ * is refused at the first gate, having touched no network, read no row and
+ * constructed no client, so the boot path is byte-identical to before on every
+ * unconfigured box.
+ *
+ * One at a time and in registry order: an attach lists the whole multiplexer
+ * catalog, so concurrent attaches would read each other's half-attached state.
+ * A server whose attach THROWS does not stop the ones after it — the point of
+ * more than one server is that they do not share a fate — and the first failure
+ * is rethrown once every server has been attempted, which is what the boot call's
+ * own handler already logs.
+ *
+ * The socket lives in `services/mcp-bridge` (ADR-043 §5); what is constructed
+ * here is an HTTP client for it, wrapped by the gate → audit front.
+ */
+export async function ensureRemoteMcpAttached(
+  prisma: AttachRemoteDeps["prisma"],
+  /** Injectable ONLY so a test can attach a server that exists nowhere else;
+   *  production attaches every MCP-track provider the registry declares. */
+  servers: readonly RemoteServerRegistration[] = registeredRemoteServers(),
+): Promise<RemoteAttachResult[]> {
+  const results: RemoteAttachResult[] = [];
+  const failures: unknown[] = [];
+  for (const server of servers) {
+    try {
+      results.push(await attachRegistered(prisma, server));
+    } catch (err) {
+      failures.push(err);
+      logger.warn({ err, serverId: server.serverId }, "remote_mcp_attach_failed");
+    }
+  }
+  if (failures.length > 0) throw failures[0];
+  return results;
 }
 
 /**
@@ -262,26 +302,43 @@ function createBridgeClient(serverId: string): McpBridgeClient {
  *
  * Every dependency is a thin adapter onto something that already exists: the
  * bridge client's `GET /sessions` and `DELETE`, the multiplexer's `detachRemote`, and
- * the SAME `attachAtlassianRemote` the boot path uses — so the re-open is not a
- * second, parallel implementation of "open a session" that could drift from the
- * gated one.
+ * the SAME gated attach the boot path uses — so the re-open is not a second,
+ * parallel implementation of "open a session" that could drift from the gated
+ * one.
+ *
+ * WARP-3703 — `reattach` opens THE SERVER THE RECONCILER NAMED. It used to
+ * ignore its `serverId`, because there was exactly one attachable server and a
+ * generic re-open would have silently re-opened Atlassian for whatever id the
+ * registry happened to hold; with more than one that is a different server's
+ * credential going to the wrong place, so an id nobody registered is refused
+ * rather than answered with some other server's attach.
  */
 export function remoteMcpReconcilerDeps(
-  prisma: AttachAtlassianDeps["prisma"],
+  prisma: AttachRemoteDeps["prisma"],
+  /** Injectable ONLY so a test can re-open a server that exists nowhere else. */
+  servers: readonly RemoteServerRegistration[] = registeredRemoteServers(),
 ): RemoteMcpReconcilerDeps {
   return {
-    sessions: () => createBridgeClient(ATLASSIAN_REMOTE_SERVER_ID).sessions(),
+    // `GET /sessions` is the whole bridge's inventory and answers the same
+    // whichever server the client was built for; the client wants one id, so the
+    // first registered server's is used.
+    sessions: async () => {
+      const probe = servers[0];
+      if (!probe) throw new Error("no MCP server is registered, so there is no bridge inventory to read");
+      return createBridgeClient(probe.serverId).sessions();
+    },
     closeSession: async (serverId) => {
       await createBridgeClient(serverId).close();
     },
     detach: (serverId) => {
       mcpClient.detachRemote(serverId);
     },
-    // `serverId` is ignored because there is exactly one attachable server
-    // today — `SESSION_FACTORIES` has one entry and `attachAtlassianRemote` is
-    // Atlassian-specific by name. A second server is a second attach function
-    // and a switch here, NOT a generic re-open that would silently re-open
-    // Atlassian for whatever id the registry happened to hold.
-    reattach: (_serverId, knownTools) => ensureRemoteMcpAttached(prisma, knownTools),
+    reattach: async (serverId, knownTools) => {
+      const server = servers.find((s) => s.serverId === serverId);
+      if (!server) {
+        throw new Error(`no MCP server "${serverId}" is registered; refusing to re-open another in its place`);
+      }
+      return attachRegistered(prisma, server, knownTools);
+    },
   };
 }

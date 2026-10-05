@@ -78,6 +78,9 @@ function stubPrisma(row: Record<string, unknown> | null) {
     m365DeltaCursor: {
       deleteMany: vi.fn(async () => ({ count: 0 })),
     },
+    // WARP-3538 — disconnect also removes the files landed from the account.
+    cloudFileItem: { deleteMany: vi.fn(async () => ({ count: 0 })) },
+    cloudFileSource: { deleteMany: vi.fn(async () => ({ count: 0 })) },
   };
 }
 
