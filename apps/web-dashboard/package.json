@@ -29,7 +29,7 @@
     "@tiptap/suggestion": "3.31.4",
     "@zxing/browser": "^0.2.1",
     "@zxing/library": "^0.21.3",
-    "framer-motion": "^13.5.0",
+    "framer-motion": "^14.0.0",
     "hls.js": "^1.7.3",
     "lucide-react": "^1.49.0",
     "next": "^15.5.27",
