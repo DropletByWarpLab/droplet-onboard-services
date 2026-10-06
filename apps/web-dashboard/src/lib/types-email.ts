@@ -27,6 +27,9 @@ export interface EmailAccount {
   lastErrorAt: string | null;
   /** Human-readable last error, or null. */
   lastError: string | null;
+  /** Provider-backed imports may be read-only even for a Droplet owner. */
+  authMode?: "PASSWORD" | "GOOGLE_OAUTH" | "M365_GRAPH";
+  canSend?: boolean;
 }
 
 export interface EmailAccountsResponse {
@@ -80,6 +83,9 @@ export interface EmailMessage {
   receivedAt: string;
   /** WARP-3267 — the files the message carried (metadata only). */
   attachments?: EmailAttachment[];
+  /** Outlook import records presence/metadata; attachment bytes stay in Outlook. */
+  hasAttachments?: boolean;
+  externalAttachmentMetadata?: Array<{ id: string; filename: string; contentType: string; size: number; isInline: boolean; status: "remote_only" }> | null;
 }
 
 /**

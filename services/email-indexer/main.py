@@ -95,6 +95,7 @@ _idle_deps = IdleDeps(
     ingest=orchestrator_client.ingest_message,
     publish_new_mail=mqtt_bridge.publish_new_mail,
     report_status=orchestrator_client.report_account_status,
+    get_oauth_access_token=orchestrator_client.get_oauth_access_token,
 )
 
 
@@ -138,7 +139,9 @@ async def _drain_outbound() -> None:
         return  # email module disabled — nothing to drain
     drafts = await db.list_queued_drafts()
     for draft in drafts:
-        await send_one_draft(draft, _status_callback)
+        await send_one_draft(
+            draft, _status_callback, orchestrator_client.get_oauth_access_token
+        )
 
 
 @asynccontextmanager

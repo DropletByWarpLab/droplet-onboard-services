@@ -70,10 +70,23 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from backoff import BackoffState
 from creds import decrypt
-from errors import IngestTooLarge
+from errors import IngestTooLarge, OAuthTokenUnavailable
 from parser import parse_message
 
 logger = logging.getLogger(__name__)
+
+
+def _redact_oauth_command(record: logging.LogRecord) -> bool:
+    # aioimaplib 2.0.1 scrubs the raw token, but its command contains BASE64
+    # SASL material instead. Keep that command out of debug diagnostics too.
+    message = record.getMessage().upper()
+    if "AUTHENTICATE" in message and "XOAUTH2" in message:
+        record.msg = "IMAP OAuth authentication command"
+        record.args = ()
+    return True
+
+
+logging.getLogger("aioimaplib.aioimaplib").addFilter(_redact_oauth_command)
 
 #: How long one IDLE waits for a server push before the cycle ends and the
 #: loop re-syncs. RFC 2177 asks clients to re-issue IDLE at least every 29
@@ -118,7 +131,8 @@ class AccountConfig:
     imap_port: int
     imap_tls: bool
     username: str
-    password_enc: str
+    password_enc: Optional[str]
+    auth_mode: str = "PASSWORD"
 
 
 class IngestFn(Protocol):
@@ -135,6 +149,10 @@ class ReportStatusFn(Protocol):
     ) -> bool: ...
 
 
+class OAuthTokenFn(Protocol):
+    async def __call__(self, account_id: str) -> Optional[str]: ...
+
+
 @dataclass
 class IdleDeps:
     """Pluggable boundary for tests — injects ingest + mqtt without
@@ -146,6 +164,7 @@ class IdleDeps:
     #: Optional so an ingest-only test fixture still constructs; production
     #: wiring (main.py) always sets it.
     report_status: Optional[ReportStatusFn] = None
+    get_oauth_access_token: Optional[OAuthTokenFn] = None
 
 
 @dataclass
@@ -362,6 +381,9 @@ async def _report(
     try:
         await deps.report_status(account.id, status, reason)
     except Exception as exc:  # noqa: BLE001 — a lost status report is not a lost cycle
+        if account.auth_mode == "GOOGLE_OAUTH":
+            logger.warning("account %s: status report failed", account.address)
+            return
         logger.warning("account %s: status report failed: %s", account.address, exc)
 
 
@@ -377,10 +399,35 @@ async def run_idle_session(
     success, `error` with a closed-set reason on failure.
     """
     state = state if state is not None else SyncState()
-    plaintext = decrypt(account.password_enc)
-    if plaintext is None:
-        logger.warning("account %s: password decrypt failed; skipping cycle", account.address)
-        await _report(deps, account, "error", REASONS["decrypt_failed"])
+    credential: Optional[str] = None
+    if account.auth_mode == "GOOGLE_OAUTH":
+        if deps.get_oauth_access_token is None:
+            await _report(deps, account, "error", REASONS["auth_failed"])
+            return False
+        try:
+            credential = await deps.get_oauth_access_token(account.id)
+        except OAuthTokenUnavailable as exc:
+            reason = (
+                REASONS["auth_failed"]
+                if exc.needs_reconnect
+                else REASONS["unreachable"]
+            )
+            await _report(deps, account, "error", reason)
+            return False
+        except Exception:  # noqa: BLE001 — never expose a token-bearing exception
+            await _report(deps, account, "error", REASONS["unknown"])
+            return False
+        if not credential:
+            await _report(deps, account, "error", REASONS["auth_failed"])
+            return False
+    elif account.auth_mode == "PASSWORD":
+        credential = decrypt(account.password_enc) if account.password_enc else None
+        if credential is None:
+            logger.warning("account %s: password decrypt failed; skipping cycle", account.address)
+            await _report(deps, account, "error", REASONS["decrypt_failed"])
+            return False
+    else:
+        await _report(deps, account, "error", REASONS["auth_failed"])
         return False
 
     imap = (
@@ -391,10 +438,14 @@ async def run_idle_session(
     reason: Optional[str] = None
     try:
         await imap.wait_hello_from_server()
-        login = await imap.login(account.username, plaintext)
+        login = (
+            await imap.xoauth2(account.username, credential)
+            if account.auth_mode == "GOOGLE_OAUTH"
+            else await imap.login(account.username, credential)
+        )
         if login.result != "OK":
-            # `login.lines` can echo the username. The result token only.
-            logger.warning("account %s: LOGIN failed: %s", account.address, login.result)
+            # Authentication responses can echo account or token material.
+            logger.warning("account %s: authentication failed", account.address)
             reason = REASONS["auth_failed"]
             return False
         select = await imap.select("INBOX")

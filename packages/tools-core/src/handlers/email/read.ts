@@ -104,7 +104,7 @@ async function handler(
 const tool: Tool = {
   name: "email_read",
   description:
-    "Fetch the full content of an email thread — subject, sender, snippet, and every message in order. Use when the user asks to open / read / show a specific thread.",
+    "Read a thread: subject, sender, snippet and messages in order.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

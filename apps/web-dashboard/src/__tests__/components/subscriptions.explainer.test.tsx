@@ -49,9 +49,11 @@ describe("SubscriptionsPanel — explainer (Samantha QA #bugs)", () => {
     render(<SubscriptionsPanel />);
     // No form opened. The intro must already be visible right under the header.
     const intro = screen.getByText(
-      /show your google, icloud, or outlook calendar/i,
+      /connect your google or outlook account in settings/i,
     );
     expect(intro).toBeInTheDocument();
+    expect(intro).toHaveTextContent(/icloud.*share link/i);
+    expect(screen.getByRole("link", { name: "Connect Google or Outlook" })).toHaveAttribute("href", "/settings#connected-accounts");
     // The add-form's auth-mode hint stays hidden until the form is opened —
     // proving the intro is not the buried form copy.
     expect(screen.queryByText(/Requires a username and password/i)).toBeNull();
@@ -62,5 +64,14 @@ describe("SubscriptionsPanel — explainer (Samantha QA #bugs)", () => {
     expect(
       screen.getByText(/no external calendars subscribed yet/i),
     ).toBeInTheDocument();
+  });
+
+  it.each(["google_oauth", "m365_oauth"])("routes managed %s calendars to account settings while retaining local-copy removal", (authMode) => {
+    useCalendarSourcesMock.mockReturnValue({ sources: [{ id: "account-cal", name: "Account calendar", url: "provider-managed", authMode, username: null, syncIntervalSec: 300, lastSyncAt: null, lastSyncError: null, createdAt: "2026-10-05T00:00:00Z" }], refresh: refreshMock, isLoading: false });
+    render(<SubscriptionsPanel />);
+    expect(screen.getByRole("link", { name: "Manage connection" })).toHaveAttribute("href", "/settings#connected-accounts");
+    expect(screen.getByText(/account · read-only/i)).toBeInTheDocument();
+    expect(screen.queryByTitle("Sync now")).not.toBeInTheDocument();
+    expect(screen.queryByText("provider-managed")).not.toBeInTheDocument();
   });
 });

@@ -33,8 +33,9 @@ const TYPE_ALLOWLIST = [
 
 /** Rotate a ring so it starts at its smallest member: one spelling per cycle. */
 function canonical(cycle: string[]): string {
-  const start = cycle.indexOf([...cycle].sort()[0]);
-  return [...cycle.slice(start), ...cycle.slice(0, start)].join(" -> ");
+  const paths = cycle.map((file) => file.replaceAll("\\", "/"));
+  const start = paths.indexOf([...paths].sort()[0]);
+  return [...paths.slice(start), ...paths.slice(0, start)].join(" -> ");
 }
 
 async function cycles(transform: boolean): Promise<string[]> {

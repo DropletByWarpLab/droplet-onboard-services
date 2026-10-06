@@ -326,6 +326,7 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   ] },
 
   // ── email ───────────────────────────────────────────────────────────────
+  { tool: "email_accounts", client: "orchestrator", hops: [admit("get", "/api/email/accounts")] },
   { tool: "email_search", client: "orchestrator", hops: [admit("get", "/api/email/:accountId/threads")] },
   { tool: "email_read", client: "orchestrator", hops: [admit("get", "/api/email/:accountId/threads/:threadId")] },
   { tool: "email_summarize_thread", client: "orchestrator", hops: [admit("get", "/api/email/:accountId/threads/:threadId/analysis")] },

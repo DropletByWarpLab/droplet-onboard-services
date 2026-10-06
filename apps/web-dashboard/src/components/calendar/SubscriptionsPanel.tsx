@@ -154,6 +154,7 @@ export function SubscriptionsPanel() {
           <h2 className="type-headline" style={{ color: "var(--text)" }}>External calendars</h2>
         </div>
         <button
+          aria-label="Add calendar feed"
           onClick={() => setShowNew((v) => !v)}
           className="text-[color:var(--text-muted)] hover:text-[color:var(--text)] max-lg:inline-flex max-lg:items-center max-lg:justify-center max-lg:h-11 max-lg:w-11"
         >
@@ -166,9 +167,10 @@ export function SubscriptionsPanel() {
           purpose was invisible until you expanded it. This one-line intro sits
           directly under the header so the user understands it at a glance. */}
       <p className="type-caption-1 mb-3" style={{ color: "var(--text-muted)" }}>
-        Show your Google, iCloud, or Outlook calendar here — paste its share
-        link below.
+        Connect your Google or Outlook account in Settings to show its calendar here.
+        You can also add an iCloud calendar or another calendar using its share link below.
       </p>
+      <a className="btn mb-3" href="/settings#connected-accounts">Connect Google or Outlook</a>
 
       {showNew && (
         // WARP-308: the previous form conflated protocol with auth ("No
@@ -297,7 +299,7 @@ export function SubscriptionsPanel() {
             <li key={s.id} className="flex items-start gap-2 p-2 rounded" style={{ background: "var(--inset)" }}>
               <div className="flex-1 min-w-0">
                 <div className="type-subheadline truncate" style={{ color: "var(--text)" }}>{s.name}</div>
-                <div className="type-caption-1 truncate" style={{ color: "var(--text-muted)" }}>{s.url}</div>
+                <div className="type-caption-1 truncate" style={{ color: "var(--text-muted)" }}>{s.authMode === "google_oauth" ? "Google account · read-only" : s.authMode === "m365_oauth" ? "Outlook account · read-only" : s.url}</div>
                 <div className="type-caption-1 mt-0.5" style={{ color: "var(--text-muted)" }}>
                   {s.lastSyncAt ? (
                     <>Last synced {new Date(s.lastSyncAt).toLocaleString()}</>
@@ -316,14 +318,14 @@ export function SubscriptionsPanel() {
                   )}
                 </div>
               </div>
-              <button
+              {s.authMode === "google_oauth" || s.authMode === "m365_oauth" ? <a className="btn" href="/settings#connected-accounts">Manage connection</a> : <button
                 onClick={() => handleSync(s.id)}
                 disabled={busy === s.id}
                 className="text-[color:var(--text-muted)] hover:text-[color:var(--text)] max-lg:inline-flex max-lg:items-center max-lg:justify-center max-lg:h-11 max-lg:w-11"
                 title="Sync now"
               >
                 <RefreshCw size={14} className={busy === s.id ? "animate-spin" : ""} />
-              </button>
+              </button>}
               <button
                 onClick={() => handleDelete(s.id, s.name)}
                 className="text-[color:var(--text-muted)] hover:text-[color:var(--danger)]"

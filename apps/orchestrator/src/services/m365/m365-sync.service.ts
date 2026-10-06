@@ -47,10 +47,12 @@
  * not implemented** (WARP-2028) — writing mail there would ship a lie about how
  * the data is protected.
  *
- * Today the shipped caller lands exactly two workloads, `files` (OneDrive) and
- * `sharepoint` (one cursor per document library), as METADATA into the
+ * The shipped caller lands `files` (OneDrive) and `sharepoint` (one cursor per
+ * document library) as METADATA into the
  * provider-agnostic cloud-file store with its names encrypted
- * (`drive-landing.service.ts`, WARP-3538). Every other workload is still
+ * (`drive-landing.service.ts`, WARP-3538), and explicitly enabled `calendar`
+ * events into the person's external calendar source, and explicitly enabled
+ * `mail` bodies into their local email archive. Every other workload is still
  * counted and discarded: this runs its cursors, proves the transport, and
  * advances `lastSyncedAt` — the column the hub renders as "last synced" and
  * which, before WARP-2218, was only ever written by `connect()`.
@@ -76,6 +78,8 @@ import {
   markNeedsReconnect,
   type EntraClient,
 } from "./m365-auth.service.js";
+import type { M365GrantGeneration, PageHandler } from "./m365-contracts.js";
+export type { PageContext, PageHandler } from "./m365-contracts.js";
 import {
   classifySyncFailure,
   HANDLER_FAILED_CODE,
@@ -113,6 +117,8 @@ import {
 } from "./graph-resources.js";
 import { ensureSource, findSourceId, upsertSource } from "../cloud-files/cloud-file-store.service.js";
 import { pruneSharePointLibraries, purgeSharePointDataForUser } from "./drive-data.service.js";
+import { ensureMicrosoftCalendarCursor, recordMicrosoftCalendarFailure } from "./calendar-landing.service.js";
+import { ensureMicrosoftMailFolder, recordMicrosoftMailFailure, setMicrosoftMailEnabled } from "./mail-settings.service.js";
 
 /**
  * How many pages one cursor may walk in a single tick.
@@ -142,45 +148,6 @@ export interface CursorSyncResult {
   error?: string;
 }
 
-/**
- * Where a page sits in the enumeration it belongs to — the one fact only the
- * engine knows, and the one a handler that LANDS needs to remove what is gone.
- *
- * A run that starts from scratch (a first sync, or a resync after Microsoft
- * dropped the token) returns the CURRENT state and says nothing about what was
- * deleted in between, so a handler must delete what such a run did not return.
- * It can only do that if it is told when a full enumeration starts and when it
- * ends — and "ends" is not "this tick ends": a big source takes many ticks, each
- * resuming from a checkpoint (WARP-3059).
- *
- *   - `fullEnumeration` — the enumeration this page belongs to began from
- *     scratch: the cursor had no delta link when it was claimed. True for a first
- *     sync, a resync, and every tick that RESUMES one; false for an incremental
- *     run (and for resuming one), which must never delete anything the feed did
- *     not say was deleted.
- *   - `isFirstPage` — the first page of the enumeration, read in THIS tick: a
- *     tick that resumes from a checkpoint never sees it, because the first page
- *     was read by an earlier tick.
- *   - `isLastPage` — the page that carries the delta link, wherever in the
- *     enumeration's ticks it falls. It may carry no items at all.
- *
- * Computed from the cursor as it was CLAIMED, never from what the run has done
- * since: a page that fails and is retried is told the same thing it was told
- * the first time, which is what makes a handler's mark and sweep idempotent.
- */
-export interface PageContext {
-  readonly fullEnumeration: boolean;
-  readonly isFirstPage: boolean;
-  readonly isLastPage: boolean;
-}
-
-/** What a caller does with a page of changes. Injected — see the module header. */
-export type PageHandler = (
-  cursor: DueCursor,
-  page: GraphPage,
-  run: PageContext,
-) => Promise<void> | void;
-
 export interface M365SyncDeps {
   prisma: PrismaClient;
   client: GraphClient;
@@ -203,6 +170,9 @@ export interface M365SyncDeps {
   initialUrlFor: (workload: string, resourceId: string) => string | null;
   handlePage?: PageHandler;
   now?: () => Date;
+  /** Workspace module choices stop the corresponding provider reads. */
+  calendarModuleEnabled?: boolean;
+  mailModuleEnabled?: boolean;
 }
 
 /**
@@ -226,6 +196,26 @@ export async function syncCursor(
     completed: false,
   };
 
+  if (cursor.workload === "mail") {
+    if (deps.mailModuleEnabled === false) return { ...base, error: "Email capability is disabled." };
+    const connection = await deps.prisma.m365Connection.findUnique({ where: { userId: cursor.userId },
+      select: { state: true, mailEnabled: true, emailAccountId: true, grantedScopes: true } });
+    if (connection?.state !== "CONNECTED" || connection.mailEnabled !== true || !connection.emailAccountId) return { ...base, error: "Outlook email import is off." };
+    if (!grantCovers((connection.grantedScopes ?? "").split(/\s+/).filter(Boolean), GRAPH_RESOURCES.mail.leastPrivilegeScope)) return { ...base, error: "Outlook email permission needs reconnecting." };
+  }
+
+  if (cursor.workload === "calendar") {
+    if (deps.calendarModuleEnabled === false) return { ...base, error: "Calendar capability is disabled." };
+    const connection = await deps.prisma.m365Connection.findUnique({ where: { userId: cursor.userId },
+      select: { state: true, calendarEnabled: true, calendarSourceId: true, grantedScopes: true } });
+    if (connection?.state !== "CONNECTED" || connection.calendarEnabled !== true || !connection.calendarSourceId) return { ...base, error: "Outlook calendar import is off." };
+    if (!grantCovers((connection.grantedScopes ?? "").split(/\s+/).filter(Boolean), GRAPH_RESOURCES.calendar.leastPrivilegeScope)) return { ...base, error: "Outlook calendar permission needs reconnecting." };
+  }
+  if (cursor.cursorLinkHash !== undefined) {
+    const connection = await deps.prisma.m365Connection.findUnique({ where: { userId: cursor.userId }, select: { state: true, cursorLinkHash: true } });
+    if (connection?.state !== "CONNECTED" || connection.cursorLinkHash !== cursor.cursorLinkHash) return { ...base, error: "The Microsoft connection changed." };
+  }
+
   // A checkpoint from a run the page budget cut short takes precedence: the
   // pages before it were handled, and starting over would re-read them.
   let url: string | null = cursor.resumeLink ?? cursor.deltaLink;
@@ -247,8 +237,9 @@ export async function syncCursor(
   }
 
   let accessToken: string;
+  let generation: M365GrantGeneration | undefined;
   try {
-    accessToken = await getAccessToken(deps.prisma, deps.entra, cursor.userId, now());
+    accessToken = await getAccessToken(deps.prisma, deps.entra, cursor.userId, now(), (current) => { generation = current; });
   } catch (err) {
     if (err instanceof M365NotConnectedError) {
       // A dead or missing grant. `classifySyncFailure` maps this to AUTH,
@@ -284,6 +275,11 @@ export async function syncCursor(
     };
   }
 
+  if (generation && cursor.cursorLinkHash !== undefined && generation.cursorLinkHash !== cursor.cursorLinkHash) return { ...base, error: "The Microsoft connection changed." };
+  if (cursor.workload === "mail") {
+    const current = await deps.prisma.m365Connection.findUnique({ where: { userId: cursor.userId }, select: { state: true, mailEnabled: true, emailAccountId: true, grantedScopes: true } });
+    if (current?.state !== "CONNECTED" || !current.mailEnabled || !current.emailAccountId || !grantCovers((current.grantedScopes ?? "").split(/\s+/).filter(Boolean), GRAPH_RESOURCES.mail.leastPrivilegeScope)) return { ...base, error: "Outlook email import needs a connected mailbox and permission." };
+  }
   let items = 0;
   let pages = 0;
 
@@ -296,7 +292,7 @@ export async function syncCursor(
   while (url && pages < MAX_PAGES_PER_TICK) {
     let page: GraphPage;
     try {
-      page = await deps.client.getPage(url, accessToken);
+      page = await deps.client.getPage(url, accessToken, cursor.workload === "mail" ? { mail: true } : {});
     } catch (err) {
       const shaped =
         err instanceof GraphRequestError
@@ -307,6 +303,8 @@ export async function syncCursor(
       // throttled request still spends the tenant's budget.
       const retryAfter = err instanceof GraphRequestError ? err.retryAfterHeader : null;
       await recordFailure(deps.prisma, cursor.id, shaped, retryAfter, now());
+      if (cursor.workload === "calendar") await recordMicrosoftCalendarFailure(deps.prisma, cursor.userId, classifySyncFailure(shaped) === "AUTH", generation);
+      if (cursor.workload === "mail") await recordMicrosoftMailFailure(deps.prisma, cursor.userId, classifySyncFailure(shaped) === "AUTH", generation);
       // 🔴 A 403 on a SHAREPOINT cursor is not a dead grant. Losing access to one
       // library — a site's permissions changed, the library was locked or
       // deleted, a policy applies to that one site — answers 403 for that
@@ -329,6 +327,7 @@ export async function syncCursor(
           deps.prisma,
           cursor.userId,
           "Microsoft rejected the sync's access to this account.",
+          ...(generation ? [generation] as const : [] as const),
         );
       }
       return {
@@ -351,15 +350,25 @@ export async function syncCursor(
           fullEnumeration,
           isFirstPage: pages === 1 && !resuming,
           isLastPage: page.links.deltaLink !== null,
+          ...(cursor.workload === "mail" ? { accessToken, grantGeneration: generation } : {}),
         });
       } catch (err) {
+        const shaped = err instanceof GraphRequestError
+          ? { statusCode: err.statusCode, code: err.code, message: err.message }
+          : { statusCode: 0, code: HANDLER_FAILED_CODE, message: "page handling failed" };
         await recordFailure(
           deps.prisma,
           cursor.id,
-          { statusCode: 0, code: HANDLER_FAILED_CODE, message: "page handling failed" },
-          null,
+          shaped,
+          err instanceof GraphRequestError ? err.retryAfterHeader : null,
           now(),
         );
+        if (cursor.workload === "calendar") await recordMicrosoftCalendarFailure(deps.prisma, cursor.userId, false, generation);
+        if (cursor.workload === "mail") {
+          const reconnect = classifySyncFailure(shaped) === "AUTH";
+          await recordMicrosoftMailFailure(deps.prisma, cursor.userId, reconnect, generation);
+          if (reconnect) await markNeedsReconnect(deps.prisma, cursor.userId, "Microsoft rejected access while importing email.", generation);
+        }
         return {
           ...base,
           items,
@@ -415,7 +424,8 @@ export async function runSyncTick(
   limit = 25,
 ): Promise<SyncTickResult> {
   const now = deps.now ?? (() => new Date());
-  const due = await claimDueCursors(deps.prisma, limit, now());
+  const due = (await claimDueCursors(deps.prisma, limit, now(), deps.calendarModuleEnabled === false, deps.mailModuleEnabled === false))
+    .filter((cursor) => (deps.calendarModuleEnabled !== false || cursor.workload !== "calendar") && (deps.mailModuleEnabled !== false || cursor.workload !== "mail"));
 
   const results: CursorSyncResult[] = [];
   for (const cursor of due) {
@@ -463,12 +473,19 @@ async function listFolders(
   deps: M365SyncDeps,
   url: string,
   accessToken: string,
+  mailOwner?: { userId: string; generation?: M365GrantGeneration },
 ): Promise<FoundFolder[]> {
   const found: FoundFolder[] = [];
   let next: string | null = url;
   let pages = 0;
 
   while (next && pages < MAX_PAGES_PER_TICK) {
+    if (mailOwner) {
+      const row = await deps.prisma.m365Connection.findUnique({ where: { userId: mailOwner.userId } });
+      if (row?.state !== "CONNECTED" || !row.mailEnabled || !row.emailAccountId ||
+          !grantCovers((row.grantedScopes ?? "").split(/\s+/).filter(Boolean), GRAPH_RESOURCES.mail.leastPrivilegeScope) ||
+          (mailOwner.generation && (row.tokenCacheEnc !== mailOwner.generation.tokenCacheEnc || row.cursorLinkHash !== mailOwner.generation.cursorLinkHash || row.emailAccountId !== mailOwner.generation.emailAccountId))) throw new Error("Outlook email import changed during folder discovery.");
+    }
     const page: GraphPage = await deps.client.getPage(next, accessToken);
     pages += 1;
     for (const item of page.items) {
@@ -530,8 +547,9 @@ export async function discoverResources(
   const now = deps.now ?? (() => new Date());
 
   let accessToken: string;
+  let generation: M365GrantGeneration | undefined;
   try {
-    accessToken = await getAccessToken(deps.prisma, deps.entra, userId, now());
+    accessToken = await getAccessToken(deps.prisma, deps.entra, userId, now(), (value) => { generation = value; });
   } catch {
     return { registered: 0, skipped: [...M365_WORKLOADS], notGranted: [], disabled: [], sharePoint: null };
   }
@@ -540,8 +558,8 @@ export async function discoverResources(
   // Microsoft granted this time, which may be narrower than last time.
   const connection = (await deps.prisma.m365Connection.findUnique({
     where: { userId },
-    select: { grantedScopes: true, sharePointEnabled: true },
-  })) as { grantedScopes: string | null; sharePointEnabled?: boolean } | null;
+    select: { grantedScopes: true, sharePointEnabled: true, calendarEnabled: true, mailEnabled: true, emailAccountId: true },
+  })) as { grantedScopes: string | null; sharePointEnabled?: boolean; calendarEnabled?: boolean; mailEnabled?: boolean; emailAccountId?: string | null } | null;
   const granted = (connection?.grantedScopes ?? "").split(" ").filter(Boolean);
   // `=== true`, not truthiness: an absent or malformed flag is OFF. Explicit
   // state, never inferred (WARP-3538).
@@ -555,6 +573,28 @@ export async function discoverResources(
 
   for (const workload of M365_WORKLOADS) {
     const spec = GRAPH_RESOURCES[workload];
+
+    if (workload === "mail") {
+      if (deps.mailModuleEnabled === false || connection?.mailEnabled !== true) { disabled.push(workload); continue; }
+      if (!grantCovers(granted, spec.leastPrivilegeScope)) { notGranted.push(workload); continue; }
+      // A successful additive consent may still need its first local mailbox.
+      if (!connection.emailAccountId) {
+        try { if (!await setMicrosoftMailEnabled(deps.prisma, userId, true, deps.entra, deps.client)) { disabled.push(workload); continue; }
+          // Refresh above rotated the cache; folder registration must use that new generation.
+          accessToken = await getAccessToken(deps.prisma, deps.entra, userId, now(), (value) => { generation = value; });
+        } catch { skipped.push(workload); continue; }
+      }
+    }
+
+    if (workload === "calendar") {
+      if (deps.calendarModuleEnabled === false || connection?.calendarEnabled !== true) { disabled.push(workload); continue; }
+      if (!grantCovers(granted, spec.leastPrivilegeScope)) { notGranted.push(workload); continue; }
+      try {
+        if (await ensureMicrosoftCalendarCursor(deps.prisma, userId, now())) registered += 1;
+        else disabled.push(workload);
+      } catch { skipped.push(workload); }
+      continue;
+    }
 
     // SharePoint: the person's choice first, then the grant, then a walk of its
     // own. `continue` after every arm, so it can never fall into the folder
@@ -627,7 +667,8 @@ export async function discoverResources(
       // Breadth-first, depth-bounded. Each level's children are fetched from
       // the child collection, which is the only documented way to see past the
       // root's immediate children.
-      let frontier = await listFolders(deps, discovery, accessToken);
+      const mailOwner = workload === "mail" ? { userId, generation } : undefined;
+      let frontier = await listFolders(deps, discovery, accessToken, mailOwner);
       let depth = 0;
 
       while (frontier.length > 0 && depth < MAX_FOLDER_DEPTH) {
@@ -640,12 +681,14 @@ export async function discoverResources(
         const deeperFolders: FoundFolder[] = [];
 
         for (const folder of frontier) {
-          await upsertCursor(deps.prisma, userId, workload, folder.id);
-          registered += 1;
+          if (workload === "mail") {
+            if (await ensureMicrosoftMailFolder(deps.prisma, userId, folder.id, generation)) registered += 1;
+            else throw new Error("Outlook email import changed during folder discovery.");
+          } else { await upsertCursor(deps.prisma, userId, workload, folder.id); registered += 1; }
 
           if (folder.hasChildren && spec.childCollectionPath) {
             const childUrl = `${GRAPH_API_BASE_URL}${spec.childCollectionPath(folder.id)}`;
-            deeperFolders.push(...(await listFolders(deps, childUrl, accessToken)));
+            deeperFolders.push(...(await listFolders(deps, childUrl, accessToken, mailOwner)));
           }
         }
 

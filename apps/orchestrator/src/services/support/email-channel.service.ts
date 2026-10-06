@@ -4,6 +4,7 @@ import { ACK_TEMPLATE_MAX, DEFAULT_ACK_TEMPLATE, checkAckTemplate } from "./ack-
 export const EMAIL_CHANNEL_ERRORS = {
   DESK_NOT_FOUND: "desk_not_found",
   ACCOUNT_NOT_FOUND: "email_account_not_found",
+  ACCOUNT_READ_ONLY: "email_account_read_only",
   CONTACT_OWNER_NOT_FOUND: "contact_owner_not_found",
   EMAIL_MODULE_DISABLED: "email_module_disabled",
   INVALID_TEMPLATE: "invalid_auto_ack_template",
@@ -11,6 +12,7 @@ export const EMAIL_CHANNEL_ERRORS = {
 
 export async function listDeskEmailAccounts(prisma: PrismaClient) {
   return prisma.emailAccount.findMany({
+    where: { authMode: { in: ["PASSWORD", "GOOGLE_OAUTH"] } },
     select: { id: true, address: true, displayName: true },
     orderBy: [{ address: "asc" }, { id: "asc" }],
   });
@@ -49,10 +51,11 @@ export async function bindDeskEmailChannel(
     return null;
   }
   const [account, contactOwner] = await Promise.all([
-    prisma.emailAccount.findUnique({ where: { id: input.emailAccountId }, select: { id: true } }),
+    prisma.emailAccount.findUnique({ where: { id: input.emailAccountId }, select: { id: true, authMode: true } }),
     prisma.user.findFirst({ where: { id: input.contactOwnerUserId, directoryStatus: "ACTIVE" }, select: { id: true } }),
   ]);
   if (!account) throw new Error(EMAIL_CHANNEL_ERRORS.ACCOUNT_NOT_FOUND);
+  if (account.authMode === "M365_GRAPH") throw new Error(EMAIL_CHANNEL_ERRORS.ACCOUNT_READ_ONLY);
   if (!contactOwner) throw new Error(EMAIL_CHANNEL_ERRORS.CONTACT_OWNER_NOT_FOUND);
   if (input.autoAckTemplate !== undefined && (input.autoAckTemplate.length > ACK_TEMPLATE_MAX || checkAckTemplate(input.autoAckTemplate).length > 0)) {
     throw new Error(EMAIL_CHANNEL_ERRORS.INVALID_TEMPLATE);

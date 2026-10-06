@@ -1,6 +1,6 @@
 """Wake-detection + STT pipeline — background thread that streams mic
 audio into a wake-word detector, then on detection streams the next
-few seconds to a Wyoming-protocol Whisper sidecar and emits a
+utterance to a Wyoming-protocol STT sidecar and emits a
 transcript.
 
 Architecture:
@@ -19,8 +19,8 @@ Architecture:
       │                       (opens Wyoming session, starts streaming)
       │
       ├─ state=transcribing  → send each frame as Wyoming audio-chunk
-      │                       → after STT_MAX_RECORD_S, send audio-stop
-      │                       → block briefly for transcript event
+      │                       → on end-of-speech or STT_MAX_RECORD_S,
+      │                         send audio-stop and await transcript
       │                       → state=transcript_ready
       │
       └─ state=transcript_ready → ignore until visual-decay; status()
@@ -29,9 +29,9 @@ Architecture:
                                   WAKE_VISUAL_DECAY_S.
 
 Single thread. The Wyoming `finish()` call blocks for the final
-transcript event (typically <1 s for small.en on CPU); during that
+transcript event (bounded by the STT client's CPU inference budget); during that
 window the mic stream isn't being drained and may overflow into a
-log line, which is harmless and brief. We don't bridge to asyncio
+log line. We don't bridge to asyncio
 because the wake loop is already a blocking thread and the gain
 isn't worth the threading-model complication. The one exception is a
 spoken reply: while it plays on this thread, a short-lived per-turn
@@ -45,7 +45,7 @@ we'd fire 10+ WakeEvents back-to-back. `WAKE_DEBOUNCE_S` enforces a
 minimum gap between events — defaults to 2 s. Once we transition into
 transcribing, the wake detector is paused entirely, so debounce only
 matters for the wake→wake re-fire window (which becomes very rare in
-practice since the STT capture takes 5 s).
+practice since wake detection pauses for the captured utterance).
 
 Status:
   state ∈ {idle, loading, listening, wake_detected, transcribing,
@@ -283,21 +283,33 @@ def transcript_is_actionable(transcript: str) -> bool:
     """
     return bool(re.search(r"[a-zA-Z]{3,}", transcript or ""))
 
+
+def strip_wake_prefix(transcript: str, wake_words: str) -> str:
+    """Remove one configured wake address at the start of a transcript.
+
+    Capture can include the wake phrase's tail. Keep mentions inside the
+    actual command and words that only begin with the configured phrase.
+    """
+    phrases = [spec.replace("_", " ").strip() for spec in wake_words.split(",")]
+    for phrase in sorted(phrases, key=len, reverse=True):
+        if not phrase:
+            continue
+        pattern = r"^\s*" + r"\s+".join(re.escape(word) for word in phrase.split())
+        pattern += r"(?=$|[\s,.:;!?])[\s,.:;!?]*"
+        match = re.match(pattern, transcript, re.IGNORECASE)
+        if match:
+            return transcript[match.end():].strip()
+    return transcript
+
 # Default tuning. Overridable via env at construct time (read by
 # main.py's wiring, not by this module directly).
 DEFAULT_THRESHOLD = 0.3
 DEFAULT_DEBOUNCE_S = 2.0
 DEFAULT_VISUAL_DECAY_S = 2.0
-DEFAULT_STT_MAX_RECORD_S = 5.0  # hard cap on captured audio per wake. The
-                                # end-of-speech VAD cuts sooner when the room
-                                # goes quiet; this cap guarantees the capture
-                                # always stops (e.g. in a room with continuous
-                                # background audio where no silence is ever
-                                # detected). WARP-1434: this 5.0 is the SINGLE
-                                # source of truth — compose, the README, and
-                                # the overview doc all ship 5.0 and the box
-                                # runs 5.0; the old 3.0 code default was drift.
-                                # Overridable via STT_MAX_RECORD_S.
+# End-of-speech VAD finishes ordinary commands sooner. The hard cap allows
+# longer requests and still bounds noisy-room captures. STT_MAX_RECORD_S
+# overrides this default in main.py.
+DEFAULT_STT_MAX_RECORD_S = 30.0
 DEFAULT_UPSTREAM_PROBE_INTERVAL_S = 30.0  # how often to re-probe STT/TTS/LLM
 # Calibration mode (WARP-1059, from WARP-1055 review F6). While the
 # dashboard wizard measures (noise floor / speech peak / echo / wake
@@ -998,6 +1010,7 @@ class WakePipeline:
         # filled by prime_cues on the warm-up thread, read by the synth
         # producer).
         self._cue_cache: dict[str, SynthesizedAudio] = {}
+        self._cue_voice_cache_key: Optional[str] = None
 
         # Whether the STT server is reachable. Probed lazily on first
         # use (start()), cached for the process lifetime. Surfaced via
@@ -2089,7 +2102,11 @@ class WakePipeline:
     def _cue_audio(self, kind: str) -> Optional[SynthesizedAudio]:
         """The cue's PCM — cached, else synthesized now. None when it can't
         be had: a cue is optional and never fails a turn."""
+        voice_key = getattr(self._tts, "voice_cache_key", None)
         with self._lock:
+            if voice_key != self._cue_voice_cache_key:
+                self._cue_cache.clear()
+                self._cue_voice_cache_key = voice_key
             cached = self._cue_cache.get(kind)
         if cached is not None:
             return cached
@@ -2099,6 +2116,7 @@ class WakePipeline:
         text = CUE_PHRASES.get(kind)
         if not text or self._tts is None:
             return None
+        voice_key = getattr(self._tts, "voice_cache_key", None)
         try:
             audio = self._tts.synthesize(text)
         except Exception as exc:  # noqa: BLE001 — a cue is optional
@@ -2106,7 +2124,14 @@ class WakePipeline:
             return None
         if not audio.pcm:
             return None
+        # A settings save may arrive while synthesis is in progress. That
+        # utterance can finish, but its audio must not become the new voice's cue.
+        if voice_key != getattr(self._tts, "voice_cache_key", None):
+            return audio
         with self._lock:
+            if voice_key != self._cue_voice_cache_key:
+                self._cue_cache.clear()
+                self._cue_voice_cache_key = voice_key
             self._cue_cache[kind] = audio
         return audio
 
@@ -3015,6 +3040,9 @@ class WakePipeline:
         except Exception as exc:
             self._set_error(f"detector.predict raised: {exc}")
             return
+        if self._detector.load_error:
+            self._set_error(self._detector.load_error)
+            return
         if not scores:
             return
         # Pick the highest-scoring model. We don't currently support
@@ -3207,6 +3235,10 @@ class WakePipeline:
             self._abort_transcription(f"finish: {exc}")
             return
         session.close()
+        wake_words = getattr(self._detector, "requested_wake_word", None)
+        transcript = strip_wake_prefix(
+            transcript, wake_words or self._detector.model_name,
+        )
         if self._turn_timing is not None:
             self._turn_timing.transcript_at = time.monotonic()  # WARP-3124
 

@@ -90,8 +90,9 @@ Implementation:
   soak.
 - The timing-plausibility gate's 0.2 s span floor bites a clipped sub-200 ms
   "droplet"; that's a new (honest, logged) failure mode "Hey Droplet" never had.
-- openWakeWord path is unaffected (it already falls back to `hey_jarvis` with no
-  trained model); this change is Vosk-only, which is the shipping default.
+- The current shipping default is Vosk. Explicit openWakeWord installs must
+  provide appropriately licensed assets; missing models report errors instead
+  of silently switching the wake phrase to hey_jarvis.
 
 ## Wave B — Streaming end-to-end + sentence-chunked TTS (WARP-626)
 

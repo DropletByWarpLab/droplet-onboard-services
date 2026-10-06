@@ -1,0 +1,10 @@
+[
+  {"name":"af_heart","description":"Heart (American, female)","language":"en-US"},
+  {"name":"af_bella","description":"Bella (American, female)","language":"en-US"},
+  {"name":"af_sarah","description":"Sarah (American, female)","language":"en-US"},
+  {"name":"am_michael","description":"Michael (American, male)","language":"en-US"},
+  {"name":"am_fenrir","description":"Fenrir (American, male)","language":"en-US"},
+  {"name":"am_puck","description":"Puck (American, male)","language":"en-US"},
+  {"name":"bf_emma","description":"Emma (British, female)","language":"en-GB"},
+  {"name":"bm_george","description":"George (British, male)","language":"en-GB"}
+]

@@ -3,10 +3,11 @@
  * server speaking the protocol (JSON header line + binary payload), so
  * the framing is verified end-to-end rather than against mocks.
  */
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import * as net from "node:net";
 import {
   parseSttUrl,
+  configuredSttTimeoutMs,
   transcribePcm,
   SttUnavailableError,
 } from "./stt.client.js";
@@ -23,6 +24,8 @@ function startMockWyoming(opts: {
   ackFirst?: boolean;
   /** Never answer (for timeout tests). */
   silent?: boolean;
+  errorCode?: string;
+  errorV2?: boolean;
 }): Promise<{
   port: number;
   events: SeenEvent[];
@@ -60,6 +63,15 @@ function startMockWyoming(opts: {
         }
         events.push(evt);
         if (evt.type === "audio-stop" && !opts.silent) {
+          if (opts.errorCode) {
+            const data = { code: opts.errorCode, text: "internal backend details" };
+            const block = Buffer.from(JSON.stringify(data));
+            sock.write(JSON.stringify(opts.errorV2
+              ? { type: "error", data_length: block.length, payload_length: 0 }
+              : { type: "error", data, payload_length: 0 }) + "\n");
+            if (opts.errorV2) sock.write(block);
+            continue;
+          }
           if (opts.ackFirst) {
             sock.write(
               JSON.stringify({ type: "ack", data: null, payload_length: 0 }) +
@@ -89,6 +101,18 @@ let cleanup: (() => void) | null = null;
 afterEach(() => {
   cleanup?.();
   cleanup = null;
+  vi.unstubAllEnvs();
+});
+
+describe("CPU STT inference budget", () => {
+  it("allows a bounded operator override", () => {
+    vi.stubEnv("STT_TRANSCRIPT_TIMEOUT_S", "120");
+    expect(configuredSttTimeoutMs()).toBe(120_000);
+  });
+  it.each(["", "0", "301", "nan", "inf", "bad"])("uses 90 seconds for invalid or empty %s", (raw) => {
+    vi.stubEnv("STT_TRANSCRIPT_TIMEOUT_S", raw);
+    expect(configuredSttTimeoutMs()).toBe(90_000);
+  });
 });
 
 describe("parseSttUrl", () => {
@@ -104,6 +128,15 @@ describe("parseSttUrl", () => {
 });
 
 describe("transcribePcm", () => {
+  it.each([false, true])("reports backend errors immediately (v2=%s)", async (errorV2) => {
+    const mock = await startMockWyoming({ errorCode: "model_unavailable", errorV2 });
+    cleanup = mock.close;
+    await expect(transcribePcm({
+      url: `tcp://127.0.0.1:${mock.port}`,
+      pcm: Buffer.alloc(100),
+      rate: 16000,
+    })).rejects.toThrow("STT server error: model_unavailable");
+  });
   it("streams transcribe/audio-start/chunks/audio-stop and returns the transcript", async () => {
     const mock = await startMockWyoming({ transcript: "turn on the lights" });
     cleanup = mock.close;

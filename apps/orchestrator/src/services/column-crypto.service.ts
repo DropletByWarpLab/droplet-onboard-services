@@ -92,6 +92,9 @@ export function deriveEmailColumnKey(): Buffer { return hkdf(deviceIkm(), "user-
  *  and unlike User.email, a token need NOT survive a disaster restore, because
  *  the person can simply sign in again. */
 export function deriveM365TokenCacheKey(): Buffer { return hkdf(deviceIkm(), "m365-token-cache"); }
+/** WARP-3788: per-person Google grants and one-time provider setup use separate keys. */
+export function deriveGoogleOAuthKey(): Buffer { return hkdf(deviceIkm(), "google-oauth-token"); }
+export function deriveAccountProviderSetupKey(): Buffer { return hkdf(deviceIkm(), "account-provider-setup"); }
 /** WARP-3538 / ADR-041 §4 — column key for the human-readable columns of the
  *  landed cloud-file metadata: `CloudFileItem` (name, URL, last modifier) and
  *  `CloudFileSource` (site name, container name, URL). A file name in a practice

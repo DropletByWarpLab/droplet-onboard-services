@@ -41,7 +41,7 @@ const svc = vi.hoisted(() => {
     SupportContactExistsError,
     EMPTY_BODY: "empty_body",
     INVALID_CURSOR: "invalid_cursor",
-    EMAIL_CHANNEL_ERRORS: { ACCOUNT_NOT_FOUND: "email_account_not_found", CONTACT_OWNER_NOT_FOUND: "contact_owner_not_found", EMAIL_MODULE_DISABLED: "email_module_disabled", INVALID_TEMPLATE: "invalid_auto_ack_template" },
+    EMAIL_CHANNEL_ERRORS: { ACCOUNT_NOT_FOUND: "email_account_not_found", ACCOUNT_READ_ONLY: "email_account_read_only", CONTACT_OWNER_NOT_FOUND: "contact_owner_not_found", EMAIL_MODULE_DISABLED: "email_module_disabled", INVALID_TEMPLATE: "invalid_auto_ack_template" },
     listAgents: vi.fn(),
     searchRequesterContacts: vi.fn(),
     createRequesterContact: vi.fn(),
@@ -410,6 +410,7 @@ describe("every service error becomes the right status", () => {
     ["identifier_taken", 409],
     ["department_archived", 409],
     ["concurrent_mutation", 409],
+    ["email_account_read_only", 409],
   ];
 
   it.each(CASES)("%s -> %i, with the code in the body", async (code, status) => {
@@ -424,6 +425,18 @@ describe("every service error becomes the right status", () => {
     const res = await request(buildApp()).patch("/api/support/tickets/t1").send({ priority: "low" });
     expect(res.body).toMatchObject({ code: "CONCURRENT_MUTATION" });
     expect(res.body.message).toMatch(/try again/i);
+  });
+
+  it("explains why an Outlook mailbox cannot be bound for service desk sends", async () => {
+    svc.bindDeskEmailChannel.mockRejectedValue(new Error("email_account_read_only"));
+    const res = await request(buildApp()).put("/api/support/desks/d1/email-channel").send({
+      emailAccountId: "outlook-account",
+    });
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({
+      error: "email_account_read_only",
+      message: "Outlook email is read-only. Choose a mailbox that supports sending for this service desk.",
+    });
   });
 
   it("names the existing contact on a duplicate address", async () => {

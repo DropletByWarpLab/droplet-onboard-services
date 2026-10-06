@@ -43,6 +43,8 @@ export interface DueCursor {
    *  where this run picks up. Takes precedence over `deltaLink`. */
   resumeLink: string | null;
   state: string;
+  /** Identity whose resources were claimed; never replay them against a replacement link. */
+  cursorLinkHash?: string | null;
 }
 
 /**
@@ -77,16 +79,22 @@ export async function claimDueCursors(
   prisma: PrismaClient,
   limit: number,
   now: Date = new Date(),
+  excludeCalendar = false,
+  excludeMail = false,
 ): Promise<DueCursor[]> {
   const owners = (await prisma.m365Connection.findMany({
     where: { state: "CONNECTED" },
-    select: { userId: true },
-  })) as Array<{ userId: string }>;
+    select: { userId: true, cursorLinkHash: true, mailEnabled: true },
+  })) as Array<{ userId: string; cursorLinkHash?: string | null; mailEnabled?: boolean }>;
   if (owners.length === 0) return [];
 
   const rows = await prisma.m365DeltaCursor.findMany({
     where: {
       userId: { in: owners.map((o) => o.userId) },
+      AND: [
+        ...(excludeCalendar ? [{ workload: { not: "calendar" } }] : []),
+        { OR: [{ workload: { not: "mail" } }, ...(excludeMail ? [] : [{ workload: "mail", userId: { in: owners.filter((o) => o.mailEnabled === true).map((o) => o.userId) } }])] },
+      ],
       state: { in: [...CLAIMABLE_STATES] },
       // Never attempted, or its backoff window has elapsed.
       OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }],
@@ -95,7 +103,9 @@ export async function claimDueCursors(
     take: limit,
   });
 
-  return rows as unknown as DueCursor[];
+  const links = new Map(owners.map((owner) => [owner.userId, owner.cursorLinkHash]));
+  return rows.map((cursor) => ({ ...cursor, ...(links.get(cursor.userId) !== undefined
+    ? { cursorLinkHash: links.get(cursor.userId) } : {}) })) as DueCursor[];
 }
 
 /**

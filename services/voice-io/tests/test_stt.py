@@ -33,11 +33,13 @@ import pytest
 
 from voice.stt import (
     DEFAULT_STT_PORT,
+    DEFAULT_TRANSCRIPT_TIMEOUT_S,
     MockSTT,
     STTUnavailable,
     WyomingSTT,
     _read_exactly,
     _read_json_line,
+    _WyomingSession,
     build_stt_from_env,
 )
 
@@ -186,6 +188,39 @@ class TestWyomingSession:
 
 
 class TestWyomingSessionErrorPaths:
+    @pytest.mark.parametrize("wire_format", ["inline", "separate"])
+    def test_backend_error_is_reported_without_waiting_for_transcript(self, wire_format):
+        rsock, wsock = socket.socketpair()
+        session = _WyomingSession(rsock, "en", transcript_timeout_s=90.0)
+        data = {"code": "model_unavailable", "text": "backend could not load model"}
+        try:
+            if wire_format == "inline":
+                wire = (json.dumps({"type": "error", "data": data}) + "\n").encode()
+            else:
+                block = json.dumps(data).encode()
+                wire = (json.dumps({"type": "error", "data_length": len(block)}) + "\n").encode() + block
+            wsock.sendall(wire)
+            with pytest.raises(STTUnavailable, match="STT server error: model_unavailable"):
+                session.finish()
+        finally:
+            session.close()
+            wsock.close()
+
+    def test_total_deadline_bounds_a_stalled_partial_data_block(self):
+        rsock, wsock = socket.socketpair()
+        session = _WyomingSession(
+            rsock, "en", transcript_timeout_s=5.0, total_deadline_s=0.05,
+        )
+        try:
+            wsock.sendall(b'{"type":"transcript","data_length":1024}\n{')
+            started = time.monotonic()
+            with pytest.raises(STTUnavailable, match="wall-clock deadline"):
+                session.finish()
+            assert time.monotonic() - started < 0.5
+        finally:
+            session.close()
+            wsock.close()
+
     def test_connect_failure_raises_sttunavailable(self):
         client = WyomingSTT(host="127.0.0.1", port=1, connect_timeout_s=0.5)
         with pytest.raises(STTUnavailable, match="connect"):
@@ -213,7 +248,7 @@ class TestWyomingSessionErrorPaths:
                 host="127.0.0.1", port=port, transcript_timeout_s=0.3,
             )
             with client.session() as session:
-                with pytest.raises(STTUnavailable, match="transcript timeout"):
+                with pytest.raises(STTUnavailable, match=r"transcript (timeout|wall-clock deadline)"):
                     session.finish()
         finally:
             srv.shutdown()
@@ -348,12 +383,24 @@ class TestMockSTT:
 # ────────────────────────────────────────────────────────────────────
 
 class TestBuildSTTFromEnv:
+    def test_cpu_inference_budget_override_applies_to_explicit_server(self, monkeypatch):
+        monkeypatch.setenv("STT_URL", "tcp://cpu-asr:10300")
+        monkeypatch.setenv("STT_TRANSCRIPT_TIMEOUT_S", "120")
+        stt = build_stt_from_env()
+        assert stt._transcript_timeout_s == 120.0
+
+    @pytest.mark.parametrize("raw", ["bad", "0", "301", "nan", "inf"])
+    def test_invalid_inference_budget_falls_back_to_bounded_default(self, monkeypatch, raw):
+        monkeypatch.delenv("STT_URL", raising=False)
+        monkeypatch.setenv("STT_TRANSCRIPT_TIMEOUT_S", raw)
+        assert build_stt_from_env()._transcript_timeout_s == DEFAULT_TRANSCRIPT_TIMEOUT_S
+
     def test_default_is_wyoming_against_compose_dns(self, monkeypatch):
         monkeypatch.delenv("STT_URL", raising=False)
         monkeypatch.delenv("STT_LANGUAGE", raising=False)
         stt = build_stt_from_env()
         assert isinstance(stt, WyomingSTT)
-        assert stt._host == "wyoming-faster-whisper"
+        assert stt._host == "qwen-stt"
         assert stt._port == DEFAULT_STT_PORT
 
     def test_mock_when_stt_url_double_underscore_mock(self, monkeypatch):
@@ -374,7 +421,7 @@ class TestBuildSTTFromEnv:
         stt = build_stt_from_env()
         assert isinstance(stt, WyomingSTT)
         # falls back to compose default
-        assert stt._host == "wyoming-faster-whisper"
+        assert stt._host == "qwen-stt"
 
     def test_language_override_propagates(self, monkeypatch):
         monkeypatch.delenv("STT_URL", raising=False)
