@@ -6,8 +6,9 @@ import { bearerIsServicePrincipal, requireRole } from "../middleware/auth.js";
 import { authRateLimit, sensitiveRateLimit, standardRateLimit } from "../middleware/rate-limit.js";
 import { trustedOriginUrl } from "../lib/trusted-origin.js";
 import { validateGoogleRedirectUri } from "../services/account-provider-setup.service.js";
+import { ACCOUNT_CONNECT_RETURN_PATHS, accountConnectOutcomeUrl, type AccountConnectReturnTo } from "../services/account-connect-return.js";
 import {
-  beginGoogleConnect, completeGoogleConnect, disconnectGoogle, getGoogleConnectionView,
+  beginGoogleConnect, completeGoogleConnect, disconnectGoogle, getGoogleConnectionView, getGoogleConnectReturnTo,
   getGoogleMailboxAccessToken, googleDependencies, GOOGLE_FLOW_TTL_MS,
   GoogleDisconnectRequiredError, GoogleMailboxUnavailableError, GoogleNotConnectedError, GoogleSetupRequiredError, GoogleTemporarilyUnavailableError,
   type GoogleDependencies, type GoogleOutcome,
@@ -17,7 +18,7 @@ export const GOOGLE_CALLBACK_PATH = "/api/google/callback";
 export const GOOGLE_STATE_COOKIE = "droplet_google_state";
 const COOKIE_PATH = "/api/google";
 const CONNECT_ROLES = ["owner", "admin", "family"] as const;
-const connectBody = z.object({ mail: z.boolean().default(true), calendar: z.boolean().default(false) }).strict()
+const connectBody = z.object({ mail: z.boolean().default(true), calendar: z.boolean().default(false), returnTo: z.enum(ACCOUNT_CONNECT_RETURN_PATHS).optional() }).strict()
   .refine((features) => features.mail || features.calendar);
 
 export function createGoogleRouter(prisma: PrismaClient, options: Partial<GoogleDependencies> = {}): Router {
@@ -98,7 +99,9 @@ export function createGoogleCallbackRouter(prisma: PrismaClient, options: Partia
     const cookie = req.cookies?.[GOOGLE_STATE_COOKIE];
     res.clearCookie(GOOGLE_STATE_COOKIE, { httpOnly: true, secure: true, sameSite: "lax", path: COOKIE_PATH });
     let outcome: GoogleOutcome;
+    let returnTo: AccountConnectReturnTo = "/settings";
     try {
+      returnTo = await getGoogleConnectReturnTo(prisma, param("state"), typeof cookie === "string" ? cookie : null);
       outcome = await completeGoogleConnect(prisma, {
         state: param("state"), browserState: typeof cookie === "string" ? cookie : null,
         code: param("code"), error: param("error"),
@@ -107,7 +110,7 @@ export function createGoogleCallbackRouter(prisma: PrismaClient, options: Partia
       outcome = "failed";
     }
     // No callback parameter becomes a URL destination or reflected error text.
-    return res.redirect(303, `/settings?google=${outcome}`);
+    return res.redirect(303, accountConnectOutcomeUrl(returnTo, "google", outcome));
   });
   return router;
 }

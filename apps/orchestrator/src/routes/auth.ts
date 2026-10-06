@@ -9,6 +9,7 @@ import {
   isRevoked,
 } from "../services/invite.service.js";
 import { convertInviteDepartmentGrants } from "../services/provisioning-invite.service.js";
+import { recoverSetupStepForFirstOwner } from "../services/setup.service.js";
 import {
   validateInviteAccessRole,
   resolveInviteAccessRoleForAccept,
@@ -170,6 +171,8 @@ export function callerIpFromReq(req: Request): string | undefined {
 }
 
 const logger = createLogger("auth-route");
+// Match the bounded Serializable retry pattern used by setup progress writes.
+const FIRST_OWNER_TX_ATTEMPTS = 3;
 
 /**
  * WARP-1558 — make the box-wide `droplet-admins` group exist before a create
@@ -730,7 +733,12 @@ export function createPublicAuthRouter(
   // ── Check if initial setup is required ──
   router.get("/auth/setup", async (_req, res, next) => {
     try {
-      const setupRequired = await ncCheckSetupRequired();
+      // The local directory is the account bootstrap authority, matching POST
+      // below. Nextcloud availability or an unrelated downstream user must not
+      // decide whether the wizard offers owner creation or existing-owner login.
+      const setupRequired = prisma
+        ? (await prisma.user.count({ where: { role: "owner" } })) === 0
+        : await ncCheckSetupRequired();
       // WARP-165 — surface whether the physical-presence claim gate is on so
       // the setup wizard's Account step knows to show + require the claim-code
       // field. Reading config (not the DB) keeps this probe cheap; the field
@@ -925,36 +933,49 @@ export function createPublicAuthRouter(
       // SERIALIZABLE transaction. The count at the top of this handler is only
       // a cheap early exit (before hashing); on its own it is check-then-act,
       // so two concurrent first-owner POSTs could both pass it. Under
-      // SERIALIZABLE the loser aborts (P2034) and answers the same benign 409
-      // as a retry. `created` is false only when the in-transaction re-check
-      // found an owner another request had just committed.
-      let created: boolean;
-      try {
-        created = await prisma.$transaction(async (tx) => {
-          if ((await tx.user.count({ where: { role: "owner" } })) > 0) return false;
-          await tx.user.upsert({
-            where: { nextcloudUsername: username },
-            update: {
-              displayName: displayName || username,
-              passwordHash,
-              // WARP-233: dcv1 ciphertext + blind index (the login key lives on
-              // emailLookupHash; findUserByEmail resolves it case-insensitively).
-              ...emailWriteData(email),
-            },
-            create: {
-              username,
-              displayName: displayName || username,
-              ...emailWriteData(email),
-              nextcloudUsername: username,
-              passwordHash,
-              role: "owner" as any,
-            },
-          });
-          return true;
-        }, SERIALIZABLE_TX);
-      } catch (txErr) {
-        if (!isConcurrencyConflict(txErr)) throw txErr;
-        created = false;
+      // SERIALIZABLE the loser aborts (P2034). Retry the whole transaction:
+      // a claim/progress write can also conflict without creating an owner.
+      // `created` is false only when a live transaction re-check finds an owner.
+      let created = false;
+      for (let attempt = 0; attempt < FIRST_OWNER_TX_ATTEMPTS; attempt++) {
+        try {
+          created = await prisma.$transaction(async (tx) => {
+            if ((await tx.user.count({ where: { role: "owner" } })) > 0) return false;
+            // Heal the ownerless resume pointer before this owner makes its raw
+            // late value valid again. The account form can resume without PATCH.
+            await recoverSetupStepForFirstOwner(tx);
+            await tx.user.upsert({
+              where: { nextcloudUsername: username },
+              update: {
+                displayName: displayName || username,
+                passwordHash,
+                // WARP-233: dcv1 ciphertext + blind index (the login key lives on
+                // emailLookupHash; findUserByEmail resolves it case-insensitively).
+                ...emailWriteData(email),
+              },
+              create: {
+                username,
+                displayName: displayName || username,
+                ...emailWriteData(email),
+                nextcloudUsername: username,
+                passwordHash,
+                role: "owner" as any,
+              },
+            });
+            return true;
+          }, SERIALIZABLE_TX);
+          break;
+        } catch (txErr) {
+          if ((txErr as { code?: unknown } | null)?.code !== "P2034") throw txErr;
+          if (attempt === FIRST_OWNER_TX_ATTEMPTS - 1) {
+            logger.warn({ err: txErr }, "setup: first-owner transaction remained busy after retries");
+            res.status(503).set("Retry-After", "1").json({
+              error: "Setup is busy. Try creating your owner account again in a moment.",
+              code: "SETUP_RETRY_REQUIRED",
+            });
+            return;
+          }
+        }
       }
       if (!created) {
         logger.warn(

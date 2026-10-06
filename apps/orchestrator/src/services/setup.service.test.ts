@@ -233,9 +233,9 @@ describe("setup.service — state machine", () => {
 
   it("isSetupStep is a precise type guard over the shipped steps (team now wired, PR #381)", () => {
     // PR #373: `claim` slots SECOND. PR #380: `org` slots AFTER account.
-    // PR #381: `team` slots near the END, after `ai` and before `done`
+    // Optional accounts and team follow AI before done.
     // (welcome → claim → account → org → internet → storage → discovery →
-    // cameras → vpn → ai → team → done).
+    // cameras → vpn → ai → accounts → team → done).
     expect(SETUP_STEPS).toEqual([
       "welcome",
       "claim",
@@ -247,6 +247,7 @@ describe("setup.service — state machine", () => {
       "cameras",
       "vpn",
       "ai",
+      "accounts",
       "team",
       "done",
     ]);
@@ -256,6 +257,7 @@ describe("setup.service — state machine", () => {
     expect(isSetupStep("claim")).toBe(true);
     expect(isSetupStep("org")).toBe(true);
     expect(isSetupStep("team")).toBe(true);
+    expect(isSetupStep("accounts")).toBe(true);
     expect(isSetupStep("")).toBe(false);
     // Every member of the runtime list is a member of the Prisma enum.
     for (const step of SETUP_STEPS) {
@@ -270,6 +272,79 @@ describe("setup.service — state machine", () => {
 // machine must treat `claim` as SATISFIED once `isClaimed` is true and resolve
 // the effective step to STEP_AFTER_CLAIM, both on read and on write. Behaviour
 // when NOT claimed is unchanged (the claim step still shows). ──
+describe("setup.service — stale pre-owner resume pointers recover read-only", () => {
+  it.each(["accounts", "done"])("a claimed box at %s with no local owner resumes account creation", async (step) => {
+    const prisma = createPrismaMock({ userCount: 0, consumedClaims: 1 });
+    await setSetupStep(prisma as never, step);
+    const upsert = vi.spyOn(prisma.applianceSetup, "upsert");
+    const count = vi.spyOn(prisma.user, "count");
+    expect((await getSetupState(prisma as never)).setupStep).toBe("account");
+    expect(count).toHaveBeenCalledWith({ where: { role: "owner" } });
+    expect(upsert).not.toHaveBeenCalled();
+    expect(prisma._peek()!.setupStep).toBe(step);
+  });
+
+  it("an unclaimed box with a stale late pointer first resumes physical claim", async () => {
+    const prisma = createPrismaMock({ userCount: 0, consumedClaims: 0 });
+    await setSetupStep(prisma as never, "accounts");
+    expect((await getSetupState(prisma as never)).setupStep).toBe("claim");
+  });
+
+  it.each(["accounts", "done"])("advancing %s to account durably recovers before owner creation", async (step) => {
+    const prisma = createPrismaMock({ userCount: 0, consumedClaims: 1 });
+    await setSetupStep(prisma as never, step);
+    const transaction = vi.spyOn(prisma, "$transaction");
+
+    expect((await advanceSetupStepToAtLeast(prisma as never, "account")).setupStep).toBe("account");
+    expect(prisma._peek()!.setupStep).toBe("account");
+    expect(transaction).toHaveBeenCalledWith(expect.any(Function), { isolationLevel: "Serializable" });
+
+    prisma._setUserCount(1);
+    expect((await getSetupState(prisma as never)).setupStep).toBe("account");
+  });
+
+  it("claim and account progress durably repair a late pointer before creating the owner", async () => {
+    const prisma = createPrismaMock({ userCount: 0, consumedClaims: 0 });
+    await setSetupStep(prisma as never, "done");
+
+    expect((await advanceSetupStepToAtLeast(prisma as never, "claim")).setupStep).toBe("claim");
+    expect(prisma._peek()!.setupStep).toBe("claim");
+    prisma._setConsumedClaims(1);
+    expect((await advanceSetupStepToAtLeast(prisma as never, "account")).setupStep).toBe("account");
+
+    prisma._setUserCount(1);
+    expect((await getSetupState(prisma as never)).setupStep).toBe("account");
+  });
+
+  it.each(["team", "done"])("preserves legitimate %s progress when an owner already exists", async (step) => {
+    const prisma = createPrismaMock({ userCount: 1, consumedClaims: 1 });
+    await setSetupStep(prisma as never, step);
+    const upsert = vi.spyOn(prisma.applianceSetup, "upsert");
+
+    expect((await advanceSetupStepToAtLeast(prisma as never, "account")).setupStep).toBe(step);
+    expect(prisma._peek()!.setupStep).toBe(step);
+    expect(upsert).not.toHaveBeenCalled();
+  });
+
+  it("preserves ready/done even when the local owner is absent", async () => {
+    const prisma = createPrismaMock({ userCount: 0, consumedClaims: 1 });
+    await markApplianceReady(prisma as never, { authorized: true });
+    const upsert = vi.spyOn(prisma.applianceSetup, "upsert");
+
+    expect(await advanceSetupStepToAtLeast(prisma as never, "account")).toMatchObject({ appliance: "ready", setupStep: "done" });
+    expect(prisma._peek()!.setupStep).toBe("done");
+    expect(upsert).not.toHaveBeenCalled();
+  });
+
+  it("does not turn a directory outage into a false no-owner recovery", async () => {
+    const prisma = createPrismaMock();
+    await setSetupStep(prisma as never, "accounts");
+    vi.spyOn(prisma.user, "count").mockRejectedValueOnce(new Error("Directory unavailable"));
+    await expect(getSetupState(prisma as never)).rejects.toThrow("Directory unavailable");
+    expect(prisma._peek()!.setupStep).toBe("accounts");
+  });
+});
+
 describe("setup.service — claim step is satisfied once the box is claimed (WARP-804)", () => {
   it("exposes STEP_AFTER_CLAIM as the post-claim resume target (account)", () => {
     // Single source of truth shared with the claim route. `account` slots

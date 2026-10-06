@@ -7,7 +7,7 @@
  *   welcome → account → wifi (skip) → address (name the box) →
  *   storage (rename two drives) → discovery (skip) →
  *   cameras (accept all) → vpn (mint peer, scan, continue) →
- *   ai (ask sample prompt, advance) → done
+ *   ai (ask sample prompt, advance) → voice → accounts (skip) → team → done
  *
  * Each step's individual test covers its branches; this one proves the
  * step-machine wiring doesn't drop state on the way through and the
@@ -283,7 +283,7 @@ describe("setup wizard E2E happy path (WARP-174)", () => {
     vi.clearAllMocks();
   });
 
-  it("walks welcome → claim → account → org → wifi → address → storage → discovery → cameras → vpn → ai → done with each step actually firing its API", async () => {
+  it("walks the complete wizard through connected accounts, team, and done", async () => {
     render(<SetupPage />);
 
     // 1. Welcome → Get Started.
@@ -495,7 +495,13 @@ describe("setup wizard E2E happy path (WARP-174)", () => {
       fireEvent.click(screen.getByRole("button", { name: /^continue$/i }));
     });
 
-    // 8b. Team (PR #381) → invite one teammate → send invites & continue.
+    // 8b. Connected accounts can be left for later without blocking setup.
+    expect(screen.getByText(/connect your accounts/i)).toBeInTheDocument();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+    });
+
+    // 8c. Team → invite one teammate (sends immediately) → continue.
     expect(screen.getByText(/bring in your team/i)).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText(/invite by email/i), {
       target: { value: "romain@acme.co" },
@@ -511,7 +517,7 @@ describe("setup wizard E2E happy path (WARP-174)", () => {
     expect(screen.getByText("romain@acme.co")).toBeInTheDocument();
     await act(async () => {
       fireEvent.click(
-        screen.getByRole("button", { name: /send invites & continue/i }),
+        screen.getByRole("button", { name: /^continue$/i }),
       );
     });
 

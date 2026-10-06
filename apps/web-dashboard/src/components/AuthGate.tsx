@@ -10,7 +10,7 @@ import { useNavLayout } from "@/lib/nav-layout";
 import { ModuleRouteGuard } from "@/components/ModuleRouteGuard";
 import { DropletMark } from "@/components/DropletMark";
 import { HelpLauncher } from "@/components/help/HelpLauncher";
-import { HELP_PATH, PUBLIC_PATHS } from "@/lib/routing";
+import { isHelpPath, PUBLIC_PATHS } from "@/lib/routing";
 
 // WARP-1079 — AuthGate renders ABOVE every page scope (`.droplet-shell`,
 // `.droplet-home`, the auth pages), so its full-screen loading / probe-error
@@ -43,6 +43,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
   const { layout: navLayout } = useNavLayout();
 
   const isPublicPage = PUBLIC_PATHS.some((p) => pathname.startsWith(p));
+  const isHelpPage = isHelpPath(pathname);
 
   // The appliance still needs claiming when setup state has loaded and
   // reports "unclaimed". Treat an unresolved (null) state as "not unclaimed"
@@ -89,7 +90,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
     if (
       applianceUnclaimed &&
       pathname !== "/setup" &&
-      pathname !== HELP_PATH
+      !isHelpPage
     ) {
       router.replace("/setup");
       return;
@@ -183,6 +184,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
     pathname,
     router,
     isPublicPage,
+    isHelpPage,
     probeBlocked,
   ]);
 
@@ -288,7 +290,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
   // visitor hits the return-null-while-redirecting path (no early help paint).
   // Gated on `applianceUnclaimed` (not `!user`) so a claimed-box logged-out
   // visitor doesn't briefly see the manual before the /login redirect.
-  if (pathname === HELP_PATH && applianceUnclaimed) {
+  if (isHelpPage && applianceUnclaimed) {
     return <>{children}</>;
   }
 

@@ -361,7 +361,12 @@ function createPrismaStub(opts: {
     }),
   };
 
-  return { deviceUpdate, systemFlag, applianceSetup };
+  // A late wizard pointer is legitimate only once the local owner exists.
+  // Setup reads verify that prerequisite before preserving an unclaimed box's
+  // progress; OTA must still defer until its explicit state becomes ready.
+  const user = { count: vi.fn(async () => 1) };
+
+  return { deviceUpdate, systemFlag, applianceSetup, user };
 }
 
 type PrismaStub = ReturnType<typeof createPrismaStub>;
@@ -831,7 +836,9 @@ describe("applyPendingUpdate (WARP-539)", () => {
     const res = await applyPendingUpdate(baseOpts(prisma, runner, logger));
 
     expect(res.outcome).toBe("deferred_setup_in_progress");
+    expect(prisma.user.count).toHaveBeenCalledWith({ where: { role: "owner" } });
     expect(prisma.deviceUpdate._rows()[0]!.status).toBe("pending");
+    expect(prisma.deviceUpdate._statusWrites()).toEqual([]);
     expect(runner.calls).toEqual([]);
     expect(logger.info).toHaveBeenCalledWith(
       expect.objectContaining({ event: "update.apply_deferred" }),

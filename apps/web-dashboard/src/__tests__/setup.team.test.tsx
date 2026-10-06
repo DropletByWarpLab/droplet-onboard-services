@@ -148,6 +148,24 @@ describe("setup Team step (PR #381)", () => {
     expect(screen.getByText(/valid email/i)).toBeInTheDocument();
   });
 
+  it("shows failed delivery without claiming that the invitation email was sent", async () => {
+    postTeamInviteMock.mockResolvedValue({ email: "romain@acme.co", role: "family", send_status: "failed" });
+    renderStep();
+    await addInvite({ email: "romain@acme.co" });
+    expect(screen.getByText("Email not sent")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent(/retry delivery from People/i);
+    expect(screen.queryByText("Email sent")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /remove romain/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /send invites/i })).not.toBeInTheDocument();
+  });
+
+  it("reports confirmed email delivery", async () => {
+    postTeamInviteMock.mockResolvedValue({ email: "romain@acme.co", role: "family", send_status: "sent" });
+    renderStep();
+    await addInvite({ email: "romain@acme.co" });
+    expect(screen.getByText("Email sent")).toBeInTheDocument();
+  });
+
   it("surfaces a server-rejected invite inline and does not list it", async () => {
     const { InviteError } = await vi.importActual<typeof import("@/lib/api")>(
       "@/lib/api",
