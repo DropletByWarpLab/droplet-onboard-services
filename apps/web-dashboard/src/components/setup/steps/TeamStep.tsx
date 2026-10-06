@@ -11,7 +11,6 @@ import {
   RefreshCw,
   UserPlus,
   Users,
-  X,
 } from "lucide-react";
 import { getEnabledSsoProviders, postTeamInvite, createUser, InviteError } from "@/lib/api";
 import { generateTempPassword } from "@droplet/auth-policy";
@@ -23,55 +22,7 @@ import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
 import { ScrollRegion } from "@/components/setup/ScrollRegion";
 import { Dialog } from "@/components/Dialog";
 
-/**
- * Wizard step — Team (PR #381), the LAST onboarding step. Slots near the END:
- * welcome → … → ai → TEAM → done.
- *
- * "You're set up — now bring people in." The owner invites teammates by email +
- * role, or notes the directory-sync (SSO) alternative. Per the spec + #371
- * handoff §4 + OnbWizard.jsx `WizTeam`.
- *
- * Team IS skippable ("I'll invite people later" — a solo owner is a valid end
- * state), so this step takes BOTH an `onComplete` (Send invites & continue) and
- * an `onSkip`, the same contract the other skippable steps use.
- *
- * PR #384 — reflowed into the shared aurora-rail `StepShell` (was a bespoke
- * centered column with in-body CTAs). `StepShell current="team"` owns the
- * "Step N" kicker, the "Bring in your team" title + sub, the container fade,
- * and the footer primary ("Send invites & continue") + skip ("I'll invite
- * people later"). The body below is the SSO card + invite UI. Functional
- * behavior is unchanged.
- *
- * Structure (mirrors the WizTeam design):
- *   - Directory-sync (SSO) note card — the bulk alternative (OIDC / Okta /
- *     Entra / Google Workspace), stays on the LAN.
- *   - Invite row: email input + role select + Add. Each Add POSTs
- *     /api/people/invite and, on success, appends the invitee to the pending
- *     list and clears the email for the next one.
- *   - Pending invitee list: neutral initials avatar + email + role chip +
- *     remove control.
- *
- * Edge cases:
- *   - Invalid email (client-side shape check) → inline error on the email
- *     field; NO network call, invitee not added.
- *   - Server-rejected invite (InviteError) → inline error; invitee not added.
- *
- * ── ROLE MODEL (the scaffold's OPEN fork, resolved → HOUSEHOLD) ──
- * The role select offers the SHIPPED HOUSEHOLD model (owner / admin / family /
- * guest) — the Prisma `Role` enum + the existing `/auth/invites` route already
- * ship it, and the appliance is home-first (ADR-002). The business fork
- * (manager / member / viewer) is NOT offered; switching is a Role-enum
- * migration + a separate ticket. Decision flagged in the PR self-assessment.
- *
- * Token mappings (no hardcoded hex): SSO card → `bg-accent-subtle` +
- * `text-accent`; inputs → `dp-input`; primary CTA → `dp-btn-primary`; secondary
- * Add → `dp-btn-secondary`; the role CHIP uses the neutral `dp-status-chip`
- * treatment (border-separator / surface-tertiary / label-secondary) because the
- * design system has no `--role-family` color token — see the PR self-assessment
- * (token gap flagged for UI/UX). Motion: the StepShell container fade the
- * other steps share, plus a restraint-first `animate-fade-rise` on each
- * newly-added invitee row.
- */
+/** Invite people or create local accounts. Both paths persist immediately; SSO provider discovery reports sign-in availability, not directory sync. */
 
 /** Roles the invite select offers — the shipped household model. Value is the
  *  wire role; label is the human name. */
@@ -131,6 +82,7 @@ interface PendingInvite {
   email: string;
   role: TeamInviteRole;
   kind: "invite" | "account";
+  sendStatus?: "sent" | "failed";
 }
 
 /** Two-letter initials from an email local-part, for the avatar. */
@@ -184,32 +136,21 @@ export function TeamStep({
   const [adding, setAdding] = useState(false);
   const emailRef = useRef<HTMLInputElement>(null);
 
-  // Directory-sync state, read from the real SSO discovery endpoint
-  // (`GET /api/sso/oidc/providers`, the same WARP-629 surface the login page
-  // uses). Best-effort: a rejection/timeout means "no directory configured" and
-  // the card stays the informational local-first invite path — never a no-op
-  // control. There is no in-wizard SSO *configuration* flow yet, so when none is
-  // configured we show the option as a note rather than a button that does
-  // nothing; when one IS configured we reflect that truthfully.
-  //
-  // Three states, to avoid a copy FLASH on first paint: `null` = discovery
-  // still in flight (neutral copy, no synced chip), `[]` = resolved with no
-  // directory configured (the honest WARP-1305 "isn't available yet" note),
-  // `[...]` = resolved with provider(s) connected ("Directory sync is on").
+  // Provider discovery is best-effort; invitations remain available if it fails.
   const [ssoProviders, setSsoProviders] = useState<string[] | null>(null);
+  const [ssoError, setSsoError] = useState(false);
   useEffect(() => {
     let alive = true;
-    // Best-effort: ANY failure — a rejected/timed-out request, or the discovery
-    // client simply being unavailable — resolves to "no directory configured"
-    // (an empty list, NOT loading) so the local-first invite path stands. The
-    // try wraps the call itself (not just the promise) so a synchronous throw is
-    // caught too.
+    // A failed read is distinct from an explicitly empty provider list.
     void (async () => {
       try {
         const providers = await getEnabledSsoProviders();
         if (alive) setSsoProviders(providers);
       } catch {
-        if (alive) setSsoProviders([]);
+        if (alive) {
+          setSsoProviders([]);
+          setSsoError(true);
+        }
       }
     })();
     return () => {
@@ -222,6 +163,7 @@ export function TeamStep({
   const normalizedEmail = useMemo(() => email.trim().toLowerCase(), [email]);
 
   const handleAdd = useCallback(async () => {
+    if (adding) return;
     setEmailError(null);
     if (!normalizedEmail || !EMAIL_SHAPE.test(normalizedEmail)) {
       setEmailError("Enter a valid email address (e.g. name@acme.co).");
@@ -235,7 +177,7 @@ export function TeamStep({
       // actually stored.
       setInvites((prev) => [
         ...prev,
-        { email: result.email, role: result.role, kind: "invite" },
+        { email: result.email, role: result.role, kind: "invite", sendStatus: result.send_status },
       ]);
       setEmail("");
       // Return focus to the email field for fast successive invites.
@@ -257,11 +199,7 @@ export function TeamStep({
     } finally {
       setAdding(false);
     }
-  }, [email, normalizedEmail, role]);
-
-  const handleRemove = useCallback((target: string) => {
-    setInvites((prev) => prev.filter((i) => i.email !== target));
-  }, []);
+  }, [adding, email, normalizedEmail, role]);
 
   // ── WARP-1049: "Create local account" dialog ──
   // The setup person mints a member NOW with an auto-generated temporary
@@ -374,27 +312,13 @@ export function TeamStep({
       title="Bring in your team"
       subtitle="Invite people and choose their roles — they map to what the AI is allowed to do on their behalf."
       primary={{
-        label: invites.length > 0 ? "Send invites & continue" : "Continue",
+        label: "Continue",
         onClick: onComplete,
+        disabled: adding || acctCreating,
       }}
-      skip={{ label: "I'll invite people later", onClick: onSkip }}
+      skip={adding || acctCreating ? undefined : { label: "I'll invite people later", onClick: onSkip }}
     >
-      {/* Directory sync (SSO) — the bulk alternative. WARP-820: fluid bottom
-          gap so the SSO card + invite row + pending list fit without scroll.
-          Three-state, flash-free: while discovery is in flight (`ssoLoading`)
-          the card shows neutral "Checking…" copy with no synced chip, so a box
-          that HAS a directory never momentarily shows the not-available note
-          before flipping to "Directory sync is on".
-
-          WARP-1305 — the not-connected state must not read as an affordance.
-          The old "Sync your directory instead" headline (accent styling, verb
-          phrase) invited a click, but there is no directory-sync setup flow
-          anywhere in the product (SSO providers are provisioned out-of-band;
-          the dashboard has no configure surface) — QA clicked it and filed
-          the dead end. Per the walkthrough-honesty pattern the card now says
-          plainly that directory sync isn't available yet, in muted (non-CTA)
-          styling, and points at the invite path that DOES work. The accent
-          treatment is reserved for the truthful connected state. */}
+      {/* Configured team sign-in providers. */}
       <div
         data-testid="directory-sync-panel"
         className={`flex items-center gap-3.5 rounded-xl border px-4 py-3.5 mb-[clamp(16px,3vh,24px)] ${
@@ -410,25 +334,27 @@ export function TeamStep({
         <div className="min-w-0 flex-1">
           <p className="type-footnote font-semibold text-label-primary">
             {ssoLoading
-              ? "Directory sync"
+              ? "Team sign-in"
               : ssoConnected
-                ? "Directory sync is on"
-                : "Directory sync isn’t available yet"}
+                ? "Team sign-in is available"
+                : ssoError
+                  ? "Team sign-in couldn’t be checked"
+                  : "Team sign-in isn’t configured"}
           </p>
           <p className="type-caption-1 text-label-tertiary mt-0.5">
             {ssoLoading
-              ? "Checking whether a directory is connected…"
+              ? "Checking whether team sign-in is configured…"
               : ssoConnected
-                ? `Your directory is mirrored over SSO (${ssoProviders
+                ? `People can sign in with ${ssoProviders
                     .map(ssoProviderName)
-                    .join(", ")}) — all on the LAN. New people sign in with your provider.`
-                : "Google Workspace, Microsoft Entra, and Okta sync (SSO) is coming — for now, invite people by email below."}
+                    .join(", ")}. Each person authorizes sign-in with the provider.`
+                : "Invite people by email below or create a local account. An administrator can configure team sign-in separately."}
           </p>
         </div>
         {ssoConnected && (
           <span className="inline-flex flex-shrink-0 items-center gap-1.5 rounded-full bg-system-green/15 px-3 py-1.5 type-caption-1 font-semibold text-system-green">
             <Check size={13} aria-hidden="true" />
-            Synced
+            Available
           </span>
         )}
       </div>
@@ -550,16 +476,14 @@ export function TeamStep({
                   {roleLabel(invite.role)}
                 </span>
                 <span className="type-caption-1 text-label-tertiary">
-                  {invite.kind === "account" ? "Account ready" : "Invited"}
+                  {invite.kind === "account"
+                    ? "Account ready"
+                    : invite.sendStatus === "failed"
+                      ? "Email not sent"
+                      : invite.sendStatus === "sent"
+                        ? "Email sent"
+                        : "Invitation created"}
                 </span>
-                <button
-                  type="button"
-                  onClick={() => handleRemove(invite.email)}
-                  aria-label={`Remove ${invite.email}`}
-                  className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full text-label-tertiary transition-colors duration-200 ease-smooth hover:bg-surface-tertiary hover:text-label-secondary"
-                >
-                  <X size={14} />
-                </button>
               </li>
             ))}
           </ul>
@@ -568,13 +492,16 @@ export function TeamStep({
 
       <p className="type-caption-1 text-label-tertiary mt-4 leading-relaxed">
         {invites.length > 0
-          ? `${invites.length} invite${invites.length === 1 ? "" : "s"} ready · roles can be changed anytime in People → Roles.`
+          ? "Invitations and accounts are created immediately. Manage them and change roles from People after setup."
           : "Roles can be changed anytime in People → Roles."}
       </p>
+      {invites.some((invite) => invite.sendStatus === "failed") && (
+        <p role="alert" className="type-footnote text-system-orange mt-2">
+          An invitation was created, but its email wasn’t sent. Retry delivery from People after setup.
+        </p>
+      )}
 
-      {/* Primary "Send invites & continue" + the "I'll invite people later"
-          skip live in the StepShell footer (Team IS skippable — a solo owner
-          is a valid end state). */}
+
       <LearnMoreCard helpAnchor="roles">
         <p>
           Each role maps to what Droplet&rsquo;s AI may do on that
@@ -585,22 +512,19 @@ export function TeamStep({
           <span className="font-semibold">External guest</span> is scoped to
           their own sessions.
         </p>
-        {/* WARP-1305 — honesty in the learn-more too: only describe SSO as an
-            instruction when a directory is actually connected. Otherwise the
-            paragraph explains what's coming without inviting a dead action. */}
+
         <p>
           {ssoConnected ? (
             <>
-              Your identity provider is connected over SSO, so Droplet mirrors
-              your directory — all on your own network, nothing sent off the
-              box.
+              Your identity provider is configured for sign-in. Each person
+              signs in with that provider; this does not import everyone in
+              its directory.
             </>
           ) : (
             <>
-              Directory sync — mirroring your identity provider (Google
-              Workspace, Microsoft Entra, or Okta) over SSO — isn&rsquo;t
-              available yet. When it lands, everyone comes in at once, all on
-              your own network.
+              Team sign-in is separate from connecting a personal Google or
+              Microsoft account. Invite people here, or create local accounts
+              so they can sign in without a provider.
             </>
           )}
         </p>

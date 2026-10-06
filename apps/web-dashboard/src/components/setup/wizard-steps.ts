@@ -30,6 +30,7 @@ export type Step =
   | "vpn"
   | "ai"
   | "voice"
+  | "accounts"
   | "team"
   | "done";
 
@@ -81,6 +82,7 @@ export const STEPS: Step[] = [
   "vpn",
   "ai",
   "voice",
+  "accounts",
   "team",
   "done",
 ];

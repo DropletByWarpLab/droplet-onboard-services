@@ -47,6 +47,21 @@ describe("administrator account registration", () => {
     fireEvent.click(screen.getByRole("button", { name: "Copy Google callback URI" }));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(callback));
   });
+  it("opens registration guides in separate tabs so unsaved setup fields remain in place", async () => {
+    authFetch.mockResolvedValue(json(view()));
+    render(<AccountProviderSetup />);
+    openSetup();
+    await screen.findByLabelText("Google client ID");
+    for (const [name, href] of [
+      ["Google registration and permissions guide", "/help/integrations/google-mail"],
+      ["Microsoft registration and permissions guide", "/help/integrations/microsoft-365"],
+    ]) {
+      const guide = screen.getByRole("link", { name });
+      expect(guide).toHaveAttribute("href", href);
+      expect(guide).toHaveAttribute("target", "_blank");
+      expect(guide).toHaveAttribute("rel", "noopener noreferrer");
+    }
+  });
   it("omits an unchanged stored Google secret on save", async () => {
     authFetch.mockResolvedValue(json(view()));
     const onSaved = vi.fn();

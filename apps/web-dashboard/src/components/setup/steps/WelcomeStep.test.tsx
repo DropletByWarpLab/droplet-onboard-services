@@ -8,8 +8,8 @@
  *
  * These tests pin the fix: the claim is rendered in a prominent design-system
  * token (NOT the dim secondary one) and in plain, first-time-reader language
- * that stays truthful to the product — local AI on your own hardware, nothing
- * leaves your premises. The supporting trust content stays intact.
+ * that stays truthful to the product — local AI on your own hardware, with
+ * optional provider connections and cloud AI chosen by the user.
  */
 import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
@@ -40,7 +40,10 @@ describe("WelcomeStep privacy claim (WARP-913)", () => {
     // home"; the subjects are "connected devices", not "smart home".
     expect(text.toLowerCase()).toMatch(/stays? on your premises/);
     expect(text.toLowerCase()).not.toMatch(/in your home/);
-    expect(text.toLowerCase()).toContain("never leaves");
+    expect(text.toLowerCase()).toContain("by default");
+    expect(text.toLowerCase()).toContain("you choose");
+    expect(text.toLowerCase()).toContain("cloud ai");
+    expect(text.toLowerCase()).not.toContain("never leaves");
     // Still truthful to the product: the AI is local / on your own hardware.
     expect(text.toLowerCase()).toMatch(/your own (droplet|hardware)|on your droplet/);
   });
@@ -52,6 +55,6 @@ describe("WelcomeStep privacy claim (WARP-913)", () => {
       screen.getByRole("button", { name: /get started/i }),
     ).toBeInTheDocument();
     // The supporting trust chips stay.
-    expect(screen.getByText(/nothing leaves the box/i)).toBeInTheDocument();
+    expect(screen.getByText("You control sharing", { exact: true })).toBeInTheDocument();
   });
 });

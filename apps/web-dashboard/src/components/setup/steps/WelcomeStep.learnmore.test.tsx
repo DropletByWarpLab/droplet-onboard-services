@@ -62,7 +62,7 @@ describe("WelcomeStep — Learn more (WARP-914)", () => {
   it("describes Droplet in the business register — premises, never 'home'", () => {
     render(<WelcomeStep onContinue={vi.fn()} />);
     expect(
-      screen.getByText(/never leaves your premises/i),
+      screen.getByText(/with local AI on your premises/i),
     ).toBeInTheDocument();
     const text = document.body.textContent ?? "";
     expect(text).not.toMatch(/leaves home/i);

@@ -89,7 +89,7 @@ describe("Google account connection", () => {
     authFetch.mockResolvedValue(json(view({ state: "NEEDS_RECONNECT", accountAddress: "sam@example.com", mailboxId: "mb1" })));
     render(<GoogleAccountCard />);
     expect(await screen.findByRole("alert")).toHaveTextContent("To connect a different Google account, disconnect the current one first. Your existing local copies were kept.");
-    expect(screen.getByText(/reconnect sam@example.com/i)).toHaveTextContent(/disconnect this one first/i);
+    expect(await screen.findByText(/reconnect sam@example.com/i)).toHaveTextContent(/disconnect this one first/i);
     expect(window.location.search).toBe("");
     expect(authFetch).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByRole("button", { name: "Disconnect Google" }));

@@ -20,6 +20,7 @@
  * Nothing here logs. Callers must never put the plaintext (or the sealed blob)
  * into a log line, an error message, or an API response.
  */
+import { accountConnectReturnTo, type AccountConnectReturnTo } from "../account-connect-return.js";
 import {
   decryptColumn,
   deriveM365TokenCacheKey,
@@ -67,6 +68,7 @@ export interface PendingAuthCodeFlow {
   nonce: string;
   redirectUri: string;
   scopes: string[];
+  returnTo?: AccountConnectReturnTo;
 }
 
 /** Same key as the token cache, its own AAD — so a blob moved between the
@@ -99,9 +101,10 @@ export function unsealPendingFlow(userId: string, blob: string): PendingAuthCode
   if (typeof codeVerifier !== "string" || typeof nonce !== "string" || typeof redirectUri !== "string") {
     throw new Error("The stored Microsoft sign-in is not in the expected shape.");
   }
-  if (scopes === undefined) return { codeVerifier, nonce, redirectUri, scopes: [...M365_BASE_SCOPES] };
+  const returnTo = accountConnectReturnTo(parsed.returnTo);
+  if (scopes === undefined) return { codeVerifier, nonce, redirectUri, scopes: [...M365_BASE_SCOPES], returnTo };
   if (!Array.isArray(scopes) || scopes.length === 0 || !scopes.every((s) => typeof s === "string" && s !== "")) {
     throw new Error("The stored Microsoft sign-in is not in the expected shape.");
   }
-  return { codeVerifier, nonce, redirectUri, scopes: [...(scopes as string[])] };
+  return { codeVerifier, nonce, redirectUri, scopes: [...(scopes as string[])], returnTo };
 }

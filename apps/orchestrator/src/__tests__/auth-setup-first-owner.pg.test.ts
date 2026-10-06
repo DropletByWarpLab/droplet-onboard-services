@@ -20,14 +20,14 @@
  * are box-wide facts, though, and the shared pg database is not guaranteed to
  * be free of other suites' owner or consumed-claim rows (it was not, in CI).
  * So beforeAll sets any such foreign rows aside (owner -> admin, consumed ->
- * available) and afterAll puts them back exactly as found. The pg lane runs
+ * available), snapshots the setup singleton, and afterAll restores them. The pg lane runs
  * --no-file-parallelism, so no other suite observes the interim state.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import request from "supertest";
 import express from "express";
 import cookieParser from "cookie-parser";
-import type { PrismaClient } from "@prisma/client";
+import type { ApplianceSetup, PrismaClient } from "@prisma/client";
 
 // The DB-less lane's global setup mocks @prisma/client; this file needs the
 // real driver (access-role.pg.test.ts precedent).
@@ -135,6 +135,7 @@ vi.mock("../services/department-reconciler.service.js", () => ({
 import { createPublicAuthRouter } from "../routes/auth.js";
 import { authRateLimit } from "../middleware/rate-limit.js";
 import * as nc from "../services/nextcloud.client.js";
+import { APPLIANCE_SETUP_ID, getSetupState } from "../services/setup.service.js";
 
 const RUN =
   process.env.RUN_PG_INTEGRATION === "1" &&
@@ -149,12 +150,14 @@ describe.skipIf(!RUN)("POST /auth/setup — real Postgres (WARP-3589)", () => {
 
   let setAsideOwners: string[] = [];
   let setAsideClaims: string[] = [];
+  let originalSetup: ApplianceSetup | null = null;
 
   beforeAll(async () => {
     const { PrismaClient: RealPrismaClient } =
       await vi.importActual<typeof import("@prisma/client")>("@prisma/client");
     prisma = new RealPrismaClient();
     await prisma.$connect();
+    originalSetup = await prisma.applianceSetup.findUnique({ where: { id: APPLIANCE_SETUP_ID } });
     await cleanup();
 
     setAsideOwners = (
@@ -197,6 +200,12 @@ describe.skipIf(!RUN)("POST /auth/setup — real Postgres (WARP-3589)", () => {
         data: { state: "consumed" },
       });
     }
+    if (originalSetup) {
+      const { id, ...data } = originalSetup;
+      await prisma.applianceSetup.upsert({ where: { id }, create: originalSetup, update: data });
+    } else {
+      await prisma.applianceSetup.deleteMany({ where: { id: APPLIANCE_SETUP_ID } });
+    }
     await prisma.$disconnect();
   });
 
@@ -212,6 +221,11 @@ describe.skipIf(!RUN)("POST /auth/setup — real Postgres (WARP-3589)", () => {
     vi.clearAllMocks();
     authRateLimit.resetKey("127.0.0.1");
     await cleanup();
+    await prisma.applianceSetup.upsert({
+      where: { id: APPLIANCE_SETUP_ID },
+      create: { id: APPLIANCE_SETUP_ID, state: "unclaimed", setupStep: "account", userTourCompleted: false },
+      update: { state: "unclaimed", setupStep: "account", userTourCompleted: false },
+    });
   });
 
   function buildApp() {
@@ -255,6 +269,9 @@ describe.skipIf(!RUN)("POST /auth/setup — real Postgres (WARP-3589)", () => {
 
   it("claimed box → two concurrent setups create exactly ONE owner", async () => {
     await claimTheBox();
+    // Both transactions must recover the same stale setup row as well as
+    // compete for the first owner; the losing snapshot retries safely.
+    await prisma.applianceSetup.update({ where: { id: APPLIANCE_SETUP_ID }, data: { setupStep: "done" } });
     const app = buildApp();
 
     const [a, b] = await Promise.all([
@@ -274,6 +291,7 @@ describe.skipIf(!RUN)("POST /auth/setup — real Postgres (WARP-3589)", () => {
     expect(
       await prisma.user.count({ where: { role: "owner", username: OURS } }),
     ).toBe(1);
+    expect((await getSetupState(prisma)).setupStep).toBe("account");
     // Only the winner reached Nextcloud provisioning.
     expect(nc.ncInstallAndCreateAdmin).toHaveBeenCalledTimes(1);
   });
@@ -295,5 +313,46 @@ describe.skipIf(!RUN)("POST /auth/setup — real Postgres (WARP-3589)", () => {
     expect(
       await prisma.user.count({ where: { role: "owner", username: OURS } }),
     ).toBe(1);
+  });
+
+  it.each(["accounts", "done"] as const)("resumed ownerless %s stays recovered after first-owner creation", async (setupStep) => {
+    await claimTheBox();
+    await prisma.applianceSetup.update({ where: { id: APPLIANCE_SETUP_ID }, data: { setupStep } });
+    expect((await getSetupState(prisma)).setupStep).toBe("account");
+    expect((await prisma.applianceSetup.findUniqueOrThrow({ where: { id: APPLIANCE_SETUP_ID } })).setupStep).toBe(setupStep);
+
+    const res = await request(buildApp()).post("/api/auth/setup")
+      .send({ email: "warp3589-resume@warp.test", password: PASSWORD });
+
+    expect(res.status).toBe(200);
+    expect(await prisma.user.count({ where: { role: "owner", username: OURS } })).toBe(1);
+    expect((await prisma.applianceSetup.findUniqueOrThrow({ where: { id: APPLIANCE_SETUP_ID } })).setupStep).toBe("account");
+    expect((await getSetupState(prisma)).setupStep).toBe("account");
+  });
+
+  it("replacement first-owner creation preserves an already-ready appliance", async () => {
+    await claimTheBox();
+    await prisma.applianceSetup.update({ where: { id: APPLIANCE_SETUP_ID }, data: { state: "ready", setupStep: "done" } });
+
+    const res = await request(buildApp()).post("/api/auth/setup")
+      .send({ email: "warp3589-ready@warp.test", password: PASSWORD });
+
+    expect(res.status).toBe(200);
+    expect(await getSetupState(prisma)).toMatchObject({ appliance: "ready", setupStep: "done" });
+  });
+
+  it("an existing-owner refusal preserves later team progress", async () => {
+    await claimTheBox();
+    const app = buildApp();
+    expect((await request(app).post("/api/auth/setup")
+      .send({ email: "warp3589-owner@warp.test", password: PASSWORD })).status).toBe(200);
+    await prisma.applianceSetup.update({ where: { id: APPLIANCE_SETUP_ID }, data: { setupStep: "team" } });
+
+    const res = await request(app).post("/api/auth/setup")
+      .send({ email: "warp3589-other@warp.test", password: PASSWORD });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("OWNER_EXISTS");
+    expect((await getSetupState(prisma)).setupStep).toBe("team");
   });
 });

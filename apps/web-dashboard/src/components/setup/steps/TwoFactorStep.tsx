@@ -213,6 +213,9 @@ export function TwoFactorStep({
     return (
       <StepShell
         current="twofactor"
+        // Verification may enable the factor and reveal recovery codes once.
+        // Keep the owner here until that response has been shown.
+        hideBack={isBusy}
         title="Scan the QR code"
         subtitle="Open your authenticator app and scan this, then enter the code it shows."
         primary={{
@@ -222,7 +225,7 @@ export function TwoFactorStep({
           isLoading: isBusy,
           disabled: !qrReady,
         }}
-        skip={{ label: "Skip for now", onClick: onSkip }}
+        skip={isBusy ? undefined : { label: "Skip for now", onClick: onSkip }}
       >
         <div className="space-y-4">
           {enrolling ? (
