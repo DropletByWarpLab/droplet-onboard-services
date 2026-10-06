@@ -13,7 +13,7 @@ been built and pushed by digest. Inputs:
   --channel   release channel — `stable` (main) or `stage` (WARP-1670)
   --registry  image registry/namespace prefix (lowercase; GHCR requires it)
   --registry-host  optional (WARP-3502): the fleet HQ registry host the box
-              pulls from, e.g. droplet-fleet-hq.rjouffret.workers.dev (host
+              pulls from, e.g. registry.example (host
               or host:port, no scheme, no path). When non-empty every image ref
               is `<host>/droplet-<name>@<digest>` and --registry is not used
               for refs; empty keeps --registry (ghcr.io), which is what stage

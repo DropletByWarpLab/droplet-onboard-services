@@ -1,43 +1,25 @@
 /**
- * WARP-979 — shared box-name validation.
+ * Shared validation for stored owner-chosen box labels. Labels are display
+ * metadata; the internal DNS hostname is configured separately.
  *
- * The setup walkthrough's "Secured / name your box" step (SetSecured in the
- * design handoff) lets the owner TYPE a name that becomes their box's
- * publicly-trusted address `<name>.droplet-us.com` (green padlock, zero
- * install). Both the DASHBOARD (live client-side validation + availability
- * check) and the ORCHESTRATOR (server-side re-validation before persisting +
- * before the name is sent to HQ) must agree on the exact same rules — so the
- * rules live HERE, in the package both apps already depend on
- * (`@droplet/shared-types`), and are imported on both sides.
- *
- * The ruleset mirrors the fleet-HQ `names.ts` contract (the authority that
- * ultimately reserves the name in the fleet registry):
+ * Preserve the existing rules for previously stored labels:
  *   - lowercase DNS-safe slug: `[a-z0-9-]` only
  *   - 3–40 characters
  *   - no leading / trailing / double hyphen
  *   - a reserved blocklist (hq/relay/api/www/admin/mail/vpn/droplet/…)
- *   - reject `d-<16 hex>` lookalikes — that shape is the opaque per-device
- *     identifier HQ auto-mints (ADR-023 `d-<hmac>.…`); a customer name must
- *     never collide with or impersonate one.
+ *   - reject `d-<16 hex>` system identifier lookalikes
  *
  * We never coerce a bad name into a good one — validation REJECTS so the
  * customer sees their own input, not a silent guess (same discipline as the
  * workspace-slug validator in setup-org.service.ts).
  */
 
-/** The public suffix every named box resolves under. NOT the handoff's
- *  `.devices.warp-lab.ai` — our production domain is `droplet-us.com`. */
-export const BOX_NAME_SUFFIX = ".droplet-us.com";
-
-/** Length bounds (DNS-label friendly; HQ mirrors these). */
+/** Length bounds for existing box labels. */
 export const BOX_NAME_MIN_LEN = 3;
 export const BOX_NAME_MAX_LEN = 40;
 
 /**
- * Names that collide with fleet infrastructure hosts / platform routes, so a
- * customer can't claim them. Kept small + explicit; extend deliberately (a name
- * check is cheap, a reserved-word collision in production is not). Mirrors the
- * HQ `RESERVED` list.
+ * Reserved system names retained for compatibility with stored box labels.
  */
 export const BOX_NAME_RESERVED: readonly string[] = [
   "hq",
@@ -66,8 +48,7 @@ export const BOX_NAME_RESERVED: readonly string[] = [
  *  leading/trailing/double hyphen (or any other character) fails the shape. */
 const BOX_NAME_SHAPE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
-/** The opaque per-device identifier shape HQ auto-mints (`d-<16 hex>`, ADR-023).
- *  A customer-chosen name must never look like one. */
+/** A customer-chosen label must not look like a system device identifier. */
 const DEVICE_LOOKALIKE = /^d-[0-9a-f]{16}$/;
 
 /** Structured reasons a name can be rejected — the dashboard maps these to
@@ -130,11 +111,6 @@ export function validateBoxName(raw: string): BoxNameValidation {
 /** Convenience predicate for callers that only need the boolean. */
 export function isValidBoxName(raw: string): boolean {
   return validateBoxName(raw).ok;
-}
-
-/** The full FQDN a valid name resolves to, e.g. `studio.droplet-us.com`. */
-export function boxNameToFqdn(slug: string): string {
-  return `${slug}${BOX_NAME_SUFFIX}`;
 }
 
 /**

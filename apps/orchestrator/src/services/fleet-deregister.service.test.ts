@@ -7,11 +7,11 @@ import {
   DEREGISTER_RESULT_OK,
   DEREGISTER_RESULT_SKIPPED,
   DEREGISTER_RESULT_FAILED,
-  type HqIssuanceClient,
+  type FleetRegistrationClient,
   type HqDeregisterRequest,
   type SignChallengeDeps,
   type DeregisterDeps,
-} from "./tls-issuance.service.js";
+} from "./fleet-registration.service.js";
 
 // ---------------------------------------------------------------------------
 // ADR-023 PR-3 — signed factory-reset HQ deregistration.
@@ -39,23 +39,12 @@ function daysFromNow(days: number): string {
   return new Date(Date.now() + days * 86_400_000).toISOString();
 }
 
-function makeHqClient(overrides: Partial<HqIssuanceClient> = {}): HqIssuanceClient {
+function makeHqClient(overrides: Partial<FleetRegistrationClient> = {}): FleetRegistrationClient {
   return {
     challenge: vi.fn(async () => ({
       nonce: NONCE,
       expires_at: daysFromNow(1),
       public_label: PUBLIC_LABEL,
-      fqdn: FQDN,
-    })),
-    order: vi.fn(async () => ({
-      order_id: "ord-1",
-      status: "pending" as const,
-      fqdn: FQDN,
-    })),
-    poll: vi.fn(async () => ({ status: "active" as const })),
-    renew: vi.fn(async () => ({
-      order_id: "ord-2",
-      status: "pending" as const,
       fqdn: FQDN,
     })),
     deregister: vi.fn(async () => ({
@@ -66,12 +55,6 @@ function makeHqClient(overrides: Partial<HqIssuanceClient> = {}): HqIssuanceClie
       device_id: DEVICE_ID,
       status: "registered" as const,
       idempotent: false,
-    })),
-    claimName: vi.fn(async (req) => ({
-      device_id: req.device_id,
-      name: req.name,
-      fqdn: `${req.name}.droplet-us.com`,
-      status: "claimed" as const,
     })),
     release: vi.fn(async () => ({
       device_id: DEVICE_ID,

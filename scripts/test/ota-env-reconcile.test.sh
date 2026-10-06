@@ -72,6 +72,8 @@ grep -qx "DROPLET_OTA_APPLY_SCRIPT=$BOX/docker/ota/apply-update.sh" "$BOX/.env" 
   && pass "OTA apply enabled with the release-shipped helper path (WARP-3007)" || fail "DROPLET_OTA_APPLY_SCRIPT not added"
 grep -q '^NVR_MEDIA_SOURCE=nvrdata$' "$BOX/.env" \
   && pass "missing literal-default key added" || fail "NVR_MEDIA_SOURCE literal missing"
+grep -qx 'HQ_ISSUANCE_URL=' "$BOX/.env" \
+  && pass "absent HQ origin stays empty for local WireGuard and DNS" || fail "HQ origin was defaulted to an external service"
 grep -q '^COMPOSE_PROFILES=linux,display,eval,email$' "$BOX/.env" \
   && pass "missing profile token appended to COMPOSE_PROFILES" || fail "email token not appended ($(grep COMPOSE_PROFILES "$BOX/.env"))"
 [ "$(grep -c '^COMPOSE_PROFILES=' "$BOX/.env")" -eq 1 ] \
@@ -121,6 +123,11 @@ reconcile "$BOXF" updf >/dev/null 2>&1
   && pass "regular docker/.env backed up as .forked-<id> and relinked" || fail "forked docker/.env not repaired"
 
 echo "env-reconcile: second run is a no-op"
+BOXHQ="$TMP/boxhq"; make_box "$BOXHQ"
+printf 'HQ_ISSUANCE_URL=https://hq.example.invalid\n' >> "$BOXHQ/.env"
+reconcile "$BOXHQ" upd-hq >/dev/null 2>&1
+grep -qx 'HQ_ISSUANCE_URL=https://hq.example.invalid' "$BOXHQ/.env" \
+  && pass "explicitly provisioned HQ origin is preserved" || fail "explicit HQ origin was changed"
 cp "$BOX/.env" "$TMP/env.after1"; cp "$BOX/droplet.service" "$TMP/unit.after1"
 OUT2="$(reconcile "$BOX" upd2 2>"$TMP/err")"; RC=$?
 [ "$RC" -eq 0 ] && cmp -s "$BOX/.env" "$TMP/env.after1" && cmp -s "$BOX/droplet.service" "$TMP/unit.after1" \

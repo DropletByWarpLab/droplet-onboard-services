@@ -64,6 +64,7 @@ function statusFixture(overrides: Record<string, unknown> = {}) {
     endpointConfigured: true,
     endpointHost: "casa.droplet-us.com",
     publicFqdn: "casa.droplet-us.com",
+    internalHostname: "droplet-ai.lan",
     homeEndpointHost: "192.168.1.87",
     listenPort: 51820,
     addresses: ["10.13.13.1/24"],
@@ -102,7 +103,7 @@ describe("Remote Access — home-mode mint (WARP-1391)", () => {
   it("mints HOME mode from the Add-device dialog when the box has a home endpoint", async () => {
     fetchVpnStatusMock.mockResolvedValue(statusFixture());
     render(<RemoteAccessPage />);
-    await screen.findByText("casa.droplet-us.com");
+    await screen.findByText("https://droplet-ai.lan");
 
     const addBtn = screen.getByRole("button", { name: /add device/i });
     expect(addBtn).not.toBeDisabled();
@@ -122,7 +123,7 @@ describe("Remote Access — home-mode mint (WARP-1391)", () => {
       statusFixture({ homeEndpointHost: null }),
     );
     render(<RemoteAccessPage />);
-    await screen.findByText("casa.droplet-us.com");
+    await screen.findByText("https://droplet-ai.lan");
 
     // The Add-device affordance is gated off — a home mint would 503.
     const addBtn = screen.getByRole("button", { name: /add device/i });
@@ -147,7 +148,7 @@ describe("Remote Access — home-mode mint (WARP-1391)", () => {
     delete (s as Record<string, unknown>).homeEndpointHost;
     fetchVpnStatusMock.mockResolvedValue(s);
     render(<RemoteAccessPage />);
-    await screen.findByText("casa.droplet-us.com");
+    await screen.findByText("https://droplet-ai.lan");
 
     expect(screen.getByRole("button", { name: /add device/i })).toBeDisabled();
     expect(createVpnPeerMock).not.toHaveBeenCalled();

@@ -699,6 +699,22 @@ apply_file_indexer_nc_grants() {
 # =============================================================================
 # Start
 # =============================================================================
+_retire_remote_access_connector() {
+  # This also runs when setup skips builds, so a previously enabled connector
+  # cannot survive just because Compose no longer declares its service.
+  local connector
+  connector="$(run_docker ps -a --filter 'name=^/droplet-cloudflared$' --format '{{.ID}}')" || {
+    log_error "Could not inspect the retired remote-access connector"
+    return 1
+  }
+  [ -n "$connector" ] || return 0
+  log_info "Removing retired remote-access connector droplet-cloudflared"
+  run_docker rm -f droplet-cloudflared || {
+    log_error "Could not remove the retired remote-access connector"
+    return 1
+  }
+}
+
 start_stack() {
   log_info "Starting the Droplet stack..."
 
@@ -712,6 +728,8 @@ start_stack() {
     . "$REPO_ROOT/.env"
     set +a
   fi
+
+  _retire_remote_access_connector || return 1
 
   # --- Start infrastructure first ---
   run_with_spinner "Starting database, cache, and broker" \

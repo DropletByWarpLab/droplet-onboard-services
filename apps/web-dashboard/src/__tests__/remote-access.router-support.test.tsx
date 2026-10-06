@@ -47,6 +47,7 @@ function statusFixture(overrides: Record<string, unknown> = {}) {
     endpointConfigured: true,
     endpointHost: "casa.droplet-us.com",
     publicFqdn: "casa.droplet-us.com",
+    internalHostname: "droplet-ai.lan",
     homeEndpointHost: "192.168.9.195",
     listenPort: 51820,
     addresses: ["10.13.13.1/24"],
@@ -66,7 +67,7 @@ describe("Remote Access — router without WireGuard (WARP-2689)", () => {
   it("shows the router guidance and disables Add device when interfaceLive is false", async () => {
     fetchVpnStatusMock.mockResolvedValue(statusFixture({ interfaceLive: false, livePeerCount: null }));
     render(<RemoteAccessPage />);
-    await screen.findByText("casa.droplet-us.com");
+    await screen.findByText("https://droplet-ai.lan");
 
     expect(screen.getByText(/router can’t run remote access yet/i)).toBeInTheDocument();
     const add = screen.getByRole("button", { name: /add device/i });
@@ -78,7 +79,7 @@ describe("Remote Access — router without WireGuard (WARP-2689)", () => {
   it("changes nothing when the router could not say (interfaceLive null)", async () => {
     fetchVpnStatusMock.mockResolvedValue(statusFixture({ interfaceLive: null }));
     render(<RemoteAccessPage />);
-    await screen.findByText("casa.droplet-us.com");
+    await screen.findByText("https://droplet-ai.lan");
 
     expect(screen.queryByText(/router can’t run remote access yet/i)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /add device/i })).toBeEnabled();
@@ -87,7 +88,7 @@ describe("Remote Access — router without WireGuard (WARP-2689)", () => {
   it("changes nothing on an older orchestrator that omits the field", async () => {
     fetchVpnStatusMock.mockResolvedValue(statusFixture());
     render(<RemoteAccessPage />);
-    await screen.findByText("casa.droplet-us.com");
+    await screen.findByText("https://droplet-ai.lan");
 
     expect(screen.queryByText(/router can’t run remote access yet/i)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /add device/i })).toBeEnabled();

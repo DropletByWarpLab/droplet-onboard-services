@@ -54,36 +54,18 @@ describe("boxDisplayHost", () => {
   });
 });
 
-/**
- * WARP-1342 — chrome address resolution. The chip must show the box's real
- * (VPN-reachable) address instead of stranding on droplet.local whenever the
- * Device row / env chain missed the issued FQDN.
- */
 describe("resolveBoxAddress", () => {
-  const FQDN = "d-0123456789abcdef.droplet-us.com";
-
-  it("an owner-chosen box name always wins over the issued FQDN", () => {
-    expect(resolveBoxAddress("aurora-loft", FQDN)).toBe("aurora-loft");
+  it("uses internal DNS over a saved display name or legacy public hostname", () => {
+    expect(resolveBoxAddress("aurora-loft", "droplet-ai.lan")).toBe("droplet-ai.lan");
+    expect(resolveBoxAddress("old.droplet-us.com", "droplet-ai.lan")).toBe("droplet-ai.lan");
   });
-
-  it("upgrades the droplet.local fallback to the issued FQDN", () => {
-    expect(resolveBoxAddress("droplet.local", FQDN)).toBe(FQDN);
-    expect(resolveBoxAddress(null, FQDN)).toBe(FQDN);
-    expect(resolveBoxAddress(undefined, FQDN)).toBe(FQDN);
+  it("uses internal DNS when the device row is missing or a container ID", () => {
+    expect(resolveBoxAddress(null, "box.lan")).toBe("box.lan");
+    expect(resolveBoxAddress("5639146fdc76", "box.lan")).toBe("box.lan");
   });
-
-  it("upgrades a masked container-id hostname to the issued FQDN", () => {
-    expect(resolveBoxAddress("5639146fdc76", FQDN)).toBe(FQDN);
-  });
-
-  it("keeps droplet.local while no FQDN has been issued / loaded", () => {
-    expect(resolveBoxAddress("droplet.local", null)).toBe(LAN_FALLBACK_HOST);
+  it("keeps the local display fallback while internal DNS is unavailable", () => {
+    expect(resolveBoxAddress("aurora-loft", null)).toBe("aurora-loft");
     expect(resolveBoxAddress(null, undefined)).toBe(LAN_FALLBACK_HOST);
-    expect(resolveBoxAddress(undefined, "")).toBe(LAN_FALLBACK_HOST);
-    expect(resolveBoxAddress(undefined, "   ")).toBe(LAN_FALLBACK_HOST);
-  });
-
-  it("a hostname that is already the FQDN passes through untouched", () => {
-    expect(resolveBoxAddress(FQDN, FQDN)).toBe(FQDN);
+    expect(resolveBoxAddress("5639146fdc76", " ")).toBe(LAN_FALLBACK_HOST);
   });
 });

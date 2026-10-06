@@ -128,15 +128,11 @@ describe("/help page (WARP-174)", () => {
       { timeout: 1500 },
     );
   });
-  it("tells the owner the 60-day rule and that the apps pair by the box's key (WARP-2944)", () => {
+  it("explains internal DNS, direct WireGuard and certificate verification", () => {
     render(<HelpPage />);
-    // The plain rule, in the owner's words, next to the web-address section.
-    expect(
-      screen.getByText(/needs an outbound internet connection at least once every 60 days/i),
-    ).toBeInTheDocument();
-    // The two audiences: apps pair by the key; browsers need the certificate.
-    expect(screen.getByText(/pair to your box by its own key/i)).toBeInTheDocument();
-    // Air-gapped is the documented exception, not an error.
-    expect(screen.getByText(/air-gapped installs/i)).toBeInTheDocument();
+    expect(screen.getByText(/configured internal DNS address/i)).toBeInTheDocument();
+    expect(screen.getByText(/configure a reachable direct WireGuard endpoint/i)).toBeInTheDocument();
+    expect(screen.getByText(/compare its fingerprint with your Droplet/i)).toBeInTheDocument();
+    expect(screen.queryByText(/at least once every 60 days/i)).not.toBeInTheDocument();
   });
 });

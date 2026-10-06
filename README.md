@@ -496,7 +496,7 @@ npm run test:integration       # Full stack integration (Docker Compose)
 | [`droplet-android`](https://github.com/DropletByWarpLab/droplet-android) | Native Kotlin/Compose Android client (ADR-008) |
 | [`droplet-windows`](https://github.com/DropletByWarpLab/droplet-windows) | Windows client |
 | [`droplet-analytics`](https://github.com/DropletByWarpLab/droplet-analytics) | Off-device operator / fleet-monitoring portal |
-| [`droplet-fleet-hq`](https://github.com/DropletByWarpLab/droplet-fleet-hq) | Per-device TLS issuance + addressing (ADR-023 / ADR-025A) |
+| [`droplet-fleet-hq`](https://github.com/DropletByWarpLab/droplet-fleet-hq) | Optional fleet device authentication + private image distribution; remote access uses local WireGuard and internal DNS |
 | [`design-and-style`](https://github.com/DropletByWarpLab/design-and-style) | Canonical design tokens (WARP-1276) |
 | [`releases`](https://github.com/DropletByWarpLab/releases) | Signed release manifests (`manifest.json`) + OTA update configs |
 

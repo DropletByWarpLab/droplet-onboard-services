@@ -31,8 +31,6 @@ import secrets
 import shlex
 import re
 import shutil
-import socket
-import struct
 import stat
 import subprocess
 import threading
@@ -347,7 +345,6 @@ ROUTE_CLASSES = {
     ("GET", "/drives"): "read",
     ("GET", "/pools"): "read",
     ("GET", "/host/uplink-ip"): "read",
-    ("GET", "/host/stun-probe"): "read",
     ("GET", "/host/topology"): "read",
     ("GET", "/host/nvr-storage"): "read",
     ("GET", "/host/nvr-storage/migrate"): "read",
@@ -370,8 +367,6 @@ ROUTE_CLASSES = {
     ("POST", "/system/factory-reset"): "destructive",
     ("POST", "/tls/bootstrap-refresh"): "destructive",
     ("POST", "/tls/reload"): "destructive",
-    ("POST", "/host/public-fqdn"): "destructive",
-    ("POST", "/host/box-name"): "destructive",
 }
 _PANEL_CLASSES = ("read", "write")
 
@@ -438,11 +433,9 @@ _factory_reset_proc = None
 
 def _run(cmd, timeout=15):
     # argv list, shell=False — nothing is ever interpolated into a shell string.
-    # CodeQL py/command-line-injection (#65) traces three request-derived
-    # arguments to this call; each is allow-listed at its call site BEFORE it
-    # gets here (collect_logs: _LOGS_SERVICE_RE, run_set_public_fqdn:
-    # _valid_public_fqdn, run_set_box_name: _valid_box_name), and the host
-    # scripts they reach validate again.
+    # Request-derived arguments are allow-listed at their call sites before
+    # reaching this helper (for example collect_logs: _LOGS_SERVICE_RE).
+    # The host scripts they reach validate again.
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         return r.returncode, r.stdout, r.stderr
@@ -1319,7 +1312,8 @@ def _save_state(s):
             base = os.path.basename(d.rstrip("/"))
             if base and base not in ("tmp", "var", "run", ""):
                 try:
-                    os.chmod(d, 0o700)
+                    # Private directory: owner traversal is required; group/other access is forbidden.
+                    os.chmod(d, 0o700)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
                 except Exception:
                     pass
         tmp = STATE_FILE + ".tmp"
@@ -2938,7 +2932,7 @@ def uplink_ip_snapshot():
 # the gateway mounts, so it is byte-identical to what the orchestrator mints
 # and what the apps compute (`openssl x509 -pubkey | openssl pkey -pubin
 # -outform DER | sha256 | base64`). Cached by the file's mtime: a cert swap
-# (tls-issuance install, tls-reload) yields a new pin on the next poll.
+# (local certificate refresh, tls-reload) yields a new pin on the next poll.
 #
 # `server` (reported alongside, not encoded in the link) is the box's
 # default-route source address — the same address the panel prints under IP
@@ -3070,125 +3064,6 @@ def pair_qr_snapshot():
     # rail's "Droplet fingerprint" face. Public data, like the pin itself.
     return {"ok": True, "server": server, "spki": pin,
             "payload": pair_link(pin), "fingerprint": format_key_fingerprint(pin)}
-
-
-# ---------------------------------------------------------------------------
-# STUN reflexive-mapping probe (WARP-1385) — the box's own public UDP mapping
-# ---------------------------------------------------------------------------
-# The direct-punch remote-access overlay (ADR-030) needs the box to learn the
-# {ip, port} an upstream NAT assigns to traffic leaving from the WireGuard
-# source port (51820). The orchestrator's overlay connect agent calls this,
-# then hands the mapping to HQ in the `answer` so the phone can aim its
-# WireGuard endpoint at the box.
-#
-# device-bridge runs in the HOST network namespace (root), so it is the one
-# place that can send a STUN Binding request FROM host udp/51820 and read the
-# reflexive mapping back. This is valid only once WARP-1385 Part A removes
-# docker-proxy from host:51820 (wg's socket is in the container netns, so the
-# host port is free).
-#
-# LPE invariant: the STUN server list is INLINED below — device-bridge is root,
-# so it must NEVER read this from a droplet-writable path (a guard test
-# enforces the no-writable-config rule).
-
-# The host UDP source port the box's WireGuard listener uses. The probe MUST
-# originate from it so the observed mapping is the SAME public ip:port the
-# overlay hole-punch will use (Part A preserves this source port on egress).
-STUN_SOURCE_PORT = 51820
-
-# Two public STUN servers (RFC 5389 Binding). Cloudflare answers on 3478;
-# Google's public STUN answers on 19302. Both are registered in
-# docs/security/allowed-egress.yaml (WARP-1385). Tried in order; the first that
-# answers wins.
-_STUN_SERVERS = (
-    ("stun.cloudflare.com", 3478),
-    ("stun.l.google.com", 19302),
-)
-
-# Bounded: one request per server, short timeout, fail closed.
-_STUN_TIMEOUT_S = 3.0
-
-_STUN_MAGIC_COOKIE = 0x2112A442
-_STUN_BINDING_REQUEST = 0x0001
-_STUN_BINDING_SUCCESS = 0x0101
-_STUN_ATTR_MAPPED_ADDRESS = 0x0001
-_STUN_ATTR_XOR_MAPPED_ADDRESS = 0x0020
-
-
-def _parse_stun_mapped_address(data: bytes, txid: bytes) -> tuple[str, int]:
-    """Parse the reflexive (public) IPv4 {ip, port} out of a STUN Binding
-    Success Response. Prefers XOR-MAPPED-ADDRESS (0x0020); falls back to the
-    legacy MAPPED-ADDRESS (0x0001). Raises ValueError on anything malformed —
-    the caller treats a raise as "this server didn't give me a usable mapping"
-    and fails closed rather than fabricating one."""
-    if len(data) < 20:
-        raise ValueError("STUN response shorter than the 20-byte header")
-    msg_type, msg_len, cookie = struct.unpack(">HHI", data[:8])
-    resp_txid = data[8:20]
-    if msg_type != _STUN_BINDING_SUCCESS:
-        raise ValueError(f"not a Binding Success Response (type={msg_type:#06x})")
-    if cookie != _STUN_MAGIC_COOKIE:
-        raise ValueError("STUN magic cookie mismatch")
-    if resp_txid != txid:
-        raise ValueError("STUN transaction id mismatch (stale/forged response)")
-    body = data[20:20 + msg_len]
-    off = 0
-    while off + 4 <= len(body):
-        attr_type, attr_len = struct.unpack(">HH", body[off:off + 4])
-        val = body[off + 4:off + 4 + attr_len]
-        # Attributes are 32-bit aligned.
-        off += 4 + attr_len + ((4 - (attr_len % 4)) % 4)
-        if attr_type not in (_STUN_ATTR_XOR_MAPPED_ADDRESS, _STUN_ATTR_MAPPED_ADDRESS):
-            continue
-        if len(val) < 8:
-            raise ValueError("mapped-address attribute too short")
-        family = val[1]
-        if family != 0x01:
-            raise ValueError("mapped address is not IPv4")
-        port = struct.unpack(">H", val[2:4])[0]
-        addr = struct.unpack(">I", val[4:8])[0]
-        if attr_type == _STUN_ATTR_XOR_MAPPED_ADDRESS:
-            port ^= (_STUN_MAGIC_COOKIE >> 16)
-            addr ^= _STUN_MAGIC_COOKIE
-        ip = socket.inet_ntoa(struct.pack(">I", addr))
-        return ip, port
-    raise ValueError("no MAPPED-ADDRESS attribute in the STUN response")
-
-
-def _stun_query(host: str, port: int, source_port: int = STUN_SOURCE_PORT,
-                timeout: float = _STUN_TIMEOUT_S) -> tuple[str, int]:
-    """Send ONE STUN Binding request from host UDP <source_port> to host:port
-    and return the reflexive (public) {ip, port}. Raises on timeout / socket
-    error / malformed response — the caller fails closed."""
-    txid = secrets.token_bytes(12)
-    req = struct.pack(">HHI", _STUN_BINDING_REQUEST, 0, _STUN_MAGIC_COOKIE) + txid
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        # Bind to the WireGuard source port on all host interfaces so the mapping
-        # we observe is the SAME one the wg0 punch uses.
-        sock.bind(("0.0.0.0", source_port))
-        sock.settimeout(timeout)
-        sock.sendto(req, (host, port))
-        data, _addr = sock.recvfrom(2048)
-    finally:
-        sock.close()
-    return _parse_stun_mapped_address(data, txid)
-
-
-def stun_probe_snapshot():
-    """Return (ok, payload). On success payload = {"ip", "port", "server"} — the
-    box's observed public UDP mapping from host udp/51820. On failure ok=False
-    and payload = {"error": ...}. Fails CLOSED — never fabricates a mapping. Each
-    inlined STUN server is tried once, in order, until one answers."""
-    errors = []
-    for host, port in _STUN_SERVERS:
-        try:
-            ip, mapped_port = _stun_query(host, port)
-            return True, {"ip": ip, "port": mapped_port, "server": f"{host}:{port}"}
-        except Exception as e:                                      # noqa: BLE001
-            errors.append(f"{host}:{port}: {e}")
-    return False, {"error": "no STUN response from any server: " + "; ".join(errors)}
 
 
 # ---------------------------------------------------------------------------
@@ -3492,7 +3367,8 @@ def _run_pool_via_executor(operation, params, refusal=None):
         # directory already exists, so explicitly chmod it on every start to
         # close the window where a prior install left a looser umask (0755).
         os.makedirs(POOL_SPOOL_DIR, mode=0o700, exist_ok=True)
-        os.chmod(POOL_SPOOL_DIR, 0o700)
+        # Recovery-key spool directory: owner traversal only, never shared access.
+        os.chmod(POOL_SPOOL_DIR, 0o700)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
         # Drop any stale pair from an interrupted earlier run so the executor
         # can never consume an old request and we never read an old result.
         # WARP-3513: a stale RESULT can be a recovery key the bridge never got
@@ -3921,7 +3797,8 @@ def _nvr_spool_prepare():
     # existing directory, so chmod explicitly every time to close the window
     # where an older install left it looser (same as the pool spool).
     os.makedirs(NVR_SPOOL_DIR, mode=0o700, exist_ok=True)
-    os.chmod(NVR_SPOOL_DIR, 0o700)
+    # Root-operation spool directory: owner traversal only, never shared access.
+    os.chmod(NVR_SPOOL_DIR, 0o700)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
 
 
 def _nvr_spool_remove(name):
@@ -4602,7 +4479,8 @@ def _spawn_detached(cmd):
 # Allow-listed shape for the informational factory-reset context fields
 # (CodeQL py/command-line-injection #66). jobId is a cuid (`ResetJob.id`);
 # targetName is boxDisplayName() — the validated box-name slug, else the
-# public FQDN, else the LAN fallback host — which the owner typed to confirm.
+# configured internal hostname, else the LAN fallback host, which the owner
+# typed to confirm.
 # ASCII word characters and `._:-`, bounded — nothing legitimate is excluded,
 # nothing else reaches the host script's argv.
 _RESET_CONTEXT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
@@ -4769,8 +4647,7 @@ def collect_logs(window_hours, service):
 
 
 # --- ADR-023 (C2): gateway-nginx reload host executor -----------------------
-# The orchestrator's tls-issuance cron writes a freshly-issued LE fullchain into
-# docker/certs/droplet.crt and then POSTs /tls/reload here. The bridge execs the
+# After a local certificate change, POST /tls/reload here. The bridge execs the
 # repo-tracked host wrapper (scripts/host/droplet-tls-reload.sh, installed to
 # /usr/local/sbin by setup.sh / install-device-bridge.sh), which delegates to the
 # shared scripts/lib/tls-reload.sh::reload_gateway_nginx — the SAME reload path
@@ -4788,8 +4665,8 @@ TLS_RELOAD_SCRIPT = os.environ.get(
 def run_tls_reload():
     """Reload the gateway nginx so a freshly-installed cert is served at once.
 
-    Takes no parameters — the cert files are already on disk (the orchestrator
-    wrote them atomically before calling). Returns (ok, info); never raises —
+    Takes no parameters — the installed cert files are already on disk.
+    Returns (ok, info); never raises —
     mirrors collect_logs()/run_pool_command()."""
     try:
         # A reload is fast; a stuck `docker compose exec` is the only slow case.
@@ -4970,131 +4847,6 @@ def run_panel_console():
         return False, msg
     logger.info("panel console handed back to the operator")
     return True, {"message": "console returned to the panel"}
-
-
-# --- ADR-023 PR-1: public-FQDN write-back host executor ---------------------
-# The orchestrator's tls-issuance service LEARNS the box's opaque per-device
-# FQDN from the HQ challenge response and POSTs it to /host/public-fqdn so it can
-# be persisted back to the host .env (DROPLET_PUBLIC_FQDN) for the next boot, and
-# so split-horizon DNS re-registers. The bridge execs the repo-tracked host
-# wrapper (scripts/host/droplet-set-public-fqdn.sh, installed to /usr/local/sbin
-# by install-device-bridge.sh). The orchestrator can't write the host .env
-# itself (no host mount), so — exactly like run_tls_reload for the docker socket
-# — the write has to run on the host.
-#
-# Mirrors run_set_hostapd()/run_tls_reload(): allow-listed shape, host-script
-# only, synchronous + bounded, surfaces the script's exit honestly, never raises.
-
-SET_PUBLIC_FQDN_SCRIPT = os.environ.get(
-    "DROPLET_SET_PUBLIC_FQDN_SCRIPT",
-    "/usr/local/sbin/droplet-set-public-fqdn.sh").strip()
-
-# STRICT validation BEFORE exec. Accept either the opaque per-device shape
-# (`d-<16 hex>.devices.warp-lab.ai`) or a conservative lowercase hostname charset
-# (defence in depth — the host script validates again). Anything with shell
-# metacharacters, whitespace, uppercase, path traversal, or absurd length is
-# refused here and the host script is NEVER invoked.
-_PUBLIC_FQDN_OPAQUE_RE = re.compile(r'^d-[0-9a-f]{16}\.devices\.warp-lab\.ai$')
-_PUBLIC_FQDN_CONSERVATIVE_RE = re.compile(r'^[a-z0-9.-]+$')
-
-
-def _valid_public_fqdn(fqdn):
-    if not isinstance(fqdn, str):
-        return False
-    if not (1 <= len(fqdn) <= 253):
-        return False
-    if _PUBLIC_FQDN_OPAQUE_RE.match(fqdn):
-        return True
-    # Conservative fallback: lowercase letters/digits/dot/hyphen only, and it
-    # must look like a dotted hostname (no leading/trailing dot or hyphen).
-    if any(c in fqdn for c in (' ', '\n', '\r', '\t')):
-        return False
-    if not _PUBLIC_FQDN_CONSERVATIVE_RE.match(fqdn):
-        return False
-    if fqdn[0] in ".-" or fqdn[-1] in ".-":
-        return False
-    if not all(label and not label.startswith('-') and not label.endswith('-')
-               for label in fqdn.split('.')):
-        return False
-    return "." in fqdn
-
-
-def run_set_public_fqdn(fqdn):
-    """Persist the learned DROPLET_PUBLIC_FQDN to the host .env via the host
-    script. Returns (ok, info); never raises — mirrors run_tls_reload()."""
-    if not _valid_public_fqdn(fqdn):
-        logger.warning("public-fqdn write-back refused: invalid fqdn shape")
-        return False, "invalid fqdn"
-    try:
-        rc, out, err = _run([SET_PUBLIC_FQDN_SCRIPT, fqdn], timeout=30)
-    except Exception as e:                                          # noqa: BLE001
-        logger.warning("public-fqdn write-back failed to exec host script: %s", e)
-        return False, "host script unavailable"
-    if rc != 0:
-        msg = (err.strip() or out.strip() or "host script refused")
-        logger.warning("public-fqdn write-back refused/failed (rc=%s): %s", rc, msg)
-        return False, msg
-    return True, {"message": (out or "").strip() or "public fqdn persisted"}
-
-
-# --- WARP-988: box-name write-back host executor -----------------------------
-# The wizard's "name your box" step (WARP-979) picks the owner's slug; the
-# orchestrator POSTs it to /host/box-name so it can be persisted back to the
-# host .env (DROPLET_BOX_NAME) for the next boot, when tls-issuance sends it to
-# HQ as `requested_name`. The bridge execs the repo-tracked host wrapper
-# (scripts/host/droplet-set-box-name.sh, installed to /usr/local/sbin by
-# install-device-bridge.sh). The orchestrator can't write the host .env itself
-# (no host mount), so — exactly like run_set_public_fqdn — the write has to run
-# on the host.
-#
-# Mirrors run_set_public_fqdn()/run_tls_reload(): allow-listed shape, host-script
-# only, synchronous + bounded, surfaces the script's exit honestly, never raises.
-
-SET_BOX_NAME_SCRIPT = os.environ.get(
-    "DROPLET_SET_BOX_NAME_SCRIPT",
-    "/usr/local/sbin/droplet-set-box-name.sh").strip()
-
-# STRICT validation BEFORE exec. Conservatively mirrors the shared ruleset in
-# packages/shared-types/src/box-name.ts (which the dashboard + orchestrator both
-# import): a lowercase slug of [a-z0-9-], 3-40 chars, no leading/trailing/double
-# hyphen, and never the `d-<16 hex>` opaque per-device lookalike (ADR-023 —
-# a customer name must not impersonate an HQ-minted device identifier). The
-# reserved-word blocklist is policy, enforced upstream (orchestrator + HQ);
-# the bridge's job is the injection-safe SHAPE (defence in depth — the host
-# script validates again). Anything with shell metacharacters, whitespace,
-# uppercase, or dots is refused here and the host script is NEVER invoked.
-_BOX_NAME_SHAPE_RE = re.compile(r'^[a-z0-9]+(?:-[a-z0-9]+)*$')
-_BOX_NAME_DEVICE_LOOKALIKE_RE = re.compile(r'^d-[0-9a-f]{16}$')
-
-
-def _valid_box_name(name):
-    if not isinstance(name, str):
-        return False
-    if not (3 <= len(name) <= 40):
-        return False
-    if not _BOX_NAME_SHAPE_RE.match(name):
-        return False
-    if _BOX_NAME_DEVICE_LOOKALIKE_RE.match(name):
-        return False
-    return True
-
-
-def run_set_box_name(name):
-    """Persist the owner-chosen DROPLET_BOX_NAME to the host .env via the host
-    script. Returns (ok, info); never raises — mirrors run_set_public_fqdn()."""
-    if not _valid_box_name(name):
-        logger.warning("box-name write-back refused: invalid name shape")
-        return False, "invalid name"
-    try:
-        rc, out, err = _run([SET_BOX_NAME_SCRIPT, name], timeout=30)
-    except Exception as e:                                          # noqa: BLE001
-        logger.warning("box-name write-back failed to exec host script: %s", e)
-        return False, "host script unavailable"
-    if rc != 0:
-        msg = (err.strip() or out.strip() or "host script refused")
-        logger.warning("box-name write-back refused/failed (rc=%s): %s", rc, msg)
-        return False, msg
-    return True, {"message": (out or "").strip() or "box name persisted"}
 
 
 def cameras_snapshot():
@@ -5776,19 +5528,6 @@ class Handler(BaseHTTPRequestHandler):
                 if not self._authed():
                     return self._send(401, {"error": "unauthorized"})
                 return self._send(200, uplink_ip_snapshot())
-            if path == "/host/stun-probe":
-                # WARP-1385: the box's own public UDP mapping (STUN reflexive
-                # {ip, port}) observed from host udp/51820, for the overlay
-                # connect agent's `answer`. Box-internal network detail behind a
-                # udp/51820 socket bind — auth-gated like /host/uplink-ip. Fails
-                # CLOSED with a 502 (never a fabricated mapping) when no STUN
-                # server answers.
-                if not self._authed():
-                    return self._send(401, {"error": "unauthorized"})
-                ok, info = stun_probe_snapshot()
-                if not ok:
-                    return self._send(502, info)
-                return self._send(200, info)
             if path == "/host/topology":
                 # WARP-817: host uplink posture, for the onboarding wizard's
                 # auto-collapse decision. Same box-internal-network-detail
@@ -6146,60 +5885,6 @@ class Handler(BaseHTTPRequestHandler):
                 # 502: the unit is missing or polkit denied it. The caller is a
                 # person at a rack trying to get a prompt, so the message is
                 # surfaced verbatim rather than flattened to "failed".
-                return self._send(502, {"ok": False, "error": info})
-            return self._send(200, {"ok": True,
-                                    **(info if isinstance(info, dict) else {"info": info})})
-        if self.path == "/host/public-fqdn":
-            # ADR-023 PR-1: persist the orchestrator-LEARNED DROPLET_PUBLIC_FQDN
-            # to the host .env (and re-register split-horizon DNS) via the host
-            # script. Auth-gated exactly like /tls/reload + /openwrt/wifi/hostapd.
-            # STRICT fqdn validation happens in run_set_public_fqdn BEFORE the
-            # host script is ever invoked; a junk fqdn is a 400, never an exec.
-            if not self._authed():
-                return self._send(401, {"ok": False, "error": "unauthorized"})
-            n = min(max(int(self.headers.get("Content-Length") or 0), 0), 4096)
-            raw = self.rfile.read(n).decode() if n else ""
-            try:
-                j = json.loads(raw) if raw else {}
-            except Exception:                                       # noqa: BLE001
-                return self._send(400, {"ok": False, "error": "bad json"})
-            fqdn = j.get("fqdn", "")
-            if not _valid_public_fqdn(fqdn):
-                # 400: the orchestrator sent a malformed name. The host script is
-                # NOT invoked — defence in depth before any exec.
-                return self._send(400, {"ok": False, "error": "invalid fqdn"})
-            ok, info = run_set_public_fqdn(fqdn)
-            if not ok:
-                # 502: the host script is missing / refused. The learned name is
-                # already in the orchestrator's cert-state row, so a failed
-                # write-back only means the next boot re-learns it from HQ.
-                return self._send(502, {"ok": False, "error": info})
-            return self._send(200, {"ok": True,
-                                    **(info if isinstance(info, dict) else {"info": info})})
-        if self.path == "/host/box-name":
-            # WARP-988: persist the owner-chosen DROPLET_BOX_NAME to the host
-            # .env via the host script. Auth-gated exactly like
-            # /host/public-fqdn + /tls/reload. STRICT name validation happens in
-            # run_set_box_name BEFORE the host script is ever invoked; a junk
-            # name is a 400, never an exec.
-            if not self._authed():
-                return self._send(401, {"ok": False, "error": "unauthorized"})
-            n = min(max(int(self.headers.get("Content-Length") or 0), 0), 4096)
-            raw = self.rfile.read(n).decode() if n else ""
-            try:
-                j = json.loads(raw) if raw else {}
-            except Exception:                                       # noqa: BLE001
-                return self._send(400, {"ok": False, "error": "bad json"})
-            name = j.get("name", "")
-            if not _valid_box_name(name):
-                # 400: the orchestrator sent a malformed name. The host script is
-                # NOT invoked — defence in depth before any exec.
-                return self._send(400, {"ok": False, "error": "invalid name"})
-            ok, info = run_set_box_name(name)
-            if not ok:
-                # 502: the host script is missing / refused. The route already
-                # accepted the name; a failed write-back only means the box keeps
-                # its previous name until the owner retries.
                 return self._send(502, {"ok": False, "error": info})
             return self._send(200, {"ok": True,
                                     **(info if isinstance(info, dict) else {"info": info})})

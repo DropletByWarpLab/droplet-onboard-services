@@ -251,14 +251,6 @@ function SetupWizard({ initialStep, furthestStep }: { initialStep: Step; furthes
   // over them instead of landing on a step that immediately auto-skips forward
   // again — the "Back goes back too far / bounces" report.
   const historyRef = useRef<Step[]>([]);
-  // WARP-1039 — where the Address step should RETURN to when the customer was
-  // sent there by another step's CTA (today: the VPN precheck's "Set up
-  // internet address"). null = the normal forward flow (address → storage).
-  // A ref, not state: it only affects where the NEXT navigation goes, never
-  // what renders. Cleared on every rail/Back navigation so a stale flag can't
-  // teleport the customer to VPN later in the session.
-  const addressReturnToRef = useRef<Step | null>(null);
-
   // Forward + rail navigation. Records the step we're leaving (for Back) and
   // persists the resume pointer ONLY when advancing past the furthest-reached
   // step. Persisting on a BACKWARD jump would lower the stored pointer, so a
@@ -323,30 +315,9 @@ function SetupWizard({ initialStep, furthestStep }: { initialStep: Step; furthes
     }
   }, []);
 
-  // WARP-1039 — the Address step's exits honor the return-to flag: complete or
-  // skip goes back to the step that sent the customer there (the VPN
-  // precheck), falling back to the normal forward flow. One-shot: consumed and
-  // cleared on use.
-  const leaveAddress = useCallback(() => {
-    const target = addressReturnToRef.current ?? "storage";
-    addressReturnToRef.current = null;
-    setStep(target);
-  }, [setStep]);
-
-  // WARP-1039 — rail + Back wrappers clear the return-to flag: any navigation
-  // NOT initiated by the VPN CTA invalidates it, so a stale flag can't yank a
-  // rail-navigating customer back to VPN from a later Address visit.
-  const railNavigate = useCallback(
-    (next: Step) => {
-      addressReturnToRef.current = null;
-      setStep(next);
-    },
-    [setStep],
-  );
-  const backNavigate = useCallback(() => {
-    addressReturnToRef.current = null;
-    back();
-  }, [back]);
+  const leaveAddress = useCallback(() => setStep("storage"), [setStep]);
+  const railNavigate = setStep;
+  const backNavigate = back;
 
   // PR #384 — each step paints its own full-bleed aurora-rail `StepShell`, so
   // the page is just the step switch. The terminal `done` step is the
@@ -438,12 +409,6 @@ function SetupWizard({ initialStep, furthestStep }: { initialStep: Step; furthes
         <VpnStep
           onComplete={() => setStep("ai")}
           onSkip={() => setStep("ai")}
-          onBackToAddress={() => {
-            // WARP-1039 — remember to bring the customer straight back here
-            // once they've dealt with the Address step (complete OR skip).
-            addressReturnToRef.current = "vpn";
-            setStep("address");
-          }}
         />
       )}
 

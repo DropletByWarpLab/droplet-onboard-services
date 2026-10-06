@@ -2595,9 +2595,8 @@ model VpnPeer {
   status        String    @default("active") // "active" | "revoked"
   // How this peer reaches the box (hybrid remote-access P1). EXPLICIT enum-
   // checked value, never inferred from another field's absence (rule 10):
-  //   "away" (default) — dials the box from OUTSIDE the home LAN via the public
-  //           FQDN / relay endpoint. The pre-hybrid behavior; every existing row
-  //           is "away", so the default keeps them correct without a backfill.
+  //   "away" (default) — dials the operator's direct WireGuard endpoint from
+  //           outside the home LAN. Existing pre-hybrid rows retain this value.
   //   "home" — dials the box DIRECTLY at its home-facing LAN IP (split-tunnel to
   //           the box, no public inbound). The .conf's Endpoint is the LAN IP.
   // A CHECK constraint pins it to exactly these two values (see the migration).
@@ -2607,28 +2606,25 @@ model VpnPeer {
   //   "static"  (default) — a persistent peer minted by the owner via
   //             POST /api/vpn/peers (the QR/.conf flow). Every pre-1385 row is
   //             "static" via the column default — no backfill needed.
-  //   "overlay" — a direct-punch overlay peer (ADR-030) installed/refreshed by
-  //             the overlay connect agent on each HQ session. `lastSessionAt`
-  //             tracks the last refresh so idle overlay peers can be expired.
+  //   "overlay" — a legacy fleet grant (ADR-030), retained for ownership,
+  //             audit and revocation. New enrollment and connect paths are retired.
   // A CHECK constraint pins it to exactly these two values (see the migration).
   kind          String    @default("static")
-  // Last time the overlay connect agent refreshed this peer's endpoint from an
-  // HQ session offer. NULL for "static" peers (they never carry a session); the
-  // idle-expiry sweep filters on `kind = 'overlay' AND lastSessionAt < cutoff`,
-  // so the NULL is never used to DERIVE state (rule 10).
+  // Historical last refresh from the retired overlay connect agent. NULL for
+  // static peers. No current connect or idle-expiry job updates this field.
   lastSessionAt DateTime?
   createdAt     DateTime  @default(now())
   revokedAt     DateTime?
   // WARP-3172: the peer was revoked locally (router + row) but HQ could not be
-  // reached, so HQ may still broker sessions for it. The connect tick refuses
-  // the device and retries the HQ revoke, clearing this on success.
+  // reached. The legacy revoke-debt sweep retries signed grant cleanup and
+  // clears this on success; it cannot connect or reinstall any peer.
   hqRevokePending Boolean @default(false)
 
-  // WARP-1474: provenance for a peer enrolled via the dashboard-QR link flow
+  // WARP-1474: historical provenance from the retired dashboard-QR link flow
   // (ADR-030). Nullable — a peer minted via POST /api/vpn/peers (kind='static')
   // or an overlay peer created before this flow existed carries none of these.
-  // When an owner APPROVES a PendingOverlayEnrollment these are stamped onto the
-  // resulting overlay peer row so the audit trail shows who linked which QR:
+  // An owner approval previously stamped these onto the resulting peer row;
+  // retaining them keeps the audit trail of who linked each device:
   //   linkTokenEnrolledBy — the approving owner's user id (createdBy).
   //   linkTokenId         — the OverlayLinkToken this device redeemed.
   //   linkTokenLabel      — the human label from the redeem body.
@@ -2640,7 +2636,7 @@ model VpnPeer {
 
   @@index([userId])
   @@index([status])
-  // WARP-1385: the overlay idle-expiry sweep scans (kind, status, lastSessionAt).
+  // Retained for legacy peer management and grant cleanup.
   @@index([kind])
   // WARP-565: a PARTIAL unique index enforces "at most one ACTIVE peer per
   // assignedIp" at the DB layer (revoked rows' IPs are reusable). Prisma can't
@@ -2650,24 +2646,22 @@ model VpnPeer {
   @@index([assignedIp])
 }
 
-// ── WARP-1474: Dashboard-QR overlay device linking (ADR-030) ──
+// ── WARP-1474: Historical dashboard-QR overlay records (ADR-030) ──
 //
-// The owner mints a short-lived QR on the dashboard; a phone scans it and
-// redeems the token (NO bearer) to STAGE an enrollment the owner then approves.
-// Only on approval does the box vouch the device to HQ (reusing the WARP-1385
-// enrollOverlayDevice broker) — the redeem itself performs NO HQ call and
-// installs NO wg0 peer.
+// These models retain audit data from the retired link, redeem and approval
+// flow. No current route mints, redeems, approves or polls these records.
+// A departing user's historical pending rows may still be marked denied.
 //
 // `state` on both models is an EXPLICIT enum-checked TEXT column (rule 10 — no
 // state derived from a NULL), pinned by a raw-SQL CHECK constraint in the
 // migration, mirroring the sibling VpnPeer.status / .mode / .kind idiom.
 
-// One row per minted QR link token. The plaintext token is returned to the
-// owner ONCE and NEVER persisted or logged — only its sha256 hex hash lives
+// One historical row per minted QR link token. The plaintext token was returned
+// once and never persisted or logged — only its sha256 hex hash lives
 // here, so a DB read can neither replay nor reconstruct a token.
 model OverlayLinkToken {
   id          String    @id @default(uuid())
-  // sha256(token) hex. Unique — the redeem path looks a token up by its hash.
+  // sha256(token) hex used by the retired redeem path.
   tokenHash   String    @unique
   // 'available' — freshly minted, unredeemed, unexpired.
   // 'consumed'  — redeemed once; boundSignFp records the first redeemer's key.
@@ -2676,14 +2670,12 @@ model OverlayLinkToken {
   state       String    @default("available")
   expiresAt   DateTime
   consumedAt  DateTime?
-  // The owner (req.user.id) who minted the token. Drives single-active-per-owner
-  // supersession + the mint audit's actor.
+  // Historical owner (req.user.id) who minted the token.
   createdBy   String
-  // Optional owner-supplied label shown on the pending-enrollments list.
+  // Historical owner-supplied label.
   label       String?
   // sha256(sign_public_key_pem) hex of the FIRST device to redeem this token.
-  // A later redeem with a DIFFERENT fingerprint is a token_conflict (409); the
-  // same fingerprint re-redeeming is idempotent.
+  // The retired redeem flow rejected a different fingerprint as a conflict.
   boundSignFp String?
   createdAt   DateTime  @default(now())
 
@@ -2691,32 +2683,26 @@ model OverlayLinkToken {
   @@index([state, expiresAt])
 }
 
-// One row per staged (redeemed-but-not-yet-approved) device enrollment.
-// Created by the by-token redeem; transitions to approved/denied by the owner,
-// or expired by the natural token TTL. The owner approves against the short
-// fingerprint; the client polls its coarse state via a PoP-guarded endpoint.
+// Historical staged device enrollment from the retired redeem/approval flow.
+// Retained for audit and account-departure cleanup; no live polling endpoint.
 model PendingOverlayEnrollment {
   id                 String    @id @default(uuid())
   // The OverlayLinkToken.id redeemed to create this row.
   linkTokenId        String
-  // sha256(sign_public_key_pem) hex — full fingerprint; the list surfaces its
-  // first 8 chars.
+  // Historical sha256(sign_public_key_pem) hex.
   signKeyFingerprint String
   // Exact validated PEM bytes, un-trimmed, so sha256(pem) stays byte-identical
-  // to the box vouch + HQ recompute. Also the key the status-PoP verifies against.
+  // to the historical box vouch + HQ recompute.
   signPublicKeyPem   String
   wgPublicKey        String
   label              String
   presentedAt        DateTime  @default(now())
   // 'pending' | 'approving' | 'approved' | 'denied' | 'expired'. CHECK-pinned in
-  // the migration. 'approving' is the WARP-1474 SEND-BACK #2 atomic-approve
-  // claim: the approve route flips pending→approving BEFORE the box→HQ vouch so
-  // exactly one approver vouches (the losing concurrent approve matches 0 rows
-  // on the conditional flip). approving→approved on vouch success; compensated
-  // back to pending on vouch failure so the owner can retry.
+  // the migration. 'approving' was the retired atomic-approval claim before
+  // an HQ vouch; historical values remain valid for existing records.
   state              String    @default("pending")
   // True once a DIFFERENT-fingerprint device tried to redeem the same token —
-  // surfaced to the owner so a hijack attempt is visible, not silent.
+  // retained as evidence of a historical token conflict.
   conflict           Boolean   @default(false)
   // Set on approval: the approving owner, the enroll timestamp, and HQ's
   // returned device reference (the response `device_id`).
@@ -2724,7 +2710,7 @@ model PendingOverlayEnrollment {
   enrolledAt         DateTime?
   hqDeviceRef        String?
   // WARP-3152: username of the account that asked, for a sign-in enrollment
-  // staged for owner review. Becomes the peer's owner at approval. NULL for a
+  // staged for owner review. Became the peer's owner at approval. NULL for a
   // QR-linked device and for rows staged before the column existed (admin-only).
   requestedBy        String?
 
@@ -5666,18 +5652,15 @@ model ClaimCode {
   updatedAt DateTime       @updatedAt
 }
 
-/// ADR-023 (C2): the lifecycle state of the per-device TLS serving cert.
-/// EXPLICIT (architecture-guard rule 10 + ADR-023 §C2): the tls-issuance cron
-/// reads this enum to decide issue-vs-renew-vs-noop — it NEVER infers the state
-/// from a null/expired cert file.
+/// ADR-023 (C2): historical per-device fleet TLS lifecycle states.
+/// Retained for certificate metadata compatibility. Automated fleet issuance
+/// and renewal have been retired; these do not identify the served local leaf.
 ///   BOOTSTRAP_SELF_SIGNED — the secrets.sh self-signed bootstrap cert is
 ///                           installed; HQ issuance has not yet succeeded.
-///   LE_ISSUED             — a publicly-trusted Let's Encrypt fullchain is
-///                           installed and current.
-///   LE_RENEWING           — a renewal/issuance order is in flight.
+///   LE_ISSUED             — a Let's Encrypt fullchain was issued.
+///   LE_RENEWING           — a renewal/issuance order was in flight.
 ///   LE_RENEW_FAILED       — HQ was unreachable or the order didn't go active;
-///                           the box keeps serving its current cert and retries
-///                           on the next daily tick.
+///                           this records that historical failure.
 enum TlsCertState {
   BOOTSTRAP_SELF_SIGNED
   LE_ISSUED
@@ -5685,11 +5668,9 @@ enum TlsCertState {
   LE_RENEW_FAILED
 }
 
-/// ADR-023 (C2): one row per opaque per-device FQDN tracking the installed TLS
-/// cert's state + expiry. Keyed by `fqdn` (`d-<hmac>.devices.warp-lab.ai`) so a
-/// box that ever learns a new FQDN gets a fresh row rather than overwriting the
-/// old one. `notAfter` mirrors the installed leaf's expiry and drives the
-/// 30-day renewal threshold; null until the first LE cert is installed.
+/// ADR-023 (C2): retained historical fleet certificate state and expiry keyed
+/// by FQDN. Owners can inspect prior issuance metadata. No current renewal job
+/// reads this table, and it does not describe the currently served local leaf.
 model TlsCert {
   fqdn      String       @id
   state     TlsCertState @default(BOOTSTRAP_SELF_SIGNED)

@@ -175,14 +175,8 @@ ReadWritePaths=/run/droplet-storage-ops
 # openwrt-attach stays root-owned operator/hardware config and is the ROOT
 # attach service's EnvironmentFile, and a droplet-writable file must never be a
 # root EnvironmentFile (see the DROPLET_HOSTAPD_ENV_FILE note above).
-# WARP-985: the FQDN + box-name write-backs must upsert <repo>/.env — POST
-# /host/public-fqdn execs droplet-set-public-fqdn.sh, which mktemp's a sibling
-# next to .env before the atomic mv, so the repo DIRECTORY (not just the file)
-# needs a carve-out from ProtectSystem=strict + ProtectHome=read-only. Without
-# it the write-back dies with EROFS and the orchestrator's tls-issuance logs
-# "device-bridge public-fqdn write-back failed" even though the cert issued.
-# Same @REPO_ROOT@ install-time substitution as ExecStart above; `-` = ignore
-# if missing so the unit still starts on a host where the checkout moved.
+# Host settings executors (for example NVR media targets) atomically upsert
+# the deployment .env, so its directory must stay writable in this sandbox.
 ReadWritePaths=-@REPO_ROOT@
 # Allow reading by-label/by-uuid for drive enumeration, and /proc/mounts.
 # Those are under /dev and /proc respectively — both readable by default.

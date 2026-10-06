@@ -219,7 +219,7 @@ class TestRegistryHost:
     passes the OTA_REGISTRY_HOST repo variable, empty until HQ is live, so the
     stage channel keeps pulling from ghcr.io in the meantime."""
 
-    HOST = "droplet-fleet-hq.rjouffret.workers.dev"
+    HOST = "registry.example"
     DIGESTS = {"orchestrator": "sha256:" + "b" * 64, "openwrt": "sha256:" + "c" * 64}
 
     def test_host_set_points_every_image_at_the_hq_registry(self, tmp_path):

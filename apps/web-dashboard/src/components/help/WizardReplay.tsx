@@ -29,16 +29,14 @@ export function WizardReplay({
   onClose: () => void;
 }) {
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
-  // ADR-023: when the box has a publicly-trusted per-device FQDN, the remote-
-  // access card shows the one-URL/green-padlock story with its real address;
-  // until then it stays generic. Best-effort fetch while the modal is open.
-  const [remoteFqdn, setRemoteFqdn] = useState<string | null>(null);
+  // Show the configured internal DNS name when available.
+  const [remoteHostname, setRemoteHostname] = useState<string | null>(null);
   useEffect(() => {
     if (!open) return;
     let alive = true;
     fetchVpnStatus()
       .then((s) => {
-        if (alive) setRemoteFqdn(s?.publicFqdn?.trim() || null);
+        if (alive) setRemoteHostname(s?.internalHostname?.trim() || null);
       })
       .catch(() => {});
     return () => {
@@ -99,9 +97,7 @@ export function WizardReplay({
             icon={<Globe size={18} className="text-[var(--brand)]" />}
             title="Remote access is end-to-end encrypted"
             body={
-              remoteFqdn
-                ? `Your phone connects back to the Droplet via WireGuard — a modern VPN protocol. The handshake uses keys you generated on the Droplet, not credentials stored somewhere else. Off the office Wi-Fi, you open the very same address you use at the office — ${remoteFqdn} — with a green padlock and nothing to install on each device.`
-                : "Your phone connects back to the Droplet via WireGuard — a modern VPN protocol. The handshake uses keys you generated on the Droplet, not credentials stored somewhere else. Off the office Wi-Fi, you reach the dashboard over that tunnel using the address you set up."
+              `Your phone connects directly to the Droplet through WireGuard. Install WireGuard, import the device's configuration, and open ${remoteHostname ? `https://${remoteHostname}` : "the Droplet's internal DNS address"} through the tunnel. Office configurations use the LAN endpoint; away configurations need a reachable direct endpoint and its UDP port allowed through the router. Your device may need to trust the Droplet's HTTPS certificate.`
             }
           />
         </div>

@@ -23,9 +23,8 @@ import { LAN_FALLBACK_HOST } from "@/lib/box-identity";
  *
  * Structure (mirrors the WizOrg design):
  *   - Workspace-name input.
- *   - URL slug input prefixed with the box's trusted address (WARP-1301,
- *     redirect-design spec §5): `https://<DROPLET_PUBLIC_FQDN>` when known,
- *     falling back to the `droplet.local` typing shortcut when not.
+ *   - URL slug input prefixed with the internal DNS name, falling back to
+ *     the office-network shortcut when it is unavailable.
  *   - Time zone / industry / company size selects.
  *   - A footnote stating industry + size pick LOCAL smart defaults only and
  *     NOTHING is sent off the box (FEATURES §10 privacy guarantee).
@@ -135,21 +134,15 @@ export function OrgStep({ onComplete }: { onComplete: () => void }) {
   const [industry, setIndustry] = useState(INDUSTRIES[0].value);
   const [size, setSize] = useState(COMPANY_SIZES[1].value);
 
-  // WARP-1301 (redirect-design spec §5, FQDN-everywhere): every emitted URL
-  // prints the box's trusted address — `droplet.local` survives only as the
-  // thing humans type. fetchVpnStatus is the dashboard's view of
-  // DROPLET_PUBLIC_FQDN (same read the Address step uses; CT-public, safe for
-  // any authenticated user). Best-effort on purpose: until the box learns its
-  // FQDN from HQ — or if the read fails while services boot — the preview
-  // falls back to the LAN typing shortcut, which is today's behavior.
-  const [fqdn, setFqdn] = useState<string | null>(null);
+  // Workspace links use the configured internal DNS hostname.
+  const [hostname, setHostname] = useState<string | null>(null);
   useEffect(() => {
     let cancelled = false;
     void (async () => {
       try {
         const s = await fetchVpnStatus();
-        const trimmed = (s.publicFqdn ?? "").trim();
-        if (!cancelled && trimmed) setFqdn(trimmed);
+        const trimmed = (s.internalHostname ?? "").trim();
+        if (!cancelled && trimmed) setHostname(trimmed);
       } catch {
         // Keep the .local fallback — the preview must never block the step.
       }
@@ -158,7 +151,7 @@ export function OrgStep({ onComplete }: { onComplete: () => void }) {
       cancelled = true;
     };
   }, []);
-  const displayHost = fqdn ?? LAN_FALLBACK_HOST;
+  const displayHost = hostname ?? LAN_FALLBACK_HOST;
 
   const [slugError, setSlugError] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
@@ -250,9 +243,7 @@ export function OrgStep({ onComplete }: { onComplete: () => void }) {
           </div>
         </div>
 
-        {/* Workspace URL (slug), prefixed with the box's trusted address —
-            falling back to the droplet.local typing shortcut until the FQDN
-            is known (WARP-1301). */}
+        {/* Workspace URL uses internal DNS. */}
         {/* WARP-820: fluid inter-section gaps so the form fits without scroll. */}
         <label htmlFor="org-slug" className="mt-[clamp(10px,2vh,16px)] block">
           <span className="type-footnote font-medium text-label-secondary mb-1.5 block">
@@ -345,25 +336,12 @@ export function OrgStep({ onComplete }: { onComplete: () => void }) {
           <p>
             Your workspace is the single &ldquo;company brain&rdquo; everyone you
             invite shares.{" "}
-            {fqdn ? (
-              <>
-                It lives at{" "}
-                <span className="font-mono">https://{fqdn}/your-workspace</span>{" "}
-                — your Droplet&rsquo;s secure address.{" "}
-                <span className="font-mono">droplet.local</span> is the shortcut
-                you can type on your own network; it lands you on the same
-                address.
-              </>
-            ) : (
-              <>
-                The URL — <span className="font-mono">droplet.local
-                /your-workspace</span> — only resolves on your own network. Once
-                your Droplet finishes securing its connection, links use its
-                trusted address instead, and{" "}
-                <span className="font-mono">droplet.local</span> stays as the
-                shortcut you type.
-              </>
-            )}
+            It lives at{" "}
+            <span className="font-mono break-all">https://{displayHost}/your-workspace</span>.
+            {hostname
+              ? " Use this internal DNS name on your office network or through WireGuard."
+              : " This office shortcut works on your local network. Configure internal DNS to use a name through WireGuard."}
+            {" "}Your device may need to trust its HTTPS certificate.
           </p>
           <p>
             Industry and company size never leave the appliance. They just let

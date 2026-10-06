@@ -15,8 +15,8 @@
  *   - `boxDisplayName()` — what the box is CALLED (dashboard identity chip,
  *     Settings → Device information, the factory-reset type-to-confirm
  *     target, the self-registered Device row). Owner-chosen name
- *     (`DROPLET_BOX_NAME`, WARP-979) → per-device public FQDN
- *     (`DROPLET_PUBLIC_FQDN`, ADR-023) → the stable LAN name.
+ *     (`DROPLET_BOX_NAME`) → configured internal DNS hostname
+ *     (`DROPLET_LAN_HOSTNAME`) → the stable LAN name.
  *
  *   - `lanSetupHost()` — what a PRE-CLAIM phone can actually reach for the
  *     OLED `https://<host>/setup` frame. Neither the owner name nor the FQDN
@@ -47,8 +47,8 @@ export const LAN_FALLBACK_HOST = "droplet.local";
  *
  *   1. `DROPLET_BOX_NAME` — the owner-chosen name (WARP-979). Validated with
  *      the shared ruleset before use (defense-in-depth against a hand-edited
- *      .env — same posture as tls-issuance's `requested_name`).
- *   2. `DROPLET_PUBLIC_FQDN` — the per-device public address (ADR-023).
+ *      .env).
+ *   2. `DROPLET_LAN_HOSTNAME` — the internal DNS name.
  *   3. `LAN_FALLBACK_HOST` — the stable LAN name.
  *
  * NEVER `os.hostname()` / `$HOSTNAME`: inside the container that is the
@@ -60,8 +60,8 @@ export function boxDisplayName(env: NodeJS.ProcessEnv = process.env): string {
     const v = validateBoxName(name);
     if (v.ok) return v.slug;
   }
-  const fqdn = (env.DROPLET_PUBLIC_FQDN || "").trim();
-  if (fqdn) return fqdn;
+  const internalHostname = (env.DROPLET_LAN_HOSTNAME || "").trim();
+  if (internalHostname) return internalHostname;
   return LAN_FALLBACK_HOST;
 }
 
@@ -76,9 +76,8 @@ export function boxDisplayName(env: NodeJS.ProcessEnv = process.env): string {
  *   3. `LAN_FALLBACK_HOST` — resolves on the box's AP (dnsmasq) and via mDNS
  *      on the home LAN, and is in the TLS cert SANs.
  *
- * The owner name / public FQDN are deliberately NOT in this chain: neither
- * necessarily exists before setup, and this URL must work on a factory-fresh
- * box. NEVER `$HOSTNAME` — inside the container that is the docker container
+ * This address is independent of the owner's display label and must work on
+ * a factory-fresh box. NEVER `$HOSTNAME` — inside the container that is the docker container
  * id (the WARP-992 leak: "Go to 5639146fdc76/setup").
  */
 export function lanSetupHost(env: NodeJS.ProcessEnv = process.env): string {

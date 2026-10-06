@@ -8,9 +8,9 @@
  * WORST case anyway, one key signing everything, and shows the message
  * formats alone keep the protocols apart:
  *
- *   - every device-key message (audit daily root, hardware BOM, overlay
- *     poll/answer/enroll/revoke, tls cert challenge/provision/claim-name/
- *     release), signed raw the way the Sign RPC signs it, is refused by the
+ *   - every device-key message (audit daily root, hardware BOM, legacy overlay
+ *     revoke, registry challenge/provision/release), signed raw the way the
+ *     Sign RPC signs it, is refused by the
  *     extension verifier;
  *   - an extension envelope signature verifies over none of those messages;
  *   - the extension prefix is disjoint from every device-key prefix, and the
@@ -26,17 +26,13 @@ import { canonicalizeDailyRoot } from "./audit-daily-root.service.js";
 import { extensionKeyFingerprint } from "./extension-manifest.js";
 import { canonicalizeComponents } from "./hardware-bom.service.js";
 import {
-  buildOverlayAnswerMessage,
-  buildOverlayEnrollMessage,
-  buildOverlayPollMessage,
   buildOverlayRevokeMessage,
-} from "./overlay-connect.service.js";
+} from "./overlay-revoke.service.js";
 import {
   CHALLENGE_PREFIX,
-  buildClaimNameMessage,
   buildProvisionMessage,
   buildReleaseMessage,
-} from "./tls-issuance.service.js";
+} from "./fleet-registration.service.js";
 
 const fx = (name: string): string => path.join(__dirname, "update-agent", "__fixtures__", name);
 const KEY = createPrivateKey(readFileSync(fx("TEST-ONLY-extension.key")));
@@ -45,7 +41,6 @@ const SPKI = new Uint8Array(PUB.export({ type: "spki", format: "der" }));
 const PREFIX = Buffer.from(EXTENSION_STATEMENT_PREFIX, "utf8");
 
 const FP = "sha256:" + "ab".repeat(32);
-const TS = "2026-09-22T12:00:00Z";
 
 /** Every message the box signs with its device-id key, as built in-tree. */
 const DEVICE_MESSAGES: Array<[string, string]> = [
@@ -66,25 +61,17 @@ const DEVICE_MESSAGES: Array<[string, string]> = [
       { category: "cpu", id: "cpu0", model: "x" },
     ] as unknown as Parameters<typeof canonicalizeComponents>[0]),
   ],
-  ["overlay poll", buildOverlayPollMessage("droplet-1", TS)],
-  ["overlay answer", buildOverlayAnswerMessage("sess-1", "10.0.0.2:51820", TS)],
-  ["overlay enroll", buildOverlayEnrollMessage("droplet-1", FP, "wgpub")],
   ["overlay revoke", buildOverlayRevokeMessage("droplet-1", "wgpub")],
   ["tls cert challenge", `${CHALLENGE_PREFIX}nonce:${FP}:label`],
   ["tls provision", buildProvisionMessage("token", "droplet-1", FP)],
-  ["tls claim-name", buildClaimNameMessage("nonce", "Front Desk", "droplet-1", FP)],
   ["tls release", buildReleaseMessage("nonce", "droplet-1", FP)],
 ];
 
 /** The prefix each prefixed device message starts with. */
 const DEVICE_PREFIXES = [
-  "droplet-overlay-poll:v1:",
-  "droplet-overlay-answer:v1:",
-  "droplet-overlay-enroll:v1:",
   "droplet-overlay-revoke:v1:",
   CHALLENGE_PREFIX,
   "droplet-provision:v1:",
-  "droplet-claim:v1:",
   "droplet-release:v1:",
 ];
 

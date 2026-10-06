@@ -542,9 +542,8 @@ export default function SettingsPage() {
               }
             />
             <InfoRow label="Uptime" value={health ? formatUptime(health.uptime) : "—"} />
-            {/* WARP-2944 — the certificate lifecycle (days left, renewal,
-                the one action when renewal is failing). Owner/admin only;
-                reads the state row the daily tick maintains, no new poll. */}
+            {/* Installed HTTPS certificate expiry, internal hostname coverage,
+                and key fingerprint. Owner/admin only. */}
             <CertificateRows />
             {/* WARP-1405 — backup health: last success, and the reason
                 when backups have stopped. Owner/admin only. */}

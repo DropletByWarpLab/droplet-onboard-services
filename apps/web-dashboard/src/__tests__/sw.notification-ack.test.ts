@@ -22,7 +22,8 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { readPackageFile } from "./helpers/test-paths";
 import { isInAppPath } from "../components/NotificationToaster";
 
-const SOURCE = readPackageFile("public/sw.js");
+// Git's Windows checkout uses CRLF; function extraction below matches LF.
+const SOURCE = readPackageFile("public/sw.js").replace(/\r\n/g, "\n");
 
 type Listener = (event: unknown) => void;
 

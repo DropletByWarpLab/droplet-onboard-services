@@ -32,6 +32,7 @@ describe("CORS allowlist config parsing (WARP-562)", () => {
     expect(config.corsAllowedOrigins).toEqual([
       "https://a.example",
       "https://b.example",
+      "https://droplet-ai.lan",
     ]);
   });
 

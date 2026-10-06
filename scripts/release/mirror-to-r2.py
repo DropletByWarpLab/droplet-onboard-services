@@ -96,7 +96,7 @@ def decide(env):
     host = env.get("OTA_REGISTRY_HOST", "")
     if host and not HOST_RE.fullmatch(host):
         raise Fail(f"OTA_REGISTRY_HOST must be a lowercase host[:port] with no scheme or "
-                   f"path (for example droplet-fleet-hq.rjouffret.workers.dev), got {host!r}")
+                   f"path (for example registry.example), got {host!r}")
     if not missing:
         if not ACCOUNT_RE.fullmatch(env["R2_ACCOUNT_ID"]):
             raise Fail("R2_ACCOUNT_ID must be the 32-hex Cloudflare account id "

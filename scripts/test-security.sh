@@ -236,13 +236,13 @@ fi
 
 GITIGNORE="$REPO_ROOT/.gitignore"
 
-if grep -qE '^\.env$' "$GITIGNORE" 2>/dev/null; then
+if grep -qE $'^\\.env\r?$' "$GITIGNORE" 2>/dev/null; then
   pass ".gitignore: .env is excluded"
 else
   fail ".gitignore: .env is NOT excluded — secrets could be committed"
 fi
 
-if grep -qE '^!\.env\.example$' "$GITIGNORE" 2>/dev/null; then
+if grep -qE $'^!\\.env\\.example\r?$' "$GITIGNORE" 2>/dev/null; then
   pass ".gitignore: .env.example is explicitly included"
 else
   fail ".gitignore: .env.example is not explicitly included"
@@ -740,24 +740,24 @@ else
 fi
 
 # =============================================================================
-# Test 20: WARP-1474 — overlay QR link token stays out of request logs
+# Test 20: request credentials stay out of request logs
 # =============================================================================
-# The overlay link token (POST /api/vpn/overlay/link-tokens) is a
-# bearer-equivalent secret returned to the owner ONCE — only its sha256 hash is
-# persisted. The pino-http base logger's redact list must cover the token (and
-# the client sign-key PEM + the PoP header) so a token can never leak into a log
-# bundle. Static guard so a future edit to the redact config can't silently drop
-# it; the runtime behaviour is covered by the middleware unit test.
+# Keep authentication headers, cookies and application tokens redacted even if
+# a future serializer or explicit request log includes them. Runtime behavior
+# is covered by the middleware unit tests.
 
 REQ_LOGGER="$REPO_ROOT/apps/orchestrator/src/middleware/request-logger.ts"
 if [ -f "$REQ_LOGGER" ] \
+  && grep -q '"req.headers.authorization"' "$REQ_LOGGER" \
+  && grep -q '"req.headers.cookie"' "$REQ_LOGGER" \
+  && grep -q 'set-cookie' "$REQ_LOGGER" \
   && grep -q '"req.body.token"' "$REQ_LOGGER" \
-  && grep -q '"req.body.sign_public_key_pem"' "$REQ_LOGGER" \
+  && grep -q '"req.query.token"' "$REQ_LOGGER" \
   && grep -q '"res.body.token"' "$REQ_LOGGER"; then
-  pass "request-logger redacts the overlay QR link token + sign-key PEM (WARP-1474)"
+  pass "request-logger redacts authentication headers, cookies and application tokens"
 else
-  fail "request-logger.ts lost the overlay link-token redaction paths (WARP-1474)"
-  printf "    The overlay link token must stay in the pino redact list — never logged.\n\n" >&2
+  fail "request-logger.ts lost credential redaction paths"
+  printf "    Authentication headers, cookies and tokens must never enter request logs.\n\n" >&2
 fi
 
 # =============================================================================

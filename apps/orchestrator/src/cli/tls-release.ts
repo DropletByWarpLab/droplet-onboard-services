@@ -9,9 +9,9 @@
  *
  * Unlike deregister (which DELETES the device from the registry), release FREES
  * the NAME + revokes the cert but KEEPS the device REGISTERED + trusted — so the
- * box self-heals: the durable TPM key stays authoritative and the next rename
- * re-claims a name via device-auth PoP with no token. This AMENDS ADR-023 reset
- * behavior: reset ≠ deregister.
+ * the durable TPM key stays authoritative for private OTA pulls and telemetry.
+ * New remote access uses the internal DNS name independently of this legacy
+ * cleanup. Reset does not decommission the device.
  *
  * Contract with factory-reset.sh (identical to tls-deregister):
  *   - ALWAYS exits 0 — a reset MUST complete even if HQ / the sidecar is down.
@@ -31,9 +31,9 @@ import {
   releaseFromHq,
   type ReleaseDeps,
   type ReleaseResult,
-  type TlsLogger,
-} from "../services/tls-issuance.service.js";
-import { createHqIssuanceClient } from "../services/tls-issuance.adapters.js";
+  type FleetLogger,
+} from "../services/fleet-registration.service.js";
+import { createFleetRegistrationClient } from "../services/fleet-registration.service.js";
 import { createDeviceIdentityClient } from "../services/device-identity.client.js";
 
 /**
@@ -65,7 +65,7 @@ export interface RunTlsReleaseCliArgs {
   deps: ReleaseDeps;
   /** Injected for tests; defaults to the real `releaseFromHq`. */
   release?: (deps: ReleaseDeps) => Promise<ReleaseResult>;
-  logger: TlsLogger;
+  logger: FleetLogger;
   /** WARP-1040 — where the sentinel line goes; defaults to stdout. */
   emit?: (line: string) => void;
 }
@@ -118,7 +118,7 @@ async function main(): Promise<void> {
   try {
     const deps: ReleaseDeps = {
       deviceId: config.DROPLET_DEVICE_ID,
-      hq: createHqIssuanceClient(),
+      hq: createFleetRegistrationClient(),
       identity: createDeviceIdentityClient(),
       logger,
     };

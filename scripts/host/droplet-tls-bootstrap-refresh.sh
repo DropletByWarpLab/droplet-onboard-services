@@ -111,21 +111,20 @@ if ! _tls_pair_matches "$CERT" "$KEY"; then
   printf '{"ok":false,"error":"certificate/key pair does not match"}\n'
   exit 1
 fi
-if _cert_is_public_ca_leaf "$CERT"; then
-  printf '{"ok":true,"changed":false,"reason":"public-CA leaf","pin":"%s"}\n' "$pin_before"
-  exit 0
-fi
-
-# setup.sh learns the per-device FQDN (ADR-023 C2) by sourcing .env; the
-# bridge's environment does not carry it, and a regeneration without it would
-# drop the DNS SAN the issuance flow relies on. Read that one key, shaped
-# like a hostname, and nothing else from the file.
-if [ -z "${DROPLET_PUBLIC_FQDN:-}" ] && [ -r "$REPO_ROOT/.env" ]; then
-  fq="$(sed -n "s/^DROPLET_PUBLIC_FQDN=[\"']\{0,1\}\([^\"']*\)[\"']\{0,1\}\$/\1/p" "$REPO_ROOT/.env" | tail -n1)"
+# Preserve the configured internal DNS name when refreshing the bootstrap
+# certificate. Read that one hostname key and nothing else from the file.
+if [ -z "${DROPLET_LAN_HOSTNAME:-}" ] && [ -r "$REPO_ROOT/.env" ]; then
+  fq="$(sed -n "s/^DROPLET_LAN_HOSTNAME=[\"']\{0,1\}\([^\"']*\)[\"']\{0,1\}\$/\1/p" "$REPO_ROOT/.env" | tail -n1)"
   case "$fq" in
     ""|*[!A-Za-z0-9.-]*|-*|.*) ;;
-    *) export DROPLET_PUBLIC_FQDN="$fq" ;;
+    *) export DROPLET_LAN_HOSTNAME="$fq" ;;
   esac
+fi
+
+if _cert_is_public_ca_leaf "$CERT" && _cert_covers_internal_hostname "$CERT" \
+   && openssl x509 -checkend 86400 -noout -in "$CERT" >/dev/null 2>&1; then
+  printf '{"ok":true,"changed":false,"reason":"CA certificate for internal DNS","pin":"%s"}\n' "$pin_before"
+  exit 0
 fi
 
 # Second lock: even if the checks above are wrong about the pair, the

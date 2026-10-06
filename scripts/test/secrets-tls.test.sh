@@ -3,20 +3,10 @@
 # Droplet Edge Platform — secrets.sh::_generate_tls_cert regression tests
 # =============================================================================
 #
-# ADR-023 PR-2: _generate_tls_cert must never CLOBBER a live publicly-trusted
-# (ZeroSSL / Google Trust Services / Let's Encrypt) fullchain that the box-side
-# tls-issuance cron installed into docker/certs/droplet.{crt,key}. Three real
-# behaviours this guards, each a separate test:
-#
-#   1. SELF-SIGNED + SAN-INCOMPLETE → still regenerates a fresh self-signed
-#      cert AND writes the droplet.{crt,key}.bootstrap side-copies (the exact
-#      bytes clients trust via trust-droplet-cert), idempotently.
-#   2. PUBLIC-CA LEAF INSTALLED → _generate_tls_cert leaves docker/certs/
-#      droplet.crt BYTE-IDENTICAL — a re-run must not silently revert the box
-#      to self-signed until the next 04:00 issuance cron.
-#   3. EXPIRED LEAF + valid .bootstrap present → restore the bootstrap pair
-#      (so trust-store clients still connect) instead of -newkey'ing a fresh
-#      keypair that breaks every client that imported the original cert.
+# Local certificate cutover preserves a matching private key. A valid CA-signed
+# certificate for the internal name is retained; a legacy fleet-only leaf is
+# replaced with a local certificate; interrupted/torn writes converge safely.
+# Existing valid bootstrap copies remain the recovery path for self-signed TLS.
 #
 # Harness pattern (mirrors scripts/test/ship-check.test.sh):
 #   - Each test mktemp -d's an isolated REPO_ROOT/docker/certs sandbox.
@@ -131,7 +121,7 @@ _make_ca_signed_leaf() {
   # Sign leaf with the CA (issuer != subject). Use a real extfile rather than
   # process substitution — mingw openssl can't open a `<(...)` FD path.
   local extcnf="$workdir/leaf-ext.cnf"
-  printf 'subjectAltName=DNS:d-deadbeef.devices.warp-lab.ai\n' > "$extcnf"
+  printf 'subjectAltName=%s\n' "${5:-DNS:d-deadbeef.devices.warp-lab.ai}" > "$extcnf"
   openssl x509 -req -in "$csr" \
     -CA "$ca_crt" -CAkey "$ca_key" -CAcreateserial \
     -days "$leaf_days" \
@@ -141,6 +131,11 @@ _make_ca_signed_leaf() {
   # leaf + intermediate in one PEM; the fixture must match that shape so
   # _cert_is_public_ca_leaf is tested against the actual production file format.
   cat "$ca_crt" >> "$leaf_crt"
+}
+
+_has_dns_san() {
+  openssl x509 -in "$1" -noout -ext subjectAltName 2>/dev/null \
+    | grep -oE 'DNS:[^,[:space:]]+' | grep -qxF "DNS:$2"
 }
 
 _sha() { openssl dgst -sha256 "$1" 2>/dev/null | awk '{print $NF}'; }
@@ -226,10 +221,8 @@ test_public_ca_leaf_not_clobbered() {
   crt="$certs/droplet.crt"; key="$certs/droplet.key"
 
   # Install a CA-signed leaf (issuer != subject; fails openssl self-verify).
-  # Its SAN is intentionally INCOMPLETE (only the FQDN) so the SAN-incomplete
-  # trigger fires — the guard must still refuse to overwrite it because it is a
-  # public-CA leaf, NOT self-signed.
-  _make_ca_signed_leaf "$sandbox" "$crt" "$key" 90
+  # It covers the configured internal name, so a valid matching pair stays.
+  _make_ca_signed_leaf "$sandbox" "$crt" "$key" 90 DNS:droplet-ai.lan
 
   local before_crt_sha before_key_sha
   before_crt_sha="$(_sha "$crt")"; before_key_sha="$(_sha "$key")"
@@ -491,60 +484,49 @@ test_mismatched_pair_regenerates_without_bootstrap() {
 # public-CA pair can sit unloadable for weeks. The preserve branch must
 # therefore surface the mismatch on stderr as a WARNING telling the operator
 # to trigger re-issuance — not report unqualified success.
-test_public_ca_broken_pair_preserved_but_warned() {
+test_public_ca_broken_pair_healed() {
   local sandbox certs crt key
   sandbox="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "rm -rf '$sandbox'" RETURN
-  certs="$sandbox/docker/certs"
-  mkdir -p "$certs"
+  certs="$sandbox/docker/certs"; mkdir -p "$certs"
   crt="$certs/droplet.crt"; key="$certs/droplet.key"
-
-  # Public-CA-style leaf (issuer != subject) whose key is then replaced by an
-  # unrelated keypair's key — the torn-issuance shape.
   _make_ca_signed_leaf "$sandbox" "$crt" "$key" 90
-  local full_san="DNS:localhost,DNS:droplet,DNS:droplet.local,DNS:droplet.lan,DNS:droplet-ai,DNS:droplet-ai.local,DNS:droplet-ai.lan,IP:127.0.0.1"
-  _make_self_signed "$sandbox/unrelated.crt" "$key" "$full_san" 3650
+  _make_self_signed "$sandbox/unrelated.crt" "$key" DNS:unrelated.lan 3650
+  _run_generate_tls_cert "$sandbox" || return 1
+  _has_dns_san "$crt" droplet-ai.lan || return 1
+  local cert_pub key_pub
+  cert_pub="$(openssl x509 -in "$crt" -pubkey -noout | openssl pkey -pubin -outform DER | openssl dgst -sha256)"
+  key_pub="$(openssl pkey -in "$key" -pubout -outform DER | openssl dgst -sha256)"
+  [ "$cert_pub" = "$key_pub" ]
+}
 
-  local before_crt_sha before_key_sha
-  before_crt_sha="$(_sha "$crt")"; before_key_sha="$(_sha "$key")"
+test_wildcard_internal_leaf_preserved() {
+  local sandbox certs crt key before
+  sandbox="$(mktemp -d)"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$sandbox'" RETURN
+  certs="$sandbox/docker/certs"; mkdir -p "$certs"
+  crt="$certs/droplet.crt"; key="$certs/droplet.key"
+  _make_ca_signed_leaf "$sandbox" "$crt" "$key" 90 'DNS:*.office.example'
+  before="$(_sha "$crt")"
+  DROPLET_LAN_HOSTNAME=box.office.example _run_generate_tls_cert "$sandbox" || return 1
+  [ "$(_sha "$crt")" = "$before" ]
+}
 
-  # Run with stderr captured so we can inspect the warning.
-  local err_file="$sandbox/stderr.txt"
-  (
-    set +e
-    # shellcheck source=/dev/null
-    source "$LOGGING_SH" >/dev/null 2>&1 || exit 90
-    reload_gateway_nginx() { return 0; }
-    export REPO_ROOT="$sandbox"
-    # shellcheck source=/dev/null
-    source "$SECRETS_SH" >/dev/null 2>&1 || exit 91
-    _generate_tls_cert >/dev/null 2>"$err_file"
-    exit $?
-  )
-  local rc=$?
-  if [ "$rc" -ne 0 ]; then
-    printf "    _generate_tls_cert returned non-zero on a broken public-CA pair (must preserve + continue)\n" >&2
-    return 1
-  fi
-
-  # Preservation is unchanged: both files byte-identical.
-  if [ "$(_sha "$crt")" != "$before_crt_sha" ] || [ "$(_sha "$key")" != "$before_key_sha" ]; then
-    printf "    broken public-CA pair was modified — preservation behaviour must not change\n" >&2
-    return 1
-  fi
-
-  # …but the mismatch must be surfaced as a WARNING mentioning re-issuance.
-  if ! grep -qi 'mismatch\|do not match\|does not match' "$err_file"; then
-    printf "    no pair-mismatch warning on stderr — a broken public-CA pair was reported as clean success\n" >&2
-    return 1
-  fi
-  if ! grep -qi 're-issuance\|reissuance\|issuance' "$err_file"; then
-    printf "    warning does not point the operator at re-issuance\n" >&2
-    return 1
-  fi
-
-  return 0
+test_legacy_public_leaf_cutover_keeps_key() {
+  local sandbox certs crt key before_key before_crt
+  sandbox="$(mktemp -d)"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$sandbox'" RETURN
+  certs="$sandbox/docker/certs"; mkdir -p "$certs"
+  crt="$certs/droplet.crt"; key="$certs/droplet.key"
+  _make_ca_signed_leaf "$sandbox" "$crt" "$key" 90
+  before_key="$(_sha "$key")"; before_crt="$(_sha "$crt")"
+  _run_generate_tls_cert "$sandbox" || return 1
+  [ "$(_sha "$key")" = "$before_key" ] || return 1
+  [ "$(_sha "$crt")" != "$before_crt" ] || return 1
+  _has_dns_san "$crt" droplet-ai.lan
 }
 
 # =============================================================================
@@ -557,7 +539,13 @@ printf "  ───────────────────────�
 _run_test "self-signed + SAN-incomplete regenerates AND writes .bootstrap (idempotent)" \
   test_selfsigned_san_incomplete_regenerates_and_bootstraps
 
-_run_test "public-CA leaf is NOT clobbered (droplet.crt byte-identical)" \
+_run_test "valid wildcard certificate covering the internal name is preserved" \
+  test_wildcard_internal_leaf_preserved
+
+_run_test "old fleet-only leaf becomes local TLS around the same private key" \
+  test_legacy_public_leaf_cutover_keeps_key
+
+_run_test "valid CA certificate covering internal DNS is preserved" \
   test_public_ca_leaf_not_clobbered
 
 _run_test "expired leaf + valid .bootstrap is restored from bootstrap" \
@@ -572,8 +560,8 @@ _run_test "mismatched cert/key pair + valid .bootstrap is restored (WARP-595)" \
 _run_test "mismatched cert/key pair without bootstrap is regenerated as a matching pair (WARP-595)" \
   test_mismatched_pair_regenerates_without_bootstrap
 
-_run_test "public-CA leaf with a mismatched key is preserved but WARNED (WARP-595)" \
-  test_public_ca_broken_pair_preserved_but_warned
+_run_test "public leaf with a mismatched key heals to a matching local pair" \
+  test_public_ca_broken_pair_healed
 
 printf "\n  ──────────────────────────────────\n"
 printf "  Results: %d/%d passed" "$PASSED" "$TOTAL"

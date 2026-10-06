@@ -67,11 +67,9 @@ export const RAIL_LABELS: Record<Step, { label: string; Icon: LucideIcon }> = {
   account: { label: "Account", Icon: User },
   org: { label: "Workspace", Icon: Building2 },
   twofactor: { label: "2-step", Icon: KeyRound },
-  // Onboarding-Flow redesign — the old single "Internet" rail row becomes two:
-  // the local Wi-Fi the box broadcasts, then the secure address the box
-  // gives itself (<name>.droplet-us.com — no DuckDNS, WARP-979).
+  // Wi-Fi and internal DNS describe the local network.
   wifi: { label: "Wi-Fi", Icon: Wifi },
-  address: { label: "Internet address", Icon: Globe },
+  address: { label: "Internal DNS", Icon: Globe },
   storage: { label: "Storage", Icon: HardDrive },
   discovery: { label: "Device control", Icon: Lightbulb },
   cameras: { label: "Cameras", Icon: Camera },

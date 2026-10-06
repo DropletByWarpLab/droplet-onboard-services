@@ -1152,7 +1152,7 @@ esac
 # newline first, and stages under umask 077 + chmod 600. Hard-fail when the
 # lib cannot be found rather than fall back to a clobbering writer — same
 # "refuse loudly" posture as the validation above. The LIB_DIR fallback chain
-# mirrors droplet-set-public-fqdn.sh: the repo-checkout location first, then
+# uses the repo-checkout location first, then
 # $REPO_ROOT/scripts/lib for the /usr/local/sbin installed copy.
 LIB_DIR="$SCRIPT_DIR/../lib"
 if [ ! -f "$LIB_DIR/secrets.sh" ]; then

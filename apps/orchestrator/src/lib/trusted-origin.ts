@@ -1,45 +1,6 @@
-/**
- * Shared, host-validated resolver for any orchestrator-generated absolute URL
- * or origin.
- *
- * Several surfaces embed the request's host into a value that later leaves the
- * box or is handed to an external party: the OAuth2 callback `redirect_uri`
- * (auth.ts), the SSO callback URL handed to openid-client (sso.ts), and the
- * WebDAV base URL returned to native clients (device-clients.ts). A forged
- * `X-Forwarded-Host` / `Host` header reflected into one of those is the same
- * class of bug as the invite-link host-trust finding (PR #486 review finding
- * 2): an attacker poisons a generated URL by lying about the host.
- *
- * This module is the single, general source of truth for "what host/origin may
- * this box embed in a URL". It does NOT trust the request host blindly; it
- * resolves a canonical public origin and only honours the request/forwarded
- * host when that host is on an allowlist of origins the box already trusts.
- *
- * It generalizes the canonical-origin logic introduced for invite links so the
- * invite path can later delegate here (one source of truth). The resolution
- * order is the documented contract — do not reorder without updating the tests:
- *
- *   1. **Canonical origin** — `DROPLET_PUBLIC_FQDN` (ADR-023: the publicly-
- *      trusted per-device FQDN `d-<hmac>.devices.warp-lab.ai`, the top-priority
- *      source), else `WIREGUARD_ENDPOINT_HOST` (the operator-set public DNS
- *      name, verbatim). This env-based order matches `vpn.ts`'s
- *      `resolveEndpointHost()`, so every generated URL and the VPN endpoint
- *      agree on "what is this box's public address". When present, the URL is
- *      built from it and the request host is ignored.
- *   2. **Allowlisted request host** — when there is no canonical origin, the
- *      request's host (`x-forwarded-host` then `host`) is used ONLY if it
- *      matches the allowlist {canonical-origin host} ∪ {hosts of
- *      `config.corsAllowedOrigins`}. `corsAllowedOrigins` is the box's own
- *      trusted LAN/dashboard origins (defaults to `https://droplet-ai.local`,
- *      covered by the TLS cert SANs), so this keeps the legitimate nginx-proxy
- *      host working without trusting arbitrary headers.
- *   3. **Safe default** — when neither a canonical origin nor an allowlisted
- *      request host is available, fall back to the first trusted origin
- *      (`https://droplet-ai.local` by default). Never the forged header.
- *
- * The protocol is `https` whenever the chosen host came from a canonical/known
- * https origin; otherwise it honours `req.secure` / `x-forwarded-proto`.
- */
+/** Host-validated internal dashboard URLs. A UDP WireGuard endpoint is
+ * separate from the web origin; request headers never override the local
+ * canonical name or the configured trusted-origin allowlist. */
 import type { Request } from "express";
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
@@ -92,7 +53,7 @@ function hostFromOrigin(origin: string): string | null {
 /** The box's own LAN dashboard origin — the safe default + permanent allowlist
  *  entry. Matches `config.ts`'s `resolveCorsAllowedOrigins` default so every
  *  generated URL and CORS agree on the box's identity. */
-const DEFAULT_TRUSTED_ORIGIN = "https://droplet-ai.local";
+const DEFAULT_TRUSTED_ORIGIN = "https://droplet-ai.lan";
 
 /**
  * The box's trusted origins. Reads `config.corsAllowedOrigins` (its own
@@ -110,8 +71,8 @@ function trustedOrigins(): string[] {
 /**
  * Resolve the canonical public origin + the host allowlist.
  *
- * The canonical origin comes from env vars (`DROPLET_PUBLIC_FQDN`, then
- * `WIREGUARD_ENDPOINT_HOST`), read verbatim with no network call. Async
+ * The canonical origin comes from `DROPLET_LAN_HOSTNAME`, read without
+ * a network call. Async
  * signature is retained so callers and tests are unaffected.
  */
 export async function resolveTrustedOrigin(): Promise<TrustedOrigin> {
@@ -122,32 +83,15 @@ export async function resolveTrustedOrigin(): Promise<TrustedOrigin> {
     if (h) allowedHosts.add(h);
   }
 
-  // 0. ADR-023 (C4): the publicly-trusted per-device FQDN
-  //    (`d-<hmac>.devices.warp-lab.ai`) is the TOP-priority canonical origin —
-  //    above WIREGUARD_ENDPOINT_HOST. It is the single address that works at
-  //    home AND over the WireGuard tunnel and carries a publicly-trusted cert,
-  //    so every generated URL should prefer it. Verbatim, no network call.
-  //    Empty until the box learns its FQDN from HQ.
-  let canonicalHost: string | null = null;
-  const fqdn = (config.DROPLET_PUBLIC_FQDN ?? "").trim();
-  if (fqdn) {
-    canonicalHost = bareHost(fqdn);
-  }
-
-  // 1. Else the operator-set public DNS name, verbatim, without a network call.
-  const envHost = (config.WIREGUARD_ENDPOINT_HOST ?? "").trim();
-  if (canonicalHost) {
-    // FQDN already chosen above — skip the lower-priority source.
-  } else if (envHost) {
-    canonicalHost = bareHost(envHost);
-  }
+  const hostname = (config.DROPLET_LAN_HOSTNAME ?? "").trim();
+  const canonicalHost = hostname ? bareHost(hostname) : null;
 
   if (canonicalHost) allowedHosts.add(canonicalHost);
 
   const value: TrustedOrigin = {
     canonicalHost,
     // The canonical origin is always an https endpoint today (the operator's
-    // public DNS / per-device FQDN front the box over TLS).
+    // internal DNS name fronts the box over TLS).
     canonicalIsHttps: true,
     allowedHosts,
   };

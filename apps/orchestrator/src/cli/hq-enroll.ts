@@ -3,12 +3,9 @@
  * registry on demand, so it can get HQ device tokens (private OTA pulls,
  * telemetry; fleet contract v1 §1).
  *
- * A freshly provisioned box already enrolls itself: ~30 s after first boot the
- * TLS-issuance tick hits HQ, is told `device_id not in registry`, and
- * self-provisions with `DROPLET_PROVISION_TOKEN` (tls-issuance.service.ts,
- * WARP-983). This is the explicit, one-time command for a box that never got
- * there (an already-deployed box, a token that arrived later). Idempotent: it
- * first tries to mint a token, and only provisions when HQ says `not_enrolled`.
+ * Registry enrollment is explicit through this command and the provisioning
+ * token. It is independent of the internal DNS name and WireGuard setup.
+ * Idempotent: it first tries to mint a token, and only provisions when HQ says `not_enrolled`.
  * HQ's provision endpoint is itself idempotent for the same key and token.
  *
  * Run it through scripts/hq-enroll.sh. The last stdout line is
@@ -25,8 +22,11 @@ import {
   type HqTokenFailure,
   type HqTokenService,
 } from "../services/hq-token.service.js";
-import { createHqIssuanceClient } from "../services/tls-issuance.adapters.js";
-import { provisionWithHq, type TlsLogger } from "../services/tls-issuance.service.js";
+import {
+  createFleetRegistrationClient,
+  provisionWithHq,
+  type FleetLogger,
+} from "../services/fleet-registration.service.js";
 
 export type HqEnrollResult =
   | "already_enrolled"
@@ -50,7 +50,7 @@ export interface HqEnrollDeps {
   tokens: Pick<HqTokenService, "getToken">;
   /** POST /api/issuance/provision with the token; throws on any HQ refusal. */
   provision: (provisionToken: string) => Promise<unknown>;
-  logger: TlsLogger;
+  logger: FleetLogger;
 }
 
 export async function runHqEnroll(deps: HqEnrollDeps): Promise<HqEnrollResult> {
@@ -102,7 +102,7 @@ async function main(): Promise<HqEnrollResult> {
     provision: (provisionToken) =>
       provisionWithHq({
         deviceId: config.DROPLET_DEVICE_ID,
-        hq: createHqIssuanceClient(),
+        hq: createFleetRegistrationClient(),
         identity,
         provisionToken,
       }),

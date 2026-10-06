@@ -300,19 +300,6 @@ EOF
       /etc/droplet-host-net/lan-dhcp.conf
   fi
 
-  # --- relay DNS origin (WARP-2189) ---------------------------------------
-  # The template above names ONE listen-address (the .20.1 LAN leg) and
-  # dnsmasq runs with bind-interfaces, so nothing binds any other leg. On a
-  # box reached over the ADR-025 cloudflared relay the connector dials
-  # DROPLET_PUBLIC_FQDN_IP:53 for every off-site lookup, and when that address
-  # is a different leg the dial gets connection refused — a healthy tunnel
-  # that cannot resolve the box's own name. Twice this was fixed by hand and
-  # twice the install above wiped it. This helper owns the pairing "answer for
-  # a name at an address => listen on that address" and is invoked from
-  # setup_local_dns() (setup time) and droplet-watchdog (runtime self-heal).
-  sudo install -m 0755 "$host_src/droplet-relay-dns.sh" \
-    /usr/local/sbin/droplet-relay-dns
-
   # --- bootstrap-certificate refresh (WARP-2944, ADR-058) -------------------
   # The device-bridge's TlsRefreshWatcher execs this when the uplink address
   # changes, so the self-signed cert's SAN follows the box around the SAME
@@ -881,9 +868,9 @@ provision_single_box_openwrt() {
 # ============================================================================
 #
 # Derive the box's default-route egress source IPv4 — the LAN address a
-# same-network client dials the overlay WireGuard endpoint at. This is the
-# value `WIREGUARD_HOME_ENDPOINT_HOST` pins so the issued overlay profile
-# carries a REACHABLE `lan` candidate.
+# same-network client dials the WireGuard endpoint at. This is the
+# value `WIREGUARD_HOME_ENDPOINT_HOST` pins so the issued WireGuard profile
+# carries a reachable endpoint.
 #
 # Why derive it here rather than leave the env empty and let the orchestrator
 # discover it at request time (the vpn-home-endpoint.ts design):
@@ -1209,20 +1196,6 @@ configure_single_box_env() {
     *)        merged_profiles="${merged_profiles},eval" ;;
   esac
 
-  # Cloudflare Tunnel relay (`relay` profile, WARP-974 / ADR-025) — the outbound
-  # remote-access connector (cloudflared) that replaces DuckDNS + the inbound
-  # WireGuard port. OPT-IN: activate `relay` ONLY when a TUNNEL_TOKEN is present in
-  # .env, so an un-provisioned box never brings up (and crash-loops) a tokenless
-  # connector. The token is provisioned out-of-band (fleet HQ / operator) — the
-  # cloudflared container reads it straight from .env via env_file.
-  if grep -qE '^TUNNEL_TOKEN=.+' "$env_file" 2>/dev/null; then
-    case ",${merged_profiles}," in
-      *,relay,*) : ;;                                # already present — idempotent
-      ,,)        merged_profiles="relay" ;;
-      *)         merged_profiles="${merged_profiles},relay" ;;
-    esac
-  fi
-
   # Document engine (`docs` profile, WARP-882 / WARP-1686 / ADR-027 WS-4) —
   # RAM GATED. The engine (Collabora CODE by default per ADR-034 — no
   # licensing fee; OnlyOffice CE via DOCS_ENGINE=onlyoffice) is a ~2 GB
@@ -1479,7 +1452,7 @@ EOF
   upsert_env WIREGUARD_LAN_CIDR  192.168.20.0/24
   upsert_env WIREGUARD_DNS       192.168.20.1
   # WARP-1947: pin the box's home-facing endpoint IP so a same-network client's
-  # overlay profile carries a REACHABLE `lan` candidate. See the
+  # WireGuard profile carries a reachable endpoint. See the
   # derive_single_box_home_endpoint() banner above for the full why — in short,
   # request-time discovery cannot find it on this shape, and a stale hardcode
   # (this box shipped a dead 192.168.1.87) is worse than none. Derived + upserted

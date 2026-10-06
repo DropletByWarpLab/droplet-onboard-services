@@ -56,28 +56,19 @@ export function createRequestLogger(opts: {
         "req.headers.authorization",
         "req.headers.cookie",
         'res.headers["set-cookie"]',
-        // WARP-1474: the overlay QR link token is a bearer-equivalent secret —
-        // it's returned to the owner ONCE and only its sha256 hash is persisted.
-        // Redact it (and the client sign-key PEM) on any request/response body
-        // that a future serializer or a `req.log.info({ req/res })` call might
-        // emit, so a token can never ride out of the box in a log bundle.
+        // Tokens remain credentials across application flows. Keep them out of
+        // any request/response body a future serializer or explicit log emits.
         "req.body.token",
         // WARP-3532: chat-app webhook URLs carry posting credentials in their
         // path. The current request serializer omits bodies, but keep this
         // secret out if a future handler logs a parsed request object.
         "req.body.url",
-        // AC2 defense-in-depth: a client that passes the redeem token as a
-        // query param (?token=…) lands it under `req.query.token`, which the
-        // default pino req serializer DOES emit — redact it alongside the body
-        // copy so neither shape rides out in a log bundle. (The raw `req.url`
-        // is unaffected; the routes take the token in the JSON body, not the
-        // query string.)
+        // Defense in depth for token query parameters; scrubReq also removes
+        // the raw query string and parsed query from serialized requests.
         "req.query.token",
         // WARP-3122: the signed-segment signature (the req serializer also
         // drops `req.query` entirely, WARP-3622).
         "req.query.sig",
-        "req.body.sign_public_key_pem",
-        'req.headers["x-overlay-pop"]',
         // WARP-3193 SEC-DATA-2: the user's Nextcloud app-password rides on
         // every file tool call; the other two carry service credentials.
         'req.headers["x-nextcloud-token"]',

@@ -39,7 +39,7 @@ describe("boxDisplayName", () => {
     expect(
       boxDisplayName({
         DROPLET_BOX_NAME: "aurora-loft",
-        DROPLET_PUBLIC_FQDN: "d-0123456789abcdef.droplet-us.com",
+        DROPLET_LAN_HOSTNAME: "droplet-ai.lan",
         HOSTNAME: "5639146fdc76",
       }),
     ).toBe("aurora-loft");
@@ -55,15 +55,15 @@ describe("boxDisplayName", () => {
     expect(
       boxDisplayName({
         DROPLET_BOX_NAME: "My Box!",
-        DROPLET_PUBLIC_FQDN: "d-0123456789abcdef.droplet-us.com",
+        DROPLET_LAN_HOSTNAME: "droplet-ai.lan",
       }),
-    ).toBe("d-0123456789abcdef.droplet-us.com");
+    ).toBe("droplet-ai.lan");
   });
 
-  it("uses DROPLET_PUBLIC_FQDN when no name is set", () => {
+  it("uses DROPLET_LAN_HOSTNAME when no name is set", () => {
     expect(
-      boxDisplayName({ DROPLET_PUBLIC_FQDN: "d-0123456789abcdef.droplet-us.com" }),
-    ).toBe("d-0123456789abcdef.droplet-us.com");
+      boxDisplayName({ DROPLET_LAN_HOSTNAME: "droplet-ai.lan" }),
+    ).toBe("droplet-ai.lan");
   });
 
   it("falls back to the stable LAN name — NEVER $HOSTNAME (the container id)", () => {
@@ -73,7 +73,7 @@ describe("boxDisplayName", () => {
 
   it("treats whitespace-only values as unset", () => {
     expect(
-      boxDisplayName({ DROPLET_BOX_NAME: "   ", DROPLET_PUBLIC_FQDN: "  " }),
+      boxDisplayName({ DROPLET_BOX_NAME: "   ", DROPLET_LAN_HOSTNAME: "  " }),
     ).toBe(LAN_FALLBACK_HOST);
   });
 });

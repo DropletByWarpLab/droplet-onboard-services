@@ -1,11 +1,5 @@
 /**
- * WARP-979 — unit spec for the SHARED box-name validation util.
- *
- * This is the highest-value file in the branch: both the dashboard (live
- * client-side check) and the orchestrator (server-side re-validation before
- * persisting + before the name goes to HQ) import these rules, so a drift here
- * silently drifts BOTH sides. QA flagged it as covered only transitively (via
- * the orchestrator route test) — this spec pins the exact behavior directly.
+ * Unit spec for validation of stored owner-chosen box labels.
  *
  * Assertions were checked against the real compiled output before being
  * written; in particular UPPERCASE is NORMALIZED to lowercase and PASSES (it is
@@ -14,14 +8,12 @@
  */
 import { describe, it, expect } from "vitest";
 import {
-  BOX_NAME_SUFFIX,
   BOX_NAME_MIN_LEN,
   BOX_NAME_MAX_LEN,
   BOX_NAME_RESERVED,
   validateBoxName,
   normalizeBoxName,
   isValidBoxName,
-  boxNameToFqdn,
   boxNameReasonMessage,
   type BoxNameInvalidReason,
 } from "./box-name";
@@ -209,17 +201,6 @@ describe("isValidBoxName", () => {
     expect(isValidBoxName("studio")).toBe(true);
     expect(isValidBoxName("ab")).toBe(false);
     expect(isValidBoxName("admin")).toBe(false);
-  });
-});
-
-describe("boxNameToFqdn", () => {
-  it(`appends ${BOX_NAME_SUFFIX} to the slug`, () => {
-    expect(boxNameToFqdn("studio")).toBe("studio.droplet-us.com");
-  });
-
-  it("uses the droplet-us.com suffix (not warp-lab.ai)", () => {
-    expect(BOX_NAME_SUFFIX).toBe(".droplet-us.com");
-    expect(boxNameToFqdn("my-box").endsWith(".droplet-us.com")).toBe(true);
   });
 });
 

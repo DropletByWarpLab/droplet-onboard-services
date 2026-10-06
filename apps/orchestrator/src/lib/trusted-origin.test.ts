@@ -8,6 +8,7 @@ vi.mock("../config.js", () => ({
   config: {
     // ADR-023: top-priority canonical origin, above WIREGUARD_ENDPOINT_HOST.
     DROPLET_PUBLIC_FQDN: "",
+    DROPLET_LAN_HOSTNAME: "",
     WIREGUARD_ENDPOINT_HOST: "",
     corsAllowedOrigins: ["https://droplet-ai.local"],
     agentMaxIter: { defaultIter: 5, capIter: 10 },
@@ -44,7 +45,8 @@ function fakeReq(opts: {
 beforeEach(() => {
   vi.clearAllMocks();
   _resetTrustedOriginCacheForTests();
-  (config as { DROPLET_PUBLIC_FQDN: string }).DROPLET_PUBLIC_FQDN = "";
+  Object.assign(config, { DROPLET_PUBLIC_FQDN: "" });
+  (config as { DROPLET_LAN_HOSTNAME: string }).DROPLET_LAN_HOSTNAME = "";
   (config as { WIREGUARD_ENDPOINT_HOST: string }).WIREGUARD_ENDPOINT_HOST = "";
   (config as { corsAllowedOrigins: string[] }).corsAllowedOrigins = [
     "https://droplet-ai.local",
@@ -97,22 +99,22 @@ describe("pickTrustedHost", () => {
         xForwardedHost: "droplet-ai.local",
       }),
       {
-        canonicalHost: "studio.example.com",
-        allowedHosts: new Set(["studio.example.com", "droplet-ai.local"]),
+        canonicalHost: "studio.lan",
+        allowedHosts: new Set(["studio.lan", "droplet-ai.local"]),
       },
     );
-    expect(host).toBe("studio.example.com");
+    expect(host).toBe("studio.lan");
   });
 
   it("falls back to the canonical host when the request host is forged", () => {
     const host = pickTrustedHost(
       fakeReq({ host: "evil.example", xForwardedHost: "also-evil.example" }),
       {
-        canonicalHost: "studio.example.com",
-        allowedHosts: new Set(["studio.example.com", "droplet-ai.local"]),
+        canonicalHost: "studio.lan",
+        allowedHosts: new Set(["studio.lan", "droplet-ai.local"]),
       },
     );
-    expect(host).toBe("studio.example.com");
+    expect(host).toBe("studio.lan");
   });
 
   it("host-header port is normalised against a bare allowlist host", () => {
@@ -141,46 +143,36 @@ describe("pickTrustedHost", () => {
   });
 });
 
-// ── resolveTrustedOrigin: canonical-origin resolution (FQDN → env) ──
+// ── resolveTrustedOrigin: internal canonical-origin resolution ──
 describe("resolveTrustedOrigin", () => {
-  it("ADR-023: DROPLET_PUBLIC_FQDN is the top-priority canonical host, above WIREGUARD_ENDPOINT_HOST", async () => {
-    (config as { DROPLET_PUBLIC_FQDN: string }).DROPLET_PUBLIC_FQDN =
-      "d-abc123.devices.warp-lab.ai";
-    (config as { WIREGUARD_ENDPOINT_HOST: string }).WIREGUARD_ENDPOINT_HOST =
-      "studio.example.com";
+  it("uses internal DNS even when stale fleet and UDP endpoint values exist", async () => {
+    Object.assign(config, {
+      DROPLET_LAN_HOSTNAME: "office.lan",
+      DROPLET_PUBLIC_FQDN: "old.devices.warp-lab.ai",
+      WIREGUARD_ENDPOINT_HOST: "vpn.example.com",
+    });
+    const { canonicalHost, allowedHosts } = await resolveTrustedOrigin();
+    expect(canonicalHost).toBe("office.lan");
+    expect(allowedHosts.has("office.lan")).toBe(true);
+    expect(allowedHosts.has("old.devices.warp-lab.ai")).toBe(false);
+    expect(allowedHosts.has("vpn.example.com")).toBe(false);
+    expect(await trustedOriginUrl(fakeReq({ host: "evil.example" }), "/api/auth/callback"))
+      .toBe("https://office.lan/api/auth/callback");
+  });
+
+  it("does not use a UDP endpoint or fleet name as a web origin", async () => {
+    Object.assign(config, { DROPLET_PUBLIC_FQDN: "old.devices.warp-lab.ai", WIREGUARD_ENDPOINT_HOST: "vpn.example.com" });
+    expect((await resolveTrustedOrigin()).canonicalHost).toBeNull();
+  });
+
+  it("uses the configured internal hostname as the canonical host", async () => {
+    (config as { DROPLET_LAN_HOSTNAME: string }).DROPLET_LAN_HOSTNAME =
+      "studio.lan";
     const { canonicalHost } = await resolveTrustedOrigin();
-    // The FQDN wins over WIREGUARD_ENDPOINT_HOST.
-    expect(canonicalHost).toBe("d-abc123.devices.warp-lab.ai");
+    expect(canonicalHost).toBe("studio.lan");
   });
 
-  it("ADR-023: the FQDN is added to the allowlist", async () => {
-    (config as { DROPLET_PUBLIC_FQDN: string }).DROPLET_PUBLIC_FQDN =
-      "d-abc123.devices.warp-lab.ai";
-    const { allowedHosts } = await resolveTrustedOrigin();
-    expect(allowedHosts.has("d-abc123.devices.warp-lab.ai")).toBe(true);
-    expect(allowedHosts.has("droplet-ai.local")).toBe(true);
-  });
-
-  it("ADR-023: trustedOriginUrl builds from the FQDN when set", async () => {
-    (config as { DROPLET_PUBLIC_FQDN: string }).DROPLET_PUBLIC_FQDN =
-      "d-abc123.devices.warp-lab.ai";
-    const url = await trustedOriginUrl(
-      fakeReq({ host: "droplet-ai.local", xForwardedProto: "https" }),
-      "/api/auth/callback",
-    );
-    expect(url).toBe(
-      "https://d-abc123.devices.warp-lab.ai/api/auth/callback",
-    );
-  });
-
-  it("uses WIREGUARD_ENDPOINT_HOST verbatim as the canonical host", async () => {
-    (config as { WIREGUARD_ENDPOINT_HOST: string }).WIREGUARD_ENDPOINT_HOST =
-      "studio.example.com";
-    const { canonicalHost } = await resolveTrustedOrigin();
-    expect(canonicalHost).toBe("studio.example.com");
-  });
-
-  it("has no canonical host when neither the FQDN nor the env override is set", async () => {
+  it("has no canonical host when the internal hostname is not set", async () => {
     const { canonicalHost } = await resolveTrustedOrigin();
     expect(canonicalHost).toBeNull();
   });
@@ -191,10 +183,10 @@ describe("resolveTrustedOrigin", () => {
   });
 
   it("adds the canonical host to the allowlist", async () => {
-    (config as { WIREGUARD_ENDPOINT_HOST: string }).WIREGUARD_ENDPOINT_HOST =
-      "studio.example.com";
+    (config as { DROPLET_LAN_HOSTNAME: string }).DROPLET_LAN_HOSTNAME =
+      "studio.lan";
     const { allowedHosts } = await resolveTrustedOrigin();
-    expect(allowedHosts.has("studio.example.com")).toBe(true);
+    expect(allowedHosts.has("studio.lan")).toBe(true);
     expect(allowedHosts.has("droplet-ai.local")).toBe(true);
   });
 });
@@ -215,13 +207,13 @@ describe("trustedOriginUrl", () => {
   });
 
   it("builds the URL from the configured canonical origin", async () => {
-    (config as { WIREGUARD_ENDPOINT_HOST: string }).WIREGUARD_ENDPOINT_HOST =
-      "studio.example.com";
+    (config as { DROPLET_LAN_HOSTNAME: string }).DROPLET_LAN_HOSTNAME =
+      "studio.lan";
     const url = await trustedOriginUrl(
       fakeReq({ host: "droplet-ai.local", xForwardedProto: "https" }),
       "/api/auth/callback",
     );
-    expect(url).toBe("https://studio.example.com/api/auth/callback");
+    expect(url).toBe("https://studio.lan/api/auth/callback");
   });
 
   it("preserves a legitimate allowlisted request host", async () => {
@@ -250,8 +242,8 @@ describe("trustedOriginUrl", () => {
   });
 
   it("a canonical https origin forces https even on a plain-http request", async () => {
-    (config as { WIREGUARD_ENDPOINT_HOST: string }).WIREGUARD_ENDPOINT_HOST =
-      "studio.example.com";
+    (config as { DROPLET_LAN_HOSTNAME: string }).DROPLET_LAN_HOSTNAME =
+      "studio.lan";
     const url = await trustedOriginUrl(
       fakeReq({ host: "droplet-ai.local", secure: false }),
       "/api/auth/callback",

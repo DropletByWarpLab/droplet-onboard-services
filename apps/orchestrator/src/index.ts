@@ -115,32 +115,13 @@ import { initHqTokenService } from "./services/hq-token.service.js";
 import { startBoxTelemetry } from "./services/box-telemetry/index.js";
 import { purgeUpdateBackups } from "./services/update-agent/purge-update-backups.js";
 import { purgeSelfSwapHelpers } from "./services/update-agent/purge-self-swap-helpers.js";
-import { createTlsIssuanceService } from "./services/tls-issuance.service.js";
-import { createTlsNotifier } from "./services/tls-notify.service.js";
 import { createBackupHealthCheck } from "./services/backup-health.service.js";
-import { initTlsReissueHook } from "./services/tls-reissue.singleton.js";
-import {
-  createHqIssuanceClient,
-  createPrismaTlsCertStore,
-  createDiskTlsFileOps,
-  bridgeNginxReloader,
-  createBridgeFqdnPersister,
-  createRoutingDnsRegistrar,
-} from "./services/tls-issuance.adapters.js";
-import { scheduleTlsBootTick } from "./services/tls-issuance.boot-tick.js";
 import { createDeviceIdentityClient } from "./services/device-identity.client.js";
 import {
-  runOverlayConnectTick,
-  expireIdleOverlayPeers,
-  type OverlayConnectDeps,
-} from "./services/overlay-connect.service.js";
-import {
-  allocatePeerIp,
-  OVERLAY_KEEPALIVE_SECONDS,
+  VPN_KEEPALIVE_SECONDS,
   serverAddressFromSubnet,
 } from "./services/vpn.service.js";
 import { reconcileVpnInterface } from "./services/vpn-reconcile.service.js";
-import { bridgeAuthToken } from "./lib/bridge-errors.js";
 import { createScheduleTicker } from "./services/schedule-ticker.js";
 import { createFirewallAdapter } from "./services/firewall-adapter.service.js";
 import {
@@ -197,6 +178,7 @@ import {
   getActivityRecorder,
 } from "./services/activity.singleton.js";
 import { initVpnDeviceRevoke } from "./services/vpn-peer-revoke.service.js";
+import { retryPendingLegacyOverlayRevokes } from "./services/vpn-legacy-revoke.service.js";
 import { initModelAccessTokenRevoke } from "./services/model-access-token.service.js";
 import { initDeviceClientRevoke } from "./services/device-client-revoke.service.js";
 import { createErpSyncRunner } from "./services/erp-sync/erp-sync.service.js";
@@ -948,84 +930,14 @@ async function main() {
     "agent run worker started",
   );
 
-  // WARP-1385 (ADR-030) — direct-punch remote-access overlay connect agent.
-  // Explicit opt-in (OVERLAY_CONNECT_ENABLED) AND HQ configured AND router
-  // supervision active (the peer install goes through the routing service). The
-  // HQ long-poll + the idle-expiry sweep are cron-driven — event-driven bounded
-  // ticks, NO while(true) — and each ticks under an advisory lock so only one
-  // replica polls HQ / sweeps.
-  if (
-    config.OVERLAY_CONNECT_ENABLED &&
-    config.HQ_ISSUANCE_URL &&
-    routerSupervisionEnabled
-  ) {
-    const overlayDeps: OverlayConnectDeps = {
-      config: {
-        hqBaseUrl: config.HQ_ISSUANCE_URL,
-        deviceId: config.DROPLET_DEVICE_ID,
-        bridgeUrl: config.DEVICE_BRIDGE_URL,
-        bridgeToken: bridgeAuthToken(),
-        vpnInterface: "wg0",
-        keepaliveSeconds: 25,
-        idleExpiryHours: config.OVERLAY_PEER_IDLE_EXPIRY_HOURS,
-      },
-      identity: createDeviceIdentityClient(),
-      prisma,
-      peers: {
-        install: async (p) => {
-          await openwrt.installOverlayVpnPeer(p);
-        },
-        // WARP-2060 — the staged-vs-applied distinction must survive this
-        // seam: a `staged / applied:false` delete leaves the peer LIVE on wg0,
-        // and the sweep must not mark the row revoked (mirrors the manual
-        // revoke route's isRevokeApplied gate).
-        remove: async (p) => {
-          const result = await openwrt.deleteVpnPeer(p);
-          return { applied: openwrt.isRevokeApplied(result) };
-        },
-        // WARP-1389 — real per-peer runtime handshake, read from the routing
-        // peer list, so the idle-expiry sweep can settle each torn-down peer as
-        // a punch success/failure. A peer is included ONLY when routing reported
-        // a value (observed: 0 = never handshook, >0 = handshook); a peer whose
-        // handshake is UNKNOWN (field absent — ubus data unavailable) is OMITTED
-        // so the sweep skips it rather than scoring a false failure.
-        listHandshakes: async (iface) => {
-          const peers = await openwrt.listVpnPeers(iface);
-          const out: Record<string, number> = {};
-          for (const p of peers) {
-            if (typeof p.latest_handshake === "number") {
-              out[p.public_key] = p.latest_handshake;
-            }
-          }
-          return out;
-        },
-      },
-      allocateIp: () => allocatePeerIp(prisma, config.WIREGUARD_VPN_SUBNET),
-      // WARP-1389 — box-side punch telemetry on the real analytics surface.
-      metrics: analytics,
-      logger: createLogger("overlay-connect"),
-    };
+  // Complete outstanding revocations for devices enrolled before the fleet
+  // overlay was retired. This sweep cannot enroll or connect a device and
+  // makes no HQ call unless a revoked row explicitly owes one.
+  if (config.HQ_ISSUANCE_URL) {
     cronRuntime.scheduleInterval(
-      config.OVERLAY_CONNECT_POLL_SECONDS * 1000,
-      async () => {
-        await runOverlayConnectTick(overlayDeps);
-      },
-      { lockKey: "droplet:overlay-connect-poll" },
-    );
-    // Sweep ~4× per idle window so an expired peer is torn down well within it.
-    const overlaySweepMs = Math.max(
       15 * 60_000,
-      (config.OVERLAY_PEER_IDLE_EXPIRY_HOURS * 3_600_000) / 4,
-    );
-    cronRuntime.scheduleInterval(
-      overlaySweepMs,
-      async () => {
-        await expireIdleOverlayPeers(overlayDeps);
-      },
-      { lockKey: "droplet:overlay-peer-expiry" },
-    );
-    logger.info(
-      "overlay connect agent enabled (HQ long-poll + idle-expiry sweep)",
+      async () => { await retryPendingLegacyOverlayRevokes(prisma); },
+      { lockKey: "droplet:legacy-vpn-revoke" },
     );
   }
 
@@ -1049,7 +961,7 @@ async function main() {
           allowedIps: string[];
           persistentKeepalive: number;
           description: string;
-        }) => openwrt.installOverlayVpnPeer(p),
+        }) => openwrt.installVpnPeer(p),
       },
       // WARP-2686 — re-check a row is still active immediately before its peer
       // is re-installed, so a revoke that lands mid-tick is never resurrected.
@@ -1059,7 +971,7 @@ async function main() {
         vpnInterface: "wg0",
         listenPort: config.WIREGUARD_LISTEN_PORT,
         serverAddress: serverAddressFromSubnet(config.WIREGUARD_VPN_SUBNET),
-        keepaliveSeconds: OVERLAY_KEEPALIVE_SECONDS,
+        keepaliveSeconds: VPN_KEEPALIVE_SECONDS,
       },
       logger: createLogger("vpn-reconcile"),
     };
@@ -1940,60 +1852,6 @@ async function main() {
     { lockKey: "droplet:camera-budget-reconcile" },
   );
 
-  // ADR-023 (C2): daily public-CA TLS issuance / renewal. Fires at 04:00 so it
-  // doesn't contend with the 03:00 daily purge or the 03:15 guest sweep on the
-  // advisory-lock pool. Reads the explicit TlsCert state
-  // row + the installed cert: a BOOTSTRAP_SELF_SIGNED box issues a publicly-
-  // trusted cert now; an LE_ISSUED cert renews when <=30 days remain. HQ-
-  // unreachable keeps the current cert and sets LE_RENEW_FAILED inside the
-  // service (it does NOT throw), so a flaky HQ never increments the canary;
-  // only an unexpected (programming) error bubbles up here — exactly what the
-  // canary should escalate, same posture as the purge handlers above.
-  // ADR-023 PR-1 — zero-touch. `hqConfigured` gates the empty-fqdn bootstrap
-  // path so a fresh box LEARNS its opaque name from HQ (and persists it back to
-  // .env via the bridge); `dns` registers that learned name with the routing
-  // service's split-horizon dnsmasq on every install. Both extra collaborators
-  // are best-effort — a persist/DNS failure never aborts issuance.
-  const hqConfigured = !!config.HQ_ISSUANCE_URL;
-  const tlsIssuance = createTlsIssuanceService({
-    fqdn: config.DROPLET_PUBLIC_FQDN,
-    deviceId: config.DROPLET_DEVICE_ID,
-    hq: createHqIssuanceClient(),
-    identity: createDeviceIdentityClient(),
-    store: createPrismaTlsCertStore(prisma),
-    files: createDiskTlsFileOps(),
-    reloadNginx: bridgeNginxReloader,
-    logger,
-    hqConfigured,
-    persistFqdn: createBridgeFqdnPersister(),
-    dns: createRoutingDnsRegistrar(),
-    // WARP-979 — send the owner-chosen box name to HQ as `requested_name` so it
-    // issues `<name>.droplet-us.com`. Empty when no name chosen (opaque-HMAC
-    // fallback). Harmless if HQ ignores it (coupled fleet-hq follow-up).
-    requestedName: config.DROPLET_BOX_NAME,
-    // WARP-983 — one-time provisioning token. When set, a fresh / factory-reset
-    // box whose HQ registry row was freed by the ADR-023 deregister self-enrolls
-    // (POST /api/issuance/provision) on the 404 and retries issuance once. Empty
-    // = self-provision disabled (dev/CI + boxes provisioned by another path).
-    provisionToken: config.DROPLET_PROVISION_TOKEN,
-    // WARP-2944 — the owner hears when renewal starts failing and when the
-    // certificate is a week from expiry (owner + admin, system notifications;
-    // once per transition / per certificate, never per tick).
-    notifier: createTlsNotifier(prisma),
-  });
-  cronRuntime.scheduleCron(
-    "0 4 * * *",
-    async () => {
-      await tlsIssuance.runOnce();
-    },
-    { lockKey: "droplet:tls-renewal" },
-  );
-  // WARP-1109 — register the composed issuance service's runOnce so the rename
-  // endpoint (POST /api/setup/box-name/rename) can trigger an immediate re-issue
-  // under the box's NEW FQDN. Composed once here (the collaborators are heavy);
-  // the setup route reads it via reissueTlsNow() (a no-op until this runs).
-  initTlsReissueHook(() => tlsIssuance.runOnce());
-
   // WARP-1405 — backups can no longer fail silently. The host backup writes an
   // explicit status file on every exit; this hourly check turns "no success in
   // 48 h" or "repository no longer opens with this box's key" into ONE owner +
@@ -2008,18 +1866,6 @@ async function main() {
     },
     { lockKey: "droplet:backup-health" },
   );
-  // ADR-023 PR-1 (Gap 3) — immediate, idempotent, fail-soft boot tick so a
-  // reflash gets its publicly-trusted cert within seconds instead of waiting up
-  // to 24h for the 04:00 cron. Gated on HQ being configured (no-op on dev/CI);
-  // the service's provisioned-guard short-circuits an un-provisioned box inside
-  // runOnce(). The unref'd timer never holds the loop open and a rejection is
-  // caught (NOT via cron-runtime.safeRun, so it never churns the cron canary).
-  scheduleTlsBootTick({
-    hqConfigured,
-    runOnce: () => tlsIssuance.runOnce(),
-    logger,
-  });
-
   // WARP-2218 — connector sync. The escape this closes: BEFORE this leg
   // existed, no connector sync was scheduled anywhere in the product, and
   // `lastHealthyAt` — the column the hub renders as "last synced" — was

@@ -337,7 +337,7 @@ nc_app_install() {
 # Nextcloud answers HTTP 400 "Access through untrusted domain" for any request
 # whose Host is absent from its STORED `trusted_domains`. docker-compose.yml
 # already renders the correct list into NEXTCLOUD_TRUSTED_DOMAINS — including
-# ADR-023's publicly-trusted per-device FQDN (${DROPLET_PUBLIC_FQDN}) — but the
+# the configured internal DNS name (${DROPLET_LAN_HOSTNAME}) — but the
 # stock `nextcloud:29-apache` image consumes that env var ONLY inside its
 # install branch. A box that learns its FQDN AFTER install (every box does — HQ
 # issues the name later) therefore freezes its stored list at install time and
@@ -421,7 +421,7 @@ reconcile_trusted_domains() {
   # how the space-separated env list is meant to be read, but a token carrying
   # a glob metacharacter would otherwise expand against the CWD — so split with
   # globbing off. `set --` touches only this function's positional parameters,
-  # and empty tokens (the trailing blank when DROPLET_PUBLIC_FQDN is unset) are
+  # and empty tokens (the trailing blank when DROPLET_LAN_HOSTNAME is unset) are
   # dropped by the split itself, so no empty domain can reach a write.
   set -f
   # shellcheck disable=SC2086

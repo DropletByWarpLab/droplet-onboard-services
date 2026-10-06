@@ -3,12 +3,10 @@
 # root store so https://droplet-ai.local / https://droplet-ai.lan stop showing
 # the "Not secure" browser warning.
 #
-# BOOTSTRAP-WINDOW / AIR-GAPPED FALLBACK ONLY (ADR-023).
-#   You normally do NOT need this. The Droplet now obtains a publicly-trusted
-#   certificate automatically (HQ-mediated ACME), so Windows gets a green padlock
-#   at home AND over the VPN with no install. Use this only during the bootstrap
-#   window (the few minutes before the first trusted cert is issued) or on an
-#   air-gapped / HQ-unreachable box. On a normal box, just wait for the padlock.
+#   Clients need to trust the Droplet's local certificate on each device.
+#   Connect to the office network or WireGuard before fetching the served leaf.
+#   The default .lan name resolves through office DNS over the tunnel. Pass
+#   -HostName with the configured internal hostname when it differs.
 #
 # By default installs into CurrentUser\Root (no admin needed). Pass
 # -SystemWide from an elevated shell to trust for all users on the machine.
@@ -18,7 +16,7 @@
 #
 # Usage (normal PowerShell):
 #   .\scripts\trust-droplet-cert.ps1
-#   .\scripts\trust-droplet-cert.ps1 -HostName droplet-ai.lan
+#   .\scripts\trust-droplet-cert.ps1 -HostName droplet.office.lan
 #   .\scripts\trust-droplet-cert.ps1 -Uninstall
 #   .\scripts\trust-droplet-cert.ps1 -SystemWide       # elevated; all users
 #
@@ -32,7 +30,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory=$false)]
-    [string]$HostName = "droplet-ai.local",
+    [string]$HostName = "droplet-ai.lan",
 
     [Parameter(Mandatory=$false)]
     [switch]$Uninstall,

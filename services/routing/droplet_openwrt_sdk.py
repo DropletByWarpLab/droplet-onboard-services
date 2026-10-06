@@ -2162,7 +2162,7 @@ class VPNApi:
         }, name=name)
 
     def add_peer(self, interface: str, public_key: str, allowed_ips: str,
-                 description: str = "", endpoint: str = "",
+                 description: str = "",
                  persistent_keepalive: int = 25):
         """Add a WireGuard peer to an interface.
 
@@ -2179,8 +2179,6 @@ class VPNApi:
         }
         if description:
             values["description"] = description
-        if endpoint:
-            values["endpoint_host"] = endpoint
         self._r.uci.add("network", f"wireguard_{interface}", values)
 
     def list_peers(self, interface: str = "wg0") -> list[dict]:
@@ -2216,7 +2214,7 @@ class VPNApi:
 
     def peer_handshakes(self, interface: str = "wg0") -> Optional[dict[str, int]]:
         """WARP-1389 — best-effort per-peer runtime `latest handshake` epoch
-        (seconds), keyed by public_key, for the overlay punch-success telemetry.
+        (seconds), keyed by public_key, for the remote-access device status.
 
         Sourced from the PERMITTED ubus read ``network.interface.<iface> status``
         (luci-proto-wireguard populates ``data.peers[].latest_handshake`` on many
@@ -2226,8 +2224,7 @@ class VPNApi:
 
         Returns ``None`` = UNKNOWN (the ubus read failed, or the status carried
         no peer data at all) — the caller must NOT treat that as "nobody
-        handshook", or every torn-down peer reads as a false failure and the
-        fleet punch-success rate collapses to 0%. Returns a dict = AVAILABLE: an
+        handshook". Returns a dict = AVAILABLE: an
         entry per peer that DID handshake (epoch > 0); a peer that exists but
         never handshook is simply absent from the dict, which — since the read
         succeeded — the caller reads as an observed 0 (a real failure). Read-only.
@@ -2235,7 +2232,7 @@ class VPNApi:
         WARP-2687: the interface-status source below is EMPTY on OpenWrt 25.12 —
         measured on a live RB5009, ``network.interface.wg0 status`` returns
         ``data: {}`` with no ``peers`` key at all, so this returned None on every
-        call and the punch telemetry has been silently blind on that release. The
+        call and device handshake status was unavailable on that release. The
         ``wireguard`` ubus object reports the same numbers from the kernel, so we
         prefer it and keep the original read as the fallback for builds that do
         populate it. Both are permitted reads; neither is ``file.exec``.

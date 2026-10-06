@@ -49,7 +49,7 @@ describe("VpnStep — routing service unavailable (WARP-1283)", () => {
   it("renders the specific 'network service isn't responding' copy for code ROUTING_UNAVAILABLE", async () => {
     fetchVpnStatus.mockRejectedValue(routingUnavailableError());
     render(
-      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToAddress={vi.fn()} />,
+      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} />,
     );
 
     // Title stays the same.
@@ -80,7 +80,7 @@ describe("VpnStep — routing service unavailable (WARP-1283)", () => {
   it("keeps the pre-existing generic copy for an untyped failure", async () => {
     fetchVpnStatus.mockRejectedValue(new Error("network down"));
     render(
-      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToAddress={vi.fn()} />,
+      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} />,
     );
 
     expect(
@@ -109,7 +109,7 @@ describe("VpnStep — routing service unavailable (WARP-1283)", () => {
       peerCount: 0,
     });
     render(
-      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToAddress={vi.fn()} />,
+      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} />,
     );
     await screen.findByText(/network service isn.t responding right now/i);
 
@@ -133,7 +133,7 @@ describe("VpnStep — routing service unavailable (WARP-1283)", () => {
     fetchVpnStatus.mockRejectedValueOnce(routingUnavailableError());
     fetchVpnStatus.mockRejectedValueOnce(new Error("network down"));
     render(
-      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToAddress={vi.fn()} />,
+      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} />,
     );
     await screen.findByText(/network service isn.t responding right now/i);
 
@@ -153,7 +153,7 @@ describe("VpnStep — routing service unavailable (WARP-1283)", () => {
     fetchVpnStatus.mockRejectedValue(routingUnavailableError());
     const onSkip = vi.fn();
     render(
-      <VpnStep onComplete={vi.fn()} onSkip={onSkip} onBackToAddress={vi.fn()} />,
+      <VpnStep onComplete={vi.fn()} onSkip={onSkip} />,
     );
     await screen.findByText(/network service isn.t responding right now/i);
 

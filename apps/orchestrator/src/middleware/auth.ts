@@ -154,69 +154,17 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
     // de-authed. The handler validates slug shape + uniqueness in
     // routes/setup.ts; it persists locally only (nothing off-box).
     "/api/setup/org",
-    // WARP-979: onboarding SECURED / name-your-box step. The name check
-    // (GET /api/setup/box-name/check) and the persist (POST /api/setup/box-name)
-    // run during first-run onboarding (the account session cookie may not be
-    // durably established yet mid-wizard), so they share the wizard's public
-    // posture — exactly like /api/setup/org. The POST re-gates itself in
-    // routes/setup.ts (session cookie OR appliance not-yet-ready) so a claimed
-    // box can't be silently renamed by an anonymous LAN client; the GET is a
-    // read-only, side-effect-free validity check.
-    //
-    // NOTE: the box-name routes need PREFIX semantics (/box-name covers
-    // /box-name/check AND /box-name/rename), so they live in PUBLIC_PREFIXES
-    // below — NOT this exact-match list. Their handlers re-gate themselves in
-    // routes/setup.ts (owner/admin once the box is claimed; see ORCH-002).
     "/api/auth/login",
     "/api/auth/authorize",
     "/api/auth/callback",
     "/api/auth/refresh",
     // WARP-217: invite-accept (token-in-path) also needs prefix semantics —
     // see PUBLIC_PREFIXES below.
-    // WARP-1474 (ADR-030/031): the dashboard-QR overlay REDEEM. The QR-scanning
-    // phone has NO bearer by design, so this EXACT POST path must reach the
-    // handler. Exact-match — NOT a prefix (SEND-BACK #4): the old
-    // startsWith("…/by-token") prefix would fail OPEN for any future sibling
-    // like `…/by-token-admin`. The `/status` subpath is opened separately by a
-    // TRAILING-SLASH prefix in PUBLIC_PREFIXES below, so ONLY the exact redeem
-    // path and the `…/by-token/<id>/status` tree are public; every sibling is
-    // authed. The handler re-gates itself (one-time token consume, per-IP/
-    // per-token/global rate limits, P256/WireGuard boundary validation).
-    "/api/vpn/overlay/devices/by-token",
   ];
-  // Exact-match the allowlist. Only two entries genuinely need PREFIX
-  // semantics: the box-name pair (/api/setup/box-name covers /box-name/check
-  // and /box-name/rename) and invite-accept (token-in-path). Everything else
-  // is matched exactly, so a future /api/setup/<x> sibling can never be
-  // silently de-authed by a stray prefix match (the latent fail-open ORCH-001
-  // caught — the old startsWith() applied to EVERY entry).
-  // WARP-1474 (ADR-030/031): the dashboard-QR overlay POLL. The QR-scanning
-  // phone has NO bearer by design, so the global gate must let the `/status`
-  // subpath through — `app.ts` mounts authMiddleware BEFORE createVpnRouter, so
-  // without this a bearer-less GET …/by-token/:pending_id/status would 401 at
-  // the gate and the redeem→stage→approve→status flow would be dead on a real
-  // box. TRAILING SLASH (SEND-BACK #4): `/api/vpn/overlay/devices/by-token/`
-  // matches the `…/by-token/<id>/status` tree but NOT a sibling like
-  // `…/by-token-admin` (the char after "by-token" must be "/"), mirroring the
-  // `/api/auth/invites/accept/` trailing-slash precedent. The EXACT redeem POST
-  // path (`…/by-token`, no slash) is opened in the exact-match `publicPaths`
-  // list above. The owner-gated siblings (/vpn/overlay/link-tokens,
-  // /vpn/overlay/pending-enrollments, and the WARP-1385 POST
-  // /vpn/overlay/devices) match neither, so they stay authed. The /status
-  // handler re-gates itself with the X-Overlay-PoP signature + per-IP/global
-  // rate limits before revealing even the coarse state.
-  //
-  // WARP-1757: the same trailing-slash prefix also covers
-  // `…/by-token/<id>/profile`, deliberately — it is the same bearer-less
-  // device using the same enrollment identity key. It re-gates itself the same
-  // way, but over a DIFFERENT domain-prefixed PoP message
-  // (`droplet-overlay-enroll-profile:v1:`), so a captured /status signature
-  // cannot be replayed against it, and it additionally requires the enrollment
-  // to be in state 'approved'.
+  // Only invite-accept needs prefix matching for its token-in-path.
+  // Retired box-name and fleet enrollment routes have no public bypass.
   const PUBLIC_PREFIXES = [
-    "/api/setup/box-name",
     "/api/auth/invites/accept/",
-    "/api/vpn/overlay/devices/by-token/",
   ];
   const isPublic =
     publicPaths.includes(req.path) ||

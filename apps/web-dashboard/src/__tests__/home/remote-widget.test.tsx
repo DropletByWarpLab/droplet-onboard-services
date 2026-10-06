@@ -44,7 +44,7 @@ const READY: VpnStatusInfo = {
   configured: true,
   endpointConfigured: true,
   endpointHost: "warp-lab.droplet-us.com",
-  publicFqdn: "warp-lab.droplet-us.com",
+  internalHostname: "droplet-ai.lan",
   // WARP-1391: the one-tap mint is HOME mode, so the switch is only live once
   // the box has discovered its home-facing LAN IP.
   homeEndpointHost: "192.168.1.87",
@@ -85,7 +85,8 @@ describe("RemoteAccessWidget (WARP-1351)", () => {
     mockFetchVpnStatus.mockResolvedValue({
       ...READY,
       endpointConfigured: false,
-      publicFqdn: null,
+      internalHostname: null,
+      homeEndpointHost: null,
       endpointHost: null,
     });
 
@@ -93,7 +94,7 @@ describe("RemoteAccessWidget (WARP-1351)", () => {
 
     const sw = await screen.findByRole("switch", { name: /^remote access$/i });
     await waitFor(() =>
-      expect(screen.getByText(/web address not ready yet/i)).toBeInTheDocument(),
+      expect(screen.getByText(/network endpoint not ready yet/i)).toBeInTheDocument(),
     );
     expect(sw).toHaveAttribute("aria-disabled", "true");
 
@@ -144,7 +145,7 @@ describe("RemoteAccessWidget (WARP-1351)", () => {
     ).toBeInTheDocument();
   });
 
-  it("promises 'from anywhere' only when the create response says off-LAN is reachable", async () => {
+  it("keeps its office QR local even if a legacy create response claims away reachability", async () => {
     mockFetchVpnStatus.mockResolvedValue(READY);
     mockCreateVpnPeer.mockResolvedValue({ ...CREATED, offLanReachable: true });
     mockFetchVpnPeers.mockResolvedValue({ peers: [MY_PEER] });
@@ -158,7 +159,8 @@ describe("RemoteAccessWidget (WARP-1351)", () => {
     fireEvent.click(sw);
 
     await screen.findByText(/scan to connect/i);
-    expect(screen.getByText(/from anywhere/i)).toBeInTheDocument();
+    expect(screen.queryByText(/from anywhere/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/office configuration works on your local network/i)).toBeInTheDocument();
   });
 
   it("shows the secure address and reports on when active peers exist", async () => {
@@ -174,7 +176,7 @@ describe("RemoteAccessWidget (WARP-1351)", () => {
     expect(screen.getByText(/on · 2 devices set up$/i)).toBeInTheDocument();
     expect(screen.queryByText(/connected now/i)).not.toBeInTheDocument();
     expect(
-      screen.getByText("https://warp-lab.droplet-us.com"),
+      screen.getByText("https://droplet-ai.lan"),
     ).toBeInTheDocument();
   });
 

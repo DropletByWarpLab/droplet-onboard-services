@@ -4,7 +4,7 @@ import { runTlsDeregisterCli } from "./tls-deregister.js";
 import {
   DEREGISTER_RESULT_OK,
   type DeregisterDeps,
-} from "../services/tls-issuance.service.js";
+} from "../services/fleet-registration.service.js";
 
 // ---------------------------------------------------------------------------
 // ADR-023 PR-3 — the tls-deregister CLI.

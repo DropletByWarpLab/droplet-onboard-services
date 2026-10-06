@@ -90,14 +90,11 @@ export const WORKSPACE_SETTING_DEFAULTS: readonly WorkspaceSettingDefault[] = [
   { key: "memory_privacy.allow_chat_writes", section: "memory_privacy", type: "bool", value: true },
 
   // ── off_lan ──
-  // Off-LAN posture — whether WireGuard peer minting is enabled and how
-  // aggressively the orchestrator should renew peer keys. The box's public
-  // address is no longer a stored setting: it comes from the per-device
-  // droplet-us.com FQDN (ADR-023) resolved in vpn.ts, not a DDNS hostname
-  // (WARP-974 removed the DuckDNS path end-to-end).
+  // Legacy preferences retained for stored-setting compatibility. They do not
+  // control peer minting or schedule key renewal. Direct WireGuard reachability
+  // uses WIREGUARD_ENDPOINT_HOST; the web address uses internal DNS.
   { key: "off_lan.vpn_enabled", section: "off_lan", type: "bool", value: false },
-  // Peer-renewal cadence; surfaces in the dashboard's VPN panel as a
-  // configurable interval. Default 30 days (in seconds).
+  // Historical renewal preference (30 days in seconds); no renewal job reads it.
   { key: "off_lan.peer_renewal_interval", section: "off_lan", type: "duration_seconds", value: 2_592_000 },
 
   // ── hardware ──

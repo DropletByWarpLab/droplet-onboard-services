@@ -49,8 +49,7 @@ _valid_hostname() {
   # injected second line would ride into /etc/avahi/avahi-daemon.conf (via the
   # sed in _set_avahi_host_name) or the dnsmasq host-record. In [[ =~ ]] the
   # char classes cannot match a newline and `$` anchors the end of the whole
-  # string, so a multi-line value is rejected. Mirrors the WARP-994 fix to
-  # droplet-set-public-fqdn.sh and the WARP-988 fix to droplet-set-box-name.sh.
+  # string, so a multi-line value is rejected before writing DNS or mDNS config.
   [[ "$name" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$ ]]
 }
 
@@ -70,21 +69,41 @@ fi
 # Discover the host's primary LAN IP. Prefers the route toward the OpenWrt
 # router (OPENWRT_HOST) when set, falling back to the first non-loopback v4
 # address returned by `hostname -I`. Stdout: the IP, or empty on failure.
-_discover_host_lan_ip() {
-  local target_ip="${OPENWRT_HOST:-192.168.50.1}"
-  local ip=""
+_usable_lan_ipv4() {
+  [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+  local octet
+  for octet in ${1//./ }; do
+    [ "$((10#$octet))" -le 255 ] || return 1
+  done
+  local first="${1%%.*}"
+  [ "$((10#$first))" -lt 224 ] || return 1
+  case "$1" in 0.*|127.*|169.254.*) return 1 ;; esac
+}
 
+_discover_host_lan_ip() {
+  local target_ip="${OPENWRT_HOST:-192.168.50.1}" ip=""
+  case "$target_ip" in
+    127.0.0.1|localhost|::1)
+      # The bundled router proxies the dashboard on the shared LAN gateway.
+      # route get 127.0.0.1 yields loopback, which clients cannot use.
+      if command -v ip >/dev/null 2>&1; then
+        ip="$(ip -4 -o addr show dev br-lan scope global 2>/dev/null | awk '{print $4; exit}' | cut -d/ -f1)"
+      fi
+      _usable_lan_ipv4 "$ip" || ip="192.168.20.1"
+      printf '%s' "$ip"
+      return 0 ;;
+  esac
   if command -v ip >/dev/null 2>&1; then
     ip="$(ip -4 route get "$target_ip" 2>/dev/null \
-            | awk '/src/ {for (i=1; i<=NF; i++) if ($i == "src") { print $(i+1); exit }}')"
+      | awk '/src/ {for (i=1; i<=NF; i++) if ($i == "src") { print $(i+1); exit }}')"
+    if _usable_lan_ipv4 "$ip"; then printf '%s' "$ip"; return 0; fi
   fi
-
-  if [ -z "$ip" ] && command -v hostname >/dev/null 2>&1; then
-    # hostname -I prints a space-separated list; take the first non-loopback.
-    ip="$(hostname -I 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i !~ /^127\./ && $i ~ /\./) { print $i; exit }}')"
+  if command -v hostname >/dev/null 2>&1; then
+    for ip in $(hostname -I 2>/dev/null); do
+      if _usable_lan_ipv4 "$ip"; then printf '%s' "$ip"; return 0; fi
+    done
   fi
-
-  printf '%s' "$ip"
+  return 0
 }
 
 # =============================================================================
@@ -298,99 +317,34 @@ setup_router_dns() {
   esac
 }
 
-# =============================================================================
-# ADR-023 (C3): split-horizon DNS for the opaque per-device FQDN
-# =============================================================================
-# The publicly-trusted per-device FQDN `d-<hmac>.devices.warp-lab.ai` has NO
-# public A/AAAA record (the box's home IP is never published). It resolves to
-# the box via SPLIT HORIZON:
-#   - LAN clients using the OpenWrt router's DNS  -> the box's LAN IP, via the
-#     SAME routing-service POST /dhcp/hostnames mechanism setup_router_dns uses.
-#   - WireGuard tunnel clients -> 192.168.20.1 (the WG gateway), because the
-#     rendered peer .conf's DNS= already points at 192.168.20.1.
-# So the one FQDN works at home AND over the tunnel, with a green padlock.
-#
-# Registers the FQDN against 192.168.20.1 (the gateway address that is reachable
-# both on the single-box LAN and over the tunnel). On a multi-box LAN the
-# operator can override DROPLET_PUBLIC_FQDN_IP if the box's LAN IP differs.
-DROPLET_PUBLIC_FQDN="${DROPLET_PUBLIC_FQDN:-}"
-DROPLET_PUBLIC_FQDN_IP="${DROPLET_PUBLIC_FQDN_IP:-192.168.20.1}"
-
-# Host dnsmasq config for the at-home single-box LAN plane (ADR-018-transitional).
-# Today's single-box LAN clients lease DNS from the host dnsmasq instance
-# (scripts/host/etc-droplet-host-net/lan-dhcp.conf), NOT the OpenWrt
-# container's. So the routing-service host-record above does not reach them; we
-# ALSO write a MANAGED host-record line into the host dnsmasq config. This whole
-# leg is retired when ADR-018 unifies the network onto the OpenWrt plane.
-_HOST_DNSMASQ_CONF="/etc/droplet-host-net/lan-dhcp.conf"
-_HOST_RECORD_MARKER="# ADR-023 managed host-record (split-horizon FQDN) — do not edit by hand"
-
-setup_public_fqdn_dns() {
-  if [ -z "$DROPLET_PUBLIC_FQDN" ]; then
-    # The box hasn't learned its FQDN from HQ yet — nothing to register. The
-    # bootstrap self-signed cert + .lan/.local names keep the box reachable.
-    log_info "Skipping public-FQDN DNS (DROPLET_PUBLIC_FQDN not set yet)"
-    return 0
-  fi
-
-  if ! _valid_hostname "$DROPLET_PUBLIC_FQDN"; then
-    log_error "DROPLET_PUBLIC_FQDN='${DROPLET_PUBLIC_FQDN}' is not a valid hostname — refusing to register split-horizon DNS"
-    return 0
-  fi
-
-  # --- Leg 1: OpenWrt dnsmasq via the routing service (LAN + tunnel) ---
-  local routing_mode="${ROUTING_MODE:-real}"
-  if [ "$routing_mode" = "disabled" ]; then
-    log_info "Skipping public-FQDN router-DNS registration (ROUTING_MODE=disabled)"
-  else
-    local routing_url="${ROUTING_SERVICE_URL:-http://localhost:8080}"
-    local token="${ROUTING_SERVICE_TOKEN:-}"
-    if ! curl -sf --max-time 5 "${routing_url}/health" >/dev/null 2>&1; then
-      log_warn "Routing service not responding at ${routing_url} — ${DROPLET_PUBLIC_FQDN} will resolve once routing is back"
-    else
-      local auth_header=()
-      [ -n "$token" ] && auth_header=(-H "Authorization: Bearer ${token}")
-      local payload
-      payload=$(printf '{"hostname":"%s","ip":"%s"}' "$DROPLET_PUBLIC_FQDN" "$DROPLET_PUBLIC_FQDN_IP")
-      local resp_file=""
-      resp_file="$(mktemp -t droplet-fqdn-resp.XXXXXX 2>/dev/null || mktemp)"
-      trap 'rm -f "${resp_file:-}"' RETURN
-      local http_code
-      http_code="$(curl -sS --max-time 10 -o "$resp_file" -w "%{http_code}" \
-                     -X POST "${routing_url}/dhcp/hostnames" \
-                     -H "Content-Type: application/json" \
-                     "${auth_header[@]}" \
-                     --data "$payload" 2>>"$LOG_FILE" || echo "000")"
-      case "$http_code" in
-        200) log_success "Split-horizon DNS: ${_CYAN}${DROPLET_PUBLIC_FQDN}${_RESET} → ${DROPLET_PUBLIC_FQDN_IP} (OpenWrt dnsmasq)" ;;
-        *)   log_warn "Public-FQDN router-DNS registration returned HTTP ${http_code}: $(cat "$resp_file" 2>/dev/null || true)" ;;
-      esac
-    fi
-  fi
-
-  # --- Leg 2: host dnsmasq host-record (ADR-018-transitional) ---
-  _write_host_dnsmasq_record
-}
-
 # Add (idempotently) a MANAGED host-record line to the host dnsmasq config so
 # at-home single-box LAN clients (which lease DNS from the host dnsmasq, not the
-# OpenWrt container) resolve the FQDN until ADR-018 retires the host plane.
+# OpenWrt container) resolve the internal name until ADR-018 retires the host plane.
 # ADR-018-TRANSITIONAL — delete this leg when the host network plane is gone.
+setup_host_dns() {
+  [ -n "$DROPLET_LAN_HOSTNAME" ] || return 0
+  local ip
+  ip="$(_discover_host_lan_ip)"
+  [ -n "$ip" ] || return 0
+  _write_host_dnsmasq_record "$DROPLET_LAN_HOSTNAME" "$ip"
+}
+
+_HOST_DNSMASQ_CONF="${DROPLET_HOST_DNSMASQ_CONF:-/etc/droplet-host-net/lan-dhcp.conf}"
+_HOST_RECORD_MARKER="# Droplet managed host-record (internal DNS) — do not edit by hand"
+
 _write_host_dnsmasq_record() {
+  local hostname="$1" ip="$2"
   if [ ! -f "$_HOST_DNSMASQ_CONF" ]; then
     # No host dnsmasq plane on this box (multi-box / dev) — the routing-service
     # leg above covers it.
     return 0
   fi
 
-  local desired="host-record=${DROPLET_PUBLIC_FQDN},${DROPLET_PUBLIC_FQDN_IP}"
+  local desired="host-record=${hostname},${ip}"
 
   # Already present + current? No-op (keeps re-runs clean — no dnsmasq restart).
-  # Still assert the listener: the record and the listen-address are two halves
-  # of one invariant, and only the record half is checked here (WARP-2189).
   if grep -qxF "$desired" "$_HOST_DNSMASQ_CONF" 2>/dev/null; then
-    log_info "Host dnsmasq host-record already current for ${DROPLET_PUBLIC_FQDN}"
-    _assert_relay_dns_listener
+    log_info "Host dnsmasq host-record already current for ${hostname}"
     return 0
   fi
 
@@ -398,11 +352,11 @@ _write_host_dnsmasq_record() {
   # NoNewPrivileges=true) sudo can never elevate, so every sudo below would
   # fail — previously silently, because the caller treats DNS registration as
   # best-effort. Detect the no-non-interactive-sudo environment up front and
-  # defer honestly: the .env upsert already persisted the FQDN, so the next
+  # defer honestly: the configured internal hostname persists, so the next
   # root-context boot/setup run rewrites this record, and the routing-service
   # leg above still covers clients on the OpenWrt DNS plane.
   if ! sudo -n true 2>/dev/null; then
-    log_warn "No non-interactive sudo here (sandboxed bridge?) — host dnsmasq host-record for ${DROPLET_PUBLIC_FQDN} deferred to the next boot/setup run"
+    log_warn "No non-interactive sudo here (sandboxed bridge?) — host dnsmasq host-record for ${hostname} deferred to the next boot/setup run"
     return 0
   fi
 
@@ -410,8 +364,12 @@ _write_host_dnsmasq_record() {
   # sudo because the file is root-owned (installed by single-box.sh).
   local tmp
   tmp="$(mktemp -t droplet-hostdns.XXXXXX 2>/dev/null || mktemp)"
-  sudo grep -vF "$_HOST_RECORD_MARKER" "$_HOST_DNSMASQ_CONF" 2>/dev/null \
-    | grep -vE '^host-record=.*\.devices\.warp-lab\.ai,' > "$tmp" || true
+  # shellcheck disable=SC2024  # sudo reads the root-owned config; $tmp is caller-owned and intentionally written as caller.
+  sudo awk -v marker="$_HOST_RECORD_MARKER" '
+    $0 == marker || $0 == "# ADR-023 managed host-record (split-horizon FQDN) — do not edit by hand" { skip = 1; next }
+    skip && /^host-record=/ { skip = 0; next }
+    { skip = 0; print }
+  ' "$_HOST_DNSMASQ_CONF" > "$tmp" || { rm -f "$tmp"; return 1; }
   {
     printf '\n%s\n' "$_HOST_RECORD_MARKER"
     printf '%s\n' "$desired"
@@ -419,7 +377,7 @@ _write_host_dnsmasq_record() {
   sudo cp "$tmp" "$_HOST_DNSMASQ_CONF"
   sudo chmod 644 "$_HOST_DNSMASQ_CONF"
   rm -f "$tmp"
-  log_success "Host dnsmasq host-record: ${DROPLET_PUBLIC_FQDN} → ${DROPLET_PUBLIC_FQDN_IP} (ADR-018-transitional)"
+  log_success "Host dnsmasq host-record: ${hostname} → ${ip} (ADR-018-transitional)"
 
   # Best-effort reload of the dedicated host dnsmasq so the record goes live now.
   if command -v systemctl >/dev/null 2>&1; then
@@ -427,16 +385,16 @@ _write_host_dnsmasq_record() {
       || sudo systemctl restart droplet-host-net.service 2>/dev/null || true
   fi
 
-  _assert_relay_dns_listener
-  _rerender_gateway_llm_access
+  _rerender_gateway_llm_access "$ip"
 }
 
-# WARP-3452 — the gateway refuses /llm/ to the cloudflared relay by the address
+# WARP-3452 — the gateway refuses /llm/ to host-originated traffic by the address
 # in the record just written (docker/nginx/render-llm-access.sh reads it at
 # container start). setup.sh starts the stack BEFORE this runs, so re-render a
 # running gateway now. Best-effort, like reload_gateway_nginx (tls-reload.sh):
 # a failure leaves the previous map, and a gateway restart re-renders it.
 _rerender_gateway_llm_access() {
+  local ip="$1"
   local compose_file="${REPO_ROOT:-}/docker/docker-compose.yml"
   if [ ! -f "$compose_file" ] || ! command -v docker >/dev/null 2>&1; then
     return 0
@@ -445,40 +403,10 @@ _rerender_gateway_llm_access() {
     | grep -qx gateway || return 0
   if docker compose -f "$compose_file" exec -T gateway \
        sh -c '/docker-entrypoint.d/04-llm-access.sh && nginx -s reload' >/dev/null 2>&1; then
-    log_info "Gateway /llm/ relay refusal re-rendered for ${DROPLET_PUBLIC_FQDN_IP}"
+    log_info "Gateway /llm/ source restriction re-rendered for ${ip}"
   else
-    log_warn "Gateway /llm/ map not re-rendered — restart the gateway to pick up ${DROPLET_PUBLIC_FQDN_IP}"
+    log_warn "Gateway /llm/ map not re-rendered — restart the gateway to pick up ${ip}"
   fi
-  return 0
-}
-
-# WARP-2189 — the OTHER half of the record written above.
-#
-# dnsmasq runs with `bind-interfaces`, so it binds ONLY the addresses named by
-# an explicit listen-address= line, and the shipped lan-dhcp.conf names one:
-# the 192.168.20.1 LAN leg. When DROPLET_PUBLIC_FQDN_IP is a different leg —
-# which it is on every box reached over the ADR-025 cloudflared relay — the
-# record above tells dnsmasq to ANSWER for the FQDN at an address it is not
-# LISTENING on. The connector then dials <ip>:53 for every off-site lookup and
-# gets connection refused: a healthy tunnel that cannot resolve the box's own
-# name, and (because the cert is name-only) no working fallback by IP either.
-#
-# droplet-relay-dns owns that pairing. Delegating keeps ONE implementation of
-# the managed listener block, shared with the runtime self-heal in
-# droplet-watchdog, instead of a second copy that can drift. Absent helper =>
-# skip: a shape without single-box host integration has no host dnsmasq plane
-# to fix, and the routing-service leg already covers its clients.
-_assert_relay_dns_listener() {
-  local helper="${DROPLET_RELAY_DNS_BIN:-/usr/local/sbin/droplet-relay-dns}"
-  [ -x "$helper" ] || return 0
-  sudo -n true 2>/dev/null || return 0
-  local out rc=0
-  out="$(sudo "$helper" repair 2>&1)" || rc=$?
-  case "$rc" in
-    0) [ -n "$out" ] && log_info "Relay DNS origin: ${out##*: }" ;;
-    3) : ;;  # not applicable on this shape — the helper explains why
-    *) log_warn "Relay DNS listener could not be asserted (exit ${rc}): ${out##*: }" ;;
-  esac
   return 0
 }
 
@@ -489,6 +417,5 @@ setup_local_dns() {
   log_info "Configuring local DNS (mDNS + OpenWrt dnsmasq)..."
   setup_mdns
   setup_router_dns
-  # ADR-023 (C3): register the split-horizon FQDN when the box knows its name.
-  setup_public_fqdn_dns
+  setup_host_dns
 }

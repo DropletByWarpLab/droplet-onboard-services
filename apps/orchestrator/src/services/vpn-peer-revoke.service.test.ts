@@ -76,7 +76,7 @@ describe("revokeUserVpnDevices (WARP-3160)", () => {
     });
 
     expect(summary).toEqual({ revoked: 2, failed: 0, hqPending: 0, pendingDenied: 1 });
-    // HQ first, and only for the overlay device.
+    // HQ cleanup only for the legacy overlay device.
     expect(overlayRevoke).toHaveBeenCalledTimes(1);
     expect(overlayRevoke).toHaveBeenCalledWith("K1");
     expect(prisma.peers.map((p) => p.status)).toEqual(["revoked", "revoked", "active"]);
@@ -98,7 +98,7 @@ describe("revokeUserVpnDevices (WARP-3160)", () => {
 
   // WARP-3172: the account is already gone, so a live router peer is the worse
   // outcome. The router peer goes anyway and the row owes HQ a retry (the
-  // connect tick refuses the device and retries).
+  // legacy revoke sweep retries).
   it("an HQ outage still removes the router peer, revokes the row and flags the HQ retry", async () => {
     const prisma = prismaWith([
       { id: "p1", userId: "bob", kind: "overlay", status: "active", publicKey: "K1" },

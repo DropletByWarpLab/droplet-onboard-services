@@ -702,6 +702,22 @@ cmd_migrate_deploy() {
   dc exec -T orchestrator npx prisma migrate deploy
 }
 
+retire_remote_access_connector() {
+  # Only this retired service is removed. OTA continues to leave unrelated
+  # compose orphans and operator-managed containers alone.
+  if [ -n "$DRY_RUN" ]; then
+    run docker rm -f droplet-cloudflared
+    return 0
+  fi
+  local connector
+  connector="$(docker ps -a --filter 'name=^/droplet-cloudflared$' --format '{{.ID}}')" \
+    || die "could not inspect retired remote-access connector"
+  [ -n "$connector" ] || return 0
+  log "removing retired remote-access connector droplet-cloudflared"
+  run docker rm -f droplet-cloudflared >&2 \
+    || die "could not remove retired remote-access connector"
+}
+
 cmd_recreate_services() {
   validate_update_id "$UPDATE_ID"
   validate_services "$SERVICES"
@@ -710,6 +726,7 @@ cmd_recreate_services() {
   local override
   override="$(override_file "$UPDATE_ID" "$TARGET")"
   require_pin_file "$override" "per-target override"
+  retire_remote_access_connector
   log "recreate-services [$SERVICES] target=$TARGET override=$override"
   # Capture failures PER SERVICE instead of aborting the loop on the first
   # one. Under `set -e` a single failing `docker compose up` would abort here,
@@ -801,11 +818,15 @@ cmd_reconcile_env() {
   log "reconcile-env $UPDATE_ID (host .env under $root)"
   if [ -n "$DRY_RUN" ]; then
     run /bin/sh "$root/docker/ota/env-reconcile.sh" "$root" "$UPDATE_ID"
+    retire_remote_access_connector
     return 0
   fi
   local out
   out="$(/bin/sh "$root/docker/ota/env-reconcile.sh" "$root" "$UPDATE_ID")" \
     || die "env-reconcile failed on the host for $UPDATE_ID"
+  # Every manifest apply reaches reconciliation, including a release with no
+  # sidecar image changes. Retire the connector before any service swap.
+  retire_remote_access_connector
   mkdir -p "$(dirname "$report")"
   printf '%s\n' "$out" > "$report"
   printf '%s\n' "$out"

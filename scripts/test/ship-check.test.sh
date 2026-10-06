@@ -1951,6 +1951,17 @@ test_tls_invariants_catches_deregister_regression() {
     return 1
   fi
 
+  # The TLS gate must reject either loss of configured internal SAN coverage.
+  sed 's/${DROPLET_LAN_HOSTNAME:-droplet-ai.lan}/droplet-ai.lan/g' \
+    "$synth/scripts/lib/secrets.sh" > "$synth/scripts/lib/secrets.tmp"
+  mv "$synth/scripts/lib/secrets.tmp" "$synth/scripts/lib/secrets.sh"
+  if ! _assert_check_fails_matching "$synth" tls-invariants \
+       'does not cover the internal hostname'; then
+    printf "    expected tls-invariants to reject missing internal hostname SAN coverage\n" >&2
+    return 1
+  fi
+  cp "$REPO_ROOT_REAL/scripts/lib/secrets.sh" "$synth/scripts/lib/secrets.sh"
+
   # 2a. Regression: strip the DEFAULT tls-release wiring. The check must FAIL
   #     (factory-reset no longer releases the HQ name by default — the self-heal
   #     is gone).

@@ -1280,26 +1280,32 @@ def test_the_vitals_ssid_default_is_empty_not_a_plausible_name(sim_display):
 
 # --- WARP-2944: the certificate lifecycle on the screen -------------------
 
-def test_tls_warning_line_speaks_only_when_renewal_is_failing_and_time_is_short():
-    """The rule, branch by branch: failing + under 14 days → the line with the
-    count and the action; failing with weeks to go, healthy, renewing, the
-    bootstrap self-signed cert, an unpolled box, and junk all say nothing."""
-    assert lw.tls_warning_line({"state": "LE_RENEW_FAILED", "daysLeft": 5}) == (
-        "CERTIFICATE · renewal failing · 5 days left · needs internet")
-    assert lw.tls_warning_line({"state": "LE_RENEW_FAILED", "daysLeft": 1}) == (
-        "CERTIFICATE · renewal failing · 1 day left · needs internet")
-    assert lw.tls_warning_line({"state": "LE_RENEW_FAILED", "daysLeft": -2}) == (
-        "CERTIFICATE EXPIRED · renewal failing · needs internet")
-    assert lw.tls_warning_line({"state": "LE_RENEW_FAILED", "daysLeft": 13}) != ""
-    assert lw.tls_warning_line({"state": "LE_RENEW_FAILED", "daysLeft": 14}) == ""
-    assert lw.tls_warning_line({"state": "LE_RENEW_FAILED", "daysLeft": 25}) == ""
+def test_tls_warning_line_reports_current_local_certificate_expiry():
+    """The footer warns about the current leaf without promising HQ renewal.
+    Historical fleet state, unknown metadata, and a healthy leaf say nothing."""
+    assert lw.tls_warning_line({"state": "LOCAL_CERTIFICATE", "daysLeft": 5}) == (
+        "CERTIFICATE · 5 days left · needs replacement")
+    assert lw.tls_warning_line({"state": "LOCAL_CERTIFICATE", "daysLeft": 1}) == (
+        "CERTIFICATE · 1 day left · needs replacement")
+    assert lw.tls_warning_line({"state": "LOCAL_CERTIFICATE", "daysLeft": -2}) == (
+        "CERTIFICATE EXPIRED · needs replacement")
+    assert lw.tls_warning_line({"state": "LOCAL_CERTIFICATE", "daysLeft": 13}) != ""
+    assert lw.tls_warning_line({"state": "LOCAL_CERTIFICATE", "daysLeft": 14}) == ""
+    assert lw.tls_warning_line({"state": "LOCAL_CERTIFICATE", "daysLeft": 25}) == ""
     assert lw.tls_warning_line({"state": "LE_ISSUED", "daysLeft": 3}) == ""
+    assert lw.tls_warning_line({"state": "LE_RENEW_FAILED", "daysLeft": 3}) == ""
     assert lw.tls_warning_line({"state": "LE_RENEWING", "daysLeft": 3}) == ""
     assert lw.tls_warning_line({"state": "BOOTSTRAP_SELF_SIGNED", "daysLeft": None}) == ""
-    assert lw.tls_warning_line({"state": "LE_RENEW_FAILED", "daysLeft": None}) == ""
-    assert lw.tls_warning_line({"state": "LE_RENEW_FAILED", "daysLeft": "5"}) == ""
+    assert lw.tls_warning_line({"state": "LOCAL_CERTIFICATE", "daysLeft": None}) == ""
+    assert lw.tls_warning_line({"state": "LOCAL_CERTIFICATE", "daysLeft": "5"}) == ""
     assert lw.tls_warning_line({}) == ""
     assert lw.tls_warning_line(None) == ""
+
+
+def test_tls_warning_line_reports_local_dns_name_mismatch():
+    assert lw.tls_warning_line({"state": "LOCAL_CERTIFICATE", "daysLeft": 61,
+                                "coversInternalHostname": False}) == (
+        "CERTIFICATE · internal DNS name mismatch · needs replacement")
 
 
 def _chrome_state(monkeypatch, populated):
@@ -1315,10 +1321,10 @@ def _chrome_state(monkeypatch, populated):
 
 
 def test_a_failing_certificate_takes_the_footer_and_the_pill_goes_degraded(populated, monkeypatch):
-    populated._mirror_to_v3("tls", {"state": "LE_RENEW_FAILED", "daysLeft": 6,
-                                    "fqdn": "warp-lab.droplet-us.com"})
+    populated._mirror_to_v3("tls", {"state": "LOCAL_CERTIFICATE", "daysLeft": 6,
+                                    "fqdn": "droplet-ai.lan"})
     t = _texts(populated)
-    assert "CERTIFICATE · renewal failing · 6 days left · needs internet" in t
+    assert "CERTIFICATE · 6 days left · needs replacement" in t
     # It outranks the last event on the footer's right, rather than sharing it.
     assert "12:04 · Backup completed" not in t
     # DEGRADED, never ALERT: the box is doing its job; its padlock is not.
@@ -1326,8 +1332,8 @@ def test_a_failing_certificate_takes_the_footer_and_the_pill_goes_degraded(popul
 
 
 def test_a_healthy_certificate_leaves_the_footer_and_the_pill_alone(populated, monkeypatch):
-    populated._mirror_to_v3("tls", {"state": "LE_ISSUED", "daysLeft": 61,
-                                    "fqdn": "warp-lab.droplet-us.com"})
+    populated._mirror_to_v3("tls", {"state": "LOCAL_CERTIFICATE", "daysLeft": 61,
+                                    "fqdn": "droplet-ai.lan"})
     t = _texts(populated)
     assert "12:04 · Backup completed" in t
     assert not any(s.startswith("CERTIFICATE") for s in t)
@@ -1335,10 +1341,10 @@ def test_a_healthy_certificate_leaves_the_footer_and_the_pill_alone(populated, m
 
 
 def test_a_later_answer_takes_the_warning_back_down(populated):
-    """update_tls replaces wholesale: renewal succeeded → no stale warning."""
-    populated._mirror_to_v3("tls", {"state": "LE_RENEW_FAILED", "daysLeft": 3})
+    """update_tls replaces wholesale: a fresh local leaf clears the warning."""
+    populated._mirror_to_v3("tls", {"state": "LOCAL_CERTIFICATE", "daysLeft": 3})
     assert any(s.startswith("CERTIFICATE") for s in _texts(populated))
-    populated._mirror_to_v3("tls", {"state": "LE_ISSUED", "daysLeft": 89})
+    populated._mirror_to_v3("tls", {"state": "LOCAL_CERTIFICATE", "daysLeft": 89})
     assert not any(s.startswith("CERTIFICATE") for s in _texts(populated))
     assert populated._v3["tls"].get("daysLeft") == 89
 

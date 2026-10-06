@@ -972,8 +972,8 @@ class TFTDisplay:
             "storage": {},
             # WARP-2944 — the certificate lifecycle from the orchestrator's
             # public /api/tls/status (state, daysLeft). Empty until polled;
-            # the footer only speaks when renewal is failing and time is
-            # short, so an unpolled box says nothing — never a false alarm.
+            # the footer warns about local certificate expiry or DNS mismatch.
+            # An unpolled box has no metadata and says nothing.
             "tls": {},
             # WARP-1645 — filled by fetch_services(). All-None so a cold box
             # renders em dashes; see WARP-1643 on why not zeros.

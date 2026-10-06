@@ -163,36 +163,13 @@ describe("requestLogger credential redaction (WARP-1015)", () => {
   });
 });
 
-describe("requestLogger overlay QR link-token redaction (WARP-1474)", () => {
-  // The overlay QR link token is bearer-equivalent (returned once; only its
-  // sha256 hash is stored). The client status PoP header is a live signature.
-  // Neither may ever land in a log line.
-  const POP = "SECRET-OVERLAY-POP-SIGNATURE-base64==";
-
-  it("redacts the X-Overlay-PoP request header", () => {
-    const lines: string[] = [];
-    const logger = createRequestLogger({
-      dest: { write: (s: string) => lines.push(s) },
-      level: "info",
-    });
-    const req = mockReq("POP-ID", { "x-overlay-pop": POP });
-    const res = mockRes();
-    runWithRequestId("POP-ID", () => {
-      logger(req as never, res as never);
-    });
-    res.emit("finish");
-    const output = lines.join("");
-    expect(output).not.toContain(POP);
-    const completion = JSON.parse(lines[lines.length - 1]);
-    expect(completion.req.headers["x-overlay-pop"]).toBe("[Redacted]");
-  });
-
-  // AC2 defense-in-depth: some clients pass the redeem token in the query
+describe("requestLogger token redaction", () => {
+  // Defense in depth: some clients pass credentials in the query
   // string, which pino-std-serializers DOES emit under `req.query`. Since
   // WARP-3622 the serializer drops `req.query` altogether, so the token cannot
   // ride into a log line whether or not the redact list still names it.
   it("never logs a token passed as a query param", () => {
-    const SECRET_TOKEN = "PLAINTEXT-OVERLAY-LINK-TOKEN-q1w2e3";
+    const SECRET_TOKEN = "PLAINTEXT-APPLICATION-TOKEN-q1w2e3";
     const lines: string[] = [];
     const logger = createRequestLogger({
       dest: { write: (s: string) => lines.push(s) },

@@ -16,7 +16,6 @@ import {
   fetchVpnStatus,
   fetchVpnPeers,
   createVpnPeer,
-  fetchBoxName,
   routerUnreachableNotice,
 } from "@/lib/api";
 import type {
@@ -44,9 +43,7 @@ import { dashboardUrlFromConf } from "@/lib/wireguard";
  * clickable rail) can never bounce. Navigation away is user-initiated only.
  *
  *   loading   → GET /api/vpn/status in flight (first entry only).
- *   blocked   → endpointConfigured === false: no reachable endpoint yet. Renders
- *               a "Set up internet address" button that is an ordinary back-jump
- *               (onBackToAddress) — NO redirect, NO reload.
+ *   blocked   → neither endpoint nor discovered LAN address: show network guidance.
  *   toggle    → endpointConfigured && no peer yet: the one-tap switch. Flipping
  *               on mints the first peer with an auto-derived label.
  *   created   → a peer was just minted this session: QR + .conf + how-to-use.
@@ -64,11 +61,9 @@ import { dashboardUrlFromConf } from "@/lib/wireguard";
 export function VpnStep({
   onComplete,
   onSkip,
-  onBackToAddress,
 }: {
   onComplete: () => void;
   onSkip: () => void;
-  onBackToAddress: () => void;
 }) {
   const [phase, setPhase] = useState<
     "loading" | "blocked" | "toggle" | "form" | "created" | "returning" | "error"
@@ -92,22 +87,7 @@ export function VpnStep({
     null,
   );
   const [copied, setCopied] = useState(false);
-  // WARP-1039 — the box name the customer ALREADY saved (null = none). Read in
-  // the blocked precheck only: when a name exists, the blocked view must stop
-  // bouncing the customer back to a step they finished and instead say honestly
-  // that the address is being set up (endpointConfigured stays false until the
-  // box learns DROPLET_PUBLIC_FQDN — a boot-time snapshot, see vpn.ts).
-  const [savedBoxName, setSavedBoxName] = useState<{
-    name: string;
-    fqdn: string;
-  } | null>(null);
   const REMOTE_ACCESS_DESTINATION = "Remote Access";
-
-  // WARP-993: only promise "from anywhere" when the minted conf's endpoint is
-  // actually routable from outside the home LAN. FQDN-only is split-horizon
-  // (no public A record — ADR-023 §3), so the orchestrator reports false until
-  // the ADR-025 relay lands. Missing field (older orchestrator) ⇒ stay honest.
-  const offLanReachable = status?.offLanReachable === true;
 
   const load = useCallback(async () => {
     setPhase("loading");
@@ -118,21 +98,7 @@ export function VpnStep({
     try {
       const s = await fetchVpnStatus();
       setStatus(s);
-      if (!s.endpointConfigured) {
-        // WARP-1039 — before rendering blocked, learn whether a name is
-        // already saved so the view can be honest instead of bouncing the
-        // customer back to the Address step. Best-effort: a failed read keeps
-        // the pre-existing back-jump variant.
-        try {
-          const saved = await fetchBoxName();
-          setSavedBoxName(
-            saved.name && saved.fqdn
-              ? { name: saved.name, fqdn: saved.fqdn }
-              : null,
-          );
-        } catch {
-          setSavedBoxName(null);
-        }
+      if (!s.endpointConfigured && !s.homeEndpointHost) {
         setPhase("blocked");
         return;
       }
@@ -150,16 +116,7 @@ export function VpnStep({
           // than trapping the customer on a half-rendered returning view.
         }
       }
-      // No peer yet → the one-tap toggle is the primary entry. But the
-      // user-facing mint is HOME mode (WARP-1391): the Endpoint is the box's
-      // discovered home-facing LAN IP (resolveHomeEndpointHost), NOT the
-      // split-horizon public FQDN the away-mode default bakes (that FQDN is
-      // public-NXDOMAIN by design — WARP-954 / ADR-023 — so an away conf shows
-      // keepalive but zero handshakes). When the box hasn't discovered that LAN
-      // IP yet (homeEndpointHost null/absent) a home mint 503s, so DO NOT offer
-      // a dead toggle — surface the same routing-unavailable guidance the
-      // precheck already shows (WARP-1283), and stay honest (missing ⇒ "not
-      // reachable at home yet", the WARP-993 never-over-promise convention).
+      // This wizard mints office configurations, which require a discovered LAN endpoint.
       if (!s.homeEndpointHost) {
         setPrecheckErrorCode("ROUTING_UNAVAILABLE");
         setPhase("error");
@@ -194,10 +151,7 @@ export function VpnStep({
       setErrorTone("error");
       setSubmitting(true);
       try {
-        // WARP-1391: user-facing surfaces mint HOME mode explicitly. The
-        // orchestrator route defaults to "away" (a byte-identical pre-hybrid
-        // compat contract, PR #897); an omitted mode silently baked a dead
-        // public-NXDOMAIN Endpoint. Home bakes the box LAN IP and works today.
+        // The wizard creates an office configuration explicitly.
         const result = await createVpnPeer(trimmed, "home");
         setCreated(result);
         setPhase("created");
@@ -324,87 +278,14 @@ export function VpnStep({
   // ──────────────────────────────────────────────────────────────────
   // blocked
   // ──────────────────────────────────────────────────────────────────
-  if (phase === "blocked" && savedBoxName) {
-    // WARP-1039 — the customer ALREADY named their box; the endpoint just
-    // hasn't materialized in this session (cert issuance + the boot-time
-    // config snapshot). Bouncing them back to the Address step is an
-    // unwinnable loop — be honest and let them move on instead.
-    return (
-      <StepShell
-        current="vpn"
-        title="Your address is being set up"
-        subtitle="Nothing to do here — this finishes on its own."
-        primary={{ label: "Continue", onClick: onComplete, showArrow: true }}
-        skip={{ label: "Skip for now", onClick: onSkip }}
-      >
-        <div className="dp-card !p-4 flex items-start gap-3">
-          <Globe
-            size={18}
-            className="text-accent flex-shrink-0 mt-0.5"
-            aria-hidden="true"
-          />
-          {/* min-w-0 lets this flex child shrink so a max-length name
-              truncates/wraps instead of pushing the card past small
-              viewports (same convention as the dashboardUrl below). */}
-          <div className="min-w-0">
-            <p className="type-subheadline text-label-primary mb-1 font-mono truncate">
-              {savedBoxName.fqdn}
-            </p>
-            <p className="type-footnote text-label-secondary">
-              Your address{" "}
-              <span className="font-mono break-all">{savedBoxName.fqdn}</span>{" "}
-              is being set up — remote access lights up automatically once the
-              box finishes issuing its certificate.
-            </p>
-          </div>
-        </div>
-
-        <LearnMoreCard helpAnchor="vpn">
-          <p>
-            You can also come back anytime from{" "}
-            <span className="font-mono">Remote Access</span> in the dashboard —
-            once the certificate is issued, the one-tap toggle appears there and
-            here.
-          </p>
-        </LearnMoreCard>
-      </StepShell>
-    );
-  }
-
   if (phase === "blocked") {
     return (
-      <StepShell
-        current="vpn"
-        title="Remote access needs an internet address first"
-        subtitle="No internet address is set up yet."
-        primary={{ label: "Set up internet address", onClick: onBackToAddress }}
-        skip={{ label: "Skip for now", onClick: onSkip }}
-      >
-        <div className="dp-card !p-4 flex items-start gap-3">
-          <Globe
-            size={18}
-            className="text-system-orange flex-shrink-0 mt-0.5"
-            aria-hidden="true"
-          />
-          <div>
-            <p className="type-subheadline text-label-primary mb-1">
-              Why this comes first
-            </p>
-            <p className="type-footnote text-label-secondary">
-              Your office internet&rsquo;s address can change. A permanent internet
-              address gives the box one reachable endpoint so your devices can
-              always find it. Set that up on the internet-address step and this
-              lights up automatically.
-            </p>
-          </div>
-        </div>
-
+      <StepShell current="vpn" title="WireGuard needs a network endpoint"
+        subtitle="The Droplet's office network address isn't available yet."
+        primary={{ label: "Check again", onClick: () => load() }}
+        skip={{ label: "Skip for now", onClick: onSkip }}>
         <LearnMoreCard helpAnchor="vpn">
-          <p>
-            You can also set this up later from{" "}
-            <span className="font-mono">Remote Access</span> in the dashboard —
-            the wizard isn&rsquo;t your only path.
-          </p>
+          <p>Check the Droplet's network connection and router discovery, then try again. You can finish this from Remote Access later.</p>
         </LearnMoreCard>
       </StepShell>
     );
@@ -414,16 +295,12 @@ export function VpnStep({
   // toggle — the one-tap primary entry (WARP-979).
   // ──────────────────────────────────────────────────────────────────
   if (phase === "toggle") {
-    const fqdn = status?.publicFqdn ?? status?.endpointHost ?? null;
+    const hostname = status?.internalHostname ?? null;
     return (
       <StepShell
         current="vpn"
         title="Turn on remote access"
-        subtitle={
-          offLanReachable
-            ? "One tap connects this device to your Droplet from anywhere — the same secure address you use at the office. No address to type, no config file, no port-forwarding."
-            : "One tap connects this device to your Droplet on your office network. No address to type, no config file, no port-forwarding. Away-from-office access arrives with the secure relay — coming soon."
-        }
+        subtitle="Create an office WireGuard configuration, then scan it in the WireGuard app."
         skip={{ label: "I'll do this later", onClick: onSkip }}
       >
         {/* The one-tap switch. Flipping on mints the first peer immediately; the
@@ -471,19 +348,17 @@ export function VpnStep({
             instead of squeezing the truncating FQDN to near-zero (UX note). */}
         <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 dp-card !py-2.5 !px-3">
           <Globe size={14} className="text-label-tertiary flex-none" aria-hidden="true" />
-          {fqdn ? (
+          {hostname ? (
             <span className="font-mono type-footnote text-label-secondary truncate min-w-0">
-              https://{fqdn}
+              https://{hostname}
             </span>
           ) : (
             <span className="type-footnote text-label-tertiary">
-              your secure address
+              your internal DNS address
             </span>
           )}
           <span className="type-caption-1 text-label-quaternary ml-auto">
-            {offLanReachable
-              ? "same address, on or off your Wi-Fi"
-              : "works on your office Wi-Fi today"}
+            Office network configuration
           </span>
         </div>
 
@@ -534,25 +409,13 @@ export function VpnStep({
         </button>
 
         <LearnMoreCard title="How does one tap do all that?" helpAnchor="vpn">
-          {offLanReachable ? (
-            <p>
-              Turning this on generates a WireGuard key pair, fetches a peer config
-              pointing at the <strong>Warp relay</strong>, and shows you a QR code
-              to import it into your phone&rsquo;s VPN. The box dials{" "}
-              <strong>outbound</strong> to the relay, so there&rsquo;s no
-              port-forward and no public address to expose, and you land on the
-              same trusted address you use at the office.
-            </p>
-          ) : (
-            <p>
-              Turning this on generates a WireGuard key pair, builds this
-              device&rsquo;s private config, and shows you a QR code to import it
-              into your phone&rsquo;s VPN. Today the tunnel works while
-              you&rsquo;re on your office network; away-from-office access
-              arrives with the secure relay — coming soon, and this same setup
-              will carry over.
-            </p>
-          )}
+          <p>
+            This generates a WireGuard key pair and an office configuration with
+            the Droplet's LAN endpoint and internal DNS. Scan the QR code in
+            WireGuard and activate the tunnel while on your office network.
+            For access from another network, configure a direct endpoint and
+            create an away configuration from Remote Access.
+          </p>
         </LearnMoreCard>
       </StepShell>
     );
@@ -583,9 +446,9 @@ export function VpnStep({
                 <p className="type-subheadline text-label-primary truncate">
                   {p.deviceLabel}
                 </p>
-                {status?.endpointHost && (
+                {status?.homeEndpointHost && (
                   <p className="type-caption-1 text-label-tertiary font-mono truncate">
-                    {status.endpointHost}
+                    {status.homeEndpointHost}
                   </p>
                 )}
               </div>
@@ -671,10 +534,10 @@ export function VpnStep({
             </p>
           </div>
 
-          {status?.endpointHost && (
+          {status?.homeEndpointHost && (
             <p className="type-footnote text-label-tertiary">
               Will connect to{" "}
-              <span className="font-mono">{status.endpointHost}</span>.
+              <span className="font-mono">{status.homeEndpointHost}</span>.
             </p>
           )}
 
@@ -729,9 +592,9 @@ export function VpnStep({
   if (!created) return null;
   const dashboardUrl = dashboardUrlFromConf(
     created.conf,
-    status?.publicFqdn ?? undefined,
+    status?.internalHostname ?? undefined,
   );
-  const hasPublicFqdn = Boolean(status?.publicFqdn);
+
   return (
     <StepShell
       current="vpn"
@@ -809,39 +672,16 @@ export function VpnStep({
         <p>
           Once connected, open{" "}
           <span className="font-mono break-all">{dashboardUrl}</span> in your
-          phone&rsquo;s browser —{" "}
-          {offLanReachable
-            ? "that’s this Droplet from anywhere."
-            : "that’s this Droplet on your office network."}{" "}
-          {hasPublicFqdn ? (
-            <>
-              Bookmark it: it&rsquo;s the same secure address you use at the
-              office, with nothing to install.
-            </>
-          ) : (
-            <>
-              Bookmark it: names like{" "}
-              <span className="font-mono">droplet.local</span> only work on the
-              office network, not over the tunnel.
-            </>
-          )}{" "}
+          phone&rsquo;s browser while connected to your office network.
+          Your device may need to trust the Droplet's HTTPS certificate.
           Lose the phone? Revoke this device from{" "}
-          <span className="font-mono">Remote Access</span> in the dashboard — its
-          config stops working immediately.
+          <span className="font-mono">Remote Access</span> in the dashboard.
         </p>
-        {offLanReachable ? (
-          <p>
-            Test it from cellular or another network. While you&rsquo;re on this
-            Droplet&rsquo;s own Wi-Fi the tunnel can&rsquo;t loop back — and
-            you don&rsquo;t need it there; everything already works directly.
-          </p>
-        ) : (
-          <p>
-            This works while you&rsquo;re connected to your office network.
-            Away-from-office access arrives with the secure relay — coming soon;
-            this device will be ready for it.
-          </p>
-        )}
+        <p>
+          This QR code uses the office LAN endpoint. For away-from-office access,
+          configure a reachable direct WireGuard endpoint and create an away
+          configuration from Remote Access.
+        </p>
         <p className="type-caption-1 text-label-quaternary">
           Heads up: this code is shown once. If you close this page without
           scanning it, you can revoke and create a new one from{" "}

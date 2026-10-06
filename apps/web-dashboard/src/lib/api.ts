@@ -103,9 +103,6 @@ import type {
   VpnPeerInfo,
   VpnStatusInfo,
   VpnPeerCreatedInfo,
-  OverlayLinkToken,
-  PendingOverlayEnrollment,
-  OverlayApproveResult,
   VoiceStatusInfo,
   VoiceSayResult,
   SpeakingVoiceInfo,
@@ -122,10 +119,6 @@ import type {
   VoiceEnrollVerifyResult,
   VoiceEnrollCommitResult,
   VoiceActivityItem,
-  BoxNameCheckResult,
-  BoxNameSetResult,
-  BoxNameCurrentResult,
-  BoxNameRenameResult,
   ToolCatalogResponse,
   DocsStatus,
   DocEditorSession,
@@ -1674,19 +1667,18 @@ export async function fetchSystemHealthDetails(): Promise<SystemHealth> {
   return res.json();
 }
 
-/** Cert-lifecycle snapshot from the PUBLIC tls-status route (ADR-023 §3,
- *  WARP-1302). Carries no secrets — state, the CT-public FQDN, and whether
- *  HQ issuance is configured at all. */
+/** Public internal hostname and installed certificate metadata; no secrets. */
 export interface TlsStatus {
   state: string;
   fqdn: string | null;
   hqConfigured: boolean;
+  internalHostname?: string | null;
+  daysLeft: number | null;
+  coversInternalHostname: boolean | null;
 }
 
 export async function fetchTlsStatus(): Promise<TlsStatus> {
-  // Public endpoint (no auth) — the same payload the gateway's plain-HTTP
-  // status page polls. WARP-1342: dashboard chrome reads `fqdn` to upgrade
-  // the identity chip off the droplet.local fallback.
+  // The dashboard address comes from the configured internal hostname.
   const res = await fetch(`${BASE}/api/tls/status`, {
     credentials: "include",
   });
@@ -1696,16 +1688,17 @@ export async function fetchTlsStatus(): Promise<TlsStatus> {
   return res.json();
 }
 
-/** WARP-2944 — the certificate lifecycle for Settings → Device information
- *  (owner/admin): days left, when the box renews on its own, whether the
- *  last week has begun. Computed once server-side so the card and the screen
- *  never disagree on the arithmetic. */
+/** The installed HTTPS certificate for Settings → Device information
+ * (owner/admin). Expiry and hostname coverage are read from the served leaf;
+ * unreadable metadata is reported as UNKNOWN, never inferred from fleet history. */
 export interface TlsCertificate {
   state: string;
   fqdn: string | null;
   notAfter: string | null;
   daysLeft: number | null;
+  /** Compatibility field: local certificates have no automatic renewal schedule. */
   renewsInDays: number | null;
+  coversInternalHostname: boolean | null;
   expiringSoon: boolean;
   hqConfigured: boolean;
   checkedAt: string | null;
@@ -1720,7 +1713,7 @@ export async function fetchTlsCertificate(): Promise<TlsCertificate> {
     credentials: "include",
   });
   if (!res.ok) {
-    throw new Error(`Failed to fetch certificate lifecycle: ${res.status}`);
+    throw new Error(`Failed to fetch installed certificate: ${res.status}`);
   }
   return res.json();
 }
@@ -7377,20 +7370,8 @@ export async function fetchVpnPeers(): Promise<{
   return res.json();
 }
 
-/**
- * Mint a WireGuard peer. `mode` selects how the device dials the box:
- *
- *   "home" — Endpoint is the box's discovered home-facing LAN IP
- *            (resolveHomeEndpointHost on the orchestrator). Works today on the
- *            home/office network. This is the DEFAULT for every user-facing
- *            surface (WARP-1391): the orchestrator route's own default is "away"
- *            (a byte-identical pre-hybrid compat contract, PR #897), and away
- *            bakes the split-horizon public FQDN Endpoint — a public-NXDOMAIN
- *            address (WARP-954 / ADR-023) the stock WireGuard app can't
- *            handshake, so an omitted mode silently minted a dead config.
- *   "away" — operator-only: dials the public FQDN / relay endpoint. Reachable
- *            via the direct API; the dashboard never mints it.
- */
+/** Mint a one-shot WireGuard config. Home dials the discovered office IP;
+ * away dials the explicitly configured direct UDP endpoint. */
 export async function createVpnPeer(
   deviceLabel: string,
   mode: "home" | "away" = "home",
@@ -7430,93 +7411,6 @@ export async function deleteVpnPeer(id: string): Promise<void> {
     err.status = res.status;
     throw err;
   }
-}
-
-// ── WARP-1475: overlay QR-enroll (ADR-030) ──
-//
-// Owner/admin mints a link token → the QR encodes it → a phone scans + redeems
-// it (no bearer) which STAGES a pending enrollment → the owner approves/denies
-// here. Approval is the load-bearing gate that turns a scan into an enrolled
-// overlay device (the box only vouches to HQ on approve).
-
-/**
- * Mint a single-use overlay link token (owner/admin). The plaintext token in
- * the response is returned ONCE — the caller renders it into a QR and forgets
- * it on dialog close. NEVER log the returned token. Minting supersedes any
- * prior available token for this owner.
- */
-export async function mintOverlayLinkToken(): Promise<OverlayLinkToken> {
-  const res = await authFetch(`${BASE}/api/vpn/overlay/link-tokens`, {
-    method: "POST",
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    const e = new Error(
-      body.error || `Failed to mint link token: ${res.status}`,
-    ) as Error & { status?: number; code?: string };
-    e.status = res.status;
-    if (typeof body.error === "string") e.code = body.error;
-    throw e;
-  }
-  return res.json();
-}
-
-/** List staged overlay enrollments awaiting owner review (owner/admin). */
-export async function fetchPendingOverlayEnrollments(): Promise<
-  PendingOverlayEnrollment[]
-> {
-  const res = await authFetch(`${BASE}/api/vpn/overlay/pending-enrollments`);
-  if (!res.ok) {
-    throw new Error(`Failed to fetch pending enrollments: ${res.status}`);
-  }
-  return res.json();
-}
-
-/**
- * Approve a staged enrollment (owner/admin). This is the point the box vouches
- * the device to HQ. On failure the thrown error carries the orchestrator's
- * typed `code` (409: `already_being_approved` / `wg_key_conflict` /
- * `overlay_device_cap_reached` / `cannot approve a <state> enrollment`; 503:
- * the vouch-retry sentence) plus the HTTP `status`, so the page can render
- * honest per-case copy via `overlayApproveErrorCopy`.
- */
-export async function approveOverlayEnrollment(
-  id: string,
-): Promise<OverlayApproveResult> {
-  const res = await authFetch(
-    `${BASE}/api/vpn/overlay/pending-enrollments/${encodeURIComponent(id)}/approve`,
-    { method: "POST" },
-  );
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    const e = new Error(
-      body.error || `Failed to approve enrollment: ${res.status}`,
-    ) as Error & { status?: number; code?: string };
-    e.status = res.status;
-    if (typeof body.error === "string") e.code = body.error;
-    throw e;
-  }
-  return res.json();
-}
-
-/** Deny a staged enrollment (owner/admin). */
-export async function denyOverlayEnrollment(
-  id: string,
-): Promise<{ state: "denied" }> {
-  const res = await authFetch(
-    `${BASE}/api/vpn/overlay/pending-enrollments/${encodeURIComponent(id)}/deny`,
-    { method: "POST" },
-  );
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    const e = new Error(
-      body.error || `Failed to deny enrollment: ${res.status}`,
-    ) as Error & { status?: number; code?: string };
-    e.status = res.status;
-    if (typeof body.error === "string") e.code = body.error;
-    throw e;
-  }
-  return res.json();
 }
 
 // --- WARP-1036: voice assistant (setup-wizard step + status) ---
@@ -7891,85 +7785,6 @@ export async function fetchVoiceActivity(limit = 5): Promise<VoiceActivityItem[]
   }));
 }
 
-// --- WARP-979: Secured / name-your-box ---
-
-/**
- * WARP-979 — check an owner-typed box name against the shared ruleset +
- * (best-effort) availability. Called debounced from the "Secured" setup step as
- * the owner types. Public endpoint — runs during first-run onboarding before an
- * account may exist, so we call `fetch` directly (no auth refresh to ride).
- * The AbortSignal lets the caller cancel a stale in-flight check.
- */
-export async function checkBoxName(
-  name: string,
-  signal?: AbortSignal,
-): Promise<BoxNameCheckResult> {
-  const res = await fetch(
-    `${BASE}/api/setup/box-name/check?name=${encodeURIComponent(name)}`,
-    { credentials: "same-origin", signal },
-  );
-  if (!res.ok) throw new Error(`Failed to check box name: ${res.status}`);
-  return res.json();
-}
-
-/**
- * WARP-979 — persist the chosen box name so the box's tls-issuance requests
- * `<name>.droplet-us.com`. Public onboarding endpoint (re-gated server-side once
- * the appliance is claimed). Throws on a non-2xx so the step can surface the
- * inline error and NOT advance.
- */
-export async function setBoxName(name: string): Promise<BoxNameSetResult> {
-  const res = await fetch(`${BASE}/api/setup/box-name`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    credentials: "same-origin",
-    body: JSON.stringify({ name }),
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throwNetworkWriteError(body, res.status, "Failed to save box name");
-  }
-  return res.json();
-}
-
-/**
- * WARP-1039 — read the CURRENTLY saved box name back: `{ name, fqdn }`, both
- * null when no name has been chosen yet. Same public-onboarding posture as the
- * POST (the orchestrator re-gates it once the appliance is claimed), so plain
- * `fetch` with the session cookie riding along. The AddressStep rehydrates its
- * input from this on mount; the VpnStep precheck uses it to render the honest
- * "address is being set up" blocked view.
- */
-export async function fetchBoxName(): Promise<BoxNameCurrentResult> {
-  const res = await fetch(`${BASE}/api/setup/box-name`, {
-    credentials: "same-origin",
-  });
-  if (!res.ok) throw new Error(`Failed to fetch box name: ${res.status}`);
-  return res.json();
-}
-
-/**
- * WARP-1109 — CHANGE the box's secured address in place. The orchestrator
- * RELEASES the current name at HQ, then claims the NEW name and re-issues the
- * cert under the new FQDN. Same public-onboarding posture as the POST (re-gated
- * server-side once the appliance is claimed). Throws on a non-2xx so the step
- * surfaces the inline error and does NOT advance — a 409 name-taken on the new
- * name carries `code: "BOX_NAME_TAKEN"` (+ suggestions) so the picker can show
- * the conflict.
- */
-export async function renameBox(name: string): Promise<BoxNameRenameResult> {
-  const res = await fetch(`${BASE}/api/setup/box-name/rename`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    credentials: "same-origin",
-    body: JSON.stringify({ name }),
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throwNetworkWriteError(body, res.status, "Failed to rename box");
-  }
-  return res.json();
-}
 // --- WARP-204: /knowledge view (recent + semantic search + brain memory) ---
 
 /** WARP-214 — source-channel signal: what extractor produced the text. */

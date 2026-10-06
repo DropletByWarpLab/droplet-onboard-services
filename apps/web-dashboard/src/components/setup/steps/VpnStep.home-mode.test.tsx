@@ -65,7 +65,7 @@ describe("VpnStep — home-mode mint (WARP-1391)", () => {
       peerCount: 0,
     });
     render(
-      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToAddress={vi.fn()} />,
+      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} />,
     );
     await waitFor(() => expect(toggle()).toBeInTheDocument());
     fireEvent.click(toggle());
@@ -88,7 +88,7 @@ describe("VpnStep — home-mode mint (WARP-1391)", () => {
       peerCount: 0,
     });
     render(
-      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToAddress={vi.fn()} />,
+      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} />,
     );
 
     // The established routing-unavailable guidance (WARP-1283), reused verbatim.
@@ -115,7 +115,7 @@ describe("VpnStep — home-mode mint (WARP-1391)", () => {
       peerCount: 0,
     });
     render(
-      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToAddress={vi.fn()} />,
+      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} />,
     );
     expect(
       await screen.findByText(/network service isn.t responding right now/i),

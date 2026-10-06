@@ -146,6 +146,25 @@ function buildApp(prisma: ReturnType<typeof createPrismaMock>) {
   return app;
 }
 
+describe("retired fleet box naming stays absent during onboarding", () => {
+  it.each([
+    ["get", "/api/setup/box-name/check?name=studio"],
+    ["get", "/api/setup/box-name"],
+    ["post", "/api/setup/box-name"],
+    ["post", "/api/setup/box-name/rename"],
+  ] as const)("%s %s never accesses fleet state", async (method, path) => {
+    const prisma = new Proxy({}, {
+      get() { throw new Error("Retired box-name route accessed the database"); },
+    }) as ReturnType<typeof createPrismaMock>;
+    const app = buildApp(prisma);
+    for (const cookie of ["", "droplet_session=valid-session"]) {
+      const response = await request(app)[method](path)
+        .set("Cookie", cookie).send({ name: "studio" });
+      expect(response.status).toBe(404);
+    }
+  });
+});
+
 describe("GET /api/setup/state", () => {
   let prisma: ReturnType<typeof createPrismaMock>;
   beforeEach(() => {

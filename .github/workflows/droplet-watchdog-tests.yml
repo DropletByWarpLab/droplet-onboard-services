@@ -22,14 +22,10 @@ on:
       # the auditor must run from the CHECKOUT, never an installed copy.
       - "scripts/app-downloads/audit.sh"
       - "data/app-downloads/EXPECTED"
-      # WARP-2189: the relay_dns check delegates to this helper, and
-      # local-dns.sh is the setup-time caller that must keep it applied.
-      - "scripts/host/droplet-relay-dns.sh"
       - "scripts/lib/local-dns.sh"
       - "scripts/lib/single-box.sh"
       - "scripts/install-device-bridge.sh"
       - "tests/droplet-watchdog.test.sh"
-      - "tests/droplet-relay-dns.test.sh"
       # WARP-2647: the boot-time network backstop and its suite, neither of
       # which any workflow named. Same harness family as droplet-watchdog.
       - "scripts/host/usr-local-sbin/droplet-net-selfheal"
@@ -46,12 +42,10 @@ on:
       - "scripts/host/MANIFEST"
       - "scripts/app-downloads/audit.sh"
       - "data/app-downloads/EXPECTED"
-      - "scripts/host/droplet-relay-dns.sh"
       - "scripts/lib/local-dns.sh"
       - "scripts/lib/single-box.sh"
       - "scripts/install-device-bridge.sh"
       - "tests/droplet-watchdog.test.sh"
-      - "tests/droplet-relay-dns.test.sh"
       # WARP-2647: the boot-time network backstop and its suite, neither of
       # which any workflow named. Same harness family as droplet-watchdog.
       - "scripts/host/usr-local-sbin/droplet-net-selfheal"
@@ -81,12 +75,8 @@ jobs:
         # warning severity to match ship-check's bar; no global excludes —
         # waivers live inline per scripts/test/ship-check.sh convention.
         run: shellcheck --severity=warning scripts/host/droplet-watchdog.sh
-      - name: shellcheck the relay-DNS helper
-        run: shellcheck --severity=warning scripts/host/droplet-relay-dns.sh
       - name: Run droplet-watchdog shell tests
         run: bash tests/droplet-watchdog.test.sh
-      - name: Run droplet-relay-dns shell tests
-        run: bash tests/droplet-relay-dns.test.sh
 
       # WARP-2647: WARP-1680's boot-time backstop ran in NO workflow. It is
       # what recovers a box whose NIC rename left netplan configuring a device

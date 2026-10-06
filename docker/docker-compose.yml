@@ -110,13 +110,8 @@ services:
       # /docs prefix → docserver:9980 (coolwsd net.service_root); onlyoffice
       # strips it → docserver:80. Same selector pattern as the knobs above.
       - DOCS_ENGINE=${DOCS_ENGINE:-collabora}
-      # WARP-3452: /docker-entrypoint.d/04-llm-access.sh refuses /llm/ to the
-      # box's own address, which the cloudflared relay dials and so arrives
-      # from. It reads it from the host dnsmasq host-record (mount below);
-      # DROPLET_PUBLIC_FQDN_IP overrides. `relay` in the profiles means the
-      # connector runs, and then a missing address refuses every /llm/ peer.
-      - DROPLET_PUBLIC_FQDN_IP=${DROPLET_PUBLIC_FQDN_IP:-}
-      - DROPLET_COMPOSE_PROFILES=${COMPOSE_PROFILES:-}
+      - DROPLET_LLM_BOX_IP=${DROPLET_LLM_BOX_IP:-}
+      - DROPLET_LAN_HOSTNAME=${DROPLET_LAN_HOSTNAME:-droplet-ai.lan}
     volumes:
       # nginx.conf moved docker/nginx.conf → docker/nginx/nginx.conf
       # (WARP-1021). Still mounted read-only over the baked copy (same file)
@@ -130,7 +125,7 @@ services:
       # when DROPLET_INTERNAL_TLS=1. Inert (never read) when the knob is 0.
       - ../data/secrets/service-tls/gateway:/etc/nginx/service-tls:ro
       # WARP-3452: the host dnsmasq conf (lan-dhcp.conf, non-secret), whose last
-      # host-record names the address the relay arrives from. The DIRECTORY,
+      # host-record names the box address refused by /llm/. The DIRECTORY,
       # never the file: a missing file bind source would be created as a
       # directory and break dnsmasq (same rule as /etc/droplet on
       # matter-controller). Read-only; local-dns.sh is the writer.
@@ -575,15 +570,9 @@ services:
       # Opt-in twice, like the erp-sql-bridge: this mount existing does nothing
       # until ERP_EXPORT_DROP_ROOT names the container path below.
       - ${ERP_EXPORT_DROP_HOST_PATH:-../data/erp-exports}:/data/erp-exports:ro
-      # ADR-023 (C2): the TLS cert dir, mounted READ-WRITE so the
-      # tls-issuance cron can atomically install the freshly-issued LE
-      # fullchain (droplet.crt) + private key (droplet.key). The gateway
-      # mounts the SAME dir read-only (see the gateway service above) and
-      # serves from it — nginx needs zero config change because the LE
-      # fullchain overwrites the same droplet.crt the bootstrap wrote. The
-      # orchestrator triggers the nginx reload via the device-bridge (the
-      # nginx reload path deliberately does NOT use the docker socket).
-      - ./certs:/app/docker/certs:rw
+      # Read the installed local leaf for status and authenticated pairing.
+      # Certificate provisioning stays on the host; the fleet issuer is retired.
+      - ./certs:/app/docker/certs:ro
       # ─────────────────────────────────────────────────────────────────────
       # WARP-539 — OTA apply (compose-over-socket). SECURITY-SENSITIVE.
       # ─────────────────────────────────────────────────────────────────────
@@ -940,10 +929,6 @@ services:
       # scripts/lib/local-dns.sh; droplet.local / droplet.lan are accepted too
       # so OpenWrt's own umdns/expand_hosts entries keep working if a user
       # ever points them at the appliance directly.
-      # ADR-023 (C4): append the publicly-trusted per-device FQDN
-      # (${DROPLET_PUBLIC_FQDN}) so Nextcloud trusts the one-URL-everywhere
-      # address. Empty until the box learns it from HQ — a trailing blank token
-      # is harmless to Nextcloud's space-separated trusted-domains list.
       #
       # WARP-1966 — the private-range wildcards are NOT belt-and-braces, they
       # are the only entries a browser addressing the box BY IP can match, and
@@ -988,7 +973,7 @@ services:
       # scripts/lib/single-box.sh and re-derived on every provision, so a new
       # DHCP lease converges without ever widening the match. Empty on a box
       # that has not provisioned yet — a blank token is harmless here.
-      - NEXTCLOUD_TRUSTED_DOMAINS=localhost nextcloud gateway droplet-ai.local droplet-ai.lan droplet.local droplet.lan ${DROPLET_TRUSTED_LAN_IPS:-} ${DROPLET_PUBLIC_FQDN:-}
+      - NEXTCLOUD_TRUSTED_DOMAINS=localhost nextcloud gateway droplet-ai.local droplet-ai.lan droplet.local droplet.lan ${DROPLET_TRUSTED_LAN_IPS:-} ${DROPLET_LAN_HOSTNAME:-droplet-ai.lan}
       - OVERWRITEPROTOCOL=https
       # WARP-883 (ADR-027 WS-5) — shared "Household" group folder. The
       # post-installation hook (nextcloud-init.sh) reads these to create the
@@ -1463,11 +1448,8 @@ services:
       - INFERENCE_MANAGER_URL=http://inference-manager:8002
       # /ai/health). MUST equal the orchestrator's SERVICE_TOKEN_AI_GATEWAY env
       # (wired above to the same source). Empty = unauthenticated (dev only).
-      # ADR-023 (C4): append https://${DROPLET_PUBLIC_FQDN} so the ai-gateway
-      # accepts the publicly-trusted one-URL-everywhere origin. Empty until the
-      # box learns its FQDN from HQ — a trailing comma is tolerated by the
-      # ai-gateway's comma-split (empty entries are dropped, see main.py).
-      - CORS_ORIGINS=https://localhost,http://localhost,https://localhost:3001,http://localhost:3001,https://${DROPLET_PUBLIC_FQDN:-}
+      # The configured internal DNS name is a first-party HTTPS origin.
+      - CORS_ORIGINS=https://localhost,http://localhost,https://localhost:3001,http://localhost:3001,https://${DROPLET_LAN_HOSTNAME:-droplet-ai.lan}
       # GW-14: socket peers (your nginx edge) whose forwarded client-IP headers
       # the rate limiter trusts. Empty default = trust nothing (key on the real
       # socket peer). Set RATE_LIMIT_TRUSTED_PROXIES to nginx's IP/subnet.
@@ -3892,35 +3874,6 @@ services:
   #   # host-side (iw phy set netns), and WireGuard is a kernel netdev; neither
   #   # is a /dev node the container opens.
   # ===========================================================================
-
-  # Cloudflare Tunnel connector (WARP-974 / ADR-025) — the OUTBOUND, serverless
-  # replacement for DuckDNS + the inbound WireGuard port. It dials Cloudflare's
-  # edge (no inbound port, no port-forward, CGNAT-friendly; the home IP is never
-  # published). A Cloudflare WARP client reaches the box's LAN over the tunnel and
-  # the box serves its OWN droplet-us.com cert end-to-end — Cloudflare routes at
-  # L3 and never terminates TLS (see docs/ADR-025). `cloudflared` reads its
-  # connector token from TUNNEL_TOKEN in ../.env (never tracked).
-  #
-  # Gated behind the `relay` profile, which scripts/lib/single-box.sh activates
-  # ONLY when TUNNEL_TOKEN is set — so an unconfigured box never crash-loops a
-  # tokenless connector. Pinned by digest to the image verified on .87 (WARP-974).
-  cloudflared:
-    image: cloudflare/cloudflared@sha256:6d91c121b803126f7a5344005d17a9324788fc09d305b6e2560ec6040a7ae283
-    container_name: droplet-cloudflared
-    profiles: ["relay"]
-    # host netns so the connector reaches the box dashboard (192.168.1.87) and the
-    # AP resolver/LAN (192.168.20.1) that the tunnel's private-network route serves.
-    network_mode: host
-    command: ["tunnel", "--no-autoupdate", "--loglevel", "info", "run"]
-    # WARP-3193 SEC-DATA-1: NO env_file — only the connector token. cloudflared
-    # maps its flags to TUNNEL_* env vars; TUNNEL_TOKEN is the only one .env
-    # carries (every other flag is on `command:` above).
-    environment:
-      - TUNNEL_TOKEN
-    restart: unless-stopped
-    mem_limit: ${CLOUDFLARED_MEM_LIMIT:-128m}
-    cpus: ${CLOUDFLARED_CPUS:-0.5}
-    pids_limit: ${CLOUDFLARED_PIDS_LIMIT:-512}
 
   # --- Fleet telemetry agent (WARP-963) ---
   # Outbound-only, fail-open push of operational telemetry (heartbeat /
