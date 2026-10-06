@@ -1,5 +1,5 @@
 /**
- * WARP-3532 / ADR-069 §7 — what the PmActivity outbox promises, against a real
+ * ADR-069 §7 — what the PmActivity outbox promises, against a real
  * Postgres.
  *
  * The unit file (`services/pm/pm-outbox.test.ts`) proves the control flow
@@ -28,14 +28,14 @@ const RUN =
   typeof process.env.DATABASE_URL === "string" &&
   process.env.DATABASE_URL.length > 0;
 
-describe.skipIf(!RUN)("PmActivity outbox — what only Postgres can prove (WARP-3532)", () => {
+describe.skipIf(!RUN)("PmActivity outbox — what only Postgres can prove ", () => {
   let prisma: PrismaClient;
   let pm: typeof import("../services/pm/pm-outbox.js");
   let cron: typeof import("../services/cron-runtime.service.js");
   let workItemId = "";
 
-  const OURS = { startsWith: "warp3532-ob-" } as const;
-  const FLAGS = { startsWith: "pm-outbox:warp3532-ob-" } as const;
+  const OURS = { startsWith: "pm-outbox-test-" } as const;
+  const FLAGS = { startsWith: "pm-outbox:pm-outbox-test-" } as const;
 
   /** A deterministic instant in 2099, `s` seconds past a fixed origin. */
   const T0 = Date.parse("2099-01-01T00:00:00.000Z");
@@ -61,13 +61,13 @@ describe.skipIf(!RUN)("PmActivity outbox — what only Postgres can prove (WARP-
     await prisma.systemFlag.deleteMany({ where: { key: FLAGS } });
     await prisma.pmWorkspace.deleteMany({ where: { slug: OURS } });
     const ws = await prisma.pmWorkspace.create({
-      data: { slug: `warp3532-ob-ws-${Date.now()}`, name: "warp3532-ob" },
+      data: { slug: `pm-outbox-test-ws-${Date.now()}`, name: "pm-outbox-test" },
     });
     const project = await prisma.pmProject.create({
-      data: { workspaceId: ws.id, name: "warp3532-ob-project", identifier: "W32O" },
+      data: { workspaceId: ws.id, name: "pm-outbox-test-project", identifier: "W32O" },
     });
     const item = await prisma.pmWorkItem.create({
-      data: { projectId: project.id, sequenceId: 1, name: "warp3532-ob-item" },
+      data: { projectId: project.id, sequenceId: 1, name: "pm-outbox-test-item" },
     });
     workItemId = item.id;
   });
@@ -106,7 +106,7 @@ describe.skipIf(!RUN)("PmActivity outbox — what only Postgres can prove (WARP-
   // ── order ────────────────────────────────────────────────────────────────
 
   it("delivers rows that share a millisecond exactly once, in (createdAt, id) order, across batches", async () => {
-    await parkCursor("warp3532-ob-order", at(-1));
+    await parkCursor("pm-outbox-test-order", at(-1));
     // One timestamp, seven random UUIDs: the id is the only tiebreaker there is.
     await prisma.pmActivity.createMany({
       data: Array.from({ length: 7 }, () => ({ workItemId, verb: "updated" as const, createdAt: at(10) })),
@@ -114,7 +114,7 @@ describe.skipIf(!RUN)("PmActivity outbox — what only Postgres can prove (WARP-
     await row(at(11));
     await row(at(9));
 
-    const c = consumer("warp3532-ob-order", { batchSize: 3 });
+    const c = consumer("pm-outbox-test-order", { batchSize: 3 });
     await pm.runOutboxSweep(prisma, c.def, { now: () => at(100) });
 
     const expected = await prisma.pmActivity.findMany({
@@ -131,11 +131,11 @@ describe.skipIf(!RUN)("PmActivity outbox — what only Postgres can prove (WARP-
   });
 
   it("resumes after a partial sweep without repeating or skipping a row", async () => {
-    await parkCursor("warp3532-ob-resume", at(-1));
+    await parkCursor("pm-outbox-test-resume", at(-1));
     await prisma.pmActivity.createMany({
       data: Array.from({ length: 5 }, () => ({ workItemId, verb: "updated" as const, createdAt: at(10) })),
     });
-    const c = consumer("warp3532-ob-resume", { batchSize: 2 });
+    const c = consumer("pm-outbox-test-resume", { batchSize: 2 });
     let calls = 0;
     c.def.handle = async (r: PmActivity) => {
       calls += 1;
@@ -158,11 +158,11 @@ describe.skipIf(!RUN)("PmActivity outbox — what only Postgres can prove (WARP-
     await row(at(-3000)); // a year-old edit
     await row(at(5));
 
-    const c = consumer("warp3532-ob-new");
+    const c = consumer("pm-outbox-test-new");
     // First sweep, at t=10: no cursor yet, so one is created AT t=10.
     await pm.runOutboxSweep(prisma, c.def, { now: () => at(10) });
     expect(c.seen).toHaveLength(0);
-    expect(await prisma.systemFlag.findUnique({ where: { key: "pm-outbox:warp3532-ob-new" } })).toMatchObject({
+    expect(await prisma.systemFlag.findUnique({ where: { key: "pm-outbox:pm-outbox-test-new" } })).toMatchObject({
       valueJson: { createdAt: at(10).toISOString(), id: "" },
     });
 
@@ -173,12 +173,12 @@ describe.skipIf(!RUN)("PmActivity outbox — what only Postgres can prove (WARP-
   });
 
   it("two consumers keep separate cursors over the same rows", async () => {
-    await parkCursor("warp3532-ob-a", at(-1));
-    await parkCursor("warp3532-ob-b", at(-1));
+    await parkCursor("pm-outbox-test-a", at(-1));
+    await parkCursor("pm-outbox-test-b", at(-1));
     await row(at(1));
     await row(at(2));
-    const a = consumer("warp3532-ob-a");
-    const b = consumer("warp3532-ob-b");
+    const a = consumer("pm-outbox-test-a");
+    const b = consumer("pm-outbox-test-b");
 
     await pm.runOutboxSweep(prisma, a.def, { now: () => at(100) });
     expect(a.seen).toHaveLength(2);
@@ -187,13 +187,13 @@ describe.skipIf(!RUN)("PmActivity outbox — what only Postgres can prove (WARP-
     await pm.runOutboxSweep(prisma, b.def, { now: () => at(100) });
     expect(b.seen).toHaveLength(2);
     const keys = await prisma.systemFlag.findMany({ where: { key: FLAGS }, select: { key: true } });
-    expect(keys.map((k) => k.key).sort()).toEqual(["pm-outbox:warp3532-ob-a", "pm-outbox:warp3532-ob-b"]);
+    expect(keys.map((k) => k.key).sort()).toEqual(["pm-outbox:pm-outbox-test-a", "pm-outbox:pm-outbox-test-b"]);
   });
 
   // ── transactions ─────────────────────────────────────────────────────────
 
   it("never sees a row from a transaction that rolled back", async () => {
-    await parkCursor("warp3532-ob-rollback", at(-1));
+    await parkCursor("pm-outbox-test-rollback", at(-1));
     await expect(
       prisma.$transaction(async (tx) => {
         await tx.pmActivity.create({ data: { workItemId, verb: "created", createdAt: at(1) } });
@@ -201,7 +201,7 @@ describe.skipIf(!RUN)("PmActivity outbox — what only Postgres can prove (WARP-
       }),
     ).rejects.toThrow("mutation failed");
 
-    const c = consumer("warp3532-ob-rollback");
+    const c = consumer("pm-outbox-test-rollback");
     await pm.runOutboxSweep(prisma, c.def, { now: () => at(100) });
     expect(c.seen).toHaveLength(0);
   });
@@ -225,14 +225,14 @@ describe.skipIf(!RUN)("PmActivity outbox — what only Postgres can prove (WARP-
   }
 
   it("does not skip a transaction that commits late, behind a younger row that committed first (the settle window)", async () => {
-    await parkCursor("warp3532-ob-gap", at(-1));
+    await parkCursor("pm-outbox-test-gap", at(-1));
 
     // A is slow: it inserted at t=1 and has not committed. B inserted at t=2
     // and committed at once. Ordered by createdAt, A is first and B second.
     const slow = await holdOpen(at(1));
     await row(at(2));
 
-    const c = consumer("warp3532-ob-gap", { settleMs: 6_000 });
+    const c = consumer("pm-outbox-test-gap", { settleMs: 6_000 });
     // t=3: both rows are younger than the 6 s settle window, so NEITHER is read,
     // and the cursor stays where it was.
     await pm.runOutboxSweep(prisma, c.def, { now: () => at(3) });
@@ -248,11 +248,11 @@ describe.skipIf(!RUN)("PmActivity outbox — what only Postgres can prove (WARP-
   it("…and that is the failure the window prevents: with no settle window the late commit is lost for good", async () => {
     // The contrast case, kept so the window cannot be 'simplified' away: the
     // same two writers, read at settleMs: 0.
-    await parkCursor("warp3532-ob-nogap", at(-1));
+    await parkCursor("pm-outbox-test-nogap", at(-1));
     const slow = await holdOpen(at(1));
     await row(at(2));
 
-    const c = consumer("warp3532-ob-nogap", { settleMs: 0 });
+    const c = consumer("pm-outbox-test-nogap", { settleMs: 0 });
     await pm.runOutboxSweep(prisma, c.def, { now: () => at(3) });
     expect(c.seen.map((r) => r.createdAt.toISOString())).toEqual([at(2).toISOString()]);
 
@@ -276,12 +276,12 @@ describe.skipIf(!RUN)("PmActivity outbox — what only Postgres can prove (WARP-
 
   it("a write wakes the consumer through the real cron runtime and advisory lock, long before the interval", async () => {
     const runtime = cron.createCronRuntime(prisma as never);
-    const c = consumer("warp3532-ob-nudge", { intervalMs: 60_000, settleMs: 0 });
+    const c = consumer("pm-outbox-test-nudge", { intervalMs: 60_000, settleMs: 0 });
     try {
       pm.registerOutboxConsumer(c.def, { prisma, cronRuntime: runtime });
       // The registration run creates the cursor at 'now'. A row written before
       // that would be history, so wait for it.
-      await until(async () => (await prisma.systemFlag.findUnique({ where: { key: "pm-outbox:warp3532-ob-nudge" } })) !== null);
+      await until(async () => (await prisma.systemFlag.findUnique({ where: { key: "pm-outbox:pm-outbox-test-nudge" } })) !== null);
 
       const written = await prisma.pmActivity.create({ data: { workItemId, verb: "created" } });
       pm.nudgeOutbox();
@@ -295,7 +295,7 @@ describe.skipIf(!RUN)("PmActivity outbox — what only Postgres can prove (WARP-
 
   it("a second sweeper is kept out by the advisory lock until the first lets go", async () => {
     const runtime = cron.createCronRuntime(prisma as never);
-    const c = consumer("warp3532-ob-lock", { intervalMs: 60_000, settleMs: 0 });
+    const c = consumer("pm-outbox-test-lock", { intervalMs: 60_000, settleMs: 0 });
     let release!: () => void;
     let locked!: () => void;
     const gate = new Promise<void>((r) => (release = r));
@@ -305,7 +305,7 @@ describe.skipIf(!RUN)("PmActivity outbox — what only Postgres can prove (WARP-
       async (tx) => {
         // $executeRaw, not $queryRaw: the function returns void, which Prisma
         // cannot deserialize as a result column.
-        await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))', "droplet:pm-outbox:warp3532-ob-lock");
+        await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))', "droplet:pm-outbox:pm-outbox-test-lock");
         locked();
         await gate;
       },
@@ -313,7 +313,7 @@ describe.skipIf(!RUN)("PmActivity outbox — what only Postgres can prove (WARP-
     );
     try {
       await holding;
-      await parkCursor("warp3532-ob-lock", new Date(Date.now() - 60_000));
+      await parkCursor("pm-outbox-test-lock", new Date(Date.now() - 60_000));
       const written = await prisma.pmActivity.create({ data: { workItemId, verb: "created" } });
 
       pm.registerOutboxConsumer(c.def, { prisma, cronRuntime: runtime }); // immediate run — skipped, lock is held

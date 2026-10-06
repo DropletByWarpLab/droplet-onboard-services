@@ -36,10 +36,19 @@ describe("eventForVerb", () => {
     expect(verbs).toContain("external_link_added");
   });
 
-  it.each(verbs)("maps %s to exactly one subscribable work_item event", (verb) => {
+  it.each(verbs)("maps %s to a subscribable event or the explicit deleted non-event", (verb) => {
     const event = eventForVerb(verb as never);
+    if (verb === "deleted") {
+      expect(event).toBeNull();
+      return;
+    }
     expect(WORK_ITEM_EVENTS).toContain(event);
-    expect(isSubscribableEvent(event)).toBe(true);
+    expect(isSubscribableEvent(event ?? "")).toBe(true);
+  });
+
+  it("never maps the private deleted tombstone to a webhook event, before or after its enum is installed", () => {
+    expect(eventForVerb("deleted")).toBeNull();
+    expect(isSubscribableEvent("work_item.deleted")).toBe(false);
   });
 
   it.each([

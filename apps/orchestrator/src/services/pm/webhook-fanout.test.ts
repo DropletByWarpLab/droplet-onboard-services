@@ -129,6 +129,25 @@ describe("fanOutActivity", () => {
     expect(prisma.pmWebhook.findMany).not.toHaveBeenCalled();
     expect(prisma.pmWorkItem.findFirst).not.toHaveBeenCalled();
   });
+
+  it("does not inspect subscribers or build a payload for a malformed attached deleted tombstone", async () => {
+    const prisma = makePrisma([hook({ events: ["work_item.updated", "work_item.deleted"] })]);
+    const origin = vi.fn(deps.origin);
+    const onQueued = vi.fn();
+    // The live-update schema requires deleted tombstones to be detached. Even
+    // an invalid non-null item reference must never turn one into an update.
+    const deleted = activity({ verb: "deleted" as PmActivity["verb"] });
+
+    expect(await fanOutActivity(prisma as never, deleted, { ...deps, origin, onQueued })).toBe(0);
+    expect(prisma.pmWebhook.findMany).not.toHaveBeenCalled();
+    expect(prisma.pmWorkItem.findFirst).not.toHaveBeenCalled();
+    expect(prisma.user.findMany).not.toHaveBeenCalled();
+    expect(prisma.pmState.findMany).not.toHaveBeenCalled();
+    expect(prisma.pmWebhookDelivery.createMany).not.toHaveBeenCalled();
+    expect(origin).not.toHaveBeenCalled();
+    expect(onQueued).not.toHaveBeenCalled();
+  });
+
   it("queues one delivery per interested webhook, keyed by the activity row", async () => {
     const prisma = makePrisma([hook({ id: "a" }), hook({ id: "b" })]);
     const queued = await fanOutActivity(prisma as never, activity(), deps);

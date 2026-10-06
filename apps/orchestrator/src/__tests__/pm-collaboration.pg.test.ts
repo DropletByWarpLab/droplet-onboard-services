@@ -2203,24 +2203,43 @@ describe.skipIf(!RUN)("PM collaboration — comments, mentions, reactions, watch
     });
 
     // Defends: "the timeline renders every verb". One row of EVERY verb the
-    // database knows is written directly; every one except the two mirrored
-    // verbs must come back, in order. A verb added to the enum later is
+    // database knows is written directly in its valid shape; every attached
+    // verb except the two mirrored verbs must come back, in order. Detached
+    // deletion tombstones are private live-delivery events. A verb added later is
     // covered the moment it exists, with no edit here — and the null
     // field / oldValue / newValue these rows carry must not break ref
     // resolution for the verbs that resolve refs.
-    it("lists every verb except `commented` and `mentioned`", async () => {
+    it("lists every attached verb except mirrored comments and excludes detached deletion events", async () => {
       const rows = await prisma.$queryRaw<Array<{ enumlabel: string }>>`
         SELECT e.enumlabel FROM pg_enum e JOIN pg_type t ON t.oid = e.enumtypid
         WHERE t.typname = 'PmActivityVerb' ORDER BY e.enumsortorder`;
       const verbs = rows.map((r) => r.enumlabel as $Enums.PmActivityVerb);
       expect(sorted([...PM_TIMELINE_MIRRORED_VERBS])).toEqual(["commented", "mentioned"]);
-      for (const [i, verb] of verbs.entries()) await seedActivity(item.id, i, verb);
+      for (const [i, verb] of verbs.entries()) {
+        if (verb === "deleted") {
+          await prisma.pmActivity.create({
+            data: {
+              workItemId: null,
+              actorId: ann.id,
+              verb,
+              deletedProjectId: project.id,
+              deletedWorkItemId: item.id,
+              createdAt: tAt(i),
+              notifyStatus: "not_needed",
+            },
+          });
+        } else {
+          await seedActivity(item.id, i, verb);
+        }
+      }
 
       const out = await everything();
 
       const mirrored = new Set<string>(PM_TIMELINE_MIRRORED_VERBS);
-      expect(out.timeline.map((e) => asActivity(e).verb)).toEqual(verbs.filter((v) => !mirrored.has(v)));
-      expect(out.total).toBe(verbs.length - mirrored.size);
+      const visibleVerbs = verbs.filter((v) => v !== "deleted" && !mirrored.has(v));
+      expect(out.timeline.map((e) => asActivity(e).verb)).toEqual(visibleVerbs);
+      expect(out.total).toBe(visibleVerbs.length);
+      expect(await prisma.pmActivity.count({ where: { verb: "deleted", deletedWorkItemId: item.id } })).toBe(1);
     });
 
     // Defends: a malformed, empty, null or dangling reference in a history row

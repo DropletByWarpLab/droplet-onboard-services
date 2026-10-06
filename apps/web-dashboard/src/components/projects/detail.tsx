@@ -27,9 +27,10 @@ import {
   usePreventStrayFileDrops,
 } from "./attachments";
 import { canWrite, type PmAttachment, type PmWorkItem } from "./types";
+import { usePresence } from "./usePresence";
+import { editActions } from "./useEditing";
 import { CycleField, ModulesField } from "./planning-pickers";
 import { ArrowUpRight, Copy } from "lucide-react";
-import { editActions } from "./useEditing";
 import { PropRow } from "./detail/PropRow";
 import { TimeSection } from "./time/TimeSection";
 import { useAuth } from "@/lib/auth";
@@ -212,6 +213,16 @@ function DetailBody({
   );
 }
 
+/** WARP-3536 — the other people who have this item open right now. Rendered only when there are some. */
+function AlsoViewing({ ids }: { ids: string[] }): JSX.Element {
+  return (
+    <span className="pm-row" role="group" aria-label="Also viewing" style={{ gap: 8 }}>
+      <span style={{ fontSize: 11.5, color: "var(--text-3)" }}>Also viewing</span>
+      <AvatarStack ids={ids} size={22} />
+    </span>
+  );
+}
+
 export function DetailDrawer({
   item,
   onClose,
@@ -231,6 +242,7 @@ export function DetailDrawer({
   canDelete?: boolean;
 }): JSX.Element {
   const titleId = useId();
+  const viewers = usePresence(item.id);
   return (
     // `flush`: the scoped `.pm-dialog-body.is-panel` owns the inset (WARP-1153).
     <Dialog open onClose={onClose} placement="right" maxWidth="lg" labelledBy={titleId} flush>
@@ -242,7 +254,8 @@ export function DetailDrawer({
           <span id={titleId} className="pm-mono" style={{ fontSize: 12.5, color: "var(--text-3)" }}>
             {item.key}
           </span>
-          <span className="pm-row" style={{ gap: 4 }}>
+          <span className="pm-row" style={{ gap: 12 }}>
+            {viewers.length > 0 && <AlsoViewing ids={viewers} />}
             <ItemMenu item={item} readOnly={readOnly} canDelete={canDelete} onChanged={onChanged} onClose={onClose} />
             <button className="pm-iconbtn" onClick={onClose} aria-label="Close" type="button">
               <PmIcon name="x" size={16} />

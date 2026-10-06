@@ -15,6 +15,7 @@ import {
   Skel,
 } from "./bits";
 import { cardAccent, isOverdue, fmtDate } from "./config";
+import { usePmLivePause } from "./usePmLive";
 import { EstimateChip, StartChip, TypeIcon } from "./TypeBits";
 import { CycleTag } from "./planning-bits";
 import type { PmCycle, PmWorkItem, PmState, PmProject } from "./types";
@@ -170,6 +171,14 @@ export function BoardView({
 }): JSX.Element {
   const [dragId, setDragId] = useState<string | null>(null);
   const [overState, setOverState] = useState<string | null>(null);
+  // WARP-3536 — the board as it was when the card was picked up. A change made
+  // by someone else mid-drag (a live update, or any revalidation) would move or
+  // remove the card in the user's hand, and a browser fires no dragend for a node
+  // that is gone. So while a card is held the board keeps showing that picture,
+  // and live refreshes are held back as well (usePmLivePause); both let go at the drop.
+  const [held, setHeld] = useState<PmWorkItem[] | null>(null);
+  usePmLivePause(dragId !== null);
+  const shown = held ?? items;
   const cols = sortStates(states);
 
   if (domain === "loading") {
@@ -237,7 +246,7 @@ export function BoardView({
   return (
     <div className="pm-board">
       {cols.map((s) => {
-        const colItems = items
+        const colItems = shown
           .filter((it) => it.stateId === s.id)
           .sort((a, b) => a.sortOrder - b.sortOrder);
         return (
@@ -252,10 +261,11 @@ export function BoardView({
             onDragLeave={() => setOverState((cur) => (cur === s.id ? null : cur))}
             onDrop={(e) => {
               e.preventDefault();
-              const item = items.find((it) => it.id === dragId);
+              const item = shown.find((it) => it.id === dragId);
               if (item && item.stateId !== s.id) onTransition(item, s.id);
               setDragId(null);
               setOverState(null);
+              setHeld(null);
             }}
           >
             <div className="pm-col-h">
@@ -291,10 +301,14 @@ export function BoardView({
                   readOnly={readOnly}
                   draggable
                   dragging={dragId === it.id}
-                  onDragStart={() => setDragId(it.id)}
+                  onDragStart={() => {
+                    setDragId(it.id);
+                    setHeld(items);
+                  }}
                   onDragEnd={() => {
                     setDragId(null);
                     setOverState(null);
+                    setHeld(null);
                   }}
                 />
               ))

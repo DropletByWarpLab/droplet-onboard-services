@@ -4,7 +4,7 @@
 // until refetch). (WARP-882 / ADR-026 P5; the timeline itself is WARP-3519.)
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
 import { SWRConfig } from "swr";
 import { DetailDrawer } from "./detail";
 import { PeopleContext } from "./bits";
@@ -18,6 +18,9 @@ import type { PmWorkItem } from "./types";
 // is the plain-textarea double (timeline.test.tsx covers the Activity section
 // itself; this file only proves the drawer hosts it).
 const calls: { url: string; method: string; body?: unknown }[] = [];
+
+// WARP-3536 — what the heartbeat answers: the OTHER people on the item.
+const presence = { viewers: [] as string[] };
 
 const PROJECT_LABELS = [
   { id: "lab-1", projectId: "p", name: "bug", color: "#ef4444" },
@@ -55,6 +58,7 @@ vi.mock("@/lib/auth", () => ({
     if (url.match(/\/work-items\/[^/]+$/) && method === "PATCH") {
       return json({ work_item: { ...ITEM, labels: PROJECT_LABELS.filter((l) => body?.label_ids?.includes(l.id)) } });
     }
+    if (url.endsWith("/presence")) return json({ viewers: presence.viewers });
     if (url.endsWith("/users")) return json({ users: [] });
     return json({});
   }),
@@ -157,6 +161,56 @@ describe("DetailDrawer — Labels field can add a label (WARP-948)", () => {
       expect(patch).toBeTruthy();
       expect((patch?.body as { label_ids?: string[] } | undefined)?.label_ids).toContain("lab-1");
     });
+  });
+});
+
+describe("DetailDrawer — Also viewing (WARP-3536)", () => {
+  beforeEach(() => {
+    calls.length = 0;
+    presence.viewers = [];
+  });
+
+  const named = (id: string) => makePerson(id, ({ "u-ben": "Ben Ortiz", "u-cy": "Cy Dunn" } as Record<string, string>)[id] ?? "Tester");
+
+  function renderWithPeople() {
+    return render(
+      <SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>
+        <PeopleContext.Provider value={named}>
+          <DetailDrawer item={ITEM} onClose={() => undefined} onChanged={() => undefined} />
+        </PeopleContext.Provider>
+      </SWRConfig>,
+    );
+  }
+
+  it("sends the heartbeat for the open item", async () => {
+    renderWithPeople();
+    await waitFor(() => {
+      expect(calls.some((c) => c.url === "/api/pm/work-items/w1/presence" && c.method === "POST")).toBe(true);
+    });
+  });
+
+  it("shows who else has it open, by name, in the header beside the key", async () => {
+    presence.viewers = ["u-ben", "u-cy"];
+    renderWithPeople();
+
+    const group = await screen.findByRole("group", { name: "Also viewing" });
+    expect(group.textContent).toContain("Also viewing");
+    expect(within(group).getByLabelText("Ben Ortiz")).toBeTruthy();
+    expect(within(group).getByLabelText("Cy Dunn")).toBeTruthy();
+    // The header is the row that carries the key and the close button.
+    // (the key appears twice: the drawer header's first, then the body's)
+    const header = screen.getAllByText("INBOX-1")[0]!.parentElement as HTMLElement;
+    expect(header.contains(group)).toBe(true);
+    expect(header.contains(screen.getByRole("button", { name: "Close" }))).toBe(true);
+  });
+
+  it("shows nothing when nobody else is there: no empty label, no placeholder", async () => {
+    renderWithPeople();
+    await waitFor(() => {
+      expect(calls.some((c) => c.url.endsWith("/presence"))).toBe(true);
+    });
+    expect(screen.queryByRole("group", { name: "Also viewing" })).toBeNull();
+    expect(screen.queryByText(/Also viewing/)).toBeNull();
   });
 });
 

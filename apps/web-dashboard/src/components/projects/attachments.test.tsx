@@ -410,7 +410,8 @@ describe("Attachments section — states", () => {
     fireEvent.drop(section(), filesDrag([makeFile("readonly.txt")]));
     fireEvent.paste(section(), { clipboardData: { files: [makeFile("readonly.png", "image/png")] } });
     expect(FakeXHR.all).toHaveLength(0);
-    expect(net.calls.filter((c) => c.method !== "GET")).toHaveLength(0);
+    // Viewing the drawer sends a presence heartbeat, but cannot mutate files.
+    expect(net.calls.filter((c) => c.method !== "GET" && !(c.method === "POST" && c.url === "/api/pm/work-items/w1/presence"))).toHaveLength(0);
   });
 
   it("has a focusable add area and a real Add files button that opens the picker", async () => {
@@ -522,7 +523,9 @@ describe("Attachments section — uploading", () => {
     fireEvent.change(sectionInput(), { target: { files: [makeFile(file)] } });
     await waitFor(() => expect(FakeXHR.all).toHaveLength(1));
     respond(FakeXHR.all[0], status, body);
-    expect(within(await uploadRows()).getByText(says)).toBeInTheDocument();
+    // The Uploads list exists before the request settles. Wait for the
+    // rejected promise to publish its error, rather than for the container.
+    expect(await within(await uploadRows()).findByText(says)).toBeInTheDocument();
     expect(screen.queryByText(/attachment_/)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Dismiss" })).toBeInTheDocument();
     // A failed row is not a progress row.
@@ -535,7 +538,7 @@ describe("Attachments section — uploading", () => {
     fireEvent.change(sectionInput(), { target: { files: [makeFile("big.bin")] } });
     await waitFor(() => expect(FakeXHR.all).toHaveLength(1));
     respond(FakeXHR.all[0], 413, "<html>Request Entity Too Large</html>");
-    expect(within(await uploadRows()).getByText("big.bin is larger than 25 MB.")).toBeInTheDocument();
+    expect(await within(await uploadRows()).findByText("big.bin is larger than 25 MB.")).toBeInTheDocument();
   });
 
   it("pasting an image into the add area uploads it, naming an unnamed one image.png", async () => {
@@ -801,7 +804,7 @@ describe("Comment composer — files", () => {
     expect(within(staged).getByText("a.txt")).toBeInTheDocument();
     expect(within(staged).getByText("b.txt")).toBeInTheDocument();
     expect(FakeXHR.all).toHaveLength(0);
-    expect(net.calls.some((c) => c.method === "POST")).toBe(false);
+    expect(net.calls.some((c) => c.method === "POST" && c.url.endsWith("/comments"))).toBe(false);
 
     fireEvent.click(send());
     await waitFor(() => expect(FakeXHR.all).toHaveLength(2));

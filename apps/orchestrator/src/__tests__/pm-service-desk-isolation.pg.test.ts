@@ -91,6 +91,9 @@ const probes: Probe[] = [
   { route: "GET /api/pm/work-items/:id/comments", kind: "desk", method: "get", url: (i) => `/api/pm/work-items/${i.deskItemId}/comments` },
   { route: "POST /api/pm/work-items/:id/comments", kind: "desk", method: "post", url: (i) => `/api/pm/work-items/${i.deskItemId}/comments`, body: { comment_html: "<p>x</p>" } },
   { route: "GET /api/pm/work-items/:id/activity", kind: "desk", method: "get", url: (i) => `/api/pm/work-items/${i.deskItemId}/activity` },
+  // Presence must not reveal Support viewers or register a Projects-only caller.
+  { route: "GET /api/pm/work-items/:id/presence", kind: "desk", method: "get", url: (i) => `/api/pm/work-items/${i.deskItemId}/presence` },
+  { route: "POST /api/pm/work-items/:id/presence", kind: "desk", method: "post", url: (i) => `/api/pm/work-items/${i.deskItemId}/presence` },
   // ── relations router ─────────────────────────────────────────────────────
   { route: "GET /api/pm/work-items/:id/relations", kind: "desk", method: "get", url: (i) => `/api/pm/work-items/${i.deskItemId}/relations` },
   { route: "POST /api/pm/work-items/:id/relations", kind: "desk", method: "post", url: (i) => `/api/pm/work-items/${i.pmItemId}/relations`, body: { to_work_item_id: "DESK_ITEM", kind: "RELATES" } },
@@ -172,13 +175,14 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
     );
     prisma = new RealPrismaClient();
     await prisma.$connect();
-    const [{ createPmNativeRouter }, { createPmRelationsRouter }, { createPmMobileRouter }, { createPmScheduleRouter }, { createPmAttachmentsRouter }, { createPmFieldsRouter }, { createPmQueryRouter }, { createPmViewsRouter }, { createPmPlanningRouter }] =
+    const [{ createPmNativeRouter }, { createPmRelationsRouter }, { createPmMobileRouter }, { createPmScheduleRouter }, { createPmAttachmentsRouter }, { createPmPresenceRouter }, { createPmFieldsRouter }, { createPmQueryRouter }, { createPmViewsRouter }, { createPmPlanningRouter }] =
       await Promise.all([
         import("../routes/pm/native.js"),
         import("../routes/pm/relations.js"),
         import("../routes/mobile/pm.js"),
         import("../routes/pm/schedule.js"),
         import("../routes/pm/attachments.js"),
+        import("../routes/pm/presence.js"),
         import("../routes/pm/fields.js"),
         import("../routes/pm/query.js"),
         import("../routes/pm/views.js"),
@@ -198,6 +202,7 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
     const query = createPmQueryRouter(prisma);
     const views = createPmViewsRouter(prisma);
     const planning = createPmPlanningRouter(prisma);
+    const presence = createPmPresenceRouter(prisma, { rateLimit: (_req, _res, next) => next() });
     routers = [
       { router: native, prefix: "/api" },
       { router: relations, prefix: "/api" },
@@ -208,6 +213,7 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
       { router: query, prefix: "/api" },
       { router: views, prefix: "/api" },
       { router: planning, prefix: "/api" },
+      { router: presence, prefix: "/api" },
     ];
     const app = express();
     app.use(express.json());
@@ -224,6 +230,7 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
     app.use("/api", query);
     app.use("/api", views);
     app.use("/api", planning);
+    app.use("/api", presence);
     app.use(
       (err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
         res.status(500).json({ error: "unhandled", message: err.message });

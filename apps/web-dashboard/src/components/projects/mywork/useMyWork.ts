@@ -13,12 +13,14 @@
 // save a request on "Load more": a loaded page is then never refetched by focus
 // at all, and the lists go stale until something calls `mutate()`.
 
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 import useSWRInfinite from "swr/infinite";
 import { pmGet } from "../calendar/pmGet";
 import type { DateOnly } from "../calendar/dateOnly";
 import type { PmWorkItem } from "../types";
 import type { PmMyWorkCounts, PmMyWorkPage, PmMyWorkProject, PmMyWorkSection } from "./types";
+import { PM_LIVE_DEBOUNCE_MS, PM_LIVE_MAX_WAIT_MS } from "../usePmLive";
+import { subscribePmLive } from "@/lib/pm-live-events";
 
 export const MY_WORK_PAGE_SIZE = 100;
 
@@ -34,6 +36,30 @@ export function useMyWork(section: PmMyWorkSection, today: DateOnly) {
     },
     (url: string) => pmGet<PmMyWorkPage>(url),
   );
+
+  // SWR's global key-filter mutation skips useSWRInfinite cache entries. Keep
+  // this personal, paged list live with its bound mutate so it revalidates the
+  // active section/pages for the current session, including after a reconnect.
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let windowStart = 0;
+    const flush = () => {
+      timer = null;
+      windowStart = 0;
+      void mutate();
+    };
+    const unsubscribe = subscribePmLive(() => {
+      const now = Date.now();
+      if (windowStart === 0) windowStart = now;
+      if (timer !== null) clearTimeout(timer);
+      const untilMaxWait = windowStart + PM_LIVE_MAX_WAIT_MS - now;
+      timer = setTimeout(flush, Math.max(0, Math.min(PM_LIVE_DEBOUNCE_MS, untilMaxWait)));
+    });
+    return () => {
+      unsubscribe();
+      if (timer !== null) clearTimeout(timer);
+    };
+  }, [mutate]);
 
   const view = useMemo(() => {
     const pages = data ?? [];

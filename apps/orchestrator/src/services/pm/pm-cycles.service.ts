@@ -565,7 +565,8 @@ export async function getCycleBurndown(
       where: { cycleId, isArchived: false },
       select: { id: true },
     });
-    const itemIds = [...new Set([...membershipRows.map((r) => r.workItemId), ...attached.map((a) => a.id)])];
+    const membershipItemIds = membershipRows.flatMap((r) => (r.workItemId === null ? [] : [r.workItemId]));
+    const itemIds = [...new Set([...membershipItemIds, ...attached.map((a) => a.id)])];
     if (itemIds.length === 0) {
       const days = reconstructBurndown({
         days: utcDayBoundaries(window.first, window.count),
@@ -596,14 +597,14 @@ export async function getCycleBurndown(
 
     const events: BurndownEvent[] = [];
     for (const r of membershipRows) {
-      if (!live.has(r.workItemId)) continue;
+      if (r.workItemId === null || !live.has(r.workItemId)) continue;
       const leaves = r.oldValue === cycleId;
       const joins = r.newValue === cycleId;
       if (leaves === joins) continue; // names this cycle on neither side (or both): not a membership change
       events.push({ kind: "membership", itemId: r.workItemId, at: r.createdAt, wasMember: leaves });
     }
     for (const r of stateRows) {
-      if (!live.has(r.workItemId)) continue;
+      if (r.workItemId === null || !live.has(r.workItemId)) continue;
       // A state id that is no longer in the project (deleted) or an item with
       // no state reads as OPEN: nothing better is knowable, and open is the
       // reading that never overstates progress.

@@ -234,7 +234,7 @@ describe("deleteWorkItem parent-removal audit (WARP-885)", () => {
         delete: async ({ where }: { where: Row }) => {
           // The audit rows must already be recorded by the time the parent
           // itself is deleted — same-transaction ordering guard.
-          expect(activityRows).toHaveLength(2);
+          expect(activityRows.filter((row) => row.verb === "parent_removed")).toHaveLength(2);
           deletedId = where.id as string;
           return {};
         },
@@ -249,6 +249,8 @@ describe("deleteWorkItem parent-removal audit (WARP-885)", () => {
           return { count: data.length };
         },
       },
+      pmWorkItemAssignee: { findMany: async () => [] },
+      user: { findMany: async () => [] },
       // WARP-2586 — deleteWorkItem now reads the item's relations before the
       // cascade, so it can emit a relation_removed audit row on the SURVIVING
       // end. Empty here: these two cases are about parent_removed.
@@ -258,14 +260,20 @@ describe("deleteWorkItem parent-removal audit (WARP-885)", () => {
       pmAttachment: { findMany: async () => [] },
     };
     const prisma = {
-      pmWorkItem: { findUnique: async () => ({ id: "parent-1" }) },
+      pmWorkItem: { findUnique: async () => ({ id: "parent-1", projectId: "project-1" }) },
       $transaction: createTransactionSeam({ client: () => tx }).$transaction,
     } as never;
 
     await deleteWorkItem(prisma, "actor-1", "parent-1");
 
     expect(deletedId).toBe("parent-1");
-    expect(activityRows).toEqual([
+    expect(activityRows).toContainEqual(expect.objectContaining({
+      workItemId: null,
+      verb: "deleted",
+      deletedProjectId: "project-1",
+      deletedWorkItemId: "parent-1",
+    }));
+    expect(activityRows.filter((row) => row.verb === "parent_removed")).toEqual([
       expect.objectContaining({
         workItemId: "child-1",
         actorId: "actor-1",
@@ -282,23 +290,38 @@ describe("deleteWorkItem parent-removal audit (WARP-885)", () => {
     ]);
   });
 
-  it("deletes cleanly with zero activity rows when the work item has no children", async () => {
-    let activityCreated = false;
+  it("persists a detached deletion tombstone for a leaf before the FK cascade", async () => {
+    const activityRows: Row[] = [];
+    let deleted = false;
     const tx = {
       pmWorkItem: {
         findMany: async () => [],
-        delete: async () => ({}),
+        delete: async () => {
+          expect(activityRows).toHaveLength(1);
+          expect(activityRows[0]).toMatchObject({
+            workItemId: null,
+            actorId: "actor-1",
+            verb: "deleted",
+            deletedProjectId: "project-1",
+            deletedWorkItemId: "leaf-1",
+            deletedGuestUserIds: ["guest-1"],
+            notifyStatus: "not_needed",
+          });
+          deleted = true;
+          return {};
+        },
       },
       pmActivity: {
-        create: async () => {
-          activityCreated = true;
+        create: async ({ data }: { data: Row }) => {
+          activityRows.push(data);
           return {};
         },
         createMany: async () => {
-          activityCreated = true;
           return { count: 0 };
         },
       },
+      pmWorkItemAssignee: { findMany: async () => [{ userId: "guest-1" }, { userId: "member-2" }] },
+      user: { findMany: async () => [{ id: "guest-1" }] },
       // WARP-2586 — deleteWorkItem now reads the item's relations before the
       // cascade, so it can emit a relation_removed audit row on the SURVIVING
       // end. Empty here: these two cases are about parent_removed.
@@ -308,13 +331,13 @@ describe("deleteWorkItem parent-removal audit (WARP-885)", () => {
       pmAttachment: { findMany: async () => [] },
     };
     const prisma = {
-      pmWorkItem: { findUnique: async () => ({ id: "leaf-1" }) },
+      pmWorkItem: { findUnique: async () => ({ id: "leaf-1", projectId: "project-1" }) },
       $transaction: createTransactionSeam({ client: () => tx }).$transaction,
     } as never;
 
-    await deleteWorkItem(prisma, null, "leaf-1");
+    await deleteWorkItem(prisma, "actor-1", "leaf-1");
 
-    expect(activityCreated).toBe(false);
+    expect(deleted).toBe(true);
   });
 
   // WARP-2586 (review): the relation audit is the part worth a test of its
@@ -327,7 +350,7 @@ describe("deleteWorkItem parent-removal audit (WARP-885)", () => {
         findMany: async () => [],
         delete: async () => {
           // Audit rows first; the cascade must never be the only record.
-          expect(audit).toHaveLength(2);
+          expect(audit.filter((row) => row.verb === "relation_removed")).toHaveLength(2);
           deleted = true;
           return {};
         },
@@ -342,6 +365,8 @@ describe("deleteWorkItem parent-removal audit (WARP-885)", () => {
           return { count: data.length };
         },
       },
+      pmWorkItemAssignee: { findMany: async () => [] },
+      user: { findMany: async () => [] },
       pmWorkItemRelation: {
         findMany: async ({ where }: { where: Row }) => {
           expect(where).toEqual({ OR: [{ fromId: "x" }, { toId: "x" }] });
@@ -356,7 +381,7 @@ describe("deleteWorkItem parent-removal audit (WARP-885)", () => {
     };
     const seam = createTransactionSeam({ client: () => tx });
     const prisma = {
-      pmWorkItem: { findUnique: async () => ({ id: "x" }) },
+      pmWorkItem: { findUnique: async () => ({ id: "x", projectId: "project-1" }) },
       $transaction: seam.$transaction,
     } as never;
 
@@ -366,8 +391,17 @@ describe("deleteWorkItem parent-removal audit (WARP-885)", () => {
     // A relation committed between the audit read and the delete must abort
     // this transaction, not slip through the cascade unrecorded. The seam
     // records the options argument, so dropping SERIALIZABLE_TX goes red.
-    expectAllTransactionsAt(seam, SERIALIZABLE_TX);
+    expectAllTransactionsAt(seam, { ...SERIALIZABLE_TX, timeout: 5_000 });
     expect(audit).toEqual([
+      expect.objectContaining({
+        workItemId: null,
+        actorId: "actor-1",
+        verb: "deleted",
+        deletedProjectId: "project-1",
+        deletedWorkItemId: "x",
+        deletedGuestUserIds: [],
+        notifyStatus: "not_needed",
+      }),
       expect.objectContaining({
         workItemId: "other-1",
         actorId: "actor-1",
@@ -390,7 +424,7 @@ describe("deleteWorkItem parent-removal audit (WARP-885)", () => {
       throw Object.assign(new Error("could not serialize access"), { code: "P2034" });
     });
     const prisma = {
-      pmWorkItem: { findUnique: async () => ({ id: "x" }) },
+      pmWorkItem: { findUnique: async () => ({ id: "x", projectId: "project-1" }) },
       $transaction: seam.$transaction,
     } as never;
     await expect(deleteWorkItem(prisma, null, "x")).rejects.toThrow("concurrent_mutation");
