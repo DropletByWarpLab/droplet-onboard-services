@@ -70,6 +70,7 @@ import {
 import type { ApDeviceInfo, ApDeviceStatus, ApOnboardBackend } from "@/lib/types";
 import { networkTabHref } from "@/app/network/tab-url";
 import { ApRadioDetail } from "@/components/network/ApRadioDetail";
+import { DevicePairingCard } from "@/components/network/DevicePairingCard";
 import {
   AP_WIFI_KEY,
   AP_WIFI_SWR_OPTIONS,
@@ -347,6 +348,14 @@ function ApCard({ ap, onApprove, onRequestRemove, busy }: ApCardProps) {
               their own controllers. */}
           {ap.status === "ONLINE" && ap.backend === "DROPLET_IMAGE" ? (
             <ApRadioDetail mac={ap.mac} />
+          ) : null}
+          {/* ADR-071 slice C: a Droplet-image AP whose pairing window is open
+              offers Pair next to Approve (credential first, then the Wi-Fi
+              approval). Self-gating: renders nothing unless the AP's own
+              `droplet.pair status` has something to offer. One AP secret per
+              box (ADR-071 section 2.3): pairing another AP replaces this one's. */}
+          {ap.backend === "DROPLET_IMAGE" && (showApprove || isFailed) ? (
+            <DevicePairingCard role="ap" mac={ap.mac} model={ap.model} variant="inline" />
           ) : null}
         </div>
       </div>
