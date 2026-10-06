@@ -5,6 +5,8 @@ import { ImageOff } from "lucide-react";
 
 interface Props {
   src: string;
+  /** Try an event's preview if its full saved picture has expired. */
+  fallbackSrc?: string | null;
   /** Spoken label for the picture. Never painted: a failed load shows the placeholder, not this text. */
   alt: string;
   className?: string;
@@ -42,6 +44,7 @@ interface Props {
  */
 export function ThumbImage({
   src,
+  fallbackSrc,
   alt,
   className,
   placeholderClassName = "w-full h-full",
@@ -51,9 +54,18 @@ export function ThumbImage({
 }: Props) {
   // What failed, as a single key: the picture AND the chance it had.
   const [failedKey, setFailedKey] = useState<string | null>(null);
+  const [failedFallbackKey, setFailedFallbackKey] = useState<string | null>(
+    null,
+  );
   const attemptKey = `${retryKey ?? ""}\u0000${src}`;
+  const fallbackKey = `${attemptKey}\u0000${fallbackSrc ?? ""}`;
+  const useFallback =
+    failedKey === attemptKey && Boolean(fallbackSrc && fallbackSrc !== src);
 
-  if (failedKey === attemptKey) {
+  if (
+    failedKey === attemptKey &&
+    (!useFallback || failedFallbackKey === fallbackKey)
+  ) {
     return (
       <div
         data-testid="thumb-fallback"
@@ -67,11 +79,15 @@ export function ThumbImage({
 
   return (
     <img
-      src={src}
+      src={useFallback ? fallbackSrc! : src}
       alt={alt}
       className={className}
       loading={loading}
-      onError={() => setFailedKey(attemptKey)}
+      onError={() =>
+        useFallback
+          ? setFailedFallbackKey(fallbackKey)
+          : setFailedKey(attemptKey)
+      }
     />
   );
 }

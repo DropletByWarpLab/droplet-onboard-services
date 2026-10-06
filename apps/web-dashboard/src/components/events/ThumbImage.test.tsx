@@ -90,6 +90,18 @@ describe("ThumbImage", () => {
 });
 
 describe("ThumbImage retryKey", () => {
+  it("tries the preview after a saved snapshot expires and stops after both fail", () => {
+    const { container, rerender } = render(<ThumbImage src="/snapshot" fallbackSrc="/thumbnail" alt="person" retryKey={null} />);
+    fireEvent.error(container.querySelector("img")!);
+    expect(container.querySelector("img")).toHaveAttribute("src", "/thumbnail");
+    fireEvent.error(container.querySelector("img")!);
+    expect(container.querySelector("img")).toBeNull();
+    rerender(<ThumbImage src="/snapshot" fallbackSrc="/thumbnail" alt="person" retryKey={null} />);
+    expect(container.querySelector("img")).toBeNull();
+    rerender(<ThumbImage src="/snapshot" fallbackSrc="/thumbnail" alt="person" retryKey={5} />);
+    expect(container.querySelector("img")).toHaveAttribute("src", "/snapshot");
+  });
+
   // Frigate writes an event's thumbnail some time after the event begins, so the
   // first request for an event in progress can 404 and a later one succeed, at
   // the SAME url. A card that remembered the failure for good never showed it.

@@ -32,6 +32,9 @@ import { isCamerasUnavailableError } from "@/lib/files-unavailable";
 import type { CameraInfo, DetectionEvent, PtzCapabilities } from "@/lib/types";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useToast } from "@/components/Toast";
+import { EventClipModal } from "@/components/events/EventClipModal";
+import { ThumbImage } from "@/components/events/ThumbImage";
+import { cameraDetectionDetail } from "@/lib/camera-detection";
 
 const STATUS_COLORS: Record<CameraInfo["status"], string> = {
   recording: "text-system-green",
@@ -69,6 +72,7 @@ export default function CameraFullscreenPage() {
 
   const { cameras, isLoading, refresh, enableCam, disableCam, removeCam } = useCameras();
   const [removeOpen, setRemoveOpen] = useState(false);
+  const [selectedDetection, setSelectedDetection] = useState<DetectionEvent | null>(null);
   // WARP-3511: enabling / disabling is a settings write that restarts the
   // camera service, so it is confirmed first and its failures are said.
   const [toggle, setToggle] = useState<"enable" | "disable" | null>(null);
@@ -172,7 +176,9 @@ export default function CameraFullscreenPage() {
   // page (typically /cameras), not into a dead-end of the same route.
   useEffect(() => {
     function onKey(ev: KeyboardEvent) {
-      if (ev.key === "Escape") router.replace("/cameras");
+      if (ev.key === "Escape" && !document.querySelector('[role="dialog"][aria-modal="true"]')) {
+        router.replace("/cameras");
+      }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -510,30 +516,35 @@ export default function CameraFullscreenPage() {
               {events && events.length > 0 ? (
                 <ul className="space-y-2">
                   {events.map((ev) => (
-                    <li
-                      key={ev.id}
-                      className="flex items-start gap-3 p-2 rounded-lg hover:bg-white/5 transition-colors"
-                    >
-                      {ev.thumbnail ? (
-                        <img
-                          src={ev.thumbnail}
-                          alt={ev.label}
-                          className="w-16 h-12 rounded object-cover flex-shrink-0 bg-surface-secondary"
-                        />
-                      ) : (
-                        <div className="w-16 h-12 rounded bg-surface-secondary flex-shrink-0" />
-                      )}
-                      <div className="flex-1 min-w-0">
-                        <p className="type-footnote text-white capitalize truncate">
-                          {ev.label}
-                        </p>
-                        <p className="type-caption-2 text-white/60">
-                          {new Date(ev.startTime * 1000).toLocaleString()}
-                        </p>
-                      </div>
-                      <span className="type-caption-2 text-white/60 flex-shrink-0">
-                        {Math.round(ev.score * 100)}%
-                      </span>
+                    <li key={ev.id}>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedDetection(ev)}
+                        aria-label={`View ${ev.label}, ${new Date(ev.startTime * 1000).toLocaleString()}`}
+                        className="flex items-start gap-3 p-2 rounded-lg hover:bg-white/5 transition-colors w-full text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                      >
+                        <div className="w-16 h-12 rounded overflow-hidden flex-shrink-0 bg-surface-secondary">
+                          <ThumbImage
+                            src={cameraDetectionDetail(ev).thumbnail}
+                            alt={ev.label}
+                            className="w-full h-full object-cover"
+                            retryKey={ev.endTime}
+                            loading="lazy"
+                            iconSize={16}
+                          />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="type-footnote text-white capitalize truncate">
+                            {ev.label}
+                          </p>
+                          <p className="type-caption-2 text-white/60">
+                            {new Date(ev.startTime * 1000).toLocaleString()}
+                          </p>
+                        </div>
+                        <span className="type-caption-2 text-white/60 flex-shrink-0">
+                          {Math.round(ev.score * 100)}%
+                        </span>
+                      </button>
                     </li>
                   ))}
                 </ul>
@@ -561,6 +572,15 @@ export default function CameraFullscreenPage() {
             </div>
           </div>
         </aside>
+        {selectedDetection && (
+          <EventClipModal
+            key={selectedDetection.id}
+            event={cameraDetectionDetail(events?.find((event) => event.id === selectedDetection.id) ?? selectedDetection)}
+            initialMedia="snapshot"
+            cameraName={camera.displayName || camera.name}
+            onClose={() => setSelectedDetection(null)}
+          />
+        )}
       </div>
     </div>
   );
