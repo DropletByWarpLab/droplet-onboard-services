@@ -1,6 +1,7 @@
-// Unit tests for the work-item DetailDrawer — comment composer must revalidate
-// the activity feed (the server writes a `commented` PmActivity row in the same
-// transaction as the PmComment, so the timeline is stale until refetch). (WARP-882 / ADR-026 P5)
+// Unit tests for the work-item DetailDrawer — the comment composer must
+// revalidate the merged activity timeline (the server writes a `commented`
+// PmActivity row in the same transaction as the PmComment, so the thread is stale
+// until refetch). (WARP-882 / ADR-026 P5; the timeline itself is WARP-3519.)
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
@@ -12,14 +13,18 @@ import type { PmWorkItem } from "./types";
 
 // Mock the auth layer that every usePm read/write flows through. We hand back
 // canned JSON keyed by URL and record every call (with body) so we can assert
-// the activity endpoint is re-fetched after a comment post AND that the labels
-// editor PATCHes the work item with the chosen label ids.
+// the timeline endpoint is re-fetched after a comment post AND that the labels
+// editor PATCHes the work item with the chosen label ids. The rich-text editor
+// is the plain-textarea double (timeline.test.tsx covers the Activity section
+// itself; this file only proves the drawer hosts it).
 const calls: { url: string; method: string; body?: unknown }[] = [];
 
 const PROJECT_LABELS = [
   { id: "lab-1", projectId: "p", name: "bug", color: "#ef4444" },
   { id: "lab-2", projectId: "p", name: "frontend", color: "#6366f1" },
 ];
+
+vi.mock("./editor/RichTextEditor", () => import("./fakeEditor"));
 
 vi.mock("@/lib/auth", () => ({
   // The drawer reads the role to decide whether to offer attachment writes (WARP-1505).
@@ -34,6 +39,10 @@ vi.mock("@/lib/auth", () => ({
     if (url.endsWith("/comments") && method === "POST") {
       return json({ comment: { id: "c-new", workItemId: "w1", authorId: "u1", commentHtml: "<p>hi</p>", createdAt: "2026-06-22T21:16:00.000Z" } });
     }
+    if (url.includes("/timeline")) {
+      return json({ timeline: [], refs: { states: {}, labels: {}, workItems: {} }, nextCursor: null, total: 0 });
+    }
+    if (url.endsWith("/watchers")) return json({ watchers: [] });
     if (url.includes("/comments")) return json({ comments: [], nextCursor: null, total: 0 });
     if (url.includes("/activity")) return json({ activity: [], nextCursor: null, total: 0 });
     if (url.endsWith("/development")) return json({ links: [{
@@ -87,22 +96,23 @@ function renderDrawer() {
   );
 }
 
-describe("DetailDrawer — comment post revalidates activity", () => {
+describe("DetailDrawer — comment post revalidates the timeline", () => {
   beforeEach(() => {
     calls.length = 0;
   });
 
-  it("re-fetches the activity feed after a comment is sent", async () => {
+  const timelineReads = () =>
+    calls.filter((c) => c.url.includes("/timeline") && c.method === "GET").length;
+
+  it("re-fetches the timeline after a comment is sent", async () => {
     renderDrawer();
 
-    // Wait for the initial activity read so we can count subsequent ones.
-    await waitFor(() => {
-      expect(calls.some((c) => c.url.includes("/activity") && c.method === "GET")).toBe(true);
-    });
-    const activityReadsBefore = calls.filter((c) => c.url.includes("/activity") && c.method === "GET").length;
+    // Wait for the initial timeline read so we can count subsequent ones.
+    await waitFor(() => expect(timelineReads()).toBeGreaterThan(0));
+    const readsBefore = timelineReads();
 
-    const textarea = screen.getByLabelText("Write a comment");
-    fireEvent.change(textarea, { target: { value: "looks good" } });
+    const editor = screen.getByLabelText("Write a comment");
+    fireEvent.change(editor, { target: { value: "looks good" } });
     fireEvent.click(screen.getByRole("button", { name: /Send/ }));
 
     // The POST must land …
@@ -110,11 +120,16 @@ describe("DetailDrawer — comment post revalidates activity", () => {
       expect(calls.some((c) => c.url.endsWith("/comments") && c.method === "POST")).toBe(true);
     });
 
-    // … and the activity feed must be revalidated (an extra GET) afterwards.
-    await waitFor(() => {
-      const activityReadsAfter = calls.filter((c) => c.url.includes("/activity") && c.method === "GET").length;
-      expect(activityReadsAfter).toBeGreaterThan(activityReadsBefore);
-    });
+    // … and the thread must be revalidated (an extra GET) afterwards.
+    await waitFor(() => expect(timelineReads()).toBeGreaterThan(readsBefore));
+  });
+
+  it("hosts the Activity section and the watch control", async () => {
+    renderDrawer();
+    expect(await screen.findByRole("heading", { name: /^Activity/ })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Watch" })).toBeInTheDocument();
+    // The old append-only Comments section is gone (the filter pill is a button, not a heading).
+    expect(screen.queryByRole("heading", { name: /^Comments/ })).toBeNull();
   });
 });
 

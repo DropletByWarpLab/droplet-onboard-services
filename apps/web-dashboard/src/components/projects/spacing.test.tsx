@@ -25,7 +25,19 @@ vi.mock("@/lib/auth", () => ({
     Promise.resolve({
       ok: true,
       status: 200,
-      json: () => Promise.resolve({ states: [], comments: [], activity: [], work_items: [], users: [] }),
+      json: () =>
+        Promise.resolve({
+          states: [],
+          comments: [],
+          activity: [],
+          work_items: [],
+          users: [],
+          timeline: [],
+          refs: { states: {}, labels: {}, workItems: {} },
+          nextCursor: null,
+          total: 0,
+          watchers: [],
+        }),
     } as Response),
   ),
 }));

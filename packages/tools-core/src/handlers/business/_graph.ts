@@ -452,6 +452,9 @@ interface PmCommentRow {
   id: string;
   commentHtml: string;
   createdAt: string;
+  /** WARP-3519 — a deleted comment stays in the list as a tombstone (empty
+   *  body). Absent on an orchestrator that predates comment deletion. */
+  deleted?: boolean;
 }
 
 /** Longest comment excerpt a timeline row carries. A feed is a list of what
@@ -486,7 +489,10 @@ export function commentToLine(html: string): string {
  * `addComment` writes BOTH a `PmComment` and a `verb: "commented"` activity
  * row, so a naive merge reports every comment twice — once with its text and
  * once as a bare "commented". The activity row is the one that gets dropped:
- * it carries strictly less.
+ * it carries strictly less. WARP-3519: the same goes for `mentioned` (the
+ * notification-queue row for one person the comment names — the comment says
+ * it), and a DELETED comment is a tombstone with no text, so it is not an entry
+ * at all (its `comment_deleted` activity row still is).
  */
 export function mergePmFeed(
   activity: PmActivityRow[],
@@ -494,7 +500,7 @@ export function mergePmFeed(
 ): TimelineEntryOut[] {
   const out: TimelineEntryOut[] = [];
   for (const a of activity) {
-    if (a.verb === "commented") continue;
+    if (a.verb === "commented" || a.verb === "mentioned") continue;
     out.push({
       id: a.id,
       source: "pm",
@@ -506,6 +512,7 @@ export function mergePmFeed(
     });
   }
   for (const c of comments) {
+    if (c.deleted) continue;
     out.push({
       id: c.id,
       source: "pm",

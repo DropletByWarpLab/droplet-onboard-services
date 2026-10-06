@@ -82,6 +82,23 @@ const file = (over: Partial<{ originalname: string; mimetype: string; size: numb
   ...over,
 });
 
+describe("deleted comment attachment boundaries", () => {
+  it("refuses a new upload to a tombstone, even for an admin", async () => {
+    const f = makeFake(); f.db.comments[0].isDeleted = true;
+    await expect(beginUpload(f.prisma, { actorId: "u-admin", isAdmin: true, workItemId: "wi-1", commentId: "c-1" })).rejects.toThrow(E.COMMENT_NOT_FOUND);
+    expect(f.db.attachments).toHaveLength(0);
+  });
+  it("does not publish an upload when its comment was deleted while bytes streamed", async () => {
+    const f = makeFake();
+    const ticket = await startUpload(f, { actorId: "u-alice", commentId: "c-1" });
+    f.db.comments[0].isDeleted = true;
+    await expect(finalizeUpload(f.prisma, { ticket, workItemId: "wi-1", actorId: "u-alice", file: file(), root })).rejects.toThrow(E.COMMENT_NOT_FOUND);
+    expect(f.db.attachments).toHaveLength(0);
+    expect(blobExists(ticket.storageKey)).toBe(false);
+    expect(f.db.activity).toHaveLength(0);
+  });
+});
+
 // ── beginUpload ──────────────────────────────────────────────────────────────
 
 describe("the shared work-item boundary", () => {

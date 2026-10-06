@@ -178,6 +178,7 @@ const SURFACES: ReadonlyArray<{ module: ModuleId; label: string; files: string[]
     files: [
       ["routes", "pm", "native.ts"],
       ["routes", "pm", "relations.ts"],
+      ["routes", "pm", "collaboration.ts"],
       // WARP-3522 — the query API, by-key lookup and saved views.
       ["routes", "pm", "query.ts"],
       ["routes", "pm", "views.ts"],
@@ -186,7 +187,7 @@ const SURFACES: ReadonlyArray<{ module: ModuleId; label: string; files: string[]
       ["routes", "pm", "planning.ts"],
       ["routes", "mobile", "pm.ts"],
     ],
-    atLeast: 50,
+    atLeast: 52,
   },
   // WARP-3365 review: what the business is owed and owes is the company's own.
   {
