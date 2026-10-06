@@ -25,6 +25,7 @@ except ImportError:
 import os
 import asyncio
 import logging
+import secrets
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -39,6 +40,18 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from _shared.internal_tls import base_url as _internal_base_url, httpx_client_kwargs
 
 from drivers import create_driver
+from pairing import (
+    FINGERPRINT_RE,
+    PairingApi,
+    PairingClaimError,
+    PairingProtocolError,
+    PairingState,
+    PairingUnsupported,
+    PairStatus,
+    STATE_CLOSED,
+    STATE_OPEN,
+    STATE_PAIRED,
+)
 from drivers.base import (
     SwitchDriver,
     SwitchError,
@@ -53,6 +66,7 @@ from provisioner import ProvisionConfig, reconcile_switch
 import provision_state
 from schemas import (
     HealthResponse,
+    PairingFingerprintRequest,
     CreateVlanRequest,
     SetVlanMembershipRequest,
     CameraSetupRequest,
@@ -328,11 +342,196 @@ def get_driver() -> SwitchDriver:
     return driver_instance
 
 
+# ---------------------------------------------------------------------------
+# Switch pairing (ADR-071 slice C, WARP-3739)
+# ---------------------------------------------------------------------------
+# The switch (reflashed to the Droplet OpenWrt image) opens a pairing window
+# (`droplet.pair`, null-session ubus); the box mints the credential, claims,
+# proves the claim by logging in, switches its live driver and hands the
+# password to the orchestrator over this service-token channel. The
+# orchestrator persists it (device-bridge -> droplet-pair-apply, target
+# "switch") and confirms with POST /pairing/persisted. Until then the password
+# is held in memory (`pending_persist`). Same contract as services/routing.
+#
+# EXPLICIT state, never derived from absence: `_auth_rejected` is True only
+# after the switch ANSWERED and refused our credential (startup connect, a
+# runtime login, or /health saw AuthenticationError). While it is True - and
+# only then - one apscheduler job re-tries the login with the current holder
+# value and asks `droplet.pair status` (null session) so /health can say
+# "window open". No `while True`: the job removes itself when the state clears.
+pairing_state = PairingState()
+_auth_rejected = False
+_pairing_scheduler = None
+_pairing_lock = asyncio.Lock()
+PAIRING_PROBE_JOB_ID = "switch-pairing-probe"
+PAIRING_PROBE_SECONDS = float(os.environ.get("SWITCH_PAIRING_PROBE_SECONDS", "30"))
+
+_SWITCH_AUTH_MESSAGE = (
+    "The switch rejected the stored credentials - it was likely reflashed. "
+    "Pair it again from the dashboard."
+)
+
+
+def _read_switch_password_file() -> str:
+    """Quiet re-read of the secret file (no warnings - this runs at every
+    login). Empty string when the file is absent, empty or unreadable."""
+    secret_path = os.environ.get("SWITCH_PASSWORD_FILE", "/run/secrets/switch_password")
+    try:
+        with open(secret_path, "r", encoding="utf-8") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+def current_switch_password() -> str:
+    """The password every switch login uses - the "holder" the driver resolves
+    at login time (ADR-071 runtime reload), not a value frozen at construction.
+
+    Resolution order: the password minted by a claim in this process (the
+    secret file still holds the OLD value until the orchestrator persists the
+    new one) -> the secret file, re-read every call so a container recreate or
+    an out-of-band update is picked up -> the deprecated SWITCH_PASSWORD env.
+    """
+    return (
+        pairing_state.live_password()
+        or _read_switch_password_file()
+        or os.environ.get("SWITCH_PASSWORD", "")
+    )
+
+
+def _pairing_api() -> PairingApi:
+    """Null-session `droplet.pair` client against the configured switch."""
+    return PairingApi(SWITCH_HOST, SWITCH_PORT)
+
+
+def _remove_probe_job() -> None:
+    if _pairing_scheduler is None:
+        return
+    try:
+        _pairing_scheduler.remove_job(PAIRING_PROBE_JOB_ID)
+    except Exception:  # noqa: BLE001 - not scheduled is fine
+        pass
+
+
+def _ensure_probe_job() -> None:
+    if _pairing_scheduler is None:
+        return
+    _pairing_scheduler.add_job(
+        _auth_state_tick,
+        "interval",
+        seconds=PAIRING_PROBE_SECONDS,
+        id=PAIRING_PROBE_JOB_ID,
+        max_instances=1,
+        coalesce=True,
+        replace_existing=True,
+    )
+
+
+def _enter_auth_rejected() -> None:
+    """The switch answered and refused our credential."""
+    global _auth_rejected
+    if not _auth_rejected:
+        logger.warning(
+            "SWITCH_AUTH: the switch at %s rejected the stored credentials - "
+            "watching for a pairing window.",
+            SWITCH_HOST,
+        )
+    _auth_rejected = True
+    _ensure_probe_job()
+
+
+def _clear_auth_rejected() -> None:
+    global _auth_rejected
+    _auth_rejected = False
+    _remove_probe_job()
+
+
+def _schedule_autoprovision() -> None:
+    """After a successful (re)connect the switch is back: run the same bring-up
+    reconcile the lifespan runs, when SWITCH_AUTOPROVISION is on. Non-blocking
+    and never raises (run_provisioner_safe swallows everything)."""
+    global _provision_task
+    if not autoprovision_enabled() or driver_instance is None:
+        return
+    if _provision_task is not None and not _provision_task.done():
+        return
+    logger.info("provisioner: switch (re)connected after pairing - scheduling reconcile.")
+    _provision_task = asyncio.create_task(run_provisioner_safe())
+
+
+async def _reconnect_driver() -> bool:
+    """One login attempt with the current holder value. True = connected and the
+    live driver replaced. An auth refusal leaves the state; anything else
+    (unreachable, odd failure) ends the auth-rejected state - it is no longer
+    "answered and refused", so probing `droplet.pair` would be a guess."""
+    global driver_instance
+    candidate = create_driver(current_switch_password)
+    try:
+        await candidate.connect()
+    except AuthenticationError:
+        await candidate.disconnect()
+        return False
+    except Exception as exc:  # noqa: BLE001
+        logger.info("switch reconnect while auth-rejected failed (%s) - not an auth state", exc)
+        await candidate.disconnect()
+        _clear_auth_rejected()
+        return False
+    old, driver_instance = driver_instance, candidate
+    _clear_auth_rejected()
+    if old is not None:
+        try:
+            await old.disconnect()
+        except Exception:  # noqa: BLE001 - best-effort close of the stale driver
+            pass
+    logger.info("Switch reconnected (driver: %s, host: %s)", SWITCH_DRIVER, SWITCH_HOST)
+    _schedule_autoprovision()
+    return True
+
+
+async def _auth_state_tick() -> None:
+    """The scheduler job: runs ONLY while `_auth_rejected`. Re-tries the login
+    (the secret file may have been re-synced out of band), then asks the switch
+    whether a pairing window is open. Never raises."""
+    try:
+        if not _auth_rejected:
+            _remove_probe_job()
+            return
+        if _pairing_lock.locked():
+            return  # a claim is in flight; it owns the state
+        if await _reconnect_driver():
+            return
+        if not _auth_rejected:
+            return
+        try:
+            pairing_state.record_probe(await _pairing_api().status())
+        except PairingUnsupported:
+            pairing_state.record_probe(PairStatus())
+        except (ConnectionLost, PairingProtocolError) as exc:
+            logger.warning("droplet.pair status probe failed: %s", exc)
+            pairing_state.record_probe(PairStatus())
+    except Exception:  # noqa: BLE001 - a probe tick must never kill the scheduler job
+        logger.exception("switch pairing tick raised")
+
+
+def _paired_elsewhere_detail(paired_box: str) -> dict:
+    return {
+        "code": "SWITCH_PAIRED_ELSEWHERE",
+        "message": (
+            "This switch is paired to another device (fingerprint "
+            f"{paired_box[:16]}...). Press the switch's button to re-pair."
+        ),
+        "paired_box": paired_box,
+    }
+
+
 def handle_switch_error(exc: SwitchError):
     """Convert driver exceptions to HTTP responses."""
     if isinstance(exc, ConnectionLost):
         raise HTTPException(status_code=503, detail=f"Switch unreachable: {exc}")
     if isinstance(exc, AuthenticationError):
+        # ADR-071: an explicit state, so the scheduler starts watching for a
+        # pairing window instead of the orchestrator guessing from 401s.
+        _enter_auth_rejected()
         raise HTTPException(status_code=401, detail=f"Switch auth failed: {exc}")
     if isinstance(exc, PoweredMemberError):
         # 409, not 400: the request is well-formed and the operator may
@@ -366,14 +565,31 @@ def handle_switch_error(exc: SwitchError):
 # ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global driver_instance, _provision_task
+    global driver_instance, _provision_task, _pairing_scheduler, _auth_rejected
+    _auth_rejected = False
     try:
-        driver_instance = create_driver()
+        driver_instance = create_driver(current_switch_password)
         await driver_instance.connect()
         logger.info("Switch service ready (driver: %s, host: %s)", SWITCH_DRIVER, SWITCH_HOST)
+    except AuthenticationError as exc:
+        # The switch answered and refused our credential (reflashed -> a new
+        # per-unit password). Distinct from "unreachable": ADR-071 pairing.
+        logger.warning("Switch at %s rejected our credentials: %s", SWITCH_HOST, exc)
+        driver_instance = None
+        _auth_rejected = True
     except Exception as exc:
         logger.warning("Could not connect to switch at %s: %s", SWITCH_HOST, exc)
         driver_instance = None
+
+    # ADR-071: the one scheduler this service owns. Idle unless the switch has
+    # refused our credential; the probe job is added then and removes itself
+    # when the state clears.
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+    _pairing_scheduler = AsyncIOScheduler()
+    _pairing_scheduler.start()
+    if _auth_rejected:
+        _ensure_probe_job()
 
     # ADR-018 item 9: bring-up provisioning. Gated by SWITCH_AUTOPROVISION
     # (default off) AND only when the driver connected (switch-absent = no-op).
@@ -405,6 +621,10 @@ async def lifespan(app: FastAPI):
         except (asyncio.CancelledError, Exception):
             pass
 
+    if _pairing_scheduler is not None:
+        _pairing_scheduler.shutdown(wait=False)
+        _pairing_scheduler = None
+
     if driver_instance:
         await driver_instance.disconnect()
         logger.info("Switch service stopped")
@@ -424,6 +644,29 @@ app.add_middleware(ServiceAuthMiddleware)
 # ---------------------------------------------------------------------------
 # Health
 # ---------------------------------------------------------------------------
+def _auth_rejected_health(status: str, auth_configured: bool) -> HealthResponse:
+    """The switch refused our credential: `SWITCH_AUTH`, or - when the cached
+    `droplet.pair status` probe says it is enrolled to a DIFFERENT box -
+    `SWITCH_PAIRED_ELSEWHERE`. Served from cache; never touches the network."""
+    foreign = pairing_state.foreign_paired_box()
+    if foreign:
+        error = _paired_elsewhere_detail(foreign)["message"]
+        error_code = "SWITCH_PAIRED_ELSEWHERE"
+    else:
+        error = _SWITCH_AUTH_MESSAGE
+        error_code = "SWITCH_AUTH"
+    return HealthResponse(
+        status=status,
+        connected=False,
+        switch_host=SWITCH_HOST,
+        driver=SWITCH_DRIVER,
+        error=error,
+        error_code=error_code,
+        auth_configured=auth_configured,
+        pairing=pairing_state.snapshot(connected=False, auth_failed=True),
+    )
+
+
 @app.get("/health", response_model=HealthResponse)
 async def health():
     # Presence ONLY — never leak the secret value. /health stays auth-exempt
@@ -433,6 +676,8 @@ async def health():
     # SWITCH_ALLOW_NO_AUTH the field is moot, so report it as configured.
     auth_configured = bool(SERVICE_SECRET) or SWITCH_ALLOW_NO_AUTH
     if driver_instance is None:
+        if _auth_rejected:
+            return _auth_rejected_health("disconnected", auth_configured)
         return HealthResponse(
             status="disconnected",
             connected=False,
@@ -440,6 +685,7 @@ async def health():
             driver=SWITCH_DRIVER,
             error="Switch not connected at startup",
             auth_configured=auth_configured,
+            pairing=pairing_state.snapshot(connected=False, auth_failed=False),
         )
     try:
         # WARP-2111: get_system_info() is the reachability probe — a successful
@@ -458,7 +704,11 @@ async def health():
             switch_host=SWITCH_HOST,
             driver=SWITCH_DRIVER,
             auth_configured=auth_configured,
+            pairing=pairing_state.snapshot(connected=True, auth_failed=False),
         )
+    except AuthenticationError:
+        _enter_auth_rejected()
+        return _auth_rejected_health("error", auth_configured)
     except SwitchError as exc:
         return HealthResponse(
             status="error",
@@ -467,7 +717,170 @@ async def health():
             driver=SWITCH_DRIVER,
             error=str(exc),
             auth_configured=auth_configured,
+            pairing=pairing_state.snapshot(connected=False, auth_failed=False),
         )
+
+
+# ---------------------------------------------------------------------------
+# Switch pairing routes (ADR-071 slice C, WARP-3739)
+# ---------------------------------------------------------------------------
+def _pair_error(status: int, code: str, detail: str, **extra) -> JSONResponse:
+    return JSONResponse(
+        status_code=status,
+        content={"code": code, "detail": detail, **extra},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+def _valid_fingerprint(value: Optional[str]) -> bool:
+    return isinstance(value, str) and FINGERPRINT_RE.match(value) is not None
+
+
+@app.put("/pairing/identity")
+async def pairing_identity(req: PairingFingerprintRequest):
+    """Record this box's fingerprint so a switch paired to a DIFFERENT box can be
+    named SWITCH_PAIRED_ELSEWHERE even before the first claim."""
+    if not _valid_fingerprint(req.box_fingerprint):
+        return _pair_error(
+            400, "INVALID_FINGERPRINT", "box_fingerprint must be 64 lowercase hex characters"
+        )
+    pairing_state.set_box_fingerprint(req.box_fingerprint)
+    return {"ok": True}
+
+
+@app.post("/pairing/claim")
+async def pairing_claim(req: PairingFingerprintRequest):
+    """Mint a password, claim the switch with it, prove the claim, go live on it."""
+    global driver_instance
+    fingerprint = req.box_fingerprint
+    if not _valid_fingerprint(fingerprint):
+        return _pair_error(
+            400, "INVALID_FINGERPRINT", "box_fingerprint must be 64 lowercase hex characters"
+        )
+    if SWITCH_DRIVER != "openwrt":
+        return _pair_error(
+            502, "PAIR_UNSUPPORTED", f"pairing is unavailable for SWITCH_DRIVER={SWITCH_DRIVER}"
+        )
+    if _pairing_lock.locked():
+        return _pair_error(409, "PAIR_BUSY", "a pairing is already in progress")
+
+    async with _pairing_lock:
+        pairing_state.set_box_fingerprint(fingerprint)
+
+        api = _pairing_api()
+        try:
+            status = await api.status()
+        except PairingUnsupported:
+            return _pair_error(502, "PAIR_UNSUPPORTED", "switch does not provide droplet.pair")
+        except (ConnectionLost, PairingProtocolError) as exc:
+            return _pair_error(503, "SWITCH_UNREACHABLE", f"switch unreachable: {exc}")
+        pairing_state.record_probe(status)
+
+        if status.state == STATE_PAIRED:
+            if status.paired_box and status.paired_box != fingerprint:
+                return _pair_error(
+                    409,
+                    "SWITCH_PAIRED_ELSEWHERE",
+                    "switch is paired to another device; press its button to re-pair",
+                    paired_box=status.paired_box,
+                )
+            return _pair_error(
+                409, "PAIR_WINDOW_CLOSED", "switch is already paired and no pairing window is open"
+            )
+        if status.state != STATE_OPEN:
+            if status.state == STATE_CLOSED:
+                return _pair_error(409, "PAIR_WINDOW_CLOSED", "no pairing window is open")
+            return _pair_error(
+                502, "PAIR_UNSUPPORTED", "switch pairing state could not be determined"
+            )
+
+        password = secrets.token_hex(16)
+        try:
+            await api.claim(password, fingerprint)
+        except PairingUnsupported:
+            return _pair_error(502, "PAIR_UNSUPPORTED", "switch does not provide droplet.pair")
+        except PairingClaimError as exc:
+            return _pair_error(502, "PAIR_CLAIM_FAILED", str(exc))
+        except (ConnectionLost, PairingProtocolError) as exc:
+            return _pair_error(502, "PAIR_CLAIM_FAILED", f"claim request failed: {exc}")
+
+        # Prove the claim took: a FRESH login with the new password (a fixed
+        # value, never the holder - this must exercise the password the switch
+        # now holds).
+        model: Optional[str] = None
+        verify = create_driver(lambda: password)
+        try:
+            await verify.connect()
+        except SwitchError as exc:
+            logger.error(
+                "PAIR_VERIFY_FAILED: switch accepted the claim but login with the new "
+                "credential failed (%s) - switch and box now disagree; keeping AUTH state",
+                type(exc).__name__,
+            )
+            await verify.disconnect()
+            return _pair_error(
+                502,
+                "PAIR_VERIFY_FAILED",
+                "claim was accepted but logging in with the new credential failed",
+            )
+        try:
+            info = await verify.get_system_info()
+            if isinstance(info, dict):
+                model = info.get("model")
+        except SwitchError as exc:
+            logger.warning("Paired switch verified but the system read failed: %s", exc)
+        finally:
+            try:
+                await verify.disconnect()
+            except Exception:  # noqa: BLE001 - best-effort logout of the proof session
+                pass
+
+        # Switch the live driver: the holder now returns the new password, so
+        # every login from here on (re-auth, reconnect) uses it.
+        paired_at = pairing_state.record_claim(password, fingerprint)
+        live = create_driver(current_switch_password)
+        try:
+            await live.connect()
+        except SwitchError as exc:
+            # Verified a moment ago, so this is a transient fault. Leave the
+            # state to the scheduler tick, which retries with the holder.
+            logger.error("Paired switch verified but the live reconnect failed: %s", exc)
+            await live.disconnect()
+            _enter_auth_rejected()
+        else:
+            old, driver_instance = driver_instance, live
+            _clear_auth_rejected()
+            if old is not None:
+                try:
+                    await old.disconnect()
+                except Exception:  # noqa: BLE001 - best-effort close of the stale driver
+                    pass
+            _schedule_autoprovision()
+        logger.info("Switch paired: host=%s box=%s...", SWITCH_HOST, fingerprint[:16])
+        return JSONResponse(
+            content={
+                "ok": True,
+                "password": password,
+                "host": SWITCH_HOST,
+                "model": model,
+                "paired_at": paired_at,
+            },
+            headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.get("/pairing/pending")
+async def pairing_pending():
+    """The password minted by a claim that the orchestrator has not yet confirmed
+    persisted (the "paired but not saved -> Retry" path)."""
+    return JSONResponse(content=pairing_state.pending(), headers={"Cache-Control": "no-store"})
+
+
+@app.post("/pairing/persisted")
+async def pairing_persisted():
+    """The orchestrator confirmed the new password is on disk: forget it."""
+    pairing_state.mark_persisted(_read_switch_password_file())
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------

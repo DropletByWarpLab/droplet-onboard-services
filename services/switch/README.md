@@ -46,7 +46,38 @@ SM8TAT2SA WebStaX driver was removed in WARP-1674.
 ### Health
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/health` | Connection status, driver type, system info |
+| GET | `/health` | Connection status, driver type. Carries `error_code` (`SWITCH_AUTH` / `SWITCH_PAIRED_ELSEWHERE` / null) and the `pairing` block below |
+
+`/health.pairing` (ADR-071 §2.2 step 1) is served from a cache and never blocks on the network:
+
+```json
+"pairing": {
+  "state": "open | closed | paired | unknown",
+  "window_ends_at": "<iso8601> | null",
+  "paired_box": "<64 lowercase hex> | null",
+  "paired_elsewhere": false,
+  "pending_persist": false
+}
+```
+
+- **Explicit auth state.** The service enters `SWITCH_AUTH` only when the switch *answered and refused* the `droplet-ai` credential (startup connect, a runtime login, or `/health` seeing `AuthenticationError`). "Unreachable" and "never configured" are different states and are never probed for a pairing window.
+- **One apscheduler job, only in that state.** While `SWITCH_AUTH` holds, the `switch-pairing-probe` interval job (every `SWITCH_PAIRING_PROBE_SECONDS`, default 30) re-tries the login with the current password holder, then calls `droplet.pair status` with the **null session** and caches the answer. It removes itself when the state clears (a successful login, or the switch becoming unreachable). Nothing polls while connected.
+- Connected: `state` is `paired` after a claim in this process, otherwise `unknown`.
+- `paired_elsewhere` is true when the switch reports `paired` with a `paired_box` that is not this box's fingerprint (supplied by the orchestrator via `PUT /pairing/identity` or the first claim; never guessed while unknown). `/health` then reports `SWITCH_PAIRED_ELSEWHERE` instead of `SWITCH_AUTH`; re-pairing needs the switch's button (or a factory reset).
+
+### Pairing (ADR-071 slice C)
+All routes require the service token. Same contract as `services/routing`'s router pairing, against `SWITCH_HOST`.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| PUT | `/pairing/identity` | `{"box_fingerprint": "<64 hex>"}` — tell the service which box it serves (enables `SWITCH_PAIRED_ELSEWHERE`) |
+| POST | `/pairing/claim` | `{"box_fingerprint": "<64 hex>"}` — mint a 32-hex password, `droplet.pair claim`, prove it by logging in as `droplet-ai` with it, switch the live driver, clear the auth state, run the bring-up reconcile if `SWITCH_AUTOPROVISION` is on. `200 {"ok": true, "password", "host", "model", "paired_at"}` |
+| GET | `/pairing/pending` | `{"pending": bool, "password": "<32hex>" \| null, "paired_at": ...}` — a minted password the orchestrator has not yet confirmed persisted |
+| POST | `/pairing/persisted` | Orchestrator confirms the password is saved; the service forgets it. `{"ok": true}` |
+
+`POST /pairing/claim` errors are `{"code", "detail"}` (plus `paired_box` for the elsewhere case): `400 INVALID_FINGERPRINT`, `409 PAIR_WINDOW_CLOSED`, `409 SWITCH_PAIRED_ELSEWHERE`, `409 PAIR_BUSY`, `502 PAIR_UNSUPPORTED` (no `droplet.pair` plugin, or a non-`openwrt` driver), `502 PAIR_CLAIM_FAILED`, `502 PAIR_VERIFY_FAILED` (claim accepted but the login with the new password failed: logged at ERROR, auth state kept, nothing switched), `503 SWITCH_UNREACHABLE`. The password appears only in the 200 body and `GET /pairing/pending`; it is never logged.
+
+The orchestrator (`POST /api/network/switch/pair`) persists the password through the device-bridge (`target: "switch"` → `docker/secrets/switch_password`, then `docker compose up -d --force-recreate switch`) and confirms with `/pairing/persisted`. The pairing code is a sibling of `services/routing/pairing.py` (`pairing.py` here): the two images share no Python package path, so the state/helper code is duplicated by design and only the null-session client differs (async httpx here).
 
 ### Ports
 | Method | Path | Description |
@@ -139,6 +170,15 @@ If neither is set the switch service still starts but logs a warning and reports
 degradation as when the switch is unreachable. **Boxes without a managed switch
 are unaffected:** they leave `SWITCH_PASSWORD` empty and the service idles
 disconnected.
+
+**Runtime reload (ADR-071).** The password is not frozen at startup: every switch login
+resolves it through `current_switch_password()` — the password minted by a pairing claim in this
+process, else the secret file **re-read at login time**, else the deprecated env var. After a claim the
+service runs on the new password with no container recreate; the secret file still holds the old value
+until the orchestrator persists the new one (device-bridge `droplet-pair-apply`, which then recreates
+this container). On a switch flashed with the Droplet OpenWrt image the dashboard's **Pair** card
+replaces the manual copy below; the manual path remains the fallback for an image without the
+`droplet.pair` plugin.
 
 To configure (or rotate) the credential:
 
