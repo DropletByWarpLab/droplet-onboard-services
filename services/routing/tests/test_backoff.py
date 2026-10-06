@@ -46,3 +46,16 @@ def test_success_resets():
     s.on_success()
     assert s.consecutive_failures == 0
     assert s.delay_seconds == INITIAL_DELAY_SECONDS
+
+
+def test_thousands_of_failures_never_overflow():
+    """Regression: 2.0 ** 1024 overflows float; a router/IMAP backend that
+    stays down for ~17h of 60s retries used to make on_failure() raise
+    OverflowError on every tick."""
+    s = BackoffState()
+    last = None
+    for _ in range(5000):
+        last = s.on_failure()
+    assert last == MAX_DELAY_SECONDS
+    assert s.delay_seconds == MAX_DELAY_SECONDS
+    assert s.consecutive_failures == 5000
