@@ -59,6 +59,7 @@ import { packagePath } from "../../__tests__/helpers/test-paths.js";
 import { createPmNativeRouter } from "./native.js";
 import { createPmRelationsRouter } from "./relations.js";
 import { createPmPresenceRouter } from "./presence.js";
+import { createPmCollaborationRouter } from "./collaboration.js";
 import { createPmAttachmentsRouter } from "./attachments.js";
 import { createPmQueryRouter } from "./query.js";
 import { createPmViewsRouter } from "./views.js";
@@ -190,6 +191,12 @@ const PM_ROUTER_MOUNTS: readonly PmRouterMount[] = [
     base: "/api",
     file: "routes/pm/relations.ts",
     router: createPmRelationsRouter(PRISMA),
+  },
+  {
+    factory: "createPmCollaborationRouter",
+    base: "/api",
+    file: "routes/pm/collaboration.ts",
+    router: createPmCollaborationRouter(PRISMA),
   },
   {
     factory: "createPmAttachmentsRouter",
@@ -542,6 +549,7 @@ describe("WARP-1625 — the walk finds the routes the routers register", () => {
     ["createPmNativeRouter", "DELETE /api/pm/projects/:id"],
     ["createPmRelationsRouter", "GET /api/pm/work-items/:id/relations"],
     ["createPmPresenceRouter", "GET /api/pm/work-items/:id/presence"],
+    ["createPmCollaborationRouter", "GET /api/pm/work-items/:id/timeline"],
     ["createPmDevelopmentRouter", "GET /api/pm/work-items/:id/development"],
     ["createPmWebhooksRouter", "GET /api/pm/webhooks"],
     ["createPmDevelopmentRouter", "GET /api/pm/development/repositories"],

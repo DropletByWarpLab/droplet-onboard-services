@@ -22,11 +22,14 @@
  */
 
 import type { Prisma, PrismaClient } from "@prisma/client";
+import { PM_REACTION_EMOJI } from "@droplet/shared-types";
 import { READ_COMMITTED_TX, SERIALIZABLE_TX } from "../../lib/prisma-tx.js";
 import { sanitizePmHtml } from "./sanitize-html.js";
 import { finishQueuedAttachmentCleanup, queueAttachmentCleanup } from "./pm-attachment-cleanup.js";
 import { PM_PLANNING_ERRORS, lockAttachableCycle } from "./pm-planning.js";
 import { nudgeOutbox } from "./pm-outbox.js";
+import { recordMentions, resolveCommentMentions } from "./pm-mentions.js";
+import { autoWatch } from "./pm-watchers.js";
 import {
   DEPARTMENT_SELECT,
   PM_DEPARTMENT_ERRORS,
@@ -148,7 +151,9 @@ export const WORK_ITEM_INCLUDE = {
   // card. `searchWorkItems` is the one cross-project reader and adds the join
   // itself.
   department: { select: DEPARTMENT_SELECT },
-  _count: { select: { comments: true, children: true } },
+  // WARP-3519: a deleted comment is a tombstone, not a comment — the board's
+  // count must drop when one is deleted.
+  _count: { select: { comments: { where: { isDeleted: false } }, children: true } },
   // WARP-3520 -- custom-field values travel with the item. One batched query per
   // list (Prisma resolves a to-many include with a single `IN` lookup), never one
   // per card.
@@ -306,13 +311,31 @@ export interface ApiWorkItem {
   updatedAt: string;
 }
 
+/** One emoji's tally on one comment. `userIds` is in the order people reacted. */
+export interface ApiReaction {
+  emoji: string;
+  count: number;
+  userIds: string[];
+}
+
 export interface ApiComment {
   id: string;
   workItemId: string;
   authorId: string | null;
+  /** Empty for a tombstone — the body of a deleted comment is cleared. */
   commentHtml: string;
   createdAt: string;
   updatedAt: string;
+  /** WARP-3519 — when the AUTHOR last changed the body; null = never edited. */
+  editedAt: string | null;
+  /** WARP-3519 — a deleted comment stays in the thread as a tombstone. */
+  deleted: boolean;
+  deletedAt: string | null;
+  deletedById: string | null;
+  /** User ids @mentioned in the comment (derived server-side, never client-supplied). */
+  mentions: string[];
+  /** Per-emoji tallies, in `PM_REACTION_EMOJI` order, only emoji somebody used. */
+  reactions: ApiReaction[];
 }
 
 // ── Mappers ──────────────────────────────────────────────────────────────────
@@ -405,7 +428,11 @@ export function mapWorkItem(
   };
 }
 
-function mapComment(row: CommentRow): ApiComment {
+function mapComment(
+  row: CommentRow,
+  extras: { mentions?: string[]; reactions?: ApiReaction[] } = {},
+): ApiComment {
+  const deleted = Boolean(row.isDeleted);
   return {
     id: row.id,
     workItemId: row.workItemId,
@@ -413,7 +440,67 @@ function mapComment(row: CommentRow): ApiComment {
     commentHtml: row.commentHtml,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
+    editedAt: row.editedAt ? row.editedAt.toISOString() : null,
+    deleted,
+    deletedAt: row.deletedAt ? row.deletedAt.toISOString() : null,
+    deletedById: row.deletedById ?? null,
+    // A tombstone carries nothing: its mention and reaction rows are removed at
+    // delete time, and a reaction that raced the delete must still not show.
+    mentions: deleted ? [] : (extras.mentions ?? []),
+    reactions: deleted ? [] : (extras.reactions ?? []),
   };
+}
+
+/**
+ * Map comment rows to the wire shape with their mentions and reactions — TWO
+ * queries for the whole set, however many comments (no N+1). Tombstones are
+ * never looked up: they have none.
+ */
+export async function hydrateComments(db: Db, rows: CommentRow[]): Promise<ApiComment[]> {
+  const live = rows.filter((r) => !r.isDeleted).map((r) => r.id);
+  if (live.length === 0) return rows.map((r) => mapComment(r));
+
+  const [reactionRows, mentionRows] = await Promise.all([
+    db.pmCommentReaction.findMany({
+      where: { commentId: { in: live } },
+      orderBy: { createdAt: "asc" },
+      select: { commentId: true, userId: true, emoji: true },
+    }),
+    db.pmCommentMention.findMany({
+      where: { commentId: { in: live } },
+      orderBy: { createdAt: "asc" },
+      select: { commentId: true, userId: true },
+    }),
+  ]);
+
+  const mentionsBy = new Map<string, string[]>();
+  for (const m of mentionRows) {
+    const list = mentionsBy.get(m.commentId) ?? [];
+    list.push(m.userId);
+    mentionsBy.set(m.commentId, list);
+  }
+  const reactionsBy = new Map<string, Map<string, string[]>>();
+  for (const r of reactionRows) {
+    const byEmoji = reactionsBy.get(r.commentId) ?? new Map<string, string[]>();
+    const users = byEmoji.get(r.emoji) ?? [];
+    users.push(r.userId);
+    byEmoji.set(r.emoji, users);
+    reactionsBy.set(r.commentId, byEmoji);
+  }
+
+  return rows.map((row) => {
+    const byEmoji = reactionsBy.get(row.id);
+    // Allowlist order, so the bar never reshuffles between reads; an emoji that
+    // somehow is not on the list (it cannot be written, but a row is a row) is
+    // not shown rather than rendered unvetted.
+    const reactions: ApiReaction[] = byEmoji
+      ? PM_REACTION_EMOJI.flatMap((emoji) => {
+          const userIds = byEmoji.get(emoji);
+          return userIds && userIds.length > 0 ? [{ emoji, count: userIds.length, userIds }] : [];
+        })
+      : [];
+    return mapComment(row, { mentions: mentionsBy.get(row.id) ?? [], reactions });
+  });
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -2028,6 +2115,13 @@ export async function createWorkItem(
           ...(imp ? { notifyStatus: "not_needed" as const } : {}),
         });
       }
+      // WARP-3519: the creator and every assignee hear about the item from now
+      // on. Creator first, so a creator who is also an assignee is recorded as
+      // the creator.
+      await autoWatch(tx, item.id, [
+        { userId: actorId, reason: "CREATOR" },
+        ...(input.assignees ?? []).map((userId) => ({ userId, reason: "ASSIGNEE" as const })),
+      ]);
       return item;
     });
   } catch (err) {
@@ -2310,7 +2404,7 @@ export async function updateWorkItem(
       await write({
         workItemId: id,
         actorId,
-        verb: "updated",
+        verb: "priority_changed",
         field: "priority",
         oldValue: existing.priority,
         newValue: fields.priority,
@@ -2341,8 +2435,10 @@ export async function updateWorkItem(
     if (setChanged(assignees, existingAssignees)) {
       const next = new Set(assignees ?? []);
       const before = new Set(existingAssignees);
+      const newlyAssigned: string[] = [];
       for (const userId of next) {
         if (before.has(userId)) continue;
+        newlyAssigned.push(userId);
         await write({
           workItemId: id,
           actorId,
@@ -2352,6 +2448,13 @@ export async function updateWorkItem(
           newValue: userId,
         });
       }
+      // WARP-3519: being assigned watches the item. Taking somebody OFF it
+      // (below) does not unwatch them — they may still care.
+      await autoWatch(
+        tx,
+        id,
+        newlyAssigned.map((userId) => ({ userId, reason: "ASSIGNEE" as const })),
+      );
       for (const userId of before) {
         if (next.has(userId)) continue;
         await write({
@@ -2378,13 +2481,39 @@ export async function updateWorkItem(
       });
     }
 
-    // WARP-3520 -- the other half of the date pair, and the two columns this
-    // slice adds. Each names itself, so none of them reaches the residual below.
-    const startDateChanged =
+    // WARP-3519 — what used to be ONE generic `updated`/`fields` row for a name,
+    // description, start-date or label change now has a verb that names each, so
+    // the item's timeline can say WHAT changed ("renamed this", "added the label
+    // Bug") instead of "updated this item". `assignees` and `dueDate` already
+    // had theirs (above); leaving a field in two places would write a second,
+    // less informative row for one edit — which is how the feed gets noisy and a
+    // notifier ends up firing twice. None of these verbs is in the notify
+    // sweep's cut (activity-notify.service.ts): board hygiene, visible here.
+    if (fields.name !== undefined && fields.name !== existing.name) {
+      await write({
+        workItemId: id,
+        actorId,
+        verb: "title_changed",
+        field: "name",
+        oldValue: existing.name,
+        newValue: fields.name,
+      });
+    }
+    if (fields.descriptionHtml !== undefined && fields.descriptionHtml !== existing.descriptionHtml) {
+      // No values: a description can be 100 KB, and the diff of a document is
+      // not something to keep in a feed row.
+      await write({
+        workItemId: id,
+        actorId,
+        verb: "description_changed",
+        field: "description",
+      });
+    }
+    if (
       fields.startDate !== undefined &&
-      fields.startDate?.toISOString() !== existing.startDate?.toISOString();
-    if (startDateChanged) {
-      await writeActivity(tx, {
+      fields.startDate?.toISOString() !== existing.startDate?.toISOString()
+    ) {
+      await write({
         workItemId: id,
         actorId,
         verb: "start_date_changed",
@@ -2393,9 +2522,35 @@ export async function updateWorkItem(
         newValue: fields.startDate?.toISOString() ?? null,
       });
     }
+    if (setChanged(fields.labelIds, existingLabelIds)) {
+      const nextLabels = new Set(fields.labelIds ?? []);
+      const beforeLabels = new Set(existingLabelIds);
+      for (const labelId of nextLabels) {
+        if (beforeLabels.has(labelId)) continue;
+        await write({
+          workItemId: id,
+          actorId,
+          verb: "label_added",
+          field: "labels",
+          oldValue: null,
+          newValue: labelId,
+        });
+      }
+      for (const labelId of beforeLabels) {
+        if (nextLabels.has(labelId)) continue;
+        await write({
+          workItemId: id,
+          actorId,
+          verb: "label_removed",
+          field: "labels",
+          oldValue: labelId,
+          newValue: null,
+        });
+      }
+    }
     // `?? "task"`: the DB-less fake's rows have no kind (see mapWorkItem).
     if (fields.type !== undefined && fields.type !== (existing.type ?? "task")) {
-      await writeActivity(tx, {
+      await write({
         workItemId: id,
         actorId,
         verb: "type_changed",
@@ -2405,7 +2560,7 @@ export async function updateWorkItem(
       });
     }
     if (fields.estimate !== undefined && fields.estimate !== (existing.estimate ?? null)) {
-      await writeActivity(tx, {
+      await write({
         workItemId: id,
         actorId,
         verb: "estimate_changed",
@@ -2413,19 +2568,6 @@ export async function updateWorkItem(
         oldValue: existing.estimate === null || existing.estimate === undefined ? null : String(existing.estimate),
         newValue: fields.estimate === null ? null : String(fields.estimate),
       });
-    }
-
-    // The residual. `assignees`, `dueDate` and (WARP-3520) `startDate` are
-    // deliberately NOT in this disjunction any more: they now have verbs that
-    // name them, and leaving them here would write a second, less informative
-    // row for the same edit — which is how the feed gets noisy and how a
-    // notifier ends up firing twice.
-    const scalarChanged =
-      (fields.name !== undefined && fields.name !== existing.name) ||
-      (fields.descriptionHtml !== undefined && fields.descriptionHtml !== existing.descriptionHtml) ||
-      setChanged(labelIds, existingLabelIds);
-    if (scalarChanged) {
-      await write({ workItemId: id, actorId, verb: "updated", field: "fields" });
     }
     // WARP-3527 — one marker per effective import update, so the item's own
     // history says which job changed it. Nothing changed, nothing written.
@@ -2656,7 +2798,9 @@ export async function listComments(
     }),
   ]);
   const { items, nextCursor } = sliceToPage(rows, limit, (r) => encodeCursor(ORDER_COMMENTS, r.createdAt, r.id));
-  return { items: items.map(mapComment), nextCursor, total };
+  // Tombstones and per-page mention/reaction metadata remain part of the
+  // collaboration contract while the response stays bounded by the paging API.
+  return { items: await hydrateComments(prisma, items), nextCursor, total };
 }
 
 export async function addComment(
@@ -2672,15 +2816,32 @@ export async function addComment(
   if (!item || isServiceDesk(item.project)) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
   // Comment HTML is rendered via dangerouslySetInnerHTML in the drawer — sanitize
   // against the strict PM allowlist at the write boundary (stored-XSS guard).
-  const safeHtml = sanitizePmHtml(commentHtml);
+  // WARP-3519: the same pass reads the @mentions back out of the SANITIZED html
+  // and keeps only the people who can read this item (pm-mentions.ts).
+  const { html: safeHtml, mentionIds } = await resolveCommentMentions(
+    prisma,
+    workItemId,
+    commentHtml,
+  );
   const row = await prisma.$transaction(async (tx) => {
     const comment = await tx.pmComment.create({
       data: { workItemId, authorId: actorId, commentHtml: safeHtml },
     });
-    await writeActivity(tx, { workItemId, actorId, verb: "commented" });
+    // `newValue` is the comment id: the notify sweep reads it to tell the
+    // people this comment MENTIONS apart from the ones it merely reaches.
+    await writeActivity(tx, {
+      workItemId,
+      actorId,
+      verb: "commented",
+      field: "comment",
+      newValue: comment.id,
+    });
+    // Commenter first: if they mention themselves they stay a COMMENTER.
+    await autoWatch(tx, workItemId, [{ userId: actorId, reason: "COMMENTER" }]);
+    await recordMentions(tx, { workItemId, commentId: comment.id, actorId, mentionIds });
     return comment;
   });
-  return mapComment(row);
+  return mapComment(row, { mentions: mentionIds });
 }
 
 // ── Activity feed ────────────────────────────────────────────────────────────
@@ -2696,8 +2857,24 @@ export interface ApiActivity {
   createdAt: string;
 }
 
+/** One activity row on the wire. Shared with the merged timeline
+ *  (pm-collaboration.service.ts) so the two cannot drift apart. */
+export function mapActivity(r: Prisma.PmActivityGetPayload<object>, workItemId: string): ApiActivity {
+  return {
+    id: r.id,
+    workItemId: r.workItemId ?? workItemId,
+    actorId: r.actorId,
+    verb: r.verb,
+    field: r.field,
+    oldValue: r.oldValue,
+    newValue: r.newValue,
+    createdAt: r.createdAt.toISOString(),
+  };
+}
+
+/** Append-only activity for a work item, oldest to newest (timeline order). */
 /** Append-only activity for a work item, oldest to newest (timeline order) — a
- *  PAGE (WARP-3371), under the same rules as `listComments`. */
+ * PAGE (WARP-3371), under the same rules as `listComments`. */
 export async function listActivity(
   prisma: PrismaClient,
   workItemId: string,
@@ -2723,16 +2900,7 @@ export async function listActivity(
   ]);
   const { items, nextCursor } = sliceToPage(rows, limit, (r) => encodeCursor(ORDER_ACTIVITY, r.createdAt, r.id));
   return {
-    items: items.map((r) => ({
-      id: r.id,
-      workItemId: r.workItemId ?? workItemId,
-      actorId: r.actorId,
-      verb: r.verb,
-      field: r.field,
-      oldValue: r.oldValue,
-      newValue: r.newValue,
-      createdAt: r.createdAt.toISOString(),
-    })),
+    items: items.map((r) => mapActivity(r, workItemId)),
     nextCursor,
     total,
   };

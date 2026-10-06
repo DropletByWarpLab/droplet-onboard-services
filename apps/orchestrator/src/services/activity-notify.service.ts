@@ -44,8 +44,8 @@
  *
  * ── WHICH EVENTS, AND WHY THE CUT IS THIS SMALL ────────────────────────────
  *
- * PM: `assigned`, `state_changed`, `due_date_changed`, `commented`. Nothing
- * else. The excluded ones are excluded on purpose:
+ * PM: `assigned`, `state_changed`, `due_date_changed`, `commented` and (WARP-3519)
+ * `mentioned`. Nothing else. The excluded ones are excluded on purpose:
  *   • `updated` is the catch-all bucket pm.service.ts writes for a name,
  *     description, startDate or label change. It fires on a typo fix. A
  *     notifier that pings the whole team when somebody corrects a spelling is
@@ -60,6 +60,9 @@
  *     case is covered by the verb that actually names it.
  *   • `unassigned` is recorded but not notified: "you are no longer on this"
  *     is rarely actionable and doubles the traffic of every re-assignment.
+ *   • `comment_edited`, `comment_deleted`, `watcher_added`, `watcher_removed`
+ *     (WARP-3519) are history, not news. The one thing an EDIT can cause that is
+ *     news — somebody newly @mentioned — is its own `mentioned` row.
  *
  * CRM: a STAGE_CHANGE whose destination stage has `kind` WON or LOST. Not
  * every stage move — a deal walking through four OPEN stages is the pipeline
@@ -69,10 +72,25 @@
  *
  * ── WHO ────────────────────────────────────────────────────────────────────
  *
- * PM: the work item's assignees (PmWorkItemAssignee), plus whatever
- * `departmentWatchers` resolves — see the seam below — and NEVER the actor.
- * A person does not need to be told what they just did; team-chat-reminders
- * gets that clause right for the organizer and this copies it.
+ * PM: the work item's assignees (PmWorkItemAssignee) UNION its watchers
+ * (PmWorkItemWatcher, WARP-3519 — people subscribed by creating, being assigned,
+ * commenting or being mentioned, or by hand) UNION whatever `departmentWatchers`
+ * resolves — see the seam below — and NEVER the actor. A person does not need
+ * to be told what they just did; team-chat-reminders gets that clause right for
+ * the organizer and this copies it. One set per person, so somebody who is an
+ * assignee AND a watcher AND in the department hears once.
+ *
+ * Assignees are unconditional (they have always been told about their own
+ * work). Everyone who arrives by ANOTHER route — a watcher, a department
+ * watcher, the target of a mention — must be able to read the item: an external
+ * guest only counts when assigned to it (WARP-3365), a `service` principal is
+ * not a person, a deactivated account is gone.
+ *
+ * A `mentioned` row is addressed to ONE person (its `newValue`) and is never
+ * fanned out to the item's other people. The `commented` row of the same
+ * comment is NOT also sent to the people that comment mentions: they hear
+ * through the mention, once, instead of twice for one comment.
+ *
  * CRM: the deal's `ownerId`, minus the actor.
  *
  * TICKETS (WARP-3528, ADR-069 section 1): a work item in a SERVICE_DESK project
@@ -133,7 +151,7 @@ export const BATCH = 500;
 const TITLE_MAX = 120;
 const BODY_MAX = 500;
 
-/** The four PM verbs worth interrupting somebody for. See the header for the
+/** The PM verbs worth interrupting somebody for. See the header for the
  *  justification of every verb NOT in this set — the cut is the design. */
 export const NOTIFIABLE_PM_VERBS: ReadonlySet<$Enums.PmActivityVerb> =
   new Set<$Enums.PmActivityVerb>([
@@ -141,6 +159,7 @@ export const NOTIFIABLE_PM_VERBS: ReadonlySet<$Enums.PmActivityVerb> =
     "state_changed",
     "due_date_changed",
     "commented",
+    "mentioned",
   ]);
 
 /** Digest vocabulary — one short past-tense word per verb, so a tally reads
@@ -150,6 +169,7 @@ const PM_VERB_WORD: Record<string, string> = {
   state_changed: "moved",
   due_date_changed: "re-dated",
   commented: "commented",
+  mentioned: "mentioned",
 };
 
 /**
@@ -512,8 +532,23 @@ async function sweepProjectItems(
   }
 
   const workItemIds = [...new Set(candidates.map((r) => r.workItemId))];
-  const [assignees, watchers] = await Promise.all([
+  // The comments the `commented` rows are ABOUT (WARP-3519 stamps the comment
+  // id on them), so the people each one mentions can be told apart from the
+  // ones it merely reaches. A legacy `commented` row has no id and fans out as
+  // it always did.
+  const commentIds = [
+    ...new Set(
+      candidates
+        .filter((r) => r.verb === "commented" && r.field === "comment" && r.newValue)
+        .map((r) => r.newValue as string),
+    ),
+  ];
+  const [assignees, itemWatchers, watchers, commentMentions] = await Promise.all([
     prisma.pmWorkItemAssignee.findMany({
+      where: { workItemId: { in: workItemIds } },
+      select: { workItemId: true, userId: true },
+    }),
+    prisma.pmWorkItemWatcher.findMany({
       where: { workItemId: { in: workItemIds } },
       select: { workItemId: true, userId: true },
     }),
@@ -523,32 +558,74 @@ async function sweepProjectItems(
       logger.warn({ err }, "department watcher resolution failed — assignees only");
       return new Map<string, string[]>();
     }),
+    commentIds.length === 0
+      ? Promise.resolve([] as Array<{ commentId: string; userId: string }>)
+      : prisma.pmCommentMention.findMany({
+          where: { commentId: { in: commentIds } },
+          select: { commentId: true, userId: true },
+        }),
   ]);
+
+  const assigneesByItem = new Map<string, Set<string>>();
+  for (const a of assignees) {
+    const set = assigneesByItem.get(a.workItemId) ?? new Set<string>();
+    set.add(a.userId);
+    assigneesByItem.set(a.workItemId, set);
+  }
+  const mentionsByComment = new Map<string, Set<string>>();
+  for (const m of commentMentions) {
+    const set = mentionsByComment.get(m.commentId) ?? new Set<string>();
+    set.add(m.userId);
+    mentionsByComment.set(m.commentId, set);
+  }
 
   // WARP-3365 (Romain, 2026-09-30) — assigning a work item to an external guest
   // SHARES that one item with them, so an ASSIGNEE is told about it: they can
   // open it. A department WATCHER is not: a watcher hears about every item in
   // the department, and a guest is admitted to no item they are not assigned to.
-  const watcherIds = [...new Set([...watchers.values()].flat())];
-  const guestWatchers = new Set<string>();
-  if (watcherIds.length > 0) {
-    const roles = await prisma.user.findMany({
-      where: { id: { in: watcherIds } },
-      select: { id: true, role: true },
+  // WARP-3519 extends the same rule to everyone who reaches an item some way
+  // other than being assigned to it — an item watcher, a mention's target — and
+  // adds the two accounts that are not people to tell: a `service` principal and
+  // a deactivated one. Looked up once for all of them.
+  const arrivedByOtherRoute = [
+    ...new Set([
+      ...itemWatchers.map((w) => w.userId),
+      ...[...watchers.values()].flat(),
+      ...candidates
+        .filter((r) => r.verb === "mentioned" && r.newValue)
+        .map((r) => r.newValue as string),
+    ]),
+  ];
+  const cannotRead = new Set<string>();
+  if (arrivedByOtherRoute.length > 0) {
+    const people = await prisma.user.findMany({
+      where: { id: { in: arrivedByOtherRoute } },
+      select: { id: true, role: true, directoryStatus: true },
     });
-    for (const u of roles) if (u.role === "guest") guestWatchers.add(u.id);
+    for (const u of people) {
+      if (u.role === "guest" || u.role === "service" || u.directoryStatus === "DEACTIVATED") {
+        cannotRead.add(u.id);
+      }
+    }
   }
+  /** May `userId` be told about `workItemId` when they did NOT arrive as its
+   *  assignee? An assigned guest still may: assignees are unconditional. */
+  const mayHear = (workItemId: string, userId: string): boolean =>
+    (assigneesByItem.get(workItemId)?.has(userId) ?? false) || !cannotRead.has(userId);
 
+  // The item-wide audience: assignees, plus watchers and department watchers who
+  // may read the item.
   const byItem = new Map<string, Set<string>>();
-  for (const a of assignees) {
-    const set = byItem.get(a.workItemId) ?? new Set<string>();
-    set.add(a.userId);
-    byItem.set(a.workItemId, set);
+  for (const itemId of workItemIds) {
+    byItem.set(itemId, new Set(assigneesByItem.get(itemId) ?? []));
+  }
+  for (const w of itemWatchers) {
+    if (mayHear(w.workItemId, w.userId)) byItem.get(w.workItemId)?.add(w.userId);
   }
   for (const [itemId, userIds] of watchers) {
-    const set = byItem.get(itemId) ?? new Set<string>();
-    for (const u of userIds) if (!guestWatchers.has(u)) set.add(u);
-    byItem.set(itemId, set);
+    const set = byItem.get(itemId);
+    if (!set) continue;
+    for (const u of userIds) if (mayHear(itemId, u)) set.add(u);
   }
 
   // A `state_changed` row carries stateIds, not names. "moved" without a
@@ -571,14 +648,29 @@ async function sweepProjectItems(
         ).map((s) => [s.id, s.name] as const),
   );
 
+  /** Who a row is for. A mention is addressed to one person and nobody else; the
+   *  rest go to the item's audience, minus the actor, minus (for a comment) the
+   *  people that comment mentions — they hear through their mention. */
+  const recipientsOf = (row: (typeof candidates)[number]): string[] => {
+    if (row.verb === "mentioned") {
+      const target = row.newValue;
+      return target && target !== row.actorId && mayHear(row.workItemId, target) ? [target] : [];
+    }
+    const mentioned =
+      row.verb === "commented" && row.field === "comment" && row.newValue
+        ? mentionsByComment.get(row.newValue)
+        : undefined;
+    return [...(byItem.get(row.workItemId) ?? new Set<string>())].filter(
+      // NEVER the actor.
+      (userId) => userId !== row.actorId && !mentioned?.has(userId),
+    );
+  };
+
   // recipient User.id -> the rows they should hear about.
   const perUser = new Map<string, typeof candidates>();
   const sendIds = new Set<string>();
   for (const row of candidates) {
-    const recipients = [...(byItem.get(row.workItemId) ?? new Set<string>())].filter(
-      // NEVER the actor.
-      (userId) => userId !== row.actorId,
-    );
+    const recipients = recipientsOf(row);
     if (recipients.length === 0) {
       skipIds.push(row.id);
       continue;
@@ -591,14 +683,50 @@ async function sweepProjectItems(
     }
   }
 
+  // The recipients' usernames, and the display names of whoever MENTIONED
+  // somebody (a mention is the one notification that is better with a name in
+  // it: "Ana mentioned you").
+  const mentionActorIds = [
+    ...new Set(
+      candidates
+        .filter((r) => r.verb === "mentioned" && r.actorId)
+        .map((r) => r.actorId as string),
+    ),
+  ];
+  const lookupIds = [...new Set([...perUser.keys(), ...mentionActorIds])];
   const users =
-    perUser.size === 0
+    lookupIds.length === 0
       ? []
       : await prisma.user.findMany({
-          where: { id: { in: [...perUser.keys()] } },
-          select: { id: true, username: true },
+          where: { id: { in: lookupIds } },
+          select: { id: true, username: true, displayName: true },
         });
   const usernames = new Map(users.map((u) => [u.id, u.username] as const));
+  const displayNames = new Map(
+    users.flatMap((u) => (u.displayName ? [[u.id, u.displayName] as const] : [])),
+  );
+
+  /** The one-line title for ONE row, for ONE recipient. */
+  const titleFor = (row: (typeof candidates)[number], userId: string): string => {
+    switch (row.verb) {
+      case "assigned":
+        // "Assigned to you" is for the people who ARE assigned; a watcher who
+        // is not is told the assignment changed, not that it is theirs.
+        return assigneesByItem.get(row.workItemId)?.has(userId)
+          ? "Assigned to you"
+          : "Assignment changed";
+      case "commented":
+        return "New comment";
+      case "due_date_changed":
+        return "Due date changed";
+      case "mentioned": {
+        const who = row.actorId ? displayNames.get(row.actorId) : undefined;
+        return who ? `${who} mentioned you` : "You were mentioned";
+      }
+      default:
+        return `Moved to ${stateNames.get(row.newValue ?? "") ?? "a new state"}`;
+    }
+  };
 
   const outgoing: Outgoing[] = [];
   const reached = new Set<string>();
@@ -612,19 +740,10 @@ async function sweepProjectItems(
     for (const r of list) reached.add(r.id);
     if (list.length === 1) {
       const row = list[0];
-      const label = workItemLabel(row.workItem);
-      const title =
-        row.verb === "assigned"
-          ? "Assigned to you"
-          : row.verb === "commented"
-            ? "New comment"
-            : row.verb === "due_date_changed"
-              ? "Due date changed"
-              : `Moved to ${stateNames.get(row.newValue ?? "") ?? "a new state"}`;
       outgoing.push({
         username,
-        title: truncate(title, TITLE_MAX),
-        body: truncate(label, BODY_MAX),
+        title: truncate(titleFor(row, userId), TITLE_MAX),
+        body: truncate(workItemLabel(row.workItem), BODY_MAX),
         url: pmLink([row]),
       });
       continue;
