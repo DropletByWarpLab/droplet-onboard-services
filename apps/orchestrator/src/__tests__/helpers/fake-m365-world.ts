@@ -75,6 +75,7 @@ export function makeFakeM365World(connectionRows: Row[] = []) {
     ) as T;
 
   const handle = (via: Via) => ({
+    cloudOAuthApp: through(via, "cloudOAuthApp", { findUnique: async () => null }),
     m365Connection: through(via, "m365Connection", connection),
     m365DeltaCursor: through(via, "m365DeltaCursor", cursors.delegate as never),
     cloudFileItem: through(via, "cloudFileItem", cloud.cloudFileItem as never),

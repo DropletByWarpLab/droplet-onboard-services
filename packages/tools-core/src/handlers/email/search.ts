@@ -28,13 +28,18 @@ const inputSchema = {
   properties: {
     accountId: {
       type: "string",
-      description: "EmailAccount.id to search inside.",
+      description: "Mailbox ID from email_accounts.",
+    },
+    query: {
+      type: "string",
+      maxLength: 200,
+      description: "Local text search; omit to list threads.",
     },
     filter: {
       type: "string",
       enum: ["inbox", "triaged", "archived", "droplet"],
       description:
-        "Tab to filter by. `droplet` returns threads with at least one Droplet-drafted reply (regardless of triage status).",
+        "Triage tab; droplet selects threads with Droplet drafts in any tab.",
     },
     limit: {
       type: "integer",
@@ -79,6 +84,14 @@ async function handler(
       error: { code: "INVALID_ARGS", message: "accountId is required" },
     };
   }
+  if (args.query !== undefined && (typeof args.query !== "string" || args.query.length > 200)) {
+    return {
+      ok: false,
+      status: "error",
+      error: { code: "INVALID_ARGS", message: "query must be a string of at most 200 characters" },
+    };
+  }
+  const query = typeof args.query === "string" ? args.query.trim() : "";
   const filter =
     typeof args.filter === "string" ? args.filter : "inbox";
   const limit =
@@ -86,6 +99,7 @@ async function handler(
       ? Math.max(1, Math.min(100, Math.floor(args.limit)))
       : 20;
   const params = new URLSearchParams({ filter, limit: String(limit) });
+  if (query) params.set("query", query);
   const res = await ctx.http.orchestrator.get(
     `/api/email/${encodeURIComponent(accountId)}/threads?${params.toString()}`,
     // WARP-1453: X-Droplet-User carries the acting human's username —
@@ -119,6 +133,7 @@ async function handler(
     data: {
       type: "email_search",
       filter: data.filter,
+      ...(query ? { query } : {}),
       threadCount: data.threads.length,
       threads: data.threads,
     },
@@ -128,7 +143,7 @@ async function handler(
 const tool: Tool = {
   name: "email_search",
   description:
-    "List email threads in a given account, filtered by triage tab (inbox / triaged / archived) or by `droplet` to find threads with Droplet-drafted replies. Returns thread id + subject + last-sender + snippet for each match.",
+    "Search local subjects, senders, snippets and bodies; omit query to list. Get accountId from email_accounts. Default inbox; returns thread summaries. email_read opens one.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

@@ -66,6 +66,7 @@ describe("off-LAN tool domains (WARP-3570)", () => {
   });
 
   it.each([
+    "email_accounts",
     "email_read",
     "email_search",
     "email_summarize_thread",

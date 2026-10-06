@@ -254,6 +254,32 @@ export async function deleteSource(
   const existing = await prisma.calendarSource.findUnique({ where: { id } });
   if (!existing) throw new Error("source_not_found");
   if (existing.userId !== userId) throw new Error("forbidden");
+  if (existing.authMode === "google_oauth") {
+    const connection = await prisma.googleConnection.findUnique({ where: { calendarSourceId: id }, select: { userId: true } });
+    if (connection) {
+      // Cancel consent as well as sync. An exchanging callback must not restore
+      // the calendar the person just removed; Gmail can keep its own grant.
+      const { disconnectGoogleCalendar } = await import("./google/google-auth.service.js");
+      const removed = await disconnectGoogleCalendar(prisma, connection.userId, id);
+      if (!removed && await prisma.calendarSource.findUnique({ where: { id } })) throw new Error("source_not_found");
+      return;
+    }
+  }
+  if (existing.authMode === "google_oauth" || existing.authMode === "m365_oauth") {
+    // Disable the person's preference before deleting the source, in the same
+    // transaction, so a late provider sync cannot recreate copied events.
+    await prisma.$transaction(async (tx) => {
+      const data = { calendarEnabled: false, calendarSyncState: "DISCONNECTED" as const, calendarSourceId: null };
+      if (existing.authMode === "m365_oauth") {
+        const connection = await tx.m365Connection.findUnique({ where: { calendarSourceId: id }, select: { userId: true } });
+        await tx.m365Connection.updateMany({ where: { calendarSourceId: id }, data });
+        if (connection) await tx.m365DeltaCursor.deleteMany({ where: { userId: connection.userId, workload: "calendar" } });
+      }
+      await tx.calendarEvent.deleteMany({ where: { sourceId: id, userId } });
+      await tx.calendarSource.deleteMany({ where: { id, userId } });
+    });
+    return;
+  }
   // Cascade by hand — Prisma schema doesn't declare a relation onDelete
   // because CalendarEvent.sourceId is a soft FK (we want to keep the data
   // model simple and avoid migrations every time we add a source kind).
@@ -271,6 +297,10 @@ export async function syncSource(
 ): Promise<{ added: number; updated: number; removed?: number; total: number; error?: string }> {
   const source = await prisma.calendarSource.findUnique({ where: { id: sourceId } });
   if (!source) throw new Error("source_not_found");
+  if (source.authMode === "google_oauth" || source.authMode === "m365_oauth") {
+    // Cloud calendars use their provider's OAuth scheduler, never CalDAV/ICS.
+    return { added: 0, updated: 0, total: 0, error: "Cloud calendars sync automatically. Manage the connection in Settings." };
+  }
 
   let password: string | null = null;
   if (source.passwordEnc) {
@@ -470,6 +500,7 @@ export async function syncSource(
  *  the periodic sync poller. */
 export async function findStaleSources(prisma: PrismaClient): Promise<string[]> {
   const all = await prisma.calendarSource.findMany({
+    where: { authMode: { in: ["none", "basic"] } },
     select: { id: true, syncIntervalSec: true, lastSyncAt: true },
   });
   const now = Date.now();

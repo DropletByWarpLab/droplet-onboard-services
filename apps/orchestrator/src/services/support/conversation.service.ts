@@ -211,12 +211,14 @@ async function addComment(
   const now = deps.now ? deps.now() : new Date();
 
   const channel = visibility === "PUBLIC"
-    ? await prisma.pmSupportChannel.findFirst({ where: { projectId: row.projectId, enabled: true }, include: { emailAccount: { select: { address: true } } } })
+    ? await prisma.pmSupportChannel.findFirst({ where: { projectId: row.projectId, enabled: true }, include: { emailAccount: { select: { address: true, authMode: true } } } })
     : null;
   let deliveryStatus: "NONE" | "PENDING" | "FAILED" = "NONE";
   let deliveryFailure: "OUTBOUND_BLOCKED" | "EMAIL_UNAVAILABLE" | "NO_RECIPIENT" | "SEND_FAILED" | null = null;
   if (channel) {
-    if (!row.ticket.requesterEmail) {
+    if (channel.emailAccount.authMode === "M365_GRAPH") {
+      deliveryStatus = "FAILED"; deliveryFailure = "EMAIL_UNAVAILABLE";
+    } else if (!row.ticket.requesterEmail) {
       deliveryStatus = "FAILED"; deliveryFailure = "NO_RECIPIENT";
     } else {
       try {
@@ -340,9 +342,10 @@ export async function retryPublicReply(prisma: PrismaClient, ticketId: string, c
   if (!comment) throw new Error("reply_not_retryable");
   const channel = await prisma.pmSupportChannel.findFirst({
     where: { projectId: ticket.projectId, enabled: true },
-    include: { emailAccount: { select: { address: true } } },
+    include: { emailAccount: { select: { address: true, authMode: true } } },
   });
   if (!channel) throw new Error("email_channel_unavailable");
+  if (channel.emailAccount.authMode === "M365_GRAPH") throw new Error("email_account_read_only");
   if (!ticket.ticket.requesterEmail) throw new Error("email_recipient_unavailable");
   if (!(await outboundEmailGate(prisma))) throw new Error("outbound_email_blocked");
   const previous = await prisma.pmTicketEmailLink.findFirst({

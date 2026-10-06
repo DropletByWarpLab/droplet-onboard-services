@@ -102,6 +102,7 @@ async function matchedTicket(tx: Tx, facts: {
 }
 
 async function queueAutoAck(tx: Tx, channel: any, ticket: any, requester: any, message: any, now: Date, headersChecked: boolean) {
+  if (channel.emailAccount.authMode === "M365_GRAPH") return;
   if (!channel.autoAckEnabled || !headersChecked || !ticket.ticket.requesterEmail || noReplyAddress(ticket.ticket.requesterEmail)) return;
   const body = renderAckTemplate(channel.autoAckTemplate || DEFAULT_ACK_TEMPLATE, {
     requesterName: requester.displayName,
@@ -246,8 +247,10 @@ async function applyInbound(tx: Tx, message: any, channel: any, now: Date): Prom
 export async function intakeEmailMessage(prisma: PrismaClient, accountId: string, messageId: string, now = new Date()): Promise<void> {
   const message = await prisma.emailMessage.findUnique({ where: { accountId_messageId: { accountId, messageId } } });
   if (!message || !(message.deskIntakeStatus === "PENDING" || (message.deskIntakeStatus === "FAILED" && message.deskIntakeReason === "PROCESSING_ERROR"))) return;
-  const channel = await prisma.pmSupportChannel.findUnique({ where: { emailAccountId: accountId }, include: { project: true, emailAccount: { select: { address: true } } } });
+  const channel = await prisma.pmSupportChannel.findUnique({ where: { emailAccountId: accountId }, include: { project: true, emailAccount: { select: { address: true, authMode: true } } } });
   if (!channel || !channel.enabled || message.receivedAt < channel.enabledAt) return;
+  // Graph imports use provider IDs and have no outbound mail capability yet.
+  if (channel.emailAccount.authMode === "M365_GRAPH") return;
   let mayAutoAck = false;
   try { mayAutoAck = await outboundEmailGate(prisma); } catch { mayAutoAck = false; }
   try {

@@ -17,13 +17,14 @@ import asyncio
 import logging
 import os
 from typing import Any, Literal, Optional
+from urllib.parse import quote
 
 import httpx
 
 # WARP-236 — internal mTLS: rewrite the orchestrator base URL to https:// and
 # present email-indexer's client cert when DROPLET_INTERNAL_TLS=1.
 from _shared.internal_tls import base_url as _internal_base_url, httpx_client_kwargs
-from errors import IngestTooLarge
+from errors import IngestTooLarge, OAuthTokenUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,42 @@ def _auth_headers() -> Optional[dict[str, str]]:
             _token_warning_logged = True
         return None
     return {"Authorization": f"Bearer {SERVICE_TOKEN}"}
+
+
+async def get_oauth_access_token(account_id: str) -> str:
+    """Ask the orchestrator for this mailbox's short-lived token only.
+
+    Refresh credentials stay in the orchestrator. Response bodies and network
+    exception text are never logged: either can carry credential material.
+    """
+    headers = _auth_headers()
+    if headers is None:
+        raise OAuthTokenUnavailable()
+    headers["Cache-Control"] = "no-store"
+    url = f"{ORCHESTRATOR_URL}/api/email/{quote(account_id, safe='')}/oauth-token"
+    try:
+        async with httpx.AsyncClient(
+            timeout=10.0, **httpx_client_kwargs()
+        ) as client:
+            resp = await client.get(url, headers=headers)
+    except httpx.HTTPError:
+        raise OAuthTokenUnavailable() from None
+    if resp.status_code != 200:
+        raise OAuthTokenUnavailable(
+            needs_reconnect=resp.status_code in (401, 403, 404, 409)
+        )
+    try:
+        body = resp.json()
+    except (ValueError, TypeError):
+        raise OAuthTokenUnavailable() from None
+    token = body.get("accessToken") if isinstance(body, dict) else None
+    if (
+        not isinstance(token, str)
+        or not token
+        or any(ord(c) <= 32 or ord(c) == 127 for c in token)
+    ):
+        raise OAuthTokenUnavailable()
+    return token
 
 
 #: WARP-3267 — one ingest in flight box-wide. A max-size message is ~30 MiB

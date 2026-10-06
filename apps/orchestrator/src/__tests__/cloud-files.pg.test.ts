@@ -348,7 +348,7 @@ describe.skipIf(!RUN)("cloud files — real Postgres (WARP-3538)", () => {
       await prisma.m365Connection.create({ data: { userId: USER, state: "CONNECTED" } });
       const at = (iso: string) => new Date(iso);
       const make = (resourceId: string, lastSyncedAt: Date | null, createdAt: Date) =>
-        prisma.m365DeltaCursor.create({ data: { userId: USER, workload: "mail", resourceId, lastSyncedAt, createdAt } });
+        prisma.m365DeltaCursor.create({ data: { userId: USER, workload: "files", resourceId, lastSyncedAt, createdAt } });
       await make("recent", at("2026-10-04T00:00:00Z"), at("2026-01-01T00:00:00Z"));
       await make("oldest", at("2026-09-01T00:00:00Z"), at("2026-01-02T00:00:00Z"));
       await make("never-b", null, at("2026-03-01T00:00:00Z"));

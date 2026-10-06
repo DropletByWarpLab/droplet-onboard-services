@@ -54,11 +54,7 @@ describe("SubscriptionsPanel — typed error → friendly toast (WARP-294)", () 
 
     render(<SubscriptionsPanel />);
     // The "+" button toggles the new-subscription form.
-    fireEvent.click(
-      screen.getByRole("button", { name: "" }).parentElement!.querySelector(
-        "button",
-      )!,
-    );
+    fireEvent.click(screen.getByRole("button", { name: "Add calendar feed" }));
 
     // WARP-308: the form label is now a visible `<span>` ("Display name",
     // "Calendar URL") and the placeholder carries example copy only.

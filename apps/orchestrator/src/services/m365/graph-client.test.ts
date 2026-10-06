@@ -125,6 +125,7 @@ describe("GraphClient.getPage — a successful page", () => {
     const init = fetchImpl.mock.calls[0][1] as Record<string, unknown>;
     const headers = init.headers as Record<string, string>;
     expect(headers.Authorization).toBe("Bearer tok");
+    expect(headers.Prefer).toBe("odata.maxpagesize=100");
     // Microsoft asks integrators to identify themselves; it is also what lets a
     // customer's admin see which app is being throttled.
     expect(headers["User-Agent"]).toBe("ISV|WarpLab|Droplet/1.2.3");
@@ -133,14 +134,38 @@ describe("GraphClient.getPage — a successful page", () => {
     expect(init.redirect).toBe("manual");
   });
 
-  it("treats a missing `value` array as no items rather than as malformed", async () => {
-    const fetchImpl = vi.fn(async () => jsonResponse({ "@odata.deltaLink": "x" }));
-    const page = await new GraphClient({ fetchImpl }).getPage(GRAPH_API_BASE_URL + "/me", "t");
+  it("keeps a valid singleton drive response in raw without inventing collection items", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse({ id: "primary-drive", name: "OneDrive" }));
+    const page = await new GraphClient({ fetchImpl }).getPage(GRAPH_API_BASE_URL + "/me/drive", "t");
     expect(page.items).toEqual([]);
+    expect(page.raw.id).toBe("primary-drive");
+  });
+
+  it("uses immutable ids and full plain text on every mail page and hydration GET only", async () => {
+    const fetchImpl = vi.fn(async (_url: string, _init?: Record<string, unknown>) => jsonResponse({ value: [] }));
+    const client = new GraphClient({ fetchImpl });
+    for (const path of ["/me/mailFolders/inbox/messages/delta", "/me/mailFolders/inbox/messages/delta?$skiptoken=opaque",
+      "/me/mailFolders/inbox/messages/delta?$deltatoken=opaque", "/me/messages/immutable-id?$select=body,internetMessageHeaders"]) {
+      await client.getPage(`${GRAPH_API_BASE_URL}${path}`, "secret", { mail: true });
+    }
+    for (const [, init] of fetchImpl.mock.calls as unknown as [string, { headers: Record<string, string> }][]) {
+      expect(init.headers.Prefer).toBe('odata.maxpagesize=100, IdType="ImmutableId", outlook.body-content-type="text"');
+    }
+    await client.getPage(`${GRAPH_API_BASE_URL}/me/calendarView/delta`, "secret");
+    const last = fetchImpl.mock.calls.at(-1)?.[1] as unknown as { headers: Record<string, string> };
+    expect(last.headers.Prefer).toBe("odata.maxpagesize=100");
   });
 });
 
 describe("GraphClient.getPage — failures are shaped for classifySyncFailure", () => {
+  it.each([200, 503])("keeps the timeout active through a stalled HTTP %s response body", async (status) => {
+    const fetchImpl = vi.fn(async () => ({ status, ok: status === 200,
+      json: () => new Promise(() => {}), headers: new Headers() }) as Response);
+    const err = await new GraphClient({ fetchImpl, timeoutMs: 10 }).getPage(`${GRAPH_API_BASE_URL}/me/calendarView/delta`, "secret-bearer").catch((error: unknown) => error);
+    expect(err).toMatchObject({ statusCode: 0, code: "ETIMEDOUT" });
+    expect(classifySyncFailure(err as GraphRequestError)).toBe("TRANSIENT");
+    expect(String(err)).not.toContain("secret-bearer");
+  });
   it("surfaces Graph's error.code so a dead delta token means RESYNC, not FATAL", async () => {
     // The whole point of extracting `error.code`: `syncStateNotFound` arriving
     // as prose inside a message would classify FATAL, and the cursor would stop

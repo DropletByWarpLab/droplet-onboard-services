@@ -66,7 +66,7 @@ import { Microsoft365Card, SETUP_GUIDE_HREF, hintForError } from "./Microsoft365
 import { SHAREPOINT_LIBRARY_LIMIT, SHAREPOINT_SWITCH_LABEL } from "./Microsoft365Files";
 import { INTEGRATION_GUIDES, integrationGuideHref } from "@/lib/integration-guides";
 
-const REDIRECT = "https://droplet-ai.local/api/m365/callback";
+const REDIRECT = new URL("/api/m365/callback", window.location.origin).toString();
 const APP = {
   clientId: "0f1e2d3c-4b5a-4968-8776-a5b4c3d2e1f0",
   tenantId: "9a8b7c6d-5e4f-4321-8fed-cba987654321",
@@ -86,6 +86,7 @@ function view(over: Record<string, unknown> = {}) {
     connectedAt: null,
     lastRefreshOkAt: null,
     lastError: null,
+    configured: true,
     redirectUri: REDIRECT,
     sharePoint: SP_OFF,
     ...over,
@@ -141,6 +142,7 @@ interface Box {
   del: () => unknown;
   /** `POST /api/m365/connect` */
   connect: () => unknown;
+  mailPut: (body: { enabled: boolean }) => unknown;
 }
 
 /** The box, answering by URL. A request a test did not expect throws. */
@@ -151,6 +153,7 @@ function serveBox(overrides: Partial<Box> = {}): Box {
     put: () => json({}),
     del: () => ({ ok: true, status: 204, json: async () => ({}) }),
     connect: () => json({ authorizeUrl: "https://sign-in.example/authorize?x=1" }),
+    mailPut: () => json({}),
     ...overrides,
   };
   authFetch.mockImplementation(async (url: string, init?: { method?: string; body?: string }) => {
@@ -165,6 +168,7 @@ function serveBox(overrides: Partial<Box> = {}): Box {
       return typeof box.sync === "number" ? json({}, box.sync) : json(box.sync);
     }
     if (url === "/api/m365/sharepoint" && method === "PUT") return answer(box.put(JSON.parse(init!.body!)));
+    if (url === "/api/m365/mail" && method === "PUT") return answer(box.mailPut(JSON.parse(init!.body!)));
     if (url === "/api/m365/connection" && method === "DELETE") return answer(box.del());
     if (url === "/api/m365/connect" && method === "POST") return answer(box.connect());
     throw new Error(`unexpected request: ${method} ${url}`);
@@ -216,13 +220,24 @@ describe("a status read that fails", () => {
     expect(await screen.findByTestId("m365-load-failed")).toHaveTextContent(/could not read/i);
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
+  it("retries a failed load without requiring a page reload", async () => {
+    authFetch.mockRejectedValueOnce(new Error("offline")).mockResolvedValue(json(view()));
+    render(<Microsoft365Card />);
+    fireEvent.click(await screen.findByRole("button", { name: "Retry" }));
+    expect(await screen.findByRole("button", { name: "Connect Outlook" })).toBeEnabled();
+    expect(screen.queryByTestId("m365-load-failed")).not.toBeInTheDocument();
+  });
 });
 
 describe("connecting", () => {
-  it("shows the server's redirect URI verbatim, to be pasted into the app registration", async () => {
-    authFetch.mockResolvedValue(json(view()));
+  it("asks the administrator to enable a missing registration and disables connect", async () => {
+    session.role = "family";
+    authFetch.mockResolvedValue(json(view({ configured: false })));
     render(<Microsoft365Card />);
-    expect(await screen.findByDisplayValue(REDIRECT)).toHaveAttribute("readonly");
+    expect(await screen.findByText(/ask your droplet administrator to enable microsoft/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Connect Outlook" })).toBeDisabled();
+    expect(screen.queryByLabelText("Application (client) ID")).not.toBeInTheDocument();
+    expect(screen.queryByDisplayValue(REDIRECT)).not.toBeInTheDocument();
   });
 
   it("pre-fills the stored app so reconnecting is one click", async () => {
@@ -230,30 +245,49 @@ describe("connecting", () => {
     render(<Microsoft365Card />);
     expect(await screen.findByDisplayValue(APP.clientId)).toBeInTheDocument();
     expect(screen.getByDisplayValue(APP.tenantId)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Sign in again" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reconnect Outlook" })).toBeInTheDocument();
+    expect(screen.getByText("Advanced personal app settings").closest("details")).not.toHaveAttribute("open");
   });
 
-  it("posts the two ids and sends the browser where the server says", async () => {
+  it("posts no registration details and sends the browser where the server says", async () => {
     const navigate = vi.fn();
     authFetch
       .mockResolvedValueOnce(json(view()))
       .mockResolvedValueOnce(json({ authorizeUrl: "https://sign-in.example/authorize?x=1" }));
     render(<Microsoft365Card navigate={navigate} />);
 
-    fireEvent.change(await screen.findByLabelText("Application (client) ID"), {
-      target: { value: ` ${APP.clientId} ` },
-    });
-    fireEvent.change(screen.getByLabelText("Directory (tenant) ID"), { target: { value: APP.tenantId } });
-    fireEvent.click(screen.getByRole("button", { name: "Sign in with Microsoft" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Connect Outlook" }));
 
     await waitFor(() => expect(navigate).toHaveBeenCalledWith("https://sign-in.example/authorize?x=1"));
     const [url, init] = authFetch.mock.calls[1]!;
     expect(url).toBe("/api/m365/connect");
     expect(init.method).toBe("POST");
-    expect(JSON.parse(init.body)).toEqual(APP); // trimmed
+    expect(JSON.parse(init.body)).toEqual({});
+    expect(screen.queryByLabelText("Application (client) ID")).not.toBeInTheDocument();
   });
 
-  it("shows the server's reason and goes nowhere when the ids are refused", async () => {
+  it("moves an alias to the registered Droplet address before starting consent", async () => {
+    const navigate = vi.fn();
+    authFetch.mockResolvedValue(json(view({ redirectUri: "https://registered.example/api/m365/callback" })));
+    render(<Microsoft365Card navigate={navigate} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Connect Outlook" }));
+    expect(navigate).toHaveBeenCalledWith("https://registered.example/settings");
+    expect(screen.getByText(/account linking opens droplet's registered address/i)).toHaveTextContent(/may need to sign in/i);
+    expect(callsTo("/api/m365/connect", "POST")).toHaveLength(0);
+  });
+
+  it("retains a stored personal app behind advanced settings", async () => {
+    const navigate = vi.fn();
+    serveBox({ view: view({ app: APP }) });
+    render(<Microsoft365Card navigate={navigate} />);
+    fireEvent.click(await screen.findByText("Advanced personal app settings"));
+    fireEvent.change(screen.getByLabelText("Application (client) ID"), { target: { value: ` ${APP.clientId} ` } });
+    fireEvent.click(screen.getByRole("button", { name: "Connect using these settings" }));
+    await waitFor(() => expect(navigate).toHaveBeenCalled());
+    expect(JSON.parse(callsTo("/api/m365/connect", "POST")[0]![1].body)).toEqual(APP);
+  });
+
+  it("shows a friendly reason without raw server errors when sign-in is refused", async () => {
     const navigate = vi.fn();
     authFetch.mockResolvedValueOnce(json(view())).mockResolvedValueOnce(
       json(
@@ -266,9 +300,10 @@ describe("connecting", () => {
       ),
     );
     render(<Microsoft365Card navigate={navigate} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Sign in with Microsoft" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Connect Outlook" }));
 
-    expect(await screen.findByRole("alert")).toHaveTextContent(/your organisation's own directory/i);
+    expect(await screen.findByRole("alert")).toHaveTextContent(/could not start the microsoft sign-in/i);
+    expect(screen.queryByText(/your organisation's own directory/i)).not.toBeInTheDocument();
     expect(navigate).not.toHaveBeenCalled();
   });
 });
@@ -290,6 +325,15 @@ describe("the callback outcome", () => {
     const note = await screen.findByTestId("m365-outcome");
     expect(note).toHaveTextContent(/cancelled/i);
     expect(note).toHaveAttribute("role", "status");
+  });
+  it("keeps retained calendar copies and offers explicit disconnect after a refused account switch", async () => {
+    window.history.replaceState(null, "", "/settings?m365=different_account");
+    serveBox({ view: view({ state: "NEEDS_RECONNECT", accountUpn: null, calendar: { enabled: true, state: "NEEDS_RECONNECT", lastSyncAt: null, lastError: null } }) });
+    render(<Microsoft365Card />);
+    expect(await screen.findByTestId("m365-outcome")).toHaveTextContent(/disconnect the current one first.*local copies were kept/i);
+    fireEvent.click(screen.getByRole("button", { name: "Disconnect" }));
+    expect(await screen.findByTestId("confirm-dialog")).toHaveTextContent(/delete its local email archive, attachment metadata, droplet drafts and imported calendar events/i);
+    expect(callsTo("/api/m365/connection", "DELETE")).toHaveLength(0);
   });
 
   it("reflects nothing from an unknown outcome value", async () => {
@@ -333,7 +377,7 @@ describe("a broken app registration", () => {
   });
 
   it("maps each registration error it knows, and nothing else", () => {
-    expect(hintForError("AADSTS50011: redirect mismatch")).toMatch(/redirect uri below/i);
+    expect(hintForError("AADSTS50011: redirect mismatch")).toMatch(/administrator.*redirect uri/i);
     expect(hintForError("AADSTS9002327: spa")).toMatch(/wrong platform/i);
     expect(hintForError("AADSTS700016: app not found")).toMatch(/client\) id/i);
     expect(hintForError("AADSTS90094: admin")).toMatch(/admin consent/i);
@@ -740,7 +784,7 @@ describe("your files — SharePoint is on but Microsoft has not approved it", ()
     const [[url, init]] = callsTo("/api/m365/connect", "POST");
     expect(url).toBe("/api/m365/connect");
     expect(init.method).toBe("POST");
-    expect(JSON.parse(init.body)).toEqual(APP);
+    expect(JSON.parse(init.body)).toEqual({});
   });
 
   it("a sign-in the box refuses is said in the card's alert and goes nowhere", async () => {
@@ -965,6 +1009,38 @@ describe("your files — keeping up while Droplet reads", () => {
   });
 });
 
+describe("Outlook local email import", () => {
+  const mailOff = { enabled: false, state: "DISCONNECTED", needsConsent: false, lastSyncAt: null, lastError: null, mailboxId: null, messageCount: 0 };
+  it("requires an explicit import switch after Microsoft authorization", async () => {
+    const box = serveBox({ view: connected({ mail: mailOff }) });
+    box.mailPut = (body) => { box.view = connected({ mail: { ...mailOff, enabled: body.enabled, state: "WAITING", mailboxId: "outlook-1" } }); return json({}); };
+    render(<Microsoft365Card />);
+    const toggle = await screen.findByRole("checkbox", { name: "Import Outlook emails into Droplet" });
+    expect(toggle).not.toBeChecked();
+    expect(callsTo("/api/m365/mail", "PUT")).toHaveLength(0);
+    fireEvent.click(toggle);
+    expect(await screen.findByText("Waiting for first email import…")).toBeInTheDocument();
+    expect(callsTo("/api/m365/mail", "PUT")).toHaveLength(1);
+    expect(screen.queryByRole("link", { name: "Open Outlook inbox" })).not.toBeInTheDocument();
+  });
+  it("polls the connection while waiting and opens the local inbox once messages land", async () => {
+    const box = serveBox({ view: connected({ mail: { ...mailOff, enabled: true, state: "WAITING", mailboxId: "outlook-1" } }) });
+    render(<Microsoft365Card mailPollMs={20} />);
+    await screen.findByText("Waiting for first email import…");
+    box.view = connected({ mail: { ...mailOff, enabled: true, state: "CONNECTED", mailboxId: "outlook-1", lastSyncAt: new Date().toISOString(), messageCount: 12 } });
+    expect(await screen.findByRole("link", { name: "Open Outlook inbox" })).toHaveAttribute("href", "/email/outlook-1");
+    expect(screen.getByTestId("outlook-mail-status")).toHaveTextContent("12 messages");
+    expect(callsTo("/api/m365/connection").length).toBeGreaterThan(1);
+  });
+  it("keeps a retained mail archive disconnectable while reconnecting without an account label", async () => {
+    serveBox({ view: view({ state: "NEEDS_RECONNECT", mail: { ...mailOff, enabled: true, state: "NEEDS_RECONNECT", mailboxId: "outlook-1" } }) });
+    render(<Microsoft365Card />);
+    fireEvent.click(await screen.findByRole("button", { name: "Disconnect" }));
+    expect(await screen.findByTestId("confirm-dialog")).toHaveTextContent(/local email archive, attachment metadata, droplet drafts/i);
+    expect(callsTo("/api/m365/connection", "DELETE")).toHaveLength(0);
+  });
+});
+
 describe("the setup guide", () => {
   it("links to the bundled guide, at the href the guide registry would build", () => {
     expect(SETUP_GUIDE_HREF).toBe(integrationGuideHref("microsoft-365"));
@@ -976,14 +1052,14 @@ describe("the setup guide", () => {
   it("names the card's buttons as the card labels them", async () => {
     const guide = INTEGRATION_GUIDES["microsoft-365"]!;
     const pressed = [...guide.matchAll(/select \*\*([^*]+)\*\*/gi)].map((m) => m[1]);
-    const cardButtons = ["Sign in with Microsoft", "Sign in again", "Disconnect"];
+    const cardButtons = ["Connect Outlook", "Reconnect Outlook", "Sign in again", "Disconnect"];
     const onCard = pressed.filter((label) => cardButtons.includes(label!));
-    expect(onCard).toEqual(expect.arrayContaining(["Sign in with Microsoft", "Sign in again"]));
+    expect(onCard).toEqual(expect.arrayContaining(["Connect Outlook", "Reconnect Outlook"]));
     expect(guide).not.toMatch(/select \*\*Reconnect\*\*/i);
 
     authFetch.mockResolvedValue(json(view({ state: "NEEDS_RECONNECT", app: APP })));
     render(<Microsoft365Card />);
-    expect(await screen.findByRole("button", { name: "Sign in again" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Reconnect Outlook" })).toBeInTheDocument();
     expect(screen.getByText("Needs reconnect")).toBeInTheDocument();
   });
 });

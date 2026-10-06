@@ -142,6 +142,34 @@ describe("email_search", () => {
     expect(get).not.toHaveBeenCalled();
   });
 
+  it("forwards a bounded local text query without turning its punctuation into URL parameters", async () => {
+    const get = okGet();
+    const res = await emailSearch.handler(
+      { accountId: "outlook/1", query: "  renewal & June?  ", filter: "archived", limit: 10 },
+      ctxWith({ get, role: "family", userId: "person-id" }),
+    );
+    expect(get).toHaveBeenCalledWith("/api/email/outlook%2F1/threads?filter=archived&limit=10&query=renewal+%26+June%3F", {
+      headers: { Accept: "application/json", "X-Droplet-User": "person-id" },
+    });
+    expect(res.ok && res.data).toMatchObject({ query: "renewal & June?", threads: THREADS });
+  });
+
+  it.each(["x".repeat(201), 42, null])("refuses invalid query %s before HTTP", async (query) => {
+    const get = vi.fn();
+    const res = await emailSearch.handler({ accountId: "a1", query }, ctxWith({ get, role: "owner", userId: "romain" }));
+    expectError(res, "INVALID_ARGS");
+    expect(get).not.toHaveBeenCalled();
+  });
+
+  it("keeps blank queries compatible with existing list behavior and admits the 200-character boundary", async () => {
+    const get = okGet();
+    await emailSearch.handler({ accountId: "a1", query: "  " }, ctxWith({ get, role: "owner", userId: "romain" }));
+    expect(get.mock.calls[0][0]).toBe("/api/email/a1/threads?filter=inbox&limit=20");
+    get.mockResolvedValue(new Response(JSON.stringify({ filter: "inbox", threads: [] })));
+    expect((await emailSearch.handler({ accountId: "a1", query: "x".repeat(200) }, ctxWith({ get, role: "owner", userId: "romain" }))).ok).toBe(true);
+    expect(new URL(get.mock.calls[1][0], "https://droplet.local").searchParams.get("query")).toHaveLength(200);
+  });
+
   it("maps a non-OK response to EMAIL_SEARCH_FAILED", async () => {
     const get = vi
       .fn()

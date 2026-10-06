@@ -37,9 +37,10 @@
  *   GET    /api/m365/callback            PUBLIC (createM365CallbackRouter):
  *                                        Microsoft's redirect back to the box.
  *
- * Both connect routes take `{ clientId, tenantId }` — the customer's OWN Entra
- * app registration (WARP-2705). Omitted, the connection's stored app is
- * reused; there is no box-wide app to fall back to.
+ * Both connect routes accept `{ clientId, tenantId }` — the customer's OWN
+ * Entra app (WARP-2705). Omitted, the connection's stored app is reused, then
+ * the owner-configured organisation app (WARP-3788). Each person's grant and
+ * token cache remain separate.
  *
  * **Every authenticated route is scoped to the requester's own connection.**
  * There is no `:userId` parameter anywhere by design: delegated authorization
@@ -71,11 +72,14 @@ import {
   getConnectionView,
   M365AppRequiredError,
   setSharePointEnabled,
+  setCalendarEnabled,
   type EntraAppRegistration,
   type EntraClient,
 } from "../services/m365/m365-auth.service.js";
 import { getSyncStatus } from "../services/m365/sync-status.service.js";
 import { createEntraClient } from "../services/m365/entra-client.js";
+import { getMicrosoftApp } from "../services/account-provider-setup.service.js";
+import { setMicrosoftMailEnabled, MicrosoftMailboxConflictError } from "../services/m365/mail-settings.service.js";
 import {
   classifyAuthFailure,
   parseAppRegistration,
@@ -178,6 +182,38 @@ export function createM365Router(
 ): Router {
   const router = Router();
 
+  router.put("/m365/mail", sensitiveRateLimit, requireRole(...CONNECT_ROLES), async (req, res) => {
+    const userId = (req as AuthedRequest).user?.id;
+    if (!userId) return res.status(401).json({ error: "unauthenticated" });
+    const body = sharePointBodySchema.safeParse(req.body);
+    if (!body.success) return res.status(400).json({ error: "invalid_request" });
+    try {
+      const before = await prisma.m365Connection.findUnique({ where: { userId }, select: { mailEnabled: true } });
+      if (!await setMicrosoftMailEnabled(prisma, userId, body.data.enabled, entra)) return res.status(409).json({ error: "m365_not_connected", message: "Connect Outlook first, then turn on email import." });
+      if (body.data.enabled !== (before?.mailEnabled === true)) await recordActivity({ kind: "auth", severity: "info", sourceIcon: "cloud",
+        what: body.data.enabled ? "Outlook email import enabled" : "Outlook email import disabled", sub: body.data.enabled ? "WAITING" : "DISCONNECTED",
+        actor: actorFromRequest(req as never), refs: { connector: "m365", userId, mailEnabled: body.data.enabled } });
+      return res.json(await getConnectionView(prisma, userId));
+    } catch (error) {
+      if (error instanceof MicrosoftMailboxConflictError || (error as { code?: string })?.code === "P2002") return res.status(409).json({ error: "mailbox_conflict", message: "This email address already has a mailbox in Droplet. Remove that mailbox before importing it through Outlook." });
+      return res.status(503).json({ error: "m365_mail_update_failed", message: "The Outlook email setting could not be changed. Reload its status and try again." });
+    }
+  });
+
+  router.put("/m365/calendar", sensitiveRateLimit, requireRole(...CONNECT_ROLES), async (req, res) => {
+    const userId = (req as AuthedRequest).user?.id;
+    if (!userId) return res.status(401).json({ error: "unauthenticated" });
+    const body = sharePointBodySchema.safeParse(req.body);
+    if (!body.success) return res.status(400).json({ error: "invalid_request" });
+    try {
+      const result = await setCalendarEnabled(prisma, userId, body.data.enabled);
+      if (!result.ok) return res.status(409).json({ error: "m365_not_connected", message: "Connect Outlook first, then turn on calendar import." });
+      return res.json(result.view);
+    } catch {
+      return res.status(503).json({ error: "m365_calendar_update_failed", message: "The Outlook calendar setting could not be changed. Reload its status and try again." });
+    }
+  });
+
   router.get(
     "/m365/connection",
     requireRole(...CONNECT_ROLES),
@@ -189,6 +225,7 @@ export function createM365Router(
         const view = await getConnectionView(prisma, userId);
         return res.json({
           ...view,
+          configured: !!view.app || !!(await getMicrosoftApp(prisma)),
           // The exact URL the owner adds to their app registration. Built from
           // the box's host-validated origin (never a forged Host header), the
           // same origin the connect route will hand to Microsoft.

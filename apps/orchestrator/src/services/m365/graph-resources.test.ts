@@ -94,7 +94,9 @@ describe("deltaTokenParamFor — the parameter is NOT uniform across Graph", () 
 describe("GRAPH_RESOURCES — endpoint shapes Microsoft actually documents", () => {
   it("scopes mail delta to a FOLDER — there is no /me/messages/delta", () => {
     const url = initialUrlFor("mail", "AAMkAD", NOW);
-    expect(url).toBe(`${GRAPH_API_BASE_URL}/me/mailFolders/AAMkAD/messages/delta`);
+    expect(new URL(url!).pathname).toBe("/v1.0/me/mailFolders/AAMkAD/messages/delta");
+    expect(new URL(url!).searchParams.get("$select")).toContain("body");
+    expect(new URL(url!).searchParams.get("$select")).toContain("internetMessageHeaders");
     // The whole-mailbox form does not exist. A cursor grain built on it would
     // silently sync nothing.
     expect(url).not.toContain("/me/messages/delta");
@@ -117,7 +119,7 @@ describe("GRAPH_RESOURCES — endpoint shapes Microsoft actually documents", () 
     // The recursion is only possible where this is declared, so its presence
     // is the property worth pinning — absence would silently flatten the walk.
     expect(GRAPH_RESOURCES.mail.childCollectionPath?.("f1")).toBe(
-      "/me/mailFolders/f1/childFolders",
+      "/me/mailFolders/f1/childFolders?includeHiddenFolders=true",
     );
     expect(GRAPH_RESOURCES.contacts.childCollectionPath?.("c1")).toBe(
       "/me/contactFolders/c1/childFolders",
@@ -229,7 +231,7 @@ describe("GRAPH_RESOURCES — endpoint shapes Microsoft actually documents", () 
   });
 
   it("records the least-privileged scope, and flags To Do as the one write exception", () => {
-    expect(GRAPH_RESOURCES.mail.leastPrivilegeScope).toBe("Mail.ReadBasic");
+    expect(GRAPH_RESOURCES.mail.leastPrivilegeScope).toBe("Mail.Read");
     expect(GRAPH_RESOURCES.calendar.leastPrivilegeScope).toBe("Calendars.Read");
     expect(GRAPH_RESOURCES.contacts.leastPrivilegeScope).toBe("Contacts.Read");
     expect(GRAPH_RESOURCES.files.leastPrivilegeScope).toBe("Files.Read");
