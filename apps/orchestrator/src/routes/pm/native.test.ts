@@ -1176,12 +1176,12 @@ describe("native PM routes — activity names what changed (WARP-3519)", () => {
     ]);
   });
 
-  it("a start-date change is the one that still writes `updated`, with an explicit field", async () => {
+  it("a start-date change writes start_date_changed with the old and new dates", async () => {
     const before = db.activity.length;
     expect((await patch({ start_date: "2026-10-05T00:00:00.000Z" })).status).toBe(200);
     expect(written(before)).toEqual([
       expect.objectContaining({
-        verb: "updated",
+        verb: "start_date_changed",
         field: "startDate",
         oldValue: null,
         newValue: "2026-10-05T00:00:00.000Z",
