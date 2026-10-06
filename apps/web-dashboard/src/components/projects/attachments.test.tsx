@@ -523,7 +523,9 @@ describe("Attachments section — uploading", () => {
     fireEvent.change(sectionInput(), { target: { files: [makeFile(file)] } });
     await waitFor(() => expect(FakeXHR.all).toHaveLength(1));
     respond(FakeXHR.all[0], status, body);
-    expect(within(await uploadRows()).getByText(says)).toBeInTheDocument();
+    // The Uploads list exists before the request settles. Wait for the
+    // rejected promise to publish its error, rather than for the container.
+    expect(await within(await uploadRows()).findByText(says)).toBeInTheDocument();
     expect(screen.queryByText(/attachment_/)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Dismiss" })).toBeInTheDocument();
     // A failed row is not a progress row.
