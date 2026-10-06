@@ -12,6 +12,10 @@ import { notifyOwnersAndAdmins } from "../notifications.service.js";
 import { classifyInbound, parseStoredHeaders, referenceCandidates, ticketTokens, cleanTicketSubject } from "./email-headers.js";
 import { inboundBodyHtml } from "./email-text.js";
 import { DEFAULT_ACK_TEMPLATE, renderAckTemplate } from "./ack-template.js";
+import { assignNewTicket } from "./assignment.service.js";
+import { lockTicketClock, syncTicketSla } from "./sla-clock.service.js";
+import { applyStateChange, findTicketRow } from "./ticket.service.js";
+import type { SupportDeps } from "./requester.service.js";
 
 type Tx = Prisma.TransactionClient;
 const MAX_PER_SENDER_PER_HOUR = 20;
@@ -137,7 +141,7 @@ async function queueAutoAck(tx: Tx, channel: any, ticket: any, requester: any, m
   await tx.pmTicket.update({ where: { workItemId: ticket.id }, data: { lastPublicActivityAt: now } });
 }
 
-async function applyInbound(tx: Tx, message: any, channel: any, now: Date): Promise<{ notifyRateLimit: boolean; wroteActivity: boolean }> {
+async function applyInbound(tx: Tx, message: any, channel: any, now: Date, deps: SupportDeps): Promise<{ notifyRateLimit: boolean; wroteActivity: boolean }> {
   const senderKey = `support-email:${message.accountId}:${message.fromAddr.trim().toLowerCase()}`;
   await tx.$executeRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${senderKey}, 0))`);
   const ownChannels = await tx.pmSupportChannel.findMany({ select: { emailAccount: { select: { address: true } } } });
@@ -166,12 +170,18 @@ async function applyInbound(tx: Tx, message: any, channel: any, now: Date): Prom
     return { notifyRateLimit: alreadyNotified === 0, wroteActivity: false };
   }
 
-  const oldTicket = await matchedTicket(tx, {
+  let oldTicket = await matchedTicket(tx, {
     accountId: message.accountId,
     inReplyTo: message.inReplyTo,
     references: headers?.references ?? [],
     subject: message.subject,
   });
+  if (oldTicket) {
+    // Staff replies, requester replies and clock ticks use the same row lock.
+    // Re-read after it so a concurrent state change cannot reopen a stale state.
+    await lockTicketClock(tx, oldTicket.id);
+    oldTicket = await findTicketRow(tx, oldTicket.id);
+  }
   const requester = await contactForSender(tx, channel.contactOwnerUserId, message.fromAddr, message.fromName);
   const bodyHtml = inboundBodyHtml(message.bodyHtml, message.bodyText);
   let ticket = oldTicket;
@@ -185,12 +195,8 @@ async function applyInbound(tx: Tx, message: any, channel: any, now: Date): Prom
       else {
         const reopenState = await tx.pmState.findFirst({ where: { projectId: oldTicket.projectId, onCustomerReply: "REOPEN", group: "started" }, orderBy: [{ sortOrder: "asc" }, { id: "asc" }] });
         if (reopenState && reopenState.id !== oldTicket.stateId) {
-          const changed = await tx.pmWorkItem.updateMany({ where: { id: oldTicket.id, stateId: oldTicket.stateId }, data: { stateId: reopenState.id, isCompleted: false, completedAt: null, updatedAt: now } });
-          if (changed.count === 1) {
-            await tx.pmTicket.update({ where: { workItemId: oldTicket.id }, data: { reopenCount: { increment: 1 }, solvedAt: null } });
-            await writeActivity(tx, { workItemId: oldTicket.id, actorId: null, verb: "state_changed", field: "state", oldValue: oldTicket.stateId, newValue: reopenState.id, nudge: false });
-            wroteActivity = true;
-          }
+          await applyStateChange(tx, oldTicket, reopenState, null, message.receivedAt, deps, { nudge: false });
+          wroteActivity = true;
         }
       }
     }
@@ -201,6 +207,7 @@ async function applyInbound(tx: Tx, message: any, channel: any, now: Date): Prom
     const state = states.find((s) => s.isDefault) ?? states[0];
     if (!state) throw new Error("desk_has_no_states");
     const bumped = await tx.pmProject.update({ where: { id: desk.id }, data: { seqCounter: { increment: 1 } }, select: { seqCounter: true } });
+    const assigneeIds = await assignNewTicket(tx, desk.id, null, deps);
     const created = await tx.pmWorkItem.create({
       data: {
         projectId: desk.id,
@@ -211,11 +218,16 @@ async function applyInbound(tx: Tx, message: any, channel: any, now: Date): Prom
         priority: "none",
         createdById: channel.contactOwnerUserId,
         sortOrder: bumped.seqCounter,
-        assignees: undefined,
+        createdAt: message.receivedAt,
+        updatedAt: message.receivedAt,
+        assignees: { create: assigneeIds.map((userId) => ({ userId })) },
       },
       select: { id: true },
     });
     await tx.pmTicket.create({ data: { workItemId: created.id, requesterKind: "CONTACT", requesterContactId: requester.id, requesterUserId: null, requesterName: requester.displayName, requesterEmail: message.fromAddr, companyId: null, channel: "EMAIL", solvedAt: null } });
+    // Retries must not grant more response time: the immutable inbound instant,
+    // rather than the indexer's processing time, starts the promise.
+    await syncTicketSla(tx, created.id, message.receivedAt, "create", deps);
     await writeActivity(tx, { workItemId: created.id, actorId: null, verb: "created", nudge: false });
     wroteActivity = true;
     ticket = await tx.pmWorkItem.findUniqueOrThrow({ where: { id: created.id }, include: { project: true, state: true, ticket: true } });
@@ -227,9 +239,10 @@ async function applyInbound(tx: Tx, message: any, channel: any, now: Date): Prom
     }
     if (bodyHtml) await tx.pmTicket.update({ where: { workItemId: ticket.id }, data: { lastPublicActivityAt: message.receivedAt } });
   } else if (bodyHtml) {
-    const comment = await tx.pmComment.create({ data: { workItemId: ticket.id, contactId: requester.id, authorKind: "CONTACT", visibility: "PUBLIC", commentHtml: bodyHtml } });
+    const comment = await tx.pmComment.create({ data: { workItemId: ticket.id, contactId: requester.id, authorKind: "CONTACT", visibility: "PUBLIC", commentHtml: bodyHtml, createdAt: message.receivedAt } });
     await tx.pmTicket.update({ where: { workItemId: ticket.id }, data: { lastPublicActivityAt: message.receivedAt } });
     await tx.pmWorkItem.update({ where: { id: ticket.id }, data: { updatedAt: message.receivedAt } });
+    await syncTicketSla(tx, ticket.id, message.receivedAt, "requester", deps);
     await writeActivity(tx, { workItemId: ticket.id, actorId: null, verb: "commented", field: "reply", nudge: false });
     wroteActivity = true;
     await tx.pmTicketEmailLink.create({ data: { workItemId: ticket.id, direction: "INBOUND", messageIdHeader: message.messageId, emailThreadId: message.threadId, emailMessageId: message.id, commentId: comment.id } });
@@ -244,7 +257,7 @@ async function applyInbound(tx: Tx, message: any, channel: any, now: Date): Prom
 
 /** Process one committed message once. A channel bound later will only process
  * messages at or after enabledAt, so historical inbox mail never becomes tickets. */
-export async function intakeEmailMessage(prisma: PrismaClient, accountId: string, messageId: string, now = new Date()): Promise<void> {
+export async function intakeEmailMessage(prisma: PrismaClient, accountId: string, messageId: string, now = new Date(), deps: SupportDeps = {}): Promise<void> {
   const message = await prisma.emailMessage.findUnique({ where: { accountId_messageId: { accountId, messageId } } });
   if (!message || !(message.deskIntakeStatus === "PENDING" || (message.deskIntakeStatus === "FAILED" && message.deskIntakeReason === "PROCESSING_ERROR"))) return;
   const channel = await prisma.pmSupportChannel.findUnique({ where: { emailAccountId: accountId }, include: { project: true, emailAccount: { select: { address: true, authMode: true } } } });
@@ -270,7 +283,7 @@ export async function intakeEmailMessage(prisma: PrismaClient, accountId: string
         data: { deskIntakeAttempts: { increment: 1 }, deskIntakeStatus: "FAILED", deskIntakeReason: "PROCESSING_ERROR", deskIntakeAt: now },
       });
       if (!claimed.count) return { notifyRateLimit: false, wroteActivity: false };
-      return applyInbound(tx, { ...message, headers: message.headers }, { ...channel, autoAckEnabled: channel.autoAckEnabled && mayAutoAck }, now);
+      return applyInbound(tx, { ...message, headers: message.headers }, { ...channel, autoAckEnabled: channel.autoAckEnabled && mayAutoAck }, now, deps);
     });
     if (result.wroteActivity) nudgeOutbox();
     if (result.notifyRateLimit) {

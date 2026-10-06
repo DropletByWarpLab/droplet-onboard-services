@@ -109,6 +109,16 @@ const VERB_EVENT: Record<PmActivityVerb, WorkItemEvent> = {
   module_removed: "work_item.updated",
   relation_added: "work_item.updated",
   relation_removed: "work_item.updated",
+  // The PROJECT-only fan-out rejects ticket rows before this mapping. SLA
+  // verbs remain reserved until a Support-scoped webhook configuration exists.
+  sla_at_risk: "work_item.updated",
+  sla_breached: "work_item.updated",
+  macro_applied: "work_item.updated",
+  comment_edited: "work_item.updated",
+  comment_deleted: "work_item.updated",
+  watcher_added: "work_item.updated",
+  watcher_removed: "work_item.updated",
+  mentioned: "work_item.updated",
   attachment_added: "work_item.updated",
   attachment_removed: "work_item.updated",
   // WARP-3535 — a pull request, commit or branch was linked. Its `changes` entry

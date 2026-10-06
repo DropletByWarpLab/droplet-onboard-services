@@ -33,12 +33,13 @@ function fixture(rejectCommit = false) {
     ticket: { requesterEmail: "dana@example.test" },
   } as never);
   const tx = {
+    $queryRaw: vi.fn().mockResolvedValue([]),
     pmComment: { create: vi.fn(async ({ data }: { data: object }) => {
       comments.push(data);
       return { ...data, id: "comment", createdAt: NOW };
     }) },
     pmActivity: { create: vi.fn(async ({ data }: { data: object }) => { activity.push(data); return {}; }) },
-    pmWorkItem: { updateMany: vi.fn().mockResolvedValue({ count: 1 }), update: vi.fn().mockResolvedValue({}) },
+    pmWorkItem: { updateMany: vi.fn().mockResolvedValue({ count: 1 }), update: vi.fn().mockResolvedValue({}), findFirst: vi.fn().mockResolvedValue(null) },
     pmTicket: { updateMany: vi.fn().mockResolvedValue({ count: 1 }), update: vi.fn().mockResolvedValue({}) },
     emailDraft: { create: vi.fn(async ({ data }: { data: object }) => { drafts.push(data); return { id: "draft" }; }) },
     pmTicketEmailLink: { create: vi.fn(async ({ data }: { data: object }) => { links.push(data); return {}; }) },

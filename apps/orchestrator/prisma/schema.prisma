@@ -5751,6 +5751,8 @@ model PmWorkspace {
   createdAt DateTime    @default(now())
   updatedAt DateTime    @default(now()) @updatedAt
   projects  PmProject[]
+  /// WARP-3530 — the business hours service-desk SLAs are counted in.
+  businessCalendars PmBusinessCalendar[]
   /// WARP-3522 — saved views, project-scoped and cross-project.
   savedViews PmSavedView[]
   /// WARP-3532 — the workspace's webhook destinations.
@@ -5809,6 +5811,8 @@ model PmProject {
   cycles     PmCycle[]
   modules    PmModule[]
   properties PmCustomProperty[]
+  /// WARP-3532 — webhooks scoped to this project (cascade with it).
+  webhooks   PmWebhook[]
   /// WARP-3522 — views saved against this project (cross-project views have no project).
   savedViews PmSavedView[]
   /// WARP-3527 — the import runs filed against this project. Cascade: a job is
@@ -5818,7 +5822,6 @@ model PmProject {
   /// empty for a PROJECT (a trigger holds that).
   supportChannels PmSupportChannel[]
   /// WARP-3532 — webhooks scoped to this project (cascade with it).
-  webhooks   PmWebhook[]
   /// WARP-3535 — the code repositories whose pull requests, commits and branches
   /// are matched against this project's work-item keys. The mapping row goes
   /// with the project; the repository registration does not.
@@ -5850,6 +5853,11 @@ model PmProject {
   /// record that outlives the project.
   fileLinks EntityLink[]
 
+  /// WARP-3530 — a service desk's SLA, assignment rule and macros. All three are
+  /// SERVICE_DESK-only (a trigger holds it); a PROJECT never has any.
+  slaPolicy      PmSlaPolicy?
+  assignmentRule PmAssignmentRule?
+  macros         PmMacro[]
   /// WARP-3533 — ICS feed links for this project (see CalendarFeedToken).
   /// Cascade: a feed of a deleted project reads nothing.
   feedTokens CalendarFeedToken[]
@@ -6056,6 +6064,8 @@ model PmWorkItem {
   activity       PmActivity[]
   modules        PmModuleWorkItem[]
   propertyValues PmWorkItemPropertyValue[]
+  /// WARP-3519 — who hears about this item. See PmWorkItemWatcher.
+  watchers       PmWorkItemWatcher[]
   /// WARP-3535 — pull requests, commits and branches from GitHub / GitLab whose
   /// text names this item's key. Cascade: a link is a pointer with no meaning
   /// once its item is gone.
@@ -6214,6 +6224,15 @@ model PmWorkItemLabel {
 
 /// A comment on a work item. `authorId` null = system / LLM-authored.
 ///
+/// WARP-3519 (WS-2): comments can be edited by their author and deleted by their
+/// author or an owner/admin. A delete is SOFT — the row stays as a tombstone with
+/// the body cleared — so the thread keeps its shape and the activity trail keeps
+/// an anchor. `isDeleted` is the canonical signal (explicit column, not derived
+/// from `deletedAt IS NOT NULL` — the WARP-884 split); `deletedAt`/`deletedById`
+/// are the audit pair, pinned to it by `PmComment_deleted_matches_flag`, and a
+/// tombstone carries no content (`PmComment_tombstone_has_no_body`). Both CHECKs
+/// live in the WARP-3519 migration (Prisma cannot express them) and are proven
+/// against a real Postgres in pm-collaboration.pg.test.ts.
 /// WARP-3528 (ADR-069 §3) — one comment stream carries both halves of a ticket's
 /// conversation. `visibility` says who may see it: INTERNAL (the default, so
 /// every existing comment stays internal) is for the team; PUBLIC is the reply
@@ -6229,6 +6248,15 @@ model PmComment {
   workItem    PmWorkItem          @relation(fields: [workItemId], references: [id], onDelete: Cascade)
   authorId    String?
   commentHtml String
+  /// When the AUTHOR last changed the body; null = never edited.
+  editedAt    DateTime?
+  isDeleted   Boolean    @default(false)
+  deletedAt   DateTime?
+  /// A User.id string, not an FK — the convention every PM attribution column
+  /// follows (see the note at the head of this section).
+  deletedById String?
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @default(now()) @updatedAt
   visibility  PmCommentVisibility @default(INTERNAL)
   authorKind  PmAuthorKind        @default(USER)
   /// A plain `Contact.id`, like every other PM reference to a person (`authorId`
@@ -6237,6 +6265,8 @@ model PmComment {
   /// source is removed or a connector is purged, and none of those paths may be
   /// blocked by — or silently eat — a customer's conversation.
   contactId   String?
+  reactions PmCommentReaction[]
+  mentions  PmCommentMention[]
   /// WARP-3529 (ADR-069 §4) — whether the email of a PUBLIC reply reached the
   /// mail server: NONE for a comment that is not an outgoing email (a note, a
   /// customer's message, a reply recorded on a desk with no channel), PENDING
@@ -6246,8 +6276,6 @@ model PmComment {
   /// and a failure always says why.
   deliveryStatus  PmDeliveryStatus   @default(NONE)
   deliveryFailure PmDeliveryFailure?
-  createdAt   DateTime            @default(now())
-  updatedAt   DateTime            @default(now()) @updatedAt
   /// WARP-1505 — files attached through this comment. Cascade: a comment that
   /// goes takes its attachment ROWS with it, so every path that can delete a
   /// comment is also a path that must unlink the blobs (pm-attachments.service).
@@ -6259,6 +6287,70 @@ model PmComment {
   @@index([workItemId, createdAt])
   /// The delivery sweep's read: the comments still waiting on the mail service.
   @@index([deliveryStatus, createdAt])
+}
+
+/// WARP-3519 — one person's reaction to one comment. The emoji is checked
+/// against a closed server-side allowlist (`PM_REACTION_EMOJI` in
+/// @droplet/shared-types, also what the dashboard renders) at the write
+/// boundary; the unique key makes adding the same reaction twice a no-op rather
+/// than a count of two. The key's leading `commentId` serves "reactions on this
+/// comment" — no second index.
+model PmCommentReaction {
+  id        String    @id @default(uuid())
+  commentId String
+  comment   PmComment @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  /// A User.id string, not an FK (PM attribution convention).
+  userId    String
+  emoji     String
+  createdAt DateTime  @default(now())
+
+  @@unique([commentId, userId, emoji])
+}
+
+/// WARP-3519 — why somebody is on an item's watch list. Informational (it is
+/// what the person was doing when they were subscribed); the notification
+/// decision never reads it.
+enum PmWatchReason {
+  CREATOR
+  ASSIGNEE
+  COMMENTER
+  MENTIONED
+  MANUAL
+}
+
+/// WARP-3519 — a person who hears about an item. Written two ways: automatically
+/// when somebody creates the item, is assigned to it, comments on it or is
+/// mentioned in it (reason says which), and by hand (MANUAL). The activity notify
+/// sweep reads this table (alongside the assignees) to decide who is told about a
+/// comment, a state change or an assignment — it is the same pipeline, not a
+/// second one. The row outlives an unassignment on purpose: being taken off an
+/// item does not mean you stopped caring about it.
+model PmWorkItemWatcher {
+  id         String        @id @default(uuid())
+  workItemId String
+  workItem   PmWorkItem    @relation(fields: [workItemId], references: [id], onDelete: Cascade)
+  /// A User.id string, not an FK (PM attribution convention).
+  userId     String
+  reason     PmWatchReason
+  createdAt  DateTime      @default(now())
+
+  @@unique([workItemId, userId])
+  @@index([userId])
+}
+
+/// WARP-3519 — a person @mentioned in a comment. Never taken from the client:
+/// the rows are derived by the server from the SANITIZED comment html
+/// (`<span data-mention-id>` spans) and only for users who can read the item.
+model PmCommentMention {
+  id        String    @id @default(uuid())
+  commentId String
+  comment   PmComment @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  /// A User.id string, not an FK (PM attribution convention).
+  userId    String
+  createdAt DateTime  @default(now())
+
+  @@unique([commentId, userId])
+  @@index([userId])
 }
 
 /// Cycle / sprint — a time-boxed set of work items.
@@ -6578,6 +6670,29 @@ enum PmActivityVerb {
   /// mirroring what parent_removed does for orphaned sub-issues.
   relation_added
   relation_removed
+  /// WARP-3530 (ADR-069 §6): the SLA ticker moved a ticket's `slaStatus` into
+  /// AT_RISK / BREACHED (`field` = the target that drove it — firstResponse,
+  /// nextResponse or resolution — `oldValue`/`newValue` = the two statuses), or a
+  /// state change found a target already missed at the moment the ticket was
+  /// solved. Written with a null actor: the system, not a person. These are the
+  /// rows a webhook consumer (WS-16: `sla.at_risk` / `sla.breached`) reads.
+  sla_at_risk
+  sla_breached
+  /// WARP-3530: an agent applied a macro to a ticket (`newValue` = its name AS IT
+  /// WAS then, so a rename or delete leaves the audit trail readable). The field
+  /// changes it made are their own rows (state_changed, updated/priority,
+  /// assigned, label_added), written in the same transaction.
+  macro_applied
+  /// WARP-3519 (WS-2): the comment lifecycle beyond `commented`, the watch list,
+  /// and the mention event. `mentioned` is the notification queue entry for ONE
+  /// newly mentioned person (`newValue` = their User.id) — the mention is visible
+  /// in the comment itself, so the timeline does not repeat it (the way GitHub's
+  /// event stream carries `mentioned` that its UI never shows).
+  comment_edited
+  comment_deleted
+  watcher_added
+  watcher_removed
+  mentioned
   /// WARP-1505: a file landed on the work item (or on one of its comments).
   /// `newValue` is the display file name. Never notifies (not in the
   /// activity-notify allowlist) — it is history, not an interruption.
@@ -7240,6 +7355,37 @@ model PmTicket {
   slaStatus    PmSlaStatus     @default(NONE)
   satisfaction PmSatisfaction?
 
+  /// WARP-3530 (ADR-069 §6) — the three due times, MATERIALISED by the pure
+  /// functions in services/support/sla-engine.ts (business-time arithmetic over the
+  /// desk's calendar) on create, on a person changing the priority, and on every
+  /// state change that starts, pauses or stops the clock. NULL = that target does
+  /// not apply: no target for this priority, the first response already given,
+  /// or no customer message waiting for an answer (`nextResponseDueAt`).
+  firstResponseDueAt DateTime?
+  nextResponseDueAt  DateTime?
+  resolutionDueAt    DateTime?
+  /// WARP-3530 — business-time MILLISECONDS the SLA clock has not run since the
+  /// ticket was opened: every closed interval of a Pending / On hold / Solved
+  /// state, measured in the calendar's business time (not wall clock), because a
+  /// weekend spent Pending must cost a deadline a weekend of business hours, not
+  /// 48. It excludes the interval in progress (`slaPausedAt`). A due time is
+  /// `addBusinessMinutes(createdAt, target + slaPausedMs)`; the identity is what
+  /// lets a priority change re-derive a deadline exactly.
+  slaPausedMs        BigInt    @default(0)
+  /// WARP-3530 — the instant the SLA clock last stopped RUNNING (the ticket entered
+  /// a PmState whose `slaClock` is PAUSED or STOPPED), or NULL while it runs. Set and
+  /// cleared in the same transaction as the state change; the ticker repairs a
+  /// disagreement with the ticket's current state.
+  slaPausedAt        DateTime?
+  /// WARP-3530 — the SLA terms the due times were computed from, as of that
+  /// computation: `{ firstResponseMins, nextResponseMins, resolutionMins,
+  /// atRiskPercent }` (minutes, null = no such target). Frozen on the ticket so a
+  /// later edit to the desk's policy never moves the goalposts of a ticket already
+  /// on the clock — and so "at risk" is judged against the promise made, which the
+  /// policy no longer states once it has been edited. NULL exactly when no SLA
+  /// applies (`slaStatus` NONE).
+  slaTargets         Json?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
 
@@ -7253,6 +7399,146 @@ model PmTicket {
   @@index([companyId])
   /// The "solved recently" queue.
   @@index([solvedAt])
+  /// WARP-3530 — the SLA ticker's scan: the tickets still on a clock.
+  @@index([slaStatus])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Service desk SLAs, business calendars, macros and assignment (ADR-069 §5-§6,
+// WARP-3530)
+//
+// A desk's SLA is a `PmSlaPolicy` (targets per priority) run against a
+// `PmBusinessCalendar` (zone, weekly windows, holidays). Due times and the
+// explicit `PmTicket.slaStatus` are materialised on the ticket by the pure
+// functions in services/support/sla-engine.ts; a cron-runtime interval
+// re-evaluates the open tickets each minute. The Json columns are validated by
+// zod at every write (services/support/sla-schemas.ts) and their TOP-LEVEL
+// shape is held by a CHECK in the migration, so another writer cannot store a
+// string where the engine reads an object.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Who may use a macro. PERSONAL is its owner alone; SHARED is every agent.
+enum PmMacroVisibility {
+  PERSONAL
+  SHARED
+}
+
+/// How new tickets in a desk are given an assignee. MANUAL leaves them for a
+/// person to pick up.
+enum PmAssignmentMode {
+  MANUAL
+  ROUND_ROBIN
+  LEAST_OPEN
+}
+
+/// The business hours an SLA is counted in. Workspace-level, so one set of hours
+/// serves every desk. `windows` is `[{ day 0-6 (0 = Sunday), start "HH:MM", end
+/// "HH:MM" }]` — an end before the start runs overnight, "24:00" closes the day —
+/// and `holidays` is `["YYYY-MM-DD"]`, local dates in `timezone`. The semantics
+/// (a window belongs to the day it starts on; DST nights are as long as they
+/// really are) are documented once, in services/support/business-time.ts.
+model PmBusinessCalendar {
+  id          String      @id @default(uuid())
+  workspaceId String
+  workspace   PmWorkspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  name        String
+  /// An IANA zone name (canonicalised on save) — never a UTC offset, which has no DST rules.
+  timezone    String
+  windows     Json
+  holidays    Json        @default("[]")
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @default(now()) @updatedAt
+
+  policies PmSlaPolicy[]
+
+  @@unique([workspaceId, name])
+}
+
+/// A desk's SLA: what is promised per priority, against which hours, and what
+/// happens when a ticket slips. One per desk. A trigger holds that `projectId` is
+/// a SERVICE_DESK project (pm_enforce_service_desk_project).
+///
+/// `targets` is `{ <priority>: { firstResponseMins, nextResponseMins,
+/// resolutionMins } }` — each a positive whole number of BUSINESS minutes, any of
+/// them absent for "no such target", a priority absent for "no SLA at this
+/// priority". `escalation` is `[{ on: AT_RISK | BREACHED, metric: any |
+/// firstResponse | nextResponse | resolution, actions: [{ type: raise_priority }
+/// | { type: reassign, userId } | { type: notify, userIds }] }]`, applied once per
+/// transition by the ticker.
+///
+/// `calendarId` NULL = a 24/7 clock. RESTRICT: deleting the calendar a desk's SLA
+/// runs on must be refused, not quietly turn that SLA into a 24/7 one.
+model PmSlaPolicy {
+  id            String              @id @default(uuid())
+  projectId     String              @unique
+  project       PmProject           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  calendarId    String?
+  calendar      PmBusinessCalendar? @relation(fields: [calendarId], references: [id], onDelete: Restrict)
+  enabled       Boolean             @default(true)
+  targets       Json
+  /// Percent of a target that may elapse before the ticket is AT_RISK (1-99, CHECK).
+  atRiskPercent Int                 @default(75)
+  escalation    Json                @default("[]")
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @default(now()) @updatedAt
+
+  /// WARP-845 — the RESTRICT scan index.
+  @@index([calendarId])
+}
+
+/// A canned reply, with optional field changes. `bodyHtml` may carry the variables
+/// {{requester.firstName}}, {{ticket.key}}, {{agent.name}} and {{desk.name}} —
+/// validated on save, substituted (HTML-escaped) when previewed or applied.
+/// `actions` is `{ stateId?, priority?, assignee?: "me" | "none" | { userId },
+/// addLabelIds?, removeLabelIds? }`. `projectId` NULL = every desk (such a macro
+/// carries no state or label change: those ids belong to one desk); set =
+/// that desk only, held SERVICE_DESK by the same trigger. `ownerId` is a plain
+/// `User.id` like every PM reference to a person.
+model PmMacro {
+  id         String            @id @default(uuid())
+  projectId  String?
+  project    PmProject?        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  name       String
+  bodyHtml   String
+  actions    Json              @default("{}")
+  visibility PmMacroVisibility @default(PERSONAL)
+  ownerId    String
+  createdAt  DateTime          @default(now())
+  updatedAt  DateTime          @default(now()) @updatedAt
+
+  @@index([projectId])
+  @@index([ownerId])
+}
+
+/// How a desk hands out new tickets. One per desk (SERVICE_DESK only, by trigger).
+///
+/// ROUND_ROBIN gives the next member after `lastAssignedUserId` in `memberIds`
+/// order, skipping anyone who is no longer an active agent; LEAST_OPEN gives the
+/// eligible member with the fewest open tickets in this desk, ties broken by that
+/// same rotation. `departmentId` set = the rule only handles tickets in that
+/// department (the ticket's own, else the desk's).
+///
+/// 🔴 `lastAssignedUserId` IS A CONTENDED ROW. Two tickets created at once must
+/// not both be handed to the same person, so the assigner takes `SELECT ... FOR
+/// UPDATE` on THIS row inside the ticket's own transaction, reads the cursor,
+/// picks, writes it back, and the lock is held to commit — a concurrent create
+/// waits, then sees the committed cursor. pm-sla.pg.test.ts proves it.
+model PmAssignmentRule {
+  id                 String           @id @default(uuid())
+  projectId          String           @unique
+  project            PmProject        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  mode               PmAssignmentMode @default(MANUAL)
+  /// SetNull: a department is archived, never deleted, but the FK must not block it.
+  departmentId       String?
+  department         Department?      @relation("PmAssignmentRuleDepartment", fields: [departmentId], references: [id], onDelete: SetNull)
+  /// `User.id[]` in rotation order.
+  memberIds          Json             @default("[]")
+  lastAssignedUserId String?
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @default(now()) @updatedAt
+
+  /// WARP-845 — the SetNull scan index.
+  @@index([departmentId])
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -8282,8 +8568,7 @@ enum WriteStatus {
 /// confirms (invariant 1, §11.2). `command` is a registered command NAME
 /// (never arbitrary SQL, invariant 4); `reversal` snapshots prior values for
 /// reversible commands; `discrepancy` records a VERIFY-step mismatch.
-// ============================================================================
-// ADR-048 - auto-filing (WARP-2727 / WARP-2729)
+// =====================================================================// ADR-048 - auto-filing (WARP-2727 / WARP-2729)
 //
 // Three tables: what the box PROPOSED, what the owner CORRECTED, and what the
 // owner CONSENTED to. The queue itself is not here - it is the claim columns on
@@ -8303,8 +8588,7 @@ enum WriteStatus {
 // by the worker's per-tick `resolveAttributedToolAccess`, which fails closed and
 // pauses filing with "the person who turned this on is no longer active" -
 // which is the designed behaviour, not a degradation.
-// ============================================================================
-
+// =====================================================================
 enum IngestSourceKind {
   FILE
   EMAIL
@@ -8625,6 +8909,8 @@ model Department {
   /// two halves share a row and nothing else.
   pmProjects        PmProject[]            @relation("PmProjectDepartment")
   pmWorkItems       PmWorkItem[]           @relation("PmWorkItemDepartment")
+  /// WARP-3530 — the service-desk assignment rules scoped to this department.
+  pmAssignmentRules PmAssignmentRule[]     @relation("PmAssignmentRuleDepartment")
   // WARP-2748 (ADR-051): department-scoped brain rows. Cascade on the owning
   // side — a digest naming a deleted department would fall through the
   // membership test, so an access key must never dangle.
@@ -9630,8 +9916,7 @@ model CloudFileItem {
 // Modelled on `IntegrationConnection`/`IntegrationStatus`, NOT on
 // `CalendarSource` — that one derives health from `lastSyncError IS NULL`,
 // which is the WARP-218 pattern this repo forbids.
-// ============================================================================
-
+// =====================================================================
 /// Lifecycle of one address-book source. Explicit column; never derived from
 /// the nullability of `lastSyncError` or `collectionUrl`.
 enum AddressBookStatus {
@@ -9877,8 +10162,7 @@ model ContactPhone {
   @@index([contactId])
 }
 
-// ============================================================================
-// CRM — WARP-2117
+// =====================================================================// CRM — WARP-2117
 //
 // Built, not adopted: every mature open-source CRM is AGPL-3 on purpose and
 // shipping the appliance is conveyance, so copyleft attaches (see WARP-2113 /
@@ -9890,8 +10174,7 @@ model ContactPhone {
 // everything else: `Contact` above for people, `Note` / `EmailMessage` /
 // `CalendarEvent` / `PmWorkItem` for timeline content, the files+RAG path for
 // attachments, and `PmProject` for the work that delivers a won deal.
-// ============================================================================
-
+// =====================================================================
 /// Where a CRM row came from. Explicit for the same reason `ContactOrigin` is.
 enum CrmRecordOrigin {
   LOCAL
@@ -10474,10 +10757,8 @@ model CrmActivity {
   @@index([notifyStatus, createdAt])
 }
 
-// ============================================================================
-// WARP-2585 (ADR-045 slice 6) — a file belongs to a business record.
-// ============================================================================
-
+// =====================================================================// WARP-2585 (ADR-045 slice 6) — a file belongs to a business record.
+// =====================================================================
 /// Which record a file link hangs off. Exactly one of the five id columns on
 /// `EntityLink` is non-NULL, and this names WHICH — an explicit discriminator,
 /// never five IS-NULL tests (CLAUDE.md "No guessing, ever"). Agreement between

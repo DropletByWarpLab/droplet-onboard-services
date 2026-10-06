@@ -1,0 +1,176 @@
+/* Rich-text editor (WARP-3519 / WS-2) — the shared Tiptap editor for comments
+ * (and, in a later slice, descriptions).
+ *
+ * Scoped under `.pm-scope`, its own classes prefixed `pm-rte-`, and bound ONLY to
+ * the aliases `.pm-scope` already defines in app/projects/projects.css
+ * (`--text`, `--border`, `--accent`, …) — no hex, no new custom property, so
+ * light and dark come for free. editor.css.test.ts pins those rules.
+ *
+ * It also owns the one mention-chip style, used while writing AND when a stored
+ * comment is read back: `.pm-scope span[data-mention-id]`. */
+
+.pm-scope .pm-rte {
+  position: relative;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  transition: box-shadow 120ms var(--ease), border-color 120ms var(--ease);
+}
+/* The ring is on the whole widget while ANY part of it has focus, so tabbing
+ * from the surface to the toolbar does not make it blink off and on. */
+.pm-scope .pm-rte:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 24%, transparent);
+}
+.pm-scope .pm-rte[data-disabled="true"] { opacity: 0.7; }
+
+/* ── toolbar ───────────────────────────────────────────────────────────── */
+.pm-scope .pm-rte-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 4px;
+  border-bottom: 1px solid var(--border);
+}
+.pm-scope .pm-rte-btn {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 120ms var(--ease), color 120ms var(--ease);
+}
+.pm-scope .pm-rte-btn:hover:not(:disabled) { background: var(--bg-hover); color: var(--text); }
+.pm-scope .pm-rte-btn[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+.pm-scope .pm-rte-btn:disabled { cursor: default; opacity: 0.5; }
+.pm-scope .pm-rte-btn:focus-visible {
+  outline: 2px solid transparent;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+/* ── link row ──────────────────────────────────────────────────────────── */
+.pm-scope .pm-rte-linkrow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.pm-scope .pm-rte-linkinput {
+  flex: 1 1 200px;
+  min-width: 0;
+  height: 28px;
+  padding: 0 9px;
+  background: var(--bg-canvas);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+}
+.pm-scope .pm-rte-linkinput[aria-invalid="true"] { border-color: var(--err); }
+.pm-scope .pm-rte-linkinput:focus-visible {
+  outline: 2px solid transparent;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+.pm-scope .pm-rte-linkerr { flex: 1 0 100%; margin: 0; font-size: 12px; color: var(--err); }
+
+/* ── editing surface ───────────────────────────────────────────────────── */
+.pm-scope .pm-rte-surface { padding: 9px 11px; }
+.pm-scope .pm-rte-content {
+  min-height: 56px;
+  max-height: 260px;
+  overflow-y: auto;
+  outline: none;
+  font-size: 13.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.pm-scope .pm-rte-content > :last-child { margin-bottom: 0; }
+.pm-scope .pm-rte-content p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  color: var(--text-4);
+  pointer-events: none;
+}
+.pm-scope .pm-rte-content ul { list-style: disc; margin: 0 0 9px; padding-left: 20px; }
+.pm-scope .pm-rte-content ol { list-style: decimal; margin: 0 0 9px; padding-left: 20px; }
+.pm-scope .pm-rte-content blockquote {
+  margin: 0 0 9px;
+  padding-left: 10px;
+  border-left: 3px solid var(--border-strong);
+  color: var(--text-2);
+}
+.pm-scope .pm-rte-content code {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--bg-hover);
+}
+.pm-scope .pm-rte-content pre {
+  margin: 0 0 9px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--bg-hover);
+  overflow-x: auto;
+}
+.pm-scope .pm-rte-content pre code { padding: 0; background: transparent; }
+.pm-scope .pm-rte-content a { color: var(--accent); text-decoration: underline; }
+
+/* ── the mention chip: the editor and every stored comment ─────────────── */
+/* Accent TEXT on the accent tint fails AA at body size, so the ink stays
+ * --text and only the tint is the accent. */
+.pm-scope span[data-mention-id] {
+  font-weight: 500;
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-radius: 4px;
+  padding: 0 3px;
+}
+
+/* ── the people popup (inside the widget, so a dialog's focus trap holds it) ── */
+.pm-scope .pm-rte-pop {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 5;
+  min-width: 200px;
+  max-width: min(320px, 100%);
+  background: var(--bg-canvas);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--text) 16%, transparent);
+}
+/* Held back until the first measurement, so it never flashes at the corner. */
+.pm-scope .pm-rte-pop:not([data-ready="true"]) { visibility: hidden; }
+.pm-scope .pm-rte-list { list-style: none; margin: 0; padding: 4px; max-height: 240px; overflow-y: auto; }
+.pm-scope .pm-rte-opt {
+  display: flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+}
+.pm-scope .pm-rte-opt[aria-selected="true"] { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.pm-scope .pm-rte-note { margin: 0; padding: 8px 10px; font-size: 13px; color: var(--text-3); }
+
+@media (prefers-reduced-motion: reduce) {
+  .pm-scope .pm-rte, .pm-scope .pm-rte-btn { transition: none; }
+}

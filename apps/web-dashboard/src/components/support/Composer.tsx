@@ -17,10 +17,14 @@ export function Composer({
   ticket,
   desk,
   onSent,
+  macroDraft,
+  onDraftUsed,
 }: {
   ticket: Ticket;
   desk: Desk | undefined;
   onSent: () => void;
+  macroDraft?: { id: number; text: string } | null;
+  onDraftUsed?: () => void;
 }): JSX.Element {
   const { toast } = useToast();
   const [mode, setMode] = useState<Mode>("reply");
@@ -73,6 +77,15 @@ export function Composer({
           </button>
         ))}
       </div>
+      {macroDraft && <div role="status">
+        <p>A macro reply is ready. Review it before sending.</p>
+        <pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", fontFamily: "inherit" }}>{macroDraft.text}</pre>
+        <div className="pm-row" style={{ gap: 8 }}>
+          <button className="pm-btn" type="button" disabled={busy} onClick={() => { setText(macroDraft.text); setMode("reply"); onDraftUsed?.(); }}>{text.trim() ? "Replace current draft" : "Use macro draft"}</button>
+          {text.trim() && <button className="pm-btn" type="button" disabled={busy} onClick={() => { setText((current) => `${current}\n\n${macroDraft.text}`); setMode("reply"); onDraftUsed?.(); }}>Append to current draft</button>}
+          <button className="pm-btn" type="button" disabled={busy} onClick={() => onDraftUsed?.()}>Dismiss draft</button>
+        </div>
+      </div>}
       <textarea
         className="pm-input"
         rows={4}

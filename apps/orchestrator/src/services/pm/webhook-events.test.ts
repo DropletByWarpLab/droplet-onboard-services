@@ -62,6 +62,7 @@ describe("eventForVerb", () => {
       "priority_changed", "due_date_changed", "start_date_changed", "type_changed", "estimate_changed", "property_changed", "title_changed", "description_changed",
       "label_added", "label_removed", "restored", "cycle_added", "cycle_removed",
       "parent_removed", "module_added", "module_removed", "relation_added", "relation_removed",
+      "comment_edited", "comment_deleted", "watcher_added", "watcher_removed", "mentioned",
       "attachment_added", "attachment_removed",
       "external_link_added",
       "time_logged", "time_log_updated", "time_log_removed",

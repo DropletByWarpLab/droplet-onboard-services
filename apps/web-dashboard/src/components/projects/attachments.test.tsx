@@ -12,6 +12,7 @@ import { SWRConfig } from "swr";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { DetailDrawer } from "./detail";
+vi.mock("./editor/RichTextEditor", () => import("./fakeEditor"));
 import { PeopleContext } from "./bits";
 import { makePerson } from "./config";
 import { uploadAttachment, PmRequestError } from "./usePm";
@@ -58,6 +59,13 @@ vi.mock("@/lib/auth", () => ({
       return reply(201, {
         comment: { id: "c-new", workItemId: "w1", authorId: "u1", commentHtml: "<p>hi</p>", createdAt: "2026-06-22T21:16:00.000Z" },
       });
+    }
+    if (pathname.endsWith("/timeline")) {
+      const timeline = [
+        ...net.comments.map((c: any) => ({ type: "comment", id: c.id, at: c.createdAt, comment: { editedAt: null, deleted: false, deletedAt: null, deletedById: null, mentions: [], reactions: [], ...c } })),
+        ...net.activity.map((a: any) => ({ type: "activity", id: a.id, at: a.createdAt, activity: a })),
+      ];
+      return reply(200, { timeline, refs: { states: {}, labels: {}, workItems: {} }, nextCursor: null, total: timeline.length });
     }
     if (pathname.endsWith("/comments")) return reply(200, { comments: net.comments, nextCursor: null, total: net.comments.length });
     if (pathname.endsWith("/activity")) return reply(200, { activity: net.activity, nextCursor: null, total: net.activity.length });
@@ -441,13 +449,13 @@ describe("Attachments section — uploading", () => {
     expect(live).toHaveTextContent("Uploading 1 file");
 
     const listBefore = getsOf("/attachments");
-    const activityBefore = getsOf("/activity");
+    const activityBefore = getsOf("/timeline");
     net.attachments = [att("a1", { fileName: "a.txt" })];
     respond(xhr, 201, { attachment: att("a1", { fileName: "a.txt" }) });
 
     expect(await within(section()).findByRole("link", { name: "a.txt" })).toBeInTheDocument();
     expect(getsOf("/attachments")).toBeGreaterThan(listBefore);
-    expect(getsOf("/activity")).toBeGreaterThan(activityBefore);
+    expect(getsOf("/timeline")).toBeGreaterThan(activityBefore);
     await waitFor(() => expect(screen.queryByRole("progressbar")).not.toBeInTheDocument());
   });
 
@@ -648,14 +656,14 @@ describe("Removing an attachment", () => {
     expect(net.calls.some((c) => c.method === "DELETE")).toBe(false);
 
     const listBefore = getsOf("/attachments");
-    const activityBefore = getsOf("/activity");
+    const activityBefore = getsOf("/timeline");
     net.attachments = [];
     fireEvent.click(within(dialog).getByRole("button", { name: "Remove" }));
 
     await waitFor(() => expect(net.calls.find((c) => c.method === "DELETE")?.url).toBe("/api/pm/attachments/a1"));
     await waitFor(() => expect(screen.queryByRole("link", { name: "plan.pdf" })).not.toBeInTheDocument());
     expect(getsOf("/attachments")).toBeGreaterThan(listBefore);
-    expect(getsOf("/activity")).toBeGreaterThan(activityBefore);
+    expect(getsOf("/timeline")).toBeGreaterThan(activityBefore);
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Remove this file?" })).not.toBeInTheDocument());
     expect(screen.getByRole("group", { name: "Add attachments" })).toHaveFocus();
   });
@@ -973,17 +981,17 @@ describe("Activity — attachment verbs", () => {
       row("4", "attachment_removed"),
     ];
     renderDrawer();
-    expect(await screen.findByText("added spec.pdf")).toBeInTheDocument();
-    expect(screen.getByText("removed old.png")).toBeInTheDocument();
-    expect(screen.getByText("added an attachment")).toBeInTheDocument();
-    expect(screen.getByText("removed an attachment")).toBeInTheDocument();
+    expect(await screen.findByText(/added\ spec\.pdf/)).toBeInTheDocument();
+    expect(screen.getByText(/removed\ old\.png/)).toBeInTheDocument();
+    expect(screen.getByText(/added\ an\ attachment/)).toBeInTheDocument();
+    expect(screen.getByText(/removed\ an\ attachment/)).toBeInTheDocument();
   });
 
   it("leaves the other verbs' text alone", async () => {
     net.activity = [row("1", "state_changed", { field: "state" }), row("2", "commented", { field: null })];
     renderDrawer();
-    expect(await screen.findByText("changed the state")).toBeInTheDocument();
-    expect(screen.getByText("added a comment")).toBeInTheDocument();
+    expect(await screen.findByText(/moved this to another state/)).toBeInTheDocument();
+    expect(screen.getByText(/added\ a\ comment/)).toBeInTheDocument();
   });
 });
 

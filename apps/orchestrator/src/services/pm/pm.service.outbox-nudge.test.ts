@@ -20,6 +20,7 @@ function prismaStub() {
       })),
     },
     pmActivity: { create: vi.fn(async () => ({})) },
+    pmWorkItemWatcher: { createMany: vi.fn(async () => ({ count: 1 })) },
   };
   const prisma = {
     tx,
