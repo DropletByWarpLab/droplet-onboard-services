@@ -89,10 +89,10 @@ on_target="$(run_entry 1)"
 # 5) Dockerfile: Bookworm nginx, builds + installs the validated provider via
 #    the real shared script, and self-tests the cipher profiles.
 df="$NGINX_DIR/Dockerfile"
-if grep -qE '^FROM nginx:1\.27-bookworm' "$df"; then
+if grep -qE '^FROM nginx:[0-9]+\.[0-9]+-bookworm' "$df"; then
   pass "Dockerfile uses Bookworm nginx (not Alpine)"
 else
-  fail "Dockerfile is not FROM nginx:1.27-bookworm"
+  fail "Dockerfile is not FROM nginx:<version>-bookworm"
 fi
 if grep -q 'docker/fips/build-openssl-fips.sh' "$df" \
    && grep -q 'docker/fips/install-fips-provider.sh' "$df"; then

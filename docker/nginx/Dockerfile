@@ -25,7 +25,7 @@ RUN sh /tmp/build-openssl-fips.sh /out
 
 # --- Runtime: Debian-packaged nginx (links the SYSTEM OpenSSL 3, so
 #     OPENSSL_CONF alone activates FIPS — same as the Python images) ----------
-FROM nginx:1.27-bookworm@sha256:6784fb0834aa7dbbe12e3d7471e69c290df3e6ba810dc38b34ae33d3c1c05f7d
+FROM nginx:1.29-bookworm@sha256:8adbdcb969e2676478ee2c7ad333956f0c8e0e4c5a7463f4611d7a2e7a7ff5dc
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends openssl ca-certificates && \
