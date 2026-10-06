@@ -11,6 +11,7 @@ import { PmIcon } from "@/components/projects/icons";
 import { EmptyBlock, LabelTag, PriorityFlag, Skel, StatePill } from "@/components/projects/bits";
 import { useDepartments } from "@/components/projects/usePm";
 import { Composer } from "./Composer";
+import { MacroPicker } from "./MacroPicker";
 import { Conversation } from "./Conversation";
 import { EscalateDialog } from "./EscalateDialog";
 import { RequesterCard } from "./RequesterCard";
@@ -57,6 +58,7 @@ export function TicketWorkspace({
   const revalidate = useRevalidateSupport();
   const [saving, setSaving] = useState(false);
   const [escalating, setEscalating] = useState(false);
+  const [macroDraft, setMacroDraft] = useState<{ id: number; text: string } | null>(null);
 
   const desk = desks.find((d) => d.id === ticket?.deskId);
   const types = useMemo(() => desk?.labels.filter((l) => l.isType) ?? [], [desk]);
@@ -146,7 +148,13 @@ export function TicketWorkspace({
           <StatePill state={toPmState(ticket.status, ticket.deskId)} />
           <PriorityFlag p={ticket.priority} withLabel />
           <SlaBadge status={ticket.slaStatus} />
+          {ticket.sla && <span className="sp-hint" aria-label="SLA clock">
+            {ticket.sla.paused ? "Clock paused" : ticket.sla.remainingBusinessMins === null ? "No active clock" : `${Math.ceil(ticket.sla.remainingBusinessMins)} business minutes remaining`}
+          </span>}
         </div>
+        {ticket.sla && <dl className="sp-kv" aria-label="Service level deadlines">{([
+          ["First response", ticket.sla.firstResponseDueAt], ["Next response", ticket.sla.nextResponseDueAt], ["Resolution", ticket.sla.resolutionDueAt],
+        ] as const).filter(([, date]) => date).map(([label, date]) => <div key={label}><dt>{label}</dt><dd><time dateTime={date!}>{new Date(date!).toLocaleString()}</time></dd></div>)}</dl>}
       </header>
 
       <div className="pm-surface sp-card" aria-label="Ticket details">
@@ -221,7 +229,8 @@ export function TicketWorkspace({
               void supportActions().retryReply(ticket.id, commentId).then(() => convo.mutate());
             }}
           />
-          {writable && <Composer ticket={ticket} desk={desk} onSent={() => void refresh()} />}
+          {writable && desk && <MacroPicker ticket={ticket} desk={desk} agents={agents} onApplied={(text) => { setMacroDraft({ id: Date.now(), text }); void refresh(); }} />}
+          {writable && <Composer ticket={ticket} desk={desk} onSent={() => void refresh()} macroDraft={macroDraft} onDraftUsed={() => setMacroDraft(null)} />}
         </div>
         <aside className="sp-side" aria-label="About this ticket">
           <RequesterCard ticket={ticket} onSelectTicket={onSelectTicket} />

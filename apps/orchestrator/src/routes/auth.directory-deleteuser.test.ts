@@ -187,7 +187,12 @@ function createPrismaMock(seed: any[] = []) {
   const users: any[] = seed.map((u) => ({ deletionStatus: "NONE", deletionDueAt: null, ...u }));
   // Every seeded user is given a Microsoft 365 link, so the delete tests can
   // assert the credential actually goes with them (WARP-2115).
-  const m365Rows: any[] = seed.map((u: any) => ({ userId: u.id }));
+  const m365Rows: any[] = seed.map((u: any) => ({
+    userId: u.id,
+    calendarSourceId: `m365-calendar-${u.id}`,
+    calendarEnabled: true,
+    calendarSyncState: "CONNECTED",
+  }));
   const self: any = {};
   // WARP-1570: shared seam — records the options argument (auth.ts opens
   // the removal rails with SERIALIZABLE_TX) and rolls `users` back when the
@@ -209,6 +214,7 @@ function createPrismaMock(seed: any[] = []) {
         ) ?? null
       );
     }),
+    findFirst: vi.fn(async ({ where }: any) => users.find((u) => u.id === where.id) ?? null),
     update: vi.fn(async ({ where, data }: any) => {
       const idx = users.findIndex(
         (u) =>
@@ -319,6 +325,16 @@ function createPrismaMock(seed: any[] = []) {
   // connection. Without this delegate the route's try/catch would swallow a
   // TypeError and the cascade would look like it worked while doing nothing.
   self.m365Connection = {
+    findUnique: vi.fn(async ({ where }: any) => m365Rows.find((r) => r.userId === where.userId) ?? null),
+    updateMany: vi.fn(async ({ where, data }: any) => {
+      let count = 0;
+      for (const row of m365Rows) {
+        if (row.userId !== where.userId) continue;
+        Object.assign(row, data);
+        count += 1;
+      }
+      return { count };
+    }),
     deleteMany: vi.fn(async ({ where }: any = {}) => {
       const before = m365Rows.length;
       for (let i = m365Rows.length - 1; i >= 0; i -= 1) {
@@ -702,7 +718,22 @@ describe("purgeDueDeletions — the nightly job (WARP-3113)", () => {
     expect(await purgeDueDeletions(prisma)).toEqual({ completed: 1, failed: 0 });
     expect(nc.ncDeleteUser).toHaveBeenCalledWith(SERVICE_NC_TOKEN, "alice");
     expect(purgeUserDataMock).toHaveBeenCalledWith(prisma, "u-alice");
+    expect(prisma.m365Connection.updateMany).toHaveBeenCalledWith({
+      where: { userId: "u-alice" },
+      data: { calendarEnabled: false, calendarSyncState: "DISCONNECTED" },
+    });
+    expect(prisma.m365Connection.updateMany).toHaveBeenCalledWith({
+      where: { userId: "u-alice" }, data: { calendarSourceId: null },
+    });
+    expect(prisma.m365DeltaCursor.deleteMany).toHaveBeenCalledWith({
+      where: { userId: "u-alice", workload: "calendar" },
+    });
     expect(prisma.m365Connection.deleteMany).toHaveBeenCalledWith({ where: { userId: "u-alice" } });
+    expect(prisma._m365Rows).toHaveLength(0);
+    for (const model of ["calendarEvent", "calendarSource"]) {
+      expect(prisma._usernameRows(model, "alice"), model).toBe(0);
+      expect(prisma._usernameRows(model, "bystander"), model).toBe(1);
+    }
     // WARP-3538 — the leaver's landed file names go with them, scoped to the one
     // person and to Microsoft 365 (another cloud's files are that cloud's to remove).
     expect(prisma.cloudFileItem.deleteMany).toHaveBeenCalledWith({ where: { userId: "u-alice", provider: "M365" } });

@@ -22,6 +22,7 @@ import {
 } from "./support-mappers.js";
 import { assertDeskOpen, applyStateChange, cleanHtml, findTicketRow, getTicket, pickState } from "./ticket.service.js";
 import type { SupportDeps } from "./requester.service.js";
+import { lockTicketClock, syncTicketSla } from "./sla-clock.service.js";
 import {
   type ApiConversation,
   type ApiConversationEntry,
@@ -211,12 +212,14 @@ async function addComment(
   const now = deps.now ? deps.now() : new Date();
 
   const channel = visibility === "PUBLIC"
-    ? await prisma.pmSupportChannel.findFirst({ where: { projectId: row.projectId, enabled: true }, include: { emailAccount: { select: { address: true } } } })
+    ? await prisma.pmSupportChannel.findFirst({ where: { projectId: row.projectId, enabled: true }, include: { emailAccount: { select: { address: true, authMode: true } } } })
     : null;
   let deliveryStatus: "NONE" | "PENDING" | "FAILED" = "NONE";
   let deliveryFailure: "OUTBOUND_BLOCKED" | "EMAIL_UNAVAILABLE" | "NO_RECIPIENT" | "SEND_FAILED" | null = null;
   if (channel) {
-    if (!row.ticket.requesterEmail) {
+    if (channel.emailAccount.authMode === "M365_GRAPH") {
+      deliveryStatus = "FAILED"; deliveryFailure = "EMAIL_UNAVAILABLE";
+    } else if (!row.ticket.requesterEmail) {
       deliveryStatus = "FAILED"; deliveryFailure = "NO_RECIPIENT";
     } else {
       try {
@@ -241,9 +244,10 @@ async function addComment(
   }
 
   const comment = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+    await lockTicketClock(tx, row.id);
     // "Send and set to Pending": the move and the comment are one change.
     if (target && target.id !== row.stateId) {
-      await applyStateChange(tx, row, target, viewer.id, now, { nudge: false });
+      await applyStateChange(tx, row, target, viewer.id, now, deps, { nudge: false });
     }
     const created = await tx.pmComment.create({
       data: {
@@ -252,6 +256,7 @@ async function addComment(
         authorKind: "USER",
         visibility,
         commentHtml: html,
+        createdAt: now,
         ...(visibility === "PUBLIC" ? { deliveryStatus, deliveryFailure } : {}),
       },
     });
@@ -266,6 +271,7 @@ async function addComment(
         where: { workItemId: row.id },
         data: { lastPublicActivityAt: now },
       });
+      await syncTicketSla(tx, row.id, now, "reply", deps);
     }
     await writeActivity(tx, {
       workItemId: row.id,
@@ -340,9 +346,10 @@ export async function retryPublicReply(prisma: PrismaClient, ticketId: string, c
   if (!comment) throw new Error("reply_not_retryable");
   const channel = await prisma.pmSupportChannel.findFirst({
     where: { projectId: ticket.projectId, enabled: true },
-    include: { emailAccount: { select: { address: true } } },
+    include: { emailAccount: { select: { address: true, authMode: true } } },
   });
   if (!channel) throw new Error("email_channel_unavailable");
+  if (channel.emailAccount.authMode === "M365_GRAPH") throw new Error("email_account_read_only");
   if (!ticket.ticket.requesterEmail) throw new Error("email_recipient_unavailable");
   if (!(await outboundEmailGate(prisma))) throw new Error("outbound_email_blocked");
   const previous = await prisma.pmTicketEmailLink.findFirst({

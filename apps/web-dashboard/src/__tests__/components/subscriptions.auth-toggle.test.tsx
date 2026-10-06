@@ -46,12 +46,7 @@ vi.mock("@/lib/hooks/useCalendar", () => ({
 import { SubscriptionsPanel } from "@/components/calendar/SubscriptionsPanel";
 
 function openForm() {
-  // The "+" Plus icon button has no accessible name; it's the only
-  // <button> inside the header row containing "External calendars."
-  const allButtons = screen.getAllByRole("button");
-  const plus = allButtons.find((b) => b.querySelector("svg.lucide-plus"));
-  if (plus) fireEvent.click(plus);
-  else fireEvent.click(allButtons[0]);
+  fireEvent.click(screen.getByRole("button", { name: "Add calendar feed" }));
 }
 
 function fillBasics() {

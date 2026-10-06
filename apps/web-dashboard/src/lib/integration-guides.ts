@@ -56,6 +56,7 @@ import exportDrop from "../../../../docs/integrations/export-drop.md?raw";
 import github from "../../../../docs/integrations/github.md?raw";
 import gitlab from "../../../../docs/integrations/gitlab.md?raw";
 import gocardless from "../../../../docs/integrations/gocardless.md?raw";
+import googleMail from "../../../../docs/integrations/google-mail.md?raw";
 import hubspot from "../../../../docs/integrations/hubspot.md?raw";
 import klaviyo from "../../../../docs/integrations/klaviyo.md?raw";
 import loyverse from "../../../../docs/integrations/loyverse.md?raw";
@@ -95,6 +96,7 @@ export const INTEGRATION_GUIDES: Readonly<Record<string, string>> = {
   github,
   gitlab,
   gocardless,
+  "google-mail": googleMail,
   hubspot,
   klaviyo,
   loyverse,

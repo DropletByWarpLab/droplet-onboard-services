@@ -432,9 +432,28 @@ export async function disconnectMailbox(
   // somebody investigating a missing archive precisely nothing.
   const existing = await prisma.emailAccount.findUnique({
     where: { id: accountId },
-    select: { address: true },
+    select: { address: true, authMode: true, userId: true },
   });
   if (!existing) return { removed: false, address: null };
+
+  if (existing.authMode === "GOOGLE_OAUTH" && existing.userId) {
+    // A Google grant can also own a calendar. Removing a mailbox must not
+    // delete that calendar without the separate account disconnect consent.
+    const { disconnectGoogleMailbox } = await import("../google/google-auth.service.js");
+    const removed = await disconnectGoogleMailbox(prisma, existing.userId, accountId);
+    return { removed, address: existing.address };
+  }
+
+  if (existing.authMode === "M365_GRAPH" && existing.userId) {
+    const { purgeMicrosoftMail } = await import("../m365/mail-settings.service.js");
+    const removed = await prisma.$transaction(async (tx) => {
+      const locked = await tx.m365Connection.updateMany({ where: { userId: existing.userId!, emailAccountId: accountId }, data: { mailEnabled: false } });
+      if (locked.count !== 1) return false;
+      await purgeMicrosoftMail(tx, existing.userId!);
+      return true;
+    });
+    return { removed, address: existing.address };
+  }
 
   const removed = await prisma.emailAccount.deleteMany({ where: { id: accountId } });
   if (removed.count === 1) {

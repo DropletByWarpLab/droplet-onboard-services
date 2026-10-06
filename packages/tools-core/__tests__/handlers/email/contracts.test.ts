@@ -17,6 +17,7 @@
  */
 import { describe, it, expect } from "vitest";
 import emailSearch from "../../../src/handlers/email/search.js";
+import emailAccounts from "../../../src/handlers/email/accounts.js";
 import emailRead from "../../../src/handlers/email/read.js";
 import emailSummarizeThread from "../../../src/handlers/email/summarize-thread.js";
 import emailDraftReply from "../../../src/handlers/email/draft-reply.js";
@@ -29,12 +30,19 @@ interface SchemaShape {
 }
 
 describe("email tool contracts", () => {
+  it("email_accounts: read-only discovery without mailbox ID prerequisites", () => {
+    expect(emailAccounts.name).toBe("email_accounts");
+    expect(emailAccounts.requiresWrite).toBe(false);
+    expect(emailAccounts.requiresConfirmation).toBe(false);
+    expect((emailAccounts.inputSchema as SchemaShape).required ?? []).toEqual([]);
+  });
   it("email_search: read-only", () => {
     expect(emailSearch.name).toBe("email_search");
     expect(emailSearch.requiresWrite).toBe(false);
     expect(emailSearch.requiresConfirmation).toBe(false);
     const schema = emailSearch.inputSchema as SchemaShape;
     expect(schema.required).toEqual(expect.arrayContaining(["accountId"]));
+    expect(schema.properties?.query).toMatchObject({ type: "string", maxLength: 200 });
   });
 
   it("email_read: read-only", () => {

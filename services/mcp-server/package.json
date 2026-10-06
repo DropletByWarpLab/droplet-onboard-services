@@ -36,11 +36,11 @@
     "@droplet/tools-core": "0.1.0",
     "@grpc/grpc-js": "^1.14.5",
     "@grpc/proto-loader": "^0.8.1",
-    "@modelcontextprotocol/sdk": "^1.30.1",
+    "@modelcontextprotocol/sdk": "^1.31.0",
     "@prisma/client": "^5.14.0",
     "ioredis": "^6.0.0",
     "jsonwebtoken": "^9.0.3",
-    "undici": "^7.29.1",
+    "undici": "^7.30.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {

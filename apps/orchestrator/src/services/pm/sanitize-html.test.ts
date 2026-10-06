@@ -21,6 +21,30 @@ describe("sanitizePmHtml", () => {
     expect(out).toContain("after");
   });
 
+  // GHSA-jxwj-j7wr-gfrw: raw-text closing tags inside a foreign namespace
+  // must not turn the following markup into an executable stored payload.
+  it.each([
+    '<svg><textarea></textarea/><img src=x onerror=alert(1)></svg>',
+    '<math><textarea></textarea/><img src=x onerror=alert(1)></math>',
+    '<svg><xmp></xmp/><img src=x onerror=alert(1)></svg>',
+  ])("rejects foreign raw-text mutation-XSS markup: %s", (html) => {
+    const out = sanitizePmHtml(html);
+    expect(out).not.toMatch(/<(?:svg|math|textarea|xmp|img)\b/i);
+    expect(out).not.toMatch(/<[^>]+\bon(?:error|load)\s*=/i);
+  });
+
+  // GHSA-g8qq-57p8-ggw5: the wrapper never permits SVG animation, even
+  // when the URI list starts with a safe fragment before javascript:.
+  it.each(["animate", "set"])("rejects SVG %s URL-policy bypasses", (tag) => {
+    const out = sanitizePmHtml(
+      `<svg><a><${tag} attributeName="href" values="#safe;javascript:alert(1)" ` +
+        `dur=".01s" fill="freeze"></${tag}><text>Click me</text></a></svg>`,
+    );
+    expect(out).not.toMatch(/<(?:svg|animate|set|text)\b/i);
+    expect(out).not.toContain("javascript:");
+    expect(out).not.toContain("attributeName");
+  });
+
   it("strips <iframe>", () => {
     const out = sanitizePmHtml('<iframe src="https://evil.example"></iframe>text');
     expect(out).not.toContain("<iframe");

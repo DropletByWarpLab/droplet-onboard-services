@@ -58,6 +58,20 @@ describe("Composer copy", () => {
 });
 
 describe("sending", () => {
+  it("preserves the current message until a macro draft is explicitly used, and sends only on Send", async () => {
+    const used = vi.fn();
+    render(<Composer ticket={makeTicket()} desk={makeDesk()} onSent={vi.fn()} macroDraft={{ id: 1, text: "Macro reply" }} onDraftUsed={used} />);
+    fireEvent.change(screen.getByLabelText("Reply"), { target: { value: "Existing reply" } });
+    expect(sendReply).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("Reply")).toHaveValue("Existing reply");
+    fireEvent.click(screen.getByRole("button", { name: "Append to current draft" }));
+    expect(screen.getByLabelText("Reply")).toHaveValue("Existing reply\n\nMacro reply");
+    expect(used).toHaveBeenCalledTimes(1);
+    expect(sendReply).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: /Send reply/ }));
+    await waitFor(() => expect(sendReply).toHaveBeenCalledTimes(1));
+  });
+
   it("cannot send an empty message", () => {
     mount();
     expect(screen.getByRole("button", { name: /Send reply/ })).toBeDisabled();

@@ -22,6 +22,7 @@
  */
 import { Router, type Request, type RequestHandler, type Response } from "express";
 import { z } from "zod";
+import { installSlaRoutes } from "./sla.routes.js";
 import type { PrismaClient } from "@prisma/client";
 import { config } from "../../config.js";
 import { requireRole } from "../../middleware/auth.js";
@@ -210,6 +211,9 @@ export function mapSupportError(err: unknown, res: Response): boolean {
       return true;
     case support.EMAIL_CHANNEL_ERRORS.EMAIL_MODULE_DISABLED:
       res.status(409).json({ error: msg, message: "Enable the Email module before binding a mailbox." });
+      return true;
+    case support.EMAIL_CHANNEL_ERRORS.ACCOUNT_READ_ONLY:
+      res.status(409).json({ error: msg, message: "Outlook email is read-only. Choose a mailbox that supports sending for this service desk." });
       return true;
     case support.EMAIL_CHANNEL_ERRORS.INVALID_TEMPLATE:
       res.status(422).json({ error: msg });
@@ -563,5 +567,6 @@ export function createSupportRouter(prisma: PrismaClient, deps: SupportRouterDep
     }
   });
 
+  installSlaRoutes(router, prisma, { staff, admins, canAct, canManage, viewerOf, ctxOf, fail, svcDeps });
   return router;
 }

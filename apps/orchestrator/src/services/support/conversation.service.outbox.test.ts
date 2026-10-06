@@ -16,7 +16,7 @@ vi.mock("./support-mappers.js", async (importOriginal) => ({
 
 import { nudgeOutbox } from "../pm/pm-outbox.js";
 import { findTicketRow } from "./ticket.service.js";
-import { addReply } from "./conversation.service.js";
+import { addReply, retryPublicReply } from "./conversation.service.js";
 
 const NOW = new Date("2026-10-05T12:00:00.000Z");
 const VIEWER = { id: "owner", role: "owner" as const };
@@ -33,12 +33,13 @@ function fixture(rejectCommit = false) {
     ticket: { requesterEmail: "dana@example.test" },
   } as never);
   const tx = {
+    $queryRaw: vi.fn().mockResolvedValue([]),
     pmComment: { create: vi.fn(async ({ data }: { data: object }) => {
       comments.push(data);
       return { ...data, id: "comment", createdAt: NOW };
     }) },
     pmActivity: { create: vi.fn(async ({ data }: { data: object }) => { activity.push(data); return {}; }) },
-    pmWorkItem: { updateMany: vi.fn().mockResolvedValue({ count: 1 }), update: vi.fn().mockResolvedValue({}) },
+    pmWorkItem: { updateMany: vi.fn().mockResolvedValue({ count: 1 }), update: vi.fn().mockResolvedValue({}), findFirst: vi.fn().mockResolvedValue(null) },
     pmTicket: { updateMany: vi.fn().mockResolvedValue({ count: 1 }), update: vi.fn().mockResolvedValue({}) },
     emailDraft: { create: vi.fn(async ({ data }: { data: object }) => { drafts.push(data); return { id: "draft" }; }) },
     pmTicketEmailLink: { create: vi.fn(async ({ data }: { data: object }) => { links.push(data); return {}; }) },
@@ -46,7 +47,8 @@ function fixture(rejectCommit = false) {
   const seam = createTransactionSeam({ client: () => tx, stores: { comments, activity, drafts, links } });
   const prisma = {
     pmProject: { findUniqueOrThrow: vi.fn().mockResolvedValue({ states: [{ id: "pending", group: "started" }], labels: [] }) },
-    pmSupportChannel: { findFirst: vi.fn().mockResolvedValue({ emailAccountId: "account", emailAccount: { address: "support@example.test" } }) },
+    pmSupportChannel: { findFirst: vi.fn().mockResolvedValue({ emailAccountId: "account", emailAccount: { address: "support@example.test", authMode: "PASSWORD" } }) },
+    pmComment: { findFirst: vi.fn().mockResolvedValue({ id: "comment", commentHtml: "<p>Reply</p>" }) },
     pmTicketEmailLink: { findFirst: vi.fn().mockResolvedValue({ emailThreadId: "thread" }) },
     $transaction: vi.fn(async (...[callback, options]: Parameters<typeof seam.$transaction>) =>
       seam.$transaction(async (client) => {
@@ -67,6 +69,24 @@ const send = (f: ReturnType<typeof fixture>) => addReply(f.prisma as never, VIEW
 beforeEach(() => vi.clearAllMocks());
 
 describe("reply activity wakes the shared outbox after commit", () => {
+  it("records an unavailable delivery without queuing a reply for a legacy Graph channel", async () => {
+    const f = fixture();
+    f.prisma.pmSupportChannel.findFirst.mockResolvedValueOnce({ emailAccountId: "account", emailAccount: { address: "support@example.test", authMode: "M365_GRAPH" } });
+    const result = await send(f);
+    expect(result.entry.deliveryStatus).toBe("FAILED");
+    expect(result.entry.deliveryFailure).toBe("EMAIL_UNAVAILABLE");
+    expect(f.drafts).toHaveLength(0);
+    expect(f.links).toHaveLength(0);
+  });
+
+  it("refuses retry on a read-only Graph channel before changing the comment", async () => {
+    const f = fixture();
+    f.prisma.pmSupportChannel.findFirst.mockResolvedValueOnce({ emailAccountId: "account", emailAccount: { address: "support@example.test", authMode: "M365_GRAPH" } });
+    await expect(retryPublicReply(f.prisma as never, "ticket", "comment")).rejects.toThrow("email_account_read_only");
+    expect(f.prisma.$transaction).not.toHaveBeenCalled();
+    expect(f.tx.emailDraft.create).not.toHaveBeenCalled();
+  });
+
   it("wakes once after the state, reply, draft and message link commit", async () => {
     const f = fixture();
     await send(f);

@@ -101,6 +101,8 @@ from voice.llm import LLMClient, build_llm_from_env
 from voice.persona import PersonaFetcher, build_persona_fetcher_from_env
 from voice.stt import MockSTT, StreamingSTT, build_stt_from_env
 from voice.tts import MockTTS, TextToSpeech, build_tts_from_env
+from voice.tts import TTSUnavailable
+from voice.speaking_voice import InvalidSpeakingVoice, SpeakingVoiceStore, SpeakingVoiceTTS
 from voice.volume import VolumeController, VolumeStore
 from voice.wake import (
     VOSK_DEFAULT_THRESHOLD,
@@ -125,9 +127,9 @@ def resolve_wake_threshold(detector: object) -> float:
     genuinely spoken phrase → default VOSK_DEFAULT_THRESHOLD) while
     openWakeWord scores are sigmoid outputs (default DEFAULT_THRESHOLD,
     0.3). Keyed off the detector instance, not WAKE_ENGINE, because
-    build_detector_from_env has fallbacks (unknown engine → vosk;
-    vosk-without-model → openWakeWord) that make the env string
-    unreliable for this decision."""
+    build_detector_from_env resolves unknown engines to Vosk. A missing
+    Vosk model remains Vosk with a visible load fault; it never changes
+    the configured wake phrase by switching engines."""
     env = (os.environ.get("WAKE_THRESHOLD") or "").strip()
     if env:
         return float(env)
@@ -273,6 +275,26 @@ _pipeline: Optional[WakePipeline] = None
 # or the box has no mic. The pipeline gets the same instance, so the
 # dashboard and a spoken "turn it up" act on one persisted state.
 _volume = VolumeController(VolumeStore())
+
+_speaking_tts: Optional[SpeakingVoiceTTS] = None
+_speaking_tts_lock = threading.RLock()
+
+
+def _get_speaking_tts() -> SpeakingVoiceTTS:
+    global _speaking_tts
+    with _speaking_tts_lock:
+        if _speaking_tts is None:
+            _speaking_tts = SpeakingVoiceTTS(build_tts_from_env(), SpeakingVoiceStore())
+        return _speaking_tts
+
+
+def _validate_speaking_voice(voice: str) -> None:
+    try:
+        _get_speaking_tts().validate(voice)
+    except InvalidSpeakingVoice as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except TTSUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 # WARP-1619 — a pipeline whose stop() outlived its join budget. Its
 # capture worker is finishing the turn it was in (LLM → TTS → playback
@@ -557,11 +579,13 @@ def _build_and_start_pipeline() -> None:
     # is what actually opens the mic stream + ONNX runtime. STT + TTS
     # clients are also lazy — `available` is probed by pipeline.start()
     # once, not on every transcript / synthesize.
-    global _pipeline, _persona_fetcher, _activity_reporter, _llm
+    global _pipeline, _persona_fetcher, _activity_reporter, _llm, _speaking_tts
     try:
         detector = build_detector_from_env()
         stt = build_stt_from_env()
-        tts = build_tts_from_env()
+        with _speaking_tts_lock:
+            tts = SpeakingVoiceTTS(build_tts_from_env(), SpeakingVoiceStore())
+            _speaking_tts = tts
         # WARP-1058 — activity-feed event bridge (wake outcomes, missed
         # wakes, DSP wedge/recovery → orchestrator /api/voice/events).
         # Cheap to build (env read + a parked daemon thread); no I/O
@@ -962,6 +986,11 @@ class SayRequest(BaseModel):
     voice: Optional[str] = None
 
 
+class SpeakingVoiceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    voice: str
+
+
 class SayResponse(BaseModel):
     ok: bool
     duration_s: float
@@ -1313,6 +1342,8 @@ def voice_say(req: SayRequest) -> SayResponse:
     to listening — wake detection is muted during that window
     (anti-feedback).
     """
+    if req.voice is not None:
+        _validate_speaking_voice(req.voice)
     if _pipeline is None:
         raise HTTPException(
             status_code=503,
@@ -2095,6 +2126,27 @@ def get_voice_volume() -> VolumeResponse:
     """The speaker output level (0-100) and mute. Works with no pipeline."""
     state = _volume.state()
     return VolumeResponse(level=state.level, muted=state.muted, fault=_volume.fault)
+
+
+@app.get("/voice/speaking-voice")
+def get_speaking_voice() -> dict:
+    """Choices come from the running speech service, including when voice is off."""
+    return _get_speaking_tts().snapshot()
+
+
+@app.post("/voice/speaking-voice")
+def set_speaking_voice(req: SpeakingVoiceRequest) -> dict:
+    try:
+        # Serialize with pipeline reconstruction so a concurrent enable
+        # cannot load the previous choice just before this one is saved.
+        with _speaking_tts_lock:
+            return _get_speaking_tts().choose(req.voice)
+    except InvalidSpeakingVoice as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except TTSUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=503, detail="The speaking voice could not be saved. Try again.") from exc
 
 
 @app.post("/voice/volume", response_model=VolumeChangeResponse)

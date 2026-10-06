@@ -95,6 +95,17 @@ beforeEach(() => {
 });
 
 describe("EmailThread", () => {
+  it("explains read-only Outlook import and attachment presence without offering fake downloads", () => {
+    const props = baseProps();
+    props.thread.messages[0].hasAttachments = true;
+    props.thread.messages[0].externalAttachmentMetadata = [{ id: "provider-att", filename: "quote.pdf", contentType: "application/pdf", size: 1000, isInline: false, status: "remote_only" }];
+    render(<EmailThread {...props} importedFromOutlook canSend={false} />);
+    expect(screen.getByText(/read-only outlook import/i)).toHaveTextContent(/sending is not available/i);
+    expect(screen.getByText(/attachments stay in outlook/i)).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /download/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^send/i })).not.toBeInTheDocument();
+    expect(screen.getByText(/2h behind on PO 4912/i)).toBeInTheDocument();
+  });
   it("renders every message body in the thread", () => {
     render(<EmailThread {...baseProps()} />);
     expect(screen.getByText(/2h behind on PO 4912/i)).toBeInTheDocument();

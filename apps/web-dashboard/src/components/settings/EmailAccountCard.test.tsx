@@ -10,8 +10,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, act } from "@testing-library/react";
 
 const authFetch = vi.fn();
+const session = { role: "owner" };
 vi.mock("@/lib/auth", () => ({
   authFetch: (...a: unknown[]) => authFetch(...a),
+  useAuth: () => ({ user: { role: session.role } }),
 }));
 vi.mock("@/components/ConfirmDialog", () => ({
   ConfirmDialog: () => null,
@@ -38,6 +40,7 @@ function listResponse(accounts: unknown[]) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  session.role = "owner";
 });
 
 afterEach(() => {
@@ -45,6 +48,20 @@ afterEach(() => {
 });
 
 describe("EmailAccountCard — mailbox state", () => {
+  it("labels a native Outlook account as a read-only import and uses its imported timestamp", async () => {
+    authFetch.mockResolvedValue(listResponse([account({ authMode: "M365_GRAPH", canSend: false, lastIdleAt: new Date(Date.now() - 2 * 3_600_000).toISOString() })]));
+    render(<EmailAccountCard />);
+    expect(await screen.findByRole("status")).toHaveTextContent(/imported · checked 2 hours ago/i);
+    expect(screen.getByText(/read-only outlook import.*sending unavailable/i)).toBeInTheDocument();
+  });
+  it("shows family a provider import management link rather than an administrator mailbox removal action", async () => {
+    session.role = "family";
+    authFetch.mockResolvedValue(listResponse([account({ authMode: "M365_GRAPH", canSend: false })]));
+    render(<EmailAccountCard />);
+    expect(await screen.findByRole("link", { name: "Manage import" })).toHaveAttribute("href", "/settings#connected-accounts");
+    expect(screen.queryByRole("button", { name: "Disconnect" })).not.toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("Waiting for first email import");
+  });
   it("says Connected with the last check time once a cycle has completed", async () => {
     authFetch.mockResolvedValue(
       listResponse([account({ lastIdleAt: new Date(Date.now() - 2 * 3_600_000).toISOString() })]),

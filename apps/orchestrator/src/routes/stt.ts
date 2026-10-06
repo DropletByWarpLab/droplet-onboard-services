@@ -5,10 +5,10 @@
  * The browser captures raw 16-bit little-endian mono PCM via Web Audio
  * (no MediaRecorder containers, so no ffmpeg anywhere) and posts it as
  * `application/octet-stream` with the sample rate in `?rate=`. The route
- * streams it to the wyoming-faster-whisper sidecar — the SAME container
+ * streams it to the configured CPU STT sidecar — the SAME container
  * voice-io uses — over the Wyoming TCP protocol and returns `{ text }`.
  *
- * Availability: the whisper container ships under the `linux` compose
+ * Availability: the STT container ships under the `linux` compose
  * profile (production appliances). On macOS dev installs (or whenever the
  * sidecar is down) the route answers 503 `stt_unavailable` and the
  * dashboard hides/disables the mic gracefully.
@@ -23,16 +23,17 @@ import {
   SttUnavailableError,
 } from "../services/stt.client.js";
 
-const DEFAULT_STT_URL = "tcp://wyoming-faster-whisper:10300";
+const DEFAULT_STT_URL = "tcp://qwen-stt:10300";
 
-/** Whisper decodes on shared appliance CPU; each transcription holds a
+/** STT decodes on shared appliance CPU; each transcription holds a
  *  worker for seconds. Bound concurrent requests so an authenticated
  *  client (or several open tabs) can't queue unbounded work onto the
  *  sidecar — excess callers get 429 and simply retry their dictation. */
 const MAX_CONCURRENT_TRANSCRIPTIONS = 2;
 
-/** 16 kHz × 2 bytes × 60 s ≈ 1.9 MB; 10 MB allows ~5 min of speech. */
-const MAX_AUDIO_BYTES = 10 * 1024 * 1024;
+const MAX_AUDIO_SECONDS = 30;
+/** Upper bound at the highest supported rate: 48 kHz × int16 × 30 s. */
+const MAX_AUDIO_BYTES = 48000 * 2 * MAX_AUDIO_SECONDS;
 
 export function createSttRouter(): Router {
   const router = Router();
@@ -79,6 +80,14 @@ export function createSttRouter(): Router {
         const rate = Number.parseInt(rawRate ?? "16000", 10);
         if (!Number.isFinite(rate) || rate < 8000 || rate > 48000) {
           res.status(400).json({ error: "invalid_rate" });
+          return;
+        }
+        if (pcm.length % 2 !== 0) {
+          res.status(400).json({ error: "invalid_audio" });
+          return;
+        }
+        if (pcm.length > rate * 2 * MAX_AUDIO_SECONDS) {
+          res.status(400).json({ error: "audio_too_long", maxSeconds: MAX_AUDIO_SECONDS });
           return;
         }
         const text = await transcribePcm({
