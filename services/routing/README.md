@@ -17,7 +17,35 @@ The routing service runs with `network_mode: host` so it can reach the router di
 ### Health
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/health` | Router connectivity check |
+| GET | `/health` | Router connectivity check. Carries `error_code` (`ROUTER_AUTH` / `ROUTER_PAIRED_ELSEWHERE` / null) and the `pairing` block below |
+
+`/health.pairing` (ADR-071 §2.2 step 1) is served from a cache and never blocks on the network:
+
+```json
+"pairing": {
+  "state": "open | closed | paired | unknown",
+  "window_ends_at": "<iso8601> | null",
+  "paired_box": "<64 lowercase hex> | null",
+  "paired_elsewhere": false,
+  "pending_persist": false
+}
+```
+
+- While the service is in the AUTH state (router answers, rejects the `droplet-ai` credential) the background reconnect tick also calls `droplet.pair status` with the **null session** and caches the result. No probing happens while connected or while the router is merely unreachable.
+- Connected: `state` is `paired` after a successful claim in this process (or a `paired` probe), otherwise `unknown`.
+- `paired_elsewhere` is true when the router reports `paired` with a `paired_box` that is not this box's fingerprint. The fingerprint comes from the orchestrator (first `POST /pairing/claim`, or `PUT /pairing/identity`); while it is unknown the state is never raised. Router-backed routes then answer HTTP 502 `{"detail": {"code": "ROUTER_PAIRED_ELSEWHERE", "paired_box": ...}}` instead of `ROUTER_AUTH`, and `/health` sets `error_code` accordingly. Logged once per distinct foreign fingerprint.
+
+### Router pairing (ADR-071 slice B)
+All routes require the service token.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| PUT | `/pairing/identity` | `{"box_fingerprint": "<64 hex>"}` — tell routing which box it serves (enables `ROUTER_PAIRED_ELSEWHERE`) |
+| POST | `/pairing/claim` | `{"box_fingerprint": "<64 hex>"}` — mint a 32-hex password, `droplet.pair claim`, prove it by logging in with it, switch the live session, clear the AUTH state, reconnect immediately. `200 {"ok": true, "password", "host", "model", "paired_at"}` |
+| GET | `/pairing/pending` | `{"pending": bool, "password": "<32hex>" \| null, "paired_at": ...}` — a minted password the orchestrator has not yet confirmed persisted |
+| POST | `/pairing/persisted` | Orchestrator confirms the password is saved; routing forgets it. `{"ok": true}` |
+
+`POST /pairing/claim` errors are `{"code", "detail"}` (plus `paired_box` for the elsewhere case): `400 INVALID_FINGERPRINT`, `409 PAIR_WINDOW_CLOSED`, `409 ROUTER_PAIRED_ELSEWHERE`, `502 PAIR_UNSUPPORTED` (no `droplet.pair` plugin, or `ROUTING_MODE` is not `real`), `502 PAIR_CLAIM_FAILED`, `502 PAIR_VERIFY_FAILED` (claim accepted but login with the new password failed: logged at ERROR, AUTH state kept, nothing switched), `503 ROUTER_UNREACHABLE`. The password appears only in the 200 body and `GET /pairing/pending`; it is never logged.
 
 ### Network
 | Method | Path | Description |
@@ -143,6 +171,8 @@ The rpcd password is mounted as a Docker secret at `/run/secrets/openwrt_passwor
 
 1. `OPENWRT_PASSWORD_FILE` (default `/run/secrets/openwrt_password`) — preferred
 2. `OPENWRT_PASSWORD` env var — deprecated, logged as a warning
+
+**Runtime reload (ADR-071).** The password is not frozen at startup: every router login resolves it through `current_openwrt_password()` — the password minted by a pairing claim in this process, else the secret file **re-read at login time**, else the value read at import. After a claim, routing therefore runs on the new password with no container recreate. The secret file still holds the old value until the orchestrator persists the new one (device-bridge `droplet-pair-apply`); a container recreate after persistence simply reads the new file. `POST /pairing/persisted` drops the in-memory copy once the file agrees with it, and keeps it otherwise so the process never regresses to a stale password.
 
 To update the password:
 
