@@ -213,7 +213,6 @@ import { createDriveLandingHandler } from "./services/m365/drive-landing.service
 import { createMicrosoftCalendarPageHandler } from "./services/m365/calendar-landing.service.js";
 import { createMicrosoftMailPageHandler } from "./services/m365/mail-landing.service.js";
 import { syncGoogleCalendars } from "./services/google/google-calendar-sync.service.js";
-import { getEffectiveModuleIds } from "./services/modules.service.js";
 
 /**
  * Product version for the Graph `User-Agent` Microsoft asks integrators to

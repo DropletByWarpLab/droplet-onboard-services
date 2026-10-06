@@ -65,7 +65,6 @@ interface PmRow {
   field?: string | null;
   oldValue?: string | null;
   newValue: string | null;
-  field?: string | null;
   createdAt: Date;
   notifyStatus: "pending" | "sent" | "not_needed";
   notifiedAt: Date | null;
