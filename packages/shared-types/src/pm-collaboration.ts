@@ -106,6 +106,7 @@ export const PM_ACTIVITY_VERBS = [
   "module_removed",
   "relation_added",
   "relation_removed",
+  "deleted",
   "sla_at_risk",
   "sla_breached",
   "macro_applied",

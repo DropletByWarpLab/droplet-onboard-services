@@ -410,7 +410,8 @@ describe("Attachments section — states", () => {
     fireEvent.drop(section(), filesDrag([makeFile("readonly.txt")]));
     fireEvent.paste(section(), { clipboardData: { files: [makeFile("readonly.png", "image/png")] } });
     expect(FakeXHR.all).toHaveLength(0);
-    expect(net.calls.filter((c) => c.method !== "GET")).toHaveLength(0);
+    // Viewing the drawer sends a presence heartbeat, but cannot mutate files.
+    expect(net.calls.filter((c) => c.method !== "GET" && !(c.method === "POST" && c.url === "/api/pm/work-items/w1/presence"))).toHaveLength(0);
   });
 
   it("has a focusable add area and a real Add files button that opens the picker", async () => {
@@ -803,7 +804,7 @@ describe("Comment composer — files", () => {
     expect(within(staged).getByText("a.txt")).toBeInTheDocument();
     expect(within(staged).getByText("b.txt")).toBeInTheDocument();
     expect(FakeXHR.all).toHaveLength(0);
-    expect(net.calls.some((c) => c.method === "POST")).toBe(false);
+    expect(net.calls.some((c) => c.method === "POST" && c.url.endsWith("/comments"))).toBe(false);
 
     fireEvent.click(send());
     await waitFor(() => expect(FakeXHR.all).toHaveLength(2));

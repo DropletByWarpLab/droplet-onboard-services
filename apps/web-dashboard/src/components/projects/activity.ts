@@ -113,6 +113,7 @@ const SENTENCES: Record<PmActivityVerbName, Describe> = {
   module_removed: () => "removed this from a module",
   relation_added: (a, c) => `linked this with ${relationTail(a.newValue, c.refs)}`,
   relation_removed: (a, c) => `unlinked this from ${relationTail(a.oldValue, c.refs)}`,
+  deleted: () => "deleted this item",
   sla_at_risk: () => "marked the SLA as at risk",
   sla_breached: () => "marked the SLA as breached",
   macro_applied: (a) => a.newValue ? `applied the macro ${a.newValue}` : "applied a macro",

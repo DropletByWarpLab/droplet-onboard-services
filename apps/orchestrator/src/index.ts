@@ -151,6 +151,9 @@ import { runActivityNotifySweep } from "./services/activity-notify.service.js";
 import { sweepAttachments } from "./services/pm/pm-attachments.service.js";
 import { runImportTick } from "./services/pm/import/runner.js";
 import { registerOutboxConsumer, stopOutbox } from "./services/pm/pm-outbox.js";
+import { createPmLiveConsumer } from "./services/pm/pm-live.js";
+import { createPmLiveAudience } from "./services/pm/pm-live-audience.js";
+import { getEffectiveModuleIds } from "./services/modules.service.js";
 import { registerSupportSlaRuntime } from "./services/support/sla-runtime.js";
 import { runDevelopmentSync } from "./services/pm/pm-development.service.js";
 import { createWebhookFanOutConsumer } from "./services/pm/webhook-fanout.js";
@@ -192,7 +195,6 @@ import { createDriveLandingHandler } from "./services/m365/drive-landing.service
 import { createMicrosoftCalendarPageHandler } from "./services/m365/calendar-landing.service.js";
 import { createMicrosoftMailPageHandler } from "./services/m365/mail-landing.service.js";
 import { syncGoogleCalendars } from "./services/google/google-calendar-sync.service.js";
-import { getEffectiveModuleIds } from "./services/modules.service.js";
 
 /**
  * Product version for the Graph `User-Agent` Microsoft asks integrators to
@@ -2165,6 +2167,19 @@ async function main() {
     logger.info("API server listening on port %d", config.PORT);
     markListening();
   });
+
+  // WARP-3536 — register after createApp(), which initializes the audience's
+  // access resolver, while sharing the transactional PM outbox.
+  registerOutboxConsumer(
+    createPmLiveConsumer({
+      prisma,
+      audience: createPmLiveAudience({
+        prisma,
+        boxModuleIds: () => getEffectiveModuleIds(prisma, config),
+      }),
+    }),
+    { prisma, cronRuntime },
+  );
 
   // Graceful shutdown. `exitCode` defaults to 0 so SIGTERM/SIGINT keep their
   // clean-exit semantics; the uncaughtException path (WARP-572) passes 1 so

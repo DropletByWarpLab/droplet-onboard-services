@@ -2655,12 +2655,36 @@ export async function deleteWorkItem(
     include: { project: { select: { kind: true } } },
   });
   if (!existing || isServiceDesk(existing.project)) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
-  let wroteRelationActivity = false;
   // WARP-1505: filled inside the transaction, used after it commits.
   let blobKeys: string[] = [];
   let cleanupKeys: string[] = [];
   try {
     await prisma.$transaction(async (tx) => {
+      const assignees = await tx.pmWorkItemAssignee.findMany({
+        where: { workItemId: id },
+        select: { userId: true },
+      });
+      const assignedUserIds = assignees.map(({ userId }) => userId);
+      const guests = assignedUserIds.length === 0
+        ? []
+        : await tx.user.findMany({
+            where: { id: { in: assignedUserIds }, role: "guest" },
+            select: { id: true },
+          });
+      // A detached PmActivity tombstone is the transactional live-update event
+      // for the deleted leaf. Ordinary activity rows cascade with the item;
+      // this snapshot survives and contains only project/item/user IDs.
+      await tx.pmActivity.create({
+        data: {
+          workItemId: null,
+          actorId,
+          verb: "deleted",
+          deletedProjectId: existing.projectId,
+          deletedWorkItemId: id,
+          deletedGuestUserIds: guests.map(({ id: userId }) => userId),
+          notifyStatus: "not_needed",
+        },
+      });
       // WARP-1505: the cascade drops this item's PmAttachment rows (and its
       // comments' — they carry the same workItemId), but the bytes are files on
       // a volume the database cannot reach. Read the keys here, inside the
@@ -2689,6 +2713,7 @@ export async function deleteWorkItem(
           field: "parentId",
           oldValue: id,
           newValue: null,
+          nudge: false,
         });
       }
       // WARP-2586: the PmWorkItemRelation FKs cascade on BOTH ends, so this
@@ -2705,7 +2730,6 @@ export async function deleteWorkItem(
         select: { fromId: true, toId: true, kind: true },
       });
       if (relations.length > 0) {
-        wroteRelationActivity = true;
         await tx.pmActivity.createMany({
           data: relations.map((rel) => {
             const otherId = rel.fromId === id ? rel.toId : rel.fromId;
@@ -2722,8 +2746,12 @@ export async function deleteWorkItem(
       }
 
       await tx.pmWorkItem.delete({ where: { id } });
-    }, SERIALIZABLE_TX);
-    if (wroteRelationActivity) nudgeOutbox();
+    }, { ...SERIALIZABLE_TX, timeout: 5_000 });
+    // Wake only after the delete and its tombstone have committed. If the
+    // transaction rolls back, no consumer is nudged for an event that vanished.
+    // This one post-commit wake also covers the surviving-end relation audit
+    // rows written directly with createMany above.
+    nudgeOutbox();
   } catch (err) {
     if (isPrismaCode(err, "P2025")) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
     // The SERIALIZABLE loser: an edge was committed under us between the audit
@@ -2831,10 +2859,10 @@ export interface ApiActivity {
 
 /** One activity row on the wire. Shared with the merged timeline
  *  (pm-collaboration.service.ts) so the two cannot drift apart. */
-export function mapActivity(r: Prisma.PmActivityGetPayload<object>): ApiActivity {
+export function mapActivity(r: Prisma.PmActivityGetPayload<object>, workItemId: string): ApiActivity {
   return {
     id: r.id,
-    workItemId: r.workItemId,
+    workItemId: r.workItemId ?? workItemId,
     actorId: r.actorId,
     verb: r.verb,
     field: r.field,
@@ -2872,7 +2900,7 @@ export async function listActivity(
   ]);
   const { items, nextCursor } = sliceToPage(rows, limit, (r) => encodeCursor(ORDER_ACTIVITY, r.createdAt, r.id));
   return {
-    items: items.map(mapActivity),
+    items: items.map((r) => mapActivity(r, workItemId)),
     nextCursor,
     total,
   };

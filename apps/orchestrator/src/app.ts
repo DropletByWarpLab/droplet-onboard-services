@@ -60,6 +60,7 @@ import { createMatterRouter } from "./routes/matter.js";
 import { createPmMobileRouter } from "./routes/mobile/pm.js";
 import { createPmNativeRouter } from "./routes/pm/native.js";
 import { createPmRelationsRouter } from "./routes/pm/relations.js";
+import { createPmPresenceRouter } from "./routes/pm/presence.js";
 import { createPmCollaborationRouter } from "./routes/pm/collaboration.js";
 import { createPmAttachmentsRouter } from "./routes/pm/attachments.js";
 import { createPmQueryRouter } from "./routes/pm/query.js";
@@ -646,6 +647,8 @@ export function createApp(
   // Every path starts `/pm/`, so the `projects` module gate and the guest tier
   // floor already cover it.
   app.use("/api", createPmPlanningRouter(prisma));
+  // WARP-3536 live presence shares the Projects route gates above.
+  app.use("/api", createPmPresenceRouter(prisma));
   // WARP-3526 (ADR-069 WS-10) — worklogs, the running timer, the weekly
   // timesheet and the time report. Its own router, disjoint paths
   // (`/pm/worklogs`, `/pm/timer`, `/pm/timesheet`, `/pm/time/...`, plus

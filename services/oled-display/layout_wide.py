@@ -249,14 +249,14 @@ COLUMNS = 12
 #     more. So surplus height becomes band D: a second row carrying data the
 #     compact tier has to drop on the floor — the alerts you can otherwise
 #     only reach by tapping the chrome badge, the degraded services past the
-#     third, the MEM/SYSTEM trend hiding behind two bare percentages, and the
+#     third, the CPU/RAM trend hiding behind two bare percentages, and the
 #     LAN client count, which the bridge already streams and which until now
 #     was rendered nowhere at all.
 #
 # Nothing in band D is invented to fill space. A block with no data says so.
 REF_BAND_B_TOP = 67    # band_b_top on the 1424x280 reference panel
 REF_ROW_H = 166        # authored primary row: eyebrow at 67 down to the
-                       # deepest glyph, health's 24px MEM/SYSTEM/TEMP/GPU
+                       # deepest glyph, health's 24px CPU/RAM/GPU T/CPU T
                        # numerals drawn at y=202
 EXTRA_GAP = 20         # rule + breathing room between the primary row and D
 EXTRA_ROW_H = 24       # one band-D list row
@@ -910,40 +910,59 @@ def _cell_health(disp, draw, v: dict) -> None:
     d = _d()
     g = geom()
     x, w = g.cells["health"]
-    _eyebrow(draw, "LOAD", x)
-    d._v3_text(draw, _num(v.get("cpu"), "%"), x, g.by(74),
-               font=d._get_font(60, weight="heavy"), fill=d.V3_TEXT,
+    _eyebrow(draw, "GPU LOAD", x)
+    gpu = v.get("gpu")
+    hero = _num(gpu, "%")
+    hero_font = d._get_font(60, weight="heavy")
+    d._v3_text(draw, hero, x, g.by(74),
+               font=hero_font, fill=d.V3_TEXT if gpu is not None else d.V3_LABEL4,
                tracking=-2)
 
-    sp = v.get("sparks_cpu") or []
-    sx, sy, sh = x, g.by(146), 36
-    draw.rectangle([sx, sy + sh, sx + w, sy + sh], fill=d.V3_SEP)
-    if len(sp) >= 2:
-        lo, hi = min(sp), max(sp)
-        rng = max(1.0, hi - lo)
-        pts = [(sx + (i / (len(sp) - 1)) * w,
-                sy + sh - ((val - lo) / rng) * sh)
-               for i, val in enumerate(sp)]
-        draw.polygon(pts + [(sx + w, sy + sh), (sx, sy + sh)],
-                     fill=d.V3_SPARK_FILL)
-        draw.line(pts, fill=d.V3_ACCENT, width=2, joint="curve")
+    # Watchdog status shares the hero row, leaving the GPU trend unbroken.
+    wd = _watchdog_overall(v)
+    label, ink = {
+        "ok": ("OK", d.V3_GREEN),
+        "healed": ("HEALED", d.V3_GREEN),
+        "heal_failed": ("HEAL FAILED", d.V3_ORANGE),
+        "escalated": ("ESCALATED", d.V3_RED),
+        "stale": ("STALE", d.V3_ORANGE),
+    }.get(wd, ("NO DATA", d.V3_LABEL4))
+    wd_w = int(w - d._v3_text_width(draw, hero, hero_font, -2) - 16)
+    wf, wt = _fit_text(draw, label, max(24, wd_w), 14, floor=9, weight="bold")
+    d._v3_text(draw, "WATCHDOG", x + w, g.by(86),
+               font=d._get_font(9, weight="bold"), fill=d.V3_LABEL3, anchor="ra")
+    d._v3_text(draw, wt, x + w, g.by(102), font=wf, fill=ink, anchor="ra")
 
-    # WARP-2668: the third gauge is `psutil.disk_usage("/")` — the filesystem
-    # the box is INSTALLED on, which is not the storage the owner bought. Under
-    # its old "DISK" eyebrow it sat two cells away from a STORAGE meter that
-    # had never received data, so the only storage-shaped number on the glass
-    # was the wrong disk. "SYSTEM" names what it measures; C4's STORAGE cell
-    # carries the data drives. Do not merge or cross-fill the two.
-    cols = (("MEM", _num(v.get("mem"), "%")),
-            ("SYSTEM", _num(v.get("disk"), "%")),
-            ("TEMP", _num(v.get("temp"), "°")),
-            ("GPU", _num(v.get("gpu"), "%")))
+    if not _spark(draw, x, g.by(146), w, 36, v.get("sparks_gpu"),
+                  d.V3_ACCENT, d.V3_SPARK_FILL):
+        d._v3_text(draw, "no GPU history", x, g.by(154),
+                   font=d._get_font(10), fill=d.V3_LABEL4)
+
+    cols = (("CPU", v.get("cpu"), "%"),
+            ("RAM", v.get("mem"), "%"),
+            ("GPU T", v.get("gpu_temp"), "°C"),
+            ("CPU T", v.get("temp"), "°C"))
     cw = w / 4
-    for i, (label, val) in enumerate(cols):
+    for i, (label, val, suffix) in enumerate(cols):
         cx = int(x + i * cw)
         _eyebrow(draw, label, cx, g.by(190))
-        d._v3_text(draw, val, cx, g.by(202), font=d._get_font(24, weight="heavy"),
-                   fill=d.V3_TEXT)
+        ink = d.V3_LABEL4 if val is None else d.V3_TEXT
+        if suffix == "°C" and val is not None:
+            ink = d.V3_RED if val >= 85 else d.V3_ORANGE if val >= 70 else d.V3_TEXT
+        font, text = _fit_text(draw, _num(val, suffix), max(24, int(cw) - 6),
+                               24, floor=16)
+        d._v3_text(draw, text, cx, g.by(202), font=font, fill=ink)
+
+
+def _watchdog_overall(v: dict) -> str:
+    """An absent watchdog feed never implies a healthy watchdog."""
+    wd = v.get("watchdog") or {}
+    overall = wd.get("overall")
+    if overall == "stale":
+        return "stale"
+    if wd.get("available") and overall in ("ok", "healed", "heal_failed", "escalated"):
+        return overall
+    return "unavailable"
 
 
 def _cell_services(disp, draw, v: dict, *, carry: int = 0) -> List[dict]:
@@ -1087,7 +1106,7 @@ def _cell_netstore(disp, draw, v: dict) -> None:
 # under the primary row for a whole second one. Every block here shows data
 # the box ALREADY streams and the compact panel has to drop: the alert list
 # you can otherwise only reach by tapping the chrome badge, the degraded
-# services past the third, the MEM/SYSTEM trend hiding behind two bare
+# services past the third, the CPU/RAM trend hiding behind two bare
 # percentages, and lan_clients - fed by the bridge and, until now, rendered on
 # no screen at all.
 #
@@ -1172,15 +1191,11 @@ def _extra_activity(disp, draw, v: dict) -> None:
 
 
 def _extra_trends(disp, draw, v: dict) -> None:
-    """MEM and SYSTEM over the same window as the CPU spark above them.
+    """CPU and RAM over the same window as the GPU spark above them.
 
     The primary row prints both as bare percentages, which cannot answer the
     question you walked to the rack holding: is this climbing, or has it been
-    sitting there all week?
-
-    SYSTEM is the install filesystem, same series as the primary row's third
-    gauge (WARP-2668) — the buffer keeps its `sparks_disk` name because that is
-    what `update_stats` feeds; only the eyebrow changed."""
+    sitting there all week?"""
     d = _d()
     g = geom()
     x, w = g.cells["health"]
@@ -1190,8 +1205,8 @@ def _extra_trends(disp, draw, v: dict) -> None:
     head = g.extra_top + EXTRA_HEAD_H
     h = max(12, min(30, g.extra_bot - head - 18))
     for i, (label, buf, cur) in enumerate((
-            ("MEM", v.get("sparks_mem"), v.get("mem")),
-            ("SYSTEM", v.get("sparks_disk"), v.get("disk")))):
+            ("CPU", v.get("sparks_cpu"), v.get("cpu")),
+            ("RAM", v.get("sparks_mem"), v.get("mem")))):
         sx = x + i * (half + 24)
         _eyebrow(draw, label, sx, head)
         d._v3_text(draw, _num(cur, "%"), sx + half, head - 4,
@@ -1296,9 +1311,11 @@ def render_status(disp, now=None, state: str = "live") -> Image.Image:
     # it earns ALERT; anything else failing is DEGRADED.
     # TODO: ALERT should also replace C2+C3 with an incident block (brief §6).
     svc_status = svc.get("status")
-    if disp._open_alerts_count() or svc_status == "down":
+    watchdog_status = _watchdog_overall(v)
+    if disp._open_alerts_count() or svc_status == "down" or watchdog_status == "escalated":
         state = "alert"
-    elif svc_status == "degraded" or (svc.get("degraded") or []):
+    elif (svc_status == "degraded" or (svc.get("degraded") or [])
+          or watchdog_status in ("heal_failed", "stale")):
         state = "degraded"
     elif tls_warning_line(v.get("tls") or {}):
         # WARP-2944 — the box is doing its job, but its padlock is running

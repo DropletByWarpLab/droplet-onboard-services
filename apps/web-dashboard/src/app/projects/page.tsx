@@ -58,6 +58,7 @@ import {
   type ViewsScope,
 } from "@/components/projects/usePm";
 import { departmentOptions } from "@/components/projects/department";
+import { usePmLive } from "@/components/projects/usePmLive";
 import { IndexView } from "@/components/projects/IndexView";
 import { BoardView, ListView, type Domain } from "@/components/projects/board";
 import { ViewSwitcher, type ProjectView } from "@/components/projects/chrome";
@@ -335,6 +336,9 @@ function ProjectsWorkspace(): JSX.Element {
   const projectId = mode === "project" ? (project?.id ?? null) : null;
   const { cycles, mutate: mutateCycles } = useProjectCycles(projectId);
   const cyclesById = useMemo(() => new Map((cycles ?? []).map((c) => [c.id, c])), [cycles]);
+
+  // Socket invalidation refreshes the server query and the URL-derived drawer.
+  usePmLive();
 
   // The server dropped something the filter named that no longer exists
   // (brief §3.9): say so once, and show the filter that was applied. The URL

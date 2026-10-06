@@ -32,6 +32,7 @@ import time
 import json
 import socket
 import logging
+import math
 import threading
 import urllib.request
 import urllib.error
@@ -923,21 +924,17 @@ class TFTDisplay:
         # Live data snapshot the redesigned screens render from, seeded with the
         # handoff sample shape so a cold sim renders something sensible.
         self._v3 = {
-            "cpu": 0, "mem": 0, "disk": 0,
+            "cpu": None, "mem": None, "disk": None,
             # None, not 0 — a cold panel must render `—` for a sensor it has
             # not read yet (WARP-1643). `gpu` is often None permanently: most
             # boxes have no GPU to report.
-            "temp": None, "gpu": None,
+            "temp": None, "gpu": None, "gpu_temp": None, "watchdog": None,
             "ip": "-", "hostname": "droplet", "uptime": "-", "now": "",
             "date": "",
-            # Three histories, not one. The wide layout's tall density tier
-            # (the 1280x400 panel, and any panel with spare band-B height)
-            # draws MEM and DISK trends beside the CPU spark. A bare "61%"
-            # cannot say whether the box is climbing or settling, which is
-            # most of what you walk to the rack to find out. Seeded EMPTY so a
-            # cold panel draws "no history yet" instead of a flat line at zero
-            # - same rule as WARP-1643's sensors: unknown renders as unknown.
+            # Empty histories distinguish a cold panel from measured idle.
+            # GPU is the primary trend; tall panels also show CPU and RAM.
             "sparks_cpu": [], "sparks_mem": [], "sparks_disk": [],
+            "sparks_gpu": [],
             # WARP-2047 — ssid defaults EMPTY, not to a plausible name. It used
             # to default to the literal "Droplet-AI", so the System screen's
             # NETWORK tile printed that on a box whose household network was
@@ -2085,27 +2082,32 @@ class TFTDisplay:
         # readiness short-circuit (WARP-638).
         self._got_live_data = True
         for k in ("cpu", "mem", "disk", "temp", "ip", "hostname", "uptime",
-                  "now", "date", "gpu"):
+                  "now", "date", "gpu", "gpu_temp", "watchdog"):
             if k in data and data[k] is not None:
                 self._v3[k] = data[k]
-        # `temp` and `gpu` are the only keys allowed to go back to None. They
-        # are read straight off host sysfs, so "sensor disappeared" is a real
-        # state (a card unbinding, /sys going away) — and the None-skip above
-        # would otherwise pin the last good reading on the glass forever. A
-        # frozen 61° is the same species of lie as a fake 0°.
-        for k in ("temp", "gpu"):
+        # An explicit null means measurement was lost. Preserve omitted keys
+        # for partial pushes, but never pin a last good reading indefinitely.
+        for k in ("cpu", "mem", "disk", "temp", "gpu", "gpu_temp", "watchdog"):
             if k in data and data[k] is None:
                 self._v3[k] = None
-        # One cadence, three series, so the tall panel's trend block compares
+        # One cadence, four series, so the tall panel's trend block compares
         # like with like. Per-series try/except rather than one around the
         # lot: a single unparseable sample must not silently stall the other
         # two and leave the histories out of step with each other.
-        for buf_key, src_key in (("sparks_cpu", "cpu"),
+        for buf_key, src_key in (("sparks_gpu", "gpu"),
+                                 ("sparks_cpu", "cpu"),
                                  ("sparks_mem", "mem"),
                                  ("sparks_disk", "disk")):
             try:
                 buf = self._v3.setdefault(buf_key, [])
-                buf.append(float(self._v3.get(src_key) or 0))
+                sample = self._v3.get(src_key)
+                if sample is None:
+                    self._v3[buf_key] = []
+                    continue
+                sample = float(sample)
+                if not math.isfinite(sample):
+                    continue
+                buf.append(sample)
                 if len(buf) > self._v3_spark_len:
                     self._v3[buf_key] = buf[-self._v3_spark_len:]
             except (TypeError, ValueError, AttributeError):
@@ -2204,12 +2206,13 @@ class TFTDisplay:
         """Fill the sparkline buffers with jittered samples around `value` so a
         freshly-seeded sim renders believable trends (dev/PNG only).
 
-        Seeds MEM and DISK from their own current readings too. A dev preview
+        Seeds GPU, MEM and DISK from their own current readings too. A dev preview
         that filled CPU alone would show the tall panel's trend block half
         empty and invite someone to "fix" a layout that is working."""
         import random
         n = n or self._v3_spark_len
-        for buf_key, base in (("sparks_cpu", value),
+        for buf_key, base in (("sparks_gpu", self._v3.get("gpu")),
+                              ("sparks_cpu", value),
                               ("sparks_mem", self._v3.get("mem")),
                               ("sparks_disk", self._v3.get("disk"))):
             if base is None:
@@ -2329,6 +2332,34 @@ class TFTDisplay:
             return boxed if boxed is not None else self.render_system(now=now)
         return layout_wide.render_debug(self, now=now)
 
+    @staticmethod
+    def _sensor_number(value, minimum: float, maximum: float) -> Optional[int]:
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            return None
+        return round(value) if math.isfinite(value) and minimum <= value <= maximum else None
+
+    @staticmethod
+    def _metric_text(value, suffix: str) -> str:
+        return "--" if value is None else f"{int(value)}{suffix}"
+
+    @staticmethod
+    def _temperature_color(value):
+        if value is None:
+            return V3_LABEL3
+        return V3_TEXT if value < 70 else V3_ORANGE if value < 85 else V3_RED
+
+    @staticmethod
+    def _watchdog_label(snapshot):
+        overall = (snapshot or {}).get("overall", "unavailable")
+        if overall != "stale" and not (snapshot or {}).get("available"):
+            return "NO DATA", V3_LABEL3
+        return {
+            "ok": ("OK", V3_GREEN), "healed": ("HEALED", V3_GREEN),
+            "heal_failed": ("FAULT", V3_ORANGE),
+            "escalated": ("CRITICAL", V3_RED),
+            "stale": ("STALE", V3_ORANGE),
+        }.get(overall, ("NO DATA", V3_LABEL3))
+
     def render_system(self, now: Optional[_dt_datetime] = None) -> Image.Image:
         """Combined System + Wi-Fi screen (design_handoff §2 / drawStats).
 
@@ -2390,9 +2421,10 @@ class TFTDisplay:
                 br * 2 + 14, self._open_drawer))
         else:
             sxs = int(WIDTH - 20 - time_w - 16)
-            draw.ellipse([sxs - 4, 16 - 4, sxs + 4, 16 + 4], fill=V3_GREEN)
-            _v3_text(draw, "OK", sxs - 8, 16, font=_get_font(11, weight="bold"),
-                     fill=V3_GREEN, anchor="rm")
+            label, ink = self._watchdog_label(v.get("watchdog"))
+            draw.ellipse([sxs - 4, 16 - 4, sxs + 4, 16 + 4], fill=ink)
+            _v3_text(draw, label, sxs - 8, 16, font=_get_font(11, weight="bold"),
+                     fill=ink, anchor="rm")
         draw.rectangle([20, 32, WIDTH - 20, 32], fill=V3_SEP)
 
         # ---- column divider at x=288 ----
@@ -2401,13 +2433,13 @@ class TFTDisplay:
         draw.rectangle([DIV, 46, DIV, HEIGHT - 24], fill=V3_SEP)
 
         # ===== LEFT: system =====
-        _v3_text(draw, "CPU LOAD", 20, 46, font=_get_font(9, weight="bold"),
+        _v3_text(draw, "GPU LOAD", 20, 46, font=_get_font(9, weight="bold"),
                  fill=V3_LABEL3, tracking=1.6)
-        _v3_text(draw, "{}%".format(int(v.get("cpu") or 0)), 20, 58,
+        _v3_text(draw, self._metric_text(v.get("gpu"), "%"), 20, 58,
                  font=_get_font(52, weight="heavy"), fill=V3_TEXT, tracking=-2)
 
-        # sparkline (48-sample CPU history).
-        sp = v.get("sparks_cpu") or []
+        # Primary trend follows the GPU load hero.
+        sp = v.get("sparks_gpu") or []
         sx, sy, sw, sh = 20, 120, INW, 40
         draw.rectangle([sx, sy + sh - 1, sx + sw, sy + sh - 1], fill=V3_SEP)
         if len(sp) >= 2:
@@ -2423,22 +2455,26 @@ class TFTDisplay:
 
         draw.rectangle([20, 172, 20 + INW, 172], fill=V3_SEP)
 
-        # tabular metrics row (MEM / DISK / TEMP / CAM).
-        cams = v.get("cameras") or {}
+        # CPU/RAM usage and independently measured GPU/CPU temperatures.
         cols = [
-            ("MEM", "{}%".format(int(v.get("mem") or 0)), V3_TEXT),
-            ("DISK", "{}%".format(int(v.get("disk") or 0)), V3_TEXT),
-            ("TEMP", "{}°".format(int(v.get("temp") or 0)), V3_TEXT),
-            ("CAM", "{}/{}".format(cams.get("online", 0),
-                                   cams.get("total", 0)), V3_GREEN),
+            ("CPU", self._metric_text(v.get("cpu"), "%"), V3_TEXT),
+            ("RAM", self._metric_text(v.get("mem"), "%"), V3_TEXT),
+            ("GPU T", self._metric_text(v.get("gpu_temp"), "°C"),
+             self._temperature_color(v.get("gpu_temp"))),
+            ("CPU T", self._metric_text(v.get("temp"), "°C"),
+             self._temperature_color(v.get("temp"))),
         ]
         col_w = INW / 4
         for i, (lbl, val, col) in enumerate(cols):
             x = int(20 + i * col_w)
             _v3_text(draw, lbl, x, 182, font=_get_font(9, weight="bold"),
                      fill=V3_LABEL3, tracking=1.2)
-            _v3_text(draw, val, x, 196, font=_get_font(22, weight="heavy"),
+            _v3_text(draw, val, x, 196, font=_get_font(20, weight="heavy"),
                      fill=col)
+
+        watchdog_label, watchdog_ink = self._watchdog_label(v.get("watchdog"))
+        _v3_text(draw, "WATCHDOG " + watchdog_label, 20, 226,
+                 font=_get_font(10, weight="bold"), fill=watchdog_ink)
 
         # detail line.
         _v3_text(draw, "WAN {}ms   ·   UP {}   ·   LAN {}".format(
@@ -3044,21 +3080,11 @@ class TFTDisplay:
         return best
 
     @staticmethod
-    def _get_gpu() -> Optional[int]:
-        """Primary-GPU utilisation as a whole percent, or **None** on a host
-        with no discoverable GPU — which is every PyPortal box, and is why the
-        cell renders `—` there rather than an invented 0.
+    def _gpu_cards() -> List[str]:
+        """Local fallback order: operator pin, NVIDIA, then largest AMD VRAM.
 
-        The amdgpu/i915 DRM path is the verified one (the mini-rack box drives
-        the panel itself from an AMD iGPU, with a discrete Radeon alongside).
-        `PANEL_GPU_CARD` pins a specific card; otherwise the lowest-numbered
-        card exposing `gpu_busy_percent` wins. Lowest-index is deliberate and
-        stable: picking "whichever is busiest" would silently swap which GPU
-        the cell describes from one render to the next.
-
-        These are plain sysfs attribute reads, not device opens, so they need
-        no `device_cgroup_rules` entry; Docker's default read-only /sys mount
-        is enough.
+        Never substitute the idle iGPU for an NVIDIA card whose counters
+        require the bridge's nvidia-smi. Numeric index breaks ties only.
         """
         pinned = os.environ.get("PANEL_GPU_CARD", "").strip()
         try:
@@ -3071,20 +3097,44 @@ class TFTDisplay:
         except Exception:
             cards = []
         if pinned:
-            cards = [pinned] if pinned in cards else []
+            return [pinned] if pinned in cards else []
+
+        def rank(card):
+            dev = f"{_SYS_DRM}/{card}/device"
+            vendor = TFTDisplay._read_sysfs(f"{dev}/vendor")
+            try:
+                vram = int(TFTDisplay._read_sysfs(f"{dev}/mem_info_vram_total") or 0)
+            except ValueError:
+                vram = 0
+            return (vendor == "0x10de", vram, -int(card[4:]))
+
+        return sorted(cards, key=rank, reverse=True)
+
+    @staticmethod
+    def _get_gpu() -> Optional[int]:
+        """Sysfs fallback when the bridge is unavailable, including Jetson."""
+        cards = TFTDisplay._gpu_cards()
 
         for card in cards:
             dev = f"{_SYS_DRM}/{card}/device"
             raw = TFTDisplay._read_sysfs(f"{dev}/gpu_busy_percent")
             if raw is None:
+                if (TFTDisplay._read_sysfs(f"{dev}/vendor") == "0x10de"
+                        or TFTDisplay._read_sysfs(f"{dev}/mem_info_vram_total") is not None):
+                    return None
                 continue
             try:
                 busy = int(raw)
             except ValueError:
-                continue
-            if 0 <= busy <= 100:
-                return busy
+                return None
+            return busy if 0 <= busy <= 100 else None
 
+        if os.environ.get("PANEL_GPU_CARD", "").strip():
+            return None
+        return TFTDisplay._get_jetson_gpu()
+
+    @staticmethod
+    def _get_jetson_gpu() -> Optional[int]:
         # Jetson: the integrated GPU has no DRM `gpu_busy_percent`; its load
         # lives on a devfreq node in **per-mille** (0–1000). Unverified on
         # hardware — the DRM path above is what the rack panel exercises.
@@ -3097,6 +3147,27 @@ class TFTDisplay:
             if 0 <= permille <= 1000:
                 return round(permille / 10.0)
 
+        return None
+
+    @staticmethod
+    def _get_gpu_temp() -> Optional[int]:
+        cards = TFTDisplay._gpu_cards()
+        if not cards:
+            return None
+        # Temperature must describe the same GPU as the fallback load.
+        for card in cards:
+            dev = f"{_SYS_DRM}/{card}/device"
+            if (TFTDisplay._read_sysfs(f"{dev}/gpu_busy_percent") is None
+                    and TFTDisplay._read_sysfs(f"{dev}/vendor") != "0x10de"
+                    and TFTDisplay._read_sysfs(f"{dev}/mem_info_vram_total") is None):
+                continue
+            for path in sorted(glob.glob(f"{dev}/hwmon/hwmon*/temp1_input")):
+                try:
+                    value = int(TFTDisplay._read_sysfs(path)) / 1000.0
+                except (TypeError, ValueError):
+                    continue
+                return TFTDisplay._sensor_number(value, 10, 120)
+            return None
         return None
 
     @staticmethod
@@ -3723,7 +3794,32 @@ class TFTDisplay:
         except Exception:
             disk_pct = None
         temp = self._get_cpu_temp()
-        gpu = self._get_gpu()
+        # The host bridge selects the discrete accelerator instead of the
+        # idle display iGPU and supports NVIDIA as well as AMD telemetry.
+        gpu_snapshot = self._bridge_get("/gpu", timeout=3.0)
+        gpu = gpu_temp = None
+        if isinstance(gpu_snapshot, dict) and gpu_snapshot.get("available") is True:
+            gpu = self._sensor_number(gpu_snapshot.get("busy_percent"), 0, 100)
+            gpu_temp = self._sensor_number(gpu_snapshot.get("temp_c"), 10, 120)
+        elif isinstance(gpu_snapshot, dict) and gpu_snapshot.get("available") is False:
+            # The bridge's DRM/NVIDIA resolver cannot see Jetson devfreq.
+            # This specific fallback never substitutes an x86 display iGPU.
+            gpu = self._get_jetson_gpu()
+        elif gpu_snapshot is None:
+            gpu = self._get_gpu()
+            gpu_temp = self._get_gpu_temp()
+        if os.environ.get("PANEL_GPU_CARD", "").strip():
+            # Preserve the panel's existing explicit operator override.
+            gpu, gpu_temp = self._get_gpu(), self._get_gpu_temp()
+        watchdog = self._bridge_get("/watchdog", timeout=1.0)
+        if not isinstance(watchdog, dict):
+            watchdog = {"available": False, "overall": "unavailable",
+                        "generated_at": None}
+        else:
+            # The screen needs the summary only. Keep diagnostic messages in
+            # the bridge API rather than allocating them on the SAMD51 heap.
+            watchdog = {k: watchdog.get(k) for k in
+                        ("available", "overall", "generated_at")}
         try:
             up = time.time() - psutil.boot_time()
             days = int(up // 86400)
@@ -3740,6 +3836,8 @@ class TFTDisplay:
             # GPU utilisation %. None on a box with no discoverable GPU, which
             # the wide panel renders as an em dash.
             "gpu": gpu,
+            "gpu_temp": gpu_temp,
+            "watchdog": watchdog,
             "ip": self._get_ip(),
             "hostname": socket.gethostname(),
             "uptime": uptime,

@@ -513,7 +513,10 @@ describe.skipIf(!RUN)("PM bulk edit (WARP-3537)", () => {
       expect(new Set(rows.map((r) => `${r.priority}/${r.stateId}`)).size).toBe(1);
       // And the history is the committed history: no row for a change that rolled back.
       const per = new Map<string, number>();
-      for (const r of await feed(ids)) per.set(r.workItemId, (per.get(r.workItemId) ?? 0) + 1);
+      for (const r of await feed(ids)) {
+        if (r.workItemId === null) throw new Error("Bulk history must retain its work item ID");
+        per.set(r.workItemId, (per.get(r.workItemId) ?? 0) + 1);
+      }
       const winners = results.filter((r) => r.status === "fulfilled").length;
       for (const id of ids) expect(per.get(id)).toBe(2 * winners);
     });

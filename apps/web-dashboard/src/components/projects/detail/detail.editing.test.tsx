@@ -159,7 +159,8 @@ function renderDrawer(over: { item?: Partial<PmWorkItem>; readOnly?: boolean; ca
   return { onClose, onChanged };
 }
 
-const writes = (method?: string) => h.calls.filter((c) => c.method !== "GET" && (!method || c.method === method));
+// Presence heartbeats keep a drawer visible to colleagues; they do not edit its work item.
+const writes = (method?: string) => h.calls.filter((c) => c.method !== "GET" && !c.url.endsWith("/presence") && (!method || c.method === method));
 const lastWrite = () => writes().at(-1);
 /** Hold a write open so the optimistic state can be observed, then settle it. */
 function deferred(reply: Reply) {
@@ -377,6 +378,9 @@ describe("built-in properties write what the user chose", () => {
   });
 
   it("assignees: sends the COMPLETE set each time and only offers people with a local id", async () => {
+    const added = deferred({ work_item: { ...ITEM, assignees: ["u-ana", "u-bo"] } });
+    h.handler = (c) => c.method === "PATCH" && c.body?.assignees?.includes("u-ana") && c.body.assignees.includes("u-bo")
+      ? added.promise : defaults(c);
     renderDrawer({ item: { assignees: ["u-ana"] } });
     fireEvent.click(await screen.findByRole("button", { name: "Add assignee" }));
     expect(await screen.findByRole("button", { name: /Bo Chen/ })).toBeInTheDocument();
@@ -385,7 +389,12 @@ describe("built-in properties write what the user chose", () => {
     expect(screen.queryByText("No Local Row")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: /Bo Chen/ }));
     await waitFor(() => expect(lastWrite()?.body).toEqual({ assignees: ["u-ana", "u-bo"] }));
-    fireEvent.click(screen.getByRole("button", { name: "Remove Ana Lopez" }));
+    const removeAna = screen.getByRole("button", { name: "Remove Ana Lopez" });
+    expect(removeAna).toBeDisabled();
+    // Request submission precedes its response: the next edit waits until this control is ready.
+    added.settle();
+    await waitFor(() => expect(removeAna).toBeEnabled());
+    fireEvent.click(removeAna);
     await waitFor(() => expect(lastWrite()?.body).toEqual({ assignees: ["u-bo"] }));
   });
 

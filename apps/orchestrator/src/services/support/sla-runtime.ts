@@ -13,8 +13,9 @@ export function registerSupportSlaRuntime(prisma: PrismaClient, cronRuntime: Cro
   // Repair a clock after another canonical Support writer commits a change.
   // Own writes are already materialised inside their transaction; this is idempotent.
   registerOutboxConsumer({ name: "support-sla", intervalMs: 60_000, handle: async (row) => {
-    if (!["created", "state_changed", "updated", "commented"].includes(row.verb)) return;
+    if (row.workItemId === null || !["created", "state_changed", "updated", "commented"].includes(row.verb)) return;
+    const workItemId = row.workItemId;
     const event = row.verb === "created" ? "create" : row.verb === "updated" && row.field === "priority" ? "priority" : "tick";
-    await prisma.$transaction((tx) => syncTicketSla(tx, row.workItemId, deps.now?.() ?? new Date(), event, deps));
+    await prisma.$transaction((tx) => syncTicketSla(tx, workItemId, deps.now?.() ?? new Date(), event, deps));
   } }, { prisma, cronRuntime, now: deps.now });
 }

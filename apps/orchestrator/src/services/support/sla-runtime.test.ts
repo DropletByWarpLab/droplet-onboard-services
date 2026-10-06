@@ -33,4 +33,10 @@ describe("SLA lifecycle on the canonical runtime", () => {
     expect(mocks.sync.mock.calls).toEqual([[f.tx, "t1", now, "create", f.deps], [f.tx, "t1", now, "priority", f.deps]]);
     expect(f.prisma.$transaction).toHaveBeenCalledTimes(2);
   });
+  it.each(["deleted", "created"])("ignores detached %s activity without a current work item", async (verb) => {
+    const f = register();
+    await f.consumer.handle({ workItemId: null, verb });
+    expect(mocks.sync).not.toHaveBeenCalled();
+    expect(f.prisma.$transaction).not.toHaveBeenCalled();
+  });
 });

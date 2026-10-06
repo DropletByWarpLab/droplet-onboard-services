@@ -1,7 +1,7 @@
 /**
  * The vocabulary of work-event webhooks (WARP-3532, ADR-069 §9).
  *
- * One PmActivity row produces exactly ONE event, for two reasons that are the
+ * One ordinary PmActivity row produces exactly ONE event, for two reasons that are the
  * same reason: a delivery is keyed `(webhook, activity row)`, so a replayed
  * outbox row cannot deliver twice, and a receiver subscribed to everything never
  * hears one change twice. That makes the events a partition of the verbs, not an
@@ -12,15 +12,17 @@
  *   assigned                        work_item.assigned
  *   commented                       work_item.commented
  *   archived                        work_item.archived
- *   everything else                 work_item.updated  (with `changes`)
+ *   other ordinary verbs            work_item.updated  (with `changes`)
+ *   deleted                         no webhook event (private live tombstone)
  *
  * `unassigned` is deliberately in the last row, not under `assigned`: an event
  * named "assigned" that also means "someone was taken off" would be a lie the
  * receiver has to special-case. Subscribe to `work_item.updated` for it.
  *
- * `Record<PmActivityVerb, …>` makes the mapping exhaustive at compile time: a
+ * `Record<PmActivityVerb | "deleted", …>` makes the mapping exhaustive at compile time: a
  * verb added to the enum (WS-2's `comment_edited`, WS-3's `attachment_added`)
- * fails the build here until somebody decides which event it is.
+ * fails the build here until somebody decides which event it is. The explicit
+ * deleted member also composes with the live-update enum without owning its schema.
  */
 import type { PmActivityVerb } from "@prisma/client";
 
@@ -83,7 +85,7 @@ export const WORK_EVENT_CATALOG: ReadonlyArray<{
   { name: "work_item.archived", label: "Archived", description: "A work item is archived." },
 ];
 
-const VERB_EVENT: Record<PmActivityVerb, WorkItemEvent> = {
+const VERB_EVENT: Record<PmActivityVerb | "deleted", WorkItemEvent | null> = {
   created: "work_item.created",
   state_changed: "work_item.state_changed",
   assigned: "work_item.assigned",
@@ -109,6 +111,7 @@ const VERB_EVENT: Record<PmActivityVerb, WorkItemEvent> = {
   module_removed: "work_item.updated",
   relation_added: "work_item.updated",
   relation_removed: "work_item.updated",
+  deleted: null,
   // The PROJECT-only fan-out rejects ticket rows before this mapping. SLA
   // verbs remain reserved until a Support-scoped webhook configuration exists.
   sla_at_risk: "work_item.updated",
@@ -130,6 +133,6 @@ const VERB_EVENT: Record<PmActivityVerb, WorkItemEvent> = {
   time_log_removed: "work_item.updated",
 };
 
-export function eventForVerb(verb: PmActivityVerb): WorkItemEvent {
+export function eventForVerb(verb: PmActivityVerb | "deleted"): WorkItemEvent | null {
   return VERB_EVENT[verb];
 }

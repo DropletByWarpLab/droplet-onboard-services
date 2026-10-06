@@ -5821,7 +5821,8 @@ model PmProject {
   /// WARP-3529 — the channels a SERVICE_DESK takes requests through. Always
   /// empty for a PROJECT (a trigger holds that).
   supportChannels PmSupportChannel[]
-  /// WARP-3532 — webhooks scoped to this project (cascade with it).
+  /// WARP-3536 — detached deletion tombstones remain scoped to their project.
+  deletedWorkItemEvents PmActivity[] @relation("PmActivityDeletedProject")
   /// WARP-3535 — the code repositories whose pull requests, commits and branches
   /// are matched against this project's work-item keys. The mapping row goes
   /// with the project; the repository registration does not.
@@ -6670,6 +6671,8 @@ enum PmActivityVerb {
   /// mirroring what parent_removed does for orphaned sub-issues.
   relation_added
   relation_removed
+  /// WARP-3536 — a live-only tombstone for a deleted work item.
+  deleted
   /// WARP-3530 (ADR-069 §6): the SLA ticker moved a ticket's `slaStatus` into
   /// AT_RISK / BREACHED (`field` = the target that drove it — firstResponse,
   /// nextResponse or resolution — `oldValue`/`newValue` = the two statuses), or a
@@ -6750,8 +6753,13 @@ enum NotifyStatus {
 /// cannot express it — the CrmActivity_subject_exactly_one precedent).
 model PmActivity {
   id           String         @id @default(uuid())
-  workItemId   String
-  workItem     PmWorkItem     @relation(fields: [workItemId], references: [id], onDelete: Cascade)
+  workItemId   String?
+  workItem     PmWorkItem?    @relation(fields: [workItemId], references: [id], onDelete: Cascade)
+  /// WARP-3536 — populated only for detached deleted-item tombstones.
+  deletedProjectId    String?
+  deletedProject      PmProject?     @relation("PmActivityDeletedProject", fields: [deletedProjectId], references: [id], onDelete: Cascade)
+  deletedWorkItemId   String?
+  deletedGuestUserIds String[]       @default([])
   actorId      String?
   verb         PmActivityVerb
   field        String?

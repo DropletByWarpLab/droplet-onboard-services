@@ -48,6 +48,7 @@ def sysfs(tmp_path, monkeypatch):
     monkeypatch.setattr(display_module, "_SYS_GPU_LOAD_GLOBS",
                         (str(tmp_path / "nonexistent" / "*" / "load"),))
     monkeypatch.delenv("PANEL_GPU_CARD", raising=False)
+    monkeypatch.setattr(TFTDisplay, "_bridge_get", lambda self, path, timeout=6: None)
     return tmp_path
 
 
@@ -293,5 +294,5 @@ def test_wide_panel_renders_the_values_it_is_given(sysfs, sim_display,
 
     sim_display.update_stats(sim_display._gather_stats())
     lw._cell_health(sim_display, ImageDraw.Draw(img), sim_display._v3)
-    assert "62°" in drawn
+    assert "62°C" in drawn
     assert "44%" in drawn

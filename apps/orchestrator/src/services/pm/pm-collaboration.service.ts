@@ -497,7 +497,9 @@ function relationTargetId(value: string | null): string | null {
  *
  * `commented` and `mentioned` activity rows are left out: the comment entry is
  * that event, and the mention is a chip inside it (see
- * PM_TIMELINE_MIRRORED_VERBS). Every other verb is shown, tombstones included.
+ * PM_TIMELINE_MIRRORED_VERBS). Every other attached activity verb and deleted
+ * comment placeholder is shown. Detached work-item deletion tombstones belong
+ * only to live delivery and are excluded by the workItemId filter.
  *
  * Paging is forward and offset-based behind an opaque cursor: the first page
  * holds the OLDEST entries and `nextCursor` (null at the end) fetches the ones
@@ -592,7 +594,7 @@ export async function getTimeline(
   ]);
   const visibleWorkItemIds = new Set(items.map((i) => i.id));
   const mapTimelineActivity = (row: ActivityRow): ApiActivity => {
-    const activity = mapActivity(row);
+    const activity = mapActivity(row, workItemId);
     // The refs map is intentionally PROJECT-only. Redact the corresponding
     // raw ids as well: returning an unresolved `RELATES:<ticket-id>` would
     // still let a project reader discover a SERVICE_DESK ticket by id.

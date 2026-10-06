@@ -51,10 +51,12 @@ def tall(monkeypatch, sim_display):
 def _fill(disp):
     disp._v3.update({
         "cpu": 34, "mem": 61, "disk": 44, "temp": 52, "gpu": 12,
+        "gpu_temp": 58,
         "ip": "192.168.1.200", "hostname": "droplet-sys",
         "public_host": "warp-lab.droplet-us.com",
         "uptime": "6d 4h", "version": "v2.6.1",
         "sparks_cpu": [20 + (i % 17) for i in range(48)],
+        "sparks_gpu": [10 + (i % 9) for i in range(48)],
         "sparks_mem": [55 + (i % 13) for i in range(48)],
         "sparks_disk": [40 + i // 6 for i in range(48)],
         "wan_online": True, "wan_latency_ms": 14, "tls_days": 61,
@@ -340,10 +342,52 @@ def test_a_seeded_zero_client_count_is_not_a_reading(tall, monkeypatch):
 def test_trends_refuse_to_draw_a_line_they_cannot_measure(tall, monkeypatch):
     disp = _fill(tall)
     disp._v3["sparks_mem"] = []
-    disp._v3["sparks_disk"] = [61.0]
+    disp._v3["sparks_cpu"] = [34.0]
     drawn = _spy_text(monkeypatch)
     lw.render_status(disp)
     assert [t for _, t in drawn].count("no history yet") == 2
+
+
+def test_tall_panel_trends_show_cpu_and_ram(tall, monkeypatch):
+    disp = _fill(tall)
+    series = []
+    labels = []
+    real_spark, real_eyebrow = lw._spark, lw._eyebrow
+
+    def spark(draw, x, y, w, h, buf, ink, fill):
+        series.append(buf)
+        return real_spark(draw, x, y, w, h, buf, ink, fill)
+
+    def eyebrow(draw, text, x, y=None, fill=None):
+        labels.append(text)
+        return real_eyebrow(draw, text, x, y, fill)
+
+    monkeypatch.setattr(lw, "_spark", spark)
+    monkeypatch.setattr(lw, "_eyebrow", eyebrow)
+    lw.render_status(disp)
+    assert series[-2:] == [disp._v3["sparks_cpu"], disp._v3["sparks_mem"]]
+    trends = labels.index("TRENDS")
+    assert labels[trends:trends + 3] == ["TRENDS", "CPU", "RAM"]
+
+
+@pytest.mark.parametrize("width,height", [(REF_W, REF_H), (TALL_W, TALL_H)])
+def test_watchdog_and_full_scale_gpu_stay_inside_the_health_cell(monkeypatch, sim_display,
+                                                                 width, height):
+    _panel(monkeypatch, width, height)
+    disp = _fill(sim_display)
+    disp._v3.update(gpu=100, gpu_temp=99, temp=99,
+                    watchdog={"available": True, "overall": "heal_failed"})
+    drawn = _spy_text(monkeypatch)
+    image = lw.render_status(disp)
+    g = lw.geom()
+    x, w = g.cells["health"]
+    hero = [box for box, text in drawn if text == "HEAL FAILED"]
+    assert hero
+    for (x0, y0, x1, y1), text in drawn:
+        if x <= x0 < x + w and g.band_b_top <= y0 < g.row_bot:
+            assert x1 <= x + w, f"{text!r} escapes the health cell"
+            assert y1 < g.band_c_rule, f"{text!r} crosses the foot rule"
+    assert image.size == (width, height)
 
 
 # --- the rail --------------------------------------------------------------

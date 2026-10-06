@@ -4,6 +4,7 @@ import { SWRConfig } from "swr";
 import type { ReactNode } from "react";
 import type { PmWorkItem } from "../types";
 import type { PmMyWorkPage } from "./types";
+import { publishPmLiveFrame } from "@/lib/pm-live-events";
 
 const pmGet = vi.fn();
 vi.mock("../calendar/pmGet", () => ({ pmGet: (url: string) => pmGet(url) }));
@@ -133,6 +134,41 @@ describe("useMyWork", () => {
     await waitFor(() => expect(result.current.items).toHaveLength(3));
     expect(result.current.counts?.assigned).toBe(3);
     expect(pmGet).toHaveBeenCalledTimes(2);
+  });
+
+  it("revalidates the active personal section once after a live-event burst, through the session-scoped endpoint", async () => {
+    pmGet.mockResolvedValueOnce(page({ items: [item(1, "p1")], projects: [P1], total: 1, counts: COUNTS }));
+    pmGet.mockResolvedValue(page({ items: [item(2, "p2")], projects: [P2], total: 1, counts: COUNTS }));
+    const { result } = renderHook(() => useMyWork("overdue", "2026-10-03"), { wrapper });
+    await waitFor(() => expect(result.current.items.map((i) => i.id)).toEqual(["w1"]));
+    expect(pmGet).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      publishPmLiveFrame("droplet/pm/alice", {
+        type: "pm.changed", projectId: "p2", workItemId: "w2", verb: "assigned",
+      });
+      publishPmLiveFrame("droplet/pm/alice", {
+        type: "pm.changed", projectId: "p2", workItemId: "w3", verb: "state_changed",
+      });
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    });
+
+    await waitFor(() => expect(result.current.items.map((i) => i.id)).toEqual(["w2"]));
+    expect(pmGet).toHaveBeenCalledTimes(2);
+    expect(pmGet).toHaveBeenLastCalledWith("/api/pm/my-work?section=overdue&today=2026-10-03&limit=100&offset=0");
+    expect(pmGet.mock.calls.every(([url]) => !String(url).includes("user"))).toBe(true);
+  });
+
+  it("clears a pending live refresh when the section unmounts", async () => {
+    pmGet.mockResolvedValue(page({ items: [item(1, "p1")], projects: [P1], total: 1, counts: COUNTS }));
+    const { unmount } = renderHook(() => useMyWork("assigned", "2026-10-03"), { wrapper });
+    await waitFor(() => expect(pmGet).toHaveBeenCalledTimes(1));
+    publishPmLiveFrame("droplet/pm/alice", {
+      type: "pm.changed", projectId: "p1", workItemId: "w1", verb: "updated",
+    });
+    unmount();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(pmGet).toHaveBeenCalledTimes(1);
   });
 
   it("a section that is opened again shows what it had, then refreshes it", async () => {

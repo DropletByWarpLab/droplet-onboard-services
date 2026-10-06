@@ -349,6 +349,7 @@ ROUTE_CLASSES = {
     ("GET", "/host/nvr-storage"): "read",
     ("GET", "/host/nvr-storage/migrate"): "read",
     ("GET", "/gpu"): "read",
+    ("GET", "/watchdog"): "read",
     ("GET", "/logs/bundle"): "read",
     ("POST", "/drives/changed"): "write",
     ("POST", "/panel/console"): "write",
@@ -5329,6 +5330,68 @@ def gpu_snapshot():
 
 
 # ---------------------------------------------------------------------------
+# Watchdog status — read-only view of the host supervisor's last pass.
+# ---------------------------------------------------------------------------
+_WATCHDOG_STATUSES = frozenset({
+    "ok", "healed", "heal_failed", "escalated", "not_applicable",
+})
+_WATCHDOG_STALE_SECONDS = 10 * 60
+_WATCHDOG_FUTURE_SECONDS = 60
+
+
+def watchdog_snapshot():
+    """Read the explicit watchdog verdict without inventing a healthy result.
+
+    The supervisor runs roughly every three minutes. A valid pass older than
+    ten minutes remains inspectable but is marked stale; an absent or invalid
+    file is unavailable. This endpoint never starts or heals the supervisor.
+    """
+    unavailable = {"available": False, "overall": "unavailable",
+                   "generated_at": None, "checks": {}}
+    state_dir = os.environ.get(
+        "DROPLET_WATCHDOG_STATE_DIR", "/var/lib/droplet/watchdog")
+    try:
+        with open(os.path.join(state_dir, "status.json"), encoding="utf-8") as fh:
+            body = json.load(fh)
+        if (not isinstance(body, dict) or type(body.get("schema")) is not int
+                or body["schema"] != 1):
+            return unavailable
+        overall = body.get("overall")
+        if overall not in _WATCHDOG_STATUSES - {"not_applicable"}:
+            return unavailable
+        generated_at = body.get("generated_at")
+        if not isinstance(generated_at, str):
+            return unavailable
+        generated = datetime.datetime.fromisoformat(
+            generated_at.replace("Z", "+00:00"))
+        if generated.tzinfo is None:
+            return unavailable
+        age = time.time() - generated.timestamp()
+        if age < -_WATCHDOG_FUTURE_SECONDS:
+            return unavailable
+        raw_checks = body.get("checks")
+        if not isinstance(raw_checks, dict) or not raw_checks:
+            return unavailable
+        checks = {}
+        for name, check in raw_checks.items():
+            if not isinstance(check, dict) or check.get("status") not in _WATCHDOG_STATUSES:
+                return unavailable
+            message = check.get("message")
+            failures = check.get("consecutive_heal_failures")
+            if (not isinstance(message, str) or type(failures) is not int
+                    or failures < 0):
+                return unavailable
+            checks[name] = {"status": check["status"], "message": message,
+                            "consecutive_heal_failures": failures}
+        return {"available": True,
+                "overall": "stale" if age > _WATCHDOG_STALE_SECONDS else overall,
+                "reported_overall": overall,
+                "generated_at": generated_at, "checks": checks}
+    except (OSError, ValueError, TypeError, OverflowError):
+        return unavailable
+
+
+# ---------------------------------------------------------------------------
 # HTTP
 # ---------------------------------------------------------------------------
 
@@ -5481,6 +5544,12 @@ class Handler(BaseHTTPRequestHandler):
                 if not self._authed():
                     return self._send(401, {"error": "unauthorized"})
                 return self._send(200, gpu_snapshot())
+            if path == "/watchdog":
+                # Check messages can name internal service failures; use the
+                # same read-token gate as the other host telemetry routes.
+                if not self._authed():
+                    return self._send(401, {"error": "unauthorized"})
+                return self._send(200, watchdog_snapshot())
             if path == "/logs/bundle":
                 # WARP-823: diagnostics log bundle. Auth-gated like /openwrt/qr
                 # and /drives — the logs can carry box-internal (and, pre-host-

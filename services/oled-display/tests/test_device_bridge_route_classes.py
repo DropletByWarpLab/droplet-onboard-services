@@ -83,6 +83,7 @@ def test_destructive_routes_refuse_the_panel_token(monkeypatch, route):
 
 @pytest.mark.parametrize("route", [
     ("GET", "/wifi"), ("GET", "/openwrt/qr"), ("GET", "/drives"), ("GET", "/pools"),
+    ("GET", "/watchdog"),
     ("POST", "/panel/console"), ("POST", "/openwrt/wifi/rotate"),
     ("POST", "/wifi/connect"), ("POST", "/drives/changed"),
 ])

@@ -24,6 +24,14 @@ export function recordMqttState(next: MqttConnectionState, error?: string): void
   else if (error) lastError = error;
 }
 
+/**
+ * True while the broker connection is up. Live updates use this to skip a
+ * publish attempt per audience member while MQTT is unavailable.
+ */
+export function mqttConnected(): boolean {
+  return state === "connected";
+}
+
 /** Health probe: resolves true when connected, else throws with the reason. */
 export async function mqttHealth(): Promise<boolean> {
   if (state === "connected") return true;

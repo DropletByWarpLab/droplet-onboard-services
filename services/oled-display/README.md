@@ -67,6 +67,32 @@ Full protocol and debugging notes: [`pyportal/README.md`](./pyportal/README.md).
 | GET  | `/wifi/scan`           | Latest scan snapshot from the device-bridge helper |
 | POST | `/wifi/connect`        | `{ssid, password}` — join a network via the helper |
 
+## System status and watchdog
+
+The live System screen prioritizes **GPU LOAD** and its recent history on
+both the 480×320 PyPortal and wide rack panels. The secondary readings show
+CPU usage, RAM usage, GPU temperature, and CPU temperature. Temperatures
+turn orange at 70°C and red at 85°C. Missing readings show `--` (or `—` on
+the wide panel); losing a sensor clears its reading and history.
+
+GPU data comes from the host device bridge's authenticated `GET /gpu`, which
+selects the discrete NVIDIA/AMD accelerator. If the bridge cannot be reached,
+local sysfs provides a best-effort fallback, preferring NVIDIA and then the
+largest AMD VRAM allocation. `PANEL_GPU_CARD` retains an explicit local-card
+override. CPU temperature comes from CPU thermal zones or CPU hwmon drivers.
+
+The authenticated bridge `GET /watchdog` reads the supervisor's
+`/var/lib/droplet/watchdog/status.json` (`DROPLET_WATCHDOG_STATE_DIR` overrides
+the directory). The screen displays its verdict; a report older than ten
+minutes is **STALE**, and an absent or invalid report is **NO DATA**. Only
+the watchdog summary is sent over serial. Resource readings do not trigger
+automatic restarts; the existing supervisor continues to own recovery.
+
+Deploy the updated display container and refresh the host device bridge via
+`scripts/install-device-bridge.sh`. PyPortal devices also need the updated
+`pyportal/code.py` copied to CIRCUITPY; wide framebuffer panels use the
+container renderer directly.
+
 ## Auto-cycle
 
 Disabled by default on the touch build (a touch display is for interaction,

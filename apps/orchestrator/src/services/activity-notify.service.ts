@@ -464,6 +464,10 @@ const SWEEP_INCLUDE = {
 } satisfies Prisma.PmActivityInclude;
 
 type SweepRow = Prisma.PmActivityGetPayload<{ include: typeof SWEEP_INCLUDE }>;
+type SweepWorkItemRow = SweepRow & {
+  workItemId: string;
+  workItem: NonNullable<SweepRow["workItem"]>;
+};
 type SweepCounts = { notified: number; skipped: number; logs: number };
 
 async function sweepPm(
@@ -482,33 +486,47 @@ async function sweepPm(
     take: BATCH,
     include: SWEEP_INCLUDE,
   });
+  // Deletion tombstones deliberately have no related work item. The live
+  // event path delivers those after commit; this assignment sweep cannot
+  // derive a project or ticket audience from them, so give them the explicit
+  // terminal instead of leaving them pending forever.
+  const tombstoneIds = rows.filter((row) => row.workItem === null).map((row) => row.id);
+  const tombstonesSkipped = await markNotNeeded(prisma, "pmActivity", tombstoneIds);
+  const workItemRows = rows.filter(
+    (row): row is SweepWorkItemRow => row.workItemId !== null && row.workItem !== null,
+  );
   // WARP-3528 — one read, two audiences: a ticket is told by `sweepTickets`
   // under its own rules, a project item by the rules below, unchanged.
-  const isTicket = (r: SweepRow): boolean => isServiceDesk(r.workItem.project);
+  const isTicket = (r: SweepWorkItemRow): boolean => isServiceDesk(r.workItem.project);
   const items = await sweepProjectItems(
     prisma,
-    rows.filter((r) => !isTicket(r)),
+    workItemRows.filter((r) => !isTicket(r)),
     now,
     resolveWatchers,
   );
-  const tickets = await sweepTickets(prisma, rows.filter(isTicket), now, resolveAccess);
+  const tickets = await sweepTickets(prisma, workItemRows.filter(isTicket), now, resolveAccess);
   return {
     notified: items.notified + tickets.notified,
-    skipped: items.skipped + tickets.skipped,
+    skipped: tombstonesSkipped + items.skipped + tickets.skipped,
     logs: items.logs + tickets.logs,
   };
 }
 
 async function sweepProjectItems(
   prisma: PrismaClient,
-  rows: SweepRow[],
+  rows: SweepWorkItemRow[],
   now: Date,
   resolveWatchers: DepartmentWatchersResolver,
 ): Promise<SweepCounts> {
   if (rows.length === 0) return { notified: 0, skipped: 0, logs: 0 };
 
-  const candidates = rows.filter((r) => NOTIFIABLE_PM_VERBS.has(r.verb));
-  const skipIds = rows.filter((r) => !NOTIFIABLE_PM_VERBS.has(r.verb)).map((r) => r.id);
+  const candidates = rows.filter(
+    (r): r is (typeof r & { workItemId: string; workItem: NonNullable<typeof r.workItem> }) =>
+      r.workItemId !== null && r.workItem !== null && NOTIFIABLE_PM_VERBS.has(r.verb),
+  );
+  const skipIds = rows
+    .filter((r) => r.workItemId === null || r.workItem === null || !NOTIFIABLE_PM_VERBS.has(r.verb))
+    .map((r) => r.id);
   if (candidates.length === 0) {
     return { notified: 0, skipped: await markNotNeeded(prisma, "pmActivity", skipIds), logs: 0 };
   }
@@ -768,7 +786,7 @@ async function sweepProjectItems(
  */
 async function sweepTickets(
   prisma: PrismaClient,
-  rows: SweepRow[],
+  rows: SweepWorkItemRow[],
   now: Date,
   resolveAccess: typeof resolveEffectiveAccess,
 ): Promise<SweepCounts> {
@@ -776,7 +794,7 @@ async function sweepTickets(
 
   const skipIds: string[] = [];
   // assignee User.id -> the assignment rows that name them.
-  const perUser = new Map<string, SweepRow[]>();
+  const perUser = new Map<string, SweepWorkItemRow[]>();
   const slaRows = rows.filter((r) => r.verb === "sla_at_risk" || r.verb === "sla_breached");
   const slaRecipients = new Map<string, Set<string>>();
   if (slaRows.length) {

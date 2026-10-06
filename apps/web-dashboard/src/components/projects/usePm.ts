@@ -3,6 +3,7 @@
 
 import useSWR from "swr";
 import useSWRInfinite from "swr/infinite";
+import { usePmLivePagedRead } from "./usePmLive";
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import {
   serializePmFilter,
@@ -268,6 +269,9 @@ export function useWorkItemQuery({ enabled, projectId, filter, counts, sort, gro
     const fresh = await mutate();
     return fresh?.flatMap((p) => p.work_items);
   }, [mutate]);
+  // Query pages use tuple keys; refresh their mounted Infinite aggregate through
+  // its own mutate when this project (or any project in a workspace view) changes.
+  usePmLivePagedRead(enabled ? (projectId ? `/api/pm/projects/${projectId}/work-items` : "/api/pm/work-items?query") : null, refresh);
 
   const first = data?.[0];
   return {
@@ -299,6 +303,10 @@ export function useWorkItemByKey(key: string | null, enabled: boolean) {
     // A key that answers 404 will not answer differently in five seconds.
     { shouldRetryOnError: false },
   );
+  const refresh = useCallback(() => mutate(), [mutate]);
+  // Frames carry the row id, while the URL carries its human-readable key.
+  // Register the resolved id so an unrelated item's change leaves this read alone.
+  usePmLivePagedRead(key && enabled && data?.work_item ? `/api/pm/work-items/${data.work_item.id}` : null, refresh);
   return { item: data?.work_item, error, mutate };
 }
 
@@ -445,6 +453,7 @@ function usePages<T extends { id: string }>(url: string | null, field: string) {
     const fresh = await mutate();
     return fresh ? flatten(fresh) : undefined;
   }, [mutate, flatten]);
+  usePmLivePagedRead(url, refresh);
 
   return {
     rows,
