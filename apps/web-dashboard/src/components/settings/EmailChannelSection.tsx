@@ -11,6 +11,7 @@ import {
   type EmailChannelUpdate,
 } from "@/lib/api";
 import { formatRelativeTime } from "@/lib/relative-time";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 /**
  * BUG-11 — "Outbound email" settings section.
@@ -289,7 +290,7 @@ export function EmailChannelSection() {
             />
           </Field>
           <Field label="Security" htmlFor="smtp-security">
-            <select
+            <ThemedSelect
               id="smtp-security"
               value={security}
               onChange={(e) => setSecurity(e.target.value as EmailChannelUpdate["security"])}
@@ -306,7 +307,7 @@ export function EmailChannelSection() {
                   {o.label}
                 </option>
               ))}
-            </select>
+            </ThemedSelect>
           </Field>
         </div>
 

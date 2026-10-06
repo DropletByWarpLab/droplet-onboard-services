@@ -110,8 +110,15 @@
 .droplet-home .w-chat-model-control:hover {
   color: var(--text);
 }
+.droplet-home .w-chat-model-control:focus-within {
+  box-shadow: 0 0 0 2px var(--brand);
+}
+.droplet-home .w-chat-model select.themed-select:focus-visible {
+  outline: none;
+}
 .droplet-home .w-chat-model select {
   min-width: 0;
+  width: auto;
   max-width: 180px;
   background: transparent;
   border: 0;
@@ -119,6 +126,9 @@
   font: inherit;
   cursor: pointer;
   text-overflow: ellipsis;
+  min-height: 0;
+  padding-block: 0;
+  height: 100%;
 }
 .droplet-home .w-chat-send {
   margin-left: auto;

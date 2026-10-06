@@ -5,6 +5,7 @@ import useSWR from "swr";
 import { fetchSpeakingVoice, sayVoiceTest, setSpeakingVoice } from "@/lib/api";
 import type { SpeakingVoiceInfo } from "@/lib/types";
 import "./voice.css";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 export function SpeakingVoiceSection({ previewAllowed }: { previewAllowed: boolean }) {
   const { data, error, isLoading, mutate } = useSWR<SpeakingVoiceInfo>(
@@ -53,11 +54,11 @@ export function SpeakingVoiceSection({ previewAllowed }: { previewAllowed: boole
         {!unavailable && data?.available && !data.selectable && <p>This Droplet uses its configured speaking voice.</p>}
         {canChoose && <div className="speaking-voice-controls">
           <label htmlFor="speaking-voice-choice">Speaking voice</label>
-          <select id="speaking-voice-choice" className="input" value={candidate}
+          <ThemedSelect id="speaking-voice-choice" className="input" value={candidate}
             disabled={busy !== null} onChange={(e) => { setCandidate(e.target.value); setMessage(""); }}>
             {!candidate && <option value="">Choose a voice</option>}
             {data.voices.map((voice) => <option key={voice.id} value={voice.id}>{voice.label}</option>)}
-          </select>
+          </ThemedSelect>
           <button type="button" className="btn" disabled={!candidate || !previewAllowed || busy !== null}
             title={!previewAllowed ? "Voice must be on and ready to play a preview." : undefined} onClick={() => { void preview(); }}>
             {busy === "preview" ? "Playing preview…" : "Preview voice"}

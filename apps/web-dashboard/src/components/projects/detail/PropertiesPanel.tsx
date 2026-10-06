@@ -25,6 +25,7 @@ import { PeoplePicker, toPersonOptions } from "./pickers/PeoplePicker";
 import type { ItemSave } from "./useItemSave";
 import "../editing.css";
 import "./editors.css";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 const MUTED = { fontSize: 12.5, color: "var(--text-4)" } as const;
 
@@ -67,7 +68,7 @@ export function PropertiesPanel({
         {readOnly || !view.state ? (
           view.state ? <StatePill state={view.state} /> : <span style={MUTED}>No state</span>
         ) : (
-          <select
+          <ThemedSelect
             className="pm-input sm"
             style={{ width: "auto" }}
             aria-label="State"
@@ -87,7 +88,7 @@ export function PropertiesPanel({
                 {s.name}
               </option>
             ))}
-          </select>
+          </ThemedSelect>
         )}
       </PropRow>
 
@@ -95,7 +96,7 @@ export function PropertiesPanel({
         {readOnly ? (
           <PriorityFlag p={view.priority} withLabel />
         ) : (
-          <select
+          <ThemedSelect
             className="pm-input sm"
             style={{ width: "auto" }}
             aria-label="Priority"
@@ -111,7 +112,7 @@ export function PropertiesPanel({
                 {PRIORITY[p].label}
               </option>
             ))}
-          </select>
+          </ThemedSelect>
         )}
       </PropRow>
 
@@ -160,7 +161,7 @@ export function PropertiesPanel({
         {readOnly ? (
           <span style={{ fontSize: 13 }}>{WORK_ITEM_TYPES[view.type ?? "task"].label}</span>
         ) : (
-          <select
+          <ThemedSelect
             className="pm-input sm"
             style={{ width: "auto" }}
             aria-label="Type"
@@ -176,7 +177,7 @@ export function PropertiesPanel({
                 {WORK_ITEM_TYPES[t].label}
               </option>
             ))}
-          </select>
+          </ThemedSelect>
         )}
       </PropRow>
 
@@ -211,7 +212,7 @@ export function PropertiesPanel({
             <span style={MUTED}>No department</span>
           )
         ) : (
-          <select
+          <ThemedSelect
             className="pm-input sm"
             style={{ width: "auto", maxWidth: "100%" }}
             aria-label="Department"
@@ -239,7 +240,7 @@ export function PropertiesPanel({
                 {d.kind === "TEAM" ? `${d.name} (team)` : d.name}
               </option>
             ))}
-          </select>
+          </ThemedSelect>
         )}
       </PropRow>
 

@@ -4,7 +4,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
   Check,
-  ChevronDown,
   Copy,
   KeyRound,
   Plus,
@@ -21,6 +20,7 @@ import { StepShell } from "@/components/setup/StepShell";
 import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
 import { ScrollRegion } from "@/components/setup/ScrollRegion";
 import { Dialog } from "@/components/Dialog";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 /** Invite people or create local accounts. Both paths persist immediately; SSO provider discovery reports sign-in availability, not directory sync. */
 
@@ -395,7 +395,7 @@ export function TeamStep({
             Role
           </span>
           <div className="relative">
-            <select
+            <ThemedSelect
               id="team-role"
               value={role}
               onChange={(e) => setRole(e.target.value as TeamInviteRole)}
@@ -406,11 +406,7 @@ export function TeamStep({
                   {o.label}
                 </option>
               ))}
-            </select>
-            <ChevronDown
-              size={15}
-              className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-label-tertiary"
-            />
+            </ThemedSelect>
           </div>
         </label>
         <button
@@ -620,7 +616,7 @@ export function TeamStep({
                     Role
                   </span>
                   <div className="relative">
-                    <select
+                    <ThemedSelect
                       id="acct-role"
                       value={acctRole}
                       onChange={(e) => setAcctRole(e.target.value as TeamInviteRole)}
@@ -631,11 +627,7 @@ export function TeamStep({
                           {o.label}
                         </option>
                       ))}
-                    </select>
-                    <ChevronDown
-                      size={15}
-                      className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-label-tertiary"
-                    />
+                    </ThemedSelect>
                   </div>
                 </label>
 

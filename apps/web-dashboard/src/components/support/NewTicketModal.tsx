@@ -12,6 +12,7 @@ import { RequesterPicker } from "./RequesterPicker";
 import { PRIORITY_CHOICES, textToHtml } from "./support-config";
 import { supportActions } from "./useSupport";
 import type { ContactCandidate, Desk, SupportPerson, Ticket, TicketPriority } from "./types";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 export function NewTicketModal({
   desks,
@@ -83,11 +84,11 @@ export function NewTicketModal({
         <ErrorStrip message={error} />
         {desks.length > 1 && (
           <Field label="Desk" htmlFor="nt-desk">
-            <select id="nt-desk" className="pm-input" value={deskId} onChange={(e) => { setDeskId(e.target.value); setTypeId(""); }}>
+            <ThemedSelect id="nt-desk" className="pm-input" value={deskId} onChange={(e) => { setDeskId(e.target.value); setTypeId(""); }}>
               {desks.map((d) => (
                 <option key={d.id} value={d.id}>{d.name}</option>
               ))}
-            </select>
+            </ThemedSelect>
           </Field>
         )}
         <Field label="Who is it for?">
@@ -121,41 +122,41 @@ export function NewTicketModal({
         <div className="pm-row" style={{ gap: 12, alignItems: "flex-start", flexWrap: "wrap" }}>
           <div style={{ flex: "1 1 140px" }}>
             <Field label="How did it arrive?" htmlFor="nt-channel">
-              <select id="nt-channel" className="pm-input" value={channel} onChange={(e) => setChannel(e.target.value as "INTERNAL" | "PHONE")}>
+              <ThemedSelect id="nt-channel" className="pm-input" value={channel} onChange={(e) => setChannel(e.target.value as "INTERNAL" | "PHONE")}>
                 <option value="INTERNAL">Added by the team</option>
                 <option value="PHONE">Phone call</option>
-              </select>
+              </ThemedSelect>
             </Field>
           </div>
           <div style={{ flex: "1 1 140px" }}>
             <Field label="Priority" htmlFor="nt-priority">
-              <select id="nt-priority" className="pm-input" value={priority} onChange={(e) => setPriority(e.target.value as TicketPriority)}>
+              <ThemedSelect id="nt-priority" className="pm-input" value={priority} onChange={(e) => setPriority(e.target.value as TicketPriority)}>
                 {PRIORITY_CHOICES.map((p) => (
                   <option key={p.value} value={p.value}>{p.label}</option>
                 ))}
-              </select>
+              </ThemedSelect>
             </Field>
           </div>
         </div>
         <div className="pm-row" style={{ gap: 12, alignItems: "flex-start", flexWrap: "wrap" }}>
           <div style={{ flex: "1 1 140px" }}>
             <Field label="Assignee" htmlFor="nt-assignee">
-              <select id="nt-assignee" className="pm-input" value={assignee} onChange={(e) => setAssignee(e.target.value)}>
+              <ThemedSelect id="nt-assignee" className="pm-input" value={assignee} onChange={(e) => setAssignee(e.target.value)}>
                 <option value="">Unassigned</option>
                 {agents.map((a) => (
                   <option key={a.id} value={a.id}>{a.displayName}</option>
                 ))}
-              </select>
+              </ThemedSelect>
             </Field>
           </div>
           <div style={{ flex: "1 1 140px" }}>
             <Field label="Type" htmlFor="nt-type">
-              <select id="nt-type" className="pm-input" value={typeId} onChange={(e) => setTypeId(e.target.value)}>
+              <ThemedSelect id="nt-type" className="pm-input" value={typeId} onChange={(e) => setTypeId(e.target.value)}>
                 <option value="">No type</option>
                 {types.map((l) => (
                   <option key={l.id} value={l.id}>{l.name}</option>
                 ))}
-              </select>
+              </ThemedSelect>
             </Field>
           </div>
         </div>

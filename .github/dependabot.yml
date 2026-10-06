@@ -347,6 +347,15 @@ updates:
         versions: [">=2.0"]
       - dependency-name: "huggingface_hub"
         versions: [">=2.0"]
+      # #2714 (2026-10-06, WARP-3324): av 19 removed the metadata_errors kwarg
+      # of av.open(), and faster-whisper 1.2.1 (the newest release, pinned)
+      # still passes it -- tests/test_audio.py fails with TypeError at
+      # faster_whisper/audio.py:46. The v<19 cap in requirements.txt is
+      # deliberate; this is the same floor-widening-crosses-a-major case as
+      # rule 3 above, so match the target version. Lift together with the cap
+      # when a faster-whisper release supports av 19.
+      - dependency-name: "av"
+        versions: [">=19.0"]
     labels: ["dependencies"]
 
   # The two RAGAS directories alone. They are the ONLY two requirements files in
@@ -489,6 +498,19 @@ updates:
         update-types: ["version-update:semver-major"]
       - dependency-name: "python"
         update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      # #2715 (2026-10-06): openwrt/rootfs x86_64-24.10.2 -> x86_64-v25.12.5 is
+      # an OpenWrt MAJOR. 25.x replaces opkg with apk, and
+      # openwrt/singlebox-image/Dockerfile bakes its package list with
+      # opkg update && opkg install; the attach scripts and their tests
+      # (tests/openwrt-attach-*.test.sh) also speak opkg. That is a migration
+      # on its own ticket, not a refresh. Digest/patch refreshes inside 24.10
+      # still flow. The tag is not plain semver (x86_64-v25.12.5), so both
+      # the major-type and a target-version match are listed; lift both when
+      # the opkg->apk migration lands.
+      - dependency-name: "openwrt/rootfs"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "openwrt/rootfs"
+        versions: [">=25"]
     labels: ["dependencies"]
 
   - package-ecosystem: github-actions

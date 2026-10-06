@@ -38,6 +38,7 @@ import { spaceRenderName } from "@/lib/space-attribution";
 // entries are HOME-relative; every path that travels next to a `space` has to
 // be relative to THAT space's root.
 import { toSpaceRelativePath } from "@/components/FileManager/search-target";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 export interface PickedFile {
   ncFileId: number;
@@ -164,7 +165,7 @@ export function ForwardFileDialog({
             className="mx-field flex-1"
           />
           {!searching && spaces.length > 1 && (
-            <select
+            <ThemedSelect
               value={space}
               onChange={(e) => {
                 setSpace(e.target.value);
@@ -178,7 +179,7 @@ export function ForwardFileDialog({
                   {spaceRenderName(s)}
                 </option>
               ))}
-            </select>
+            </ThemedSelect>
           )}
         </div>
 

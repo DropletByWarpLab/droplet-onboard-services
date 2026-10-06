@@ -1,4 +1,6 @@
 "use client";
+import { ThemedDateInput } from "@/components/ui/ThemedDateInput";
+
 
 // WARP-3522 — the filter bar (brief §3.9): a search box, a "Filter" menu that
 // reaches every field of the filter language, and the active filters as chips.
@@ -42,6 +44,7 @@ import {
   type MultiMode,
 } from "./filter-model";
 import type { PmLabel, PmProject, PmState, StateGroup } from "./types";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 // ── popover ─────────────────────────────────────────────────────────────────
 
@@ -180,10 +183,10 @@ function MultiEditor({
         if (picked.length > 0) onApply(multiChip(field, mode, picked));
       }}
     >
-      <select className="pm-input" aria-label="Match" value={mode} onChange={(e) => setMode(e.target.value as MultiMode)}>
+      <ThemedSelect className="pm-input" aria-label="Match" value={mode} onChange={(e) => setMode(e.target.value as MultiMode)}>
         <option value="any">is any of</option>
         <option value="none">is none of</option>
-      </select>
+      </ThemedSelect>
       <fieldset className="pm-pop-list">
         <legend className="sr-only">{FIELD_LABEL[field]}</legend>
         {choices.length === 0 && <div className="pm-pop-empty">{EMPTY_CHOICES[field] ?? "Nothing to pick from yet."}</div>}
@@ -261,15 +264,15 @@ function DateEditor({
         }}
       >
         <div className="pm-row" style={{ gap: 8, flexWrap: "wrap" }}>
-          <select className="pm-input" style={{ width: "auto" }} aria-label="Condition" value={op} onChange={(e) => setOp(e.target.value as DateOp)}>
+          <ThemedSelect className="pm-input" style={{ width: "auto" }} aria-label="Condition" value={op} onChange={(e) => setOp(e.target.value as DateOp)}>
             <option value="is">on</option>
             <option value="before">before</option>
             <option value="after">after</option>
             <option value="between">between</option>
-          </select>
-          <input className="pm-input pm-mono" style={{ width: "auto" }} type="date" aria-label={op === "between" ? "From" : "Date"} value={a} onChange={(e) => setA(e.target.value)} />
+          </ThemedSelect>
+          <ThemedDateInput className="pm-input pm-mono" style={{ width: "auto" }} type="date" aria-label={op === "between" ? "From" : "Date"} value={a} onChange={(e) => setA(e.target.value)} />
           {op === "between" && (
-            <input className="pm-input pm-mono" style={{ width: "auto" }} type="date" aria-label="To" value={b} onChange={(e) => setB(e.target.value)} />
+            <ThemedDateInput className="pm-input pm-mono" style={{ width: "auto" }} type="date" aria-label="To" value={b} onChange={(e) => setB(e.target.value)} />
           )}
         </div>
         <div className="pm-pop-f">

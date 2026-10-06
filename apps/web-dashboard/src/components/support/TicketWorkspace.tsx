@@ -19,6 +19,7 @@ import { SlaBadge } from "./TicketList";
 import { CHANNEL_LABELS, PRIORITY_CHOICES, toPmState } from "./support-config";
 import { SupportRequestError, supportActions, useConversation, useRevalidateSupport, useTicket } from "./useSupport";
 import { canWrite, type Desk, type SupportPerson, type TicketPriority, type UpdateTicketInput } from "./types";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 export interface TicketWorkspaceProps {
   /** A work item id or a key like SUP-12 — straight from `?t=`. */
@@ -160,43 +161,43 @@ export function TicketWorkspace({
       <div className="pm-surface sp-card" aria-label="Ticket details">
         <div className="sp-props">
           <Prop label="Status" htmlFor="tw-status">
-            <select id="tw-status" className="pm-input" value={ticket.status.id} disabled={disabled} onChange={(e) => void save({ stateId: e.target.value })}>
+            <ThemedSelect id="tw-status" className="pm-input" value={ticket.status.id} disabled={disabled} onChange={(e) => void save({ stateId: e.target.value })}>
               {(desk?.states ?? [ticket.status]).map((s) => (
                 <option key={s.id} value={s.id}>{s.name}</option>
               ))}
-            </select>
+            </ThemedSelect>
           </Prop>
           <Prop label="Priority" htmlFor="tw-priority">
-            <select id="tw-priority" className="pm-input" value={ticket.priority} disabled={disabled} onChange={(e) => void save({ priority: e.target.value as TicketPriority })}>
+            <ThemedSelect id="tw-priority" className="pm-input" value={ticket.priority} disabled={disabled} onChange={(e) => void save({ priority: e.target.value as TicketPriority })}>
               {PRIORITY_CHOICES.map((p) => (
                 <option key={p.value} value={p.value}>{p.label}</option>
               ))}
-            </select>
+            </ThemedSelect>
           </Prop>
           <Prop label="Assignee" htmlFor="tw-assignee">
-            <select id="tw-assignee" className="pm-input" value={ticket.assignees[0]?.id ?? ""} disabled={disabled} onChange={(e) => void save({ assigneeIds: e.target.value ? [e.target.value] : [] })}>
+            <ThemedSelect id="tw-assignee" className="pm-input" value={ticket.assignees[0]?.id ?? ""} disabled={disabled} onChange={(e) => void save({ assigneeIds: e.target.value ? [e.target.value] : [] })}>
               <option value="">Unassigned</option>
               {assignable.map((a) => (
                 <option key={a.id} value={a.id}>{a.displayName}</option>
               ))}
-            </select>
+            </ThemedSelect>
           </Prop>
           <Prop label="Type" htmlFor="tw-type">
-            <select id="tw-type" className="pm-input" value={currentType} disabled={disabled} onChange={(e) => void save({ labelIds: [...otherLabels, ...(e.target.value ? [e.target.value] : [])] })}>
+            <ThemedSelect id="tw-type" className="pm-input" value={currentType} disabled={disabled} onChange={(e) => void save({ labelIds: [...otherLabels, ...(e.target.value ? [e.target.value] : [])] })}>
               <option value="">No type</option>
               {types.map((l) => (
                 <option key={l.id} value={l.id}>{l.name}</option>
               ))}
-            </select>
+            </ThemedSelect>
           </Prop>
           {choosable.length > 0 && (
             <Prop label="Department" htmlFor="tw-dept">
-              <select id="tw-dept" className="pm-input" value={ownDepartment} disabled={disabled} onChange={(e) => void save({ departmentId: e.target.value || null })}>
+              <ThemedSelect id="tw-dept" className="pm-input" value={ownDepartment} disabled={disabled} onChange={(e) => void save({ departmentId: e.target.value || null })}>
                 <option value="">{ticket.department && ticket.department.source === "project" ? `Desk's department (${ticket.department.name})` : "No department"}</option>
                 {choosable.map((d) => (
                   <option key={d.id} value={d.id}>{d.name}</option>
                 ))}
-              </select>
+              </ThemedSelect>
             </Prop>
           )}
         </div>

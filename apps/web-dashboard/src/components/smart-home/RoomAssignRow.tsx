@@ -74,7 +74,7 @@ export function RoomAssignRow({ device, rooms, onSetAlias, onCreateRoom }: RoomA
             aria-label="Assign room"
             onKeyDown={onKeyDown}
             className={`absolute right-5 z-20 mt-1 min-w-[220px] max-h-[60vh] overflow-y-auto py-1 rounded-lg shadow-lg ${POPOVER_SHEET}`}
-            style={{ background: "var(--card)", border: "1px solid var(--card-bd)" }}
+            style={{ background: "var(--surface)", border: "1px solid var(--card-bd)" }}
           >
             {rooms.map((r) => {
               const on = r.id === device.roomId;

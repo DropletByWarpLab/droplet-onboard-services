@@ -1,4 +1,6 @@
 "use client";
+import { ThemedDateInput } from "@/components/ui/ThemedDateInput";
+
 
 // "Unscheduled" side panel of the calendar: open work with no dates. Drag a card
 // onto a day to schedule it (due date), or — for keyboard, touch and screen-reader
@@ -98,7 +100,7 @@ function ScheduleControl({
 
   return (
     <form className="pm-cal-schedule" onSubmit={submit}>
-      <input
+      <ThemedDateInput
         type="date"
         className="pm-input pm-mono pm-cal-dateinput"
         aria-label={`Set due date for ${item.key}`}

@@ -1,11 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { AlertCircle, ChevronDown } from "lucide-react";
+import { AlertCircle } from "lucide-react";
 import { fetchVpnStatus, postOrg, OrgError } from "@/lib/api";
 import { StepShell } from "@/components/setup/StepShell";
 import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
 import { LAN_FALLBACK_HOST } from "@/lib/box-identity";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 /**
  * Wizard step — Org (PR #380, slots AFTER account:
@@ -85,8 +86,8 @@ const COMPANY_SIZES: ReadonlyArray<{ value: string; label: string }> = [
   { value: "500+", label: "500+ people" },
 ];
 
-/** Reusable labelled `<select>` matching the dp-input field treatment, with a
- *  chevron affordance (the native arrow is hidden via appearance-none). */
+/** Reusable labelled select matching the dp-input field treatment, with the
+ *  shared themed chevron and popup. */
 function SelectField({
   id,
   label,
@@ -106,7 +107,7 @@ function SelectField({
         {label}
       </span>
       <div className="relative">
-        <select
+        <ThemedSelect
           id={id}
           value={value}
           onChange={(e) => onChange(e.target.value)}
@@ -117,11 +118,7 @@ function SelectField({
               {o.label}
             </option>
           ))}
-        </select>
-        <ChevronDown
-          size={15}
-          className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-label-tertiary"
-        />
+        </ThemedSelect>
       </div>
     </label>
   );

@@ -85,6 +85,7 @@ export function useMenuButton({ disabled, minWidth = DEFAULT_MIN_WIDTH }: UseMen
   const onMenuKeyDown = (e: ReactKeyboardEvent<HTMLElement>) => {
     if (e.key === "Escape") {
       e.preventDefault();
+      e.stopPropagation();
       close(true);
     } else if (e.key === "Tab") {
       close(false);
@@ -139,5 +140,5 @@ export function moveMenuFocus(menu: HTMLElement | null, key: string): boolean {
 
 export function menuItems(menu: HTMLElement | null): HTMLElement[] {
   if (!menu) return [];
-  return Array.from(menu.querySelectorAll<HTMLElement>('[role^="menuitem"]'));
+  return Array.from(menu.querySelectorAll<HTMLElement>('[role^="menuitem"]')).filter((item) => !item.matches(":disabled"));
 }

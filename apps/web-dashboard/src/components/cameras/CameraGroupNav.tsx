@@ -178,7 +178,7 @@ function GroupPill({
               e.stopPropagation();
               onDelete();
             }}
-            className="p-1 rounded-full hover:bg-[rgba(239,68,68,0.12)] text-[color:var(--text-muted)] hover:text-[color:var(--danger)] transition-colors"
+            className="p-1 rounded-full hover:bg-[rgba(239,68,68,0.12)] text-[color:var(--text-muted)] hover:text-[color:var(--danger-ink)] transition-colors"
             title="Delete group"
           >
             <Trash2 size={12} />

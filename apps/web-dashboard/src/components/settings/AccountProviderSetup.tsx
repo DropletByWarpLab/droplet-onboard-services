@@ -1,16 +1,8 @@
 "use client";
 
-import { useCallback, useId, useState, type CSSProperties } from "react";
+import { useCallback, useId, useState } from "react";
 import { Copy } from "lucide-react";
 import { authFetch, useAuth } from "@/lib/auth";
-
-const inputStyle: CSSProperties = {
-  background: "var(--surface)",
-  border: "1px solid var(--border)",
-  borderRadius: "var(--radius-input)",
-  color: "var(--text)",
-};
-const inputClass = "w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] disabled:opacity-60 transition-colors";
 
 export interface AccountConnectionSetupView {
   google: { clientId: string; hasClientSecret: boolean; configured: boolean; redirectUri: string; callbackSupported: boolean };
@@ -33,7 +25,7 @@ function CallbackField({ provider, value }: { provider: string; value: string })
   return <div className="space-y-1.5">
     <label htmlFor={inputId}>{provider} callback URI</label>
     <div className="flex flex-wrap items-center gap-2">
-      <input id={inputId} value={value} readOnly className={`${inputClass} flex-1 min-w-0`} style={inputStyle} onFocus={(event) => event.target.select()} />
+      <input id={inputId} value={value} readOnly className="input flex-1 min-w-0" onFocus={(event) => event.target.select()} />
       <button className="btn" type="button" onClick={() => void copy()} aria-label={`Copy ${provider} callback URI`}><Copy size={16} aria-hidden="true" />{copied ? "Copied" : "Copy"}</button>
     </div>
     {copyFailed && <p className="type-caption-1" role="status">Select the URI and copy it manually.</p>}
@@ -122,8 +114,8 @@ export function AccountProviderSetup({ onSaved }: { onSaved?: () => void } = {})
           <a href="/help/integrations/google-mail" target="_blank" rel="noopener noreferrer" className="type-caption-1 underline">Google registration and permissions guide</a>
           <CallbackField provider="Google" value={view.google.redirectUri} />
           {!view.google.callbackSupported && <p className="type-footnote text-system-red" role="alert">Google requires an HTTPS address with a registered hostname. A local hostname, IP address or HTTP address cannot be used. Configure Droplet&apos;s public HTTPS address, reload this setup, and register the updated callback URI.</p>}
-          <label className="flex flex-col gap-1.5">Google client ID<input className={inputClass} style={inputStyle} value={googleClientId} onChange={(event) => setGoogleClientId(event.target.value)} autoComplete="off" spellCheck={false} disabled={Boolean(saving)} /></label>
-          <label className="flex flex-col gap-1.5">Google client secret<input className={inputClass} style={inputStyle} type="password" value={googleSecret} onChange={(event) => setGoogleSecret(event.target.value)} autoComplete="new-password" spellCheck={false} disabled={Boolean(saving) || clearSecret} aria-describedby="google-secret-help" /></label>
+          <label className="flex flex-col gap-1.5">Google client ID<input className="input" value={googleClientId} onChange={(event) => setGoogleClientId(event.target.value)} autoComplete="off" spellCheck={false} disabled={Boolean(saving)} /></label>
+          <label className="flex flex-col gap-1.5">Google client secret<input className="input" type="password" value={googleSecret} onChange={(event) => setGoogleSecret(event.target.value)} autoComplete="new-password" spellCheck={false} disabled={Boolean(saving) || clearSecret} aria-describedby="google-secret-help" /></label>
           <p className="type-caption-1" id="google-secret-help">{view.google.hasClientSecret ? "A secret is stored. Leave this blank to keep it, or enter a replacement. The saved secret is never shown." : "Enter the client secret from your Google OAuth application. It will not be shown after saving."}</p>
           {view.google.hasClientSecret && <label className="flex items-center gap-2 type-caption-1"><input type="checkbox" checked={clearSecret} onChange={(event) => { setClearSecret(event.target.checked); setGoogleSecret(""); }} disabled={Boolean(saving)} />Remove stored Google client secret</label>}
           <button className="btn primary" type="submit" disabled={Boolean(saving) || loading || loadFailed}>{saving === "google" ? "Saving Google…" : "Save Google setup"}</button>
@@ -134,8 +126,8 @@ export function AccountProviderSetup({ onSaved }: { onSaved?: () => void } = {})
           <p className="type-caption-1">Register a single-tenant Microsoft Entra application under “Mobile and desktop applications” with this exact callback URI. Enable the required delegated permissions and have your Microsoft administrator grant consent.</p>
           <a href="/help/integrations/microsoft-365" target="_blank" rel="noopener noreferrer" className="type-caption-1 underline">Microsoft registration and permissions guide</a>
           <CallbackField provider="Microsoft" value={view.microsoft.redirectUri} />
-          <label className="flex flex-col gap-1.5">Microsoft application (client) ID<input className={inputClass} style={inputStyle} value={microsoftClientId} onChange={(event) => setMicrosoftClientId(event.target.value)} autoComplete="off" spellCheck={false} disabled={Boolean(saving)} /></label>
-          <label className="flex flex-col gap-1.5">Microsoft directory (tenant) ID<input className={inputClass} style={inputStyle} value={tenantId} onChange={(event) => setTenantId(event.target.value)} autoComplete="off" spellCheck={false} disabled={Boolean(saving)} /></label>
+          <label className="flex flex-col gap-1.5">Microsoft application (client) ID<input className="input" value={microsoftClientId} onChange={(event) => setMicrosoftClientId(event.target.value)} autoComplete="off" spellCheck={false} disabled={Boolean(saving)} /></label>
+          <label className="flex flex-col gap-1.5">Microsoft directory (tenant) ID<input className="input" value={tenantId} onChange={(event) => setTenantId(event.target.value)} autoComplete="off" spellCheck={false} disabled={Boolean(saving)} /></label>
           <button className="btn primary" type="submit" disabled={Boolean(saving) || loading || loadFailed}>{saving === "microsoft" ? "Saving Microsoft…" : "Save Microsoft setup"}</button>
         </form>
       </div>}

@@ -1,4 +1,6 @@
 "use client";
+import { ThemedDateInput } from "@/components/ui/ThemedDateInput";
+
 
 // Cycles (sprints) — the planning half of Projects, WARP-3521. Replaces the
 // "Cycles aren't ready yet" placeholder (design brief §3.7).
@@ -38,6 +40,7 @@ import {
   useProjectCycles,
 } from "./usePm";
 import type { PmBurndown, PmCycle, PmPlanningProgress, PmProject, PmState, PmWorkItem } from "./types";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 // ── Pure helpers (exported for tests) ────────────────────────────────────────
 
@@ -226,7 +229,7 @@ function CycleFormDialog({
         <div className="pm-row" style={{ gap: 12, alignItems: "flex-start" }}>
           <div style={{ flex: 1 }}>
             <Field label="Start date" htmlFor={startId}>
-              <input
+              <ThemedDateInput
                 id={startId}
                 className="pm-input pm-mono"
                 type="date"
@@ -238,7 +241,7 @@ function CycleFormDialog({
           </div>
           <div style={{ flex: 1 }}>
             <Field label="End date" htmlFor={endId} error={tried || start || end ? errors.dates : undefined}>
-              <input
+              <ThemedDateInput
                 id={endId}
                 className="pm-input pm-mono"
                 type="date"
@@ -320,14 +323,14 @@ function CompleteCycleDialog({
         </p>
         {unfinished > 0 && (
           <Field label="Move unfinished items to" htmlFor={selectId}>
-            <select id={selectId} className="pm-input" value={target} onChange={(e) => setTarget(e.target.value)}>
+            <ThemedSelect id={selectId} className="pm-input" value={target} onChange={(e) => setTarget(e.target.value)}>
               <option value="backlog">Backlog</option>
               {others.map((o) => (
                 <option key={o.id} value={o.id}>
                   {o.name} · {CYCLE_STATUS_LABEL[o.status]}
                 </option>
               ))}
-            </select>
+            </ThemedSelect>
           </Field>
         )}
         <Footer onClose={onClose} onSubmit={submit} submitLabel="Complete cycle" busy={busy} />

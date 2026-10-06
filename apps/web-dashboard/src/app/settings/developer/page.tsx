@@ -45,6 +45,7 @@ import {
   type FeedRow,
   type FeedTarget,
 } from "@/lib/hooks/useDeveloper";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 const SWITCH_LABEL = "Allow API tokens";
 const TOKEN_PLACEHOLDER = "<your token>";
@@ -427,7 +428,7 @@ function YourTokens({
                   <label htmlFor="token-expiry" className="px-0.5" style={{ fontSize: 12, color: "var(--text-muted)" }}>
                     Lasts
                   </label>
-                  <select
+                  <ThemedSelect
                     id="token-expiry"
                     value={expiry}
                     onChange={(e) => setExpiry(e.target.value)}
@@ -444,7 +445,7 @@ function YourTokens({
                         {c.label}
                       </option>
                     ))}
-                  </select>
+                  </ThemedSelect>
                 </div>
               </div>
 

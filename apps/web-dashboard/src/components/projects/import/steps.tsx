@@ -23,6 +23,7 @@ import type {
   PreviewRow,
   StateDecision,
 } from "./types";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 // ── step 1 — choose a file ──────────────────────────────────────────────────
 
@@ -210,7 +211,7 @@ function StatusRow({
       <td>{s.value}</td>
       <td className="num">{s.count}</td>
       <td>
-        <select
+        <ThemedSelect
           className="pm-input"
           aria-label={`State for status ${s.value}`}
           value={value}
@@ -228,9 +229,9 @@ function StatusRow({
           ))}
           <option value="create">Create “{s.value}” as a new state</option>
           <option value="default">Use the project default</option>
-        </select>
+        </ThemedSelect>
         {d.kind === "create" && (
-          <select
+          <ThemedSelect
             className="pm-input"
             style={{ marginLeft: 8 }}
             aria-label={`Group for the new state ${d.name}`}
@@ -242,7 +243,7 @@ function StatusRow({
                 {label}
               </option>
             ))}
-          </select>
+          </ThemedSelect>
         )}
       </td>
     </tr>
@@ -264,7 +265,7 @@ function PersonRow({
       <td>{p.value}</td>
       <td className="num">{p.count}</td>
       <td>
-        <select
+        <ThemedSelect
           className="pm-input"
           aria-label={`Member for ${p.value}`}
           value={value}
@@ -282,7 +283,7 @@ function PersonRow({
               {m.name}
             </option>
           ))}
-        </select>
+        </ThemedSelect>
       </td>
       <td className="muted">
         {p.userId && p.by !== "override" ? `Matched by ${p.by}` : p.by === "override" ? "Your choice" : (p.detail ?? "No member matches")}
@@ -303,7 +304,7 @@ function PriorityRow({
       <td>{p.value}</td>
       <td className="num">{p.count}</td>
       <td>
-        <select
+        <ThemedSelect
           className="pm-input"
           aria-label={`Priority for ${p.value}`}
           value={p.priority}
@@ -314,7 +315,7 @@ function PriorityRow({
               {PRIORITY[v].label}
             </option>
           ))}
-        </select>
+        </ThemedSelect>
       </td>
       <td className="muted">{p.known ? "" : "Not recognised"}</td>
     </tr>
@@ -355,7 +356,7 @@ export function MappingStep({
         return (
           <div className="pm-imp-field" key={f.key}>
             <label htmlFor={id}>{f.label}</label>
-            <select
+            <ThemedSelect
               id={id}
               className="pm-input"
               value={bound[0] ?? ""}
@@ -367,7 +368,7 @@ export function MappingStep({
                   {c}
                 </option>
               ))}
-            </select>
+            </ThemedSelect>
             {bound.length > 1 && <div className="also">Also reads {bound.slice(1).join(", ")}</div>}
             {f.hint && bound.length <= 1 && <div className="also">{f.hint}</div>}
           </div>
@@ -377,7 +378,7 @@ export function MappingStep({
       {hasDates && (
         <div className="pm-imp-field">
           <label htmlFor="imp-date-order">Date format</label>
-          <select
+          <ThemedSelect
             id="imp-date-order"
             className="pm-input"
             value={m.dateOrder}
@@ -388,13 +389,13 @@ export function MappingStep({
                 {label}
               </option>
             ))}
-          </select>
+          </ThemedSelect>
         </div>
       )}
       {hasLists && (
         <div className="pm-imp-field">
           <label htmlFor="imp-sep">Several in one cell</label>
-          <select
+          <ThemedSelect
             id="imp-sep"
             className="pm-input"
             value={m.listSeparator}
@@ -405,7 +406,7 @@ export function MappingStep({
                 {label}
               </option>
             ))}
-          </select>
+          </ThemedSelect>
         </div>
       )}
       <div style={{ margin: "8px 0 4px" }}>

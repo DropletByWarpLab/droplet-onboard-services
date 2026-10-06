@@ -160,7 +160,7 @@ export function PasskeysSection() {
                 autoComplete="current-password"
                 autoFocus
                 // Same input treatment as the rename field below.
-                className="h-9 px-3 type-subheadline outline-none focus:ring-2 focus:ring-[var(--brand)]"
+                className="input h-9 px-3 type-subheadline outline-none focus:ring-2 focus:ring-[var(--brand)]"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
               />
@@ -230,7 +230,7 @@ export function PasskeysSection() {
                         <input
                           aria-label="Passkey name"
                           // Romain 2026-09-22: input focus = full-strength 2px brand ring (as PR #2287).
-                          className="flex-1 h-9 px-3 type-subheadline outline-none focus:ring-2 focus:ring-[var(--brand)]"
+                          className="input flex-1 h-9 px-3 type-subheadline outline-none focus:ring-2 focus:ring-[var(--brand)]"
                           value={draftName}
                           maxLength={64}
                           autoFocus

@@ -591,10 +591,16 @@ describe("DrivesPanel — a Droplet with no TPM cannot encrypt a drive", () => {
     (adoptDrive as ReturnType<typeof vi.fn>).mockResolvedValue(mintToken);
     (confirmStorageCommand as ReturnType<typeof vi.fn>).mockRejectedValue(tpmError());
     setup();
-    fireEvent.click(within(cardOf("Wedding Photos")).getByRole("button", { name: /prepare drive/i }));
-    const dialog = await screen.findByRole("dialog");
+    // Finish token minting and the dialog's open-state reset before typing.
+    await act(async () => {
+      fireEvent.click(within(cardOf("Wedding Photos")).getByRole("button", { name: /prepare drive/i }));
+    });
+    const dialog = await screen.findByRole("dialog", { name: /prepare this drive/i });
     fireEvent.change(within(dialog).getByRole("textbox"), { target: { value: "Wedding Photos" } });
-    fireEvent.click(within(dialog).getByRole("button", { name: /^prepare drive$/i }));
+    const confirm = within(dialog).getByRole("button", { name: /^prepare drive$/i });
+    await waitFor(() => expect(confirm).toBeEnabled());
+    await act(async () => { fireEvent.click(confirm); });
+    expect(confirmStorageCommand).toHaveBeenCalledOnce();
     await waitFor(() => expect(toastMock).toHaveBeenCalledWith(TPM, "error"));
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   });

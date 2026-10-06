@@ -95,7 +95,7 @@ export function VersionHistoryPanel({ filePath, onRestored }: VersionHistoryPane
       </div>
 
       {error && (
-        <p className="type-caption-1 mb-2" style={{ color: "var(--danger)" }}>
+        <p className="type-caption-1 mb-2" style={{ color: "var(--danger-ink)" }}>
           {error}
         </p>
       )}

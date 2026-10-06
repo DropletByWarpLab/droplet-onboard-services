@@ -26,6 +26,7 @@ import {
 } from "@/components/FileManager/drive-display";
 import { DestructiveConfirm } from "./DestructiveConfirm";
 import { DestructiveConfirm as FactoryResetConfirm } from "@/components/DestructiveConfirm";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 /**
  * Settings "Danger zone" (WARP-828 + WARP-825).
@@ -66,7 +67,7 @@ export function DangerZoneSection() {
       <h2
         id="danger-zone-heading"
         className="type-footnote uppercase tracking-wider px-1 mb-2"
-        style={{ color: "var(--danger)" }}
+        style={{ color: "var(--danger-ink)" }}
       >
         Danger zone
       </h2>
@@ -169,7 +170,7 @@ function ReformatDriveCard() {
   return (
     <>
       {/* Danger-tinted card — visually set apart from the neutral settings
-          groups above it. var(--danger) throughout, no invented colours. */}
+          groups above it. --danger fills and --danger-ink text. */}
       <div
         className="card"
         style={{
@@ -182,7 +183,7 @@ function ReformatDriveCard() {
             className="flex-none flex h-9 w-9 items-center justify-center rounded-lg"
             style={{
               background: "color-mix(in srgb, var(--danger) 12%, transparent)",
-              color: "var(--danger)",
+              color: "var(--danger-ink)",
             }}
             aria-hidden="true"
           >
@@ -213,7 +214,7 @@ function ReformatDriveCard() {
               >
                 Choose a drive
               </label>
-              <select
+              <ThemedSelect
                 id="danger-zone-drive"
                 value={selectedUuid}
                 onChange={(e) => {
@@ -234,7 +235,7 @@ function ReformatDriveCard() {
                     {driveLabel(d)} · {formatBytes(d.size_bytes)}
                   </option>
                 ))}
-              </select>
+              </ThemedSelect>
             </div>
 
             {selected && (
@@ -256,7 +257,7 @@ function ReformatDriveCard() {
                     <AlertCircle
                       size={14}
                       className="mt-0.5 flex-shrink-0"
-                      style={{ color: "var(--danger)" }}
+                      style={{ color: "var(--danger-ink)" }}
                       aria-hidden="true"
                     />
                     <span>{opError}</span>
@@ -383,7 +384,7 @@ function FactoryResetCard() {
               className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
               style={{ background: "color-mix(in srgb, var(--danger) 12%, transparent)" }}
             >
-              <RotateCcw size={18} style={{ color: "var(--danger)" }} aria-hidden="true" />
+              <RotateCcw size={18} style={{ color: "var(--danger-ink)" }} aria-hidden="true" />
             </span>
             <div className="min-w-0">
               <p className="type-headline" style={{ color: "var(--text)" }}>Factory reset is under way</p>
@@ -401,7 +402,7 @@ function FactoryResetCard() {
                 className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
                 style={{ background: "color-mix(in srgb, var(--danger) 12%, transparent)" }}
               >
-                <AlertTriangle size={18} style={{ color: "var(--danger)" }} aria-hidden="true" />
+                <AlertTriangle size={18} style={{ color: "var(--danger-ink)" }} aria-hidden="true" />
               </span>
               <div className="min-w-0">
                 <p className="type-headline" style={{ color: "var(--text)" }}>Factory reset</p>

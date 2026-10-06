@@ -15,6 +15,7 @@ import { editActions, pmKeys, useRevalidate } from "../useEditing";
 import { useProjectStates } from "../usePm";
 import type { PmProject, PmState, StateGroup } from "../types";
 import { DEFAULT_COLOR, ErrorStrip, GROUP_LABEL, GROUP_ORDER, SwatchDot, SwatchPicker, useSettingsAction } from "./parts";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 const isTerminal = (g: StateGroup) => g === "completed" || g === "cancelled";
 
@@ -211,13 +212,13 @@ function AddState({
     >
       <SwatchDot color={color} label="New state color" expanded={pickingColor} onClick={() => setPickingColor((v) => !v)} />
       <input className="pm-input sm" style={{ width: 180 }} placeholder="New state name" aria-label="New state name" maxLength={100} value={name} onChange={(e) => setName(e.target.value)} />
-      <select className="pm-input sm" style={{ width: "auto" }} aria-label="New state group" value={group} onChange={(e) => setGroup(e.target.value as StateGroup)}>
+      <ThemedSelect className="pm-input sm" style={{ width: "auto" }} aria-label="New state group" value={group} onChange={(e) => setGroup(e.target.value as StateGroup)}>
         {GROUP_ORDER.map((g) => (
           <option key={g} value={g}>
             {GROUP_LABEL[g]}
           </option>
         ))}
-      </select>
+      </ThemedSelect>
       <button type="submit" className="pm-btn sm" disabled={busy || !name.trim()}>
         <PmIcon name="plus" size={12} />
         Add state
@@ -257,13 +258,13 @@ function DeleteStateDialog({
         </p>
         <div className="pm-field">
           <label htmlFor={`${titleId}-target`}>Move its items to</label>
-          <select id={`${titleId}-target`} className="pm-input" value={target} onChange={(e) => setTarget(e.target.value)}>
+          <ThemedSelect id={`${titleId}-target`} className="pm-input" value={target} onChange={(e) => setTarget(e.target.value)}>
             {others.map((s) => (
               <option key={s.id} value={s.id}>
                 {s.name}
               </option>
             ))}
-          </select>
+          </ThemedSelect>
         </div>
         <div className="pm-set-foot">
           <SafetyChip tier="write" />

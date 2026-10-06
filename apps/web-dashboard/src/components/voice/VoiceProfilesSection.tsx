@@ -17,7 +17,7 @@
  * model absent / mic broken); the parent owns that flag.
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import {
   MoreHorizontal,
   RefreshCw,
@@ -26,6 +26,8 @@ import {
   UserRound,
 } from "lucide-react";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { useMenuButton } from "@/components/ui/useMenuButton";
+import "@/components/ui/pick-menu.css";
 import { SafetyChip } from "@/components/email/SafetyChip";
 import { useToast } from "@/components/Toast";
 import { removeVoiceProfile } from "@/lib/api";
@@ -86,6 +88,79 @@ export interface VoiceProfilesSectionProps {
   onProfilesChanged: () => void;
 }
 
+function VoiceProfileMenu({
+  name,
+  enrollmentAllowed,
+  blockedTitle,
+  onReRecord,
+  onRemove,
+}: {
+  name: string;
+  enrollmentAllowed: boolean;
+  blockedTitle?: string;
+  onReRecord: () => void;
+  onRemove: () => void;
+}) {
+  const menu = useMenuButton({ minWidth: 172 });
+
+  return (
+    <div className="vrow-menu" ref={menu.rootRef}>
+      <button
+        ref={menu.buttonRef}
+        type="button"
+        className="vmenu-btn"
+        aria-label={`Voice options for ${name}`}
+        aria-haspopup="menu"
+        aria-expanded={menu.open}
+        aria-controls={menu.open ? menu.menuId : undefined}
+        onClick={menu.onButtonClick}
+        onKeyDown={menu.onButtonKeyDown}
+      >
+        <MoreHorizontal size={15} aria-hidden="true" />
+      </button>
+      {menu.open && (
+        <div
+          ref={menu.menuRef}
+          id={menu.menuId}
+          role="menu"
+          aria-label={`Voice options for ${name}`}
+          className="pick-menu"
+          data-placement="below"
+          data-align={menu.align}
+          onKeyDown={menu.onMenuKeyDown}
+        >
+          <button
+            type="button"
+            role="menuitem"
+            tabIndex={-1}
+            className="pick-item"
+            disabled={!enrollmentAllowed}
+            title={blockedTitle}
+            onClick={() => {
+              menu.close(true);
+              onReRecord();
+            }}
+          >
+            <RefreshCw size={12} aria-hidden="true" /> Re-record voice
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            tabIndex={-1}
+            className="pick-item danger"
+            onClick={() => {
+              menu.close(true);
+              onRemove();
+            }}
+          >
+            <Trash2 size={12} aria-hidden="true" /> Remove voice
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function VoiceProfilesSection({
   profiles,
   enrollmentAllowed,
@@ -96,30 +171,9 @@ export function VoiceProfilesSection({
   onProfilesChanged,
 }: VoiceProfilesSectionProps) {
   const { toast } = useToast();
-  const [menuFor, setMenuFor] = useState<string | null>(null);
   const [removeTarget, setRemoveTarget] = useState<VoiceProfileInfo | null>(
     null,
   );
-  const menuRef = useRef<HTMLDivElement | null>(null);
-
-  // Outside-click / Escape close for the row overflow menu.
-  useEffect(() => {
-    if (!menuFor) return;
-    const onDown = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        setMenuFor(null);
-      }
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setMenuFor(null);
-    };
-    document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [menuFor]);
 
   async function handleRemoveConfirm() {
     if (!removeTarget) return;
@@ -194,51 +248,13 @@ export function VoiceProfilesSection({
                     <ShieldCheck size={11} aria-hidden="true" />
                     {COPY.chip}
                   </span>
-                  <div
-                    className="vrow-menu"
-                    ref={menuFor === p.user_id ? menuRef : undefined}
-                  >
-                    <button
-                      type="button"
-                      className="vmenu-btn"
-                      aria-label={`Voice options for ${name}`}
-                      aria-haspopup="menu"
-                      aria-expanded={menuFor === p.user_id}
-                      onClick={() =>
-                        setMenuFor((v) => (v === p.user_id ? null : p.user_id))
-                      }
-                    >
-                      <MoreHorizontal size={15} aria-hidden="true" />
-                    </button>
-                    {menuFor === p.user_id && (
-                      <div role="menu" className="vmenu">
-                        <button
-                          type="button"
-                          role="menuitem"
-                          disabled={!enrollmentAllowed}
-                          title={blockedTitle}
-                          onClick={() => {
-                            setMenuFor(null);
-                            onReRecord(p.user_id);
-                          }}
-                        >
-                          <RefreshCw size={12} aria-hidden="true" /> Re-record
-                          voice
-                        </button>
-                        <button
-                          type="button"
-                          role="menuitem"
-                          className="danger"
-                          onClick={() => {
-                            setMenuFor(null);
-                            setRemoveTarget(p);
-                          }}
-                        >
-                          <Trash2 size={12} aria-hidden="true" /> Remove voice
-                        </button>
-                      </div>
-                    )}
-                  </div>
+                  <VoiceProfileMenu
+                    name={name}
+                    enrollmentAllowed={enrollmentAllowed}
+                    blockedTitle={blockedTitle}
+                    onReRecord={() => onReRecord(p.user_id)}
+                    onRemove={() => setRemoveTarget(p)}
+                  />
                 </li>
               );
             })}

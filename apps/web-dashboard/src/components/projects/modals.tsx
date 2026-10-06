@@ -1,4 +1,6 @@
 "use client";
+import { ThemedDateInput } from "@/components/ui/ThemedDateInput";
+
 
 // Create item / create project / archive / delete-project — canonical Dialog (center).
 
@@ -12,6 +14,7 @@ import { pmActions, useProjectStates } from "./usePm";
 import type { PmProject, Priority } from "./types";
 import { escapeHtml } from "@/lib/escape-html";
 import { translateError } from "@/lib/friendly-errors";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }): JSX.Element {
   return (
@@ -125,30 +128,30 @@ export function NewItemModal({
         <div className="pm-row" style={{ gap: 12, alignItems: "flex-start" }}>
           <div style={{ flex: 1 }}>
             <Field label="State">
-              <select className="pm-input" value={stateId} onChange={(e) => setStateId(e.target.value)}>
+              <ThemedSelect className="pm-input" value={stateId} onChange={(e) => setStateId(e.target.value)}>
                 <option value="">Default ({states?.find((s) => s.isDefault)?.name ?? "Todo"})</option>
                 {(states ?? []).map((s) => (
                   <option key={s.id} value={s.id}>
                     {s.name}
                   </option>
                 ))}
-              </select>
+              </ThemedSelect>
             </Field>
           </div>
           <div style={{ flex: 1 }}>
             <Field label="Priority">
-              <select className="pm-input" value={priority} onChange={(e) => setPriority(e.target.value as Priority)}>
+              <ThemedSelect className="pm-input" value={priority} onChange={(e) => setPriority(e.target.value as Priority)}>
                 {PRIORITY_ORDER.map((p) => (
                   <option key={p} value={p}>
                     {PRIORITY[p].label}
                   </option>
                 ))}
-              </select>
+              </ThemedSelect>
             </Field>
           </div>
           <div style={{ flex: 1 }}>
             <Field label="Due date">
-              <input className="pm-input pm-mono" type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} />
+              <ThemedDateInput className="pm-input pm-mono" type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} />
             </Field>
           </div>
         </div>

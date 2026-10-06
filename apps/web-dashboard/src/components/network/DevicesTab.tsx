@@ -13,6 +13,7 @@ import { DeviceDetailPanel } from "@/components/network/DeviceDetailPanel";
 import { GroupManagerDialog } from "@/components/network/GroupManagerDialog";
 import { CoverageExtendersPanel } from "@/components/network/CoverageExtendersPanel";
 import type { EnrichedNetworkDevice } from "@/lib/types";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 type DeviceSort = "name" | "lastSeen" | "vendor";
 
@@ -165,12 +166,13 @@ export function DevicesTab({ onOpenWifiSettings }: DevicesTabProps = {}) {
         </label>
         <label className="flex items-center gap-2 type-subheadline text-[color:var(--text-muted)]">
           Sort by
-          <select
+          <ThemedSelect
             value={sort}
             onChange={(e) => setSort(e.target.value as DeviceSort)}
             aria-label="Sort devices"
             className="px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-colors"
             style={{
+              width: "auto",
               background: "var(--surface)",
               border: "1px solid var(--border)",
               borderRadius: "var(--radius-input)",
@@ -180,7 +182,7 @@ export function DevicesTab({ onOpenWifiSettings }: DevicesTabProps = {}) {
             <option value="name">Name</option>
             <option value="lastSeen">Last seen</option>
             <option value="vendor">Vendor</option>
-          </select>
+          </ThemedSelect>
         </label>
         <button
           type="button"

@@ -23,6 +23,7 @@ import type {
   WorkWebhookPatch,
 } from "@/lib/api.work-webhooks";
 import { FORMAT_OPTIONS } from "./work-notifications-copy";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 export interface WebhookFormValue extends WorkWebhookPatch {
   name: string;
@@ -196,7 +197,7 @@ export function WebhookForm({ mode, initial, events, projects, onSubmit, onCance
           <label className="type-caption-1 block" style={{ color: "var(--text-muted)" }} htmlFor="webhook-project">
             Which work
           </label>
-          <select
+          <ThemedSelect
             id="webhook-project"
             className={inputClass}
             style={inputStyle}
@@ -209,7 +210,7 @@ export function WebhookForm({ mode, initial, events, projects, onSubmit, onCance
                 {p.name} ({p.identifier})
               </option>
             ))}
-          </select>
+          </ThemedSelect>
         </div>
       )}
 

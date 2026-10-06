@@ -17,6 +17,7 @@ import type { PmRelation, PmWorkItem, RelationKind } from "../types";
 import { ItemSearchPicker } from "./pickers/ItemSearchPicker";
 import "../editing.css";
 import "./editors.css";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 /** What the user picks; `blocked_by` is `BLOCKS` stored the other way round. */
 type LinkChoice = "blocks" | "blocked_by" | "relates" | "duplicates";
@@ -167,7 +168,7 @@ export function RelationsPanel({
           <label htmlFor={kindId} style={{ fontSize: 12, color: "var(--text-3)" }}>
             This item
           </label>
-          <select
+          <ThemedSelect
             id={kindId}
             className="pm-input sm"
             style={{ width: "auto" }}
@@ -178,7 +179,7 @@ export function RelationsPanel({
             <option value="blocked_by">is blocked by</option>
             <option value="relates">relates to</option>
             <option value="duplicates">duplicates</option>
-          </select>
+          </ThemedSelect>
           <ItemSearchPicker
             label="Search for an item to link"
             filter={(r) => r.id !== item.id && !linked(r)}

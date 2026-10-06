@@ -1,4 +1,6 @@
 "use client";
+import { ThemedDateInput } from "@/components/ui/ThemedDateInput";
+
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
@@ -34,6 +36,7 @@ import { X } from "lucide-react";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { CameraRelatedLinks } from "@/components/cameras/CameraRelatedLinks";
 import { formatDays, maxRetentionDays } from "@/lib/camera-recording";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 /** Playback window — one full hour. With HLS the orchestrator no
  *  longer caps the range, but the per-hour granularity matches the
@@ -369,7 +372,7 @@ export default function RecordingsPage() {
         >
           <ChevronLeft size={16} />
         </button>
-        <input
+        <ThemedDateInput
           type="date"
           aria-label="Recording date"
           value={day}
@@ -481,9 +484,9 @@ export default function RecordingsPage() {
                 else void playerRef.current?.play().catch(() => setPlayerError("Playback could not start. Try the player's play button."));
               }}>{playing ? <Pause size={18} /> : <Play size={18} />}</button>
               <button type="button" className="icon-btn" aria-label="Next event" disabled={dayHook.timeline.length === 0} onClick={() => jumpEvent(1)}><SkipForward size={16} /></button>
-              <select aria-label="Playback speed" value={playbackRate} onChange={(e) => setPlaybackRate(Number(e.target.value))} className="h-8 rounded-md px-2 type-caption-1" style={{ background: "var(--inset)", color: "var(--text)" }}>
+              <ThemedSelect aria-label="Playback speed" value={playbackRate} onChange={(e) => setPlaybackRate(Number(e.target.value))} className="h-8 rounded-md px-2 type-caption-1" style={{ width: "auto", background: "var(--inset)", color: "var(--text)" }}>
                 {[0.25, 0.5, 1, 2, 4, 8, 16].map((rate) => <option key={rate} value={rate}>{rate}×</option>)}
-              </select>
+              </ThemedSelect>
             </div>
             <label className="flex items-center gap-2 type-caption-1 text-label-tertiary">Go to time
               <input type="time" step="1" aria-label="Go to recording time" value={archiveDate === null ? "" : `${String(archiveDate.getHours()).padStart(2, "0")}:${String(archiveDate.getMinutes()).padStart(2, "0")}:${String(archiveDate.getSeconds()).padStart(2, "0")}`} onChange={(e) => {

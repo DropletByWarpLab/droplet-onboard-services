@@ -13,6 +13,7 @@ import { PmIcon } from "./icons";
 import { CYCLE_STATUS_LABEL } from "./planning-bits";
 import { pmActions, useProjectCycles, useProjectModules, useWorkItemModules } from "./usePm";
 import type { PmWorkItem } from "./types";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 const MUTED = { fontSize: 12.5, color: "var(--text-2)" } as const;
 
@@ -68,7 +69,7 @@ export function CycleField({
   };
 
   return (
-    <select
+    <ThemedSelect
       id={selectId}
       className="pm-input"
       style={{ height: 30, maxWidth: 260 }}
@@ -84,7 +85,7 @@ export function CycleField({
           {c.name} · {CYCLE_STATUS_LABEL[c.status]}
         </option>
       ))}
-    </select>
+    </ThemedSelect>
   );
 }
 
@@ -146,7 +147,7 @@ export function ModulesField({
         ))}
       </span>
       {!readOnly && addable.length > 0 && (
-        <select
+        <ThemedSelect
           id={addId}
           className="pm-input"
           style={{ height: 30, maxWidth: 260 }}
@@ -164,7 +165,7 @@ export function ModulesField({
               {m.name}
             </option>
           ))}
-        </select>
+        </ThemedSelect>
       )}
     </span>
   );

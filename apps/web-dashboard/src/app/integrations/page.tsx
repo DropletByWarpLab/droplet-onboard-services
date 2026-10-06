@@ -101,7 +101,7 @@ export default function IntegrationsPage() {
           into an empty, healthy-looking hub. */}
       {error && (
         <div className="card" role="alert" style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
-          <AlertTriangle size={16} className="shrink-0" style={{ marginTop: 1, color: "var(--danger)" }} aria-hidden />
+          <AlertTriangle size={16} className="shrink-0" style={{ marginTop: 1, color: "var(--danger-ink)" }} aria-hidden />
           <span className="type-footnote text-label-secondary">
             {error} What you see below may be out of date.
           </span>

@@ -120,7 +120,7 @@ function RoomHeader({
               role="menu"
               onKeyDown={onKeyDown}
               className={`absolute right-0 top-9 z-20 min-w-[168px] py-1 rounded-lg shadow-lg ${POPOVER_SHEET}`}
-              style={{ background: "var(--card)", border: "1px solid var(--card-bd)" }}
+              style={{ background: "var(--surface)", border: "1px solid var(--card-bd)" }}
             >
               <button
                 role="menuitem"

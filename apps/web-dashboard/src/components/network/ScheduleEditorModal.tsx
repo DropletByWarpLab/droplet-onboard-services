@@ -11,6 +11,7 @@ import { ScheduleHeatmap } from "./ScheduleHeatmap";
 import { presetById, type RecurringSchedulePresetId } from "./schedule-presets";
 import { Dialog } from "@/components/Dialog";
 import { toastForError } from "@/lib/toastForError";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 /**
  * Full-viewport modal for creating and editing a schedule.
@@ -279,7 +280,7 @@ export function ScheduleEditorModal({
             </div>
 
             {form.subjectType === "device" ? (
-              <select
+              <ThemedSelect
                 value={form.deviceMac}
                 onChange={(e) => update("deviceMac", e.target.value)}
                 disabled={isEditing}
@@ -292,9 +293,9 @@ export function ScheduleEditorModal({
                     {d.displayName ?? d.hostname ?? d.mac} ({d.mac})
                   </option>
                 ))}
-              </select>
+              </ThemedSelect>
             ) : (
-              <select
+              <ThemedSelect
                 value={form.groupId}
                 onChange={(e) => update("groupId", e.target.value)}
                 disabled={isEditing}
@@ -307,7 +308,7 @@ export function ScheduleEditorModal({
                     {g.name}
                   </option>
                 ))}
-              </select>
+              </ThemedSelect>
             )}
           </fieldset>
 
