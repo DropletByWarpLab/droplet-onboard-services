@@ -35,6 +35,7 @@ import { EntryList } from "./TimeSection";
 import type { ReportGroupBy } from "./types";
 import { useTimeActions, useTimeReport, useTimesheet } from "./useTime";
 import "./time.css";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 const LOAD_ERROR = "Couldn't load time. Check the appliance connection and try again.";
 
@@ -88,7 +89,7 @@ function PersonSelect({ value, onChange }: { value: string; onChange: (id: strin
   const listed = people ?? [];
   const hasSelf = listed.some((u) => u.id === access.userId);
   return (
-    <select
+    <ThemedSelect
       className="pm-input"
       style={{ width: "auto", minWidth: 180, height: 34 }}
       aria-label="Person"
@@ -102,7 +103,7 @@ function PersonSelect({ value, onChange }: { value: string; onChange: (id: strin
           {u.id === access.userId ? " (you)" : ""}
         </option>
       ))}
-    </select>
+    </ThemedSelect>
   );
 }
 
@@ -293,7 +294,7 @@ function ReportTab({ projects, projectId }: { projects: PmProject[] | undefined;
     <div role="tabpanel" aria-label="Report" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <div className="pm-time-bar">
         <span className="pm-row" style={{ gap: 10, flexWrap: "wrap" }}>
-          <select
+          <ThemedSelect
             className="pm-input"
             style={{ width: "auto", minWidth: 180, height: 34 }}
             aria-label="Project"
@@ -306,7 +307,7 @@ function ReportTab({ projects, projectId }: { projects: PmProject[] | undefined;
                 {p.name}{p.archived ? " (archived)" : ""}
               </option>
             ))}
-          </select>
+          </ThemedSelect>
           <input
             className="pm-input"
             style={{ width: "auto", height: 34 }}

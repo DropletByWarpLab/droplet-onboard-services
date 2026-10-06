@@ -12,6 +12,7 @@ import {
 } from "@/lib/api";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Dialog } from "@/components/Dialog";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 /**
  * Interface Add / Edit / Restart write controls (KAN-10).
@@ -303,7 +304,7 @@ function InterfaceEditorDialog({
               <label htmlFor="iface-proto" className="type-subheadline text-[color:var(--text-muted)] block mb-1.5">
                 Connection type
               </label>
-              <select
+              <ThemedSelect
                 id="iface-proto"
                 value={proto}
                 onChange={(e) => setProto(e.target.value)}
@@ -321,7 +322,7 @@ function InterfaceEditorDialog({
                     {o.label}
                   </option>
                 ))}
-              </select>
+              </ThemedSelect>
             </div>
 
             {isStatic && (
@@ -468,7 +469,7 @@ function RestartNetworkButton({ onApplied }: { onApplied?: () => void }) {
         className="btn ghost"
         /* `.droplet-shell .btn` pins `color` at (0,2,0) — the danger ink has to
            come from the style attribute to win. */
-        style={{ color: "var(--danger)" }}
+        style={{ color: "var(--danger-ink)" }}
       >
         {restarting ? (
           <Loader2 size={16} className="animate-spin" aria-hidden="true" />

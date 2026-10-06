@@ -18,6 +18,7 @@ import { DraftInput } from "../detail/fields";
 import { editActions, pmKeys, useProjectProperties, useRevalidate, type PropertyOptionInput } from "../useEditing";
 import type { PmProject, PmProperty, PropertyType } from "../types";
 import { ErrorStrip, SwatchDot, SwatchPicker, useSettingsAction } from "./parts";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 const hasOptions = (t: PropertyType) => t === "select" || t === "multi_select";
 
@@ -185,13 +186,13 @@ function AddField({
       }}
     >
       <input className="pm-input sm" style={{ width: 200 }} placeholder="New field name" aria-label="New field name" maxLength={60} value={name} onChange={(e) => setName(e.target.value)} />
-      <select className="pm-input sm" style={{ width: "auto" }} aria-label="New field type" value={type} onChange={(e) => setType(e.target.value as PropertyType)}>
+      <ThemedSelect className="pm-input sm" style={{ width: "auto" }} aria-label="New field type" value={type} onChange={(e) => setType(e.target.value as PropertyType)}>
         {PROPERTY_TYPE_ORDER.map((t) => (
           <option key={t} value={t}>
             {PROPERTY_TYPES[t].label}
           </option>
         ))}
-      </select>
+      </ThemedSelect>
       <button type="submit" className="pm-btn sm" disabled={busy || !name.trim()}>
         <PmIcon name="plus" size={12} />
         Add field

@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState, type JSX } from "react";
 import { useAgents, supportActions, useRevalidateSupport } from "./useSupport";
 import type { Desk, DeskEmailAccount, DeskEmailChannelSettings } from "./types";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 const DEFAULT_TEMPLATE = [
   "Hi {{requester.firstName}},",
@@ -85,13 +86,13 @@ export function EmailChannelSettings({ desk }: { desk: Desk }): JSX.Element {
     <h3 id="support-email-channel-heading" style={{ margin: "0 0 8px", fontSize: 14 }}>Email channel</h3>
     <p className="sp-hint" style={{ margin: "0 0 10px" }}>New mailbox messages become tickets. Email is sent only when outbound_email is enabled.</p>
     {loading ? <p role="status">Loading mailbox settings…</p> : error && accounts.length === 0 ? <p role="alert">{error}</p> : <>
-      <label className="pm-field"><span>Mailbox</span><select className="pm-input" value={accountId} onChange={(e) => setAccountId(e.target.value)}>
+      <label className="pm-field"><span>Mailbox</span><ThemedSelect className="pm-input" value={accountId} onChange={(e) => setAccountId(e.target.value)}>
         <option value="">Not connected</option>{accounts.map((account) => <option key={account.id} value={account.id}>{account.displayName} · {account.address}</option>)}
-      </select></label>
+      </ThemedSelect></label>
       {accountId && <>
-        <label className="pm-field"><span>Contact owner</span><select className="pm-input" value={ownerId} onChange={(e) => setOwnerId(e.target.value)}>
+        <label className="pm-field"><span>Contact owner</span><ThemedSelect className="pm-input" value={ownerId} onChange={(e) => setOwnerId(e.target.value)}>
           <option value="">Choose an active Support agent</option>{agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.displayName}</option>)}
-        </select></label>
+        </ThemedSelect></label>
         <label className="pm-row" style={{ gap: 8, margin: "10px 0" }}><input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />Accept new messages</label>
         <label className="pm-field"><span>Reopen window (days)</span><input className="pm-input" type="number" min={0} max={365} value={reopenDays} onChange={(e) => setReopenDays(Number(e.target.value))} /></label>
         <label className="pm-row" style={{ gap: 8, margin: "10px 0" }}><input type="checkbox" checked={autoAck} onChange={(e) => setAutoAck(e.target.checked)} />Send an automatic acknowledgement</label>

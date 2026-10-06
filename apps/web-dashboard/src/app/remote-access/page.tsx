@@ -37,6 +37,7 @@ import { translateError } from "@/lib/friendly-errors";
 import { dashboardUrlFromConf } from "@/lib/wireguard";
 import { formatRelativeTime } from "@/lib/relative-time";
 import { peerConnectionCopy } from "@/lib/vpn-peer-liveness";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 /**
  * Remote Access — WireGuard VPN management page.
@@ -558,14 +559,14 @@ function AddDeviceDialog({
             {offLanReachable && (
               <label className="type-caption-1 text-label-tertiary block">
                 Connection
-                <select
+                <ThemedSelect
                   className="w-full mt-1.5 px-3 py-2.5 bg-[var(--surface)] text-[var(--text)] border border-[var(--border)] rounded"
                   value={mode}
                   onChange={(event) => setMode(event.target.value as "home" | "away")}
                 >
                   {homeAvailable && <option value="home">Office network</option>}
                   <option value="away">Away from the office</option>
-                </select>
+                </ThemedSelect>
               </label>
             )}
             <div>

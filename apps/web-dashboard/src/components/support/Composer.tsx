@@ -10,6 +10,7 @@ import { translateError } from "@/lib/friendly-errors";
 import { hasDeliveryChannel, textToHtml } from "./support-config";
 import { supportActions } from "./useSupport";
 import type { Desk, Ticket } from "./types";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 type Mode = "reply" | "note";
 
@@ -101,7 +102,7 @@ export function Composer({
         </span>
         <div className="pm-row" style={{ gap: 8, flexWrap: "wrap" }}>
           {desk && (
-            <select
+            <ThemedSelect
               className="pm-input"
               aria-label="Then set the status to"
               value={thenState}
@@ -114,7 +115,7 @@ export function Composer({
                   Set to {s.name}
                 </option>
               ))}
-            </select>
+            </ThemedSelect>
           )}
           <button className="pm-btn primary" type="button" onClick={() => void send()} disabled={busy || empty}>
             {busy ? "Working…" : note ? "Add note" : "Send reply"}

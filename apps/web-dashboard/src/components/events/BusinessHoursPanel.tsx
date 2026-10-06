@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import { Clock } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import type { BusinessDay, CameraBusinessHours } from "@/lib/types";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 const DAYS: BusinessDay[] = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
 const DAY_LABEL = (day: BusinessDay) => day.charAt(0).toUpperCase() + day.slice(1);
@@ -118,7 +119,7 @@ export function BusinessHoursPanel({ schedule, isLoading, error, onRetry, onSave
           </label>
           <label className="block type-footnote">
             Time zone
-            <select
+            <ThemedSelect
               required
               aria-label="Business hours time zone"
               value={draft.timezone}
@@ -128,7 +129,7 @@ export function BusinessHoursPanel({ schedule, isLoading, error, onRetry, onSave
               style={{ maxWidth: 360 }}
             >
               {timezoneOptions.map((zone) => <option key={zone} value={zone}>{zone.replace(/_/g, " ").replace(/\//g, " / ")}</option>)}
-            </select>
+            </ThemedSelect>
           </label>
           <p className="type-caption-1 text-[color:var(--text-muted)]">Choose the business&apos;s local time zone. Times use a 24-hour clock. Closed days count as outside hours.</p>
           <div className="space-y-2">

@@ -15,6 +15,7 @@ import { useDepartments, usePeople } from "../usePm";
 import { toPersonOptions } from "../detail/pickers/PeoplePicker";
 import type { PmProject } from "../types";
 import { DEFAULT_COLOR, ErrorStrip, SwatchPicker, useSettingsAction } from "./parts";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 /** Glyphs a project can wear (the keys of the Projects icon map). */
 const PROJECT_ICONS = ["board", "target", "layers", "briefcase", "handshake", "building", "flag", "bulb", "doc", "shield", "spark", "server", "users", "inbox", "cal", "msg"];
@@ -113,7 +114,7 @@ export function DetailsTab({
       <div className="pm-row" style={{ gap: 12, alignItems: "flex-start", flexWrap: "wrap" }}>
         <div className="pm-field" style={{ flex: "1 1 200px", marginBottom: 14 }}>
           <label htmlFor="pm-set-lead">Lead</label>
-          <select
+          <ThemedSelect
             id="pm-set-lead"
             className="pm-input"
             value={leadId}
@@ -126,25 +127,25 @@ export function DetailsTab({
                 {p.name}
               </option>
             ))}
-          </select>
+          </ThemedSelect>
         </div>
 
         <div className="pm-field" style={{ flex: "1 1 200px", marginBottom: 14 }}>
           <label htmlFor="pm-set-dept">Department</label>
-          <select id="pm-set-dept" className="pm-input" value={departmentId} onChange={(e) => setDepartmentId(e.target.value)}>
+          <ThemedSelect id="pm-set-dept" className="pm-input" value={departmentId} onChange={(e) => setDepartmentId(e.target.value)}>
             <option value="">No department</option>
             {departmentChoices.map((d) => (
               <option key={d.id} value={d.id}>
                 {d.kind === "TEAM" ? `${d.name} (team)` : d.name}
               </option>
             ))}
-          </select>
+          </ThemedSelect>
         </div>
 
         {(companies !== undefined || project.companyId) && (
           <div className="pm-field" style={{ flex: "1 1 200px", marginBottom: 14 }}>
             <label htmlFor="pm-set-company">Customer</label>
-            <select
+            <ThemedSelect
               id="pm-set-company"
               className="pm-input"
               value={companyId}
@@ -158,7 +159,7 @@ export function DetailsTab({
                   {c.name}
                 </option>
               ))}
-            </select>
+            </ThemedSelect>
           </div>
         )}
       </div>

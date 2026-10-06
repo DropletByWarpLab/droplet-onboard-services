@@ -898,48 +898,12 @@
   background: var(--color-accent-subtle);
   color: var(--color-label-primary);
 }
-.vmenu {
-  position: absolute;
-  right: 0;
-  top: calc(100% + 4px);
-  z-index: 10;
-  min-width: 172px;
-  padding: 4px;
-  border-radius: 10px;
-  border: 1px solid var(--color-separator);
-  background: var(--color-surface-primary);
-  box-shadow: var(--shadow-tile);
-}
-.dark .vmenu {
-  background: var(--color-surface-elevated);
-}
-.vmenu button {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 8px 10px;
-  border: none;
-  border-radius: 7px;
-  background: transparent;
-  font-size: 13px;
-  color: var(--color-label-primary);
-  cursor: pointer;
-  text-align: left;
-}
-.vmenu button:hover {
-  background: var(--color-accent-subtle);
-}
-.vmenu button:disabled {
+.droplet-shell .vrow-menu .pick-menu { min-width: 172px; }
+.droplet-shell .vrow-menu .pick-item:disabled {
   opacity: 0.45;
   cursor: not-allowed;
 }
-.vmenu button.danger {
-  color: var(--color-system-red);
-}
-.vmenu button.danger:hover {
-  background: color-mix(in srgb, var(--color-system-red) 8%, transparent);
-}
+.droplet-shell .vrow-menu .pick-item.danger { color: var(--danger-ink); }
 
 /* Flow B · step 1 — person picker rows. */
 .venroll-picker {

@@ -1102,7 +1102,7 @@ export function RolesAccessPanel({
                   className="btn ghost sm"
                   disabled={inUse}
                   title={inUse ? ACCESS_COPY.deleteRoleInUse(selectedRole.peopleCount) : undefined}
-                  style={{ justifyContent: "flex-start", border: "none", color: inUse ? undefined : "var(--danger)" }}
+                  style={{ justifyContent: "flex-start", border: "none", color: inUse ? undefined : "var(--danger-ink)" }}
                   onClick={() => {
                     setMenuOpen(false);
                     setDeleteTarget(selectedRole);

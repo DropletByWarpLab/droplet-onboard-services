@@ -23,6 +23,7 @@ import {
 import type { ShareDetail, ShareRecipient } from "@/lib/types";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { translateError } from "@/lib/friendly-errors";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 interface ShareDialogProps {
   filePath: string;
@@ -517,7 +518,7 @@ export function ShareDialog({
                         </button>
                       </div>
                       <div className="flex items-center gap-2">
-                        <select
+                        <ThemedSelect
                           aria-label="Access level"
                           value={presetBitsFor(share.permissions, isDirectory)}
                           onChange={(e) =>
@@ -540,7 +541,7 @@ export function ShareDialog({
                               {level.label}
                             </option>
                           ))}
-                        </select>
+                        </ThemedSelect>
                       </div>
                     </div>
                   ) : (
@@ -592,7 +593,7 @@ export function ShareDialog({
                         </button>
                       </div>
                       <div className="flex items-center gap-2">
-                        <select
+                        <ThemedSelect
                           aria-label="Access level"
                           disabled={!!publicLinkBlockedReason}
                           title={publicLinkBlockedReason}
@@ -617,7 +618,7 @@ export function ShareDialog({
                               {level.label}
                             </option>
                           ))}
-                        </select>
+                        </ThemedSelect>
                         {share.expireDate && (
                           <span
                             className="type-caption-2 flex items-center gap-1"

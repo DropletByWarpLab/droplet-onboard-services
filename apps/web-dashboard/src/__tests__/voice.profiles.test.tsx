@@ -131,6 +131,29 @@ describe("profile rows (§3.3)", () => {
 });
 
 describe("row actions", () => {
+  it("opens from the keyboard, moves through actions and restores focus on Escape", () => {
+    renderSection();
+    const trigger = screen.getByRole("button", { name: "Voice options for Nadia" });
+    trigger.focus();
+    fireEvent.keyDown(trigger, { key: "ArrowDown" });
+    const reRecord = screen.getByRole("menuitem", { name: /Re-record voice/ });
+    const remove = screen.getByRole("menuitem", { name: /Remove voice/ });
+    expect(reRecord).toHaveFocus();
+    fireEvent.keyDown(reRecord, { key: "End" });
+    expect(remove).toHaveFocus();
+    fireEvent.keyDown(remove, { key: "ArrowDown" });
+    expect(reRecord).toHaveFocus();
+    fireEvent.keyDown(reRecord, { key: "Escape" });
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+  });
+
+  it("lands on the available action when re-recording is disabled", () => {
+    renderSection({ enrollmentAllowed: false });
+    fireEvent.click(screen.getByRole("button", { name: "Voice options for Nadia" }));
+    expect(screen.getByRole("menuitem", { name: /Remove voice/ })).toHaveFocus();
+  });
+
   it("Remove voice: red confirm with the §10 copy, then immediate delete", async () => {
     const { onProfilesChanged } = renderSection();
     fireEvent.click(

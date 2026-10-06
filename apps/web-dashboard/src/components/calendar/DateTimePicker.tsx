@@ -30,6 +30,7 @@ import {
   snapTimeToQuarter,
   type TimeOption,
 } from "@/components/calendar/datetime-picker-helpers";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 interface Props {
   /** `YYYY-MM-DDTHH:mm` local-input string (no TZ suffix), or "". */
@@ -111,7 +112,7 @@ export function DateTimePicker({ value, onChange, label, disabled }: Props) {
           padding: "6px 10px",
         }}
       />
-      <select
+      <ThemedSelect
         id={timeId}
         aria-label={`${label} time`}
         value={time}
@@ -133,7 +134,7 @@ export function DateTimePicker({ value, onChange, label, disabled }: Props) {
             {o.label}
           </option>
         ))}
-      </select>
+      </ThemedSelect>
     </div>
   );
 }

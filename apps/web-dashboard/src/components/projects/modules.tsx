@@ -30,6 +30,7 @@ import {
   useProjectModules,
 } from "./usePm";
 import type { ModuleStatus, PmModule, PmProject, PmWorkItem } from "./types";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 /** The most items one "Add" call may carry — the API's own bound. */
 export const MAX_ADD = 200;
@@ -222,18 +223,18 @@ function ModuleFormDialog({
         <div className="pm-row" style={{ gap: 12, alignItems: "flex-start" }}>
           <div style={{ flex: 1 }}>
             <Field label="Status" htmlFor={statusId}>
-              <select id={statusId} className="pm-input" value={status} onChange={(e) => setStatus(e.target.value as ModuleStatus)}>
+              <ThemedSelect id={statusId} className="pm-input" value={status} onChange={(e) => setStatus(e.target.value as ModuleStatus)}>
                 {MODULE_STATUS_ORDER.map((s) => (
                   <option key={s} value={s}>
                     {MODULE_STATUS_LABEL[s]}
                   </option>
                 ))}
-              </select>
+              </ThemedSelect>
             </Field>
           </div>
           <div style={{ flex: 1 }}>
             <Field label="Lead" htmlFor={leadId}>
-              <select id={leadId} className="pm-input" value={lead} onChange={(e) => setLead(e.target.value)}>
+              <ThemedSelect id={leadId} className="pm-input" value={lead} onChange={(e) => setLead(e.target.value)}>
                 <option value="">No lead</option>
                 {leadMissing && <option value={lead}>{person(lead).name}</option>}
                 {leads.map((u) => (
@@ -241,7 +242,7 @@ function ModuleFormDialog({
                     {u.displayName}
                   </option>
                 ))}
-              </select>
+              </ThemedSelect>
             </Field>
           </div>
         </div>

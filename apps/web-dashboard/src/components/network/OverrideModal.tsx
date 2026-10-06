@@ -10,6 +10,7 @@ import { nextTransitionFor } from "@/lib/scheduleEval";
 import type { Schedule, ScheduleOverride } from "@/lib/types";
 import { Dialog } from "@/components/Dialog";
 import { toastForError } from "@/lib/toastForError";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 /**
  * Compact modal for creating one-off allow/block overrides against a device
@@ -378,7 +379,7 @@ export function OverrideModal({
               </div>
 
               {pickerType === "device" ? (
-                <select
+                <ThemedSelect
                   value={pickerDeviceMac}
                   onChange={(e) => setPickerDeviceMac(e.target.value)}
                   aria-label="Device"
@@ -396,9 +397,9 @@ export function OverrideModal({
                       {d.displayName ?? d.hostname ?? d.mac} ({d.mac})
                     </option>
                   ))}
-                </select>
+                </ThemedSelect>
               ) : (
-                <select
+                <ThemedSelect
                   value={pickerGroupId}
                   onChange={(e) => setPickerGroupId(e.target.value)}
                   aria-label="Group"
@@ -416,7 +417,7 @@ export function OverrideModal({
                       {g.name}
                     </option>
                   ))}
-                </select>
+                </ThemedSelect>
               )}
             </fieldset>
           )}

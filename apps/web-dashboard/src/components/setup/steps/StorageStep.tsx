@@ -29,6 +29,7 @@ import {
   takenVolumeNames,
   uniqueFsLabel,
 } from "@/components/FileManager/drive-display";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 /**
  * Wizard step — name the drives the box detected, and (optionally) combine
@@ -1403,7 +1404,7 @@ function AdoptSection({
                     </span>
                   ) : (
                     <div className="flex items-center gap-2 flex-shrink-0">
-                      <select
+                      <ThemedSelect
                         aria-label={`Wipe method for ${heldNames}`}
                         className="dp-input py-1 text-sm"
                         value={wipeMethods[disk.disk] ?? "quick"}
@@ -1416,7 +1417,7 @@ function AdoptSection({
                       >
                         <option value="quick">Quick wipe</option>
                         <option value="secure">Secure erase</option>
-                      </select>
+                      </ThemedSelect>
                       <button
                         type="button"
                         onClick={() => onAdopt(disk)}

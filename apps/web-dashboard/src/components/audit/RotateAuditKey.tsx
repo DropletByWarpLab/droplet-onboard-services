@@ -108,7 +108,7 @@ export function RotateAuditKey({ onRotated }: { onRotated?: () => void }) {
         </p>
       )}
       {outcome?.kind === "error" && (
-        <p role="alert" className="type-footnote" style={{ marginTop: 10, color: "var(--danger)" }}>
+        <p role="alert" className="type-footnote" style={{ marginTop: 10, color: "var(--danger-ink)" }}>
           {outcome.message}
         </p>
       )}

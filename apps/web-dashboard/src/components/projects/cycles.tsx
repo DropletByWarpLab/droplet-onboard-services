@@ -38,6 +38,7 @@ import {
   useProjectCycles,
 } from "./usePm";
 import type { PmBurndown, PmCycle, PmPlanningProgress, PmProject, PmState, PmWorkItem } from "./types";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 // ── Pure helpers (exported for tests) ────────────────────────────────────────
 
@@ -320,14 +321,14 @@ function CompleteCycleDialog({
         </p>
         {unfinished > 0 && (
           <Field label="Move unfinished items to" htmlFor={selectId}>
-            <select id={selectId} className="pm-input" value={target} onChange={(e) => setTarget(e.target.value)}>
+            <ThemedSelect id={selectId} className="pm-input" value={target} onChange={(e) => setTarget(e.target.value)}>
               <option value="backlog">Backlog</option>
               {others.map((o) => (
                 <option key={o.id} value={o.id}>
                   {o.name} · {CYCLE_STATUS_LABEL[o.status]}
                 </option>
               ))}
-            </select>
+            </ThemedSelect>
           </Field>
         )}
         <Footer onClose={onClose} onSubmit={submit} submitLabel="Complete cycle" busy={busy} />

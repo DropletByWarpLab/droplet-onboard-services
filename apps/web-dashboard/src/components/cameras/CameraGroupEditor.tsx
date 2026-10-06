@@ -260,7 +260,7 @@ export function CameraGroupEditor({
             </div>
 
             {err && (
-              <p className="type-footnote" style={{ color: "var(--danger)" }}>
+              <p className="type-footnote" style={{ color: "var(--danger-ink)" }}>
                 {err}
               </p>
             )}

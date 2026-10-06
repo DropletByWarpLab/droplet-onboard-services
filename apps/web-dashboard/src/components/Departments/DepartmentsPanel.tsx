@@ -61,6 +61,7 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useToast } from "@/components/Toast";
 import { orgUnitDisplayName } from "@/lib/org-unit-name";
 import { Badge, Meter, type BadgeKind } from "@/components/shell/primitives";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 const RIGHTS: DepartmentRight[] = ["reader", "contributor", "manager"];
 const RIGHT_LABEL: Record<DepartmentRight, string> = {
@@ -759,7 +760,7 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
                         {m.syncError && <span className="sr-only">{m.syncError}</span>}
                       </span>
                     )}
-                    <select
+                    <ThemedSelect
                       aria-label={`Rights for ${m.displayName}`}
                       value={m.right}
                       disabled={disabled}
@@ -772,7 +773,7 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
                           {RIGHT_LABEL[r]}
                         </option>
                       ))}
-                    </select>
+                    </ThemedSelect>
                     {canManage && selected.kind !== "HOUSEHOLD" && (
                       <button
                         type="button"
@@ -793,7 +794,7 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
 
             {canManage && selected.kind !== "HOUSEHOLD" && availablePeople.length > 0 && (
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 14, paddingTop: 14, borderTop: "1px solid var(--card-bd)" }}>
-                <select
+                <ThemedSelect
                   aria-label="Person to add"
                   value={addMemberUserId}
                   onChange={(e) => setAddMemberUserId(e.target.value)}
@@ -806,8 +807,8 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
                       {p.displayName || p.id}
                     </option>
                   ))}
-                </select>
-                <select
+                </ThemedSelect>
+                <ThemedSelect
                   aria-label="Rights for new member"
                   value={addMemberRight}
                   onChange={(e) => setAddMemberRight(e.target.value as DepartmentRight)}
@@ -819,7 +820,7 @@ export function DepartmentsPanel({ people, isAdminTier }: DepartmentsPanelProps)
                       {RIGHT_LABEL[r]}
                     </option>
                   ))}
-                </select>
+                </ThemedSelect>
                 <button
                   type="button"
                   className="btn primary sm"

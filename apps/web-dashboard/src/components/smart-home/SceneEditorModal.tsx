@@ -7,6 +7,7 @@ import { Dialog } from "@/components/Dialog";
 import { getScene, createScene, updateScene, type SceneActionInput } from "@/lib/api";
 import { useSmartHome } from "@/lib/hooks/useSmartHome";
 import type { MatterDevice, SmartHomeCategory } from "@/lib/types";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 /**
  * Create / edit a routine (Scene, WARP-474). Wired to the existing /api/scenes
@@ -228,7 +229,7 @@ export function SceneEditorModal({
                       >
                         <GripVertical size={16} />
                       </span>
-                      <select
+                      <ThemedSelect
                         aria-label="Device"
                         value={a.deviceNodeId}
                         onChange={(e) => onDeviceChange(a.key, e.target.value)}
@@ -239,8 +240,8 @@ export function SceneEditorModal({
                             {d.name}
                           </option>
                         ))}
-                      </select>
-                      <select
+                      </ThemedSelect>
+                      <ThemedSelect
                         aria-label="Action"
                         value={a.command}
                         onChange={(e) => onCommandChange(a.key, e.target.value)}
@@ -251,7 +252,7 @@ export function SceneEditorModal({
                             {c.label}
                           </option>
                         ))}
-                      </select>
+                      </ThemedSelect>
                       {kind === "percent" && (
                         <input
                           aria-label="Brightness percent"

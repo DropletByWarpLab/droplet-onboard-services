@@ -325,6 +325,32 @@ describe("DeviceDetailPanel", () => {
     });
   });
 
+  it("opens schedule options with the keyboard and dismisses only the menu on Escape", async () => {
+    const onClose = vi.fn();
+    mockFetchOnceJson(fetchMock, { device: makeDevice(), presence: makePresence() });
+    renderPanel(onClose);
+    const trigger = await screen.findByRole("button", { name: "Schedule options" });
+    trigger.focus();
+    fireEvent.keyDown(trigger, { key: "ArrowDown" });
+    const create = screen.getByRole("menuitem", { name: "Create recurring schedule…" });
+    expect(create).toHaveFocus();
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+    fireEvent.keyDown(create, { key: "Escape" });
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
+  it("dismisses schedule options on an outside press", async () => {
+    mockFetchOnceJson(fetchMock, { device: makeDevice(), presence: makePresence() });
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: "Schedule options" }));
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+    fireEvent.mouseDown(screen.getByLabelText("Display name"));
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+  });
+
   it("renders the effective schedule name + 'own schedule' badge when a device-level schedule applies", async () => {
     schedulesResponse = [makeSchedule({ name: "Bedtime", deviceMac: MAC })];
     mockFetchOnceJson(fetchMock, { device: makeDevice(), presence: makePresence() });

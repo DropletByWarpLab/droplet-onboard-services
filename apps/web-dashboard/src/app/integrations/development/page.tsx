@@ -6,6 +6,7 @@ import { GitBranch, RefreshCw, Trash2 } from "lucide-react";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { Sect } from "@/components/shell/primitives";
 import { authFetch } from "@/lib/auth";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 type Provider = "github" | "gitlab";
 type Project = { id: string; name: string; identifier: string };
@@ -99,24 +100,24 @@ export default function DevelopmentSettingsPage() {
     <ShellPage icon={<GitBranch size={15} />} label="Integrations" title="Development links" sub="Choose code repositories and map them to Projects.">
       <div className="card" style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
         <label className="type-footnote" htmlFor="development-provider">Code host</label>
-        <select id="development-provider" className="input" value={provider} disabled={loading || saving !== null} onChange={(event) => { setProvider(event.target.value as Provider); setAvailable([]); }}>
+        <ThemedSelect id="development-provider" className="input" value={provider} disabled={loading || saving !== null} onChange={(event) => { setProvider(event.target.value as Provider); setAvailable([]); }}>
           <option value="github">GitHub</option><option value="gitlab">GitLab</option>
-        </select>
+        </ThemedSelect>
         <button type="button" className="btn secondary" onClick={() => void discover()} disabled={loading}>
           <RefreshCw size={14} aria-hidden /> {loading ? "Discovering…" : "Discover repositories"}
         </button>
         <Link href="/integrations" className="type-footnote">Manage integration credentials</Link>
       </div>
-      {error && <div className="card" role="alert" style={{ marginTop: 12, color: "var(--danger)" }}>{error}</div>}
+      {error && <div className="card" role="alert" style={{ marginTop: 12, color: "var(--danger-ink)" }}>{error}</div>}
       {notice && <div className="card" role="status" style={{ marginTop: 12 }}>{notice}</div>}
 
       {available.length > 0 && <>
         <Sect title="Available repositories" />
         <div className="card" style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
           <label htmlFor="new-repository-project" className="type-footnote">Map new repositories to</label>
-          <select id="new-repository-project" className="input" value={projectForNew} onChange={(event) => setProjectForNew(event.target.value)}>
+          <ThemedSelect id="new-repository-project" className="input" value={projectForNew} onChange={(event) => setProjectForNew(event.target.value)}>
             <option value="">Choose a project</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.identifier} · {project.name}</option>)}
-          </select>
+          </ThemedSelect>
         </div>
         <div className="card" style={{ marginTop: 8 }}>
           {available.map((repo) => <div key={repo.externalId} className="lrow" style={{ gap: 10 }}>
@@ -148,7 +149,7 @@ function RepositoryCard({
   return <section style={{ borderBottom: "1px solid var(--border)", paddingBottom: 12 }}>
     <div className="pm-row" style={{ justifyContent: "space-between", gap: 12 }}>
       <div><strong>{repo.fullName}</strong><div className="type-footnote">{repo.provider} · {repo.status.replaceAll("_", " ")}{repo.lastSyncedAt ? ` · synced ${new Date(repo.lastSyncedAt).toLocaleString()}` : " · never synced"}</div>
-        {repo.lastError && <div role="status" className="type-footnote" style={{ color: "var(--danger)", marginTop: 3 }}>{repo.lastError}</div>}
+        {repo.lastError && <div role="status" className="type-footnote" style={{ color: "var(--danger-ink)", marginTop: 3 }}>{repo.lastError}</div>}
       </div>
       <a href={repo.webUrl} target="_blank" rel="noopener noreferrer" className="type-footnote">Open repository</a>
     </div>
@@ -156,9 +157,9 @@ function RepositoryCard({
       {repo.projects.map((mapping) => <ProjectMapping key={mapping.projectId} repositoryId={repo.id} mapping={mapping} saving={saving} onRemove={onRemove} />)}
     </div>
     {unmapped.length > 0 && <div className="pm-row" style={{ gap: 8, marginTop: 9 }}>
-      <select className="input" aria-label={`Add project mapping for ${repo.fullName}`} value={projectId} onChange={(event) => setProjectId(event.target.value)}>
+      <ThemedSelect className="input" aria-label={`Add project mapping for ${repo.fullName}`} value={projectId} onChange={(event) => setProjectId(event.target.value)}>
         <option value="">Add project mapping</option>{unmapped.map((project) => <option key={project.id} value={project.id}>{project.identifier} · {project.name}</option>)}
-      </select>
+      </ThemedSelect>
       <button type="button" className="btn secondary" disabled={!projectId || saving === `${repo.id}:${projectId}`} onClick={() => void onAdd(repo.id, projectId)}>Map</button>
     </div>}
     <button type="button" className="pm-btn ghost sm" style={{ marginTop: 8 }} disabled={saving === repo.id} onClick={() => void onRemove(repo.id)}>Disconnect repository</button>
@@ -197,16 +198,16 @@ function ProjectMapping({
   };
   return <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(130px, 100%), 1fr))", gap: 8, alignItems: "center" }}>
     <span className="type-footnote">{mapping.project.identifier} · {mapping.project.name}</span>
-    <select className="input" aria-label={`${mapping.project.name} state when pull request opens`} value={opened} onChange={(event) => { setOpened(event.target.value); setSaved(false); }}>
+    <ThemedSelect className="input" aria-label={`${mapping.project.name} state when pull request opens`} value={opened} onChange={(event) => { setOpened(event.target.value); setSaved(false); }}>
       <option value="">On opened: no change</option>{states.map((state) => <option key={state.id} value={state.id}>{state.name}</option>)}
-    </select>
-    <select className="input" aria-label={`${mapping.project.name} state when pull request merges`} value={merged} onChange={(event) => { setMerged(event.target.value); setSaved(false); }}>
+    </ThemedSelect>
+    <ThemedSelect className="input" aria-label={`${mapping.project.name} state when pull request merges`} value={merged} onChange={(event) => { setMerged(event.target.value); setSaved(false); }}>
       <option value="">On merged: no change</option>{states.map((state) => <option key={state.id} value={state.id}>{state.name}</option>)}
-    </select>
+    </ThemedSelect>
     <span className="pm-row" style={{ gap: 4 }}>
       <button type="button" className="pm-btn ghost sm" disabled={saved || saving === repositoryId} onClick={() => void saveRules()}>Save rules</button>
       <button type="button" className="pm-iconbtn" disabled={saving === repositoryId} onClick={() => void onRemove(repositoryId, mapping.projectId)} aria-label={`Remove ${mapping.project.name} mapping`}><Trash2 size={14} /></button>
     </span>
-    {saveError && <span role="alert" className="type-footnote" style={{ color: "var(--danger)", gridColumn: "2 / 4" }}>{saveError}</span>}
+    {saveError && <span role="alert" className="type-footnote" style={{ color: "var(--danger-ink)", gridColumn: "2 / 4" }}>{saveError}</span>}
   </div>;
 }

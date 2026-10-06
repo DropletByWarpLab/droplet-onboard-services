@@ -25,6 +25,8 @@ import { ScheduleEditorModal } from "./ScheduleEditorModal";
 import { Dialog } from "@/components/Dialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { authFetch } from "@/lib/auth";
+import { useMenuButton } from "@/components/ui/useMenuButton";
+import "@/components/ui/pick-menu.css";
 
 const fetcher = async (url: string) => {
   const r = await authFetch(url);
@@ -423,7 +425,7 @@ function ScheduleSection({ mac, deviceGroups, onError }: ScheduleSectionProps) {
     { action: "allow" | "block"; durationMin?: number } | null
   >(null);
   const [editorOpen, setEditorOpen] = useState(false);
-  const [splitOpen, setSplitOpen] = useState(false);
+  const scheduleMenu = useMenuButton();
 
   const schedules: Schedule[] = schedulesSwr.data?.schedules ?? [];
   const overrides: ScheduleOverride[] = overridesSwr.data?.overrides ?? [];
@@ -565,37 +567,39 @@ function ScheduleSection({ mac, deviceGroups, onError }: ScheduleSectionProps) {
           >
             + Schedule
           </button>
-          <div className="relative">
+          <div className="relative" ref={scheduleMenu.rootRef}>
             <button
+              ref={scheduleMenu.buttonRef}
               type="button"
-              onClick={() => setSplitOpen((o) => !o)}
+              onClick={scheduleMenu.onButtonClick}
+              onKeyDown={scheduleMenu.onButtonKeyDown}
               aria-label="Schedule options"
+              aria-haspopup="menu"
+              aria-expanded={scheduleMenu.open}
+              aria-controls={scheduleMenu.open ? scheduleMenu.menuId : undefined}
               className="px-2 py-1.5 rounded-r border border-l-0 border-[var(--card-bd)] text-[color:var(--text-muted)] hover:text-[color:var(--text)] hover:bg-[var(--hover)]"
             >
               <Icons.ChevronDown className="w-4 h-4" />
             </button>
-            {splitOpen && (
+            {scheduleMenu.open && (
               <div
+                ref={scheduleMenu.menuRef}
+                id={scheduleMenu.menuId}
                 role="menu"
-                className="card absolute right-0 mt-1 w-52 z-10"
-                style={{
-                  padding: "4px 0",
-                  background: "var(--glass)",
-                  backdropFilter: "blur(20px) saturate(150%)",
-                  WebkitBackdropFilter: "blur(20px) saturate(150%)",
-                  border: "1px solid var(--card-bd)",
-                  borderRadius: "var(--radius-card)",
-                  boxShadow: "var(--lift)",
-                }}
+                aria-label="Schedule options"
+                className="pick-menu"
+                data-align={scheduleMenu.align}
+                onKeyDown={scheduleMenu.onMenuKeyDown}
               >
                 <button
                   type="button"
                   role="menuitem"
+                  tabIndex={-1}
                   onClick={() => {
-                    setSplitOpen(false);
+                    scheduleMenu.close(true);
                     setEditorOpen(true);
                   }}
-                  className="w-full text-left px-3 py-2 type-footnote text-[color:var(--text)] hover:bg-[var(--hover)]"
+                  className="pick-item"
                 >
                   Create recurring schedule…
                 </button>

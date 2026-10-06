@@ -53,6 +53,7 @@ import type {
 } from "@/lib/types";
 import { useAssistantInspect } from "@/lib/hooks/useAssistantInspect";
 import { classificationLabel } from "@/lib/runtime-tools";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 const ICON = <Bot size={15} />;
 const SUB = "The prompt and the tools each person's assistant actually receives.";
@@ -172,10 +173,11 @@ export default function AssistantInspectorPage() {
             title="Person"
             sub="The assistant runs as this person and can only ever do less than they can."
             right={
-              <select
+              <ThemedSelect
                 aria-label="Person"
                 value={userId ?? ""}
                 onChange={(e) => setUserId(e.target.value || null)}
+                style={{ width: "auto" }}
               >
                 <option value="">Choose someone…</option>
                 {(people ?? []).map((p) => (
@@ -183,7 +185,7 @@ export default function AssistantInspectorPage() {
                     {p.displayName || p.username}
                   </option>
                 ))}
-              </select>
+              </ThemedSelect>
             }
           />
           <Row

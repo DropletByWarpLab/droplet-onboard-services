@@ -62,6 +62,7 @@ import type {
   RoutineStatus,
   RoutineVisibility,
 } from "@/lib/types";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 const SUB =
   "Sequences your Droplet can run for you — on a schedule, or whenever you press Run.";
@@ -677,17 +678,18 @@ function SchedulePanel({
 
       {adding ? (
         <div style={{ marginTop: 8, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-          <select
+          <ThemedSelect
             aria-label="How often"
             value={preset}
             onChange={(e) => setPreset(Number(e.target.value))}
+            style={{ width: "auto" }}
           >
             {CADENCE_PRESETS.map((p, i) => (
               <option key={p.rrule} value={i}>
                 {p.label}
               </option>
             ))}
-          </select>
+          </ThemedSelect>
           <input
             type="time"
             aria-label="At what time"

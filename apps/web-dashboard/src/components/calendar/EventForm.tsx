@@ -355,7 +355,7 @@ export function EventForm({ open, initial, initialDate, onClose, onSaved }: Prop
                   id={meetingUrlErrorId}
                   role="alert"
                   className="type-caption-1"
-                  style={{ color: "var(--danger)" }}
+                  style={{ color: "var(--danger-ink)" }}
                 >
                   {urlError}
                 </p>
@@ -416,7 +416,7 @@ export function EventForm({ open, initial, initialDate, onClose, onSaved }: Prop
               onClick={handleDelete}
               disabled={saving}
               className="btn ghost"
-              style={{ color: "var(--danger)" }}
+              style={{ color: "var(--danger-ink)" }}
             >
               Delete
             </button>

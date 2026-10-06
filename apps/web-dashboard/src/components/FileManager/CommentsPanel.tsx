@@ -90,12 +90,12 @@ export function CommentsPanel({ filePath }: CommentsPanelProps) {
       ) : (
         <>
           {error && (
-            <p className="type-caption-1 mb-2" style={{ color: "var(--danger)" }}>
+            <p className="type-caption-1 mb-2" style={{ color: "var(--danger-ink)" }}>
               {translateError(error, "files")}
             </p>
           )}
           {actionError && (
-            <p className="type-caption-1 mb-2" style={{ color: "var(--danger)" }}>
+            <p className="type-caption-1 mb-2" style={{ color: "var(--danger-ink)" }}>
               {actionError}
             </p>
           )}
@@ -134,7 +134,7 @@ export function CommentsPanel({ filePath }: CommentsPanelProps) {
                       <button
                         type="button"
                         onClick={() => onRemove(c.id)}
-                        className="shrink-0 p-1 rounded-full opacity-0 group-hover:opacity-100 focus:opacity-100 text-[color:var(--text-muted)] hover:text-[color:var(--danger)] transition-all"
+                        className="shrink-0 p-1 rounded-full opacity-0 group-hover:opacity-100 focus:opacity-100 text-[color:var(--text-muted)] hover:text-[color:var(--danger-ink)] transition-all"
                         title="Delete comment"
                         aria-label="Delete comment"
                       >

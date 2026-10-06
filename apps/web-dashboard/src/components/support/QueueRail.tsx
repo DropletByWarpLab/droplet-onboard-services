@@ -4,6 +4,7 @@ import { useRef, type JSX, type KeyboardEvent } from "react";
 import { Skel } from "@/components/projects/bits";
 import { QUEUE_LABELS } from "./support-config";
 import { SUPPORT_QUEUES, type Desk, type QueueCounts, type SupportQueue } from "./types";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 /** The queues, with live counts, and a desk switcher once there is more than one
  *  desk. Every queue is a real button (`aria-current` on the active one); the
@@ -36,7 +37,7 @@ export function QueueRail({
   return (
     <nav className="sp-rail" aria-label="Ticket queues">
       {desks.length > 1 && (
-        <select
+        <ThemedSelect
           className="pm-input"
           aria-label="Service desk"
           value={deskId ?? ""}
@@ -49,7 +50,7 @@ export function QueueRail({
               {d.name}
             </option>
           ))}
-        </select>
+        </ThemedSelect>
       )}
       <div className="sp-rail-h">Queues</div>
       {SUPPORT_QUEUES.map((q, i) => (

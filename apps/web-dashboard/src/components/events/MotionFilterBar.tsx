@@ -4,6 +4,7 @@ import { useMemo } from "react";
 import { Filter, X } from "lucide-react";
 import type { CameraInfo, MotionFilter } from "@/lib/types";
 import { BusinessHoursFilter } from "./BusinessHoursFilter";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 export type MotionPeriod = "recent" | "day";
 export function recentMotionRange(): Pick<MotionFilter, "after" | "before"> {
@@ -49,10 +50,10 @@ export function MotionFilterBar({ cameras, filter, period, businessHoursConfigur
       </div>}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <label className="type-caption-2 text-[color:var(--text-muted)]">When
-          <select aria-label="Motion time range" className={`${CONTROL} mt-1.5`} value={period} onChange={(e) => {
+          <ThemedSelect aria-label="Motion time range" className={`${CONTROL} mt-1.5`} value={period} onChange={(e) => {
             const nextPeriod = e.target.value as MotionPeriod;
             onChange({ ...filter, ...(nextPeriod === "recent" ? recentMotionRange() : calendarDayRange(dateString(Date.now() / 1000))) }, nextPeriod);
-          }}><option value="recent">Last 24 hours</option><option value="day">Calendar day</option></select>
+          }}><option value="recent">Last 24 hours</option><option value="day">Calendar day</option></ThemedSelect>
         </label>
         {period === "day" && <label className="type-caption-2 text-[color:var(--text-muted)]">Date
           <input aria-label="Motion date" type="date" className={`${CONTROL} mt-1.5`} value={dateString(filter.after)} max={dateString(Date.now() / 1000)} onChange={(e) => {

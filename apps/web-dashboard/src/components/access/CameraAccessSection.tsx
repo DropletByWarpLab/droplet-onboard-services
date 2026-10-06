@@ -142,7 +142,7 @@ export function CameraAccessSection({
         <p
           data-testid="camera-access-error"
           className="type-caption-1"
-          style={{ color: "var(--danger)", display: "flex", gap: 6, alignItems: "flex-start" }}
+          style={{ color: "var(--danger-ink)", display: "flex", gap: 6, alignItems: "flex-start" }}
         >
           <AlertTriangle size={14} aria-hidden="true" style={{ flexShrink: 0, marginTop: 2 }} />
           <span>

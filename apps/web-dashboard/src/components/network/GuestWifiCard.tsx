@@ -195,7 +195,7 @@ function GuestActive({
             /* `.droplet-shell .btn` pins `color` at (0,2,0), so the danger ink
                has to come from the style attribute — same as the converted
                access panel's destructive menu item. */
-            style={{ color: "var(--danger)" }}
+            style={{ color: "var(--danger-ink)" }}
           >
             {removing ? <Loader2 size={15} className="animate-spin" /> : <Power size={15} />}
             {removing ? "Turning off…" : "Turn off guest Wi-Fi"}

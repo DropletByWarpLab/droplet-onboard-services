@@ -30,6 +30,7 @@ import {
   type JSX,
 } from "react";
 import Link from "next/link";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 import { useRouter } from "next/navigation";
 import {
   Activity as ActivityIcon,
@@ -487,7 +488,7 @@ function ChatWidget({ w, h }: WidgetProps) {
               title={model.name}
             >
               <span className="dot" aria-hidden />
-              <select
+              <ThemedSelect
                 aria-label="Model"
                 value={model.id}
                 onChange={(e) => setPickedId(e.target.value)}
@@ -498,7 +499,7 @@ function ChatWidget({ w, h }: WidgetProps) {
                     {m.capabilities?.vision ? " · vision" : ""}
                   </option>
                 ))}
-              </select>
+              </ThemedSelect>
             </label>
           ) : model ? (
             <Link

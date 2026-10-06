@@ -1204,7 +1204,7 @@ function RouterRebootCard({
         onClick={() => setConfirmOpen(true)}
         disabled={status.kind === "rebooting"}
         className="btn ghost"
-        style={{ color: "var(--danger)" }}
+        style={{ color: "var(--danger-ink)" }}
       >
         {status.kind === "rebooting" ? (
           <Loader2 size={16} className="animate-spin" />

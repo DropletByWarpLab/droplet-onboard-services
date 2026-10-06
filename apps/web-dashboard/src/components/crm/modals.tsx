@@ -20,6 +20,7 @@ import { Timeline } from "./views";
 import { useCompanies, useCrmActions, useTimeline } from "./useCrm";
 import type { CrmSubject } from "./types";
 import { StopFilingHere } from "./StopFilingHere";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 function Field({
   label,
@@ -237,14 +238,14 @@ export function NewDealModal({
           />
         </Field>
         <Field label="Customer">
-          <select className="pm-input" value={companyId} onChange={(e) => setCompanyId(e.target.value)}>
+          <ThemedSelect className="pm-input" value={companyId} onChange={(e) => setCompanyId(e.target.value)}>
             <option value="">No customer yet</option>
             {(companies ?? []).map((c) => (
               <option key={c.id} value={c.id}>
                 {c.name}
               </option>
             ))}
-          </select>
+          </ThemedSelect>
         </Field>
         <div className="pm-row" style={{ gap: 12, alignItems: "flex-start" }}>
           <div style={{ flex: 2 }}>

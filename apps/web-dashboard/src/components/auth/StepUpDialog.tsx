@@ -151,7 +151,7 @@ export function StepUpDialog({
           />
         </label>
         {error && (
-          <p role="alert" className="type-footnote" style={{ color: "var(--danger)" }}>
+          <p role="alert" className="type-footnote" style={{ color: "var(--danger-ink)" }}>
             {error}
           </p>
         )}

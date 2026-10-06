@@ -75,6 +75,7 @@ import { ACCESS_COPY } from "./copy";
 import { AccessToggle, GuardNote, LevelPills } from "./bits";
 import { AlertTriangle, Lock } from "lucide-react";
 import "./access.css";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 const FEATURE_ICON: Record<string, typeof Home> = {
   home: Home,
@@ -550,16 +551,16 @@ export function RoleBuilderSheet({
                     className="flex-1 px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow"
                     style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius-input)", color: "var(--text)", fontFamily: "var(--font-mono)", minWidth: 0 }}
                   />
-                  <select
+                  <ThemedSelect
                     aria-label="Storage limit unit"
                     value={draft.usage.storageUnit}
                     onChange={(e) => patchUsage({ storageUnit: e.target.value as "GB" | "TB" })}
-                    className="px-2.5 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow"
+                    className="w-auto px-2.5 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow"
                     style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius-input)", color: "var(--text)" }}
                   >
                     <option value="GB">GB</option>
                     <option value="TB">TB</option>
-                  </select>
+                  </ThemedSelect>
                 </div>
               </div>
               <div style={{ flex: 1 }}>
@@ -758,7 +759,7 @@ export function RoleBuilderSheet({
                           {connector.label}
                           {connector.note && <small>{connector.note}</small>}
                         </span>
-                        <select
+                        <ThemedSelect
                           aria-label={`${connector.label} access`}
                           // The reason travels WITH the control, not just
                           // beside it — a floor is not decoration (§13).
@@ -770,6 +771,7 @@ export function RoleBuilderSheet({
                           }
                           className="px-2.5 py-2 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow disabled:cursor-not-allowed"
                           style={{
+                            width: "auto",
                             background: connectorsBlocked ? "var(--inset)" : "var(--surface)",
                             border: `1px solid ${connectorsBlocked ? "var(--card-bd)" : "var(--border)"}`,
                             borderRadius: "var(--radius-input)",
@@ -782,7 +784,7 @@ export function RoleBuilderSheet({
                               {CONNECTOR_LEVEL_LABEL[lvl]}
                             </option>
                           ))}
-                        </select>
+                        </ThemedSelect>
                       </div>
                     );
                   })}

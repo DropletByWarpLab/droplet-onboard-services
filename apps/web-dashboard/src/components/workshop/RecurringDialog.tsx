@@ -9,6 +9,7 @@ import { useRef, useState, type RefObject } from "react";
 import { Repeat } from "lucide-react";
 import { Dialog } from "@/components/Dialog";
 import { createAgentRunSchedule, RRULE_PRESETS } from "./agent-runs/api";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 const CALM_ERROR = "Something went wrong on the box. Try again in a moment.";
 
@@ -84,14 +85,14 @@ export function RecurringDialog({ open, onClose, triggerRef, onAdded }: Recurrin
         </label>
         <label className="flex flex-col gap-1 text-[12.5px]">
           When
-          <select value={preset} disabled={busy} onChange={(e) => setPreset(e.target.value)} className="rounded px-2 py-1.5 text-[13px]">
+          <ThemedSelect value={preset} disabled={busy} onChange={(e) => setPreset(e.target.value)} className="rounded px-2 py-1.5 text-[13px]">
             {RRULE_PRESETS.map((p) => (
               <option key={p.key} value={p.key}>
                 {p.label}
               </option>
             ))}
             <option value="custom">Custom RRULE…</option>
-          </select>
+          </ThemedSelect>
         </label>
         {preset === "custom" && (
           <label className="flex flex-col gap-1 text-[12.5px]">

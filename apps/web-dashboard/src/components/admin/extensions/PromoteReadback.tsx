@@ -22,6 +22,7 @@ import { Badge, Card, Row } from "@/components/shell/primitives";
 import type { ExtensionPreflight, ExtensionReadback } from "@/lib/types";
 import { labelForDomain } from "@/lib/tool-domains";
 import { TOOLS_START_BLOCKED, displayVersion } from "./copy";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 export interface PromoteReadbackProps {
   slug: string;
@@ -99,20 +100,20 @@ export function PromoteReadback(props: PromoteReadbackProps) {
             title="Area"
             sub="Where the assistant looks for its tools when a message is about that area."
             right={
-              <select aria-label="Area" value={domain} onChange={(e) => setDomain(e.target.value)}>
+              <ThemedSelect aria-label="Area" value={domain} onChange={(e) => setDomain(e.target.value)} style={{ width: "auto" }}>
                 {areas.map((d) => (
                   <option key={d} value={d}>
                     {labelForDomain(d)}
                   </option>
                 ))}
-              </select>
+              </ThemedSelect>
             }
           />
         ) : null}
       </div>
 
       {props.error ? (
-        <p className="sub" role="alert" style={{ color: "var(--danger)" }}>
+        <p className="sub" role="alert" style={{ color: "var(--danger-ink)" }}>
           {props.error}
         </p>
       ) : null}

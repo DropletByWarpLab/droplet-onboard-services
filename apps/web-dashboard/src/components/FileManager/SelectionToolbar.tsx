@@ -217,7 +217,7 @@ export function SelectionToolbar({
             disabled={readOnly}
             aria-disabled={readOnly || undefined}
             className="btn ghost sm"
-            style={{ color: readOnly ? undefined : "var(--danger)" }}
+            style={{ color: readOnly ? undefined : "var(--danger-ink)" }}
             title={readOnly ? READER_TOOLTIP : "Move to trash"}
           >
             <Trash2 size={14} />

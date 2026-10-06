@@ -27,6 +27,7 @@ import { Video } from "lucide-react";
 import { parseMeetingLink } from "@droplet/shared-types";
 import { Dialog } from "@/components/Dialog";
 import { createTeamChatMeeting } from "@/lib/api";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 const DURATIONS: Array<{ value: string; label: string }> = [
   { value: "", label: "No set length" },
@@ -183,7 +184,7 @@ export function MeetingDialog({
           </label>
           <label className="block">
             <span className="mx-label">Length</span>
-            <select
+            <ThemedSelect
               value={duration}
               onChange={(e) => setDuration(e.target.value)}
               className="mx-field"
@@ -193,7 +194,7 @@ export function MeetingDialog({
                   {d.label}
                 </option>
               ))}
-            </select>
+            </ThemedSelect>
           </label>
         </div>
 

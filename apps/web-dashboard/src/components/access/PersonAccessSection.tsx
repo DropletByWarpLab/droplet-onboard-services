@@ -49,6 +49,7 @@ import { AccessChip, GuardNote } from "./bits";
 import { RoleSelectOptions } from "./role-options";
 import { CameraAccessSection } from "./CameraAccessSection";
 import "./access.css";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 export type PersonAccessValue = `role:${string}` | `tier:${string}`;
 
@@ -180,7 +181,7 @@ export function PersonAccessSection({
           Role
         </div>
         {guard && <div className="mb-2">{guard}</div>}
-        <select
+        <ThemedSelect
           aria-label="Assigned role"
           value={value}
           disabled={locked}
@@ -190,7 +191,7 @@ export function PersonAccessSection({
           style={{ ...fieldStyle, opacity: locked ? 0.55 : 1 }}
         >
           <RoleSelectOptions roles={roles} actingTier={actingTier} includeOwnerOption={isOwner} />
-        </select>
+        </ThemedSelect>
         {!locked && (
           <p className="type-caption-1 mt-1.5" style={{ color: "var(--text-muted)", lineHeight: 1.5 }}>
             Changing the role signs {(person.displayName || person.id).split(" ")[0]} out of their
@@ -401,11 +402,11 @@ export function PersonExceptionsSection({
       )}
       {!locked && addingException && (
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-          <select
+          <ThemedSelect
             aria-label="Exception feature"
             value={exceptionModule}
             onChange={(e) => setExceptionModule(e.target.value)}
-            className="px-2.5 py-2 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow"
+            className="w-auto px-2.5 py-2 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow"
             style={fieldStyle}
           >
             <option value="">Feature…</option>
@@ -414,23 +415,23 @@ export function PersonExceptionsSection({
                 {f.label}
               </option>
             ))}
-          </select>
-          <select
+          </ThemedSelect>
+          <ThemedSelect
             aria-label="Exception effect"
             value={exceptionEffect}
             onChange={(e) => setExceptionEffect(e.target.value as "allow" | "deny")}
-            className="px-2.5 py-2 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow"
+            className="w-auto px-2.5 py-2 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow"
             style={fieldStyle}
           >
             <option value="allow">Allow</option>
             <option value="deny">Deny</option>
-          </select>
+          </ThemedSelect>
           {exceptionEffect === "allow" && (
-            <select
+            <ThemedSelect
               aria-label="Exception level"
               value={exceptionLevel}
               onChange={(e) => setExceptionLevel(e.target.value as FeatureAccessLevel)}
-              className="px-2.5 py-2 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow"
+              className="w-auto px-2.5 py-2 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow"
               style={fieldStyle}
             >
               {(selectedExceptionFeature?.levels ?? []).map((l) => (
@@ -439,7 +440,7 @@ export function PersonExceptionsSection({
                 </option>
               ))}
               {!selectedExceptionFeature && <option value="view">View</option>}
-            </select>
+            </ThemedSelect>
           )}
           <button type="button" className="btn primary sm" onClick={addException} disabled={!exceptionModule}>
             Add exception

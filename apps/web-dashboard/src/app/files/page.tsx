@@ -2345,7 +2345,7 @@ export default function FilesPage() {
                   {row.status === "failed" && (
                     <div
                       className="type-caption-1 flex items-center gap-1"
-                      style={{ color: "var(--danger)" }}
+                      style={{ color: "var(--danger-ink)" }}
                     >
                       <AlertTriangle size={12} />
                       {row.error}

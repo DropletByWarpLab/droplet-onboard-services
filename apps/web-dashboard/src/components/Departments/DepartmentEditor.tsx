@@ -37,6 +37,7 @@ import type {
 } from "@/lib/types";
 
 import { DEPARTMENT_WIDGETS } from "./department-widgets";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 /** The orchestrator's stable profile-write codes, in words a person can act
  *  on. Shared by the template picker and Customize. */
@@ -222,7 +223,7 @@ export function DepartmentEditor({
               return (
                 <li key={w.widget} className="dept-widget-row">
                   <span className="dept-widget-row-name">{def.label}</span>
-                  <select
+                  <ThemedSelect
                     aria-label={`Size of ${def.label}`}
                     value={w.size}
                     onChange={(e) =>
@@ -238,7 +239,7 @@ export function DepartmentEditor({
                         {SIZE_LABEL[s]}
                       </option>
                     ))}
-                  </select>
+                  </ThemedSelect>
                   <button
                     type="button"
                     className="icon-btn"
@@ -280,14 +281,14 @@ export function DepartmentEditor({
             <label htmlFor={addId} className="sr-only">
               Widget to add
             </label>
-            <select id={addId} value={toAdd} onChange={(e) => setToAdd(e.target.value)}>
+            <ThemedSelect id={addId} value={toAdd} onChange={(e) => setToAdd(e.target.value)}>
               <option value="">Choose a widget</option>
               {addable.map((id) => (
                 <option key={id} value={id}>
                   {DEPARTMENT_WIDGETS[id].label} — {DEPARTMENT_WIDGETS[id].description}
                 </option>
               ))}
-            </select>
+            </ThemedSelect>
             <button
               type="button"
               className="btn sm"

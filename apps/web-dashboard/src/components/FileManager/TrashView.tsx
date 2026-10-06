@@ -233,7 +233,7 @@ export function TrashView({
             onClick={() => setConfirmEmpty(true)}
             disabled={items.length === 0}
             className="btn ghost sm disabled:opacity-50 disabled:cursor-not-allowed"
-            style={{ color: "var(--danger)" }}
+            style={{ color: "var(--danger-ink)" }}
           >
             <AlertTriangle size={14} />
             Empty trash
