@@ -88,7 +88,7 @@ tokenizers>=0.23.2,<1.0
 # declared because we now import it directly. tokenizers 0.23.2 requires Hub <2;
 # faster-whisper also requires tokenizers <1. Lift this ceiling only with a
 # released tokenizers version that supports Hub 2, then validate both loaders.
-huggingface_hub>=1.0,<2.0
+huggingface_hub>=1.33.0,<2.0
 # WARP-435 (ADR-003 Phase 1) — PPTX extraction with section-aware
 # hierarchical paths (section_name → slide_title). python-pptx is the
 # canonical pure-Python pptx parser; depends only on lxml + Pillow,
