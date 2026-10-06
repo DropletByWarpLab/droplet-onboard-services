@@ -15,6 +15,7 @@ import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
 import { ReasoningDisclosure } from "@/components/chat/ReasoningDisclosure";
 import { SAFE_MARKDOWN_COMPONENTS } from "@/components/chat/safe-markdown";
 import { isLocalProvider } from "@/lib/provider";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 // Module-level constants so ReactMarkdown receives stable references across
 // re-renders (model-poll ticks, error state toggles). Inline object/array
@@ -398,7 +399,7 @@ export function AiStep({
           >
             Model
           </label>
-          <select
+          <ThemedSelect
             id="ai-step-model"
             value={selectedModel}
             onChange={(e) => setSelectedModel(e.target.value)}
@@ -435,7 +436,7 @@ export function AiStep({
                 ))}
               </optgroup>
             )}
-          </select>
+          </ThemedSelect>
 
           {/* WARP-1284 — the server flagged the response degraded: the AI
               service (ai-gateway / Ollama) can't be reached, so an empty
@@ -521,7 +522,7 @@ export function AiStep({
             >
               Personality
             </label>
-            <select
+            <ThemedSelect
               id="ai-step-persona"
               value={personaPreset}
               onChange={(e) =>
@@ -535,7 +536,7 @@ export function AiStep({
                   {t.name}
                 </option>
               ))}
-            </select>
+            </ThemedSelect>
             <p className="mt-1.5 type-footnote text-label-tertiary">
               How your AI talks — fine-tune it anytime in Settings.
             </p>

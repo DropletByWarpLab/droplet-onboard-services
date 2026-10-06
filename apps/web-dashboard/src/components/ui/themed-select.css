@@ -1,0 +1,61 @@
+/* Keep each field's layout and tokens; replace the browser's arrow and popup. */
+:where(select.themed-select) {
+  min-width: 0;
+  min-height: 28px;
+  max-width: 100%;
+  width: 100%;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: var(--radius-input, 8px);
+  background-color: var(--surface-2, var(--color-surface-secondary));
+  color: var(--text, var(--color-label-primary));
+  font: inherit;
+  font-size: 13px;
+}
+select.themed-select {
+  appearance: none;
+  padding-inline-end: 28px !important;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='m3 4.5 3 3 3-3' fill='none' stroke='%238b90a0' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") !important;
+  background-position: right 9px center !important;
+  background-repeat: no-repeat !important;
+  cursor: pointer;
+}
+select.themed-select:focus-visible { outline: 2px solid var(--brand, var(--aurora-ink)); outline-offset: 2px; }
+select.themed-select:disabled { cursor: default; }
+
+/* Values are copied from the trigger's theme so a portal keeps its page tone. */
+.themed-select-popup {
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  z-index: 100;
+  box-sizing: border-box;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 6px;
+  border: 0;
+  border-radius: 14px;
+  background: var(--select-surface);
+  color: var(--select-text);
+  font-family: var(--font-inter), sans-serif;
+  font-size: 13px;
+  text-align: left;
+  box-shadow: 0 16px 40px -12px rgba(0, 0, 0, 0.35), 0 2px 10px rgba(0, 0, 0, 0.08);
+}
+.themed-select-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 40px;
+  padding: 6px 10px;
+  border-radius: 9px;
+  cursor: pointer;
+}
+.themed-select-option > span { min-width: 0; overflow-wrap: anywhere; }
+.themed-select-option > svg { flex: none; color: var(--select-brand); }
+.themed-select-option[data-active="true"] { background: var(--select-hover); }
+.themed-select-option:focus-visible { outline: 2px solid var(--select-brand); outline-offset: -2px; }
+.themed-select-option[aria-disabled="true"] { color: var(--select-muted); cursor: default; }
+.themed-select-group { padding: 10px 10px 4px; color: var(--select-muted); font-size: 11.5px; font-weight: 600; }
+@media (pointer: coarse) { .themed-select-option { min-height: 44px; } }

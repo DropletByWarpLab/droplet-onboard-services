@@ -319,11 +319,31 @@ describe("SpaceSwitcher — Spaces menu (>3 spaces)", () => {
     expect(screen.queryByRole("button", { name: /^spaces$/i })).not.toBeInTheDocument();
   });
 
-  it("closes the menu on Escape", () => {
+  it("closes the menu on Escape and restores focus to its trigger", () => {
     render(<SpaceSwitcher spaces={SIX_SPACES} active="personal" onChange={() => {}} />);
     fireEvent.click(screen.getByRole("button", { name: /spaces/i }));
     expect(screen.getByRole("menu")).toBeInTheDocument();
-    fireEvent.keyDown(document, { key: "Escape" });
+    fireEvent.keyDown(screen.getByRole("menuitem", { name: /finance/i }), { key: "Escape" });
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /spaces/i })).toHaveFocus();
+  });
+
+  it("opens from the keyboard and traverses departments and teams", () => {
+    render(<SpaceSwitcher spaces={SIX_SPACES} active="personal" onChange={() => {}} />);
+    const trigger = screen.getByRole("button", { name: /spaces/i });
+    trigger.focus();
+    fireEvent.keyDown(trigger, { key: "ArrowDown" });
+    const finance = screen.getByRole("menuitem", { name: /finance/i });
+    const engineering = screen.getByRole("menuitem", { name: /engineering/i });
+    const platform = screen.getByRole("menuitem", { name: /platform/i });
+    expect(finance).toHaveFocus();
+    fireEvent.keyDown(finance, { key: "ArrowDown" });
+    expect(engineering).toHaveFocus();
+    fireEvent.keyDown(engineering, { key: "ArrowDown" });
+    expect(platform).toHaveFocus();
+    fireEvent.keyDown(platform, { key: "Home" });
+    expect(finance).toHaveFocus();
+    fireEvent.keyDown(finance, { key: "Tab" });
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
   });
 });

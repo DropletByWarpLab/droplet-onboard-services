@@ -265,12 +265,16 @@ body:has(.droplet-shell) { background: #f5f6fb; }
 .droplet-shell .search input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--text); font: inherit; font-size: 13.5px; }
 .droplet-shell .search input::placeholder { color: var(--text-muted); }
 
-/* segmented pills */
+/* Segmented pills. Only the segments inherit this chrome; nested menu rows
+   (the Files space picker) keep their own selected tone and spacing. */
 .droplet-shell .pills { display: inline-flex; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 3px; gap: 2px; }
-.droplet-shell .pills button { border: 0; background: transparent; font: inherit; font-size: 13px; color: var(--text-muted); padding: 5px 13px; border-radius: 7px; cursor: pointer;
+.droplet-shell .pills > button,
+.droplet-shell .pills > div > button { border: 0; background: transparent; font: inherit; font-size: 13px; color: var(--text-muted); padding: 5px 13px; border-radius: 7px; cursor: pointer;
   transition: background 180ms var(--ease), color 180ms var(--ease); }
-.droplet-shell .pills button:hover { color: var(--text); }
-.droplet-shell .pills button.active { background: var(--brand-subtle); color: var(--brand); font-weight: 500; }
+.droplet-shell .pills > button:hover,
+.droplet-shell .pills > div > button:hover { color: var(--text); }
+.droplet-shell .pills > button.active,
+.droplet-shell .pills > div > button.active { background: var(--brand-subtle); color: var(--brand); font-weight: 500; }
 
 /* chips */
 .droplet-shell .chiprow { display: flex; flex-wrap: wrap; gap: 8px; }
@@ -543,7 +547,8 @@ body:has(.droplet-shell) { background: #f5f6fb; }
      audit-log time range) so a long segment set scrolls instead of
      stretching the page behind it. */
   .droplet-shell .pills { max-width: 100%; overflow-x: auto; overscroll-behavior-x: contain; }
-  .droplet-shell .pills button { flex: 0 0 auto; }
+  .droplet-shell .pills > button,
+  .droplet-shell .pills > div > button { flex: 0 0 auto; }
 
   /* ── 3. The page-top status chip was still widening every shell route ────
      `.pt-chip` is `white-space: nowrap` + `flex-shrink: 0` and measures 282px
@@ -596,7 +601,8 @@ body:has(.droplet-shell) { background: #f5f6fb; }
   .droplet-shell .chip { height: 44px; }
   .droplet-shell .cal-leg { height: 44px; }
   .droplet-shell .search { height: 44px; }
-  .droplet-shell .pills button { min-height: 44px; }
+  .droplet-shell .pills > button,
+  .droplet-shell .pills > div > button { min-height: 44px; }
   .droplet-shell .ds-ios-nav .x { width: 44px; height: 44px; }
   .droplet-shell .ds-ios-nav .edit { min-height: 44px; }
 

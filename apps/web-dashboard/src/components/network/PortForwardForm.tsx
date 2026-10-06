@@ -15,6 +15,7 @@ import {
   RouterStatusError,
   routerUnreachableNotice,
 } from "@/lib/api";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 /**
  * WARP-871 — "Add port forward" for the Network → Firewall tab.
@@ -271,7 +272,7 @@ export function PortForwardForm({ onApplied }: { onApplied?: () => void }) {
             >
               Protocol
             </label>
-            <select
+            <ThemedSelect
               id="pf-proto"
               value={proto}
               onChange={(e) => setProto(e.target.value as Proto)}
@@ -289,7 +290,7 @@ export function PortForwardForm({ onApplied }: { onApplied?: () => void }) {
                   {PROTO_LABEL[p]}
                 </option>
               ))}
-            </select>
+            </ThemedSelect>
           </div>
         </div>
 

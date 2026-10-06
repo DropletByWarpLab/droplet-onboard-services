@@ -20,7 +20,7 @@ describe("DateTimePicker", () => {
         label="Starts"
       />,
     );
-    const date = screen.getByLabelText(/Starts date/i) as HTMLInputElement;
+    const date = screen.getByLabelText(/Starts date/i, { selector: "input" }) as HTMLInputElement;
     const time = screen.getByLabelText(/Starts time/i) as HTMLSelectElement;
     expect(date.value).toBe("2026-05-12");
     expect(time.value).toBe("09:30");
@@ -67,7 +67,7 @@ describe("DateTimePicker", () => {
         label="Starts"
       />,
     );
-    fireEvent.change(screen.getByLabelText(/Starts date/i), {
+    fireEvent.change(screen.getByLabelText(/Starts date/i, { selector: "input" }), {
       target: { value: "2026-06-01" },
     });
     expect(onChange).toHaveBeenCalledWith("2026-06-01T09:30");
@@ -96,7 +96,7 @@ describe("DateTimePicker", () => {
         disabled
       />,
     );
-    expect(screen.getByLabelText(/Starts date/i)).toBeDisabled();
+    expect(screen.getByLabelText(/Starts date/i, { selector: "input" })).toBeDisabled();
     expect(screen.getByLabelText(/Starts time/i)).toBeDisabled();
   });
 
@@ -104,7 +104,7 @@ describe("DateTimePicker", () => {
     const onChange = vi.fn();
     render(<DateTimePicker value="" onChange={onChange} label="Due" />);
     // Only a date so far — no time picked yet — must not emit a malformed value.
-    fireEvent.change(screen.getByLabelText(/Due date/i), {
+    fireEvent.change(screen.getByLabelText(/Due date/i, { selector: "input" }), {
       target: { value: "2026-06-01" },
     });
     expect(onChange).not.toHaveBeenCalledWith(expect.stringContaining("undefined"));
@@ -123,7 +123,7 @@ describe("DateTimePicker", () => {
         label="Starts"
       />,
     );
-    const date = screen.getByLabelText(/Starts date/i) as HTMLInputElement;
+    const date = screen.getByLabelText(/Starts date/i, { selector: "input" }) as HTMLInputElement;
     // The collapse-enabling class must be gone…
     expect(date.className).not.toMatch(/\bmin-w-0\b/);
     // …and a minimum-width floor sized for a full date must be present so the

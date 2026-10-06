@@ -511,6 +511,32 @@ html .dark {
     --tw-ring-color: var(--color-accent);
     --tw-ring-opacity: 0.4;
   }
+
+  /* Indigo shell form fields. The component layer beats native resets but
+     stays below utility overrides for compact widths, icon padding and type.
+     Explicit markers keep search and composer controls on their own styles. */
+  :where(.droplet-shell) .input:where(input, textarea) {
+    box-sizing: border-box;
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+    min-height: 40px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-input);
+    background: var(--surface);
+    color: var(--text);
+    font: inherit;
+    transition: border-color 160ms var(--ease), outline-color 160ms var(--ease);
+  }
+  :where(.droplet-shell) .input:where(input, textarea)::placeholder { color: var(--text-muted); }
+  :where(.droplet-shell) .input:where(input, textarea):focus-visible {
+    outline: 2px solid var(--brand);
+    outline-offset: 2px;
+  }
+  :where(.droplet-shell) .input:where(input, textarea):disabled { opacity: 0.6; cursor: not-allowed; }
+  :where(.droplet-shell) .input:where(textarea) { min-height: 80px; line-height: 1.5; resize: vertical; }
+
   /* Native <select> popup options. `color-scheme` on the theme root makes the
      browser paint the popup chrome dark, but several engines still ignore it
      for the option list itself — so pin the option surface + label to our

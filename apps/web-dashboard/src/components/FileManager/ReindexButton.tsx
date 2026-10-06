@@ -82,7 +82,7 @@ export function ReindexButton({ fileId }: ReindexButtonProps): JSX.Element {
 
   const toneColor =
     status === "error"
-      ? "var(--danger)"
+      ? "var(--danger-ink)"
       : status === "done"
         ? "var(--success)"
         : "var(--text-muted)";

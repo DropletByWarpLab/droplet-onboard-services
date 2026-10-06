@@ -1,4 +1,6 @@
 "use client";
+import { ThemedDateInput } from "@/components/ui/ThemedDateInput";
+
 
 // WARP-3520 -- the small editors the properties card and the custom fields share:
 // a commit-on-blur text/number input, a date input, the estimate field and the
@@ -139,7 +141,8 @@ export function DateField({
 
   return (
     <span className="pm-row" style={{ gap: 6 }}>
-      <input
+      <ThemedDateInput
+        clearable={false}
         className="pm-input pm-mono sm"
         style={{ width: "auto" }}
         type="date"

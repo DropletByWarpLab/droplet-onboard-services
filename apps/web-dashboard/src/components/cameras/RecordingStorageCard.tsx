@@ -41,6 +41,7 @@ import { DestructiveConfirm } from "@/components/settings/DestructiveConfirm";
 import { SafetyChip } from "@/components/email/SafetyChip";
 import { Badge, Meter } from "@/components/shell/primitives";
 import "./recording-storage.css";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 /**
  * WARP-3515 — "Recording storage" on /cameras/system.
@@ -808,7 +809,7 @@ function DrivePicker({
         Move recordings to
       </label>
       <div className="rs-picker-row">
-        <select
+        <ThemedSelect
           id={id}
           ref={selectRef}
           className="rs-select"
@@ -823,7 +824,7 @@ function DrivePicker({
               {d.encrypted ? "" : " · not encrypted"}
             </option>
           ))}
-        </select>
+        </ThemedSelect>
         <button
           type="button"
           className="btn"

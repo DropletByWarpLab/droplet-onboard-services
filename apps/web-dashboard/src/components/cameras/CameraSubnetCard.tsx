@@ -110,7 +110,7 @@ export function CameraSubnetCard({ config, onRefresh }: CameraSubnetCardProps) {
             <button
               onClick={() => setTeardownOpen(true)}
               className="btn ghost"
-              style={{ color: "var(--danger)" }}
+              style={{ color: "var(--danger-ink)" }}
             >
               <ShieldOff size={16} />
               <span className="type-subheadline">Disable</span>

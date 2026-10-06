@@ -16,6 +16,7 @@ import {
 } from "@/lib/api";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { MODULE_GATE_KEY } from "@/lib/hooks/useModuleGate";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 /**
  * WARP-1368 — Settings → "Features" (design contract §2.12).
@@ -269,7 +270,7 @@ export function FeaturesCard() {
                   </span>
                 ) : null}
               </span>
-              <select
+              <ThemedSelect
                 aria-label="Business type preset"
                 className="input"
                 value={selectedBusinessType}
@@ -283,7 +284,7 @@ export function FeaturesCard() {
                     {preset.label}{preset.id === "custom" ? "" : ` (${preset.modules.length} modules)`}
                   </option>
                 ))}
-              </select>
+              </ThemedSelect>
               <button
                 type="button"
                 className="btn"

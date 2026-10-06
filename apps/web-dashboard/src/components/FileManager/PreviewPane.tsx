@@ -359,7 +359,7 @@ export function PreviewPane({
                 </p>
               )}
               {textError && (
-                <p className="type-footnote" style={{ color: "var(--danger)" }}>
+                <p className="type-footnote" style={{ color: "var(--danger-ink)" }}>
                   {textError}
                 </p>
               )}

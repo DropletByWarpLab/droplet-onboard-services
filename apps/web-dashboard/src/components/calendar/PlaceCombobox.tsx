@@ -18,6 +18,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Building2, MapPin } from "lucide-react";
 import { fetchPlaces, type PlaceSuggestion } from "@/lib/api";
+import "@/components/ui/pick-menu.css";
 
 interface PlaceComboboxProps {
   value: string;
@@ -179,16 +180,7 @@ export function PlaceCombobox({
         <ul
           id="place-suggestions"
           role="listbox"
-          className="card absolute left-0 right-0 top-full mt-1 overflow-hidden z-40 max-h-72 overflow-y-auto"
-          style={{
-            padding: "4px 0",
-            background: "var(--glass)",
-            backdropFilter: "blur(20px) saturate(150%)",
-            WebkitBackdropFilter: "blur(20px) saturate(150%)",
-            border: "1px solid var(--card-bd)",
-            borderRadius: "var(--radius-card)",
-            boxShadow: "var(--lift)",
-          }}
+          className="pick-surface absolute left-0 right-0 top-full mt-1 overflow-hidden z-40 max-h-72 overflow-y-auto p-1.5"
         >
           {suggestions.map((s, idx) => {
             const primary = primaryName(s);
@@ -209,11 +201,11 @@ export function PlaceCombobox({
                   pick(s);
                 }}
                 onMouseEnter={() => setActiveIdx(idx)}
-                className={`flex items-start gap-2 px-3 py-2 cursor-pointer ${
-                  idx === activeIdx
-                    ? "bg-[var(--brand-subtle)]"
-                    : "hover:bg-[var(--hover)]"
-                }`}
+                className="pick-item"
+                style={{
+                  alignItems: "flex-start",
+                  background: idx === activeIdx ? "var(--surface-2)" : undefined,
+                }}
               >
                 {/* WARP-1906 — a premade conference room reads as "your
                     building", not "a place on the map". */}

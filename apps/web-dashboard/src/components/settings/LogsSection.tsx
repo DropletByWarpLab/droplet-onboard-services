@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Check, Download, FileText } from "lucide-react";
 import { Sect } from "@/components/shell/primitives";
 import { downloadLogBundle } from "@/lib/api";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 /**
  * WARP-823 — Settings "Diagnostics" section.
@@ -85,7 +86,7 @@ export function LogsSection() {
             >
               Time range
             </label>
-            <select
+            <ThemedSelect
               id="logs-range"
               value={windowHours}
               onChange={(e) => setWindowHours(Number(e.target.value))}
@@ -103,7 +104,7 @@ export function LogsSection() {
                   {o.label}
                 </option>
               ))}
-            </select>
+            </ThemedSelect>
           </div>
 
           <button

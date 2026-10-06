@@ -89,6 +89,7 @@ import {
   storageInputToBytes,
   type StorageUnit,
 } from "@/lib/storage-units";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 // WARP-1533 (design §7): the invite picker defaults to the most-restrictive
 // sensible role — the built-in Guest tier (fail-toward-least-privilege; a
@@ -1691,7 +1692,7 @@ export default function UsersPage() {
                       <label htmlFor={inviteRoleId} className="type-caption-1 mb-1.5 block" style={{ color: "var(--text-muted)" }}>
                         Role
                       </label>
-                      <select
+                      <ThemedSelect
                         id={inviteRoleId}
                         value={inviteRoleOption}
                         onChange={(e) => setInviteRoleOption(e.target.value)}
@@ -1715,7 +1716,7 @@ export default function UsersPage() {
                           roles={accessRoles}
                           actingTier={currentUser?.role ?? "guest"}
                         />
-                      </select>
+                      </ThemedSelect>
                       {accessRolesFailed && (
                         <p
                           id={`${inviteRoleId}-degraded`}
@@ -1730,7 +1731,7 @@ export default function UsersPage() {
                       <label htmlFor={inviteTtlId} className="type-caption-1 mb-1.5 block" style={{ color: "var(--text-muted)" }}>
                         Link expires in
                       </label>
-                      <select
+                      <ThemedSelect
                         id={inviteTtlId}
                         value={inviteTtlHours}
                         onChange={(e) => setInviteTtlHours(Number(e.target.value))}
@@ -1747,7 +1748,7 @@ export default function UsersPage() {
                             {opt.label}
                           </option>
                         ))}
-                      </select>
+                      </ThemedSelect>
                     </div>
                   </div>
 
@@ -1810,7 +1811,7 @@ export default function UsersPage() {
                                     >
                                       {d.name}
                                     </label>
-                                    <select
+                                    <ThemedSelect
                                       aria-label={`Rights in ${d.name}`}
                                       value={right}
                                       disabled={!checked}
@@ -1818,6 +1819,7 @@ export default function UsersPage() {
                                         setInviteDeptGrants((prev) => new Map(prev).set(d.id, e.target.value as DepartmentRight))
                                       }
                                       style={{
+                                        width: "auto",
                                         background: "var(--surface)",
                                         border: "1px solid var(--border)",
                                         borderRadius: "var(--radius-input)",
@@ -1832,7 +1834,7 @@ export default function UsersPage() {
                                           {DEPT_RIGHT_LABEL[r]}
                                         </option>
                                       ))}
-                                    </select>
+                                    </ThemedSelect>
                                   </div>
                                 );
                               })}
@@ -2036,7 +2038,7 @@ export default function UsersPage() {
                     >
                       Role
                     </label>
-                    <select
+                    <ThemedSelect
                       id={createRoleId}
                       value={createRole}
                       onChange={(e) => setCreateRole(e.target.value as CreateUserRole)}
@@ -2050,7 +2052,7 @@ export default function UsersPage() {
                     >
                       <option value="family">User</option>
                       <option value="admin">Admin</option>
-                    </select>
+                    </ThemedSelect>
                   </div>
                   <div>
                     <label
@@ -2374,13 +2376,13 @@ export default function UsersPage() {
                             color: "var(--text)",
                           }}
                         />
-                        <select
+                        <ThemedSelect
                           value={editStorageUnit}
                           onChange={(e) => setEditStorageUnit(e.target.value as StorageUnit)}
                           aria-label="Storage limit unit"
                           disabled={editingIsOwner}
                           title={editUsageDisabledTitle}
-                          className="px-2.5 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-colors disabled:opacity-55"
+                          className="w-auto px-2.5 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-colors disabled:opacity-55"
                           style={{
                             background: "var(--surface)",
                             border: "1px solid var(--border)",
@@ -2390,7 +2392,7 @@ export default function UsersPage() {
                         >
                           <option value="GB">GB</option>
                           <option value="TB">TB</option>
-                        </select>
+                        </ThemedSelect>
                       </div>
                     </div>
                     <div>
@@ -2509,7 +2511,7 @@ export default function UsersPage() {
         accessory={
           <label className="flex flex-col gap-1 text-sm">
             <span>Or hand their files to someone now</span>
-            <select
+            <ThemedSelect
               aria-label="Hand files to"
               value={handoverRecipient}
               onChange={(e) => setHandoverRecipient(e.target.value)}
@@ -2530,7 +2532,7 @@ export default function UsersPage() {
                     {r.displayName || r.id}
                   </option>
                 ))}
-            </select>
+            </ThemedSelect>
             {handoverRecipient && (
               <span className="text-label-tertiary">
                 Their files move to a new folder in the recipient&apos;s files, then the

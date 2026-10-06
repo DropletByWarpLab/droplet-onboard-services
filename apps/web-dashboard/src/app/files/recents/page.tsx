@@ -1,4 +1,6 @@
 "use client";
+import { ThemedDateInput } from "@/components/ui/ThemedDateInput";
+
 
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -108,13 +110,13 @@ export default function RecentsPage() {
               a dismissable chip so the narrowed state is always visible and
               always one tap from the default grouping. */}
           <div className="mb-4 flex flex-wrap items-center gap-2">
-            <input
+            <ThemedDateInput
               type="date"
               aria-label="Jump to a day"
               value={filterDay ?? ""}
               onChange={(e) => setFilterDay(e.target.value || null)}
               max={localDayKey(new Date().toISOString())}
-              className="h-9 px-3 type-subheadline outline-none focus:ring-2 focus:ring-[var(--brand)]"
+              className="w-auto h-9 px-3 type-subheadline outline-none focus:ring-2 focus:ring-[var(--brand)]"
               style={{
                 background: "var(--surface)",
                 border: "1px solid var(--border)",

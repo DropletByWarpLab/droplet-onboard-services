@@ -1,4 +1,6 @@
 "use client";
+import { ThemedDateInput } from "@/components/ui/ThemedDateInput";
+
 
 /**
  * Calendar UX clarity (Samantha QA #bugs) — a date input paired with a
@@ -30,6 +32,7 @@ import {
   snapTimeToQuarter,
   type TimeOption,
 } from "@/components/calendar/datetime-picker-helpers";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 interface Props {
   /** `YYYY-MM-DDTHH:mm` local-input string (no TZ suffix), or "". */
@@ -94,7 +97,7 @@ export function DateTimePicker({ value, onChange, label, disabled }: Props) {
     // max-w-md dialog). Without it the row's min-content width overflowed the
     // dialog's content box and grew an internal horizontal scrollbar.
     <div className="flex flex-wrap gap-2">
-      <input
+      <ThemedDateInput
         id={dateId}
         type="date"
         aria-label={`${label} date`}
@@ -111,20 +114,13 @@ export function DateTimePicker({ value, onChange, label, disabled }: Props) {
           padding: "6px 10px",
         }}
       />
-      <select
+      <ThemedSelect
         id={timeId}
         aria-label={`${label} time`}
         value={time}
         disabled={disabled}
         onChange={(e) => emit(date, e.target.value)}
-        className="w-auto shrink-0 outline-none focus:ring-2 focus:ring-[var(--brand)]"
-        style={{
-          background: "var(--surface)",
-          border: "1px solid var(--border)",
-          borderRadius: "var(--radius-input)",
-          color: "var(--text)",
-          padding: "6px 10px",
-        }}
+        className="w-auto shrink-0"
       >
         {/* A blank placeholder slot while no time is chosen yet. */}
         {!time && <option value="" />}
@@ -133,7 +129,7 @@ export function DateTimePicker({ value, onChange, label, disabled }: Props) {
             {o.label}
           </option>
         ))}
-      </select>
+      </ThemedSelect>
     </div>
   );
 }

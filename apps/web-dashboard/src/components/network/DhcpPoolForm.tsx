@@ -10,6 +10,7 @@ import {
   setDhcpPool,
   type DhcpPool,
 } from "@/lib/api";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 /**
  * DHCP pool — the LAN address range Droplet hands out + how long each lease
@@ -194,7 +195,7 @@ export function DhcpPoolForm() {
           >
             Lease time
           </label>
-          <select
+          <ThemedSelect
             id="dhcp-pool-leasetime"
             value={leasetime}
             onChange={(e) => setLeasetime(e.target.value)}
@@ -212,7 +213,7 @@ export function DhcpPoolForm() {
                 {o.label}
               </option>
             ))}
-          </select>
+          </ThemedSelect>
         </div>
 
         <button

@@ -47,6 +47,7 @@ import {
 } from "@/components/audit/types";
 import { activityRowsToCsv } from "@/lib/audit-csv";
 import { RotateAuditKey } from "@/components/audit/RotateAuditKey";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 const PAGE_SIZE = 50;
 const SEARCH_DEBOUNCE_MS = 300;
@@ -458,7 +459,7 @@ function AuditPageInner() {
       <RotateAuditKey onRotated={() => void runVerify()} />
 
       <div className="toolbar">
-        <select
+        <ThemedSelect
           aria-label="Filter by kind"
           className="px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-colors"
           style={{
@@ -477,11 +478,11 @@ function AuditPageInner() {
               {KIND_LABELS[k]}
             </option>
           ))}
-        </select>
+        </ThemedSelect>
         {/* WARP-1009: actorType filter. NOTE the API only matches signed
             (v2+) rows for actor predicates — filtered views exclude
             pre-upgrade unattributed rows by design. */}
-        <select
+        <ThemedSelect
           aria-label="Filter by actor"
           className="px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-colors"
           style={{
@@ -500,7 +501,7 @@ function AuditPageInner() {
               {ACTOR_TYPE_LABELS[a]}
             </option>
           ))}
-        </select>
+        </ThemedSelect>
         <div className="pills" role="group" aria-label="Time range">
           {RANGES.map((r) => (
             <button

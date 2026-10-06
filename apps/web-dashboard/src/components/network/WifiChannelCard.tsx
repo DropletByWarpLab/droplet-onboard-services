@@ -10,6 +10,7 @@ import {
   routerUnreachableNotice,
 } from "@/lib/api";
 import type { NetworkCommandResult } from "@/lib/types";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 /**
  * WARP-871 — WiFi channel selector for the Network → WiFi tab.
@@ -229,7 +230,7 @@ export function WifiChannelCard() {
                   className="absolute left-3 top-1/2 -translate-y-1/2 text-[color:var(--text-muted)]"
                   aria-hidden="true"
                 />
-                <select
+                <ThemedSelect
                   id="wifi-channel"
                   value={selected}
                   onChange={(e) => setSelected(e.target.value)}
@@ -248,7 +249,7 @@ export function WifiChannelCard() {
                       Channel {c}
                     </option>
                   ))}
-                </select>
+                </ThemedSelect>
               </div>
             </div>
 

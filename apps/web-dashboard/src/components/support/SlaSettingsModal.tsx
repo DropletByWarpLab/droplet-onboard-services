@@ -1,4 +1,6 @@
 "use client";
+import { ThemedDateInput } from "@/components/ui/ThemedDateInput";
+
 
 import { useId, useState, type JSX } from "react";
 import { Dialog } from "@/components/Dialog";
@@ -8,6 +10,7 @@ import { ErrorStrip, Field } from "./form-bits";
 import { PRIORITY_CHOICES } from "./support-config";
 import type { Desk, SupportPerson } from "./types";
 import { slaActions, useBusinessCalendars, useDeskSla, type BusinessCalendar, type DeskSla, type EscalationAction, type SlaMetric, type SlaPolicy, type SlaReport } from "./useSla";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 const METRICS: Array<[SlaMetric, string]> = [["firstResponse", "First response"], ["nextResponse", "Next response"], ["resolution", "Resolution"]];
 const DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
@@ -60,9 +63,9 @@ function SlaSettingsForm({ desk, agents, initial, calendars, onCalendarChanged, 
     <fieldset disabled={busy || !initial.canManage} style={{ border: 0, padding: 0, margin: 0 }}>
       <label><input type="checkbox" checked={policy.enabled} onChange={(e) => { setPolicy({ ...policy, enabled: e.target.checked }); setSaved(false); }} /> Enable service levels</label>
       <Field label="Business calendar" htmlFor="sla-calendar" hint="24/7 uses elapsed time. Calendars use their named time zone and exclude holidays.">
-        <select id="sla-calendar" className="pm-input" value={policy.calendarId ?? ""} onChange={(e) => setPolicy({ ...policy, calendarId: e.target.value || null })}>
+        <ThemedSelect id="sla-calendar" className="pm-input" value={policy.calendarId ?? ""} onChange={(e) => setPolicy({ ...policy, calendarId: e.target.value || null })}>
           <option value="">24/7</option>{calendars.map((c) => <option key={c.id} value={c.id}>{c.name} · {c.timezone}</option>)}
-        </select>
+        </ThemedSelect>
       </Field>
       <div className="pm-row" style={{ gap: 8, flexWrap: "wrap" }}>
         <button className="pm-btn" type="button" onClick={() => setCalendar("new")}>New business calendar</button>
@@ -77,15 +80,15 @@ function SlaSettingsForm({ desk, agents, initial, calendars, onCalendarChanged, 
       <h3>Escalation rules</h3>
       {policy.escalation.map((rule, index) => <fieldset key={index} style={{ border: "1px solid var(--border)", borderRadius: 8, marginBottom: 10 }}>
         <legend>Rule {index + 1}</legend>
-        <Field label="When" htmlFor={`sla-rule-${index}-on`}><select id={`sla-rule-${index}-on`} className="pm-input" value={rule.on} onChange={(e) => updateRule(index, { on: e.target.value as typeof rule.on })}><option value="AT_RISK">At risk</option><option value="BREACHED">Breached</option></select></Field>
-        <Field label="Clock" htmlFor={`sla-rule-${index}-metric`}><select id={`sla-rule-${index}-metric`} className="pm-input" value={rule.metric} onChange={(e) => updateRule(index, { metric: e.target.value as typeof rule.metric })}><option value="any">Any clock</option>{METRICS.map(([v, label]) => <option key={v} value={v}>{label}</option>)}</select></Field>
+        <Field label="When" htmlFor={`sla-rule-${index}-on`}><ThemedSelect id={`sla-rule-${index}-on`} className="pm-input" value={rule.on} onChange={(e) => updateRule(index, { on: e.target.value as typeof rule.on })}><option value="AT_RISK">At risk</option><option value="BREACHED">Breached</option></ThemedSelect></Field>
+        <Field label="Clock" htmlFor={`sla-rule-${index}-metric`}><ThemedSelect id={`sla-rule-${index}-metric`} className="pm-input" value={rule.metric} onChange={(e) => updateRule(index, { metric: e.target.value as typeof rule.metric })}><option value="any">Any clock</option>{METRICS.map(([v, label]) => <option key={v} value={v}>{label}</option>)}</ThemedSelect></Field>
         {rule.actions.map((action, a) => <div key={a} className="pm-field" style={{ marginBottom: 12 }}>
           <label htmlFor={`sla-rule-${index}-action-${a}`}>Action {a + 1}</label>
-          <select id={`sla-rule-${index}-action-${a}`} className="pm-input" value={action.type} onChange={(e) => {
+          <ThemedSelect id={`sla-rule-${index}-action-${a}`} className="pm-input" value={action.type} onChange={(e) => {
             const next: EscalationAction = e.target.value === "reassign" ? { type: "reassign", userId: agents[0]?.id ?? "" } : e.target.value === "notify" ? { type: "notify", userIds: [] } : { type: "raise_priority" };
             updateRule(index, { actions: rule.actions.map((current, j) => j === a ? next : current) });
-          }}><option value="raise_priority">Raise priority</option><option value="reassign">Reassign</option><option value="notify">Notify people</option></select>
-          {action.type === "reassign" && <select className="pm-input" aria-label={`Reassign rule ${index + 1} action ${a + 1}`} value={action.userId} onChange={(e) => updateRule(index, { actions: rule.actions.map((current, j) => j === a ? { type: "reassign", userId: e.target.value } : current) })}><option value="">Choose a person</option>{agents.map((person) => <option key={person.id} value={person.id}>{person.displayName}</option>)}</select>}
+          }}><option value="raise_priority">Raise priority</option><option value="reassign">Reassign</option><option value="notify">Notify people</option></ThemedSelect>
+          {action.type === "reassign" && <ThemedSelect className="pm-input" aria-label={`Reassign rule ${index + 1} action ${a + 1}`} value={action.userId} onChange={(e) => updateRule(index, { actions: rule.actions.map((current, j) => j === a ? { type: "reassign", userId: e.target.value } : current) })}><option value="">Choose a person</option>{agents.map((person) => <option key={person.id} value={person.id}>{person.displayName}</option>)}</ThemedSelect>}
           {action.type === "notify" && <div aria-label={`Notify rule ${index + 1} action ${a + 1}`}>{agents.map((person) => <label key={person.id} style={{ display: "block" }}><input type="checkbox" checked={action.userIds.includes(person.id)} onChange={(e) => updateRule(index, { actions: rule.actions.map((current, j) => j === a ? { type: "notify", userIds: e.target.checked ? [...action.userIds, person.id] : action.userIds.filter((id) => id !== person.id) } : current) })} /> {person.displayName}</label>)}</div>}
           {rule.actions.length > 1 && <button className="pm-btn sm" type="button" onClick={() => updateRule(index, { actions: rule.actions.filter((_, j) => j !== a) })}>Remove action</button>}
         </div>)}
@@ -93,8 +96,8 @@ function SlaSettingsForm({ desk, agents, initial, calendars, onCalendarChanged, 
       </fieldset>)}
       <button className="pm-btn" type="button" disabled={policy.escalation.length >= 20} onClick={() => setPolicy({ ...policy, escalation: [...policy.escalation, { on: "BREACHED", metric: "any", actions: [{ type: "raise_priority" }] }] })}>Add escalation rule</button>
       <h3>New ticket assignment</h3>
-      <Field label="Assignment" htmlFor="sla-assignment"><select id="sla-assignment" className="pm-input" value={assignment.mode} onChange={(e) => setAssignment({ ...assignment, mode: e.target.value as typeof assignment.mode })}><option value="MANUAL">Manual</option><option value="ROUND_ROBIN">Round robin</option><option value="LEAST_OPEN">Fewest open tickets</option></select></Field>
-      <Field label="Department" htmlFor="sla-department"><select id="sla-department" className="pm-input" value={assignment.departmentId ?? ""} onChange={(e) => setAssignment({ ...assignment, departmentId: e.target.value || null })}><option value="">Keep desk department</option>{(departments ?? []).filter((d) => d.kind !== "HOUSEHOLD").map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}</select></Field>
+      <Field label="Assignment" htmlFor="sla-assignment"><ThemedSelect id="sla-assignment" className="pm-input" value={assignment.mode} onChange={(e) => setAssignment({ ...assignment, mode: e.target.value as typeof assignment.mode })}><option value="MANUAL">Manual</option><option value="ROUND_ROBIN">Round robin</option><option value="LEAST_OPEN">Fewest open tickets</option></ThemedSelect></Field>
+      <Field label="Department" htmlFor="sla-department"><ThemedSelect id="sla-department" className="pm-input" value={assignment.departmentId ?? ""} onChange={(e) => setAssignment({ ...assignment, departmentId: e.target.value || null })}><option value="">Keep desk department</option>{(departments ?? []).filter((d) => d.kind !== "HOUSEHOLD").map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}</ThemedSelect></Field>
       {assignment.mode !== "MANUAL" && <Field label="Assignment pool" hint="Only currently eligible Support agents receive new tickets.">{agents.map((person) => <label key={person.id} style={{ display: "block" }}><input type="checkbox" checked={assignment.memberIds.includes(person.id)} onChange={(e) => setAssignment({ ...assignment, memberIds: e.target.checked ? [...assignment.memberIds, person.id] : assignment.memberIds.filter((id) => id !== person.id) })} /> {person.displayName}</label>)}</Field>}
       <button className="pm-btn primary" type="button" disabled={assignment.mode !== "MANUAL" && assignment.memberIds.length === 0} onClick={() => void save()}>{busy ? "Saving…" : "Save service levels"}</button>
       {saved && <p role="status">Service levels saved.</p>}
@@ -126,7 +129,7 @@ function CalendarEditor({ initial, onClose, onSaved }: { initial: BusinessCalend
     <Field label="Time zone" htmlFor="calendar-zone" hint="Use an IANA name such as America/Los_Angeles."><input id="calendar-zone" className="pm-input" value={value.timezone} onChange={(e) => setValue({ ...value, timezone: e.target.value })} /></Field>
     <h3>Weekly hours</h3><p className="sp-hint">End 24:00 means midnight. An end earlier than the start continues into the next day. Holidays exclude windows that start on that date.</p>
     {value.windows.map((window, index) => <div key={index} className="pm-row" style={{ gap: 6, marginBottom: 8, flexWrap: "wrap" }}>
-      <select className="pm-input" aria-label={`Day ${index + 1}`} value={window.day} onChange={(e) => setValue({ ...value, windows: value.windows.map((w, i) => i === index ? { ...w, day: Number(e.target.value) } : w) })} style={{ width: "auto" }}>{DAYS.map((day, i) => <option key={day} value={i}>{day}</option>)}</select>
+      <ThemedSelect className="pm-input" aria-label={`Day ${index + 1}`} value={window.day} onChange={(e) => setValue({ ...value, windows: value.windows.map((w, i) => i === index ? { ...w, day: Number(e.target.value) } : w) })} style={{ width: "auto" }}>{DAYS.map((day, i) => <option key={day} value={i}>{day}</option>)}</ThemedSelect>
       {(["start", "end"] as const).map((key) => <input key={key} className="pm-input" aria-label={`${key === "start" ? "Start" : "End"} ${index + 1}`} value={window[key]} placeholder="HH:MM" maxLength={5} onChange={(e) => setValue({ ...value, windows: value.windows.map((w, i) => i === index ? { ...w, [key]: e.target.value } : w) })} style={{ width: 85 }} />)}
       <button className="pm-btn sm" type="button" aria-label={`Remove hours ${index + 1}`} onClick={() => setValue({ ...value, windows: value.windows.filter((_, i) => i !== index) })}>Remove</button>
     </div>)}
@@ -145,5 +148,5 @@ function SlaReportPanel({ deskId }: { deskId: string }): JSX.Element {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const load = async () => { if (busy) return; setBusy(true); setError(null); setReport(null); try { setReport(await slaActions.report(deskId, from, to)); } catch (e) { setError(translateError(e, "support")); } finally { setBusy(false); } };
-  return <section aria-label="SLA attainment" style={{ marginTop: 24 }}><h3>SLA attainment</h3><p className="sp-hint">Completed tickets created in the date range, at most 366 days. Active tickets appear in the status counts.</p><div className="pm-row" style={{ gap: 8, flexWrap: "wrap" }}><label>From <input className="pm-input" type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></label><label>To <input className="pm-input" type="date" value={to} onChange={(e) => setTo(e.target.value)} /></label><button className="pm-btn" type="button" disabled={busy || !from || !to || from > to} onClick={() => void load()}>{busy ? "Loading…" : "Show attainment"}</button></div><ErrorStrip message={error} />{report && <div role="status"><p>{report.total} tickets · {report.met} met · {report.breached} breached · {report.attainmentPercent === null ? "No measured tickets" : `${report.attainmentPercent}% attainment`}</p><ul>{Object.entries(report.statusCounts).map(([status, count]) => <li key={status}>{status.replaceAll("_", " ").toLowerCase()}: {count}</li>)}</ul></div>}</section>;
+  return <section aria-label="SLA attainment" style={{ marginTop: 24 }}><h3>SLA attainment</h3><p className="sp-hint">Completed tickets created in the date range, at most 366 days. Active tickets appear in the status counts.</p><div className="pm-row" style={{ gap: 8, flexWrap: "wrap" }}><label>From <ThemedDateInput className="pm-input" type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></label><label>To <ThemedDateInput className="pm-input" type="date" value={to} onChange={(e) => setTo(e.target.value)} /></label><button className="pm-btn" type="button" disabled={busy || !from || !to || from > to} onClick={() => void load()}>{busy ? "Loading…" : "Show attainment"}</button></div><ErrorStrip message={error} />{report && <div role="status"><p>{report.total} tickets · {report.met} met · {report.breached} breached · {report.attainmentPercent === null ? "No measured tickets" : `${report.attainmentPercent}% attainment`}</p><ul>{Object.entries(report.statusCounts).map(([status, count]) => <li key={status}>{status.replaceAll("_", " ").toLowerCase()}: {count}</li>)}</ul></div>}</section>;
 }

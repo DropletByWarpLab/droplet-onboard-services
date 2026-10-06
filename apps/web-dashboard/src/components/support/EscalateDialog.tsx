@@ -12,6 +12,7 @@ import { useProjects } from "@/components/projects/usePm";
 import { ErrorStrip, Field, ModalFooter } from "./form-bits";
 import { supportActions } from "./useSupport";
 import type { Ticket } from "./types";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 export function EscalateDialog({
   ticket,
@@ -67,14 +68,14 @@ export function EscalateDialog({
         ) : (
           <>
             <Field label="Project" htmlFor="esc-project">
-              <select id="esc-project" className="pm-input" value={projectId} onChange={(e) => setProjectId(e.target.value)} disabled={isLoading}>
+              <ThemedSelect id="esc-project" className="pm-input" value={projectId} onChange={(e) => setProjectId(e.target.value)} disabled={isLoading}>
                 <option value="">{isLoading ? "Loading projects…" : choices.length ? "Choose a project" : "No projects yet"}</option>
                 {choices.map((p) => (
                   <option key={p.id} value={p.id}>
                     {p.name} ({p.identifier})
                   </option>
                 ))}
-              </select>
+              </ThemedSelect>
             </Field>
             <Field label="Title" htmlFor="esc-title">
               <input id="esc-title" className="pm-input" value={title} maxLength={500} onChange={(e) => setTitle(e.target.value)} />

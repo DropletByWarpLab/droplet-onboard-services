@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import { ChevronDown, Filter, X } from "lucide-react";
 import type { CameraInfo, EventFilter } from "@/lib/types";
 import { BusinessHoursFilter } from "./BusinessHoursFilter";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 interface Props {
   cameras: CameraInfo[];
@@ -205,7 +206,7 @@ export function EventFilterBar({ cameras, knownLabels, filter, onChange, busines
             {/* Time preset */}
             <div>
               <div className="type-caption-2 text-[color:var(--text-muted)] mb-1.5">When</div>
-              <select
+              <ThemedSelect
                 value={activePreset}
                 onChange={(e) => setTimePreset(e.target.value)}
                 className="w-full h-9 px-2 type-footnote outline-none focus:ring-2 focus:ring-[var(--brand)]"
@@ -221,7 +222,7 @@ export function EventFilterBar({ cameras, knownLabels, filter, onChange, busines
                     {p.label}
                   </option>
                 ))}
-              </select>
+              </ThemedSelect>
             </div>
 
             {/* Score floor */}

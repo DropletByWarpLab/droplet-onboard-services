@@ -16,6 +16,7 @@ import { PropRow } from "./PropRow";
 import { DateField, DraftInput } from "./fields";
 import type { ItemSave } from "./useItemSave";
 import type { PersonOption } from "./pickers/PeoplePicker";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 const NONE = "";
 const NOT_SET = <span style={{ fontSize: 12.5, color: "var(--text-4)" }}>Not set</span>;
@@ -164,7 +165,7 @@ function FieldEditor({
       );
     case "boolean":
       return (
-        <select
+        <ThemedSelect
           className="pm-input sm"
           style={{ width: "auto" }}
           aria-label={label}
@@ -175,11 +176,11 @@ function FieldEditor({
           <option value={NONE}>Not set</option>
           <option value="yes">Yes</option>
           <option value="no">No</option>
-        </select>
+        </ThemedSelect>
       );
     case "select":
       return (
-        <select
+        <ThemedSelect
           className="pm-input sm"
           style={{ width: "auto", maxWidth: "100%" }}
           aria-label={label}
@@ -193,7 +194,7 @@ function FieldEditor({
               {o.label}
             </option>
           ))}
-        </select>
+        </ThemedSelect>
       );
     case "multi_select": {
       const chosen = optionIds(value);
@@ -230,7 +231,7 @@ function FieldEditor({
       const options = [...(people ?? [])];
       if (current && !options.some((p) => p.id === current)) options.unshift({ id: current, name: person(current).name });
       return (
-        <select
+        <ThemedSelect
           className="pm-input sm"
           style={{ width: "auto", maxWidth: "100%" }}
           aria-label={label}
@@ -244,7 +245,7 @@ function FieldEditor({
               {p.name}
             </option>
           ))}
-        </select>
+        </ThemedSelect>
       );
     }
   }

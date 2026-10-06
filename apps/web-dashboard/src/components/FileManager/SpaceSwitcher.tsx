@@ -1,9 +1,9 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   Building2,
+  Check,
   ChevronDown,
   Eye,
   FolderLock,
@@ -13,6 +13,8 @@ import {
   Users,
   type LucideIcon,
 } from "lucide-react";
+import { useMenuButton } from "@/components/ui/useMenuButton";
+import "@/components/ui/pick-menu.css";
 import type { FileSpace, FileSpaceId } from "@/lib/types";
 // WARP-1808 — display-only "Workspace" mapping for the household space, used
 // at RENDER SITES ONLY. Grouping and parent lookups below (`teamsByParent`,
@@ -100,32 +102,12 @@ export function SpaceSwitcher({
   onChange,
   isOwnerOrAdmin = false,
 }: SpaceSwitcherProps) {
-  const [menuOpen, setMenuOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement | null>(null);
+  const menu = useMenuButton({ minWidth: 320 });
 
   const activeVisible = spaces.filter(isActiveState);
   const nonActiveVisible = spaces.filter(
     (s) => !isActiveState(s) && isVisibleNonActive(s, isOwnerOrAdmin)
   );
-
-  // Light dismiss + Esc on the Spaces menu.
-  useEffect(() => {
-    if (!menuOpen) return;
-    const onDown = (e: MouseEvent) => {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
-        setMenuOpen(false);
-      }
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setMenuOpen(false);
-    };
-    document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [menuOpen]);
 
   // Nothing to switch between → don't show a lone control. Same predicate
   // the Files page uses to decide the root breadcrumb's fate (WARP-1910).
@@ -200,21 +182,21 @@ export function SpaceSwitcher({
         key={space.id}
         type="button"
         role="menuitem"
+        tabIndex={-1}
         aria-disabled={disabled || undefined}
+        aria-current={isActive || undefined}
         onClick={() => {
           if (disabled) return;
           onChange(space.id);
-          setMenuOpen(false);
+          menu.close(true);
         }}
-        className={`flex items-center gap-2.5 w-full text-left px-2.5 py-2 rounded-md type-footnote transition-colors ${
-          indent ? "pl-7" : ""
-        } ${
-          disabled
-            ? "text-label-tertiary cursor-default"
-            : isActive
-            ? "bg-accent-subtle text-accent font-medium"
-            : "text-label-primary hover:bg-accent-subtle"
-        }`}
+        className="pick-item type-footnote transition-colors"
+        style={{
+          paddingLeft: indent ? 28 : undefined,
+          background: isActive ? "var(--brand-subtle)" : undefined,
+          color: isActive ? "var(--brand)" : undefined,
+          fontWeight: isActive ? 500 : undefined,
+        }}
       >
         <Icon
           size={14}
@@ -239,23 +221,48 @@ export function SpaceSwitcher({
           </span>
         )}
         {!disabled && space.right && <RightChip right={space.right} />}
+        {isActive && <Check size={14} className="pick-check" aria-hidden="true" />}
       </button>
     );
   };
 
   return (
-    <div role="tablist" aria-label="File space" className="pills" ref={rootRef}>
-      {pinned.map((space) => {
-        const Icon = iconForSpace(space);
-        const isActive = space.id === active;
-        return (
+    <div className="relative inline-flex min-w-0" ref={menu.rootRef}>
+      <div role="tablist" aria-label="File space" className="pills">
+        {pinned.map((space) => {
+          const Icon = iconForSpace(space);
+          const isActive = space.id === active;
+          return (
+            <button
+              key={space.id}
+              type="button"
+              role="tab"
+              aria-selected={isActive}
+              onClick={() => onChange(space.id)}
+              className={isActive ? "active" : undefined}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+                whiteSpace: "nowrap",
+              }}
+            >
+              <Icon size={14} aria-hidden="true" />
+              {spaceRenderName(space)}
+            </button>
+          );
+        })}
+
+        <div className="relative">
           <button
-            key={space.id}
+            ref={menu.buttonRef}
             type="button"
-            role="tab"
-            aria-selected={isActive}
-            onClick={() => onChange(space.id)}
-            className={isActive ? "active" : undefined}
+            aria-haspopup="menu"
+            aria-expanded={menu.open}
+            aria-controls={menu.open ? menu.menuId : undefined}
+            onClick={menu.onButtonClick}
+            onKeyDown={menu.onButtonKeyDown}
+            className={activeIsInMenu ? "active" : undefined}
             style={{
               display: "inline-flex",
               alignItems: "center",
@@ -263,63 +270,50 @@ export function SpaceSwitcher({
               whiteSpace: "nowrap",
             }}
           >
-            <Icon size={14} aria-hidden="true" />
-            {spaceRenderName(space)}
+            <Building2 size={14} aria-hidden="true" />
+            <span className="max-w-[9rem] truncate">{triggerLabel}</span>
+            <ChevronDown size={12} aria-hidden="true" />
           </button>
-        );
-      })}
-
-      <div className="relative">
-        <button
-          type="button"
-          aria-haspopup="menu"
-          aria-expanded={menuOpen}
-          onClick={() => setMenuOpen((v) => !v)}
-          className={activeIsInMenu ? "active" : undefined}
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            gap: 6,
-            whiteSpace: "nowrap",
-          }}
-        >
-          <Building2 size={14} aria-hidden="true" />
-          <span className="max-w-[9rem] truncate">{triggerLabel}</span>
-          <ChevronDown size={12} aria-hidden="true" />
-        </button>
-
-        {menuOpen && (
-          <div
-            role="menu"
-            aria-label="Spaces"
-            className="absolute left-0 top-[calc(100%+6px)] z-30 w-80 max-w-[85vw] p-1.5 bg-surface-elevated border border-separator rounded-lg shadow-lg"
-          >
-            <div className="px-2 pt-1.5 pb-1 type-caption-1 uppercase tracking-wider text-label-tertiary">
-              Departments
-            </div>
-            {departments.length === 0 && orphanTeams.length === 0 ? (
-              <div className="px-2.5 py-3 type-footnote text-label-tertiary">
-                No department libraries yet.
-              </div>
-            ) : (
-              departments.map((dept) => {
-                const kids = teamsByParent.get(dept.name) ?? [];
-                return (
-                  <div key={dept.id}>
-                    {renderRow(dept, false)}
-                    {kids.length > 0 && (
-                      <div className="ml-[19px] border-l border-separator">
-                        {kids.map((team) => renderRow(team, true))}
-                      </div>
-                    )}
-                  </div>
-                );
-              })
-            )}
-            {orphanTeams.map((team) => renderRow(team, false))}
-          </div>
-        )}
+        </div>
       </div>
+
+      {menu.open && (
+        <div
+          ref={menu.menuRef}
+          id={menu.menuId}
+          role="menu"
+          aria-label="Spaces"
+          className="pick-menu"
+          data-placement="below"
+          data-align={menu.align}
+          style={{ width: 320 }}
+          onKeyDown={menu.onMenuKeyDown}
+        >
+          <div className="px-2 pt-1.5 pb-1 type-caption-1 uppercase tracking-wider text-label-tertiary">
+            Departments
+          </div>
+          {departments.length === 0 && orphanTeams.length === 0 ? (
+            <div className="px-2.5 py-3 type-footnote text-label-tertiary">
+              No department libraries yet.
+            </div>
+          ) : (
+            departments.map((dept) => {
+              const kids = teamsByParent.get(dept.name) ?? [];
+              return (
+                <div key={dept.id}>
+                  {renderRow(dept, false)}
+                  {kids.length > 0 && (
+                    <div className="ml-[19px] border-l border-separator">
+                      {kids.map((team) => renderRow(team, true))}
+                    </div>
+                  )}
+                </div>
+              );
+            })
+          )}
+          {orphanTeams.map((team) => renderRow(team, false))}
+        </div>
+      )}
     </div>
   );
 }

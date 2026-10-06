@@ -324,7 +324,7 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
             }}
             style={
               action.destructive && !action.disabled
-                ? { color: "var(--danger)" }
+                ? { color: "var(--danger-ink)" }
                 : undefined
             }
             className={`w-full flex items-center gap-3 px-3 py-2 text-left text-[13px]

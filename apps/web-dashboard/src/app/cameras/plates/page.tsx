@@ -240,7 +240,7 @@ export default function PlatesPage() {
                   <button
                     onClick={() => handleDelete(p)}
                     disabled={busy === p.plate}
-                    className="p-1.5 rounded hover:bg-[rgba(239,68,68,0.1)] text-[color:var(--text-muted)] hover:text-[color:var(--danger)]"
+                    className="p-1.5 rounded hover:bg-[rgba(239,68,68,0.1)] text-[color:var(--text-muted)] hover:text-[color:var(--danger-ink)]"
                     title="Forget plate"
                   >
                     <Trash2 size={12} />

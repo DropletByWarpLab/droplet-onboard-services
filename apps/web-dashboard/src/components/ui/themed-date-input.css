@@ -1,0 +1,123 @@
+/* Preserve each native field's sizing and editable date/time segments. */
+:where(.themed-date-field) {
+  position: relative;
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+  width: 100%;
+  vertical-align: middle;
+}
+.themed-date-field > input.themed-date-input {
+  min-width: 0;
+  max-width: 100%;
+  width: 100%;
+  padding-inline-end: 36px !important;
+}
+.themed-date-input::-webkit-calendar-picker-indicator { display: none; }
+.themed-date-trigger {
+  position: absolute;
+  inset-inline-end: 2px;
+  top: 2px;
+  bottom: 2px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-input, 8px);
+  background: transparent;
+  color: var(--text-muted, var(--color-label-secondary));
+  cursor: pointer;
+}
+.themed-date-trigger:hover { background: var(--hover, var(--color-surface-secondary)); color: var(--text, var(--color-label-primary)); }
+.themed-date-trigger:focus-visible { outline: 2px solid var(--brand, var(--aurora-ink)); outline-offset: -2px; }
+.themed-date-trigger:disabled { opacity: .5; cursor: default; }
+
+/* A top-layer calendar inherits the same opaque tone and spacing as selects. */
+.themed-date-popup {
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  z-index: 100;
+  box-sizing: border-box;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 6px;
+  border: 0;
+  border-radius: 14px;
+  background: var(--date-surface);
+  color: var(--date-text);
+  font-family: var(--font-inter), sans-serif;
+  font-size: 13px;
+  text-align: left;
+  box-shadow: 0 16px 40px -12px rgba(0, 0, 0, .35), 0 2px 10px rgba(0, 0, 0, .08);
+  --surface: var(--date-surface);
+  --surface-2: var(--date-hover);
+  --text: var(--date-text);
+  --text-muted: var(--date-muted);
+  --brand: var(--date-brand);
+}
+.themed-date-header {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) 82px 30px;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0 6px;
+}
+.themed-date-nav {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 36px;
+  flex: none;
+  padding: 0;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--date-muted);
+  cursor: pointer;
+}
+/* Keep selected text inside its track and clear of the shared select chevron. */
+.themed-date-header .themed-select {
+  width: 100%;
+  min-width: 0;
+  min-height: 36px;
+  padding: 6px 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.themed-date-grid { display: flex; flex-direction: column; gap: 2px; }
+.themed-date-week, .themed-date-weekdays { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 2px; }
+.themed-date-weekdays { color: var(--date-muted); text-align: center; font-size: 11.5px; padding: 4px 0; }
+.themed-date-day {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  width: 100%;
+  min-height: 34px;
+  padding: 4px 0;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--date-text);
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+.themed-date-day[data-outside="true"] { color: var(--date-muted); }
+.themed-date-day[data-today="true"] { box-shadow: inset 0 0 0 1px var(--date-brand); }
+.themed-date-day[aria-pressed="true"] { background: var(--date-fill, var(--date-brand)); color: var(--date-ink, var(--date-text)); }
+.themed-date-nav:hover, .themed-date-day:not([aria-pressed="true"]):not([aria-disabled="true"]):hover, .themed-date-action:hover { background: var(--date-hover); }
+.themed-date-day[aria-disabled="true"], .themed-date-nav:disabled, .themed-date-action:disabled { opacity: .4; cursor: default; }
+.themed-date-nav:focus-visible, .themed-date-day:focus-visible, .themed-date-action:focus-visible { outline: 2px solid var(--date-brand); outline-offset: -2px; }
+.themed-date-footer { display: flex; justify-content: space-between; gap: 6px; padding-top: 6px; }
+.themed-date-action { padding: 6px 10px; min-height: 34px; border: 0; border-radius: 9px; background: transparent; color: var(--date-text); font: inherit; cursor: pointer; }
+@media (pointer: coarse) {
+  .themed-date-day, .themed-date-action { min-height: 44px; }
+  .themed-date-header .themed-select { min-height: 44px; }
+  .themed-date-nav { height: 44px; }
+}

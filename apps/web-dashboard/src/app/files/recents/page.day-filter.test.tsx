@@ -77,7 +77,7 @@ const JUL23_HEADING = new Date(2026, 6, 23).toLocaleDateString(undefined, {
 });
 
 const pickDay = (day: string) =>
-  fireEvent.change(screen.getByLabelText(/jump to a day/i), {
+  fireEvent.change(screen.getByLabelText(/jump to a day/i, { selector: "input" }), {
     target: { value: day },
   });
 

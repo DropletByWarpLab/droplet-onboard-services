@@ -10,6 +10,7 @@ import {
   fetchNetworkOperation,
 } from "@/lib/api";
 import type { NetworkCommandResult } from "@/lib/types";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 /**
  * Firewall authoring (Droplet Design System · Network · Firewall). Two writes:
@@ -143,23 +144,23 @@ export function FirewallRuleForm({ zones, onApplied }: { zones: string[]; onAppl
         </label>
         <label className="type-caption-1 text-[color:var(--text-muted)]">
           From
-          <select className={`${INPUT_CLASS} mt-1`} style={INPUT_STYLE} value={src} onChange={(e) => setSrc(e.target.value)}>
+          <ThemedSelect className={`${INPUT_CLASS} mt-1`} style={INPUT_STYLE} value={src} onChange={(e) => setSrc(e.target.value)}>
             {zoneOpts.map((z) => <option key={z} value={z}>{z}</option>)}
-          </select>
+          </ThemedSelect>
         </label>
         <label className="type-caption-1 text-[color:var(--text-muted)]">
           To
-          <select className={`${INPUT_CLASS} mt-1`} style={INPUT_STYLE} value={dest} onChange={(e) => setDest(e.target.value)}>
+          <ThemedSelect className={`${INPUT_CLASS} mt-1`} style={INPUT_STYLE} value={dest} onChange={(e) => setDest(e.target.value)}>
             {zoneOpts.map((z) => <option key={z} value={z}>{z}</option>)}
-          </select>
+          </ThemedSelect>
         </label>
         <label className="type-caption-1 text-[color:var(--text-muted)]">
           Protocol
-          <select className={`${INPUT_CLASS} mt-1`} style={INPUT_STYLE} value={proto} onChange={(e) => setProto(e.target.value)}>
+          <ThemedSelect className={`${INPUT_CLASS} mt-1`} style={INPUT_STYLE} value={proto} onChange={(e) => setProto(e.target.value)}>
             <option value="tcp">TCP</option>
             <option value="udp">UDP</option>
             <option value="tcpudp">TCP + UDP</option>
-          </select>
+          </ThemedSelect>
         </label>
         <label className="type-caption-1 text-[color:var(--text-muted)]">
           Dest port
@@ -167,9 +168,9 @@ export function FirewallRuleForm({ zones, onApplied }: { zones: string[]; onAppl
         </label>
         <label className="type-caption-1 text-[color:var(--text-muted)]">
           Action
-          <select className={`${INPUT_CLASS} mt-1`} style={INPUT_STYLE} value={target} onChange={(e) => setTarget(e.target.value as Target)}>
+          <ThemedSelect className={`${INPUT_CLASS} mt-1`} style={INPUT_STYLE} value={target} onChange={(e) => setTarget(e.target.value as Target)}>
             {TARGETS.map((t) => <option key={t} value={t}>{t}</option>)}
-          </select>
+          </ThemedSelect>
         </label>
       </div>
       <button ref={submitRef} type="button" onClick={handleSubmit} disabled={status.kind === "saving"} className="btn primary mt-3">
@@ -271,7 +272,7 @@ export function ZonePolicyEditor({
           {(["input", "output", "forward"] as const).map((k) => (
             <label key={k} className="type-caption-2 text-[color:var(--text-muted)] capitalize">
               {k}
-              <select
+              <ThemedSelect
                 className={`${INPUT_CLASS} mt-0.5 block`}
                 style={INPUT_STYLE}
                 value={policy[k]}
@@ -279,7 +280,7 @@ export function ZonePolicyEditor({
                 aria-label={`${zone} ${k} policy`}
               >
                 {TARGETS.map((t) => <option key={t} value={t}>{t}</option>)}
-              </select>
+              </ThemedSelect>
             </label>
           ))}
           <button type="button" className="btn primary sm" onClick={handleSave} disabled={status.kind === "saving"}>

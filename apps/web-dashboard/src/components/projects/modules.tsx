@@ -1,4 +1,6 @@
 "use client";
+import { ThemedDateInput } from "@/components/ui/ThemedDateInput";
+
 
 // Modules (milestones / epics) — grouping work beyond the sprint boundary,
 // WARP-3521. Replaces the "Modules aren't ready yet" placeholder (design brief
@@ -30,6 +32,7 @@ import {
   useProjectModules,
 } from "./usePm";
 import type { ModuleStatus, PmModule, PmProject, PmWorkItem } from "./types";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 /** The most items one "Add" call may carry — the API's own bound. */
 export const MAX_ADD = 200;
@@ -222,18 +225,18 @@ function ModuleFormDialog({
         <div className="pm-row" style={{ gap: 12, alignItems: "flex-start" }}>
           <div style={{ flex: 1 }}>
             <Field label="Status" htmlFor={statusId}>
-              <select id={statusId} className="pm-input" value={status} onChange={(e) => setStatus(e.target.value as ModuleStatus)}>
+              <ThemedSelect id={statusId} className="pm-input" value={status} onChange={(e) => setStatus(e.target.value as ModuleStatus)}>
                 {MODULE_STATUS_ORDER.map((s) => (
                   <option key={s} value={s}>
                     {MODULE_STATUS_LABEL[s]}
                   </option>
                 ))}
-              </select>
+              </ThemedSelect>
             </Field>
           </div>
           <div style={{ flex: 1 }}>
             <Field label="Lead" htmlFor={leadId}>
-              <select id={leadId} className="pm-input" value={lead} onChange={(e) => setLead(e.target.value)}>
+              <ThemedSelect id={leadId} className="pm-input" value={lead} onChange={(e) => setLead(e.target.value)}>
                 <option value="">No lead</option>
                 {leadMissing && <option value={lead}>{person(lead).name}</option>}
                 {leads.map((u) => (
@@ -241,19 +244,19 @@ function ModuleFormDialog({
                     {u.displayName}
                   </option>
                 ))}
-              </select>
+              </ThemedSelect>
             </Field>
           </div>
         </div>
         <div className="pm-row" style={{ gap: 12, alignItems: "flex-start" }}>
           <div style={{ flex: 1 }}>
             <Field label="Start date" htmlFor={startId}>
-              <input id={startId} className="pm-input pm-mono" type="date" value={start} onChange={(e) => setStart(e.target.value)} />
+              <ThemedDateInput id={startId} className="pm-input pm-mono" type="date" value={start} onChange={(e) => setStart(e.target.value)} />
             </Field>
           </div>
           <div style={{ flex: 1 }}>
             <Field label="Target date" htmlFor={targetId} error={tried || start || target ? errors.dates : undefined}>
-              <input id={targetId} className="pm-input pm-mono" type="date" value={target} onChange={(e) => setTarget(e.target.value)} />
+              <ThemedDateInput id={targetId} className="pm-input pm-mono" type="date" value={target} onChange={(e) => setTarget(e.target.value)} />
             </Field>
           </div>
         </div>

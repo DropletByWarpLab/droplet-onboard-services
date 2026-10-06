@@ -24,6 +24,7 @@ import { Dialog } from "@/components/Dialog";
 import { createDepartment, createTeam } from "@/lib/api";
 import { storageInputToBytes, type StorageUnit } from "@/lib/storage-units";
 import type { Department } from "@/lib/types";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 
 /** Client-side slug preview only — the server (nameToSlug in
  *  routes/departments.ts) is the authoritative slug generator. */
@@ -213,16 +214,16 @@ export function CreateLibraryDialog({
               className="flex-1 px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow"
               style={fieldStyle}
             />
-            <select
+            <ThemedSelect
               value={quota.unit}
               onChange={(e) => setQuota((q) => ({ ...q, unit: e.target.value as StorageUnit }))}
               aria-label="Quota unit"
-              className="px-2.5 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow"
+              className="w-auto px-2.5 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-shadow"
               style={fieldStyle}
             >
               <option value="GB">GB</option>
               <option value="TB">TB</option>
-            </select>
+            </ThemedSelect>
           </div>
         </div>
         {error && (
