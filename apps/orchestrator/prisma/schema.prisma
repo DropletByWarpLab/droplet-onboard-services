@@ -4230,6 +4230,9 @@ model EmailAccount {
   passwordEnc String?
   authMode    MailboxAuthMode @default(PASSWORD)
   googleConnection GoogleConnection?
+  m365Connection M365Connection?
+  m365MailFolders M365MailFolder[]
+  m365MailMemberships M365MailMembership[]
   imapStatus  EmailImapStatus @default(paused)
   lastIdleAt  DateTime?
   lastErrorAt DateTime?
@@ -4292,6 +4295,13 @@ model EmailMessage {
   threadId   String
   thread     EmailThread  @relation(fields: [threadId], references: [id], onDelete: Cascade)
   messageId  String
+  /// Provider identity is case-sensitive; RFC Message-ID is retained separately.
+  providerMessageId String?
+  internetMessageId String?
+  hasAttachments Boolean @default(false)
+  /// Metadata only. Attachment bytes remain with the provider.
+  externalAttachmentMetadata Json?
+  m365MailMemberships M365MailMembership[]
   inReplyTo  String?
   fromAddr   String
   fromName   String?
@@ -4361,6 +4371,7 @@ model EmailMessage {
   ticketLink PmTicketEmailLink?
 
   @@unique([accountId, messageId])
+  @@unique([accountId, providerMessageId])
   @@index([threadId, receivedAt(sort: Desc)])
   @@index([extractStatus, receivedAt])
   /// The desk sweep's claim: one mailbox's pending mail, oldest first.
@@ -9242,6 +9253,10 @@ model M365Connection {
   userId String @unique
 
   state M365ConnectionState @default(DISCONNECTED)
+  mailEnabled Boolean @default(false)
+  mailSyncState CloudMailSyncState @default(DISCONNECTED)
+  emailAccountId String? @unique
+  emailAccount EmailAccount? @relation(fields: [emailAccountId], references: [id], onDelete: SetNull)
   /// The person's explicit opt-in to a read-only local calendar copy.
   calendarEnabled Boolean @default(false)
   calendarSyncState CloudCalendarSyncState @default(DISCONNECTED)
@@ -10748,6 +10763,40 @@ enum BriefingTrigger {
 enum MailboxAuthMode {
   PASSWORD
   GOOGLE_OAUTH
+  M365_GRAPH
+}
+
+enum CloudMailSyncState {
+  DISCONNECTED
+  WAITING
+  CONNECTED
+  NEEDS_RECONNECT
+  ERROR
+}
+
+/// Folder membership follows Graph delta; archived messages survive remote moves/deletes.
+model M365MailFolder {
+  id String @id @default(uuid())
+  accountId String
+  account EmailAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  folderId String
+  externalSyncRun String?
+  lastSyncAt DateTime?
+  lastError String?
+  @@unique([accountId, folderId])
+}
+
+model M365MailMembership {
+  id String @id @default(uuid())
+  accountId String
+  account EmailAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  folderId String
+  providerMessageId String
+  messageId String
+  message EmailMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  externalSeenRun String?
+  @@unique([accountId, folderId, providerMessageId])
+  @@index([messageId])
 }
 
 enum CloudOAuthProvider {

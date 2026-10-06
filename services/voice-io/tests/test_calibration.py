@@ -135,6 +135,7 @@ class _FrameSpyDetector:
 
     loaded = True
     model_name = "spy"
+    load_error = None
 
     def __init__(self) -> None:
         self.frames: list[np.ndarray] = []

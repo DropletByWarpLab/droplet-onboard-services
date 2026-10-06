@@ -363,12 +363,33 @@ describe("GET /api/m365/callback", () => {
       .filter(Boolean) as NonNullable<Layer["route"]>[];
     // connection, connect, connect/device-code, disconnect — and, since WARP-3538,
     // the SharePoint switch, sync status and opt-in calendar switch.
-    expect(authed.length).toBe(7);
+    expect(authed.length).toBe(8);
     for (const r of authed) expect(guarded(r)).toBe(true);
 
     const open = (createM365CallbackRouter(fakePrisma() as never, fakeEntra()) as unknown as { stack: Layer[] }).stack
       .map((l) => l.route)
       .filter(Boolean) as NonNullable<Layer["route"]>[];
     expect(open.map((r) => r.path)).toEqual(["/m365/callback"]);
+  });
+});
+
+
+describe("PUT /api/m365/mail", () => {
+  it.each([{ enabled: "yes" }, { enabled: true, userId: "someone-else" }, {}])("requires a strict explicit choice %j", async (body) => {
+    const prisma = fakePrisma();
+    const entra = fakeEntra();
+    expect((await request(authedApp(prisma, entra)).put("/api/m365/mail").send(body)).status).toBe(400);
+    expect(prisma.m365Connection.updateMany).not.toHaveBeenCalled();
+    expect(entra.acquireSilent).not.toHaveBeenCalled();
+  });
+  it("records the signed-in person's missing-body-scope opt-in without reading provider data", async () => {
+    const prisma = fakePrisma({ userId: USER, state: "CONNECTED", mailEnabled: false, mailSyncState: "DISCONNECTED", emailAccountId: null,
+      grantedScopes: "Mail.ReadBasic", tokenCacheEnc: "sealed", cursorLinkHash: "link", connectedAt: null });
+    const entra = fakeEntra();
+    const res = await request(authedApp(prisma, entra, { id: USER, role: "family" })).put("/api/m365/mail").send({ enabled: true });
+    expect(res.status).toBe(200);
+    expect(res.body.mail).toMatchObject({ enabled: true, state: "NEEDS_RECONNECT", needsConsent: true, mailboxId: null, messageCount: 0 });
+    expect(prisma.__row()).toMatchObject({ userId: USER, mailEnabled: true });
+    expect(entra.acquireSilent).not.toHaveBeenCalled();
   });
 });

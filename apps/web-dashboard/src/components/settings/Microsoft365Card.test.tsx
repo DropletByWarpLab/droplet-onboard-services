@@ -142,6 +142,7 @@ interface Box {
   del: () => unknown;
   /** `POST /api/m365/connect` */
   connect: () => unknown;
+  mailPut: (body: { enabled: boolean }) => unknown;
 }
 
 /** The box, answering by URL. A request a test did not expect throws. */
@@ -152,6 +153,7 @@ function serveBox(overrides: Partial<Box> = {}): Box {
     put: () => json({}),
     del: () => ({ ok: true, status: 204, json: async () => ({}) }),
     connect: () => json({ authorizeUrl: "https://sign-in.example/authorize?x=1" }),
+    mailPut: () => json({}),
     ...overrides,
   };
   authFetch.mockImplementation(async (url: string, init?: { method?: string; body?: string }) => {
@@ -166,6 +168,7 @@ function serveBox(overrides: Partial<Box> = {}): Box {
       return typeof box.sync === "number" ? json({}, box.sync) : json(box.sync);
     }
     if (url === "/api/m365/sharepoint" && method === "PUT") return answer(box.put(JSON.parse(init!.body!)));
+    if (url === "/api/m365/mail" && method === "PUT") return answer(box.mailPut(JSON.parse(init!.body!)));
     if (url === "/api/m365/connection" && method === "DELETE") return answer(box.del());
     if (url === "/api/m365/connect" && method === "POST") return answer(box.connect());
     throw new Error(`unexpected request: ${method} ${url}`);
@@ -327,9 +330,9 @@ describe("the callback outcome", () => {
     window.history.replaceState(null, "", "/settings?m365=different_account");
     serveBox({ view: view({ state: "NEEDS_RECONNECT", accountUpn: null, calendar: { enabled: true, state: "NEEDS_RECONNECT", lastSyncAt: null, lastError: null } }) });
     render(<Microsoft365Card />);
-    expect(await screen.findByTestId("m365-outcome")).toHaveTextContent(/disconnect the current one first.*calendar copies were kept/i);
+    expect(await screen.findByTestId("m365-outcome")).toHaveTextContent(/disconnect the current one first.*local copies were kept/i);
     fireEvent.click(screen.getByRole("button", { name: "Disconnect" }));
-    expect(await screen.findByTestId("confirm-dialog")).toHaveTextContent(/delete the calendar events copied locally/i);
+    expect(await screen.findByTestId("confirm-dialog")).toHaveTextContent(/delete its local email archive, attachment metadata, droplet drafts and imported calendar events/i);
     expect(callsTo("/api/m365/connection", "DELETE")).toHaveLength(0);
   });
 
@@ -1003,6 +1006,38 @@ describe("your files — keeping up while Droplet reads", () => {
     const atUnmount = sync();
     await new Promise((r) => setTimeout(r, 120));
     expect(sync()).toBe(atUnmount);
+  });
+});
+
+describe("Outlook local email import", () => {
+  const mailOff = { enabled: false, state: "DISCONNECTED", needsConsent: false, lastSyncAt: null, lastError: null, mailboxId: null, messageCount: 0 };
+  it("requires an explicit import switch after Microsoft authorization", async () => {
+    const box = serveBox({ view: connected({ mail: mailOff }) });
+    box.mailPut = (body) => { box.view = connected({ mail: { ...mailOff, enabled: body.enabled, state: "WAITING", mailboxId: "outlook-1" } }); return json({}); };
+    render(<Microsoft365Card />);
+    const toggle = await screen.findByRole("checkbox", { name: "Import Outlook emails into Droplet" });
+    expect(toggle).not.toBeChecked();
+    expect(callsTo("/api/m365/mail", "PUT")).toHaveLength(0);
+    fireEvent.click(toggle);
+    expect(await screen.findByText("Waiting for first email import…")).toBeInTheDocument();
+    expect(callsTo("/api/m365/mail", "PUT")).toHaveLength(1);
+    expect(screen.queryByRole("link", { name: "Open Outlook inbox" })).not.toBeInTheDocument();
+  });
+  it("polls the connection while waiting and opens the local inbox once messages land", async () => {
+    const box = serveBox({ view: connected({ mail: { ...mailOff, enabled: true, state: "WAITING", mailboxId: "outlook-1" } }) });
+    render(<Microsoft365Card mailPollMs={20} />);
+    await screen.findByText("Waiting for first email import…");
+    box.view = connected({ mail: { ...mailOff, enabled: true, state: "CONNECTED", mailboxId: "outlook-1", lastSyncAt: new Date().toISOString(), messageCount: 12 } });
+    expect(await screen.findByRole("link", { name: "Open Outlook inbox" })).toHaveAttribute("href", "/email/outlook-1");
+    expect(screen.getByTestId("outlook-mail-status")).toHaveTextContent("12 messages");
+    expect(callsTo("/api/m365/connection").length).toBeGreaterThan(1);
+  });
+  it("keeps a retained mail archive disconnectable while reconnecting without an account label", async () => {
+    serveBox({ view: view({ state: "NEEDS_RECONNECT", mail: { ...mailOff, enabled: true, state: "NEEDS_RECONNECT", mailboxId: "outlook-1" } }) });
+    render(<Microsoft365Card />);
+    fireEvent.click(await screen.findByRole("button", { name: "Disconnect" }));
+    expect(await screen.findByTestId("confirm-dialog")).toHaveTextContent(/local email archive, attachment metadata, droplet drafts/i);
+    expect(callsTo("/api/m365/connection", "DELETE")).toHaveLength(0);
   });
 });
 

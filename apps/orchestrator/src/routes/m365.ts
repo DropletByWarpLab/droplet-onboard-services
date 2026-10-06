@@ -81,6 +81,7 @@ import { getSyncStatus } from "../services/m365/sync-status.service.js";
 import { createEntraClient } from "../services/m365/entra-client.js";
 import { getMicrosoftApp } from "../services/account-provider-setup.service.js";
 import { ACCOUNT_CONNECT_RETURN_PATHS, accountConnectOutcomeUrl, type AccountConnectReturnTo } from "../services/account-connect-return.js";
+import { setMicrosoftMailEnabled, MicrosoftMailboxConflictError } from "../services/m365/mail-settings.service.js";
 import {
   classifyAuthFailure,
   parseAppRegistration,
@@ -178,6 +179,24 @@ export function createM365Router(
   entra: EntraClient = createEntraClient(),
 ): Router {
   const router = Router();
+
+  router.put("/m365/mail", sensitiveRateLimit, requireRole(...CONNECT_ROLES), async (req, res) => {
+    const userId = (req as AuthedRequest).user?.id;
+    if (!userId) return res.status(401).json({ error: "unauthenticated" });
+    const body = sharePointBodySchema.safeParse(req.body);
+    if (!body.success) return res.status(400).json({ error: "invalid_request" });
+    try {
+      const before = await prisma.m365Connection.findUnique({ where: { userId }, select: { mailEnabled: true } });
+      if (!await setMicrosoftMailEnabled(prisma, userId, body.data.enabled, entra)) return res.status(409).json({ error: "m365_not_connected", message: "Connect Outlook first, then turn on email import." });
+      if (body.data.enabled !== (before?.mailEnabled === true)) await recordActivity({ kind: "auth", severity: "info", sourceIcon: "cloud",
+        what: body.data.enabled ? "Outlook email import enabled" : "Outlook email import disabled", sub: body.data.enabled ? "WAITING" : "DISCONNECTED",
+        actor: actorFromRequest(req as never), refs: { connector: "m365", userId, mailEnabled: body.data.enabled } });
+      return res.json(await getConnectionView(prisma, userId));
+    } catch (error) {
+      if (error instanceof MicrosoftMailboxConflictError || (error as { code?: string })?.code === "P2002") return res.status(409).json({ error: "mailbox_conflict", message: "This email address already has a mailbox in Droplet. Remove that mailbox before importing it through Outlook." });
+      return res.status(503).json({ error: "m365_mail_update_failed", message: "The Outlook email setting could not be changed. Reload its status and try again." });
+    }
+  });
 
   router.put("/m365/calendar", sensitiveRateLimit, requireRole(...CONNECT_ROLES), async (req, res) => {
     const userId = (req as AuthedRequest).user?.id;

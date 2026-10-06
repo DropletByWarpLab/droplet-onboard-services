@@ -558,6 +558,14 @@ describe("purgeM365ForUser", () => {
 });
 
 describe("getAccessToken", () => {
+  it("passes the acquired mail ownership and selection in the grant generation", async () => {
+    const prisma = await connectedAsAWithCursors();
+    Object.assign(prisma.__row()!, { mailEnabled: true, emailAccountId: "mailbox", mailSyncState: "CONNECTED" });
+    const onGrant = vi.fn();
+    await getAccessToken(prisma as never, fakeEntra(), USER, new Date(), onGrant);
+    expect(onGrant).toHaveBeenCalledWith(expect.objectContaining({ mailEnabled: true, emailAccountId: "mailbox", tokenCacheEnc: prisma.__row()!.tokenCacheEnc }));
+  });
+
   it("an old Graph refusal cannot downgrade a newly consented grant", async () => {
     const prisma = await connectedAsAWithCursors();
     let generation: any;
@@ -568,7 +576,7 @@ describe("getAccessToken", () => {
     expect(prisma.__row()).toEqual(newer);
   });
 
-  it.each(["disconnect", "same-account-reconnect", "different-account-reconnect", "calendar-off"])("a late successful refresh cannot overwrite %s or return its bearer", async (action) => {
+  it.each(["disconnect", "same-account-reconnect", "different-account-reconnect", "calendar-off", "mail-off"])("a late successful refresh cannot overwrite %s or return its bearer", async (action) => {
     const prisma = await connectedAsAWithCursors();
     if (action === "calendar-off") Object.assign(prisma.__row()!, { calendarEnabled: true, calendarSourceId: "s1", calendarSyncState: "CONNECTED" });
     let release!: (result: EntraAuthResult) => void;
@@ -588,7 +596,7 @@ describe("getAccessToken", () => {
     expect(prisma.__row()).toEqual(current);
   });
 
-  it.each(["same-account-reconnect", "calendar-off"])("a failed old refresh cannot downgrade %s", async (action) => {
+  it.each(["same-account-reconnect", "calendar-off", "mail-off"])("a failed old refresh cannot downgrade %s", async (action) => {
     const prisma = await connectedAsAWithCursors();
     if (action === "calendar-off") Object.assign(prisma.__row()!, { calendarEnabled: true, calendarSourceId: "s1", calendarSyncState: "CONNECTED" });
     let reject!: (error: unknown) => void;
@@ -1398,7 +1406,7 @@ describe("a reconnect as someone else starts their sync from nothing (#2347 revi
 
     expect(prisma.__row()).toMatchObject({ state: "ERROR", calendarEnabled: true,
       calendarSourceId: "a-calendar", calendarSyncState: "NEEDS_RECONNECT", tokenCacheEnc: null,
-      lastError: "Your copied Outlook calendar was kept. Disconnect Outlook before linking a different Microsoft account." });
+      lastError: "Your copied Outlook emails and calendar were kept. Disconnect Outlook before linking a different Microsoft account." });
     expect(prisma.__cursors().map((cursor) => cursor.resourceId)).toEqual(["inbox-of-a", "archive-of-a"]);
     expect(prisma.m365DeltaCursor.deleteMany).not.toHaveBeenCalled();
     expect(prisma.__row()!.pendingStateHash).toBeNull();

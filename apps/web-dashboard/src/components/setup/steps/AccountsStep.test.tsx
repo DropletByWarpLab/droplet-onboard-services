@@ -65,7 +65,7 @@ describe("Optional connected accounts onboarding", () => {
     expect(await screen.findByRole("button", { name: "Connect Google" })).toBeEnabled();
     expect(await screen.findByRole("button", { name: "Connect Outlook" })).toBeEnabled();
     expect(screen.getByText(/does not change how you sign in to droplet/i)).toHaveTextContent(/copied and stored locally/i);
-    expect(screen.getByText(/connect your work or school microsoft account/i)).toHaveTextContent(/outlook messages do not yet appear/i);
+    expect(screen.getByText(/connect your work or school microsoft account/i)).toHaveTextContent(/received and sent outlook emails or calendar/i);
     expect(screen.getByText("Account connection setup")).toBeInTheDocument();
   });
 
@@ -205,5 +205,24 @@ describe("Optional connected accounts onboarding", () => {
     expect(screen.getByRole("checkbox", { name: "Show Outlook calendar in Droplet" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Continue" })).toBeEnabled();
     expect(window.location.search).toBe("?step=accounts");
+  });
+
+  it("keeps Outlook email import available and saves the onboarding return point before email reconnect", async () => {
+    serveConnections(googleView(), microsoftView({
+      state: "CONNECTED", accountUpn: "sam@school.example",
+      mail: { enabled: true, state: "NEEDS_RECONNECT", needsConsent: true, lastSyncAt: "2026-10-05T12:00:00Z",
+        lastError: null, mailboxId: "outlook-mailbox", messageCount: 12 },
+    }));
+    const beforeConnect = vi.fn().mockResolvedValue(undefined);
+    render(<AccountsStep onComplete={vi.fn()} onSkip={vi.fn()} beforeConnect={beforeConnect} />);
+    expect(await screen.findByRole("checkbox", { name: "Import Outlook emails into Droplet" })).toBeChecked();
+    expect(screen.getByRole("link", { name: "Open Outlook inbox" })).toHaveAttribute("href", "/email/outlook-mailbox");
+    fireEvent.click(screen.getByRole("button", { name: "Reconnect Outlook email" }));
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith("https://provider.example/consent"));
+    expect(beforeConnect).toHaveBeenCalledOnce();
+    expect(authFetch).toHaveBeenCalledWith("/api/m365/connect", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ returnTo: "/setup?step=accounts" }),
+    });
   });
 });

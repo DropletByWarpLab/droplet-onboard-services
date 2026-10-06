@@ -40,6 +40,7 @@ import { scopesForRefresh, scopesForSignIn } from "./scopes.js";
 import { getMicrosoftApp } from "../account-provider-setup.service.js";
 import { accountConnectReturnTo, type AccountConnectReturnTo } from "../account-connect-return.js";
 import { microsoftCalendarViewOf, purgeMicrosoftCalendar, setMicrosoftCalendarEnabled, type MicrosoftCalendarView } from "./calendar-landing.service.js";
+import { microsoftMailViewOf, purgeMicrosoftMail, type MicrosoftMailView } from "./mail-data.service.js";
 import type { M365GrantGeneration } from "./m365-contracts.js";
 export type { M365GrantGeneration } from "./m365-contracts.js";
 import {
@@ -237,6 +238,7 @@ export interface M365ConnectionView {
   /** WARP-3538 — the person's SharePoint choice and Microsoft's answer to it. */
   sharePoint: M365SharePointView;
   calendar: MicrosoftCalendarView;
+  mail: MicrosoftMailView;
 }
 
 interface ConnectionRow {
@@ -257,6 +259,9 @@ interface ConnectionRow {
   calendarEnabled?: boolean;
   calendarSourceId?: string | null;
   calendarSyncState?: MicrosoftCalendarView["state"];
+  mailEnabled?: boolean;
+  emailAccountId?: string | null;
+  mailSyncState?: MicrosoftMailView["state"];
   pendingStateHash?: string | null;
   pendingFlowEnc?: string | null;
   cursorLinkHash?: string | null;
@@ -375,6 +380,7 @@ const DISCONNECTED_VIEW: M365ConnectionView = {
   lastError: null,
   sharePoint: { enabled: false, granted: false, needsConsent: false },
   calendar: microsoftCalendarViewOf(null),
+  mail: microsoftMailViewOf(null),
 };
 
 function toView(row: ConnectionRow, now: Date): M365ConnectionView {
@@ -397,6 +403,7 @@ function toView(row: ConnectionRow, now: Date): M365ConnectionView {
     lastError: row.lastError ?? null,
     sharePoint: sharePointViewOf(row.sharePointEnabled, row.grantedScopes),
     calendar: microsoftCalendarViewOf(row),
+    mail: microsoftMailViewOf(row),
   };
 }
 
@@ -416,7 +423,10 @@ export async function getConnectionView(
   const source = row.calendarSourceId && person ? await prisma.calendarSource.findFirst({
     where: { id: row.calendarSourceId, userId: person.username, authMode: "m365_oauth" }, select: { lastSyncAt: true, lastSyncError: true },
   }) : null;
-  return { ...toView(row, now), calendar: microsoftCalendarViewOf(row, source) };
+  const account = row.emailAccountId ? await prisma.emailAccount.findFirst({ where: { id: row.emailAccountId, userId, authMode: "M365_GRAPH" },
+    select: { id: true, lastIdleAt: true, lastError: true } }) : null;
+  const messageCount = account ? await prisma.emailMessage.count({ where: { accountId: account.id } }) : 0;
+  return { ...toView(row, now), calendar: microsoftCalendarViewOf(row, source), mail: microsoftMailViewOf(row, account, messageCount) };
 }
 
 // --- Connect --------------------------------------------------------------
@@ -696,7 +706,7 @@ async function settleConnectFailure(
     const locked = await tx.m365Connection.updateMany({ where: expectedFlow, data: { state: "PENDING_CONSENT" } });
     if (locked.count !== 1) return;
     const row = await tx.m365Connection.findUnique({ where: { userId } });
-    await persistFailure(tx, userId, failure, { where: expectedFlow, calendarEnabled: row?.calendarEnabled === true });
+    await persistFailure(tx, userId, failure, { where: expectedFlow, calendarEnabled: row?.calendarEnabled === true, mailEnabled: row?.mailEnabled === true });
   });
   else await persistFailure(prisma, userId, failure);
   return kind === "ABANDONED" ? "cancelled" : "failed";
@@ -821,10 +831,11 @@ async function persistConnected(
   })) as ConnectionRow | null;
   if (!prior || prior.state !== "PENDING_CONSENT") return "cancelled";
   const relinked = prior?.state === "PENDING_CONSENT" && prior.cursorLinkHash !== linkHash;
-  if (relinked && prior?.calendarSourceId) {
-    const rejected = await tx.m365Connection.updateMany({ where: { ...flowGuard, calendarEnabled: true, calendarSourceId: prior.calendarSourceId }, data: {
-      state: "ERROR", calendarSyncState: "NEEDS_RECONNECT", pendingStateHash: null, pendingFlowEnc: null,
-      pendingFlowExpiresAt: null, lastError: "Your copied Outlook calendar was kept. Disconnect Outlook before linking a different Microsoft account.",
+  if (relinked && (prior?.calendarSourceId || prior?.emailAccountId)) {
+    const rejected = await tx.m365Connection.updateMany({ where: { ...flowGuard, calendarSourceId: prior.calendarSourceId, emailAccountId: prior.emailAccountId }, data: {
+      state: "ERROR", ...(prior.calendarEnabled ? { calendarSyncState: "NEEDS_RECONNECT" as const } : {}),
+      ...(prior.mailEnabled ? { mailSyncState: "NEEDS_RECONNECT" as const } : {}), pendingStateHash: null, pendingFlowEnc: null,
+      pendingFlowExpiresAt: null, lastError: "Your copied Outlook emails and calendar were kept. Disconnect Outlook before linking a different Microsoft account.",
     } });
     return rejected.count ? "different_account" : "cancelled";
   }
@@ -868,6 +879,10 @@ async function persistConnected(
   // and an audit row claiming a connection would be the audit log's own version
   // of the bug that guard exists to prevent.
   if (count > 0) {
+    if (prior?.mailEnabled === true) await tx.m365Connection.updateMany({
+      where: { userId, state: "CONNECTED", cursorLinkHash: linkHash, mailEnabled: true },
+      data: { mailSyncState: grantCovers(result.grantedScopes.split(/\s+/), GRAPH_RESOURCES.mail.leastPrivilegeScope) ? "WAITING" : "NEEDS_RECONNECT" },
+    });
     if (prior?.calendarEnabled === true && prior.calendarSourceId) await tx.m365Connection.updateMany({
       where: { userId, state: "CONNECTED", cursorLinkHash: linkHash, calendarEnabled: true, calendarSourceId: prior.calendarSourceId },
       data: { calendarSyncState: grantCovers(result.grantedScopes.split(/\s+/), GRAPH_RESOURCES.calendar.leastPrivilegeScope) ? "WAITING" : "NEEDS_RECONNECT" },
@@ -898,7 +913,7 @@ async function persistFailure(
   prisma: Pick<PrismaClient, "m365Connection">,
   userId: string,
   err: unknown,
-  expected?: { where: Prisma.M365ConnectionWhereInput; calendarEnabled: boolean },
+  expected?: { where: Prisma.M365ConnectionWhereInput; calendarEnabled: boolean; mailEnabled?: boolean },
 ): Promise<void> {
   const failure = (err ?? {}) as EntraFailureLike;
   const kind = classifyAuthFailure(failure);
@@ -934,9 +949,11 @@ async function persistFailure(
       pendingFlowExpiresAt: null,
       lastError: redactAuthError(failure),
       ...(expected?.calendarEnabled ? { calendarSyncState: kind === "NEEDS_RECONNECT" ? "NEEDS_RECONNECT" as const : "ERROR" as const } : {}),
+      ...(expected?.mailEnabled ? { mailSyncState: kind === "NEEDS_RECONNECT" ? "NEEDS_RECONNECT" as const : "ERROR" as const } : {}),
     },
   });
   if (!expected) await prisma.m365Connection.updateMany({ where: { userId, calendarEnabled: true }, data: { calendarSyncState: kind === "NEEDS_RECONNECT" ? "NEEDS_RECONNECT" : "ERROR" } });
+  if (!expected) await prisma.m365Connection.updateMany({ where: { userId, mailEnabled: true }, data: { mailSyncState: kind === "NEEDS_RECONNECT" ? "NEEDS_RECONNECT" : "ERROR" } });
 }
 
 // --- Needs reconnect, discovered by the box ---------------------------------
@@ -968,7 +985,8 @@ export async function markNeedsReconnect(
   const changed = await prisma.m365Connection.updateMany({
     where: generation ? grantGenerationWhere(userId, generation) : grantGenerationWhere(userId, row),
     data: { state: "NEEDS_RECONNECT", lastError: reason,
-      ...(row.calendarEnabled === true ? { calendarSyncState: "NEEDS_RECONNECT" as const } : {}) },
+      ...(row.calendarEnabled === true ? { calendarSyncState: "NEEDS_RECONNECT" as const } : {}),
+        ...(row.mailEnabled === true ? { mailSyncState: "NEEDS_RECONNECT" as const } : {}) },
   });
   if (changed.count !== 1) return;
   await auditM365({
@@ -1130,7 +1148,7 @@ export async function disconnect(prisma: PrismaClient, userId: string): Promise<
   });
   // Always take the connection lock before inspecting the source. A calendar
   // opt-in may have committed after the pre-read above; that source goes too.
-  await prisma.$transaction(async (tx) => { await purgeMicrosoftCalendar(tx, userId); await unlink(tx); });
+  await prisma.$transaction(async (tx) => { await purgeMicrosoftCalendar(tx, userId); await purgeMicrosoftMail(tx, userId); await unlink(tx); });
 
   // WARP-3059 — and the sync positions. A delta link is the OLD account's
   // position: replayed after reconnecting as a different account it is wrong,
@@ -1174,7 +1192,7 @@ export async function purgeM365ForUser(
   userId: string,
 ): Promise<number> {
   const { count } = await prisma.$transaction(async (tx) => {
-    await purgeMicrosoftCalendar(tx, userId);
+    await purgeMicrosoftCalendar(tx, userId); await purgeMicrosoftMail(tx, userId);
     return tx.m365Connection.deleteMany({ where: { userId } });
   });
   // WARP-3059 — the deleted person's sync positions go with them. Second, so a
@@ -1192,7 +1210,8 @@ export async function purgeM365ForUser(
 function grantGenerationWhere(userId: string, generation: M365GrantGeneration): Prisma.M365ConnectionWhereInput {
   return { userId, state: "CONNECTED", tokenCacheEnc: generation.tokenCacheEnc,
     cursorLinkHash: generation.cursorLinkHash, connectedAt: generation.connectedAt,
-    calendarEnabled: generation.calendarEnabled, calendarSourceId: generation.calendarSourceId };
+    calendarEnabled: generation.calendarEnabled, calendarSourceId: generation.calendarSourceId,
+    mailEnabled: generation.mailEnabled, emailAccountId: generation.emailAccountId };
 }
 
 class M365GrantChangedError extends Error {
@@ -1234,6 +1253,7 @@ export async function getAccessToken(
       data: {
         state: "NEEDS_RECONNECT",
         ...(row.calendarEnabled === true ? { calendarSyncState: "NEEDS_RECONNECT" as const } : {}),
+        ...(row.mailEnabled === true ? { mailSyncState: "NEEDS_RECONNECT" as const } : {}),
         tokenCacheEnc: null,
         // WARP-3538 — the key that sealed this person's LANDED file names is the
         // same one that just failed to open their token (DEVICE_SECRET_KEY,
@@ -1271,7 +1291,8 @@ export async function getAccessToken(
       "This Microsoft 365 link was made before Droplet used your organisation's own app. Please connect again.";
     const changed = await prisma.m365Connection.updateMany({
       where: expected,
-      data: { state: "NEEDS_RECONNECT", lastError: reason, ...(row.calendarEnabled === true ? { calendarSyncState: "NEEDS_RECONNECT" as const } : {}) },
+      data: { state: "NEEDS_RECONNECT", lastError: reason, ...(row.calendarEnabled === true ? { calendarSyncState: "NEEDS_RECONNECT" as const } : {}),
+        ...(row.mailEnabled === true ? { mailSyncState: "NEEDS_RECONNECT" as const } : {}) },
     });
     if (changed.count !== 1) throw new M365GrantChangedError();
     await auditM365({
@@ -1293,7 +1314,7 @@ export async function getAccessToken(
     // NEEDS_RECONNECT — a healthy connection broken by a switch.
     result = await entra.acquireSilent(app, cache, row.homeAccountId, scopesForRefresh(row.grantedScopes));
   } catch (err) {
-    await persistFailure(prisma, userId, err, { where: expected, calendarEnabled: row.calendarEnabled === true });
+    await persistFailure(prisma, userId, err, { where: expected, calendarEnabled: row.calendarEnabled === true, mailEnabled: row.mailEnabled === true });
     // SDK failures can carry response or credential material. The stored
     // status is redacted; callers receive a fixed message as well.
     throw new Error("Microsoft 365 could not refresh this account. Try again or reconnect.");
@@ -1311,6 +1332,8 @@ export async function getAccessToken(
       grantedScopes: result.grantedScopes,
       ...(row.calendarEnabled === true && !grantCovers(result.grantedScopes.split(/\s+/), GRAPH_RESOURCES.calendar.leastPrivilegeScope)
         ? { calendarSyncState: "NEEDS_RECONNECT" as const } : {}),
+      ...(row.mailEnabled === true && !grantCovers(result.grantedScopes.split(/\s+/), GRAPH_RESOURCES.mail.leastPrivilegeScope)
+        ? { mailSyncState: "NEEDS_RECONNECT" as const } : {}),
       lastRefreshOkAt: now,
       lastError: null,
     },
@@ -1324,6 +1347,6 @@ export async function getAccessToken(
     throw new M365NotConnectedError("ERROR");
   }
   onGrant?.({ tokenCacheEnc, cursorLinkHash: row.cursorLinkHash, connectedAt: row.connectedAt,
-    calendarEnabled: row.calendarEnabled, calendarSourceId: row.calendarSourceId });
+    calendarEnabled: row.calendarEnabled, calendarSourceId: row.calendarSourceId, mailEnabled: row.mailEnabled, emailAccountId: row.emailAccountId });
   return result.accessToken;
 }

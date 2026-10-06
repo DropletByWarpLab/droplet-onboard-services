@@ -9,6 +9,8 @@ export interface M365GrantGeneration {
   connectedAt?: Date | null;
   calendarEnabled?: boolean;
   calendarSourceId?: string | null;
+  mailEnabled?: boolean;
+  emailAccountId?: string | null;
 }
 
 /**
@@ -41,6 +43,9 @@ export interface PageContext {
   readonly fullEnumeration: boolean;
   readonly isFirstPage: boolean;
   readonly isLastPage: boolean;
+  /** Ephemeral handler credentials, never stored or logged. */
+  readonly accessToken?: string;
+  readonly grantGeneration?: M365GrantGeneration;
 }
 
 /** What a caller does with a page of changes. Injected into the sync engine. */

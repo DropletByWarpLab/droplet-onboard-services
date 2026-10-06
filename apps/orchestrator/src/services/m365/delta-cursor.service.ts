@@ -80,17 +80,21 @@ export async function claimDueCursors(
   limit: number,
   now: Date = new Date(),
   excludeCalendar = false,
+  excludeMail = false,
 ): Promise<DueCursor[]> {
   const owners = (await prisma.m365Connection.findMany({
     where: { state: "CONNECTED" },
-    select: { userId: true, cursorLinkHash: true },
-  })) as Array<{ userId: string; cursorLinkHash?: string | null }>;
+    select: { userId: true, cursorLinkHash: true, mailEnabled: true },
+  })) as Array<{ userId: string; cursorLinkHash?: string | null; mailEnabled?: boolean }>;
   if (owners.length === 0) return [];
 
   const rows = await prisma.m365DeltaCursor.findMany({
     where: {
       userId: { in: owners.map((o) => o.userId) },
-      ...(excludeCalendar ? { workload: { not: "calendar" } } : {}),
+      AND: [
+        ...(excludeCalendar ? [{ workload: { not: "calendar" } }] : []),
+        { OR: [{ workload: { not: "mail" } }, ...(excludeMail ? [] : [{ workload: "mail", userId: { in: owners.filter((o) => o.mailEnabled === true).map((o) => o.userId) } }])] },
+      ],
       state: { in: [...CLAIMABLE_STATES] },
       // Never attempted, or its backoff window has elapsed.
       OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }],

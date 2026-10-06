@@ -159,6 +159,7 @@ function calendarWindowBounds(resourceId: string): [Date, Date] | null {
  * when a run fails partway, and the run restarts from the beginning.
  */
 export { GRAPH_PREFERRED_PAGE_SIZE as PREFERRED_PAGE_SIZE } from "./graph-client.js";
+import { MICROSOFT_MAIL_FIELDS } from "./mail-normalizer.js";
 
 /**
  * How a workload's cursors come to exist (WARP-3538).
@@ -228,7 +229,7 @@ export const GRAPH_RESOURCES: Readonly<Record<M365Workload, GraphResourceSpec>> 
     workload: "mail",
     // Folder-scoped ONLY — there is no /me/messages/delta. See the header.
     initialPath: (folderId) =>
-      `/me/mailFolders/${encodeURIComponent(folderId)}/messages/delta`,
+      `/me/mailFolders/${encodeURIComponent(folderId)}/messages/delta?$select=${MICROSOFT_MAIL_FIELDS.join(",")}`,
     // 🔴 NOT `/me/mailFolders/delta`, and this is a correction, not a
     // preference. Microsoft states it on the sibling list operation over the
     // identical collection: *"This operation doesn't return all mail folders in
@@ -244,9 +245,9 @@ export const GRAPH_RESOURCES: Readonly<Record<M365Workload, GraphResourceSpec>> 
     discoveryPath: "/me/mailFolders?includeHiddenFolders=true",
     // The child collection the walk descends through.
     childCollectionPath: (folderId) =>
-      `/me/mailFolders/${encodeURIComponent(folderId)}/childFolders`,
+      `/me/mailFolders/${encodeURIComponent(folderId)}/childFolders?includeHiddenFolders=true`,
     deltaTokenParam: "$deltatoken",
-    leastPrivilegeScope: "Mail.ReadBasic",
+    leastPrivilegeScope: "Mail.Read",
   },
   calendar: {
     workload: "calendar",

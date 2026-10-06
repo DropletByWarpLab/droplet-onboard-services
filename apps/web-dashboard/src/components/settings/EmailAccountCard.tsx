@@ -45,7 +45,7 @@
 
 import { useCallback, useEffect, useState, type JSX } from "react";
 
-import { authFetch } from "@/lib/auth";
+import { authFetch, useAuth } from "@/lib/auth";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { translateError } from "@/lib/friendly-errors";
 import { formatRelativeTime } from "@/lib/relative-time";
@@ -59,6 +59,8 @@ interface MailboxAccount {
   lastErrorAt: string | null;
   /** A closed-set sentence the orchestrator chose — never the server's line. */
   lastError: string | null;
+  authMode?: "PASSWORD" | "GOOGLE_OAUTH" | "M365_GRAPH";
+  canSend?: boolean;
 }
 
 /** How often to re-read the list while a mailbox has not finished its first
@@ -72,6 +74,13 @@ function awaitingFirstSync(a: MailboxAccount): boolean {
 
 /** One line per mailbox state. The tone token is a design-system class. */
 function describeMailbox(a: MailboxAccount): { label: string; tone: string } {
+  if (a.authMode === "M365_GRAPH") {
+    if (a.imapStatus === "error") return { label: a.lastError ?? "Outlook email import needs attention.", tone: "text-system-red" };
+    if (a.imapStatus === "paused") return { label: "Outlook import paused", tone: "" };
+    return a.lastIdleAt
+      ? { label: `Imported · checked ${formatRelativeTime(a.lastIdleAt)}`, tone: "text-system-green" }
+      : { label: "Waiting for first email import…", tone: "" };
+  }
   switch (a.imapStatus) {
     case "error":
       return {
@@ -96,6 +105,8 @@ const DEFAULT_IMAP_PORT = 993;
 const DEFAULT_SMTP_PORT = 465;
 
 export function EmailAccountCard(): JSX.Element {
+  const { user } = useAuth();
+  const managesMailboxes = user?.role === "owner" || user?.role === "admin";
   const [accounts, setAccounts] = useState<MailboxAccount[]>([]);
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -240,8 +251,9 @@ export function EmailAccountCard(): JSX.Element {
             const state = describeMailbox(a);
             return (
               <li key={a.id} className="flex items-center justify-between gap-2">
-                <span>
+                <span className="min-w-0">
                   {a.displayName} · {a.address}
+                  {a.authMode === "M365_GRAPH" && <span className="block type-caption-1" style={{ color: "var(--text-muted)" }}>Read-only Outlook import · sending unavailable</span>}
                 </span>
                 <span
                   className={`type-caption-1 ${state.tone}`}
@@ -250,13 +262,13 @@ export function EmailAccountCard(): JSX.Element {
                 >
                   {state.label}
                 </span>
-                <button
+                {a.authMode === "M365_GRAPH" && !managesMailboxes ? <a className="btn" href="/settings#connected-accounts">Manage import</a> : <button
                   className="btn"
                   disabled={busy}
                   onClick={() => setPendingDisconnect(a)}
                 >
                   Disconnect
-                </button>
+                </button>}
               </li>
             );
           })}
@@ -374,7 +386,7 @@ export function EmailAccountCard(): JSX.Element {
         // Says what is DESTROYED and what SURVIVES. "Are you sure?" about an
         // unnamed thing is not a confirmation, it is a speed bump.
         description={
-          "Droplet will delete its copy of this mailbox's mail, including anything " +
+          "Droplet will delete its copy of this mailbox's mail and drafts, including anything " +
           "shown on your customers' timelines. The mail itself stays on your mail " +
           "server and is not touched."
         }
