@@ -258,6 +258,10 @@ describe("setup VPN step (WARP-174)", () => {
       await Promise.resolve();
       fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
     });
+    expect(screen.getByText(/connect your accounts/i)).toBeInTheDocument();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+    });
     await act(async () => {
       await Promise.resolve();
       fireEvent.click(
@@ -413,6 +417,10 @@ describe("setup VPN step (WARP-174)", () => {
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();
+      fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+    });
+    expect(screen.getByText(/connect your accounts/i)).toBeInTheDocument();
+    await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
     });
     await act(async () => {

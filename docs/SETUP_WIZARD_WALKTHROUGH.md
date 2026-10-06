@@ -1,10 +1,10 @@
-# Setup wizard walkthrough — design doc
+# Setup wizard walkthrough — historical design rationale
 
-> Branch: `feat/setup-wizard-walkthrough` off `main` (target). Will merge to
-> `main` after Stefan validates the photo-studio handoff. Deployment-shape-
-> specific overrides (single-box vs multi-box vs v2-6) ride the
-> `COMPOSE_PROFILES` mechanism in `docker/docker-compose.yml`; this wizard
-> itself is shape-agnostic.
+> This is the original walkthrough proposal, retained for design rationale.
+> Its scaffold, endpoint assumptions, gates and branch plan are historical.
+> Use [ONBOARDING_STATE_MACHINE.md](ONBOARDING_STATE_MACHINE.md) for the
+> implemented flow, including Google/Microsoft connected accounts, resume,
+> and completion. Current feature PRs target `stage` (CONTRIBUTING.md).
 
 ## What we're adding (Stefan's brief)
 

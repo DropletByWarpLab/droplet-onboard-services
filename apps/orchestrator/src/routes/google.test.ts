@@ -8,10 +8,11 @@ import { beginGoogleConnect, completeGoogleConnect, googleDependencies, type Goo
 import type { GoogleProvider } from "../services/google/google-client.js";
 import { DEFAULT_GOOGLE_FEATURES, scopesForGoogleFeatures } from "../services/google/scopes.js";
 import { createGoogleCallbackRouter, createGoogleRouter, GOOGLE_STATE_COOKIE } from "./google.js";
+import { config } from "../config.js";
 
 vi.mock("../config.js", () => ({ config: {
   AUTH_ENABLED: true, SERVICE_TOKEN_EMAIL: "email-service-secret", SERVICE_TOKEN_VOICE: "voice-service-secret",
-  DROPLET_PUBLIC_FQDN: "box.customer.com", WIREGUARD_ENDPOINT_HOST: "", corsAllowedOrigins: ["https://droplet-ai.local"],
+  DROPLET_LAN_HOSTNAME: "box.customer.com", WIREGUARD_ENDPOINT_HOST: "", corsAllowedOrigins: ["https://droplet-ai.local"],
   agentMaxIter: { defaultIter: 5, capIter: 10 },
 } }));
 vi.mock("../services/activity.singleton.js", () => ({ recordActivity: vi.fn(async () => {}) }));
@@ -52,7 +53,10 @@ const cookieHeaders = (value: unknown): string[] => Array.isArray(value)
   : typeof value === "string" ? [value] : [];
 
 describe("Google browser and mail worker routes", () => {
-  beforeEach(() => __setColumnCryptoKeyForTest(Buffer.alloc(32, 9).toString("base64")));
+  beforeEach(() => {
+    config.DROPLET_LAN_HOSTNAME = "box.customer.com";
+    __setColumnCryptoKeyForTest(Buffer.alloc(32, 9).toString("base64"));
+  });
   afterEach(() => __setColumnCryptoKeyForTest(null));
 
   it("lets a person connect without app fields and returns only browser navigation data", async () => {
@@ -70,6 +74,21 @@ describe("Google browser and mail worker routes", () => {
     expect(provider.getAuthorizationUrl).toHaveBeenCalledWith(appRegistration, expect.objectContaining({ redirectUri }));
     expect(db.connections()[0].userId).toBe(userId);
     expect(result.text).not.toMatch(/customer-secret|refresh-secret|access-secret/);
+  });
+
+  it("reports internal-only .lan callbacks as unsupported without starting consent", async () => {
+    config.DROPLET_LAN_HOSTNAME = "droplet-ai.lan";
+    const { app, provider } = setup();
+    const status = await asUser(request(app).get("/api/google/connection"));
+    expect(status.body).toMatchObject({
+      configured: true,
+      callbackSupported: false,
+      redirectUri: "https://droplet-ai.lan/api/google/callback",
+    });
+    const started = await asUser(request(app).post("/api/google/connect")).send({});
+    expect(started.status).toBe(400);
+    expect(started.body.error).toBe("google_callback_unsupported");
+    expect(provider.getAuthorizationUrl).not.toHaveBeenCalled();
   });
 
   it("does not accept another person's ID or client credentials in a connect body", async () => {
@@ -145,6 +164,28 @@ describe("Google browser and mail worker routes", () => {
     expect(provider.exchangeCode).toHaveBeenCalledOnce();
     expect(db.connections()[0].state).toBe("CONNECTED");
     expect(cookieHeaders(callback.headers["set-cookie"])[0]).toContain("Expires=Thu, 01 Jan 1970");
+  });
+
+  it.each(["connected", "cancelled", "expired", "failed"])("returns onboarding %s to the stored accounts step", async (outcome) => {
+    const { app, db } = setup();
+    const started = await asUser(request(app).post("/api/google/connect")).send({ returnTo: "/setup?step=accounts" });
+    expect(started.status).toBe(200);
+    const state = new URL(started.body.authorizeUrl).searchParams.get("state");
+    const cookie = cookieHeaders(started.headers["set-cookie"])[0].split(";")[0];
+    if (outcome === "expired") db.connections()[0].pendingExpiresAt = new Date(0);
+    const callback = await request(app).get("/api/google/callback").query({ state,
+      ...(outcome === "cancelled" ? { error: "access_denied" } : outcome === "failed" ? { error: "server_error" } : { code: "code" }),
+      returnTo: "https://evil.example", error_description: "PROVIDER_SECRET",
+    }).set("Cookie", cookie);
+    expect(callback.status).toBe(303);
+    expect(callback.headers.location).toBe(`/setup?step=accounts&google=${outcome}`);
+    expect(callback.text).not.toMatch(/evil.example|PROVIDER_SECRET/);
+  });
+
+  it.each(["https://evil.example", "//evil.example", "/setup?step=done", "/settings#x"])("rejects an untrusted Google return destination %s before creating a flow", async (returnTo) => {
+    const { app, db } = setup();
+    expect((await asUser(request(app).post("/api/google/connect")).send({ returnTo })).status).toBe(400);
+    expect(db.connections()).toHaveLength(0);
   });
 
   it("callback cannot reflect a return URL, missing state cookie or provider error text", async () => {

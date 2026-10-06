@@ -5,6 +5,7 @@ import { Mail } from "lucide-react";
 import { authFetch, useAuth } from "@/lib/auth";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { ProviderCalendarStatus, type ProviderCalendarView } from "./ProviderCalendarStatus";
+import type { AccountConnectionNavigation } from "./ConnectedAccounts";
 
 export interface GoogleConnectionView {
   state: "DISCONNECTED" | "PENDING_CONSENT" | "CONNECTED" | "NEEDS_RECONNECT" | "ERROR";
@@ -38,7 +39,7 @@ function takeOutcome(): Outcome | null {
   return Object.hasOwn(OUTCOMES, raw) ? raw as Outcome : null;
 }
 
-export function GoogleAccountCard({ navigate = (url: string) => window.location.assign(url), calendarPollMs = 5_000 }: { navigate?: (url: string) => void; calendarPollMs?: number } = {}) {
+export function GoogleAccountCard({ navigate = (url: string) => window.location.assign(url), calendarPollMs = 5_000, returnTo, beforeConnect }: AccountConnectionNavigation & { navigate?: (url: string) => void; calendarPollMs?: number } = {}) {
   const { user } = useAuth();
   const allowed = user?.role === "owner" || user?.role === "admin" || user?.role === "family";
   const [view, setView] = useState<GoogleConnectionView | null>(null);
@@ -52,6 +53,12 @@ export function GoogleAccountCard({ navigate = (url: string) => window.location.
   const [mail, setMail] = useState(true);
   const [calendar, setCalendar] = useState(false);
   const initializedFeatures = useRef(false);
+  const mounted = useRef(true);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -95,14 +102,27 @@ export function GoogleAccountCard({ navigate = (url: string) => window.location.
     setError(null);
     setOutcome(null);
     try {
+      if (beforeConnect) {
+        try {
+          await beforeConnect();
+        } catch {
+          if (mounted.current) {
+            setError("Droplet could not save your setup progress. Try again before connecting Google.");
+            setBusy(false);
+          }
+          return;
+        }
+      }
+      if (!mounted.current) return;
       if (new URL(view.redirectUri).origin !== window.location.origin) {
-        navigate(new URL("/settings", view.redirectUri).toString());
+        navigate(new URL(returnTo ?? "/settings", view.redirectUri).toString());
         return;
       }
       const res = await authFetch("/api/google/connect", {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mail, calendar }),
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mail, calendar, ...(returnTo ? { returnTo } : {}) }),
       });
       const body = await res.json().catch(() => ({})) as { authorizeUrl?: string };
+      if (!mounted.current) return;
       if (res.ok && body.authorizeUrl) {
         navigate(body.authorizeUrl);
         return;

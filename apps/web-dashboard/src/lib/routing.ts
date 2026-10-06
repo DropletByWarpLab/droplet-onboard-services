@@ -1,5 +1,9 @@
 export const HELP_PATH = "/help";
 
+export function isHelpPath(pathname: string): boolean {
+  return pathname === HELP_PATH || pathname.startsWith(`${HELP_PATH}/`);
+}
+
 // Pages an anonymous visitor may sit on. ONE list, read by both AuthGate (route
 // guard) and authFetch (the dead-session bounce): they used to keep separate
 // copies, and `/invite` was added to AuthGate's only — so an invitee's first

@@ -25,34 +25,30 @@
  *
  * AUTH POSTURE (M1/M2, PR #372 re-review):
  *   - GET is PUBLIC and SIDE-EFFECT-FREE (findUnique; never writes — M5).
- *   - PATCH of `setup_step` / `user_tour_completed` stays PUBLIC: these are
- *     low-sensitivity resumability hints that the wizard needs to persist
- *     pre-claim, and neither can claim the box.
+ *   - First-run PATCH of `setup_step` through account stays PUBLIC so the
+ *     owner can claim the appliance and create their account. Progress after
+ *     account requires a live owner session. Tour completion cannot claim the box.
  *   - PATCH of `appliance:"ready"` — the lifecycle-MUTATING claim transition
  *     — is GATED. It is honored only when the caller proves they're the
- *     legitimate owner: either a valid dashboard session cookie (the wizard
- *     authenticates at the account step, so the finish PATCH rides that
- *     cookie), or — the durable backstop — the service's M2 precondition
- *     that an admin account already exists (`markApplianceReady` rejects an
- *     account-less box with 409). An unauthenticated pre-claim caller can
- *     therefore neither take the box over (flip it ready early) nor lock the
- *     owner out.
+ *     legitimate owner through a live, non-revoked owner session cookie.
+ *     The wizard authenticates at the account step, so the finish PATCH rides
+ *     that cookie. An existing user row never authorizes anonymous completion.
  *
- * The GATE constraint (PR #372) keeps claim / org / team out of SetupStep,
- * so an unknown step is a 400 here (the service's InvalidSetupStepError),
- * never silently coerced onto a resume target the wizard can't render.
+ * The service accepts only shipped resume targets, including optional accounts
+ * and team. Unknown steps are 400s, and progress writes are monotonic so a
+ * delayed earlier PATCH cannot undo a newer resume point or completed setup.
  */
 import { Router, type Request } from "express";
 import { type PrismaClient } from "@prisma/client";
 import { z } from "zod";
 import {
   getSetupState,
-  setSetupStep,
   advanceSetupStepToAtLeast,
   markApplianceReady,
   markTourCompleted,
   isSetupStep,
   STEP_AFTER_CLAIM,
+  SETUP_STEPS,
   InvalidSetupStepError,
   SetupNotCompleteError,
   type SetupState,
@@ -85,12 +81,13 @@ import { sensitiveRateLimit } from "../middleware/rate-limit.js";
 const logger = createLogger("setup-route");
 
 /**
- * WARP-3193 SEC-AUTH-5 — the write gate for a SET-UP ("ready") box on this
+ * WARP-3193 SEC-AUTH-5 — the session gate for protected setup writes on this
  * pre-authMiddleware router. `verifyAccessToken` alone accepts ANY role and a
  * revoked-but-unexpired (≤15 min) token, so mirror what authMiddleware would
  * have checked: the hard-revocation denylist, a live session record (a Redis
- * error fails OPEN, as in the middleware and /setup/box-name), then the role.
- * First-run (unclaimed) writes never reach this — onboarding stays open.
+ * error fails OPEN, as in the middleware), then the role.
+ * First-run progress after account, workspace changes, and finish also use
+ * this gate; welcome/claim/account progress stays open.
  */
 type ReadyBoxWriteGate =
   | { ok: true }
@@ -294,9 +291,8 @@ function toWire(state: SetupState): {
  * sent. `storage` is the primary trigger (storage → discovery → cameras →
  * vpn → ai is minutes of wizard time); the later steps cover mid-wizard
  * resumes that land past storage. The warm itself is debounced 10 min
- * inside model-readiness.service, so repeated PATCHes — including abuse of
- * this pre-auth route — are free, and the worst an anonymous caller can do
- * is load the box's own configured model.
+ * inside model-readiness.service, so repeated authenticated owner PATCHes
+ * share the same load instead of restarting it.
  */
 const WARM_TRIGGER_STEPS = new Set([
   "storage",
@@ -373,24 +369,8 @@ export function createSetupRouter(
         return;
       }
 
-      // M1 — the `appliance:"ready"` claim is the only lifecycle-MUTATING
-      // transition, so it is the only one we gate. A request is allowed to
-      // claim the box when EITHER:
-      //   (a) it carries a valid dashboard session cookie (the wizard's
-      //       account step authenticated the owner, so the finish PATCH
-      //       rides that cookie — this router is mounted before
-      //       authMiddleware so we verify the cookie inline, the same way
-      //       routes/pm.ts does for the OIDC authorize endpoint), OR
-      //   (b) an admin account already exists, in which case the box is
-      //       genuinely claimable and `markApplianceReady` (M2) will honor
-      //       it; the service itself fails CLOSED with 409 when no admin
-      //       exists, so an anonymous pre-claim caller can never flip it.
-      // The session check here is a fast 403 for the common anonymous case;
-      // the M2 precondition in the service is the authoritative backstop.
-      //
-      // WARP-3193 SEC-AUTH-5: none of that applies once the box is SET UP.
-      // Every write then needs a live, non-revoked session; moving the step
-      // or re-asserting `ready` is owner-only. Completing the tour is open to
+      // On a ready box every write needs a live, non-revoked session; moving
+      // the step or re-asserting ready is owner-only. Completing the tour is open to
       // any signed-in member: AuthGate shows the pending tour to whoever
       // signs in first, and owner-only would re-trap everyone else in it.
       const sessionToken = req.cookies?.[SESSION_COOKIE_NAME];
@@ -419,33 +399,40 @@ export function createSetupRouter(
         }
       }
 
-      let claimAuthorized = false;
-      if (body.appliance === "ready") {
-        if (session) {
-          claimAuthorized = true;
-        } else if ((await prisma.user.count()) === 0) {
-          res.status(403).json({
-            error:
-              "Claiming the appliance (appliance:\"ready\") requires an authenticated session or a completed setup.",
-            code: "SETUP_CLAIM_FORBIDDEN",
-          });
+      const needsOwner = body.appliance === "ready" || (body.setup_step !== undefined
+        && SETUP_STEPS.indexOf(body.setup_step) > SETUP_STEPS.indexOf(STEP_AFTER_CLAIM));
+      if (needsOwner) {
+        // The account step signs the owner in before later steps and Done. A local user row
+        // is not proof that the caller owns the box, even during first-run.
+        const gate = await gateReadyBoxWrite(session, ["owner"]);
+        if (!gate.ok) {
+          if (gate.reason === "session_expired") {
+            res.status(401).json(SESSION_EXPIRED_BODY);
+          } else {
+            // A missing or expired access cookie must allow authFetch to
+            // refresh the owner's session and retry the finish transition.
+            res.status(gate.reason === "unauthenticated" ? 401 : 403).json({
+              error: "Continuing setup after account creation requires an authenticated owner session.",
+              code: gate.reason === "unauthenticated"
+                ? body.appliance === "ready" ? "SETUP_CLAIM_FORBIDDEN" : "SETUP_AUTH_REQUIRED"
+                : "SETUP_FORBIDDEN",
+            });
+          }
           return;
         }
       }
 
       // Apply the requested transitions. Order is deliberate: persist the
-      // step first (resumability), then the terminal flips. Each helper
+      // step first (monotonic resumability), then the terminal flips. Each helper
       // upserts the singleton and returns the latest state, so the last
       // one wins as the response.
       let latest: SetupState | null = null;
       if (body.setup_step !== undefined) {
-        latest = await setSetupStep(prisma, body.setup_step);
+        latest = await advanceSetupStepToAtLeast(prisma, body.setup_step);
       }
       if (body.appliance === "ready") {
-        // `authorized` short-circuits the service's admin-count precondition
-        // when a valid session proved ownership (covers the freshly-claimed
-        // window); otherwise the service re-checks admin existence (M2).
-        latest = await markApplianceReady(prisma, { authorized: claimAuthorized });
+        // The live owner session above proves the account step completed.
+        latest = await markApplianceReady(prisma, { authorized: true });
       }
       if (body.user_tour_completed === true) {
         latest = await markTourCompleted(prisma);
@@ -663,31 +650,11 @@ export function createSetupRouter(
   // NEVER sent off it (FEATURES.md §10). This handler makes no outbound call.
   router.post("/setup/org", sensitiveRateLimit, async (req: Request, res, next) => {
     try {
-      // ORCH-04 — this route is on the public allow-list (no authMiddleware),
-      // and `persistOrg` does an UNCONDITIONAL upsert of the Workspace
-      // singleton (clearing optional fields with `?? null` each call). Gate
-      // it the same way the lifecycle-mutating `appliance:"ready"` PATCH is
-      // gated above: a write is allowed when EITHER
-      //   (a) the request carries a valid dashboard session cookie (the
-      //       wizard's account step authenticated the owner before the org
-      //       step, so the org POST rides that cookie — verified inline
-      //       because this router mounts before authMiddleware), OR
-      //   (b) setup is not yet finished (`appliance !== "ready"`), i.e.
-      //       genuine first-run/unclaimed onboarding, which must stay open.
-      // Once the appliance is claimed (`appliance:"ready"`), an anonymous LAN
-      // client must NOT be able to silently rename the workspace, change its
-      // tz/logo, or re-reserve its slug — so we require a session then. This
-      // also closes the unauthenticated slug-uniqueness probe oracle on a
-      // set-up box.
-      //
-      // WARP-3193 SEC-AUTH-5: "a valid session cookie" is not enough on a
-      // set-up box — the signature alone accepts any role and a revoked
-      // token. Owner only (the POST /settings/workspace bar), on a live,
-      // non-revoked session.
+      // The account step signs the owner in before the organization step.
+      // This public router must enforce that session even during first-run.
       const sessionToken = req.cookies?.[SESSION_COOKIE_NAME];
       const session = sessionToken ? verifyAccessToken(sessionToken) : null;
-      const { appliance } = await getSetupState(prisma);
-      if (appliance === "ready") {
+      {
         const gate = await gateReadyBoxWrite(session, ["owner"]);
         if (!gate.ok) {
           if (gate.reason === "unauthenticated") {
@@ -732,7 +699,7 @@ export function createSetupRouter(
       // also advances locally and re-syncs on the next PATCH. (Mirrors the
       // claim route's post-bind step advance.)
       try {
-        await setSetupStep(prisma, STEP_AFTER_ORG);
+        await advanceSetupStepToAtLeast(prisma, STEP_AFTER_ORG);
       } catch (stepErr) {
         logger.warn(
           { err: stepErr },

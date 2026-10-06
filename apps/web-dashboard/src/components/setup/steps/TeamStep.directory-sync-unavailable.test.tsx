@@ -86,7 +86,7 @@ describe("TeamStep directory-sync panel is honest when no flow exists (WARP-1305
 
     const panel = await settledPanel();
     expect(panel.textContent).toMatch(
-      /directory sync isn(?:'|’)t available yet/i,
+      /team sign-in isn(?:'|’)t configured/i,
     );
     // Points the customer at the path that DOES work.
     expect(panel.textContent).toMatch(/invite people by email below/i);
@@ -117,7 +117,7 @@ describe("TeamStep directory-sync panel is honest when no flow exists (WARP-1305
 
     const panel = await settledPanel();
     expect(panel.textContent).toMatch(
-      /directory sync isn(?:'|’)t available yet/i,
+      /team sign-in couldn(?:'|’)t be checked/i,
     );
     expect(within(panel).queryAllByRole("button")).toHaveLength(0);
   });
@@ -126,8 +126,8 @@ describe("TeamStep directory-sync panel is honest when no flow exists (WARP-1305
     getEnabledSsoProviders.mockResolvedValue(["google"]);
     render(<TeamStep onComplete={() => {}} onSkip={() => {}} />);
 
-    expect(await screen.findByText(/directory sync is on/i)).toBeInTheDocument();
-    expect(screen.getByText(/synced/i)).toBeInTheDocument();
+    expect(await screen.findByText(/team sign-in is available/i)).toBeInTheDocument();
+    expect(screen.getByText(/^Available$/i)).toBeInTheDocument();
     expect(screen.getByText(/google workspace/i)).toBeInTheDocument();
     expect(
       screen.queryByText(/isn(?:'|’)t available yet/i),

@@ -39,7 +39,7 @@
  * Microsoft has not approved SharePoint yet.
  */
 
-import { useCallback, useEffect, useState, type JSX, type CSSProperties } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type JSX } from "react";
 import { Mail } from "lucide-react";
 
 const inputStyle: CSSProperties = {
@@ -54,6 +54,7 @@ import { authFetch, useAuth } from "@/lib/auth";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Microsoft365Files, SYNC_POLL_MS, type M365SharePointView } from "./Microsoft365Files";
 import { Microsoft365Calendar, type MicrosoftCalendarView } from "./Microsoft365Calendar";
+import type { AccountConnectionNavigation } from "./ConnectedAccounts";
 import { Microsoft365Mail, type MicrosoftMailView } from "./Microsoft365Mail";
 
 type M365State = "DISCONNECTED" | "PENDING_CONSENT" | "CONNECTED" | "NEEDS_RECONNECT" | "ERROR";
@@ -170,7 +171,9 @@ export function Microsoft365Card({
   syncPollMs = SYNC_POLL_MS,
   calendarPollMs = 5_000,
   mailPollMs = 5_000,
-}: {
+  returnTo,
+  beforeConnect,
+}: AccountConnectionNavigation & {
   /** Where the browser goes to sign in. Injected so tests can observe it. */
   navigate?: (url: string) => void;
   /** How often the files block re-reads while something is still being read for
@@ -199,6 +202,12 @@ export function Microsoft365Card({
    *  card so the person can retry; the card's own error line would be hidden
    *  behind it. */
   const [disconnectError, setDisconnectError] = useState<string | null>(null);
+  const mounted = useRef(true);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -252,16 +261,29 @@ export function Microsoft365Card({
     setError(null);
     setOutcome(null);
     try {
+      if (beforeConnect) {
+        try {
+          await beforeConnect();
+        } catch {
+          if (mounted.current) {
+            setError("Droplet could not save your setup progress. Try again before connecting Microsoft.");
+            setBusy(false);
+          }
+          return;
+        }
+      }
+      if (!mounted.current) return;
       if (new URL(view.redirectUri).origin !== window.location.origin) {
-        navigate(new URL("/settings", view.redirectUri).toString());
+        navigate(new URL(returnTo ?? "/settings", view.redirectUri).toString());
         return;
       }
       const res = await authFetch("/api/m365/connect", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(usePersonalRegistration ? { clientId: clientId.trim(), tenantId: tenantId.trim() } : {}),
+        body: JSON.stringify({ ...(usePersonalRegistration ? { clientId: clientId.trim(), tenantId: tenantId.trim() } : {}), ...(returnTo ? { returnTo } : {}) }),
       });
       const body = (await res.json().catch(() => ({}))) as { authorizeUrl?: string; message?: string };
+      if (!mounted.current) return;
       if (res.ok && body.authorizeUrl) {
         navigate(body.authorizeUrl);
         return; // leaving the page; keep the button busy
@@ -392,7 +414,8 @@ export function Microsoft365Card({
           <label className="flex flex-col gap-1.5">
             Application (client) ID
             <input
-              className={inputClass} style={inputStyle}
+              className={inputClass}
+              style={inputStyle}
               value={clientId}
               onChange={(e) => setClientId(e.target.value)}
               spellCheck={false}
@@ -402,7 +425,8 @@ export function Microsoft365Card({
           <label className="flex flex-col gap-1.5">
             Directory (tenant) ID
             <input
-              className={inputClass} style={inputStyle}
+              className={inputClass}
+              style={inputStyle}
               value={tenantId}
               onChange={(e) => setTenantId(e.target.value)}
               spellCheck={false}

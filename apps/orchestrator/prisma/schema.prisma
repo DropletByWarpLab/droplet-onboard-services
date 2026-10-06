@@ -5573,6 +5573,10 @@ model ApplianceSetup {
 /// declaration for the same append-only `ALTER TYPE … ADD VALUE` reason as
 /// `claim` / `org` — declaration order is membership-only; the wizard ORDER
 /// (team before done) lives in `SETUP_STEPS` + the dashboard `STEPS` array.
+///
+/// `accounts` is the optional Microsoft/Google connection step after AI and
+/// the client-only voice step, before team. Append-only enum membership;
+/// the wizard order is `ai → accounts → team → done` in SETUP_STEPS.
 enum SetupStep {
   welcome
   account
@@ -5586,6 +5590,7 @@ enum SetupStep {
   claim
   org
   team
+  accounts
 }
 
 /// PR #373 — claim-code lifecycle. EXPLICIT, never derived from absence.

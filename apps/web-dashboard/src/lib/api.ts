@@ -311,17 +311,32 @@ export async function checkClaimGateEnabled(): Promise<boolean> {
  * Fire-and-forget from the caller's perspective: a failure to persist must
  * never block the customer from advancing the wizard locally, so we
  * swallow network errors (the in-memory step still moves forward; the next
- * successful PATCH re-syncs). Public endpoint — runs before any user
- * exists, like POST /api/auth/setup.
+ * successful PATCH re-syncs). Early first-run progress is public; steps
+ * after account creation require the owner session established by the wizard.
  */
-export async function patchSetupStep(setupStep: string): Promise<void> {
+export async function patchSetupStep(
+  setupStep: string,
+  options: { requireSuccess?: boolean } = {},
+): Promise<void> {
   try {
-    await fetch(`${BASE}/api/setup/state`, {
+    // Provider consent can start long after the access cookie expires. Renew
+    // the owner session before requiring a durable save; pre-account hints
+    // keep their public, best-effort fetch behavior.
+    const setupFetch = options.requireSuccess || !["welcome", "claim", "account"].includes(setupStep)
+      ? authFetch : fetch;
+    const res = await setupFetch(`${BASE}/api/setup/state`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
       body: JSON.stringify({ setup_step: setupStep }),
     });
-  } catch {
+    if (options.requireSuccess && !res.ok) {
+      throw new Error("Couldn't save setup progress. Please retry before connecting your account.");
+    }
+  } catch (error) {
+    // Leaving the page for provider consent requires a durable resume target.
+    // Ordinary in-page navigation keeps its existing best-effort behavior.
+    if (options.requireSuccess) throw error;
     /* non-fatal — local wizard progress is the source of truth mid-step */
   }
 }
@@ -348,7 +363,7 @@ export async function patchSetupStep(setupStep: string): Promise<void> {
  * always safe.
  */
 export async function patchSetupReady(): Promise<void> {
-  const res = await fetch(`${BASE}/api/setup/state`, {
+  const res = await authFetch(`${BASE}/api/setup/state`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     credentials: "same-origin",
@@ -369,16 +384,15 @@ export async function patchSetupReady(): Promise<void> {
  * move false → true). Once persisted, AuthGate's "ready + tour pending → tour"
  * branch stops firing and the owner passes through to the dashboard.
  *
- * Public endpoint, same as the other setup-state writes (the tour runs
- * immediately post-claim, before any session-refresh concerns), so the plain
- * `fetch` — no authFetch refresh dance. We swallow a transient network error:
+ * A ready appliance requires a session for tour writes, so renew an expired
+ * access cookie if the owner spends time in the tour. We swallow a transient network error:
  * the optimistic in-memory flip in `completeTour` already routed the owner
  * onward, and the next `/api/setup/state` GET re-syncs. Re-running the tour
  * later is an explicit Help-page action, never an accidental re-trap.
  */
 export async function patchTourCompleted(): Promise<void> {
   try {
-    await fetch(`${BASE}/api/setup/state`, {
+    await authFetch(`${BASE}/api/setup/state`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ user_tour_completed: true }),
@@ -482,13 +496,12 @@ export class OrgError extends Error {
 
 /**
  * PR #380 — name the single workspace + reserve droplet.local/<slug>. Org slots
- * AFTER account, but shares the wizard's public posture (the route is
- * allow-listed), so a bare `fetch` with same-origin credentials. On a taken
+ * AFTER account and requires the owner session, renewed if needed. On a taken
  * (409) or invalid (400) slug we throw an `OrgError` the step renders inline on
  * the URL field; the server validates the slug shape + uniqueness server-side.
  */
 export async function postOrg(input: OrgInput): Promise<OrgResult> {
-  const res = await fetch(`${BASE}/api/setup/org`, {
+  const res = await authFetch(`${BASE}/api/setup/org`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     credentials: "same-origin",
@@ -551,16 +564,19 @@ export async function postTeamInvite(
 
 export async function loginUser(
   email: string,
-  password: string
+  password: string,
+  secondFactor?: { totp?: string; recoveryCode?: string },
 ): Promise<{ user: AuthUser }> {
   const res = await authFetch(`${BASE}/api/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify({ email, password, ...secondFactor }),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || "Login failed");
+    const error = new Error(data.error || "Login failed") as Error & { code?: string };
+    error.code = data.code;
+    throw error;
   }
   return res.json();
 }
