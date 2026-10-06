@@ -108,6 +108,35 @@ function authHeaders(): Record<string, string> {
   return headers;
 }
 
+// --- Pairing (ADR-071 slice C) ---
+
+/**
+ * Fetch against the switch service for the shared device-pairing service
+ * (`device-pairing.service.ts`), which reads the typed refusal out of the BODY
+ * (`PAIR_WINDOW_CLOSED`, `SWITCH_PAIRED_ELSEWHERE`, ...). So, unlike the
+ * `throwIfNotOk` readers above, a non-ok status is handed back as a Response,
+ * never thrown or retried; only a transport failure throws. `/health` is
+ * auth-exempt on the service, every `/pairing/*` route is bearer-gated, and the
+ * claim response carries the freshly minted password: it goes to the caller
+ * and nowhere else.
+ */
+export async function switchServiceFetch(
+  path: string,
+  init: {
+    method?: string;
+    headers?: Record<string, string>;
+    body?: string;
+    signal?: AbortSignal;
+  } = {},
+): Promise<Response> {
+  return internalFetch(`${SWITCH_URL}${path}`, {
+    method: init.method ?? "GET",
+    body: init.body,
+    headers: { ...authHeaders(), ...(init.headers ?? {}) },
+    signal: init.signal ?? timeout(),
+  });
+}
+
 // --- Health ---
 
 export async function healthCheck(): Promise<boolean> {
