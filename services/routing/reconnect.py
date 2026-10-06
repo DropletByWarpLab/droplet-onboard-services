@@ -45,7 +45,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from backoff import BackoffState, INITIAL_DELAY_SECONDS, MAX_DELAY_SECONDS
 from droplet_openwrt_sdk import ConnectionLost, UbusError
@@ -81,12 +81,18 @@ class ReconnectCoordinator:
         is_connected: IsConnectedFn,
         cooldown_seconds: float = ON_DEMAND_COOLDOWN_SECONDS,
         now_fn: Callable[[], float] = time.monotonic,
+        on_background_failure: Optional[Callable[[], None]] = None,
     ) -> None:
         self._connect_fn = connect_fn
         self._on_connected = on_connected
         self._is_connected = is_connected
         self._cooldown_seconds = cooldown_seconds
         self._now_fn = now_fn
+        # ADR-071 §2.2 step 1: invoked (blocking, off the event loop) after a
+        # FAILED background tick so the caller can probe `droplet.pair status`
+        # while the router refuses our credentials. Never runs on the on-demand
+        # path (that one sits inside a request) or while connected.
+        self._on_background_failure = on_background_failure
         self._last_attempt_monotonic: float = 0.0
         self._background_backoff = BackoffState()
 
@@ -103,6 +109,12 @@ class ReconnectCoordinator:
         logger.info("OpenWrt reconnect attempt (%s) succeeded", reason)
         self._on_connected(router)
         return True
+
+    def reconnect_now(self, *, reason: str) -> bool:
+        """One immediate attempt, ignoring the on-demand cooldown (WARP-3739:
+        the pairing claim just rotated the credential, so waiting out a
+        cooldown that was earned against the OLD password helps nobody)."""
+        return self._attempt(reason=reason)
 
     def maybe_reconnect_on_demand(self) -> bool:
         """Try to reconnect if disconnected and the cooldown has elapsed.
@@ -148,6 +160,11 @@ class ReconnectCoordinator:
                 self._background_backoff.on_success()
                 _stop()
                 return
+            if self._on_background_failure is not None:
+                try:
+                    await asyncio.to_thread(self._on_background_failure)
+                except Exception:  # noqa: BLE001 — a probe must never stop the retry
+                    logger.exception("reconnect: post-failure probe raised")
             delay = self._background_backoff.on_failure()
             scheduler.reschedule_job(job_id, trigger="interval", seconds=delay)
 

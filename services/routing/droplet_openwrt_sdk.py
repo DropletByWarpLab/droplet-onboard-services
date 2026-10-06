@@ -34,7 +34,7 @@ import logging
 from contextlib import contextmanager
 from enum import Enum
 from http.client import HTTPException
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from urllib.request import Request, urlopen
 
 from request_context import get_request_id
@@ -511,12 +511,22 @@ class UbusClient:
 class SessionManager:
     """Handles authentication, session refresh, and logout."""
 
-    def __init__(self, client: UbusClient, username: str, password: str):
+    def __init__(self, client: UbusClient, username: str,
+                 password: "str | Callable[[], str]"):
         self.client = client
         self.username = username
-        self.password = password
+        # ADR-071: `password` may be a zero-arg callable (a "holder") that is
+        # resolved at every login, so a credential rotated at runtime (the
+        # pairing claim, a re-read secret file) takes effect on the next
+        # session refresh without rebuilding the router object.
+        self._password_source = password
         self.token: Optional[str] = None
         self.expires_at: float = 0
+
+    @property
+    def password(self) -> str:
+        source = self._password_source
+        return source() if callable(source) else source
 
     def login(self) -> str:
         """Authenticate and store the session token.
@@ -3084,7 +3094,8 @@ class DropletRouter:
     """
 
     def __init__(self, host: str = "192.168.50.1", port: int = 80,
-                 username: str = "droplet-ai", password: str = "",
+                 username: str = "droplet-ai",
+                 password: "str | Callable[[], str]" = "",
                  scheme: str = "http", timeout: int = 10,
                  auto_login: bool = True):
         self._client = UbusClient(host, port, scheme, timeout)
