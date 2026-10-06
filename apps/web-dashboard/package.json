@@ -31,7 +31,7 @@
     "@zxing/library": "^0.21.3",
     "framer-motion": "^14.0.0",
     "hls.js": "^1.7.3",
-    "lucide-react": "^1.49.0",
+    "lucide-react": "^1.51.0",
     "next": "^15.5.27",
     "qrcode.react": "^4.2.0",
     "react": "^19.3.0",
