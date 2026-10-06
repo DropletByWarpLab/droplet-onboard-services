@@ -437,7 +437,7 @@ export default function CamerasPage() {
       )}
 
       {/* Recent events */}
-      {recentEvents.length > 0 && <CameraEvents events={recentEvents} cameraLabel={cameraLabel} />}
+      <CameraEvents events={recentEvents} cameraLabel={cameraLabel} />
 
       {/* Add Camera Modal — opens on the discovered list when there is one, so
           "Add camera" answers "which camera?" before asking for an RTSP URL. */}
