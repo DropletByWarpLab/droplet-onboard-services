@@ -58,13 +58,19 @@
   --text-muted: var(--date-muted);
   --brand: var(--date-brand);
 }
-.themed-date-header { display: flex; align-items: center; gap: 4px; padding: 4px 0 6px; }
+.themed-date-header {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) 82px 30px;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0 6px;
+}
 .themed-date-nav {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   width: 30px;
-  height: 34px;
+  height: 36px;
   flex: none;
   padding: 0;
   border: 0;
@@ -73,8 +79,16 @@
   color: var(--date-muted);
   cursor: pointer;
 }
-.themed-date-header .themed-date-month { width: auto; min-width: 0; flex: 1; }
-.themed-date-header .themed-date-year { width: 82px; flex: none; }
+/* Keep selected text inside its track and clear of the shared select chevron. */
+.themed-date-header .themed-select {
+  width: 100%;
+  min-width: 0;
+  min-height: 36px;
+  padding: 6px 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .themed-date-grid { display: flex; flex-direction: column; gap: 2px; }
 .themed-date-week, .themed-date-weekdays { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 2px; }
 .themed-date-weekdays { color: var(--date-muted); text-align: center; font-size: 11.5px; padding: 4px 0; }
@@ -104,5 +118,6 @@
 .themed-date-action { padding: 6px 10px; min-height: 34px; border: 0; border-radius: 9px; background: transparent; color: var(--date-text); font: inherit; cursor: pointer; }
 @media (pointer: coarse) {
   .themed-date-day, .themed-date-action { min-height: 44px; }
+  .themed-date-header .themed-select { min-height: 44px; }
   .themed-date-nav { height: 44px; }
 }
