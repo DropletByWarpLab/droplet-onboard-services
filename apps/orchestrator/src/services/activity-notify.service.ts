@@ -79,10 +79,10 @@
  * is not told like the above. Its subject is a customer's words and the people
  * who handle it hold the `support` grant, not necessarily `pm`, so a department
  * WATCHER is never a recipient and `state_changed` / `commented` /
- * `due_date_changed` interrupt nobody. Exactly one verb tells anyone -- `assigned`
- * -- and it tells the user the row NAMES (`newValue`), never the actor, a guest,
- * or an account with no deliverable username. Every other ticket verb takes the
- * explicit `not_needed` terminal. See `sweepTickets`.
+ * `due_date_changed` interrupt nobody. `assigned` tells the named user;
+ * `sla_at_risk` / `sla_breached` tell current assignees, administrators and
+ * configured escalation recipients. Every recipient must still be active
+ * staff with current Support access. Other ticket verbs are `not_needed`.
  *
  * ── COALESCING, AND ITS WINDOW ─────────────────────────────────────────────
  *
@@ -115,6 +115,7 @@ import { isUserIdShaped } from "@droplet/auth-policy";
 import { buildPmPath, pmWorkItemPath } from "@droplet/shared-types";
 import { isServiceDesk } from "./pm/pm.service.js";
 import { resolveEffectiveAccess } from "./effective-access.service.js";
+import { escalationSchema } from "./support/sla-schemas.js";
 
 const logger = createLogger("activity-notify");
 
@@ -436,6 +437,7 @@ const SWEEP_INCLUDE = {
       id: true,
       name: true,
       sequenceId: true,
+      projectId: true,
       project: { select: { identifier: true, kind: true } },
     },
   },
@@ -642,7 +644,8 @@ async function sweepProjectItems(
  *
  * Its own coalescing unit and its own claim: one NotificationLog row per
  * recipient per tick, apart from the PM one. The claim keeps the same
- * exactly-once discipline as every other phase (`claimAndNotify`).
+ * exactly-once discipline as every other phase (`claimAndNotify`). SLA
+ * transition rows use that same claim, with the current Support audience.
  */
 async function sweepTickets(
   prisma: PrismaClient,
@@ -655,7 +658,35 @@ async function sweepTickets(
   const skipIds: string[] = [];
   // assignee User.id -> the assignment rows that name them.
   const perUser = new Map<string, SweepRow[]>();
+  const slaRows = rows.filter((r) => r.verb === "sla_at_risk" || r.verb === "sla_breached");
+  const slaRecipients = new Map<string, Set<string>>();
+  if (slaRows.length) {
+    const [assignees, admins, policies] = await Promise.all([
+      prisma.pmWorkItemAssignee.findMany({ where: { workItemId: { in: slaRows.map((r) => r.workItemId) } }, select: { workItemId: true, userId: true } }),
+      prisma.user.findMany({ where: { directoryStatus: "ACTIVE", role: { in: ["owner", "admin"] } }, select: { id: true } }),
+      prisma.pmSlaPolicy.findMany({ where: { projectId: { in: [...new Set(slaRows.map((r) => r.workItem.projectId))] } }, select: { projectId: true, escalation: true } }),
+    ]);
+    const byDesk = new Map(policies.map((p) => [p.projectId, escalationSchema.parse(p.escalation)]));
+    for (const r of slaRows) {
+      const ids = new Set([...admins.map((u) => u.id), ...assignees.filter((a) => a.workItemId === r.workItemId).map((a) => a.userId)]);
+      for (const e of byDesk.get(r.workItem.projectId) ?? []) {
+        if (e.on === r.newValue && (e.metric === "any" || e.metric === r.field)) {
+          for (const a of e.actions) if (a.type === "notify") for (const id of a.userIds) ids.add(id);
+        }
+      }
+      slaRecipients.set(r.id, ids);
+    }
+  }
   for (const row of rows) {
+    const recipients = slaRecipients.get(row.id);
+    if (recipients) {
+      if (!recipients.size) skipIds.push(row.id);
+      for (const userId of recipients) {
+        const list = perUser.get(userId) ?? [];
+        list.push(row); perUser.set(userId, list);
+      }
+      continue;
+    }
     const userId = row.newValue;
     if (row.verb !== "assigned" || !userId || userId === row.actorId) {
       skipIds.push(row.id);
@@ -700,15 +731,15 @@ async function sweepTickets(
       const key = `${row.workItem.project.identifier}-${row.workItem.sequenceId}`;
       outgoing.push({
         username,
-        title: truncate(`Ticket ${key} assigned to you`, TITLE_MAX),
-        body: truncate(row.workItem.name, BODY_MAX),
+        title: truncate(row.verb === "sla_at_risk" ? `Ticket ${key} SLA at risk` : row.verb === "sla_breached" ? `Ticket ${key} SLA breached` : `Ticket ${key} assigned to you`, TITLE_MAX),
+        body: row.verb === "assigned" ? truncate(row.workItem.name, BODY_MAX) : "A ticket needs your attention.",
         url: `/support?t=${encodeURIComponent(key)}`,
       });
       continue;
     }
     outgoing.push({
       username,
-      title: truncate(`${tickets.length} tickets assigned to you`, TITLE_MAX),
+      title: truncate(tickets.every((r) => r.verb === "assigned") ? `${tickets.length} tickets assigned to you` : `${tickets.length} tickets need attention`, TITLE_MAX),
       body: truncate(
         tickets.map((r) => `${r.workItem.project.identifier}-${r.workItem.sequenceId}`).join(", "),
         BODY_MAX,
@@ -717,9 +748,10 @@ async function sweepTickets(
     });
   }
 
-  const logs = await claimAndNotify(prisma, "pmActivity", sendIds, outgoing, now);
+  const uniqueSendIds = [...new Set(sendIds)];
+  const logs = await claimAndNotify(prisma, "pmActivity", uniqueSendIds, outgoing, now);
   const skipped = await markNotNeeded(prisma, "pmActivity", skipIds);
-  return { notified: logs > 0 ? sendIds.length : 0, skipped, logs };
+  return { notified: logs > 0 ? uniqueSendIds.length : 0, skipped, logs };
 }
 
 async function sweepCrm(
