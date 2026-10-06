@@ -25,10 +25,12 @@ import display as display_module
 from display import TFTDisplay, WIDTH, HEIGHT
 
 
-# Sample live values straight from the handoff preview.html `data` object so
-# the rendered frames match the design reference 1:1.
+# Representative live values, including the GPU-first status telemetry.
 SAMPLE_STATS = {
     "cpu": 24, "mem": 47, "disk": 62, "temp": 54,
+    "gpu": 81, "gpu_temp": 72,
+    "watchdog": {"available": True, "overall": "ok",
+                 "generated_at": "2026-06-01T14:08:00Z", "checks": {}},
     "ip": "192.168.50.41", "hostname": "droplet-lab",
     "uptime": "4d 12h", "now": "14:08",
     "date": "SUNDAY, JUN 1",
@@ -119,6 +121,91 @@ def test_render_system_returns_full_frame(sim_display: TFTDisplay):
     img = sim_display.render_system()
     assert isinstance(img, Image.Image)
     assert img.size == (WIDTH, HEIGHT)
+
+
+def _system_texts(monkeypatch, d):
+    seen = []
+    original = display_module._v3_text
+
+    def capture(draw, text, x, y, **kwargs):
+        seen.append((text, x, y, kwargs.get("fill")))
+        return original(draw, text, x, y, **kwargs)
+
+    monkeypatch.setattr(display_module, "_v3_text", capture)
+    d.render_system()
+    return seen
+
+
+def test_system_hero_is_gpu_and_includes_cpu_ram_and_temperatures(
+        monkeypatch, sim_display: TFTDisplay):
+    _seed(sim_display)
+    texts = _system_texts(monkeypatch, sim_display)
+    assert any(t == "GPU LOAD" and y == 46 for t, _, y, _ in texts)
+    assert any(t == "81%" and y == 58 for t, _, y, _ in texts)
+    assert [t for t, _, y, _ in texts if y == 182] == [
+        "CPU", "RAM", "GPU T", "CPU T"]
+    assert [t for t, _, y, _ in texts if y == 196] == [
+        "24%", "47%", "72°C", "54°C"]
+
+
+def test_system_sparkline_follows_gpu_history(sim_display: TFTDisplay):
+    _seed(sim_display)
+    sim_display._v3["sparks_gpu"] = [0, 70, 30, 100]
+    sim_display._v3["sparks_cpu"] = [0, 0, 0, 0]
+    gpu_line = sim_display.render_system().crop((20, 120, 267, 161))
+    sim_display._v3["sparks_cpu"] = [100, 0, 100, 0]
+    cpu_changed = sim_display.render_system().crop((20, 120, 267, 161))
+    assert gpu_line.tobytes() == cpu_changed.tobytes()
+    sim_display._v3["sparks_gpu"] = [0, 0, 0, 0]
+    gpu_changed = sim_display.render_system().crop((20, 120, 267, 161))
+    assert gpu_line.tobytes() != gpu_changed.tobytes()
+
+
+def test_system_missing_telemetry_is_explicitly_unknown(
+        monkeypatch, sim_display: TFTDisplay):
+    _seed(sim_display)
+    sim_display.update_stats({"gpu": None, "cpu": None, "mem": None,
+                              "gpu_temp": None, "temp": None})
+    texts = _system_texts(monkeypatch, sim_display)
+    assert any(t == "--" and y == 58 for t, _, y, _ in texts)
+    assert [t for t, _, y, _ in texts if y == 196] == ["--"] * 4
+
+
+def test_system_zero_gpu_load_is_a_real_reading(
+        monkeypatch, sim_display: TFTDisplay):
+    sim_display.update_stats({"gpu": 0})
+    texts = _system_texts(monkeypatch, sim_display)
+    assert any(t == "0%" and y == 58 for t, _, y, _ in texts)
+
+
+def test_system_temperature_severity_colors(
+        monkeypatch, sim_display: TFTDisplay):
+    sim_display.update_stats({"gpu_temp": 85, "temp": 70})
+    texts = _system_texts(monkeypatch, sim_display)
+    assert ("85°C", 143, 196, display_module.V3_RED) in texts
+    assert ("70°C", 204, 196, display_module.V3_ORANGE) in texts
+
+
+@pytest.mark.parametrize("overall,label,color_name", [
+    ("ok", "OK", "V3_GREEN"),
+    ("healed", "HEALED", "V3_GREEN"),
+    ("heal_failed", "FAULT", "V3_ORANGE"),
+    ("escalated", "CRITICAL", "V3_RED"),
+    ("stale", "STALE", "V3_ORANGE"),
+    ("unavailable", "NO DATA", "V3_LABEL3"),
+])
+def test_system_watchdog_status_is_visible_and_header_matches(
+        monkeypatch, sim_display: TFTDisplay, overall, label, color_name):
+    sim_display.update_stats({"watchdog": {
+        "available": overall != "unavailable", "overall": overall,
+        "generated_at": None, "checks": {},
+    }})
+    texts = _system_texts(monkeypatch, sim_display)
+    color = getattr(display_module, color_name)
+    assert ("WATCHDOG " + label, 20, 226, color) in texts
+    assert any(t == label and y == 16 and c == color for t, _, y, c in texts)
+    if overall in ("heal_failed", "escalated", "stale", "unavailable"):
+        assert not any(t == "OK" and y == 16 for t, _, y, _ in texts)
 
 
 def test_render_system_honors_clock_mode(sim_display: TFTDisplay):

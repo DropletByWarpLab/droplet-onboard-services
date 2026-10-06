@@ -338,14 +338,14 @@ def test_the_storage_pump_is_gated_on_a_wide_panel():
     assert "_is_wide_panel()" in guard
 
 
-# --- the relabelled gauge --------------------------------------------------
+# --- resource health stays separate from storage ---------------------------
 
-def test_the_health_row_names_the_gauge_system_not_disk(populated,
-                                                        monkeypatch):
-    """It is psutil.disk_usage("/") — the install filesystem. "DISK" beside a
-    STORAGE cell reads as the box's storage, which is the wrong disk."""
+def test_the_health_row_shows_resources_with_storage_separate(populated,
+                                                             monkeypatch):
+    """The GPU-first health row must not stand in for the data-drive total."""
     labels = _eyebrows(populated, monkeypatch)
-    assert "SYSTEM" in labels
+    assert all(label in labels for label in ("CPU", "RAM", "GPU T", "CPU T"))
+    assert "SYSTEM" not in labels
     assert "DISK" not in labels
     # The cell it was being confused with is still there, and still separate.
     assert "STORAGE" in labels
@@ -358,16 +358,16 @@ def test_the_trend_block_agrees_with_the_gauge_above_it(populated,
     monkeypatch.setattr(display_module, "HEIGHT", 400)
     labels = _eyebrows(populated, monkeypatch)
     assert "TRENDS" in labels, "band D did not draw — the test proves nothing"
-    assert labels.count("SYSTEM") >= 2
+    assert labels.count("CPU") >= 2
+    assert labels.count("RAM") >= 2
     assert "DISK" not in labels
 
 
 @pytest.mark.parametrize("w, h", [(1424, 280), (1280, 400), (1024, 280)])
 def test_the_longer_eyebrow_still_fits_its_column(monkeypatch, sim_display,
                                                   w, h):
-    """"SYSTEM" is 60% wider than "DISK" was, in a row of four columns whose
-    width is the health cell divided by four. The narrowest supported panel is
-    where that stops being free, and an eyebrow spilling into TEMP is not
+    """The health labels share four columns. The narrowest supported panel is
+    where that stops being free, and an eyebrow spilling into its neighbor is not
     something band containment catches — both labels are inside the band."""
     from PIL import Image, ImageDraw
 
@@ -378,7 +378,7 @@ def test_the_longer_eyebrow_still_fits_its_column(monkeypatch, sim_display,
 
     draw = ImageDraw.Draw(Image.new("RGB", (w, h)))
     font = display_module._get_font(9, weight="bold")
-    for label in ("MEM", "SYSTEM", "TEMP", "GPU"):
+    for label in ("CPU", "RAM", "GPU T", "CPU T"):
         # _eyebrow draws at tracking=1.6, which the width helper does not know
         # about — one gap per pair of glyphs.
         width = (display_module._v3_text_width(draw, label, font)
@@ -386,9 +386,7 @@ def test_the_longer_eyebrow_still_fits_its_column(monkeypatch, sim_display,
         assert width < col, f"{label} ({width:.0f}px) overflows a {col:.0f}px column"
 
 
-def test_the_relabel_did_not_move_the_series(populated):
-    """The buffer keeps its `sparks_disk` name — that is what update_stats
-    feeds. Only the eyebrow changed; renaming the key would silently empty the
-    trend."""
-    populated._v3["disk"] = 44
+def test_the_resource_row_uses_cpu_not_install_disk(populated):
+    populated._v3.update({"cpu": 44, "disk": 99})
     assert any("44%" in t for t in _drawn(populated))
+    assert not any("99%" in t for t in _drawn(populated))

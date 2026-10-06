@@ -34,10 +34,12 @@ def wide(monkeypatch, sim_display):
 def populated(wide):
     wide._v3.update({
         "cpu": 34, "mem": 61, "disk": 44, "temp": 52, "gpu": 12,
+        "gpu_temp": 58,
         "ip": "192.168.1.250", "hostname": "droplet-sys",
         "public_host": "warp-lab.droplet-us.com",
         "uptime": "6d 4h", "version": "v2.6.1",
         "sparks_cpu": [20 + (i % 17) for i in range(48)],
+        "sparks_gpu": [10 + (i % 9) for i in range(48)],
         "wan_online": True, "wan_latency_ms": 14, "tls_days": 61,
         "wifi": {"ssid": "Droplet-AI", "band": "5 GHz", "channel": 36,
                  "clients": 4},
@@ -168,6 +170,93 @@ def test_missing_metrics_render_as_dash_never_zero(wide):
     assert lw._num(None) == "—"
     assert lw._num(None, "%") == "—"
     assert lw._num(0, "%") == "0%"
+
+
+def _health_runs(populated, monkeypatch):
+    runs = []
+    real = display_module._v3_text
+
+    def spy(draw, text, x, y, **kwargs):
+        runs.append((text, x, y, kwargs))
+        return real(draw, text, x, y, **kwargs)
+
+    monkeypatch.setattr(display_module, "_v3_text", spy)
+    draw = ImageDraw.Draw(Image.new("RGB", (PANEL_W, PANEL_H)))
+    lw._cell_health(populated, draw, populated._v3)
+    return runs
+
+
+def test_gpu_is_the_largest_load_reading_and_owns_the_primary_trend(populated, monkeypatch):
+    sparks = []
+    real = lw._spark
+
+    def spy(draw, x, y, w, h, series, ink, fill):
+        sparks.append(series)
+        return real(draw, x, y, w, h, series, ink, fill)
+
+    monkeypatch.setattr(lw, "_spark", spy)
+    runs = _health_runs(populated, monkeypatch)
+    by_text = {text: kw for text, _x, _y, kw in runs}
+    assert "GPU LOAD" in by_text
+    assert {"CPU", "RAM", "GPU T", "CPU T", "34%", "61%", "58°C", "52°C"} <= by_text.keys()
+    assert by_text["12%"]["font"].size > by_text["34%"]["font"].size
+    assert sparks == [populated._v3["sparks_gpu"]]
+
+
+def test_a_missing_gpu_stays_unknown_even_with_cpu_history(populated, monkeypatch):
+    populated._v3.update(gpu=None, gpu_temp=None, sparks_gpu=[])
+    runs = _health_runs(populated, monkeypatch)
+    texts = [text for text, _x, _y, _kw in runs]
+    assert texts.count("—") == 2
+    assert "no GPU history" in texts
+    assert "0%" not in texts and "0°C" not in texts
+
+
+@pytest.mark.parametrize("temperature,expected", [
+    (69, display_module.V3_TEXT),
+    (70, display_module.V3_ORANGE),
+    (84, display_module.V3_ORANGE),
+    (85, display_module.V3_RED),
+])
+def test_both_temperature_readings_warn_at_the_thermal_thresholds(populated, monkeypatch,
+                                                                  temperature, expected):
+    populated._v3.update(gpu_temp=temperature, temp=temperature)
+    runs = _health_runs(populated, monkeypatch)
+    inks = [kw["fill"] for text, _x, _y, kw in runs if text == f"{temperature}°C"]
+    assert inks == [expected, expected]
+
+
+@pytest.mark.parametrize("overall,label,state", [
+    ("ok", "OK", "live"),
+    ("healed", "HEALED", "live"),
+    ("heal_failed", "HEAL FAILED", "degraded"),
+    ("escalated", "ESCALATED", "alert"),
+    ("stale", "STALE", "degraded"),
+    ("unavailable", "NO DATA", "live"),
+])
+def test_watchdog_status_is_visible_and_affects_the_box_state(populated, monkeypatch,
+                                                             overall, label, state):
+    populated._v3["watchdog"] = {"available": overall != "unavailable", "overall": overall}
+    assert label in _texts(populated)
+    assert _chrome_state(monkeypatch, populated) == state
+
+
+def test_an_unavailable_watchdog_does_not_claim_ok(populated):
+    populated._v3["watchdog"] = {"available": False, "overall": "ok"}
+    texts = _texts(populated)
+    assert "NO DATA" in texts and "OK" not in texts
+
+
+def test_stale_watchdog_is_degraded_even_if_the_feed_is_unavailable(populated, monkeypatch):
+    populated._v3["watchdog"] = {"available": False, "overall": "stale"}
+    assert "STALE" in _texts(populated)
+    assert _chrome_state(monkeypatch, populated) == "degraded"
+
+
+def test_watchdog_failure_cannot_hide_a_service_alert(populated, monkeypatch):
+    populated._v3["watchdog"] = {"available": True, "overall": "heal_failed"}
+    populated._v3["services"]["status"] = "down"
+    assert _chrome_state(monkeypatch, populated) == "alert"
 
 
 def test_touch_regions_cover_every_cell(populated):
