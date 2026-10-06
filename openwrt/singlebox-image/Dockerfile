@@ -20,7 +20,7 @@
 # pulled image, or a future package the bake predates), so the two are
 # complementary — the bake makes the common path fast + offline-safe, the
 # attach retry covers the rest.
-FROM openwrt/rootfs:x86_64-24.10.2@sha256:3c8adad624f661f683e9e5d2977bc44fa4b29a17f76eb5c45d0aec8e079668cc
+FROM openwrt/rootfs:x86_64-v25.12.5@sha256:c5d5f05bab4ce06a4e840b3573671a06ec8ae9842273188ffc53f7021836b8e2
 
 # WARP-1639 — stop procd opening the HOST's consoles.
 #
