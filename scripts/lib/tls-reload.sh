@@ -5,10 +5,8 @@
 # Factored out of scripts/lib/secrets.sh::_generate_tls_cert so the SAME reload
 # path is used by:
 #   1. secrets.sh (self-signed bootstrap cert + --sync-secrets re-runs), and
-#   2. the box LE-renew path — the orchestrator's tls-issuance cron writes the
-#      new fullchain into docker/certs/droplet.crt and then triggers this helper
-#      on the HOST via the device-bridge (the orchestrator deliberately does NOT
-#      mount the docker socket — ADR-023).
+#   2. explicit local certificate changes via the device-bridge host wrapper.
+#      The retired fleet issuer no longer writes or renews certificates.
 #
 # Idempotent + safe to call when the gateway isn't running (fresh install): on a
 # stopped gateway it is a no-op (nginx picks the cert up on first start). Never

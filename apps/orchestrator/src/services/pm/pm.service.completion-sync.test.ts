@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { createWorkItem, deleteState, deleteWorkItem, updateProject, updateState } from "./pm.service.js";
+import { createWorkItem, deleteState, deleteWorkItem, setProjectArchived, updateState } from "./pm.service.js";
 import { SERIALIZABLE_TX } from "../../lib/prisma-tx.js";
 // WARP-1570: pm.service.ts now declares an isolation level (deleteWorkItem's
 // relation audit), so its suites must inherit the shared seam rather than
@@ -234,7 +234,7 @@ describe("deleteWorkItem parent-removal audit (WARP-885)", () => {
         delete: async ({ where }: { where: Row }) => {
           // The audit rows must already be recorded by the time the parent
           // itself is deleted — same-transaction ordering guard.
-          expect(activityRows).toHaveLength(2);
+          expect(activityRows.filter((row) => row.verb === "parent_removed")).toHaveLength(2);
           deletedId = where.id as string;
           return {};
         },
@@ -249,20 +249,31 @@ describe("deleteWorkItem parent-removal audit (WARP-885)", () => {
           return { count: data.length };
         },
       },
+      pmWorkItemAssignee: { findMany: async () => [] },
+      user: { findMany: async () => [] },
       // WARP-2586 — deleteWorkItem now reads the item's relations before the
       // cascade, so it can emit a relation_removed audit row on the SURVIVING
       // end. Empty here: these two cases are about parent_removed.
       pmWorkItemRelation: { findMany: async () => [] },
+      // WARP-1505 — and the item's attachment keys, to unlink the files after
+      // the commit. None here; pm.service.attachments.test.ts covers the hook.
+      pmAttachment: { findMany: async () => [] },
     };
     const prisma = {
-      pmWorkItem: { findUnique: async () => ({ id: "parent-1" }) },
+      pmWorkItem: { findUnique: async () => ({ id: "parent-1", projectId: "project-1" }) },
       $transaction: createTransactionSeam({ client: () => tx }).$transaction,
     } as never;
 
     await deleteWorkItem(prisma, "actor-1", "parent-1");
 
     expect(deletedId).toBe("parent-1");
-    expect(activityRows).toEqual([
+    expect(activityRows).toContainEqual(expect.objectContaining({
+      workItemId: null,
+      verb: "deleted",
+      deletedProjectId: "project-1",
+      deletedWorkItemId: "parent-1",
+    }));
+    expect(activityRows.filter((row) => row.verb === "parent_removed")).toEqual([
       expect.objectContaining({
         workItemId: "child-1",
         actorId: "actor-1",
@@ -279,36 +290,54 @@ describe("deleteWorkItem parent-removal audit (WARP-885)", () => {
     ]);
   });
 
-  it("deletes cleanly with zero activity rows when the work item has no children", async () => {
-    let activityCreated = false;
+  it("persists a detached deletion tombstone for a leaf before the FK cascade", async () => {
+    const activityRows: Row[] = [];
+    let deleted = false;
     const tx = {
       pmWorkItem: {
         findMany: async () => [],
-        delete: async () => ({}),
+        delete: async () => {
+          expect(activityRows).toHaveLength(1);
+          expect(activityRows[0]).toMatchObject({
+            workItemId: null,
+            actorId: "actor-1",
+            verb: "deleted",
+            deletedProjectId: "project-1",
+            deletedWorkItemId: "leaf-1",
+            deletedGuestUserIds: ["guest-1"],
+            notifyStatus: "not_needed",
+          });
+          deleted = true;
+          return {};
+        },
       },
       pmActivity: {
-        create: async () => {
-          activityCreated = true;
+        create: async ({ data }: { data: Row }) => {
+          activityRows.push(data);
           return {};
         },
         createMany: async () => {
-          activityCreated = true;
           return { count: 0 };
         },
       },
+      pmWorkItemAssignee: { findMany: async () => [{ userId: "guest-1" }, { userId: "member-2" }] },
+      user: { findMany: async () => [{ id: "guest-1" }] },
       // WARP-2586 — deleteWorkItem now reads the item's relations before the
       // cascade, so it can emit a relation_removed audit row on the SURVIVING
       // end. Empty here: these two cases are about parent_removed.
       pmWorkItemRelation: { findMany: async () => [] },
+      // WARP-1505 — and the item's attachment keys, to unlink the files after
+      // the commit. None here; pm.service.attachments.test.ts covers the hook.
+      pmAttachment: { findMany: async () => [] },
     };
     const prisma = {
-      pmWorkItem: { findUnique: async () => ({ id: "leaf-1" }) },
+      pmWorkItem: { findUnique: async () => ({ id: "leaf-1", projectId: "project-1" }) },
       $transaction: createTransactionSeam({ client: () => tx }).$transaction,
     } as never;
 
-    await deleteWorkItem(prisma, null, "leaf-1");
+    await deleteWorkItem(prisma, "actor-1", "leaf-1");
 
-    expect(activityCreated).toBe(false);
+    expect(deleted).toBe(true);
   });
 
   // WARP-2586 (review): the relation audit is the part worth a test of its
@@ -321,7 +350,7 @@ describe("deleteWorkItem parent-removal audit (WARP-885)", () => {
         findMany: async () => [],
         delete: async () => {
           // Audit rows first; the cascade must never be the only record.
-          expect(audit).toHaveLength(2);
+          expect(audit.filter((row) => row.verb === "relation_removed")).toHaveLength(2);
           deleted = true;
           return {};
         },
@@ -336,6 +365,8 @@ describe("deleteWorkItem parent-removal audit (WARP-885)", () => {
           return { count: data.length };
         },
       },
+      pmWorkItemAssignee: { findMany: async () => [] },
+      user: { findMany: async () => [] },
       pmWorkItemRelation: {
         findMany: async ({ where }: { where: Row }) => {
           expect(where).toEqual({ OR: [{ fromId: "x" }, { toId: "x" }] });
@@ -345,10 +376,12 @@ describe("deleteWorkItem parent-removal audit (WARP-885)", () => {
           ];
         },
       },
+      // WARP-1505 — see the two cases above.
+      pmAttachment: { findMany: async () => [] },
     };
     const seam = createTransactionSeam({ client: () => tx });
     const prisma = {
-      pmWorkItem: { findUnique: async () => ({ id: "x" }) },
+      pmWorkItem: { findUnique: async () => ({ id: "x", projectId: "project-1" }) },
       $transaction: seam.$transaction,
     } as never;
 
@@ -358,8 +391,17 @@ describe("deleteWorkItem parent-removal audit (WARP-885)", () => {
     // A relation committed between the audit read and the delete must abort
     // this transaction, not slip through the cascade unrecorded. The seam
     // records the options argument, so dropping SERIALIZABLE_TX goes red.
-    expectAllTransactionsAt(seam, SERIALIZABLE_TX);
+    expectAllTransactionsAt(seam, { ...SERIALIZABLE_TX, timeout: 5_000 });
     expect(audit).toEqual([
+      expect.objectContaining({
+        workItemId: null,
+        actorId: "actor-1",
+        verb: "deleted",
+        deletedProjectId: "project-1",
+        deletedWorkItemId: "x",
+        deletedGuestUserIds: [],
+        notifyStatus: "not_needed",
+      }),
       expect.objectContaining({
         workItemId: "other-1",
         actorId: "actor-1",
@@ -382,14 +424,19 @@ describe("deleteWorkItem parent-removal audit (WARP-885)", () => {
       throw Object.assign(new Error("could not serialize access"), { code: "P2034" });
     });
     const prisma = {
-      pmWorkItem: { findUnique: async () => ({ id: "x" }) },
+      pmWorkItem: { findUnique: async () => ({ id: "x", projectId: "project-1" }) },
       $transaction: seam.$transaction,
     } as never;
     await expect(deleteWorkItem(prisma, null, "x")).rejects.toThrow("concurrent_mutation");
   });
 });
 
-describe("updateProject archival signal sync (WARP-884)", () => {
+// WARP-3370 — archive / restore moved out of `updateProject` into
+// `setProjectArchived`, a compare-and-set that also says whether it moved the
+// project. The WARP-884 invariant these two pin is unchanged: `isArchived` (the
+// canonical signal) and `archivedAt` (its timestamp) are written and cleared
+// TOGETHER. Lifecycle + audit behaviour is in native.test.ts and the pg suite.
+describe("setProjectArchived archival signal sync (WARP-884)", () => {
   function baseProjectRow(overrides: Row = {}): Row {
     return {
       id: "p1",
@@ -407,49 +454,78 @@ describe("updateProject archival signal sync (WARP-884)", () => {
   }
 
   it("archiving sets isArchived=true and stamps archivedAt", async () => {
-    let persisted: Row | undefined;
+    let persisted: { where: Row; data: Row } | undefined;
+    let row = baseProjectRow();
     const prisma = {
       pmProject: {
-        findUnique: async () => baseProjectRow(),
-        update: async ({ data, include }: { data: Row; include?: Row }) => {
-          persisted = data;
-          return {
-            ...baseProjectRow(),
-            ...data,
-            ...(include?.workspace ? { workspace: { slug: "home" } } : {}),
-          };
+        updateMany: async (args: { where: Row; data: Row }) => {
+          persisted = args;
+          row = { ...row, ...args.data };
+          return { count: 1 };
         },
+        findUnique: async ({ include }: { include?: Row }) => ({
+          ...row,
+          ...(include?.workspace ? { workspace: { slug: "home" } } : {}),
+        }),
       },
     } as never;
 
-    const result = await updateProject(prisma, "p1", { archived: true });
+    const { project, changed } = await setProjectArchived(prisma, "p1", true);
 
-    expect(persisted!.isArchived).toBe(true);
-    expect(persisted!.archivedAt).toBeInstanceOf(Date);
-    expect(result.archived).toBe(true);
+    // compare-and-set: only a project that is NOT yet archived is moved
+    expect(persisted!.where).toEqual({ id: "p1", kind: "PROJECT", isArchived: false });
+    expect(persisted!.data.isArchived).toBe(true);
+    expect(persisted!.data.archivedAt).toBeInstanceOf(Date);
+    expect(project.archived).toBe(true);
+    expect(changed).toBe(true);
   });
 
   it("unarchiving clears isArchived and archivedAt together", async () => {
-    let persisted: Row | undefined;
+    let persisted: { where: Row; data: Row } | undefined;
+    let row = baseProjectRow({ isArchived: true, archivedAt: new Date() });
     const prisma = {
       pmProject: {
-        findUnique: async () => baseProjectRow({ isArchived: true, archivedAt: new Date() }),
-        update: async ({ data, include }: { data: Row; include?: Row }) => {
-          persisted = data;
-          return {
-            ...baseProjectRow(),
-            ...data,
-            ...(include?.workspace ? { workspace: { slug: "home" } } : {}),
-          };
+        updateMany: async (args: { where: Row; data: Row }) => {
+          persisted = args;
+          row = { ...row, ...args.data };
+          return { count: 1 };
         },
+        findUnique: async ({ include }: { include?: Row }) => ({
+          ...row,
+          ...(include?.workspace ? { workspace: { slug: "home" } } : {}),
+        }),
       },
     } as never;
 
-    const result = await updateProject(prisma, "p1", { archived: false });
+    const { project, changed } = await setProjectArchived(prisma, "p1", false);
 
-    expect(persisted!.isArchived).toBe(false);
-    expect(persisted!.archivedAt).toBeNull();
-    expect(result.archived).toBe(false);
+    expect(persisted!.where).toEqual({ id: "p1", kind: "PROJECT", isArchived: true });
+    expect(persisted!.data.isArchived).toBe(false);
+    expect(persisted!.data.archivedAt).toBeNull();
+    expect(project.archived).toBe(false);
+    expect(changed).toBe(true);
+  });
+
+  it("a project already in the asked state is not moved and says so (the route audits transitions only)", async () => {
+    const prisma = {
+      pmProject: {
+        updateMany: async () => ({ count: 0 }), // the compare-and-set matched nothing
+        findUnique: async ({ include }: { include?: Row }) => ({
+          ...baseProjectRow({ isArchived: true, archivedAt: new Date() }),
+          ...(include?.workspace ? { workspace: { slug: "home" } } : {}),
+        }),
+      },
+    } as never;
+    const { project, changed } = await setProjectArchived(prisma, "p1", true);
+    expect(changed).toBe(false);
+    expect(project.archived).toBe(true);
+  });
+
+  it("a project that does not exist is project_not_found", async () => {
+    const prisma = {
+      pmProject: { updateMany: async () => ({ count: 0 }), findUnique: async () => null },
+    } as never;
+    await expect(setProjectArchived(prisma, "nope", true)).rejects.toThrow("project_not_found");
   });
 });
 

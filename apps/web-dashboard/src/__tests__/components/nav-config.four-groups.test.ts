@@ -10,15 +10,11 @@
  * The shape now:
  *
  *   WORK      Overview · Ask AI · Files · Messages · Email · Calendar · Workshop
- *   BUSINESS  Insights [Brief, Reports] · Customers · Projects [Money] · Practice
- *   SYSTEMS   Security · Cameras [Events] · Doors · Network [Voice, Remote access] · Devices
+ *   BUSINESS  Insights [Brief, Reports] · Customers [Support] · Projects [Money] · Practice
+ *   SYSTEMS   Cameras [Events] · Network [Voice, Remote access] · Devices
  *
- * Security (WARP-2977, ADR-059) landed on stage after this tree was cut and is
- * its own module, so it is a fifteenth row rather than a child of Cameras.
- * Workshop (WARP-3063) is the sixteenth, and only owner/admin see it: the
+ * Workshop (WARP-3063) is the fifteenth row, and only owner/admin see it: the
  * tuck behind Settings had removed it from the product.
- * Doors (ADR-055 P4b) is the seventeenth, owner/admin only, and in no box's
- * nav until DOORS_ENABLED is set.
  *   ADMIN     Settings
  *
  * Everything else keeps its route and moves behind Settings as the WARP-1807
@@ -68,27 +64,31 @@ describe("the tree is four groups (WARP-2967)", () => {
     ]);
   });
 
-  it("renders at most seventeen top-level rows with everything switched on", () => {
-    // The ticket's ≤ 14, plus WARP-2977's Security row, plus WARP-3063's
-    // Workshop row, plus ADR-055 P4b's Doors row. Workshop's owner/admin gate
-    // is pinned in workshop.nav.test.ts, Doors' in doors.module-gate.test.tsx.
+  it("renders at most fifteen top-level rows with everything switched on", () => {
+    // The ticket's ≤ 14, plus WARP-3063's Workshop row. Workshop's owner/admin
+    // gate is pinned in workshop.nav.test.ts.
     const rows = NAV_GROUPS.flatMap((g) => visible(g.label)).length;
-    expect(rows).toBeLessThanOrEqual(17);
+    expect(rows).toBeLessThanOrEqual(15);
   });
 
   it.each([
     ["Work", ["/", "/chat", "/files", "/messages", "/email", "/calendar", "/workshop"]],
     ["Business", ["/business", "/customers", "/projects", "/practice"]],
-    ["Systems", ["/security", "/cameras", "/doors", "/network", "/devices"]],
+    ["Systems", ["/cameras", "/network", "/devices"]],
     ["Admin", ["/settings"]],
   ])("%s shows exactly %j", (label, hrefs) => {
     expect(visible(label).map((i) => i.href)).toEqual(hrefs);
   });
 
-  it("nests Brief and Reports under Insights, Money under Projects", () => {
+  it("nests Brief and Reports under Insights, Support under Customers, Money under Projects", () => {
     const insights = visible("Business").find((i) => i.href === "/business")!;
     expect(insights.label).toBe("Insights");
     expect(insights.children?.map((c) => c.href)).toEqual(["/brief", "/reports"]);
+
+    // WARP-3528 — the service desk is filed under Customers, not a sixteenth
+    // row: the cap above and the exact Business list in the table both hold.
+    const customers = visible("Business").find((i) => i.href === "/customers")!;
+    expect(customers.children?.map((c) => c.href)).toEqual(["/support"]);
 
     const projects = visible("Business").find((i) => i.href === "/projects")!;
     expect(projects.children?.map((c) => c.href)).toEqual(["/money"]);
@@ -115,10 +115,34 @@ describe("the tree is four groups (WARP-2967)", () => {
     expect(rows.map((i) => i.href)).not.toContain(`/${off}`);
   });
 
+  // WARP-3528 — Customers fails only its `crm` gate and Support names a module
+  // of its own, so it takes Customers' slot. (The table above asserts the
+  // parent is gone via `/${off}`, which is only true when the module id is the
+  // route; Customers is `/customers`, so this one says it outright.)
+  it("Business: support on, crm off → /support is promoted into Customers' slot", () => {
+    const rows = visible("Business", "owner", (id) => id !== "crm").map((i) => i.href);
+    expect(rows).toEqual(["/business", "/support", "/projects", "/practice"]);
+  });
+
+  it("Business: support off → no /support row, and Customers keeps no sub-nav", () => {
+    const rows = visible("Business", "owner", (id) => id !== "support");
+    expect(rows.map((i) => i.href)).toEqual(["/business", "/customers", "/projects", "/practice"]);
+    expect(rows.find((i) => i.href === "/customers")?.children).toEqual([]);
+  });
+
+  it("offers an external guest neither Customers nor Support", () => {
+    const hrefs = visible("Business", "guest").flatMap((i) => [
+      i.href,
+      ...(i.children ?? []).map((c) => c.href),
+    ]);
+    expect(hrefs).not.toContain("/customers");
+    expect(hrefs).not.toContain("/support");
+  });
+
   it("promotes nothing without a module of its own, and never past a role gate", () => {
     // Events is part of Cameras (no module), Remote access shares Network's.
     const sys = visible("Systems", "owner", (id) => id !== "cameras" && id !== "network");
-    expect(sys.map((i) => i.href)).toEqual(["/security", "/doors", "/voice", "/devices"]);
+    expect(sys.map((i) => i.href)).toEqual(["/voice", "/devices"]);
     // Insights is role-gated: a guest gets neither it nor its children.
     const biz = visible("Business", "guest").map((i) => i.href);
     expect(biz).not.toContain("/reports");
@@ -144,7 +168,7 @@ describe("the tree is four groups (WARP-2967)", () => {
 describe("every tucked destination has a way back in (WARP-2967)", () => {
   const tucked = everyItem().filter((i) => i.hidden);
 
-  it("tucks the sixteen admin surfaces the tree no longer carries", () => {
+  it("tucks the admin surfaces the tree no longer carries", () => {
     expect(tucked.map((i) => i.href).sort()).toEqual(
       [
         "/admin",
@@ -160,9 +184,15 @@ describe("every tucked destination has a way back in (WARP-2967)", () => {
         "/help",
         "/integrations",
         "/integrations/credentials",
+        // WARP-3532 — webhooks and chat-app updates for work, a Settings sibling of
+        // the two above.
+        "/integrations/work-notifications",
         "/knowledge",
         "/models",
         "/routines",
+        "/settings/coding-tools",
+        "/settings/developer",
+        "/settings/telemetry",
         "/tools",
         "/trust",
         "/users",

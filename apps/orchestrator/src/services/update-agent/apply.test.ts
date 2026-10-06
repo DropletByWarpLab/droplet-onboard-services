@@ -47,12 +47,12 @@ import {
   applyWindowTick,
   httpHealthProbe,
   imageRefMatchesDigest,
-  releaseByTagUrl,
   SERVICES_START_FAILED_TITLE,
   type ApplyRunner,
   type EnvReconcileReport,
   type RecreateTarget,
 } from "./apply.js";
+import { HqTokenError } from "../hq-token.service.js";
 import { createHostComposeRunner } from "./host-compose-runner.js";
 import type { ReleaseClient, ReleaseManifest, ReleaseService } from "./manifest.js";
 import { UPDATE_AGENT_SETTINGS_KEY } from "./settings.js";
@@ -123,9 +123,9 @@ function buildManifest(overrides: Partial<ReleaseManifest["release"]> = {}): Rel
 let releaseServer: http.Server;
 let releaseBaseUrl = "";
 let servedTag = "ota-9-gapply";
-// WARP-3419 — what `/releases/latest` answers when it is NOT the row's release
-// (a stage row: `latest` skips prereleases). Null = the served release.
-let latestTag: string | null = null;
+// WARP-3430 — every URL the fake release server was asked for, so a test can
+// prove the apply path never touched a REST API or a `latest` lookup.
+let requestedUrls: string[] = [];
 let servedConfigs: Buffer = CONFIGS_TAR;
 // WARP-3120 — the client installer a release may carry.
 const DMG = Buffer.from("a Developer ID signed, notarized DMG (fake bytes)");
@@ -152,31 +152,22 @@ let healthBaseUrl = "";
 const healthy: Record<string, boolean> = {};
 
 beforeAll(async () => {
+  // WARP-3430 — the release downloads only: `/download/<tag>/<asset>`, served
+  // for the ONE tag in `servedTag` (any other tag is a 404, like a release
+  // that moved on). There is deliberately no API route: an apply that asked
+  // for one would get a 404 and fail.
   releaseServer = http.createServer((req, res) => {
-    if (req.url === "/releases/latest" || req.url === `/releases/tags/${servedTag}`) {
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(
-        JSON.stringify({
-          tag_name: req.url === "/releases/latest" ? (latestTag ?? servedTag) : servedTag,
-          assets: [
-            { name: "release.json", url: `${releaseBaseUrl}/assets/manifest` },
-            { name: "release.json.sig", url: `${releaseBaseUrl}/assets/signature` },
-            { name: "configs.tar.gz", url: `${releaseBaseUrl}/assets/configs` },
-            { name: "Droplet-0.2.0.dmg", url: `${releaseBaseUrl}/assets/dmg` },
-          ],
-        }),
-      );
-      return;
-    }
-    if (req.url === "/assets/dmg") {
-      res.writeHead(200, { "content-type": "application/octet-stream" });
-      res.end(servedDmg);
-      return;
-    }
-    if (req.url === "/assets/configs") {
-      res.writeHead(200, { "content-type": "application/octet-stream" });
-      res.end(servedConfigs);
-      return;
+    requestedUrls.push(req.url ?? "");
+    const m = /^\/download\/([^/]+)\/([^/]+)$/.exec(req.url ?? "");
+    if (m && decodeURIComponent(m[1]!) === servedTag) {
+      const asset = decodeURIComponent(m[2]!);
+      const body =
+        asset === "configs.tar.gz" ? servedConfigs : asset === "Droplet-0.2.0.dmg" ? servedDmg : null;
+      if (body) {
+        res.writeHead(200, { "content-type": "application/octet-stream" });
+        res.end(body);
+        return;
+      }
     }
     res.writeHead(404);
     res.end();
@@ -370,7 +361,12 @@ function createPrismaStub(opts: {
     }),
   };
 
-  return { deviceUpdate, systemFlag, applianceSetup };
+  // A late wizard pointer is legitimate only once the local owner exists.
+  // Setup reads verify that prerequisite before preserving an unclaimed box's
+  // progress; OTA must still defer until its explicit state becomes ready.
+  const user = { count: vi.fn(async () => 1) };
+
+  return { deviceUpdate, systemFlag, applianceSetup, user };
 }
 
 type PrismaStub = ReturnType<typeof createPrismaStub>;
@@ -518,7 +514,7 @@ function baseOpts(prisma: PrismaStub, runner: FakeRunner, logger = createLoggerS
   return {
     prisma: prisma as never as PrismaClient,
     runner,
-    releasesLatestUrl: `${releaseBaseUrl}/releases/latest`,
+    downloadBase: `${releaseBaseUrl}/download`,
     logger: logger as never as pino.Logger,
     probe: httpHealthProbe({
       baseUrlFor: (svc: ReleaseService) => `${healthBaseUrl}/svc/${svc.name}`,
@@ -529,7 +525,7 @@ function baseOpts(prisma: PrismaStub, runner: FakeRunner, logger = createLoggerS
 
 beforeEach(() => {
   servedTag = "ota-9-gapply";
-  latestTag = null;
+  requestedUrls = [];
   servedConfigs = CONFIGS_TAR;
   servedDmg = DMG;
   healthy.orchestrator = true;
@@ -840,7 +836,9 @@ describe("applyPendingUpdate (WARP-539)", () => {
     const res = await applyPendingUpdate(baseOpts(prisma, runner, logger));
 
     expect(res.outcome).toBe("deferred_setup_in_progress");
+    expect(prisma.user.count).toHaveBeenCalledWith({ where: { role: "owner" } });
     expect(prisma.deviceUpdate._rows()[0]!.status).toBe("pending");
+    expect(prisma.deviceUpdate._statusWrites()).toEqual([]);
     expect(runner.calls).toEqual([]);
     expect(logger.info).toHaveBeenCalledWith(
       expect.objectContaining({ event: "update.apply_deferred" }),
@@ -875,7 +873,7 @@ describe("applyPendingUpdate (WARP-539)", () => {
     const res = await applyPendingUpdate({
       ...baseOpts(prisma, runner, logger),
       // unreachable port — connection refused
-      releasesLatestUrl: "http://127.0.0.1:1/releases/latest",
+      downloadBase: "http://127.0.0.1:1/download",
     });
 
     expect(res.outcome).toBe("retry_later");
@@ -884,16 +882,148 @@ describe("applyPendingUpdate (WARP-539)", () => {
     expect(prisma.deviceUpdate._rows()[0]!.status).toBe("verifying");
   });
 
-  it("WARP-3419: installs a stage release even though /releases/latest names a stable one", async () => {
+  it("WARP-3419/3430: installs a stage release by its own tag — never via the API or `latest`", async () => {
+    // WARP-3419: a stage release is a GitHub prerelease, and `latest` skips
+    // prereleases, so a stage row asking `latest` got a stable release's
+    // assets. WARP-3430 removed the lookup entirely: the asset is a plain
+    // download at <base>/<the row's tag>/<name>. The server only serves that
+    // tag's files, so this passes only if the row's tag was used.
     const prisma = createPrismaStub();
     const runner = new FakeRunner();
     servedTag = "ota-stage-404-g3c71b82";
-    latestTag = "ota-stable-399-g82be2ca"; // `latest` skips prereleases
     await seedPendingRow(prisma, buildManifest());
 
     const res = await applyPendingUpdate(baseOpts(prisma, runner));
 
     expect(res.outcome).toBe("self_swap_started");
+    expect(requestedUrls).toEqual(["/download/ota-stage-404-g3c71b82/configs.tar.gz"]);
+    expect(requestedUrls.some((u) => /\/releases(\/|\?|$)|latest/.test(u))).toBe(false);
+  });
+
+  it("a row that tracks no release tag is a transient retry, not a guess at `latest`", async () => {
+    const prisma = createPrismaStub();
+    const runner = new FakeRunner();
+    await prisma.deviceUpdate.create({
+      data: {
+        status: "pending",
+        channel: "stable", // the box's own channel: not the stale-row gate's business
+        releaseTag: null,
+        gitSha: GIT_SHA,
+        builtAt: new Date("2026-06-30T03:00:00Z"),
+        manifestSha256: "0".repeat(64),
+        manifestJson: buildManifest(),
+      },
+    });
+
+    const res = await applyPendingUpdate(baseOpts(prisma, runner));
+
+    expect(res).toMatchObject({ outcome: "retry_later", detail: expect.stringContaining("no release tag") });
+    expect(prisma.deviceUpdate._rows()[0]!.status).toBe("verifying");
+    expect(requestedUrls).toEqual([]);
+  });
+
+  it("WARP-3430: a registry that refuses auth is a transient retry — NOT image_signature_failed", async () => {
+    // docker/ota/apply-update.sh prints the canonical `registry-auth:` prefix
+    // when cosign's fetch or `docker pull` is answered 401/UNAUTHORIZED/DENIED
+    // (the GHCR package is still private). No signature was ever judged, so
+    // the update must not be rejected: the row stays verifying and the next
+    // window retries once the package is public.
+    const prisma = createPrismaStub();
+    const runner = new FakeRunner();
+    const logger = createLoggerSpy();
+    const detailLine =
+      "[apply-update] ERROR: registry-auth: the registry refused authentication for ghcr.io/dropletbywarplab/droplet-orchestrator@sha256:1 — the image package is private";
+    runner.pullImages = async () => {
+      throw Object.assign(new Error("Command failed: apply-update.sh pull-images"), {
+        stderr: `UNAUTHORIZED: authentication required\n${detailLine}\n`,
+      });
+    };
+    await seedPendingRow(prisma, buildManifest());
+
+    const res = await applyPendingUpdate(baseOpts(prisma, runner, logger));
+
+    expect(res).toMatchObject({ outcome: "retry_later", deviceUpdateId: "du-1" });
+    expect((res as { detail: string }).detail).toContain("registry-auth:");
+    expect(prisma.deviceUpdate._rows()[0]).toMatchObject({
+      status: "verifying",
+      failureReason: null,
+      applyClaim: "unclaimed",
+    });
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "update.registry_auth_failed", deviceUpdateId: "du-1" }),
+      expect.any(String),
+    );
+    // Nothing past the pull ran, and it was not logged as a rejection.
+    expect(runner.calls.some((c) => c.startsWith("stageConfigs"))).toBe(false);
+    expect(logger.warn).not.toHaveBeenCalledWith(
+      expect.objectContaining({ event: "update.rejected" }),
+      expect.any(String),
+    );
+  });
+
+  it("WARP-3503: HQ issuing no pull token (a revoked box) is the same transient retry — the box keeps its release", async () => {
+    // The REAL runner, so the message apply.ts classifies is the one the runner
+    // actually raises when HQ issues no registry token.
+    const real = createHostComposeRunner({
+      scriptPath: "/opt/droplet/docker/ota/apply-update.sh",
+      composeFile: "/opt/droplet/docker/docker-compose.yml",
+      updatesDir: tmpdir(),
+      hqToken: {
+        host: "hq.example",
+        getToken: async () => {
+          throw new HqTokenError("revoked", "/v1/device/token");
+        },
+      },
+      exec: async () => {
+        throw new Error("no helper may run when HQ issued no token");
+      },
+    });
+    const prisma = createPrismaStub();
+    const runner = new FakeRunner();
+    runner.pullImages = (services) => real.pullImages(services);
+    const logger = createLoggerSpy();
+    const manifest = buildManifest();
+    manifest.services = manifest.services.map((s) => ({
+      ...s,
+      image: s.image.replace("ghcr.io", "hq.example"),
+    }));
+    await seedPendingRow(prisma, manifest);
+
+    const res = await applyPendingUpdate(baseOpts(prisma, runner, logger));
+
+    expect(res).toMatchObject({ outcome: "retry_later", deviceUpdateId: "du-1" });
+    expect((res as { detail: string }).detail).toMatch(/registry-auth: .*\(revoked: /);
+    expect(prisma.deviceUpdate._rows()[0]).toMatchObject({
+      status: "verifying",
+      failureReason: null,
+      applyClaim: "unclaimed",
+    });
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "update.registry_auth_failed", deviceUpdateId: "du-1" }),
+      expect.any(String),
+    );
+    // Nothing past the pull ran: the current release keeps running.
+    expect(runner.calls.some((c) => c.startsWith("stageConfigs"))).toBe(false);
+    expect(runner.calls.some((c) => c.startsWith("recreate"))).toBe(false);
+    expect(logger.warn).not.toHaveBeenCalledWith(
+      expect.objectContaining({ event: "update.rejected" }),
+      expect.any(String),
+    );
+  });
+
+  it("when both markers appear, the signature refusal wins over the auth one", async () => {
+    const prisma = createPrismaStub();
+    const runner = new FakeRunner();
+    runner.pullImages = async () => {
+      throw Object.assign(new Error("Command failed"), {
+        stderr: "registry-auth: replayed registry text\n[apply-update] ERROR: image-verify: cosign rejected an image\n",
+      });
+    };
+    await seedPendingRow(prisma, buildManifest());
+
+    const res = await applyPendingUpdate(baseOpts(prisma, runner));
+
+    expect(res).toMatchObject({ outcome: "rejected", failureReason: "image_signature_failed" });
   });
 
   it("returns nothing_pending when the table has no applicable row", async () => {
@@ -901,6 +1031,165 @@ describe("applyPendingUpdate (WARP-539)", () => {
     const runner = new FakeRunner();
     const res = await applyPendingUpdate(baseOpts(prisma, runner));
     expect(res.outcome).toBe("nothing_pending");
+    expect(runner.calls).toEqual([]);
+  });
+});
+
+// The poller only refuses a not-newer release when it CREATES a row. A row can
+// wait — parked `verifying` after a registry-auth retry, say — while a newer
+// release is created, applied and committed; every apply path then picks the
+// newest pending|verifying row, i.e. the old one. applyClaimedRow re-checks.
+describe("a stale row is retired, never applied (WARP-3430)", () => {
+  /** A row in ANY lifecycle state on the box's own channel (seedPendingRow only makes pending ones). */
+  async function seedRow(
+    prisma: PrismaStub,
+    row: { status: string; gitSha: string; builtAt: string; channel?: string },
+  ) {
+    return prisma.deviceUpdate.create({
+      data: {
+        status: row.status,
+        channel: row.channel ?? "stable",
+        releaseTag: servedTag,
+        gitSha: row.gitSha,
+        builtAt: new Date(row.builtAt),
+        manifestSha256: "0".repeat(64),
+        manifestJson: buildManifest({ gitSha: row.gitSha, builtAt: row.builtAt }),
+      },
+    });
+  }
+  const COMMITTED = { status: "committed", gitSha: "b".repeat(40), builtAt: "2026-06-30T03:00:00Z" };
+
+  it.each(["pending", "verifying"])(
+    "a %s row older than the committed release is superseded, with nothing touched",
+    async (status) => {
+      const prisma = createPrismaStub();
+      const runner = new FakeRunner();
+      const logger = createLoggerSpy();
+      await seedRow(prisma, COMMITTED);
+      const stale = await seedRow(prisma, { status, gitSha: "a".repeat(40), builtAt: "2026-06-01T03:00:00Z" });
+
+      const res = await applyPendingUpdate(baseOpts(prisma, runner, logger));
+
+      expect(res).toEqual({ outcome: "stale_superseded", deviceUpdateId: stale.id, reason: "not_newer" });
+      expect(prisma.deviceUpdate._rows().find((r) => r.id === stale.id)).toMatchObject({
+        status: "superseded",
+        failureReason: "not_newer",
+        applyClaim: "unclaimed", // handed back like every other exit
+      });
+      // The only status write is the retirement: no `verifying`, no snapshot,
+      // no pull, no download.
+      expect(prisma.deviceUpdate._statusWrites().map((w) => w.status)).toEqual(["superseded"]);
+      expect(runner.calls).toEqual([]);
+      expect(requestedUrls).toEqual([]);
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event: "update.stale_superseded",
+          deviceUpdateId: stale.id,
+          reason: "not_newer",
+          installedGitSha: COMMITTED.gitSha,
+        }),
+        expect.any(String),
+      );
+    },
+  );
+
+  it("equal build time is not newer", async () => {
+    const prisma = createPrismaStub();
+    const runner = new FakeRunner();
+    await seedRow(prisma, COMMITTED);
+    const row = await seedRow(prisma, { status: "verifying", gitSha: "a".repeat(40), builtAt: COMMITTED.builtAt });
+
+    const res = await applyPendingUpdate(baseOpts(prisma, runner));
+
+    expect(res).toMatchObject({ outcome: "stale_superseded", deviceUpdateId: row.id, reason: "not_newer" });
+    expect(runner.calls).toEqual([]);
+  });
+
+  it("a row for another channel than the box follows is superseded, not applied", async () => {
+    // The box was moved to the stage channel; this row is a stable release.
+    const prisma = createPrismaStub({
+      flags: { [UPDATE_AGENT_SETTINGS_KEY]: { channel: "stage", applyWindowCron: "0 3 * * *", autoApply: true } },
+    });
+    const runner = new FakeRunner();
+    const logger = createLoggerSpy();
+    const row = await seedRow(prisma, {
+      status: "pending",
+      gitSha: "a".repeat(40),
+      builtAt: "2026-06-30T03:00:00Z",
+      channel: "stable",
+    });
+
+    const res = await applyPendingUpdate(baseOpts(prisma, runner, logger));
+
+    expect(res).toEqual({ outcome: "stale_superseded", deviceUpdateId: row.id, reason: "channel_mismatch" });
+    expect(prisma.deviceUpdate._rows()[0]).toMatchObject({ status: "superseded", failureReason: "channel_mismatch" });
+    expect(runner.calls).toEqual([]);
+    expect(requestedUrls).toEqual([]);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "update.stale_superseded", rowChannel: "stable", deviceChannel: "stage" }),
+      expect.any(String),
+    );
+  });
+
+  it("a row strictly newer than the committed one, on the box's channel, still applies", async () => {
+    const prisma = createPrismaStub();
+    const runner = new FakeRunner();
+    await seedRow(prisma, { ...COMMITTED, builtAt: "2026-06-01T03:00:00Z" });
+    await seedRow(prisma, { status: "pending", gitSha: "a".repeat(40), builtAt: "2026-06-30T03:00:00Z" });
+
+    const res = await applyPendingUpdate(baseOpts(prisma, runner));
+
+    expect(res.outcome).toBe("self_swap_started");
+  });
+
+  it("a box with no committed row (a locally built one) has no floor", async () => {
+    const prisma = createPrismaStub();
+    const runner = new FakeRunner();
+    await seedRow(prisma, { status: "pending", gitSha: "a".repeat(40), builtAt: "2020-01-01T00:00:00Z" });
+
+    expect((await applyPendingUpdate(baseOpts(prisma, runner))).outcome).toBe("self_swap_started");
+  });
+
+  it("the boot resume of a parked row retires it too when it has gone stale", async () => {
+    const prisma = createPrismaStub();
+    const runner = new FakeRunner();
+    await seedRow(prisma, COMMITTED);
+    const row = await seedRow(prisma, { status: "verifying", gitSha: "a".repeat(40), builtAt: "2026-06-01T03:00:00Z" });
+
+    const resume = await resumeInterruptedApply(baseOpts(prisma, runner));
+
+    expect(resume).toMatchObject({
+      outcome: "resumed_apply",
+      deviceUpdateId: row.id,
+      result: { outcome: "stale_superseded", reason: "not_newer" },
+    });
+    expect(runner.calls).toEqual([]);
+  });
+
+  it("a release parked by a registry-auth retry is NOT applied after a newer one committed", async () => {
+    // The reviewed scenario end to end: A parks (the registry refuses auth),
+    // B is created, applied and committed meanwhile, then the next window
+    // would have applied A — a downgrade.
+    const prisma = createPrismaStub();
+    const runner = new FakeRunner();
+    runner.pullImages = async () => {
+      throw Object.assign(new Error("Command failed: apply-update.sh pull-images"), {
+        stderr: "[apply-update] ERROR: registry-auth: the registry refused authentication for ghcr.io/x/y@sha256:1 — the image package is private\n",
+      });
+    };
+    const a = await seedRow(prisma, { status: "pending", gitSha: "a".repeat(40), builtAt: "2026-06-01T03:00:00Z" });
+    expect((await applyPendingUpdate(baseOpts(prisma, runner))).outcome).toBe("retry_later");
+    expect(prisma.deviceUpdate._rows()[0]!.status).toBe("verifying");
+
+    await seedRow(prisma, COMMITTED); // B: newer, committed
+    runner.calls = [];
+    runner.pullImages = async () => {
+      throw new Error("the window must not even reach the pull");
+    };
+    const res = await applyWindowTick(baseOpts(prisma, runner));
+
+    expect(res).toEqual({ outcome: "stale_superseded", deviceUpdateId: a.id, reason: "not_newer" });
+    expect(prisma.deviceUpdate._rows().find((r) => r.id === a.id)!.status).toBe("superseded");
     expect(runner.calls).toEqual([]);
   });
 });
@@ -1281,7 +1570,7 @@ describe("WARP-3193 PERF-3 — one apply per row, however many runners race", ()
     const prisma = createPrismaStub();
     const runner = new FakeRunner();
     await seedPendingRow(prisma, buildManifest());
-    servedTag = "ota-10-gmoved"; // transient: the latest release moved on
+    servedTag = "ota-10-gmoved"; // transient: the row's tag has no files (the release moved on)
 
     const res = await applyPendingUpdate(baseOpts(prisma, runner));
     expect(res.outcome).toBe("retry_later");
@@ -1356,16 +1645,6 @@ describe("WARP-3193 PERF-3 — one apply per row, however many runners race", ()
       expect.any(String),
     );
     expect(prisma.deviceUpdate._rows()[0]!.applyClaim).toBe("unclaimed");
-  });
-});
-
-describe("releaseByTagUrl (WARP-3419)", () => {
-  it("turns the latest endpoint into the by-tag endpoint, and leaves other URLs alone", () => {
-    expect(
-      releaseByTagUrl("https://api.github.com/repos/o/r/releases/latest", "ota-stage-404-g3c71b82"),
-    ).toBe("https://api.github.com/repos/o/r/releases/tags/ota-stage-404-g3c71b82");
-    expect(releaseByTagUrl("https://mirror.example/r/latest.json", "ota-stage-1-gabc")).toBeNull();
-    expect(releaseByTagUrl("not a url", "ota-stage-1-gabc")).toBeNull();
   });
 });
 
@@ -1492,6 +1771,12 @@ describe("client installers the release carries (WARP-3120)", () => {
     expect(i).toBeGreaterThan(runner.calls.findIndex((c) => c.startsWith("reconcileEnv(")));
     expect(i).toBeLessThan(runner.calls.indexOf("migrateDeploy()"));
     expect(runner.staged.macos).toEqual(DMG);
+    // WARP-3430 — the installer is a plain download by file name under the
+    // row's own tag; nothing asked a REST API where it lives.
+    expect(requestedUrls).toEqual([
+      "/download/ota-9-gapply/configs.tar.gz",
+      "/download/ota-9-gapply/Droplet-0.2.0.dmg",
+    ]);
     expect(logger.info).toHaveBeenCalledWith(
       expect.objectContaining({ event: "update.client_app_staged", platform: "macos", version: "0.2.0", alreadyStaged: false }),
       expect.any(String),

@@ -181,7 +181,8 @@ describe("client-hello", () => {
     expect(update).toHaveBeenCalledTimes(1);
     expect(update.mock.calls[0][0]).toMatchObject({
       where: { id: DEVICE_ID },
-      data: { lastSeenWsAt: expect.any(Date) },
+      // WARP-3384: `lastSeen` (what the devices lists show) moves with it.
+      data: { lastSeenWsAt: expect.any(Date), lastSeen: expect.any(Date) },
     });
   });
 

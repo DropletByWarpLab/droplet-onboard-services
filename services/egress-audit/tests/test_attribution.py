@@ -15,7 +15,7 @@ class TestNameMapping:
 
     def test_explicit_container_names(self):
         assert service_from_container_name("droplet-openwrt") == "openwrt"
-        assert service_from_container_name("/droplet-cloudflared") == "cloudflared"
+        assert service_from_container_name("/droplet-matter-controller") == "matter-controller"
 
 
 class TestBuildIpMap:

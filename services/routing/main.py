@@ -86,7 +86,7 @@ from schemas import (
     FirewallRedirectCollection,
     VpnSetupRequest,
     VpnPeerCreateRequest,
-    VpnOverlayPeerRequest,
+    VpnPeerInstallRequest,
     VpnPeerDeleteRequest,
     ApApproveRequest,
     ApTestSeedRequest,
@@ -1897,8 +1897,8 @@ def vpn_setup(req: VpnSetupRequest):
             # after its first setup (and after this PR's reconciler runs), so
             # this is the branch the field actually hits; returning `created:
             # False` WITHOUT `interface_live` here left every consumer's
-            # `setup.interface_live === false` gate — the mint 503, the profile
-            # 503, provisionOverlayPeer, the reconciler — reading `undefined`
+            # `setup.interface_live === false` gate — the mint 503 and the
+            # reconciler — reading `undefined`
             # and never firing on exactly the routers WARP-2689 is about. The
             # value is three-valued (True/False/None); None = the router cannot
             # say (no rpcd-mod-wireguard / ACL), and callers must not treat that
@@ -2109,17 +2109,13 @@ def vpn_create_peer(req: VpnPeerCreateRequest):
         handle_router_error(exc)
 
 
-@app.post("/vpn/peers/overlay")
+@app.post("/vpn/peers/install")
 @_uci_serialised
-def vpn_install_overlay_peer(req: VpnOverlayPeerRequest):
-    """WARP-1385 (ADR-030) — install/refresh a direct-punch overlay peer.
+def vpn_install_peer(req: VpnPeerInstallRequest):
+    """Restore a saved public-key peer; WireGuard learns its endpoint on handshake.
 
-    The phone brings its OWN key (enrolled via HQ), so unlike POST /vpn/peers
-    this installs the caller-supplied `public_key` with the phone's observed
-    `endpoint` + a keepalive — WireGuard's own initiations from that endpoint
-    are the box side of the NAT hole-punch. Idempotent: any prior section for
-    the same public_key is removed first, so a re-connect just refreshes the
-    endpoint. Never generates or returns a private key.
+    Idempotent: replace any existing section for this key, then reload and
+    confirm the peer is installed. Never generates or returns a private key.
     """
     try:
         r = get_router()
@@ -2129,7 +2125,7 @@ def vpn_install_overlay_peer(req: VpnOverlayPeerRequest):
                 detail=f"VPN interface '{req.interface}' not configured — POST /vpn/setup first",
             )
         # Refresh semantics: drop any existing section for this key before adding
-        # so the endpoint/allowed-ips update cleanly (add_peer would otherwise
+        # so the allowed-ips update cleanly (add_peer would otherwise
         # append a duplicate section).
         r.vpn.delete_peer(req.interface, req.public_key)
         allowed_ips_uci = ",".join(req.allowed_ips)
@@ -2138,10 +2134,6 @@ def vpn_install_overlay_peer(req: VpnOverlayPeerRequest):
             public_key=req.public_key,
             allowed_ips=allowed_ips_uci,
             description=req.description,
-            # WARP-1757: None means "client-initiated, no endpoint configured".
-            # add_peer's `if endpoint:` guard then omits endpoint_host entirely,
-            # which is what lets wg learn it from the first handshake.
-            endpoint=req.endpoint or "",
             persistent_keepalive=req.persistent_keepalive,
         )
         applied = True
@@ -2149,30 +2141,26 @@ def vpn_install_overlay_peer(req: VpnOverlayPeerRequest):
             r.uci.apply(timeout=5, rollback=False)
         except Exception as exc:  # noqa: BLE001 — apply failure shouldn't fail the request
             applied = False
-            logger.warning("vpn: uci.apply after overlay add_peer failed (peer is staged): %s", exc)
+            logger.warning("vpn: uci.apply after saved-peer install failed (peer is staged): %s", exc)
 
-        # WARP-2686 — same defect, and this is the path the phone and the
-        # desktop app actually use, so it is the one a customer meets. `apply`
-        # is not a peer-set reload; force the ifup and then confirm the key is
-        # really on the interface.
+        # apply is not a peer-set reload; force ifup and then confirm the key
+        # is really on the interface before declaring the restore applied.
         if applied:
             r.vpn.reload_interface(req.interface)
         live = r.vpn.live_peers(req.interface)
         if live is not None and req.public_key not in live:
             applied = False
             logger.error(
-                "vpn: overlay peer %s not on %s after add + reload — the device cannot punch",
+                "vpn: peer %s not on %s after add + reload — the device cannot connect",
                 req.public_key, req.interface,
             )
 
-        # staged-vs-live: an overlay peer that never applied cannot hole-punch,
-        # so the phone would silently fail to connect (audit 2026-08-06).
+        # A config-only install must not be reported as a working peer.
         return {
             "status": "ok" if applied else "staged",
             "applied": applied,
             "interface": req.interface,
             "public_key": req.public_key,
-            "endpoint": req.endpoint,
             "allowed_ips": list(req.allowed_ips),
             "persistent_keepalive": req.persistent_keepalive,
             # None = kernel state unreadable on this router. Never downgrade
@@ -2188,17 +2176,19 @@ def vpn_install_overlay_peer(req: VpnOverlayPeerRequest):
 def vpn_delete_peer(req: VpnPeerDeleteRequest):
     """Remove every peer matching `public_key` from `interface`.
 
-    404 when there's nothing to remove — the orchestrator treats that as a
-    success-equivalent (peer already gone). Multiple matches are deleted in
-    one shot; the response carries the count.
+    Reload even when no config entry remains: a previous staged removal may
+    have left the key live in the kernel. A missing-peer 404 requires observed
+    absence after that reload. Multiple matches are deleted in one shot.
     """
     try:
         r = get_router()
         if not r.vpn.interface_exists(req.interface):
-            raise HTTPException(status_code=404, detail=f"VPN interface '{req.interface}' not configured")
+            # UCI absence is not kernel absence: an orphaned interface can
+            # still hold the revoked key. Only observed absence permits 404.
+            live = r.vpn.live_peers(req.interface)
+            if live is not None and req.public_key not in live:
+                raise HTTPException(status_code=404, detail="Peer not found on interface")
         removed = r.vpn.delete_peer(req.interface, req.public_key)
-        if removed == 0:
-            raise HTTPException(status_code=404, detail="Peer not found")
         applied = True
         try:
             r.uci.apply(timeout=5, rollback=False)
@@ -2213,8 +2203,12 @@ def vpn_delete_peer(req: VpnPeerDeleteRequest):
         # and reached the LAN. So force the ifup the peer set actually needs,
         # then go and LOOK.
         if applied:
-            r.vpn.reload_interface(req.interface)
+            reloaded = r.vpn.reload_interface(req.interface)
         live = r.vpn.live_peers(req.interface)
+        if applied:
+            # A confirmed reload supports older routers without kernel reads.
+            # A failed reload requires actual observed absence to prove revoke.
+            applied = reloaded or (live is not None and req.public_key not in live)
         if live is not None and req.public_key in live:
             # Observed still-present after the reload. This is the one case that
             # must never read as success: `applied: false` is the contract the
@@ -2225,6 +2219,8 @@ def vpn_delete_peer(req: VpnPeerDeleteRequest):
                 "vpn: peer %s still live on %s after delete + reload — revocation NOT in effect",
                 req.public_key, req.interface,
             )
+        if removed == 0 and applied and live is not None and req.public_key not in live:
+            raise HTTPException(status_code=404, detail="Peer not found on interface")
         return {
             "status": "ok" if applied else "staged",
             "applied": applied,
@@ -2233,11 +2229,8 @@ def vpn_delete_peer(req: VpnPeerDeleteRequest):
             # Three-valued on purpose. `None` = we could not read kernel state
             # (no rpcd-mod-wireguard, or no `wireguard` ACL grant — the default
             # on routers flashed before WARP-2183/WARP-2689), and the caller
-            # must not read that as either proof or failure. We still performed
-            # the reload, so we do not downgrade `applied` on unknown: doing so
-            # would fail every revoke on those routers, trading a rare
-            # half-revoke for the total loss of revocation the orchestrator's
-            # own `isRevokeApplied` comment warns about.
+            # must not read that as proof. A confirmed reload still permits
+            # success on those older routers; a failed reload does not.
             "revocation_verified": None if live is None else (req.public_key not in live),
         }
     except (ConnectionLost, UbusError) as exc:

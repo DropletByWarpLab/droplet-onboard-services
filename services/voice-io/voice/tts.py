@@ -2,11 +2,9 @@
 
 The pipeline calls `tts.synthesize(text)` to turn the LLM's reply
 into PCM bytes, then hands the bytes to the speaker via
-`voice.audio_io.play()`. We use Piper (Apache 2.0) for the same
-reason we used openWakeWord + faster-whisper: all-OSS, on-device,
-no licensing/cloud round-trips. `rhasspy/wyoming-piper` is the
-official image — same Wyoming protocol as the STT side, just
-flipped (we send `synthesize`, server streams `audio-chunk` back).
+`voice.audio_io.play()`. A local Wyoming server supplies the audio:
+Kokoro on CPU or an operator-configured legacy Piper server. Both use
+the same protocol (we send `synthesize`, the server streams audio back).
 
 Wire format:
 
@@ -19,21 +17,19 @@ Wire format:
     ... more chunks ...
     ← {"type": "audio-stop", "data": null, "payload_length": 0}\\n
 
-Piper's default voice is `en_US-ryan-medium` (~70 MB, sounds natural,
-fast on CPU). The Wyoming-Piper image lets us swap voices via env;
-production may pick a different one — the operator only has to set
-`PIPER_VOICE` and restart.
+Kokoro's default voice is `af_heart`. The speaking-voice controller wraps
+this client so the dashboard's persisted selection applies to every
+reply. A temporary voice override is used for previews.
 
 `SynthesizedAudio` returned from `synthesize()` carries the rate +
 width along with the PCM bytes, so the caller (pipeline.speak)
-doesn't have to assume 16/22.05/24 kHz — Piper voices vary, and
+doesn't have to assume 16/22.05/24 kHz — server rates vary, and
 the speaker driver in audio_io.play handles any rate sounddevice
 accepts.
 
 Threading + isolation same as STT: sync sockets, the wake-pipeline
-thread blocks for the duration of synthesize() + play(). On CPU that's
-~300-500 ms for typical replies; the dropped mic frames during that
-window are harmless (we're not listening for wake while speaking
+thread blocks for the duration of synthesize() + play(). The dropped mic
+frames during that window are harmless (we're not listening for wake while speaking
 anyway — that's anti-feedback by design).
 """
 from __future__ import annotations
@@ -41,11 +37,13 @@ from __future__ import annotations
 import json
 import logging
 import socket
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional
 
 from voice.stt import (  # reuse the wire-helpers — same Wyoming protocol
+    STTUnavailable,
     _read_event,
     _read_exactly,
     _read_json_line,
@@ -55,11 +53,11 @@ logger = logging.getLogger("voice.tts")
 
 
 # Wyoming defaults. Override via env in main.py.
-DEFAULT_TTS_HOST = "wyoming-piper"
+DEFAULT_TTS_HOST = "kokoro-tts"
 DEFAULT_TTS_PORT = 10200
-DEFAULT_TTS_VOICE = "en_US-ryan-medium"
+DEFAULT_TTS_VOICE = "af_heart"
 DEFAULT_CONNECT_TIMEOUT_S = 5.0
-DEFAULT_SYNTHESIZE_TIMEOUT_S = 15.0  # generous — Piper is fast but warm-up takes time
+DEFAULT_SYNTHESIZE_TIMEOUT_S = 60.0  # CPU synthesis has a longer cold/warm budget.
 
 
 class TTSUnavailable(Exception):
@@ -106,6 +104,19 @@ class TextToSpeech(ABC):
     def available(self) -> bool:
         """True iff the TTS server is reachable. Probed at startup."""
 
+    @property
+    def default_voice(self) -> str:
+        return ""
+
+    @property
+    def voice_cache_key(self) -> str:
+        """Cached spoken cues must follow the current default voice."""
+        return self.default_voice
+
+    def describe(self) -> dict:
+        """Installed voices from the running server, never a model download."""
+        raise TTSUnavailable("Speaking voices are not available right now.")
+
 
 # ────────────────────────────────────────────────────────────────────
 # Wyoming — production client
@@ -127,6 +138,35 @@ class WyomingTTS(TextToSpeech):
         self._synthesize_timeout_s = synthesize_timeout_s
 
     @property
+    def default_voice(self) -> str:
+        return self._default_voice
+
+    def describe(self) -> dict:
+        try:
+            with socket.create_connection(
+                (self._host, self._port), timeout=self._connect_timeout_s,
+            ) as sock:
+                sock.settimeout(self._connect_timeout_s)
+                self._send_event(sock, "describe")
+                deadline = time.monotonic() + self._connect_timeout_s
+                # Bound both time and event count when talking to a bad peer.
+                for _ in range(16):
+                    event = _read_event(sock, deadline)
+                    if event is None:
+                        break
+                    header, _ = event
+                    if header.get("type") == "error":
+                        raise TTSUnavailable("Speaking voices are not available right now.")
+                    if header.get("type") == "info":
+                        data = header.get("data")
+                        if isinstance(data, dict):
+                            return data
+                        break
+        except (OSError, ValueError, TypeError, STTUnavailable) as exc:
+            raise TTSUnavailable("Speaking voices are not available right now.") from exc
+        raise TTSUnavailable("Speaking voices are not available right now.")
+
+    @property
     def available(self) -> bool:
         try:
             with socket.create_connection(
@@ -144,7 +184,10 @@ class WyomingTTS(TextToSpeech):
             # Defensive: Piper hangs on an empty synthesize request in
             # some versions. Short-circuit with an empty audio result.
             return SynthesizedAudio(pcm=b"", sample_rate=22050, sample_width=2, channels=1)
-        chosen_voice = (voice or self._default_voice).strip()
+        # An explicit empty override uses the server's own default. The
+        # speaking-voice wrapper uses it when legacy config does not match
+        # the actual server, so no unknown model name is sent/downloaded.
+        chosen_voice = (self._default_voice if voice is None else voice).strip()
 
         try:
             sock = socket.create_connection(
@@ -164,7 +207,7 @@ class WyomingTTS(TextToSpeech):
                 data["voice"] = {"name": chosen_voice}
             self._send_event(sock, "synthesize", data)
             return self._read_audio_until_stop(sock)
-        except (OSError, socket.timeout) as exc:
+        except (OSError, STTUnavailable) as exc:
             raise TTSUnavailable(f"synthesize failed: {exc}") from exc
         finally:
             try:
@@ -198,13 +241,18 @@ class WyomingTTS(TextToSpeech):
         """
         chunks: list[bytes] = []
         rate, width, channels = 22050, 2, 1  # Piper default for ryan-medium
+        deadline = time.monotonic() + self._synthesize_timeout_s
         while True:
-            event = _read_event(sock)
+            event = _read_event(sock, deadline)
             if event is None:
                 raise TTSUnavailable("server closed before audio-stop")
             header, payload = event
             data = header.get("data") or {}
             event_type = header.get("type")
+
+            if event_type == "error":
+                message = data.get("text") or data.get("code") or "TTS server rejected synthesis"
+                raise TTSUnavailable(str(message))
 
             if event_type == "audio-start":
                 rate = int(data.get("rate", rate))
@@ -290,7 +338,8 @@ def build_tts_from_env() -> TextToSpeech:
       - `__mock__`        → MockTTS (dev mode, silent playback)
       - empty/unset       → WyomingTTS against compose default DNS
 
-    `TTS_VOICE` overrides the default Piper voice name.
+    `TTS_VOICE` overrides the default speaking voice name. Legacy Piper
+    deployments set both TTS_URL and their installed Piper voice.
     """
     import os
     import urllib.parse
@@ -300,14 +349,18 @@ def build_tts_from_env() -> TextToSpeech:
     if raw == "__mock__":
         logger.info("TTS_URL=__mock__ → MockTTS (dev only, silent playback)")
         return MockTTS()
+    timeout = float((os.environ.get("TTS_SYNTHESIZE_TIMEOUT_S") or "").strip() or DEFAULT_SYNTHESIZE_TIMEOUT_S)
+    if not 1 <= timeout <= 300:
+        raise ValueError("TTS_SYNTHESIZE_TIMEOUT_S must be between 1 and 300 seconds")
     if not raw:
-        return WyomingTTS(default_voice=voice)
+        return WyomingTTS(default_voice=voice, synthesize_timeout_s=timeout)
     parsed = urllib.parse.urlparse(raw)
     if parsed.scheme != "tcp" or not parsed.hostname or not parsed.port:
         logger.warning(
             "TTS_URL=%r not in tcp://host:port form; falling back to default", raw,
         )
-        return WyomingTTS(default_voice=voice)
+        return WyomingTTS(default_voice=voice, synthesize_timeout_s=timeout)
     return WyomingTTS(
         host=parsed.hostname, port=parsed.port, default_voice=voice,
+        synthesize_timeout_s=timeout,
     )

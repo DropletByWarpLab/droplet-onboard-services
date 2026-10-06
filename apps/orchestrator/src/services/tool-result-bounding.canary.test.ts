@@ -73,11 +73,6 @@ const NOT_A_CURSOR: Record<string, string> = {
     "reaches does hold a resume position (its `watermark` column), but that never crosses a " +
     "tool result: WARP-2218's poller is a cron job, not a tool. Adding it to CURSOR_KEYS would " +
     "preserve a key that is never in a payload in the first place.",
-  threatCursor:
-    "security-events.service.ts — the SecurityIngestState COLUMN holding the threat mirror's " +
-    "ActivityRow id watermark (WARP-2977). Only mirrorThreatRows reads and writes it, and only the " +
-    "registerSecurityJobs interval job calls that — a cron, not a tool. No route or tool result " +
-    "carries it: /api/security/health selects threatMirrorRanAt and the retention fields only.",
   nextSecrets:
     "saas-credential.service.ts — a LOCAL const, not a payload key: " +
     "`const nextSecrets: Record<string, string>`. declaredKeys() greps `identifier:` and so " +
@@ -102,6 +97,12 @@ const NOT_A_CURSOR: Record<string, string> = {
   nextStorage: "routes/access.ts — the storage target being switched TO",
   nextModel: "routes/models.ts — the model id being switched TO",
   nextEnabled: "routes/settings.ts — the boolean feature state being switched TO",
+  nextResponseMins: "support/sla-clock.service.ts — the numeric customer-response SLA target in minutes",
+  nextResponseStartedAt: "support/sla-clock.service.ts — when the current customer-response SLA clock started, an ISO timestamp",
+  nextResponsePausedMs: "support/sla-clock.service.ts — the accumulated paused duration at the customer-response clock's start, in milliseconds",
+  nextResponseDueAt: "support/sla-clock.service.ts — the customer-response promise's deadline, a timestamp or null",
+  nextResponse: "support/sla-engine.ts — a metric name in the finite firstResponse/nextResponse/resolution deadline map",
+  nextSyncAt: "pm/pm-development.service.ts — the code-host poller's scheduled retry timestamp, never a pagination position",
 };
 
 function tsFilesUnder(dir: string): string[] {

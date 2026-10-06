@@ -57,6 +57,9 @@ const email: CategoryRenderer = (can) => {
   return line + ".";
 };
 
+// WARP-3692 — the camera line gained the vision hint, paid for by trimming the
+// memory_extract_fact wording (fit under the cap, never raise it).
+//
 // WARP-3340 — Romain, 2026-09-29: team chat is the default way to reach a
 // colleague; email only when the person asks for it. Paid for by trimming the
 // content-search, smart-device and memory wording, the WARP-3116 rule: fit
@@ -118,12 +121,18 @@ const cameras: CategoryRenderer = (can) => {
   if (ground.length === 0) return null;
   return (
     `- For camera questions, ground answers in ${ground.join(" and ")} results` +
+    // WARP-3691 - the chat renders these results as pictures/feeds; the
+    // user already sees them, so the model should call the tool, not paste URLs.
     (can("get_camera_snapshot")
-      ? "; fetch a current view with get_camera_snapshot"
+      ? "; look with get_camera_snapshot (vision: you see it)"
       : "") +
     "."
   );
 };
+
+/** WARP-3691 - show_file puts the file in the chat as a card/preview. */
+const showFiles: CategoryRenderer = (can) =>
+  can("show_file") ? "- To show a file or image, call show_file." : null;
 
 const networkSystem: CategoryRenderer = (can) => {
   const status = [
@@ -148,12 +157,12 @@ const memoryPointer: CategoryRenderer = (can) => {
 
 const memoryWrite: CategoryRenderer = (can) => {
   if (!can("memory_extract_fact")) return null;
-  return "- When someone states a durable preference or fact worth keeping, save it with memory_extract_fact.";
+  return "- Save a durable preference or fact someone states with memory_extract_fact.";
 };
 
 const memoryForget: CategoryRenderer = (can) => {
   if (!can("memory_forget")) return null;
-  return "- When asked to forget or delete a remembered fact, remove it with memory_forget.";
+  return "- To forget a remembered fact, use memory_forget.";
 };
 
 const businessContext: CategoryRenderer = (can) => {
@@ -179,6 +188,7 @@ const CATEGORY_RENDERERS: CategoryRenderer[] = [
   computation,
   smartDevices,
   cameras,
+  showFiles,
   networkSystem,
   memoryPointer,
   memoryWrite,

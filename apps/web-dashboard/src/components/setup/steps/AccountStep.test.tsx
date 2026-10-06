@@ -283,6 +283,62 @@ describe("AccountStep — owner already exists (WARP-867)", () => {
  * shows a "Claim code" field and POST /auth/setup requires it. When OFF (the
  * default), the field is absent and setup is unchanged.
  */
+describe("AccountStep — interrupted setup with two-factor enabled", () => {
+  async function challenge(onComplete = vi.fn()) {
+    checkSetupRequired.mockResolvedValue("complete");
+    loginUser.mockRejectedValueOnce(Object.assign(new Error("Two-factor required"), { code: "TOTP_REQUIRED" }));
+    render(<AccountStep onComplete={onComplete} />);
+    await screen.findByText(/welcome back/i);
+    fireEvent.change(screen.getByLabelText(/work email/i), { target: { value: "owner@warp.test" } });
+    fireEvent.change(screen.getByLabelText(/^password$/i), { target: { value: "OwnerPassword123!" } });
+    fireEvent.click(screen.getByRole("button", { name: /sign in & continue/i }));
+    await screen.findByLabelText(/authenticator code/i);
+    return onComplete;
+  }
+
+  it("resends credentials with the authenticator code and adopts the verified session", async () => {
+    const onComplete = await challenge();
+    expect(onComplete).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: /sign in & continue/i })).toBeDisabled();
+    fireEvent.change(screen.getByLabelText(/authenticator code/i), { target: { value: "123456" } });
+    fireEvent.click(screen.getByRole("button", { name: /sign in & continue/i }));
+    await waitFor(() => expect(loginUser).toHaveBeenLastCalledWith("owner@warp.test", "OwnerPassword123!", { totp: "123456" }));
+    expect(onComplete).toHaveBeenCalledWith("Stefan");
+    expect(setUserFromPasskey).toHaveBeenCalled();
+  });
+
+  it("supports a saved recovery code instead of an authenticator code", async () => {
+    await challenge();
+    fireEvent.click(screen.getByRole("button", { name: /use a recovery code/i }));
+    fireEvent.change(screen.getByLabelText(/^recovery code$/i), { target: { value: " saved-code " } });
+    fireEvent.click(screen.getByRole("button", { name: /sign in & continue/i }));
+    await waitFor(() => expect(loginUser).toHaveBeenLastCalledWith("owner@warp.test", "OwnerPassword123!", { recoveryCode: "saved-code" }));
+  });
+
+  it("keeps resumed setup in sign-in mode when the owner probe is unavailable", async () => {
+    checkSetupRequired.mockResolvedValue("unknown");
+    loginUser.mockRejectedValueOnce(Object.assign(new Error("Two-factor required"), { code: "TOTP_REQUIRED" }));
+    render(<AccountStep signInOnly onComplete={vi.fn()} />);
+    await waitFor(() => expect(checkSetupRequired).toHaveBeenCalled());
+    expect(screen.queryByRole("button", { name: /create account/i })).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText(/work email/i), { target: { value: "owner@warp.test" } });
+    fireEvent.change(screen.getByLabelText(/^password$/i), { target: { value: "OwnerPassword123!" } });
+    fireEvent.click(screen.getByRole("button", { name: /sign in & continue/i }));
+    expect(await screen.findByLabelText(/authenticator code/i)).toBeInTheDocument();
+    expect(setupAdmin).not.toHaveBeenCalled();
+  });
+
+  it("keeps the owner on the challenge after a rejected code and clears it", async () => {
+    const onComplete = await challenge();
+    loginUser.mockRejectedValueOnce(Object.assign(new Error("Two-factor required"), { code: "TOTP_REQUIRED" }));
+    fireEvent.change(screen.getByLabelText(/authenticator code/i), { target: { value: "654321" } });
+    fireEvent.click(screen.getByRole("button", { name: /sign in & continue/i }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/code didn't match/i);
+    expect(screen.getByLabelText(/authenticator code/i)).toHaveValue("");
+    expect(onComplete).not.toHaveBeenCalled();
+  });
+});
+
 describe("AccountStep — claim-code gate field (WARP-165)", () => {
   const claimInput = () => screen.getByPlaceholderText(/DRPL-/i);
 

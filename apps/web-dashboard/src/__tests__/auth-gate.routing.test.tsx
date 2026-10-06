@@ -37,7 +37,6 @@ vi.mock("@/lib/auth", () => ({
 }));
 
 import { AuthGate } from "@/components/AuthGate";
-import { WALL_COPY } from "@/components/security/wall-status";
 
 function setAuth(value: Record<string, unknown>) {
   useAuthMock.mockReturnValue(value);
@@ -82,8 +81,8 @@ describe("AuthGate — routes off /setup/state (PR #372)", () => {
     expect(replaceMock).toHaveBeenCalledWith("/login?from=setup");
   });
 
-  it("renders /help during setup (unclaimed) instead of bouncing to /setup (WARP-930)", () => {
-    pathnameValue = "/help";
+  it.each(["/help", "/help/integrations/google-mail", "/help/integrations/microsoft-365"])("renders %s during setup instead of bouncing to /setup", (path) => {
+    pathnameValue = path;
     setAuth({
       user: null,
       isLoading: false,
@@ -92,6 +91,14 @@ describe("AuthGate — routes off /setup/state (PR #372)", () => {
     const { container } = render(<AuthGate>help content</AuthGate>);
     expect(replaceMock).not.toHaveBeenCalled();
     expect(container.textContent).toContain("help content");
+  });
+
+  it("does not exempt an unrelated path that merely starts with help", () => {
+    pathnameValue = "/helpful";
+    setAuth({ user: null, isLoading: false, setupState: { appliance: "unclaimed", setupStep: "accounts", userTourCompleted: false } });
+    const { container } = render(<AuthGate>other content</AuthGate>);
+    expect(replaceMock).toHaveBeenCalledWith("/setup");
+    expect(container.textContent).not.toContain("other content");
   });
 
   it("renders /help mid-wizard for the signed-in owner without bouncing (WARP-930)", () => {
@@ -290,42 +297,5 @@ describe("AuthGate — wizard Done screen owns /setup while the tour is pending"
     });
     render(<AuthGate>child</AuthGate>);
     expect(replaceMock).toHaveBeenCalledWith("/");
-  });
-});
-
-describe("AuthGate — no sign-in on the Security wall (WARP-2981)", () => {
-  beforeEach(() => {
-    replaceMock.mockReset();
-    useAuthMock.mockReset();
-  });
-
-  const signedOut = { user: null, isLoading: false, setupState: { appliance: "ready", setupStep: "done", userTourCompleted: true } };
-
-  it.each(["/security/wall", "/security/wall/"])(
-    "on %s: says the screen is signed out, with a 'Sign in on this screen' someone has to press — and never goes to /login by itself",
-    (path) => {
-      pathnameValue = path;
-      setAuth(signedOut);
-      const { getByRole, queryByText } = render(<AuthGate>wall page</AuthGate>);
-      expect(replaceMock).not.toHaveBeenCalled();
-      expect(getByRole("heading", { level: 1, name: WALL_COPY.signedOutTitle })).toBeInTheDocument();
-      expect(getByRole("link", { name: WALL_COPY.signedOutAction })).toHaveAttribute("href", "/login?next=%2Fsecurity%2Fwall");
-      expect(queryByText("wall page")).toBeNull();
-    },
-  );
-
-  it("…while anywhere else a signed-out visitor still goes to /login", () => {
-    pathnameValue = "/security";
-    setAuth(signedOut);
-    const { queryByText } = render(<AuthGate>security page</AuthGate>);
-    expect(replaceMock).toHaveBeenCalledWith("/login");
-    expect(queryByText(WALL_COPY.signedOutTitle)).toBeNull();
-  });
-
-  it("an unclaimed box still goes to the wizard from the wall", () => {
-    pathnameValue = "/security/wall";
-    setAuth({ user: null, isLoading: false, setupState: { appliance: "unclaimed", setupStep: "welcome", userTourCompleted: false } });
-    render(<AuthGate>wall page</AuthGate>);
-    expect(replaceMock).toHaveBeenCalledWith("/setup");
   });
 });

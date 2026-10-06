@@ -17,12 +17,12 @@ import {
   Activity,
   Blocks,
   BookOpen,
+  Braces,
   Building2,
   Calendar as CalendarIcon,
   ChartColumn,
   Repeat,
   Cpu,
-  DoorOpen,
   Download,
   Film,
   FlaskConical,
@@ -37,20 +37,20 @@ import {
   Laptop,
   Lightbulb,
   LayoutDashboard,
+  LifeBuoy,
   Mail,
-  MapPin,
   MessageSquare,
   MessagesSquare,
   Mic,
   Network,
+  Radio,
   KeyRound,
   ScrollText,
   Settings,
-  Shield,
   ShieldCheck,
-  SlidersHorizontal,
   Sparkles,
   Stethoscope,
+  Terminal,
   Trash2,
   Clock,
   Share2,
@@ -58,6 +58,7 @@ import {
   ServerCog,
   Users,
   Video,
+  Webhook,
   Wrench,
 } from "lucide-react";
 
@@ -84,10 +85,10 @@ export type NavItem = {
   href: string;
   label: string;
   /**
-   * WARP-2978 — the accessible name, when the visible label alone would
-   * collide out of context (Security's "Settings" child beside the app's own
-   * Settings link in the mobile drawer). Must CONTAIN the visible label
-   * (WCAG 2.5.3). Default: the label is the name.
+   * The accessible name, when the visible label alone would collide out of
+   * context (a child's "Settings" beside the app's own Settings link in the
+   * mobile drawer). Must CONTAIN the visible label (WCAG 2.5.3). Default: the
+   * label is the name.
    */
   ariaLabel?: string;
   icon: LucideIcon;
@@ -225,12 +226,12 @@ export type NavGroup = {
    WARP-2967 — four groups and a Settings front door:
 
      WORK      Overview · Ask AI · Files · Messages · Email · Calendar · Workshop
-     BUSINESS  Insights [Brief, Reports] · Customers · Projects [Money] · Practice
-     SYSTEMS   Security · Cameras [Events] · Network [Voice, Remote access] · Devices
+     BUSINESS  Insights [Brief, Reports] · Customers [Support] · Projects [Money] · Practice
+     SYSTEMS   Cameras [Events] · Network [Voice, Remote access] · Devices
      ADMIN     Settings
 
-   16 rows all-on for an owner: the ticket's ~14, plus Security (WARP-2977)
-   and Workshop (WARP-3063, owner/admin only). Everything else keeps its route and
+   15 rows all-on for an owner: the ticket's ~14, plus Workshop (WARP-3063,
+   owner/admin only). Everything else keeps its route and
    moves behind Settings as the WARP-1807 tuck — `hidden: true` plus a
    `settingsSection`, which is what `settingsGroups()` below renders from.
 
@@ -474,6 +475,29 @@ export const NAV_GROUPS: NavGroup[] = [
         icon: Building2,
         roles: ["owner", "admin", "family"],
         requiresModule: "crm",
+        children: [
+          // WARP-3528 (ADR-069 §1) — the service desk: customer requests, the
+          // replies and the internal notes behind them. Filed under Customers
+          // as the other half of the same relationship, and a child rather than
+          // a fifth row because an owner already sees fifteen (the four-groups
+          // cap).
+          //
+          // Nesting is filing, not a gate. Support keeps its own `support`
+          // module gate and there is no `requires` edge to projects, so with
+          // CRM off `visibleItems` promotes it into Customers' slot
+          // (`passesParentGate`), as it does Money under Projects. Role-gated
+          // like its parent: the box refuses `/api/support` below the member
+          // floor (`refuseBelowFloor`), so a guest is never offered it, promoted
+          // or not.
+          {
+            href: "/support",
+            label: "Support",
+            icon: LifeBuoy,
+            roles: ["owner", "admin", "family"],
+            requiresModule: "support",
+            keywords: ["tickets", "help desk", "service desk", "requests"],
+          },
+        ],
       },
       // ADR-026: native PM surface, rendered off /api/pm/* under the dashboard
       // session — no embedded stack, no second login. WARP-1154/1155: hidden
@@ -531,38 +555,6 @@ export const NAV_GROUPS: NavGroup[] = [
       // index; its default prefix match keeps it lit on /cameras and the
       // /cameras/[name] detail pages, but NOT on the /events sibling (which
       // owns its own active state).
-      //
-      // WARP-2977 (ADR-059) — Security sits ABOVE Cameras: it is the one
-      // place camera detections, camera health and network warnings land,
-      // and Cameras is one of its sources. Its own module, so a person can
-      // hold it without holding cameras (and vice versa).
-      //
-      // WARP-2977 P2b — Areas and Settings are part of the Security
-      // section: they inherit its module gate (moduleForPath), carry no
-      // `roles` (both pages are readable at view — manage only adds
-      // controls), and live under /security, never /settings (ALWAYS_ON,
-      // which would escape ModuleRouteGuard). Not destinations in SPACES, so
-      // the Workspace shell shows them as the view pills
-      // "Security · Areas · Patterns · Settings".
-      //
-      // WARP-2980 (P5) — Patterns: what normal looks like for each area and
-      // camera. Read-only at view, like Areas.
-      //
-      // WARP-2978 (ADR-059 P3 D33): the settings page holds the opening hours
-      // AND who is told about alerts, so its label is Settings. Incident pages
-      // (/security/incidents/<id>) are details, not nav entries; the /security
-      // prefix gates them.
-      {
-        href: "/security",
-        label: "Security",
-        icon: Shield,
-        requiresModule: "security",
-        children: [
-          { href: "/security/zones", label: "Areas", icon: MapPin },
-          { href: "/security/patterns", label: "Patterns", icon: Activity },
-          { href: "/security/settings", label: "Settings", ariaLabel: "Security settings", icon: SlidersHorizontal },
-        ],
-      },
       {
         href: "/cameras",
         label: "Cameras",
@@ -580,29 +572,6 @@ export const NAV_GROUPS: NavGroup[] = [
             keywords: ["clips", "recordings", "footage", "detections"],
           },
         ],
-      },
-      // ADR-055 (P4b) — Doors: the doors this box knows about, what each last
-      // reported and when, and the log of what happened at them. Its own
-      // module (`doors`), which SHIPS DARK: DOORS_ENABLED is off by default and
-      // the module is then ABSENT from GET /api/modules rather than listed as
-      // off, so `isModuleEffective` treats "absent" as off for it and fails
-      // CLOSED while the probe is unresolved (see `ABSENT_UNLESS_LISTED` in
-      // lib/dark-modules.ts); the page is a plain 404 when off. Owner/admin only, mirroring
-      // the API's read floor (`DOORS_READ_ROLES`, services/doors-access.ts): the module's
-      // own grant is the only narrowing until door groups exist, and a page
-      // that would 403 for everyone else is not offered to them. The owner
-      // alone adds, changes and retires doors; the page shows those controls
-      // to no one else.
-      //
-      // The seventeenth top-level row, and the four-groups test's cap moves to
-      // 17 with it (WARP-2967's ≤ 14, plus Security, Workshop and this). It
-      // shows on no box until the flag is set.
-      {
-        href: "/doors",
-        label: "Doors",
-        icon: DoorOpen,
-        roles: ["owner", "admin"],
-        requiresModule: "doors",
       },
       {
         href: "/network",
@@ -685,6 +654,23 @@ export const NAV_GROUPS: NavGroup[] = [
         hidden: true,
         settingsSection: "Workspace",
         settingsBlurb: "API keys and sign-ins for connected services",
+      },
+      // WARP-3532 (ADR-069 §9) — Work notifications: webhooks and Slack / Teams /
+      // Discord / Google Chat updates for work. A SIBLING of the two above for the
+      // reason WARP-2968 gave (a page you reach only through another is not in the
+      // nav). `roles` mirrors the server's owner/admin gate on every
+      // /api/pm/webhooks route; `requiresModule: "projects"` mirrors the module
+      // gate on the /api/pm prefix those routes live under, so the entry is hidden
+      // exactly when the API would answer module_disabled.
+      {
+        href: "/integrations/work-notifications",
+        label: "Work notifications",
+        icon: Webhook,
+        roles: ["owner", "admin"],
+        requiresModule: "projects",
+        hidden: true,
+        settingsSection: "Workspace",
+        settingsBlurb: "Send work updates to chat apps and webhooks",
       },
     ],
   },
@@ -781,6 +767,39 @@ export const NAV_GROUPS: NavGroup[] = [
         settingsSection: "System",
         settingsBlurb: "Local models and any cloud provider you opted into",
       },
+      // WARP-3452 — personal tokens that let GitHub Copilot and other coding
+      // tools use the box's active model over `/llm/`. Beside Models, whose
+      // active model is what it serves. owner/admin/member mirrors the API: an
+      // external guest can never hold a token (GET /api/llm-access answers 403),
+      // so the row is not offered to them.
+      {
+        href: "/settings/coding-tools",
+        label: "Coding tools",
+        icon: Terminal,
+        roles: ["owner", "admin", "family"],
+        keywords: ["copilot", "api key", "token", "ollama", "vs code", "coding agent"],
+        hidden: true,
+        settingsSection: "System",
+        settingsBlurb: "Use the box's model from Copilot and other coding tools",
+      },
+      // WARP-3533 — personal API tokens a script uses on the projects API, the
+      // OpenAPI document that describes it, and the calendar links for "my work"
+      // and each project. Filed under Automation: it is what lets other tools act
+      // for you. owner/admin/member mirrors the API: an external guest can never
+      // hold a token (GET /api/developer answers 403) and Projects refuses a
+      // guest, so the row is not offered to them. No `requiresModule`: the page
+      // explains an off module itself, and a Settings destination that vanishes
+      // when a module is switched off is one you cannot use to find out why.
+      {
+        href: "/settings/developer",
+        label: "Developer",
+        icon: Braces,
+        roles: ["owner", "admin", "family"],
+        keywords: ["api", "api token", "script", "openapi", "calendar link", "ics", "feed"],
+        hidden: true,
+        settingsSection: "Automation",
+        settingsBlurb: "API tokens for scripts, and calendar links for your due dates",
+      },
       // PR #382: appliance/service health status page. Reads the existing
       // WARP-43 aggregate.
       {
@@ -812,6 +831,21 @@ export const NAV_GROUPS: NavGroup[] = [
         settingsSection: "System",
         settingsBlurb: "How this box handles your data, in plain terms",
       },
+      // WARP-3504 (ADR-068): the owner's view of what this Droplet sends to Warp —
+      // the operational telemetry, the last payload of each kind, what is never
+      // sent. Owner/admin, mirroring the server-side requireRole("owner","admin")
+      // on GET /api/telemetry/last. No module gate: telemetry is part of the
+      // managed lease, not a feature a business switches off.
+      {
+        href: "/settings/telemetry",
+        label: "What this Droplet sends",
+        icon: Radio,
+        roles: ["owner", "admin"],
+        keywords: ["telemetry", "privacy", "logs", "data", "warp", "usage"],
+        hidden: true,
+        settingsSection: "System",
+        settingsBlurb: "What this Droplet sends to Warp, and what it never does",
+      },
       // WARP-174: customer-facing manual + "How Droplet works" replay modal.
       {
         href: "/help",
@@ -834,8 +868,10 @@ export const NAV_GROUPS: NavGroup[] = [
         settingsSection: "Advanced",
         settingsBlurb: "The signed record of everything the box did",
       },
-      // WARP-279: admin-only Activity log entry. Role-gated AND hidden unless
-      // GitHub/Jira is configured (capabilities.claudeActivity) — #14.
+      // WARP-279: admin-only Activity log entry. Role-gated AND absent unless the
+      // box runs with the developer flag DROPLET_DEV_ENGINEERING_DASHBOARD and
+      // GitHub/Jira is configured (capabilities.claudeActivity) — #14, WARP-3433.
+      // Warp Lab's own engineering dashboard: no customer box ever shows it.
       {
         href: "/admin/claude-activity",
         label: "Activity",

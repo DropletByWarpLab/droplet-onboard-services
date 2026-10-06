@@ -56,9 +56,14 @@ const sha256 = (v: string) => createHash("sha256").update(v).digest("hex");
 function fakePrisma(seed: Record<string, unknown> | null = null) {
   let row: Record<string, unknown> | null = seed ? { ...seed } : null;
   const matches = (where: Record<string, unknown> = {}) =>
-    row !== null && Object.entries(where).every(([k, v]) => row![k] === v);
-  return {
+    row !== null && Object.entries(where).every(([k, v]) => k === "user"
+      ? Object.entries((v as { is: Record<string, unknown> }).is).every(([field, value]) => ({ directoryStatus: "ACTIVE", deletionStatus: "NONE" } as Record<string, unknown>)[field] === value)
+      : row![k] === v);
+  const db = {
     __row: () => row,
+    user: { findFirst: vi.fn(async () => ({ id: USER, username: "sam", directoryStatus: "ACTIVE", deletionStatus: "NONE" })) },
+    $transaction: async <T>(work: (tx: unknown) => Promise<T>): Promise<T> => work(db),
+    cloudOAuthApp: { findUnique: vi.fn(async () => null) },
     m365Connection: {
       findUnique: vi.fn(async ({ where }: { where: Record<string, unknown> }) =>
         matches(where) ? { ...row! } : null,
@@ -81,7 +86,11 @@ function fakePrisma(seed: Record<string, unknown> | null = null) {
     m365DeltaCursor: {
       deleteMany: vi.fn(async () => ({ count: 0 })),
     },
+    // WARP-3538 — disconnect also removes the files landed from the account.
+    cloudFileItem: { deleteMany: vi.fn(async () => ({ count: 0 })) },
+    cloudFileSource: { deleteMany: vi.fn(async () => ({ count: 0 })) },
   };
+  return db;
 }
 
 function authResult(): EntraAuthResult {
@@ -216,6 +225,17 @@ describe("POST /api/m365/connect (authorization code)", () => {
     expect(vi.mocked(entra.getAuthCodeUrl).mock.calls[0]![0]).toEqual(APP);
   });
 
+  it("lets a new person connect using the customer's one-time Droplet setup", async () => {
+    const prisma = fakePrisma();
+    prisma.cloudOAuthApp.findUnique.mockResolvedValue({ provider: "MICROSOFT", ...APP } as never);
+    const entra = fakeEntra();
+    const view = await request(authedApp(prisma, entra)).get("/api/m365/connection");
+    expect(view.body.configured).toBe(true);
+    const res = await request(authedApp(prisma, entra)).post("/api/m365/connect").send({});
+    expect(res.status).toBe(200);
+    expect(vi.mocked(entra.getAuthCodeUrl).mock.calls[0]![0]).toEqual(APP);
+  });
+
   it("refuses a multitenant authority or a half-filled app, and writes nothing", async () => {
     for (const body of [
       { ...APP, tenantId: "organizations" },
@@ -274,6 +294,29 @@ describe("GET /api/m365/callback", () => {
     expect(prisma.__row()).toMatchObject({ state: "CONNECTED", accountUpn: "sam@practice.com" });
   });
 
+  it.each(["connected", "cancelled", "expired", "failed"])("returns onboarding %s to the stored accounts step", async (outcome) => {
+    const prisma = fakePrisma();
+    const entra = fakeEntra();
+    const started = await request(authedApp(prisma, entra)).post("/api/m365/connect").send({ ...APP, returnTo: "/setup?step=accounts" });
+    expect(started.status).toBe(200);
+    const state = stateCookie(started).value;
+    if (outcome === "expired") prisma.__row()!.pendingFlowExpiresAt = new Date(0);
+    const res = await request(publicApp(prisma, entra)).get("/api/m365/callback").query({ state,
+      ...(outcome === "cancelled" ? { error: "access_denied" } : outcome === "failed" ? {} : { code: "code" }),
+      returnTo: "https://evil.example", error_description: "PROVIDER_SECRET",
+    }).set("Cookie", `${M365_STATE_COOKIE}=${encodeURIComponent(state)}`);
+    expect(res.status).toBe(303);
+    expect(res.headers.location).toBe(`/setup?step=accounts&m365=${outcome}`);
+    expect(res.text).not.toMatch(/evil.example|PROVIDER_SECRET/);
+  });
+
+  it.each(["https://evil.example", "//evil.example", "/setup?step=done", "/settings#x"])("rejects an untrusted Microsoft return destination %s before creating a flow", async (returnTo) => {
+    const prisma = fakePrisma();
+    const res = await request(authedApp(prisma, fakeEntra())).post("/api/m365/connect").send({ ...APP, returnTo });
+    expect(res.status).toBe(400);
+    expect(prisma.__row()).toBeNull();
+  });
+
   it("refuses a callback from a browser that did not press Connect, and leaves the sign-in intact", async () => {
     const prisma = fakePrisma();
     const entra = fakeEntra();
@@ -318,12 +361,35 @@ describe("GET /api/m365/callback", () => {
     const authed = (createM365Router(fakePrisma() as never, fakeEntra()) as unknown as { stack: Layer[] }).stack
       .map((l) => l.route)
       .filter(Boolean) as NonNullable<Layer["route"]>[];
-    expect(authed.length).toBe(4);
+    // connection, connect, connect/device-code, disconnect — and, since WARP-3538,
+    // the SharePoint switch, sync status and opt-in calendar switch.
+    expect(authed.length).toBe(8);
     for (const r of authed) expect(guarded(r)).toBe(true);
 
     const open = (createM365CallbackRouter(fakePrisma() as never, fakeEntra()) as unknown as { stack: Layer[] }).stack
       .map((l) => l.route)
       .filter(Boolean) as NonNullable<Layer["route"]>[];
     expect(open.map((r) => r.path)).toEqual(["/m365/callback"]);
+  });
+});
+
+
+describe("PUT /api/m365/mail", () => {
+  it.each([{ enabled: "yes" }, { enabled: true, userId: "someone-else" }, {}])("requires a strict explicit choice %j", async (body) => {
+    const prisma = fakePrisma();
+    const entra = fakeEntra();
+    expect((await request(authedApp(prisma, entra)).put("/api/m365/mail").send(body)).status).toBe(400);
+    expect(prisma.m365Connection.updateMany).not.toHaveBeenCalled();
+    expect(entra.acquireSilent).not.toHaveBeenCalled();
+  });
+  it("records the signed-in person's missing-body-scope opt-in without reading provider data", async () => {
+    const prisma = fakePrisma({ userId: USER, state: "CONNECTED", mailEnabled: false, mailSyncState: "DISCONNECTED", emailAccountId: null,
+      grantedScopes: "Mail.ReadBasic", tokenCacheEnc: "sealed", cursorLinkHash: "link", connectedAt: null });
+    const entra = fakeEntra();
+    const res = await request(authedApp(prisma, entra, { id: USER, role: "family" })).put("/api/m365/mail").send({ enabled: true });
+    expect(res.status).toBe(200);
+    expect(res.body.mail).toMatchObject({ enabled: true, state: "NEEDS_RECONNECT", needsConsent: true, mailboxId: null, messageCount: 0 });
+    expect(prisma.__row()).toMatchObject({ userId: USER, mailEnabled: true });
+    expect(entra.acquireSilent).not.toHaveBeenCalled();
   });
 });

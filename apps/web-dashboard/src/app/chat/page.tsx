@@ -79,6 +79,10 @@ import "@/components/shell/indigo-tokens.css";
 import "@/components/chat/chat-indigo.css";
 import { isLocalProvider } from "@/lib/provider";
 
+/** WARP-3475 — browser-storage key holding the interview chat id whose resume
+ *  banner the person closed. */
+const RESUME_DISMISS_KEY = "droplet.interviewResumeDismissed";
+
 export default function ChatPage() {
   // WARP-331: history panel imperative handle + mobile drawer state.
   const router = useRouter();
@@ -651,6 +655,26 @@ export default function ChatPage() {
   const handleResumeWrapUp = useCallback(() => {
     if (handleResumeOpen()) pendingWrapUpRef.current = true;
   }, [handleResumeOpen]);
+
+  // WARP-3475 — the resume banner can be closed without resuming or wrapping
+  // up. Remembered per parked interview (its chat id), so it stays closed for
+  // that session and comes back for a new one. Blocked storage = it shows.
+  const [resumeDismissedFor, setResumeDismissedFor] = useState<string | null>(() => {
+    try {
+      return typeof window === "undefined" ? null : localStorage.getItem(RESUME_DISMISS_KEY);
+    } catch {
+      return null;
+    }
+  });
+  const handleResumeDismiss = useCallback(() => {
+    const id = bizProfile?.interviewChatId ?? null;
+    setResumeDismissedFor(id);
+    try {
+      if (id) localStorage.setItem(RESUME_DISMISS_KEY, id);
+    } catch {
+      /* storage blocked: closed for this visit only */
+    }
+  }, [bizProfile]);
   useEffect(() => {
     if (
       pendingWrapUpRef.current &&
@@ -1008,6 +1032,34 @@ export default function ChatPage() {
             onPause={() => router.push("/chat")}
           />
         )}
+        {/* Resume banner on the empty new-chat view while an interview is
+            parked mid-flight elsewhere. WARP-3475 — pinned here, above the
+            scroll region, so it sits at the top of /chat rather than in the
+            middle of the empty state, and it can be closed.
+
+            WARP-1668 — `interviewResumable` is load-bearing, not belt-and-
+            braces. The other three conditions are box-wide singleton state;
+            only the server can say whether the parked session is one THIS
+            user can open (sessions are owner-scoped, and the FK is
+            `onDelete: SetNull` so the link can be null while the state
+            still reads in_progress). Without it the banner rendered in
+            states where both its buttons were no-ops — a permanent dead
+            end. If it is not accessible, it is not shown. */}
+        {messages.length === 0 &&
+          isPrivileged &&
+          !interviewSessionOpen &&
+          interviewResumable &&
+          (bizProfile?.onboardingState === "in_progress" ||
+            bizProfile?.onboardingState === "re_running") &&
+          resumeDismissedFor !== bizProfile?.interviewChatId && (
+            <div className="flex-none w-full max-w-[640px] mx-auto px-4 pt-3">
+              <InterviewResumeBanner
+                onResume={handleResumeOpen}
+                onSkipTheRest={handleResumeWrapUp}
+                onDismiss={handleResumeDismiss}
+              />
+            </div>
+          )}
         {/* Messages */}
         <div
           ref={scrollRef}
@@ -1046,30 +1098,6 @@ export default function ChatPage() {
                       })
                       .finally(refreshBizProfile);
                   }}
-                />
-              </div>
-            )}
-          {/* Resume banner on the empty new-chat view while an interview is
-              parked mid-flight elsewhere.
-
-              WARP-1668 — `interviewResumable` is load-bearing, not belt-and-
-              braces. The other three conditions are box-wide singleton state;
-              only the server can say whether the parked session is one THIS
-              user can open (sessions are owner-scoped, and the FK is
-              `onDelete: SetNull` so the link can be null while the state
-              still reads in_progress). Without it the banner rendered in
-              states where both its buttons were no-ops — a permanent dead
-              end. If it is not accessible, it is not shown. */}
-          {messages.length === 0 &&
-            isPrivileged &&
-            !interviewSessionOpen &&
-            interviewResumable &&
-            (bizProfile?.onboardingState === "in_progress" ||
-              bizProfile?.onboardingState === "re_running") && (
-              <div className="max-w-[640px] mx-auto px-4 pt-4">
-                <InterviewResumeBanner
-                  onResume={handleResumeOpen}
-                  onSkipTheRest={handleResumeWrapUp}
                 />
               </div>
             )}

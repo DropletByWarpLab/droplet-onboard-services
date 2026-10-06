@@ -8,9 +8,11 @@ import type { FileEntryInfo, FileSpaceId } from "../types";
 /**
  * Fetch the directory listing for `path` within a space (default personal).
  *
- * Realtime is handled by `useFileRealtime` which invalidates this cache on
- * every incoming droplet/files/{user}/* MQTT event, so we no longer poll.
- * We still revalidate on focus so switching tabs feels immediate.
+ * `useFileRealtime` invalidates this cache on droplet/files/{user}/* MQTT
+ * events. SMB writes and paired Windows sync bypass that event stream, so
+ * Droplet, Computers and the personal root also refresh while visible. Root refresh picks up a
+ * /Droplet mount registered after the initial listing. Other folders keep
+ * using events and focus revalidation.
  *
  * WARP-883: the SWR key includes the space so My Files and Shared keep
  * independent caches; the personal key is byte-identical to before.
@@ -21,6 +23,10 @@ import type { FileEntryInfo, FileSpaceId } from "../types";
  * contents. Mirrors the request URL `fetchFiles` now builds.
  */
 export function useFiles(path: string, space: FileSpaceId = "personal") {
+  const watchNetworkDrive =
+    space === "personal" &&
+    (path === "/" || path === "/Droplet" || path.startsWith("/Droplet/") ||
+      path === "/Computers" || path.startsWith("/Computers/"));
   const key =
     space === "personal"
       ? `/api/files?path=${path}`
@@ -28,7 +34,13 @@ export function useFiles(path: string, space: FileSpaceId = "personal") {
   const { data, error, isLoading, mutate } = useSWR<FileEntryInfo[]>(
     key,
     () => fetchFiles(path, space),
-    { revalidateOnFocus: true }
+    {
+      revalidateOnFocus: true,
+      // The orchestrator caches directory listings for 10s. Poll after expiry.
+      refreshInterval: watchNetworkDrive ? 15_000 : 0,
+      refreshWhenHidden: false,
+      refreshWhenOffline: false,
+    }
   );
 
   return {

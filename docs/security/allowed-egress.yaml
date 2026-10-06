@@ -76,7 +76,139 @@ entries:
     review_by: 2027-07-04
     code_refs: [apps/orchestrator/src/config.ts]
 
+  # WARP-3430 — `github.com` and the two release-asset CDN hosts are ALSO
+  # registered above under `ota-github-releases`, which is now the FALLBACK
+  # discovery path (the REST API, used only while no channel pointer is
+  # published). Separate rows on purpose, as with `github-api`: this is the
+  # path every box takes, it needs no token and never touches api.github.com,
+  # and retiring the API fallback must not un-register it.
+  - id: ota-release-downloads
+    kind: egress
+    service: orchestrator
+    destination:
+      hosts: [github.com, release-assets.githubusercontent.com, objects.githubusercontent.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: none
+    purpose: >-
+      Anonymous, token-free OTA discovery and download (WARP-3430): the
+      cosign-signed channel pointer (ota-index/channel-<channel>.json), each
+      release's release.json and signature, configs.tar.gz and the client
+      installers, all plain file downloads under releases/download. GitHub
+      answers with a redirect to its release-asset CDN, so the two
+      githubusercontent.com hosts are dialled on the same requests. Carries no
+      credential (ADR-045: none on an appliance) and nothing from the box
+      beyond what an HTTPS GET itself reveals.
+    ticket: WARP-3430
+    added: 2026-10-01
+    review_by: 2027-10-01
+    code_refs: [apps/orchestrator/src/config.ts]
+    no_code_literal:
+      release-assets.githubusercontent.com: >-
+        GitHub's redirect target for a release download; the Location header
+        names it, no Droplet source does.
+      objects.githubusercontent.com: >-
+        The older name of the same redirect target; the Location header names
+        it, no Droplet source does.
+
+  # WARP-3503 (ADR-068) — `ota-image-registry` (ghcr.io and
+  # pkg-containers.githubusercontent.com, runtime, added by WARP-3430) is
+  # DROPPED. The release images are private and a box pulls and
+  # cosign-verifies them from the HQ registry, which is the `fleet-hq-registry`
+  # host below (the `/v2/` registry and the `/v1/device/` token paths); no
+  # customer box dials GHCR any more. The lab-only fallback in
+  # docker/ota/apply-update.sh (DROPLET_OTA_GITHUB_TOKEN, ghcr.io refs, never
+  # provisioned on an appliance: ADR-045) keeps its `ghcr.io` literal under
+  # `build-container-registries`; `pkg-containers.githubusercontent.com`, its
+  # blob redirect, is deliberately not registered.
+
+  # WARP-3433 — Warp Lab's own engineering dashboard (/admin/claude-activity,
+  # WARP-279). Two entries, one per host, because the two have different
+  # credentials and neither is the OTA fetch above or the customer-connector
+  # `github-api` entry below: retiring any one of the three must not silently
+  # un-register another. DEVELOPER-FLAG ONLY: every call below is behind
+  # DROPLET_DEV_ENGINEERING_DASHBOARD=1 (default 0; setup.sh and the compose
+  # defaults never set it), so on a customer box the code path is unreachable —
+  # the router is not mounted, the capability is false, and nothing dials either
+  # host. With the flag on, the GitHub half also needs GITHUB_TOKEN (no token,
+  # no request) and the Jira half needs host + email + API token.
+  - id: claude-activity-github
+    kind: egress
+    service: orchestrator
+    destination:
+      hosts: [api.github.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: none
+    purpose: >-
+      DEVELOPER-FLAG ONLY (DROPLET_DEV_ENGINEERING_DASHBOARD=1, off by default,
+      never on a customer box). Reads Warp Lab's own repository (commits, open
+      pull requests, CI runs) for the engineering dashboard under a
+      fine-grained read-only GITHUB_TOKEN. Carries no customer data: the
+      requests name the lab's repo and send the token; nothing from the box's
+      files, people or network is in them. Without GITHUB_TOKEN no request is
+      made. 60 s Redis cache.
+    ticket: WARP-3433
+    added: 2026-10-02
+    review_by: 2027-10-02
+    code_refs: [apps/orchestrator/src/services/claude-activity/github-adapter.ts]
+
+  - id: claude-activity-jira
+    kind: dynamic
+    service: orchestrator
+    config_key: JIRA_HOST
+    phase: runtime
+    data_class: none
+    purpose: >-
+      DEVELOPER-FLAG ONLY (DROPLET_DEV_ENGINEERING_DASHBOARD=1, off by default,
+      never on a customer box). The lab's own Jira Cloud site (JIRA_HOST, the
+      bare atlassian.net subdomain) for the engineering dashboard's WARP ticket
+      panels, under JIRA_EMAIL + JIRA_API_TOKEN basic auth. Carries no customer
+      data: a fixed project JQL query out, ticket titles and status back. Never
+      called unless host, email and token are all set. 60 s Redis cache.
+    ticket: WARP-3433
+    added: 2026-10-02
+    review_by: 2027-10-02
+    code_refs: [apps/orchestrator/src/services/claude-activity/jira-adapter.ts]
+
+  # WARP-3504 (ADR-068) — the orchestrator's box telemetry sender is now the
+  # live dialer of the portal: always on for an enrolled box, authenticated with
+  # the short-lived HQ device token. The runtime audit matches on (service,
+  # host), so the registered service is `orchestrator`. The older fleet-agent
+  # keeps its own row below (it dials the same host when its profile is on).
   - id: fleet-telemetry-portal
+    kind: egress
+    service: orchestrator
+    destination:
+      hosts: [analytics.warp-lab.ai]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: operational-telemetry
+    purpose: >-
+      Operator-portal telemetry from the box telemetry sender (ADR-068), three
+      POST endpoints under `/api/v1/telemetry/` (`heartbeat`, `events`,
+      `logs`) with `Authorization: Bearer <HQ device JWT>`. Sent, from a
+      closed allowlist that is validated against strict schemas before it
+      leaves: the release tag, sha and channel; kernel and distro; uptime;
+      compose service names with state, health and restart counts; CPU, memory,
+      disk and GPU percentages and temperature; network byte counters; counts
+      of assistant messages, background runs, active members and OTA steps (no
+      content, no identities); error counts by class; and warn/error/fatal log
+      records, each a stable code plus a message masked on the box (emails,
+      IPv4/IPv6, MACs, paths, URLs, host names and long tokens) and cut to 500
+      characters. Never sent: prompts or responses, file names, paths or
+      contents, member or guest names, emails or ids, customer-chosen
+      hostnames, LAN IPs, MACs or device lists, camera data, business data. The
+      owner sees the last payload of each kind in Settings.
+    ticket: WARP-3504
+    added: 2026-07-04
+    review_by: 2027-10-03
+    code_refs: [apps/orchestrator/src/config.ts, apps/orchestrator/src/services/box-telemetry/sender.ts, apps/orchestrator/src/services/box-telemetry/contract.ts]
+
+  - id: fleet-telemetry-portal-legacy
     kind: egress
     service: fleet-agent
     destination:
@@ -86,59 +218,15 @@ entries:
     phase: runtime
     data_class: operational-telemetry
     purpose: >-
-      Fleet health/telemetry portal (ADR-028) — device metrics and update
-      status only; never file contents, camera frames, chat, or credentials.
+      Legacy fleet-agent telemetry (ADR-028): double-gated (compose profile
+      `telemetry` plus DROPLET_TELEMETRY_ENABLED), off by default, superseded
+      for enrolled boxes by the orchestrator sender above (WARP-3504). Device
+      metrics and update status only; never file contents, camera frames, chat,
+      or credentials.
     ticket: WARP-961
     added: 2026-07-04
     review_by: 2027-07-04
     code_refs: [services/fleet-agent/config.py, apps/orchestrator/src/services/analytics/client.ts, docker/docker-compose.yml]
-
-  - id: cloudflare-tunnel-edge
-    kind: egress
-    service: cloudflared
-    destination:
-      hosts: ["*.argotunnel.com", api.cloudflare.com]
-      ports: [443, 7844]
-      protocol: quic
-    phase: runtime
-    data_class: user-content-on-request
-    purpose: >-
-      Outbound-only tunnel transport for remote dashboard access (ADR-025);
-      carries TLS-encrypted user sessions the user initiated. No repo
-      literal — destination comes from the tunnel token consumed by the
-      pinned cloudflare/cloudflared image.
-    ticket: WARP-978
-    added: 2026-07-04
-    review_by: 2027-07-04
-    code_refs: [docker/docker-compose.yml]
-    no_code_literal: >-
-      The pinned cloudflare/cloudflared image resolves its own edge from the
-      tunnel token; no Droplet source names the host. Restates the purpose
-      field's "No repo literal" so the gate can check it. (WARP-2452)
-
-  - id: overlay-stun-mapping
-    kind: egress
-    service: device-bridge
-    destination:
-      hosts: [stun.cloudflare.com, stun.l.google.com]
-      # Cloudflare answers STUN on 3478; Google's public STUN on 19302. Both are
-      # documented so the WARP-268 runtime audit knows the real ports.
-      ports: [3478, 19302]
-      protocol: udp/stun
-    phase: runtime
-    data_class: none
-    purpose: >-
-      STUN Binding probe (RFC 5389) sent by device-bridge FROM host udp/51820 to
-      learn the box's own public UDP mapping for the direct-punch remote-access
-      overlay (ADR-030 / WARP-1385). One request/response per connect; carries no
-      user content — only the box's reflexive ip:port, handed to HQ in the
-      overlay `answer`. The orchestrator only calls device-bridge's internal
-      /host/stun-probe endpoint; the STUN socket egress originates in
-      device-bridge (host netns), so that is the owning service.
-    ticket: WARP-1385
-    added: 2026-07-18
-    review_by: 2027-07-18
-    code_refs: [services/oled-display/device-bridge.py]
 
   - id: sso-oidc-idps
     kind: egress
@@ -235,7 +323,7 @@ entries:
   # it FINDS that are unregistered (:199). docs/ is outside SCOPE_PREFIXES
   # (:50-51), so registry.ollama.ai is matched nowhere in scanner scope and
   # this entry ALREADY prints the non-fatal stale NOTICE (:208) — exactly as
-  # the other daemon/SDK-owned entries do (cloudflare-tunnel-edge,
+  # the other daemon/SDK-owned entries do (
   # cloud-llm-providers-optin). The gate is indifferent in both directions;
   # the reason to keep this is the runtime record, nothing to do with CI.
   #
@@ -475,12 +563,16 @@ entries:
     phase: runtime
     data_class: user-content-on-request
     purpose: >-
-      Microsoft 365 connector (ADR-041) — reads the mail, calendar, contacts
-      and OneDrive/SharePoint files of accounts the owner explicitly connected,
-      onto the box, via Graph delta queries. Carries that user content in the
-      response, plus drafted replies the owner chooses to send. Delegated
-      per-user authorization only: the box can never read what the signed-in
-      user cannot. Nothing is sent opportunistically. Off until connected.
+      Microsoft 365 connector (ADR-041) — delegated per-person Graph reads.
+      Explicit mail opt-in imports received/sent history and full plain-text
+      bodies for local reading/search; attachment bytes and unsent drafts are
+      not imported, and Outlook sending is unsupported. Calendar opt-in imports
+      primary events; OneDrive/optional SharePoint retain file metadata only,
+      and contacts are checked without landing local copies. Folder delta
+      changes preserve archived mail after remote deletion. Mail OFF purges
+      the local mailbox while retaining the calendar/file account connection.
+      Carries the selected user content in responses; never reads what the
+      signed-in person cannot. Mail/calendar remain off until that person opts in.
     ticket: WARP-2114
     added: 2026-08-19
     review_by: 2027-08-19
@@ -494,9 +586,79 @@ entries:
     # literal (GRAPH_API_BASE_URL) precisely so the scanner extracts it, so the
     # `no_code_literal` declaration that stood here has been deleted — which is
     # exactly the self-pruning that declaration prescribed for this moment.
-    # It is metadata only: `driveItem: get content` answers 302 to a per-tenant
+    # Drive reads remain metadata only: `driveItem: get content` answers 302 to a per-tenant
     # preauthenticated download host, and nothing here follows that redirect.
-    code_refs: [apps/orchestrator/src/services/m365/graph-client.ts, apps/orchestrator/src/services/m365/graph-resources.ts, apps/orchestrator/src/services/m365/m365-sync.service.ts, apps/orchestrator/src/services/m365/delta-cursor.service.ts, apps/orchestrator/src/services/m365/sync-policy.ts]
+    code_refs: [apps/orchestrator/src/services/m365/graph-client.ts, apps/orchestrator/src/services/m365/graph-resources.ts, apps/orchestrator/src/services/m365/m365-sync.service.ts, apps/orchestrator/src/services/m365/delta-cursor.service.ts, apps/orchestrator/src/services/m365/sync-policy.ts, apps/orchestrator/src/services/m365/mail-settings.service.ts, apps/orchestrator/src/services/m365/mail-landing.service.ts, apps/orchestrator/src/services/m365/mail-normalizer.ts, apps/orchestrator/src/services/email/mail-ingest.service.ts]
+
+  - id: google-mail-oauth
+    kind: egress
+    service: orchestrator
+    destination:
+      hosts: [oauth2.googleapis.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: none
+    purpose: >-
+      WARP-3788 customer-owned Google Web OAuth client: code exchange, per-person
+      refresh and best-effort revocation. Protocol credentials only, encrypted
+      on the appliance and never logged. No public inbound or cloud relay.
+    ticket: WARP-3788
+    added: 2026-10-05
+    review_by: 2027-10-05
+    code_refs: [apps/orchestrator/src/services/google/google-client.ts]
+
+  - id: google-account-calendar-api
+    kind: egress
+    service: orchestrator
+    destination:
+      hosts: [www.googleapis.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      Verified Google email identity and read-only primary Calendar event
+      snapshots after explicit per-person browser consent. Calendar-only
+      connections request no mail access. Gmail IMAP/SMTP is separate.
+    ticket: WARP-3788
+    added: 2026-10-05
+    review_by: 2027-10-05
+    code_refs: [apps/orchestrator/src/services/google/google-client.ts, apps/orchestrator/src/services/google/google-calendar-client.ts]
+
+  - id: google-mail-imap-smtp
+    kind: egress
+    service: email-indexer
+    destination:
+      hosts: [imap.gmail.com, smtp.gmail.com]
+      ports: [993, 465]
+      protocol: tls
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      Gmail mailbox transport after per-person OAuth approval: existing local
+      mail ingest over IMAP and human-approved outgoing mail over SMTP using
+      XOAUTH2. Sends retain the existing outbound_email gate and draft claim.
+    ticket: WARP-3788
+    added: 2026-10-05
+    review_by: 2027-10-05
+    code_refs: [apps/orchestrator/src/services/google/google-auth.service.ts]
+
+  - id: ref-google-mail-scope
+    kind: reference
+    service: orchestrator
+    destination:
+      hosts: [mail.google.com]
+    phase: runtime
+    data_class: none
+    purpose: >-
+      Gmail IMAP/SMTP permission identifier in the Google consent request,
+      never a destination the orchestrator dials. Google requires this full-mail
+      scope for XOAUTH2; the person approves it on Google's own screen.
+    ticket: WARP-3788
+    added: 2026-10-05
+    review_by: 2027-10-05
+    code_refs: [apps/orchestrator/src/services/google/scopes.ts]
 
   - id: m365-entra-login
     kind: egress
@@ -928,32 +1090,21 @@ entries:
     code_refs: [services/erp-connector/src/dentrix/ascend-connector.ts]
 
   # ── dynamic (config-driven) destinations ────────────────────────────────
-  - id: fleet-hq-issuance
-    kind: egress
+  - id: fleet-hq-registry
+    kind: dynamic
     service: orchestrator
-    destination:
-      hosts: [droplet-fleet-hq.rjouffret.workers.dev, fleet-hq.droplet-us.com]
-      ports: [443]
-      protocol: https
+    config_key: HQ_ISSUANCE_URL
     phase: runtime
     data_class: none
     purpose: >-
-      Fleet HQ TLS issuance API (ADR-023 public-CA-per-device via HQ DNS-01);
-      CSR/cert material only. Now baked as the default HQ_ISSUANCE_URL in
-      .env.example + scripts/lib/secrets.sh (WARP-978) so a reflash
-      self-provisions its publicly-trusted cert with zero hand-patching;
-      still operator-overridable via HQ_ISSUANCE_URL. Was kind: dynamic
-      before the default host became a repo literal. The default is the LIVE
-      HQ Worker (droplet-fleet-hq.rjouffret.workers.dev) — the vanity name
-      fleet-hq.droplet-us.com was allowlisted + baked before it was ever
-      bound in DNS (NXDOMAIN), dead-ending issuance on every fresh flash; it
-      stays allowlisted here so the production-cutover flip
-      (droplet-fleet-hq docs/HQ-CUTOVER-RUNBOOK.md) is a default swap, not an
-      egress change.
-    ticket: WARP-243
-    added: 2026-07-04
-    review_by: 2027-07-04
-    code_refs: [apps/orchestrator/src/services/tls-issuance.adapters.ts, scripts/lib/secrets.sh, .env.example]
+      Explicitly provisioned fleet device authentication and private image
+      distribution for OTA. No default origin is seeded; remote access uses
+      local WireGuard and internal DNS independently. Legacy registration
+      release/deregister remains available for appliance decommissioning.
+    ticket: WARP-3503
+    added: 2026-10-05
+    review_by: 2027-10-05
+    code_refs: [apps/orchestrator/src/services/hq-token.service.ts, docker/ota/apply-update.sh]
 
   - id: user-mail-servers
     kind: dynamic
@@ -1002,6 +1153,46 @@ entries:
       - apps/orchestrator/src/lib/outbound-url-guard.ts
       - apps/orchestrator/src/services/caldav.client.ts
       - apps/orchestrator/src/services/calendar.service.ts
+
+  - id: work-webhooks
+    kind: dynamic
+    service: orchestrator
+    config_key: PmWebhook.urlEnc (encrypted per-webhook URL, registered by an owner or admin)
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      The webhook and chat-app destinations an owner or admin registers under
+      Settings, Integrations, Work notifications (WARP-3532, ADR-069 §9): an
+      HTTPS or HTTP endpoint on the LAN or the internet, or a Slack, Teams,
+      Discord or Google Chat incoming-webhook address. Each delivery carries one
+      work event: the work item's key, title, state, priority, due date, the
+      names of the people involved and a link back to the box. Comment text,
+      descriptions and email addresses are not sent. Same shape as
+      user-calendar-servers: the destination is a row, so no hostname can be
+      written down here and no static entry could cover it.
+
+      THE ENFORCEMENT IS IN CODE. Off-LAN delivery is OFF by default behind the
+      owner-only `work_integrations` off-LAN channel (OffLanChannelKey), read
+      fail-closed by workIntegrationsGate immediately before every dial; with it
+      off such deliveries stay queued with "Blocked by egress setting" and
+      nothing leaves. A destination on the box's own LAN (RFC 1918 or IPv6 ULA)
+      needs no switch but always passes lib/outbound-url-guard.ts: resolve once,
+      refuse loopback, link-local, multicast, unspecified, cloud-metadata
+      addresses, this box's own addresses and the compose networks, and connect
+      to the vetted address only (lib/outbound-pinned-fetch.ts) with the original
+      Host and SNI, certificate verification on, and no redirects followed.
+      Every request is signed with HMAC-SHA256 under a per-webhook secret held
+      encrypted at rest. WS-18's GitHub and GitLab poll is the other consumer of
+      this channel.
+    ticket: WARP-3532
+    added: 2026-10-04
+    review_by: 2027-10-04
+    code_refs:
+      - apps/orchestrator/src/lib/outbound-url-guard.ts
+      - apps/orchestrator/src/lib/outbound-pinned-fetch.ts
+      - apps/orchestrator/src/services/pm/webhook-delivery.service.ts
+      - apps/orchestrator/src/services/pm/webhook-url.ts
+      - apps/orchestrator/src/services/off-lan-gate.service.ts
 
   - id: web-push-services
     kind: egress
@@ -1493,6 +1684,23 @@ entries:
     review_by: 2027-09-18
     code_refs: [services/erp-connector/src/rest/vendors/github.ts]
 
+  # WARP-3535 — the same trap, twice more. The development panel's commit field
+  # map reads a commit's author name and committer date off a GitHub `/commits`
+  # row, and `.name` and `.date` are both real ICANN TLDs. A plain object key has
+  # no bracket spelling (see `ref-github-repository-id-path` above), so the
+  # honest answer is the same one: state the true fact — these tokens appear in
+  # source as paths into a response body, and the box never dials them.
+  - id: ref-github-commit-field-paths
+    kind: reference
+    service: erp-connector
+    destination:
+      hosts: [commit.author.name, commit.committer.date]
+    purpose: the dotted JSON paths `commit.author.name` and `commit.committer.date` in the GitHub REST profile's development commit field map (a commit's author name and committer date on a `/commits` row) — paths into a response body that parse as hostnames under the `.name` and `.date` TLDs, never a connection the box makes
+    ticket: WARP-3535
+    added: 2026-10-04
+    review_by: 2027-10-04
+    code_refs: [services/erp-connector/src/rest/vendors/github.ts]
+
   - id: github-api
     kind: egress
     service: erp-connector
@@ -1631,7 +1839,172 @@ entries:
     review_by: 2027-09-18
     code_refs: [services/erp-connector/src/rest/vendors/loyverse.ts]
 
+  - id: gocardless-api
+    kind: egress
+    service: erp-connector
+    destination:
+      hosts: [api.gocardless.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      GoCardless API — the Direct Debit payments cloud connector (WARP-3697),
+      on ADR-046's declarative REST track. Read-only, GET only, three
+      datasets: payments, refunds and payouts. Payers, mandates, bank accounts
+      and subscriptions are not requested. Carries the merchant's own
+      collection history, fetched on request under a read-only access token an
+      admin minted in their own GoCardless dashboard (Developers → API
+      settings); never ambient, off until the owner connects. ONE FIXED HOST
+      for live accounts; the sandbox host is never dialled and never
+      registered. The `GoCardless-Version` header is an API-version pin
+      carried in the profile, not a destination. Paced at 60 ms against the
+      lower of GoCardless's two published rate-limit figures.
+    ticket: WARP-3697
+    added: 2026-10-04
+    review_by: 2027-10-04
+    code_refs: [services/erp-connector/src/rest/vendors/gocardless.ts]
+
+  # 🔴 WARP-3698 — three JSON PATHS IN THE CAPSULE FIELD MAP parse as hostnames.
+  # `.name` and `.id` are real ICANN TLDs, so the WARP-2467 bare-host pass reads
+  # the whole string literals `milestone.name`, `owner.id` and `kase.id` as
+  # destinations. Same mechanism as `ref-github-repository-id-path`: each states
+  # the true fact — a path into a response body that appears in source as a
+  # string, never a connection the box makes. Bracket syntax does not apply to a
+  # plain object key, and renaming Capsule's fields is not an option.
+  - id: ref-capsule-milestone-name-path
+    kind: reference
+    service: erp-connector
+    destination:
+      hosts: [milestone.name]
+    purpose: the dotted JSON path `milestone.name` in the Capsule REST profile's deal field map (the pipeline stage's name on an opportunity row) — a path into a response body that parses as a hostname under the `.name` TLD, never a connection the box makes
+    ticket: WARP-3698
+    added: 2026-10-04
+    review_by: 2027-10-04
+    code_refs: [services/erp-connector/src/rest/vendors/capsule.ts]
+
+  - id: ref-capsule-owner-id-path
+    kind: reference
+    service: erp-connector
+    destination:
+      hosts: [owner.id]
+    purpose: the dotted JSON path `owner.id` in the Capsule REST profile's task field map (the task's owner, which is its assignee) — a path into a response body that parses as a hostname under the `.id` TLD, never a connection the box makes
+    ticket: WARP-3698
+    added: 2026-10-04
+    review_by: 2027-10-04
+    code_refs: [services/erp-connector/src/rest/vendors/capsule.ts]
+
+  - id: ref-capsule-kase-id-path
+    kind: reference
+    service: erp-connector
+    destination:
+      hosts: [kase.id]
+    purpose: the dotted JSON path `kase.id` in the Capsule REST profile's task field map (the Capsule project a task hangs off) — a path into a response body that parses as a hostname under the `.id` TLD, never a connection the box makes
+    ticket: WARP-3698
+    added: 2026-10-04
+    review_by: 2027-10-04
+    code_refs: [services/erp-connector/src/rest/vendors/capsule.ts]
+
+  - id: capsule-api
+    kind: egress
+    service: erp-connector
+    destination:
+      hosts: [api.capsulecrm.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      Capsule CRM API v2 — the CRM cloud connector (WARP-3698), on ADR-046's
+      declarative REST track. Read-only, GET only, two datasets: opportunities
+      (pipeline deals) and tasks. People, organisations, notes, e-mails and
+      projects are not requested. Carries the owner's own pipeline, fetched on
+      request under a personal access token the account owner minted in their
+      own Capsule (My Preferences → API Authentication); never ambient, off
+      until the owner connects. ONE FIXED HOST. Opportunities are read
+      incrementally with the documented `since` filter; tasks have none, so
+      each tick is a declared full scan. Paced at 900 ms against the published
+      4,000-requests-per-hour per-user ceiling. Pagination follows the RFC-5988
+      Link header and every next URL is re-run through the exact-host guard.
+      The owner's browser host, the developer-docs host and the OAuth and MCP
+      hosts are never dialled and never registered.
+    ticket: WARP-3698
+    added: 2026-10-04
+    review_by: 2027-10-04
+    code_refs: [services/erp-connector/src/rest/vendors/capsule.ts]
+
   # ── build / setup / ci egress ───────────────────────────────────────────
+  - id: build-qwen-asr-source
+    kind: egress
+    service: qwen-stt
+    destination:
+      hosts: [codeload.github.com]
+      ports: [443]
+      protocol: https
+    phase: build
+    data_class: none
+    purpose: Immutable native CPU ASR source archive, verified by SHA-256 during image assembly; no appliance audio or customer data
+    ticket: WARP-3729
+    added: 2026-10-05
+    review_by: 2027-10-05
+    code_refs: [services/qwen-stt/Dockerfile]
+
+  - id: build-qwen-asr-model
+    kind: egress
+    service: qwen-stt
+    destination:
+      hosts: [huggingface.co]
+      ports: [443]
+      protocol: https
+    phase: build
+    data_class: none
+    purpose: Immutable Qwen3-ASR weights and tokenizer assets, individually SHA-256 verified and bundled in the image; no runtime download
+    ticket: WARP-3729
+    added: 2026-10-05
+    review_by: 2027-10-05
+    code_refs: [services/qwen-stt/download_model.py]
+
+  - id: build-kokoro-assets
+    kind: egress
+    service: kokoro-tts
+    destination:
+      hosts: [huggingface.co]
+      ports: [443]
+      protocol: https
+    phase: build
+    data_class: none
+    purpose: Immutable Kokoro ONNX model and English voice assets, individually SHA-256 verified and bundled in the image; no runtime download
+    ticket: WARP-3729
+    added: 2026-10-05
+    review_by: 2027-10-05
+    code_refs: [services/kokoro-tts/download_assets.py]
+
+  - id: ref-qwen-asr-attribution
+    kind: reference
+    service: qwen-stt
+    destination:
+      hosts: [huggingface.co]
+    phase: runtime
+    data_class: none
+    purpose: Model provenance URL returned as Wyoming attribution metadata; the speech server does not dial it
+    ticket: WARP-3729
+    added: 2026-10-05
+    review_by: 2027-10-05
+    code_refs: [services/qwen-stt/server.py]
+
+  - id: ref-kokoro-attribution
+    kind: reference
+    service: kokoro-tts
+    destination:
+      hosts: [huggingface.co]
+    phase: runtime
+    data_class: none
+    purpose: Model provenance URL returned as Wyoming attribution metadata; the speech server does not dial it
+    ticket: WARP-3729
+    added: 2026-10-05
+    review_by: 2027-10-05
+    code_refs: [services/kokoro-tts/server.py]
+
   - id: build-container-registries
     kind: egress
     service: repo
@@ -1646,6 +2019,21 @@ entries:
     added: 2026-07-04
     review_by: 2027-07-04
     code_refs: [docker/docker-compose.yml]
+
+  - id: build-ota-r2-mirror
+    kind: egress
+    service: repo
+    destination:
+      hosts: [r2.cloudflarestorage.com]
+      ports: [443]
+      protocol: https
+    phase: build
+    data_class: none
+    purpose: publish-release.yml copies signed release images and their cosign signatures (by digest) from private GHCR into the fleet HQ R2 bucket the read-only registry serves; CI-only, never from a box (ADR-068)
+    ticket: WARP-3502
+    added: 2026-10-03
+    review_by: 2027-10-03
+    code_refs: [scripts/release/mirror-to-r2.py]
 
   - id: build-openssl-fips-source
     kind: egress
@@ -1861,36 +2249,27 @@ entries:
     review_by: 2027-09-02
     code_refs: [services/erp-connector/src/xero/connector.ts]
 
-  - id: ref-security-audit-identifiers
+  - id: ref-prisma-transaction-symbol
     kind: reference
     service: orchestrator
     destination:
-      # NOT destinations. Two dotted identifiers whose last label is a
-      # delegated TLD (.open, .id), the same false positive that
-      # ref-dotted-identifier-keys describes:
-      #   * mode.open is a Security audit ACTION NAME: the `refs.action`
-      #     stored on the ActivityRow when a person switches the Security
-      #     mode to open (SecurityAuditAction in security-audit.ts, and
-      #     ACTION_AUDIT in security-mode.service.ts).
-      #   * prisma.client.transaction.id is a Symbol.for KEY: the
-      #     well-known symbol Prisma sets on an interactive-transaction
-      #     client, which the in-transaction chain append reads to refuse
-      #     a bare client and to serialise appends per transaction.
-      # Neither is ever resolved or dialled. Registered by EXACT name, so a
-      # real host under .open or .id is still denied.
-      hosts: [mode.open, prisma.client.transaction.id]
+      # NOT a destination. A dotted identifier whose last label is a
+      # delegated TLD (.id), the same false positive that
+      # ref-dotted-identifier-keys describes: prisma.client.transaction.id is
+      # a Symbol.for KEY, the well-known symbol Prisma sets on an
+      # interactive-transaction client, which the in-transaction chain append
+      # reads to refuse a bare client and to serialise appends per
+      # transaction. It is never resolved or dialled. Registered by EXACT
+      # name, so a real host under .id is still denied.
+      hosts: [prisma.client.transaction.id]
     purpose: >-
-      Two orchestrator identifiers that parse as hostnames: the Security
-      audit action name mode.open and the Symbol.for key
-      prisma.client.transaction.id that Prisma's interactive-transaction
-      client carries. Neither is a destination, and the box never
-      resolves either.
-    ticket: WARP-2977
-    added: 2026-09-23
-    review_by: 2027-09-23
-    code_refs: [apps/orchestrator/src/services/security-audit.ts,
-                apps/orchestrator/src/services/security-mode.service.ts,
-                apps/orchestrator/src/services/activity.service.ts]
+      The Symbol.for key prisma.client.transaction.id that Prisma's
+      interactive-transaction client carries. It parses as a hostname, but it
+      is not a destination, and the box never resolves it.
+    ticket: WARP-3474
+    added: 2026-10-02
+    review_by: 2027-10-02
+    code_refs: [apps/orchestrator/src/services/activity.service.ts]
 
   - id: ref-xml-namespaces
     kind: reference

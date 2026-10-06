@@ -30,6 +30,17 @@ Attachments (WARP-3267):
     is listed.
   - Bytes travel base64 in the ingest payload. Nothing here opens, renders or
     runs them; the content type is the sender's claim, recorded as is.
+
+Headers (WARP-3529):
+  - `headers` carries the few header facts the orchestrator's service desk
+    needs and the payload used to lack: every `References` id (threading) and
+    the markers of a message no person wrote — `Auto-Submitted`, `Precedence`,
+    `X-Autoreply`, `X-Autorespond`, `Return-Path` and the `report-type` of a
+    delivery-status report. They are RECORDED as the sender wrote them
+    (keywords lowercased, nothing interpreted): what to do about them is the
+    desk's decision, written down there as an explicit reason. `None` means the
+    header was absent; `""` means present and empty — `Return-Path: <>` (the
+    null reverse path of a bounce) is exactly that.
 """
 from __future__ import annotations
 
@@ -39,6 +50,7 @@ import email.header
 import email.utils
 import hashlib
 import json
+import re
 from email.message import Message
 from typing import Optional, TypedDict
 
@@ -52,6 +64,12 @@ MAX_LISTED_ATTACHMENTS = 50
 #: before it is sent. Without the budget, a message with 20 MiB of
 #: attachments AND large bodies was refused with a 413 and lost.
 MAX_INGEST_PAYLOAD_BYTES = 30 * 1024 * 1024
+#: `References` ids sent per message — the orchestrator's zod `max`. A longer
+#: chain keeps its root (what the thread key is) and its newest ids (what a reply
+#: is matched by); the middle is the part nothing reads.
+MAX_REFERENCES = 100
+#: One Message-ID, in UTF-16 code units — the orchestrator's zod `max`.
+MAX_MESSAGE_ID_LENGTH = 998
 
 
 def _json_size(value: object) -> int:
@@ -78,6 +96,16 @@ class ParsedAttachment(TypedDict, total=False):
     data: str  # base64, only when status == "stored"
 
 
+class ParsedHeaders(TypedDict):
+    references: list[str]  # oldest first, brackets stripped
+    autoSubmitted: Optional[str]  # RFC 3834 keyword, lowercased
+    precedence: Optional[str]
+    xAutoreply: Optional[str]
+    xAutorespond: Optional[str]
+    returnPath: Optional[str]  # bare address; "" is the null path of a bounce
+    reportType: Optional[str]  # `multipart/report`'s report-type; "" if it names none
+
+
 class ParsedMessage(TypedDict):
     messageId: str
     inReplyTo: Optional[str]
@@ -91,6 +119,7 @@ class ParsedMessage(TypedDict):
     receivedAt: str  # ISO 8601
     threadKey: str
     attachments: list[ParsedAttachment]
+    headers: ParsedHeaders
 
 
 def _decode_header(value: Optional[str]) -> str:
@@ -306,6 +335,66 @@ def derive_thread_key(
     return message_id
 
 
+def _reference_ids(msg: Message) -> list[str]:
+    """Every Message-ID in `References`, oldest first, brackets stripped. An id
+    that is over the length the orchestrator accepts is dropped — one junk id
+    must not fail the whole message."""
+    raw = " ".join(str(v) for v in (msg.get_all("References") or []))
+    ids: list[str] = []
+    for tok in raw.split():
+        norm = _normalize_msgid(tok)
+        if norm and _fit_utf16(norm, MAX_MESSAGE_ID_LENGTH) == norm:
+            ids.append(norm)
+    if len(ids) > MAX_REFERENCES:
+        ids = ids[:1] + ids[-(MAX_REFERENCES - 1):]
+    return ids
+
+
+def _header_keyword(msg: Message, name: str) -> Optional[str]:
+    """The first word of a header's value, lowercased — `auto-replied` out of
+    `Auto-Replied; owner-email="x@y"`. None when the header is absent, "" when
+    it is there and says nothing."""
+    value = msg.get(name)
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    return re.split(r"[;\s]", text, maxsplit=1)[0][:64] if text else ""
+
+
+def _return_path(msg: Message) -> Optional[str]:
+    """The bare address of `Return-Path`; "" for `<>`, the null reverse path an
+    MTA gives a bounce; None when the header is absent."""
+    value = msg.get("Return-Path")
+    if value is None:
+        return None
+    _name, addr = email.utils.parseaddr(str(value).strip())
+    return addr.strip()[:320]
+
+
+def _report_type(msg: Message) -> Optional[str]:
+    """`report-type` of a `multipart/report` (a delivery-status or disposition
+    notification — a machine's report either way); None for any other message.
+    A report that names no type is still a report: ""."""
+    if msg.get_content_type() != "multipart/report":
+        return None
+    value = msg.get_param("report-type")
+    if not value:
+        return ""
+    return str(email.utils.collapse_rfc2231_value(value)).strip().lower()[:64]
+
+
+def extract_headers(msg: Message) -> ParsedHeaders:
+    return ParsedHeaders(
+        references=_reference_ids(msg),
+        autoSubmitted=_header_keyword(msg, "Auto-Submitted"),
+        precedence=_header_keyword(msg, "Precedence"),
+        xAutoreply=_header_keyword(msg, "X-Autoreply"),
+        xAutorespond=_header_keyword(msg, "X-Autorespond"),
+        returnPath=_return_path(msg),
+        reportType=_report_type(msg),
+    )
+
+
 def parse_message(
     raw: bytes,
     *,
@@ -366,6 +455,7 @@ def parse_message(
         receivedAt=received_at.isoformat(),
         threadKey=thread_key,
         attachments=[],
+        headers=extract_headers(msg),
     )
     out["attachments"] = _extract_attachments(
         msg, MAX_INGEST_PAYLOAD_BYTES - _json_size(out), bodies

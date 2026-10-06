@@ -1,6 +1,6 @@
 /**
  * WARP-844 — minimal Wyoming-protocol STT client for the dashboard's
- * voice input. Streams raw 16-bit mono PCM to the wyoming-faster-whisper
+ * voice input. Streams raw 16-bit mono PCM to the configured CPU STT
  * sidecar (the same container voice-io uses) and returns the transcript.
  *
  * The protocol is deliberately re-implemented rather than wrapped: one
@@ -48,6 +48,15 @@ function encodeEvent(
  *  frame the voice pipeline uses, well within Wyoming's comfort zone. */
 const CHUNK_BYTES = 2560;
 
+/** Same bounded CPU inference budget as services/voice-io/voice/stt.py. */
+export function configuredSttTimeoutMs(): number {
+  const raw = process.env.STT_TRANSCRIPT_TIMEOUT_S?.trim();
+  const seconds = raw ? Number(raw) : 90;
+  return Number.isFinite(seconds) && seconds >= 1 && seconds <= 300
+    ? seconds * 1000
+    : 90_000;
+}
+
 export interface TranscribeOptions {
   url: string;
   /** Raw little-endian 16-bit mono PCM. */
@@ -66,7 +75,7 @@ export interface TranscribeOptions {
  */
 export function transcribePcm(opts: TranscribeOptions): Promise<string> {
   const { host, port } = parseSttUrl(opts.url);
-  const timeoutMs = opts.timeoutMs ?? 30_000;
+  const timeoutMs = opts.timeoutMs ?? configuredSttTimeoutMs();
 
   return new Promise<string>((resolve, reject) => {
     const sock = net.connect({ host, port });
@@ -118,7 +127,7 @@ export function transcribePcm(opts: TranscribeOptions): Promise<string> {
     /** Header whose v2 data block we're waiting for. */
     interface WireHeader {
       type?: string;
-      data?: { text?: string } | null;
+      data?: { text?: string; code?: string } | null;
       data_length?: number;
       payload_length?: number;
     }
@@ -128,6 +137,10 @@ export function transcribePcm(opts: TranscribeOptions): Promise<string> {
      *  Returns true when the promise settled (stop draining). */
     const emitEvent = (header: WireHeader): boolean => {
       payloadToSkip = header.payload_length ?? 0;
+      if (header.type === "error") {
+        finish(new SttUnavailableError(`STT server error: ${header.data?.code || "stt_error"}`));
+        return true;
+      }
       if (header.type === "transcript") {
         finish(null, (header.data?.text ?? "").trim());
         return true;

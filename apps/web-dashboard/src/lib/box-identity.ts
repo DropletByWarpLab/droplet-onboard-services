@@ -9,7 +9,7 @@
  *
  * The orchestrator now registers the canonical box name
  * (apps/orchestrator/src/lib/box-identity.ts: owner-chosen DROPLET_BOX_NAME →
- * DROPLET_PUBLIC_FQDN → `droplet.local`). This client-side resolver is the
+ * DROPLET_LAN_HOSTNAME → `droplet.local`). This client-side resolver is the
  * belt-and-braces half: already-deployed boxes keep their STALE Device rows
  * (container-id hostnames) in the DB and in the 60s devices:list cache, and a
  * dashboard can be upgraded ahead of its orchestrator — so a hostname that
@@ -42,31 +42,14 @@ export function boxDisplayHost(hostname: string | null | undefined): string {
   return h;
 }
 
-/**
- * WARP-1342 — the address shown in dashboard chrome (ShellPage status chip,
- * Home header).
- *
- * `boxDisplayHost` alone strands already-deployed boxes on `droplet.local`
- * whenever the Device row / DROPLET_PUBLIC_FQDN env chain misses (stale row,
- * failed write-back, env injected after boot) — even though the issued
- * ADR-023 per-device FQDN (`<name>.droplet-us.com`, the one address that
- * works over the VPN tunnel) is already persisted in `TlsCert` and served by
- * the public `GET /api/tls/status`.
- *
- * Resolution order:
- *   1. The registered hostname, when it resolves to something better than
- *      the LAN fallback — an owner-chosen box name (WARP-979) always wins.
- *   2. The issued FQDN from /api/tls/status, when the hostname resolved to
- *      the LAN fallback.
- *   3. `droplet.local` — pre-issuance, or while the status fetch is in
- *      flight.
- */
+/** Resolve the address shown in dashboard chrome. The configured internal
+ * DNS name wins over a stored display identity, which may still contain a
+ * fleet address from an older installation. */
 export function resolveBoxAddress(
   hostname: string | null | undefined,
-  issuedFqdn: string | null | undefined,
+  internalHostname: string | null | undefined,
 ): string {
-  const named = boxDisplayHost(hostname);
-  if (named !== LAN_FALLBACK_HOST) return named;
-  const fqdn = (issuedFqdn ?? "").trim();
-  return fqdn || LAN_FALLBACK_HOST;
+  const internal = (internalHostname ?? "").trim();
+  if (internal) return internal;
+  return boxDisplayHost(hostname);
 }

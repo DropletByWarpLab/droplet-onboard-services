@@ -33,6 +33,7 @@ import os
 import re
 import time
 from datetime import datetime
+from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
@@ -48,8 +49,24 @@ from _shared.internal_tls import base_url as _internal_base_url, httpx_client_kw
 
 from driver_checker import full_driver_report, auto_fix_drivers
 from frigate_client import FrigateClient
-from onvif_scanner import discover_cameras, probe_onvif_device
-from rtsp_prober import probe_camera, verify_stream
+from onvif_scanner import discover_cameras, onvif_stream_uri, probe_onvif_device
+from rtsp_prober import (
+    RTSP_PORTS,
+    credential_probing_paused,
+    probe_camera,
+    probe_with_credentials,
+    redact_rtsp_url,
+    scan_ports,
+    verify_stream,
+)
+from rtsp_url import (
+    UnsafeStreamUrl,
+    frigate_userinfo,
+    internal_url,
+    is_valid_stream_path,
+    scrub_credentials,
+    to_frigate_url,
+)
 from vendor_init import check_status as vendor_status_check
 from vendor_init import initialize_camera as vendor_initialize
 
@@ -199,6 +216,41 @@ def _require_auth(request: Request) -> None:
 
 MAX_REJECTED_MACS = 1000  # Cap rejected set to prevent unbounded growth
 
+# --- Camera keys (WARP-3508) ---
+#
+# ``pending_cameras``, ``known_cameras`` and ``rejected_macs`` are all keyed by ONE
+# canonical form: the lower-case MAC. ``scan_and_discover`` lower-cases every lease
+# and the lookups in accept/reject are exact, so a caller that spelled the same MAC
+# in upper case — the orchestrator's candidate ids carry ``E4:30:...`` — got a 404
+# for a camera that was sitting right there in the list.
+#
+# A camera with no DHCP lease is filed under a synthetic key instead: ``ip:<addr>``
+# (found by the subnet sweep) or ``onvif_<addr_with_underscores>`` (found by ONVIF).
+# Those travel through the same ``{mac}`` routes, so they are valid keys too.
+_CAMERA_KEY = re.compile(
+    r"[0-9a-f]{2}(?:[:-][0-9a-f]{2}){5}"  # hardware address
+    r"|ip:\d{1,3}(?:\.\d{1,3}){3}"  # synthetic: subnet sweep, no lease
+    r"|onvif_\d{1,3}(?:_\d{1,3}){3}"  # synthetic: ONVIF, no lease
+)
+
+
+def _camera_key(raw: str) -> str:
+    """Canonical key for a ``{mac}`` path parameter; a 400 when it cannot be one.
+
+    Call it AFTER ``_require_auth`` so an unauthenticated caller learns nothing
+    about what a valid key looks like, and BEFORE the key touches any state — the
+    in-flight guard in accept/reject must claim the canonical spelling, or an
+    accept for ``E4:..`` would not stop a reject for ``e4:..``.
+    """
+    key = raw.strip().lower()
+    if not _CAMERA_KEY.fullmatch(key):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid camera identifier — expected a MAC address",
+        )
+    return key
+
+
 # --- State ---
 
 # Known cameras: MAC address -> camera info
@@ -214,6 +266,126 @@ rejected_macs: set[str] = set()
 # reject (or a second accept) from acting on a MAC that is being committed —
 # preserving the invariant that a MAC is never both accepted AND rejected.
 accepting_macs: set[str] = set()
+# WARP-3508: IPs that are already a Frigate camera input. Frigate is the source of
+# truth for "this host is a camera": a camera added by hand (the orchestrator's
+# POST /cameras) never passes through this service, so without this set it sat in
+# `pending_cameras` as "needs sign-in" and was re-probed — ONVIF as admin/blank,
+# then the default-credential ladder — on every sweep. Refreshed from Frigate's
+# config (see `_refresh_managed_ips`); the sweep skips these IPs entirely.
+managed_ips: set[str] = set()
+
+
+def _already_decided(mac: str, ip: str) -> bool:
+    """True when something has already decided this camera's fate (WARP-3508, F5).
+
+    A sweep awaits for seconds per candidate — ONVIF, the RTSP probe, the
+    credential ladder, Frigate — and writes its result afterwards. In that window
+    an operator can accept the camera (``known_cameras``, or mid-flight in
+    ``accepting_macs``), dismiss it (``rejected_macs``) or add it by hand (its IP
+    becomes a ``managed_ips`` entry). Writing the sweep's now-stale result over any
+    of those undoes the decision: a camera already live in Frigate reappears as
+    "needs credentials", a dismissed one reappears at all.
+
+    So a sweep asks this when it builds its candidate list, again before it spends
+    any probes on a candidate, and once more — with no await between the check and
+    the write — before it adds the camera to Frigate or records what it found.
+    """
+    return (
+        mac in known_cameras
+        or mac in accepting_macs
+        or mac in rejected_macs
+        or ip in managed_ips
+    )
+
+
+# --- Persisted dismissals (WARP-3508) ---
+#
+# ``rejected_macs`` is the one piece of state here that is the OPERATOR'S DECISION
+# rather than something discovery can re-derive from the network, so it is the one
+# piece that must outlive the process. It lived only in memory, so every restart
+# (and every update, which recreates the container) resurrected each dismissed
+# camera as a fresh "Needs sign-in" card.
+#
+# Stored as a small JSON file in a named volume (``camera-discovery-state``).
+# ``known_cameras`` is deliberately NOT persisted: its records embed ``user:pass@``
+# stream URLs, so saving it would put camera credentials in a file — and what
+# Frigate already manages is re-derived from Frigate itself on startup.
+_REJECTED_FILE = "rejected-macs.json"
+
+
+def _rejected_path() -> Path:
+    """Where the dismissed-camera list lives. Resolved per call, like
+    ``services/switch/provision_state.py``, so the directory is overridable
+    without an import-order trap."""
+    base = os.getenv("CAMERA_DISCOVERY_STATE_DIR", "/var/lib/droplet/camera-discovery")
+    return Path(base) / _REJECTED_FILE
+
+
+def _load_rejected_macs() -> None:
+    """Restore the dismissed-camera list written by ``_save_rejected_macs``.
+
+    Runs once at startup and never raises: a missing, unreadable or malformed file
+    means "nothing dismissed yet", never a service that will not start. The file is
+    outside this process's control, so every entry is re-validated, and the
+    ``MAX_REJECTED_MACS`` cap holds on load as it does on reject.
+    """
+    path = _rejected_path()
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return
+    except (OSError, ValueError) as exc:
+        logger.warning("Ignoring unreadable %s (%s) — no dismissed cameras restored", path, exc)
+        return
+    entries = raw.get("rejected_macs") if isinstance(raw, dict) else None
+    if not isinstance(entries, list):
+        logger.warning('Ignoring %s — expected {"rejected_macs": [...]}', path)
+        return
+    for entry in entries:
+        if len(rejected_macs) >= MAX_REJECTED_MACS:
+            logger.warning("%s holds more than %d entries — the rest are ignored", path, MAX_REJECTED_MACS)
+            break
+        key = entry.strip().lower() if isinstance(entry, str) else ""
+        if _CAMERA_KEY.fullmatch(key):
+            rejected_macs.add(key)
+    if rejected_macs:
+        logger.info("Restored %d dismissed camera(s) from %s", len(rejected_macs), path)
+
+
+def _save_rejected_macs() -> bool:
+    """Write the dismissed-camera list to disk. True on success; never raises.
+
+    Best-effort by the same contract as ``services/switch/provision_state.py``: an
+    unwritable state dir must not stop the operator dismissing a camera, and the
+    dismissal still holds for this run. The failure is logged at ERROR and returned,
+    so it is loud rather than silent.
+
+    Atomic: the list is written to a temp file in the SAME directory, flushed to
+    disk, then renamed over the target. A crash or a full disk part-way leaves the
+    previous list intact instead of a truncated file the next startup cannot read.
+    """
+    path = _rejected_path()
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tmp.open("w", encoding="utf-8") as fh:
+            json.dump({"rejected_macs": sorted(rejected_macs)}, fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except OSError as exc:
+        logger.error(
+            "Could not save the dismissed-camera list to %s (%s) — dismissals will not survive a restart",
+            path,
+            exc,
+        )
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return False
+    return True
+
 
 # --- MQTT ---
 
@@ -252,12 +424,27 @@ def _connect_mqtt() -> mqtt.Client:
     return client
 
 
+def public_camera(camera: dict) -> dict:
+    """Copy of a camera record that is safe to publish or return: the RTSP URL
+    loses its ``user:pass@`` and ``has_credentials`` says whether it had one.
+    Frigate (frigate.add_camera) still gets the full URL from the internal record."""
+    out = dict(camera)
+    url = out.get("rtsp_url")
+    if url:
+        out["rtsp_url"] = redact_rtsp_url(url)
+        out["has_credentials"] = out["rtsp_url"] != url
+    return out
+
+
 def publish_discovery(camera_info: dict) -> None:
-    """Publish camera discovery event to MQTT."""
+    """Publish camera discovery event to MQTT (never with credentials in a URL)."""
     if mqtt_client:
+        payload = dict(camera_info)
+        if isinstance(payload.get("camera"), dict):
+            payload["camera"] = public_camera(payload["camera"])
         mqtt_client.publish(
             "droplet/cameras/discovered",
-            json.dumps(camera_info),
+            json.dumps(payload),
             qos=1,
         )
 
@@ -607,7 +794,11 @@ async def scan_and_discover() -> None:
             continue  # Skip non-LAN IPs (loopback, link-local, public)
         if not is_camera_subnet_ip(ip):
             continue  # Skip IPs outside camera subnet when isolation is active
-        if mac in known_cameras or mac in rejected_macs:
+        if _already_decided(mac, ip):
+            # Accepted, dismissed, or a host Frigate already pulls a stream from
+            # (WARP-3508): a camera the operator has, not a candidate. Probing it
+            # would mean an ONVIF login and the credential ladder against a camera
+            # that is already set up — and Hanwha locks the account after ~5 failures.
             continue
 
         candidates[mac] = {
@@ -632,8 +823,8 @@ async def scan_and_discover() -> None:
             # No DHCP match — use IP as key
             mac = f"onvif_{ip.replace('.', '_')}"
 
-        if mac in known_cameras or mac in rejected_macs:
-            continue
+        if _already_decided(mac, ip):
+            continue  # see the lease loop above
 
         candidates[mac] = {
             **candidates.get(mac, {}),
@@ -654,6 +845,12 @@ async def scan_and_discover() -> None:
     for mac, candidate in candidates.items():
         ip = candidate["ip"]
 
+        # The candidates were listed before any probe ran, and each probe takes
+        # seconds: the operator may have accepted, dismissed or hand-added THIS one
+        # since. Don't spend a login attempt on a camera that is already decided.
+        if _already_decided(mac, ip):
+            continue
+
         # First-run provisioning: Hanwha/Wisenet etc. reject every API
         # call (403 on SUNAPI, 401 on RTSP) until the operator sets the
         # initial admin password. When auto-init is on AND we have a
@@ -665,8 +862,14 @@ async def scan_and_discover() -> None:
         if candidate.get("rtsp_url"):
             camera_info = candidate
         else:
-            # Try ONVIF probe first
-            onvif_info = await probe_onvif_device(ip)
+            # Try ONVIF probe first. It logs in as admin/blank — one more failed
+            # login per sweep — so it stands down with the credential ladder
+            # whenever this camera has been rejecting logins (WARP-3508); on its
+            # own it would spend the camera's lockout budget every 30 s.
+            if credential_probing_paused(ip):
+                onvif_info = None
+            else:
+                onvif_info = await probe_onvif_device(ip)
             if onvif_info:
                 camera_info = {**candidate, **onvif_info}
             else:
@@ -682,9 +885,12 @@ async def scan_and_discover() -> None:
                     # doesn't speak RTSP — probe_camera returns None for it).
                     # Drop any prior pending/known entry so a device that was
                     # mis-classified before this confirmation clears without a
-                    # restart, instead of lingering in the discovered list.
-                    pending_cameras.pop(mac, None)
-                    known_cameras.pop(mac, None)
+                    # restart, instead of lingering in the discovered list. Unless
+                    # an operator decided this camera while it was being probed:
+                    # an accept that landed in that window must survive this.
+                    if not _already_decided(mac, ip):
+                        pending_cameras.pop(mac, None)
+                        known_cameras.pop(mac, None)
                     continue
 
         camera_name = _sanitize_camera_name(
@@ -696,7 +902,7 @@ async def scan_and_discover() -> None:
         # Validate RTSP URL before sending to Frigate
         rtsp_url = camera_info.get("rtsp_url")
         if rtsp_url and not is_safe_rtsp_url(rtsp_url):
-            logger.warning("Rejecting unsafe RTSP URL from %s: %s", ip, rtsp_url)
+            logger.warning("Rejecting unsafe RTSP URL from %s: %s", ip, scrub_credentials(rtsp_url))
             rtsp_url = None
             camera_info["rtsp_url"] = None
 
@@ -731,6 +937,17 @@ async def scan_and_discover() -> None:
                 logger.debug("Stream verify raised for %s: %s", ip, exc)
                 verified = False
 
+        # Everything above awaited. If an operator accepted, dismissed or hand-added
+        # this camera in the meantime, what the probes found is stale, and writing it
+        # would undo that decision (WARP-3508, F5). Nothing below awaits between this
+        # check and the state writes except the Frigate add, which holds a claim.
+        if _already_decided(mac, ip):
+            logger.debug(
+                "Dropping stale probe result for %s (%s) — decided while it was being probed",
+                mac, ip,
+            )
+            continue
+
         # Guard the Frigate call: a 5xx / connection-refused / timeout from
         # frigate.add_camera must NOT escape and abort the candidate loop —
         # that would silently skip every remaining candidate this sweep. A
@@ -739,6 +956,12 @@ async def scan_and_discover() -> None:
         # known_cameras (so it can't go stagnant on a stream Frigate refused).
         added = False
         if verified:
+            # PYNET-017, for the sweep: claim the MAC for the add exactly as
+            # accept_camera does, so a reject (or an accept) arriving during the
+            # Frigate round-trip is refused with a 409 instead of leaving the
+            # camera both live and dismissed. The check above and this claim have
+            # no await between them.
+            accepting_macs.add(mac)
             try:
                 added = await frigate.add_camera(camera_name, rtsp_url)
             except Exception as exc:
@@ -750,6 +973,8 @@ async def scan_and_discover() -> None:
                     exc,
                 )
                 added = False
+            finally:
+                accepting_macs.discard(mac)
 
         if added:
             camera_info["status"] = "active"
@@ -799,13 +1024,41 @@ async def scan_and_discover() -> None:
 
 _scan_scheduler: AsyncIOScheduler | None = None
 
+# WARP-3508: how often the scheduled sweeps re-read which hosts Frigate pulls
+# streams from. Startup and an operator-triggered /scan always do. Between those a
+# camera added by hand is invisible to discovery, so it keeps being probed until
+# the next refresh — 10 sweeps is ~5 minutes at the default 30 s SCAN_INTERVAL,
+# which bounds that, for the cost of one small GET to the local Frigate.
+RECONCILE_EVERY_SWEEPS = 10
+_sweeps_since_refresh = 0
+# The longest an operator-triggered /scan waits on Frigate before scanning anyway.
+# Frigate restarts after every adoption and can hold a connection open for the
+# whole httpx timeout (15 s per request); the orchestrator gives the entire /scan
+# call 30 s, so an unbounded wait would turn "a camera was just added" into a
+# "scan_unavailable" the operator reads as "discovery is not running".
+RECONCILE_TIMEOUT_SECONDS = 5.0
+
 
 async def run_scan() -> None:
     """One discovery sweep, with the try/except the old loop body had.
 
     A failing scan is logged and swallowed so a transient sweep error
     never tears down the schedule — the next interval tick retries.
+
+    Every ``RECONCILE_EVERY_SWEEPS``-th sweep first refreshes ``managed_ips``
+    (WARP-3508). Only that half of the Frigate reconcile runs on a schedule: the
+    other half drops ``known_cameras`` that ``/api/stats`` does not list, and a
+    camera added moments ago is not listed until Frigate has restarted — fine
+    once at startup or on an operator's say-so, wrong on a timer.
     """
+    global _sweeps_since_refresh
+    _sweeps_since_refresh += 1
+    if _sweeps_since_refresh >= RECONCILE_EVERY_SWEEPS:
+        _sweeps_since_refresh = 0
+        try:
+            await _refresh_managed_ips()
+        except Exception as e:  # never raises by contract; a bug in it must not cost the sweep
+            logger.error("Managed-host refresh error: %s", e)
     try:
         await scan_and_discover()
     except Exception as e:
@@ -847,38 +1100,83 @@ def build_scan_scheduler() -> AsyncIOScheduler:
 app = FastAPI(title="Droplet Camera Discovery", version="0.1.0")
 
 
-async def _reconcile_with_frigate() -> None:
-    """Drop ``known_cameras`` entries that Frigate no longer has.
+async def _refresh_managed_ips() -> None:
+    """Recompute ``managed_ips``: every host a Frigate camera input pulls from.
 
-    ``known_cameras`` is our in-memory cache of what we told Frigate
-    about. If someone wipes the Frigate config.yml, recreates the
-    container, or manually removes a camera, our cache goes stale and
-    the scan loop skips re-adding because the MAC looks "already
-    known". Reconcile on startup (and after explicit /scan calls) by
-    asking Frigate for its active camera list and dropping any of our
-    records whose Frigate name no longer exists.
+    A camera Frigate already records from is a camera, whoever added it. This
+    service only ever learned about the adoptions it made itself, so a camera added
+    by hand stayed in ``pending_cameras`` as "needs sign-in" and was re-probed every
+    sweep — ONVIF as admin/blank, then the default-credential ladder. Hanwha locks
+    the admin account after ~5 failed logins (HTTP 490), so the service was locking
+    out cameras the operator had already set up.
+
+    The result REPLACES the previous set, so a camera removed from Frigate becomes
+    discoverable again. A failed read changes nothing: Frigate restarts after every
+    adoption, and a refresh that lands in that window must not make a managed
+    camera look new. Pending records on a managed IP are dropped — the sweep no
+    longer probes them, so nothing else would ever clear them. Never raises.
+    """
+    try:
+        hosts = await frigate.get_camera_input_hosts()
+    except Exception as exc:
+        logger.debug("Frigate managed-host refresh skipped (config fetch failed): %s", exc)
+        return
+    if hosts != managed_ips:
+        logger.info("Frigate pulls streams from %d host(s) — discovery leaves them alone", len(hosts))
+    managed_ips.clear()
+    managed_ips.update(hosts)
+    for mac in [m for m, record in pending_cameras.items() if record.get("ip") in managed_ips]:
+        record = pending_cameras.pop(mac)
+        logger.info(
+            "Dropping pending camera %s (%s) — Frigate already pulls a stream from it",
+            mac, record.get("ip"),
+        )
+
+
+async def _reconcile_with_frigate() -> None:
+    """Re-sync discovery's picture of the world with what Frigate actually has.
+
+    Two independent halves; each fails quietly, because Frigate being down for a
+    restart must never take discovery with it.
+
+    1. Drop ``known_cameras`` entries that Frigate no longer has.
+       ``known_cameras`` is our in-memory cache of what we told Frigate
+       about. If someone wipes the Frigate config.yml, recreates the
+       container, or manually removes a camera, our cache goes stale and
+       the scan loop skips re-adding because the MAC looks "already
+       known". Ask Frigate for its active camera list and drop any of our
+       records whose Frigate name no longer exists.
+    2. Refresh ``managed_ips`` (WARP-3508) — see ``_refresh_managed_ips``.
+
+    Runs on startup and before an operator-triggered /scan, so the sweep the
+    operator asked for already knows what Frigate has. The scheduled sweeps run
+    only the second half (``run_scan`` says why).
     """
     try:
         frigate_cams = await frigate.get_cameras()
     except Exception as exc:
-        logger.debug("Frigate reconcile skipped (stats fetch failed): %s", exc)
-        return
-    live_names = set(frigate_cams.keys())
-    stale = [
-        mac for mac, rec in known_cameras.items()
-        if rec.get("name") and rec["name"] not in live_names
-    ]
-    for mac in stale:
-        logger.info(
-            "Dropping stale known-camera %s (%s) — not present in Frigate",
-            mac, known_cameras[mac].get("name"),
-        )
-        known_cameras.pop(mac, None)
+        logger.debug("Frigate reconcile of known cameras skipped (stats fetch failed): %s", exc)
+    else:
+        live_names = set(frigate_cams.keys())
+        stale = [
+            mac for mac, rec in known_cameras.items()
+            if rec.get("name") and rec["name"] not in live_names
+        ]
+        for mac in stale:
+            logger.info(
+                "Dropping stale known-camera %s (%s) — not present in Frigate",
+                mac, known_cameras[mac].get("name"),
+            )
+            known_cameras.pop(mac, None)
+    await _refresh_managed_ips()
 
 
 @app.on_event("startup")
 async def startup():
     global mqtt_client, _scan_scheduler
+    # WARP-3508: restore what the operator dismissed before any scan can run —
+    # the first sweep must already know not to resurrect it.
+    _load_rejected_macs()
     try:
         mqtt_client = _connect_mqtt()
         logger.info("Connected to MQTT broker")
@@ -945,7 +1243,7 @@ async def get_discovered(request: Request):
     reconnaissance-grade data that must not be readable by any LAN peer.
     """
     _require_auth(request)
-    return list(pending_cameras.values())
+    return [public_camera(c) for c in pending_cameras.values()]
 
 
 @app.get("/cameras/known")
@@ -956,7 +1254,7 @@ async def get_known(request: Request):
     (may embed ``user:pass@``), MACs and models otherwise.
     """
     _require_auth(request)
-    return list(known_cameras.values())
+    return [public_camera(c) for c in known_cameras.values()]
 
 
 @app.post("/cameras/discovered/{mac}/accept")
@@ -965,8 +1263,12 @@ async def accept_camera(mac: str, request: Request):
 
     Gated by DEVICE_SECRET (NET-05): pushing an arbitrary pending camera
     into Frigate is a privileged write, not a public action.
+
+    ``mac`` may be spelled in any case (WARP-3508); it is normalised to the
+    canonical lower-case key before anything is looked up or claimed.
     """
     _require_auth(request)
+    mac = _camera_key(mac)
     # PYNET-014: peek, don't pop — the record stays in pending until the add
     # actually succeeds, so a transient exception from verify_stream/add_camera
     # can't silently drop the camera from the list until the next scan.
@@ -1014,7 +1316,7 @@ async def accept_camera(mac: str, request: Request):
             camera["status"] = "active"
             known_cameras[mac] = camera
             publish_discovery({"event": "camera_accepted", "camera": camera})
-            return {"status": "accepted", "camera": camera}
+            return {"status": "accepted", "camera": public_camera(camera)}
 
         # Still in pending (peeked, not popped) — just surface the failure.
         raise HTTPException(status_code=500, detail="Failed to add camera to Frigate")
@@ -1022,14 +1324,373 @@ async def accept_camera(mac: str, request: Request):
         accepting_macs.discard(mac)
 
 
+# --- Operator-supplied credentials (WARP-3505) ---
+
+# Credential field limits. RTSP/ONVIF accounts are short; the caps keep a
+# pathological body from being hashed/base64'd/sent and keep the digest header
+# well inside a single read.
+_MAX_CRED_USERNAME = 128
+_MAX_CRED_PASSWORD = 256
+
+# Time budgets for one credentials submit, so "up to a minute" is true and the
+# orchestrator's 60 s wait (camera-candidates.service.ts) is never the thing that
+# gives up on a camera that was in fact added. The probing phase has a HARD
+# deadline (_CRED_TOTAL_BUDGET_S); inside it, RTSP gets the first share and ONVIF
+# (best effort, only when RTSP found no path) the rest. The Frigate commit that
+# follows is sub-second.
+_CRED_RTSP_BUDGET_S = 25.0
+_CRED_ONVIF_TIMEOUT_S = 8.0
+_CRED_HINT_BUDGET_S = 10.0  # the one path ONVIF names
+_CRED_TOTAL_BUDGET_S = 45.0
+
+# probe_with_credentials outcome -> (HTTP status, machine code, operator prose).
+# Prose never includes the username or password (NET-05).
+_CREDENTIAL_FAILURES: dict[str, tuple[int, str, str]] = {
+    "auth_failed": (
+        422,
+        "auth_failed",
+        "The camera rejected that username and password. Check them and try again.",
+    ),
+    "locked": (
+        423,
+        "locked",
+        "The camera has temporarily locked its account after too many failed "
+        "sign-ins. Wait a few minutes before trying again.",
+    ),
+    "basic_only": (
+        422,
+        "basic_auth_only",
+        "This camera only offers a sign-in that sends its password without "
+        "protection, so Droplet will not use it. Switch the camera to a secure "
+        "sign-in (Digest), or ask an administrator to allow this camera.",
+    ),
+    "no_path": (
+        422,
+        "no_stream_path",
+        "The camera is reachable but none of the usual video stream addresses "
+        "worked. Enter the stream address manually (see your camera's manual).",
+    ),
+    "unreachable": (
+        502,
+        "unreachable",
+        "Couldn't reach the camera. Check that it is powered on and on the "
+        "same network, then try again.",
+    ),
+    "timeout": (
+        504,
+        "timeout",
+        "The camera took too long to answer. Try again in a moment.",
+    ),
+}
+
+
+def _credential_error(outcome: str) -> JSONResponse:
+    status, code, message = _CREDENTIAL_FAILURES[outcome]
+    return JSONResponse(status_code=status, content={"detail": message, "code": code})
+
+
+class CredentialsRejected(HTTPException):
+    """A 400 for a username/password that cannot be used, with a machine ``code``.
+
+    ``invalid_credentials`` — malformed (type, size, control characters, a colon in
+    the username); ``unsupported_password`` — well-formed, but cannot be written
+    into a Frigate stream URL for this account (spaces or curly braces in a raw
+    password, see rtsp_url.py); ``unsupported_stream_address`` — the camera's own
+    stream address cannot be written next to this account (an ``@`` after the host,
+    see rtsp_url.py). Raised BEFORE any attempt is spent on the camera, except the
+    last, which is only known once the camera has named its stream.
+    """
+
+    def __init__(self, code: str, detail: str):
+        super().__init__(status_code=400, detail=detail)
+        self.code = code
+
+    @classmethod
+    def for_unsafe(cls, exc: UnsafeStreamUrl) -> "CredentialsRejected":
+        """The rejection that says which part of ``exc``'s stream URL is the problem."""
+        code = {
+            "password": "unsupported_password",
+            "address": "unsupported_stream_address",
+        }.get(exc.field, "invalid_credentials")
+        return cls(code, exc.message)
+
+
+@app.exception_handler(CredentialsRejected)
+async def _credentials_rejected_handler(_request: Request, exc: CredentialsRejected):
+    return JSONResponse(
+        status_code=exc.status_code, content={"detail": exc.detail, "code": exc.code}
+    )
+
+
+def _validated_credentials(body: object) -> tuple[str, str]:
+    """Pull ``(username, password)`` out of a request body or raise 400.
+
+    Control characters are refused outright: the values are written into an RTSP
+    request (``Authorization`` header) and a CR/LF would let a caller inject
+    extra headers. A lone surrogate (valid in JSON, not in UTF-8) would crash the
+    request encoding downstream, so it is a 400 here rather than a 500 there. The
+    400 detail names the FIELD, never its value.
+
+    Finally the account must be expressible in a Frigate stream URL — checked now,
+    before a single sign-in is spent on the camera.
+    """
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Expected a JSON object")
+    username = body.get("username")
+    password = body.get("password")
+    if not isinstance(username, str) or not username.strip():
+        raise HTTPException(status_code=400, detail="username is required")
+    if not isinstance(password, str) or not password:
+        raise HTTPException(status_code=400, detail="password is required")
+    if len(username) > _MAX_CRED_USERNAME:
+        raise HTTPException(status_code=400, detail="username is too long")
+    if len(password) > _MAX_CRED_PASSWORD:
+        raise HTTPException(status_code=400, detail="password is too long")
+    try:
+        frigate_userinfo(username, password)
+    except UnsafeStreamUrl as exc:
+        raise CredentialsRejected.for_unsafe(exc) from None
+    return username, password
+
+
+def _redact_camera(camera: dict) -> dict:
+    """A camera record safe to return/publish: no RTSP URL, no credentials."""
+    return {
+        k: camera.get(k)
+        for k in ("name", "ip", "mac", "manufacturer", "model", "status", "detection_method")
+    }
+
+
+def _valid_port(value: object) -> int | None:
+    """``value`` as a TCP port, or None. A record or a device can hold anything."""
+    if isinstance(value, bool):
+        return None
+    try:
+        port = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return port if 0 < port < 65536 else None
+
+
+def _port_of_url(url: str) -> int | None:
+    # urlparse(...).port raises ValueError on a bad port instead of returning None.
+    try:
+        return _valid_port(urlparse(url).port)
+    except ValueError:
+        return None
+
+
+def _candidate_ports(camera: dict) -> list[int]:
+    """The RTSP port(s) discovery already knows for this camera.
+
+    The port in the stream URL is the explicit one. The record's own ``port`` is
+    the RTSP port for records the RTSP prober made, but for an ONVIF /
+    WS-Discovery record it is the ONVIF HTTP port (usually 80) — pointing an RTSP
+    DESCRIBE at that finds a web server and a bogus "no stream path".
+    """
+    found = [_port_of_url(camera.get("rtsp_url") or "")]
+    if camera.get("detection_method") not in ("onvif", "ws_discovery"):
+        found.append(_valid_port(camera.get("port")))
+    return list(dict.fromkeys(p for p in found if p))
+
+
+def _hint_from_onvif_uri(uri: str, ip: str) -> tuple[str, int | None] | None:
+    """The ``(path, port)`` an ONVIF stream URI names — only if it can be trusted.
+
+    ONVIF is a DEVICE telling us what to write into Frigate's config, so the path
+    is checked like any other untrusted input: it must be for this camera's own
+    address, and carry no template, whitespace or control characters (Frigate
+    expands ``{FRIGATE_*}`` — SEC-INJ-5). A bad port is ignored, not fatal.
+    """
+    try:
+        parsed = urlparse(uri)
+        if parsed.scheme not in ("rtsp", "rtsps") or parsed.hostname != ip:
+            return None
+        path = parsed.path + (f"?{parsed.query}" if parsed.query else "")
+        if not is_valid_stream_path(path):
+            return None
+        try:
+            port = _valid_port(parsed.port)
+        except ValueError:
+            port = None
+    except ValueError:
+        return None
+    return path, port
+
+
+async def _probe_credentials(
+    camera: dict, ip: str, username: str, password: str
+) -> tuple[str, int | None, str | None]:
+    """Find ``(outcome, port, path)`` for these credentials on this camera.
+
+    RTSP first, and it stops at the first path that refuses the password: the
+    camera counts every failed sign-in toward a lockout and ONVIF is a second
+    protocol on the same account, so running it first made a wrong password cost
+    two or three failures. ONVIF is asked for a stream path only when RTSP found
+    none at all (``no_path``) — and if ONVIF is where the camera first refuses the
+    credentials, that is reported as the wrong password it is.
+    """
+    ports = _candidate_ports(camera) or await scan_ports(ip, RTSP_PORTS)
+    if not ports:
+        return "unreachable", None, None
+
+    # A port that answered but has no stream path beats one that did not answer:
+    # the camera IS there, so ONVIF may still name the path.
+    port = ports[0]
+    reachable = False
+    for candidate in ports:
+        outcome, path = await probe_with_credentials(
+            ip, candidate, username, password, max_seconds=_CRED_RTSP_BUDGET_S
+        )
+        if outcome in ("ok", "auth_failed", "locked", "basic_only"):
+            return outcome, candidate, path
+        if outcome == "no_path" and not reachable:
+            reachable, port = True, candidate
+    if not reachable:
+        return "unreachable", port, None
+
+    try:
+        status, uri = await asyncio.wait_for(
+            onvif_stream_uri(ip, 80, username, password), timeout=_CRED_ONVIF_TIMEOUT_S
+        )
+    except Exception:  # a timeout, or anything the ONVIF stack throws
+        status, uri = "unsupported", None
+    if status == "auth_failed":
+        return "auth_failed", port, None
+    hint = _hint_from_onvif_uri(uri, ip) if status == "ok" and uri else None
+    if hint is None:
+        return "no_path", port, None
+
+    hint_path, hint_port = hint
+    probe_port = hint_port or port
+    outcome, path = await probe_with_credentials(
+        ip,
+        probe_port,
+        username,
+        password,
+        hint_paths=[hint_path],
+        max_seconds=_CRED_HINT_BUDGET_S,
+        # The standard list was already walked on the ports tried above; a port
+        # ONVIF names that was not among them has not been.
+        include_known_paths=probe_port not in ports,
+    )
+    if outcome == "ok":
+        return "ok", probe_port, path
+    if outcome in ("auth_failed", "locked", "basic_only"):
+        return outcome, probe_port, None
+    return "no_path", port, None
+
+
+@app.post("/cameras/discovered/{mac}/credentials")
+async def submit_camera_credentials(mac: str, request: Request):
+    """Add a discovered camera using credentials the operator typed in.
+
+    The default-credential ladder only knows factory defaults, so a camera with
+    a real password could never be adopted. This probes the camera's RTSP stream
+    paths with the SUPPLIED ``{username, password}`` (and asks ONVIF GetStreamUri
+    for a path only when RTSP found none) and, when a stream answers, commits the
+    camera to Frigate. What Frigate is given is built by
+    ``FrigateClient.add_camera`` from the internal URL — see rtsp_url.py for why
+    that is not the same string.
+
+    Failure modes are distinct so the dashboard can say what is wrong:
+    422 ``auth_failed`` / 422 ``no_stream_path`` / 422 ``basic_auth_only`` (the
+    camera only offers clear-text Basic and is not on CAMERA_RTSP_BASIC_ALLOW_IPS,
+    so nothing was sent) / 423 ``locked`` / 502 ``unreachable`` / 504 ``timeout``,
+    and 400 ``invalid_credentials`` / ``unsupported_password`` for input that
+    cannot be used (nothing was tried on the camera) or
+    ``unsupported_stream_address`` for a stream path that cannot be stored next to
+    this account (an ``@`` after the host — see rtsp_url.py).
+
+    NET-05: gated by DEVICE_SECRET; the password is never logged, never put on
+    MQTT, and the response carries no RTSP URL.
+    """
+    _require_auth(request)
+    # One canonical key (lower-case MAC, or a synthetic ip:/onvif_ key) before the
+    # key touches any state: the orchestrator addresses a candidate by its
+    # UPPER-case id, and the in-flight claim below must be taken on the canonical
+    # spelling. WARP-3508 owns the helper; every {mac} route goes through it.
+    mac = _camera_key(mac)
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    username, password = _validated_credentials(body)
+
+    camera = pending_cameras.get(mac)
+    if not camera:
+        raise HTTPException(status_code=404, detail="Camera not found in pending list")
+
+    # Same mutual exclusion as accept_camera (PYNET-017): claim the MAC before
+    # the first await so a concurrent reject/accept can't act mid-commit.
+    if mac in accepting_macs:
+        raise HTTPException(status_code=409, detail="Camera accept already in progress")
+    accepting_macs.add(mac)
+    try:
+        ip = camera["ip"]
+        # The record was validated when it was discovered; this is the same gate
+        # applied again, before any packet is sent on behalf of a request.
+        if not isinstance(ip, str) or not is_safe_ip(ip):
+            raise HTTPException(status_code=400, detail="Camera address is not a safe LAN address")
+
+        try:
+            outcome, port, path = await asyncio.wait_for(
+                _probe_credentials(camera, ip, username, password),
+                timeout=_CRED_TOTAL_BUDGET_S,
+            )
+        except asyncio.TimeoutError:
+            return _credential_error("timeout")
+        if outcome != "ok" or path is None or port is None:
+            return _credential_error(outcome)
+
+        # The address is built from the record's own LAN IP and a path that is
+        # either one of our constants or an ONVIF hint that passed
+        # is_valid_stream_path. Guard it as a whole all the same, WITHOUT the
+        # credentials: a raw password may hold '/', '?' or '#', which would make
+        # urlparse read a different host.
+        address = f"rtsp://{ip}:{port}{path}"
+        if not is_valid_stream_path(path) or not is_safe_rtsp_url(address):
+            raise HTTPException(status_code=400, detail="Camera address is not a safe LAN address")
+
+        rtsp_url = internal_url(username, password, ip, port, path)
+        try:
+            to_frigate_url(rtsp_url)  # the rule add_camera applies; say so BEFORE it fails there
+        except UnsafeStreamUrl as exc:
+            raise CredentialsRejected.for_unsafe(exc) from None
+
+        name = camera.get("name", _sanitize_camera_name(camera.get("hostname", ""), ip))
+        if not await frigate.add_camera(name, rtsp_url):
+            # Still pending (peeked, not popped) — the credentials are good, the
+            # failure is downstream, so say that rather than blaming them.
+            raise HTTPException(status_code=500, detail="Failed to add camera to Frigate")
+
+        pending_cameras.pop(mac, None)
+        camera["rtsp_url"] = rtsp_url
+        camera["port"] = port
+        camera["detection_method"] = "operator_credentials"
+        camera["status"] = "active"
+        known_cameras[mac] = camera
+        logger.info("Added camera %s (%s) with operator-supplied credentials", name, ip)
+        safe = _redact_camera(camera)
+        publish_discovery({"event": "camera_accepted", "camera": safe})
+        return {"status": "accepted", "camera": safe}
+    finally:
+        accepting_macs.discard(mac)
+
+
 @app.post("/cameras/discovered/{mac}/reject")
 async def reject_camera(mac: str, request: Request):
-    """Reject a discovered camera — won't be discovered again.
+    """Reject a discovered camera — won't be discovered again, across restarts.
 
     Gated by DEVICE_SECRET (NET-05): mutates the rejected-MAC set, a
     privileged write.
+
+    ``mac`` may be spelled in any case (WARP-3508). The dismissal is saved to the
+    state volume; ``persisted`` in the response says whether that write worked —
+    a ``false`` is still a rejection for this run, not an error.
     """
     _require_auth(request)
+    mac = _camera_key(mac)
     # PYNET-017: refuse to reject a MAC whose accept is mid-flight. Otherwise the
     # in-flight accept could still commit it to Frigate *after* we mark it
     # rejected, leaving a "rejected" camera live. reject_camera has no awaits, so
@@ -1050,10 +1711,17 @@ async def reject_camera(mac: str, request: Request):
         pending_cameras[mac] = camera
         raise HTTPException(
             status_code=507,
-            detail="Rejected-camera list is full; cannot persist this rejection. Clear rejected cameras first.",
+            detail=(
+                "Rejected-camera list is full; cannot persist this rejection. "
+                "Remove entries from rejected-macs.json and restart camera-discovery first."
+            ),
         )
     rejected_macs.add(mac)
-    return {"status": "rejected", "mac": mac}
+    # Synchronous on purpose: this handler's atomicity against an in-flight accept
+    # (PYNET-017) rests on there being no await between the claim check above and
+    # here, and the file is a few hundred bytes.
+    persisted = _save_rejected_macs()
+    return {"status": "rejected", "mac": mac, "persisted": persisted}
 
 
 @app.post("/scan")
@@ -1065,6 +1733,17 @@ async def trigger_scan(request: Request):
     action — an unauthenticated LAN peer must not be able to launch it.
     """
     _require_auth(request)
+    # WARP-3508: the operator asked for a scan NOW — bring discovery's picture of
+    # Frigate up to date first, so it skips cameras added since the last refresh.
+    # Bounded: a slow Frigate costs this refresh (the sweep falls back to the managed
+    # hosts from the last one), never the scan.
+    try:
+        await asyncio.wait_for(_reconcile_with_frigate(), timeout=RECONCILE_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Frigate did not answer within %.0f s — scanning with the managed hosts from the last refresh",
+            RECONCILE_TIMEOUT_SECONDS,
+        )
     await scan_and_discover()
     return {
         "status": "scan_complete",

@@ -101,6 +101,26 @@ describe("ws-bridge subscription topics (WARP-493)", () => {
     expect(topics.some((t) => t.includes("9f8e7d6c-5b4a-4210-aedc-ba9876543210") && t.includes("notifications"))).toBe(false);
   });
 
+  it("WARP-3485: team-chat events are subscribed on the USERNAME only", async () => {
+    const topics = await connectOnce({
+      id: "9f8e7d6c-5b4a-4210-aedc-ba9876543210",
+      username: "alice-nc",
+    });
+    expect(topics.filter((t) => t.startsWith("droplet/team-chat/"))).toEqual([
+      "droplet/team-chat/alice-nc",
+    ]);
+  });
+
+  it("WARP-3536: work-suite live updates are subscribed on the USERNAME only", async () => {
+    // pm-live publishes `droplet/pm/<username>` (ids and a kind, never content).
+    // A `${user.id}` twin would double every frame for the same person.
+    const topics = await connectOnce({
+      id: "9f8e7d6c-5b4a-4210-aedc-ba9876543210",
+      username: "alice-nc",
+    });
+    expect(topics.filter((t) => t.startsWith("droplet/pm/"))).toEqual(["droplet/pm/alice-nc"]);
+  });
+
   it("does not double-subscribe when id === username (dev shape)", async () => {
     const topics = await connectOnce({ id: "dev", username: "dev" });
     expect(

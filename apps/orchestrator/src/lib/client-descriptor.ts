@@ -24,10 +24,9 @@
  *
  * The result has `stripUnsafeDisplayChars` applied (bidi overrides and control
  * characters reorder or corrupt whatever renders the ack) and is at most 120
- * code points (the column is VARCHAR(120)). Pure: shared with WARP-2978's
- * incident acknowledgement.
+ * code points (the column is VARCHAR(120)). Pure.
  */
-import { stripUnsafeDisplayChars } from "../services/security-audit.js";
+import { stripUnsafeDisplayChars } from "./text-safety.js";
 
 /** `ackClient` is VARCHAR(120); Postgres counts characters, i.e. code points. */
 export const CLIENT_DESCRIPTOR_MAX = 120;

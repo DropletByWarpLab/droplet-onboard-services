@@ -38,8 +38,8 @@ If you only read one thing: the [System map](#system-map) and
 ## System map
 
 The appliance is a **single Docker Compose stack** (`docker/docker-compose.yml`,
-**36 services** — 14 default-on, the rest profile-gated; count taken from the
-compose file on 2026-09-02, when WARP-2627 added `mcp-bridge`) fronted by one
+**39 services** — 16 default-on, the rest profile-gated; count taken from the
+compose file on 2026-10-05, after adding CPU speech sidecars) fronted by one
 nginx `gateway`. The **orchestrator** is the brain —
 every client request and every internal coordination path goes through it. There
 is deliberately **no separate API gateway service** in front of the orchestrator
@@ -75,19 +75,20 @@ is deliberately **no separate API gateway service** in front of the orchestrator
 | **orchestrator** | `apps/orchestrator/` | Node + Express + Prisma | Central control plane / agent loop |
 | **web-dashboard** | `apps/web-dashboard/` | Next.js 14 + React | Admin UI |
 | **tools-core** | `packages/tools-core/` | TypeScript | Canonical LLM tool registry (≈78 tools) |
-| **shared-types** | `packages/shared-types/` | TypeScript + Zod | Cross-package `Anchor` types |
+| **shared-types** | `packages/shared-types/` | TypeScript + Zod | Cross-package `Anchor` types + the PM filter language |
 | **fips-selftest** | `packages/fips-selftest/` | TypeScript | FIPS 140-3 boot self-test (Node services) |
 | **mcp-server** | `services/mcp-server/` | TypeScript + MCP SDK | Tool dispatch (stdio + HTTP) |
 | **mcp-bridge** | `services/mcp-bridge/` | TypeScript + MCP SDK | **Outbound** MCP sessions (ADR-043 §5) — profile `remote-mcp`, off by default |
 | **ai-gateway** | `services/ai-gateway/` | Python + FastAPI | Inference router + gRPC embed/rerank |
 | **routing** | `services/routing/` | Python + FastAPI | OpenWrt control via ubus |
 | **switch** | `services/switch/` | Python + FastAPI | Managed-switch driver |
-| **device-gateway** | `services/device-gateway/` | Python + FastAPI | Device control over BACnet/IP, Modbus TCP, SNMP, KNX/IP |
 | **file-indexer** | `services/file-indexer/` | Python + watchdog | Filesystem indexer + embedder (RAG) |
 | **email-indexer** | `services/email-indexer/` | Python + FastAPI | IMAP IDLE ingest + SMTP send |
 | **camera-discovery** | `services/camera-discovery/` | Python + FastAPI | ONVIF/RTSP discovery → Frigate |
 | **erp-sql-bridge** | `services/erp-sql-bridge/` | Python + FastAPI + pyodbc | Direct-SQL ERP bridge (SAP SQL Anywhere) |
 | **voice-io** | `services/voice-io/` | Python + FastAPI | Wake → STT → agent → TTS |
+| **qwen-stt** | `services/qwen-stt/` | Python + native C/OpenBLAS | Offline English Qwen3-ASR 1.7B, CPU-only Wyoming :10300 |
+| **kokoro-tts** | `services/kokoro-tts/` | Python + ONNX Runtime | Offline Kokoro speech, eight selectable English voices, CPU-only Wyoming :10200 |
 | **oled-display** | `services/oled-display/` | Python + FastAPI | Front-panel TFT screen |
 | **ops-console** | `services/ops-console/` | Python + FastAPI | Support "what's running" console |
 | **rag-eval** | `services/rag-eval/` | Python + RAGAS | Offline retrieval-quality harness |
@@ -125,7 +126,6 @@ network. Host-published ports and host-network services are called out.
 | mcp-bridge | 9096 (`MCP_BRIDGE_PORT`) | HTTP (internal JSON) | internal only (profile `remote-mcp`) — holds the customer's vendor credential in memory |
 | routing | 8080 | HTTP | **host network mode** (direct router access) |
 | switch | 8081 | HTTP | host (profile `full`) |
-| device-gateway | 8084 | HTTP (+ BACnet UDP 47808, KNX 3671) | host (profiles `full`, `single-box`) |
 | oled-display | 8082 | HTTP | host network (display profile) |
 | camera-discovery | 8085 | HTTP | internal (profile `full`) |
 | erp-sql-bridge | 9095 | HTTP | internal only (profile `erp`) — holds the practice's DB credentials |
@@ -164,10 +164,52 @@ network. Host-published ports and host-network services are called out.
   Highlights: `llm` (chat / agent loop), `auth`, `devices`/`device-clients`
   (pairing), `files`/`files-knowledge` (Nextcloud + RAG), `cameras`, `network*`,
   `switch`, `matter`/`scenes`, `vpn`, `calendar`, `reminders`, `email`, `pm*`
-  (native project management — `/api/pm/*`, ADR-026, behind `authMiddleware`/`requireRole`),
+  (native project management — `/api/pm/*`, ADR-026, behind `authMiddleware`/`requireRole`;
+  comment edit/delete, reactions, watchers and the merged activity timeline are
+  `routes/pm/collaboration.ts`, WARP-3519 — their notifications ride the existing
+  `activity-notify.service.ts` sweep, not a second dispatcher; every `/api/pm/*` and `/api/mobile/pm*`
+  route sits behind the `projects` module gate, and
+  `routes/pm/pm-module-gate.mount.test.ts` enumerates the mounted routers so a new one cannot
+  ship outside it. Every PM list is a page: `limit` (default 100, max 500) + an opaque
+  `cursor`, answering `nextCursor` and an exact `total` — WARP-3371. Due and start dates are
+  calendar dates, `YYYY-MM-DD` on the wire. `GET /api/pm/people` is the member-readable
+  `{id, displayName, avatarUrl}` roster that names the ids on PM rows. A project is archived
+  with `PATCH {archived}` (members may, audited) and deleted for good only by owner/admin,
+  archived-only, with its identifier retyped and its audit row written in the delete's
+  transaction — WARP-3370;
+  `GET /api/pm/insights` is its own router, `routes/pm/insights.ts`, counting in SQL in
+  `services/pm/pm-insights.service.ts` and cached in-process for five minutes),
+  `support/` (the service desk — `/api/support/*`, ADR-069: tickets are work items in
+  `PmProject.kind = SERVICE_DESK` projects, behind the `support` module gate; `/api/pm/*`
+  and `/api/mobile/pm/*` answer 404 for a desk and everything under it),
   `activity` (signed audit log), `agent-runs` (durable background runs, owner/admin),
   `settings*`, `aps` (coverage-extender onboarding),
   `admin-*` (owner/admin-gated dashboards).
+- **Account linking (WARP-3788):** `routes/account-provider-setup.ts` holds
+  owner/admin-only customer app setup. `routes/google.ts` and
+  `services/google/` handle per-person Gmail/Calendar browser consent and encrypted
+  grants; the public callback mounts before session auth and verifies its
+  browser state cookie. `/api/email/:accountId/oauth-token` is restricted to
+  the email service bearer. Microsoft uses its existing per-person lifecycle,
+  with the owner's app as a default for new links. Both providers land opted-in
+  primary-calendar events in `CalendarEvent`, keyed by the calendar owner's
+  username, as read-only external events. Google takes bounded snapshots;
+  Microsoft uses its existing delta engine with durable enumeration marks.
+  The five-minute jobs use `cron-runtime` and respect Calendar enablement.
+  Outlook mail import is per-person, opt-in and Email-module gated. Full
+  `Mail.Read` (also covered by the existing `Mail.ReadWrite` grant) lands
+  received/sent history with no date cutoff through
+  `services/m365/mail-landing.service.ts` and the canonical
+  `services/email/mail-ingest.service.ts`. Plain-text bodies are readable and
+  searchable locally; unsent Outlook drafts and attachment bytes are excluded.
+  `M365_GRAPH` mailboxes are read-only and excluded from IMAP/SMTP workers and
+  service-desk sends. Case-sensitive immutable provider IDs deduplicate the
+  archive; `M365MailFolder`/`M365MailMembership` track folder changes without
+  deleting archived messages after a remote move/delete. Turning mail import
+  off purges only that local mailbox and its drafts, preserving Calendar/files.
+  No new service or public
+  inbound listener is introduced. Setup guides: [Google](integrations/google-mail.md),
+  [Microsoft](integrations/microsoft-365.md).
 - **Data model:** `prisma/schema.prisma` — **55 models, 21 enums**, PostgreSQL
   (`DATABASE_URL`). Notable: `BrainMemoryItemStatus` / `ApDeviceStatus` are
   explicit status enums (the [no-guessing rule](#repo-wide-conventions)),
@@ -198,7 +240,7 @@ network. Host-published ports and host-network services are called out.
 - **External guests get nothing of the company's data unless it is shared with
   them (Romain, 2026-09-30).** The box enforces it on every route; clients only
   mirror it. Modules the catalog refuses the guest tier (`refuseBelowFloor` in
-  `services/access-catalog.ts`: `security`, `crm`, `projects`, `money`) are
+  `services/access-catalog.ts`: `crm`, `projects`, `money`) are
   floored at the prefix by `requireModuleTierFloor` (mounted by
   `mountModuleGates`, 404 `module_disabled`), for the assistant acting for a
   guest by `requireMcpActingUserToolDomain`, and for context pins by the tier in
@@ -293,7 +335,15 @@ network. Host-published ports and host-network services are called out.
 ## packages/shared-types (`@droplet/shared-types`)
 
 - **Purpose:** Cross-package `Anchor` types — the positional citation anchors for
-  PDFs, media timestamps, email parts, and (recursive) archive members.
+  PDFs, media timestamps, email parts, and (recursive) archive members. Also the
+  Work Suite's **one filter language** (WARP-3522, ADR-069 §8): `pm-filter.ts`
+  (the field table, a bounded validator, the canonical form and the compact `f=`
+  string), `pm-filter-schema.ts` (its zod adapter), `pm-views.ts` (the five
+  built-in saved views as DSL, and the sort / group-by / column shapes a view
+  persists) and `pm-links.ts` (the `/projects?p=&view=&item=&v=&f=` deep-link
+  contract). The compiler that turns a filter into a Prisma `where` is NOT here —
+  it needs Prisma and department resolution — it is the orchestrator's
+  `services/pm/filter/compile.ts`.
 - **Gotcha:** `src/anchor.ts` is **generated** from `schemas/anchor.schema.json`
   via `npm run gen:anchor-schema`. Edit the JSON schema, then regenerate — don't
   hand-edit the `.ts`. Uses `z.union` (not `discriminatedUnion`) because some
@@ -429,22 +479,6 @@ network. Host-published ports and host-network services are called out.
   Endpoints (ports, VLANs, PoE, WAN detect, one-click camera setup) are
   driver-agnostic. Bearer `SERVICE_SECRET`. Profile `full`.
 
-## services/device-gateway
-
-- **Purpose:** Device control for commercial/industrial equipment beside
-  Matter, under the same `smart_home` ("Device control") module. BACnet/IP
-  (BACpypes3), Modbus TCP (pymodbus), SNMP v2c/v3 (pysnmp), KNX/IP (xknx), one
-  `ProtocolDriver` each. The orchestrator fronts it at `/api/building/*`
-  (`routes/building.ts`); the LLM reaches it through `get_building_devices` /
-  `set_building_point`.
-- **Gotchas:** A point exists only if an admin registered it; writable only
-  when marked, with min/max for numbers; BACnet priorities 1-7 are refused.
-  Writes are **plan-only** until `DEVICE_GATEWAY_LIVE_WRITES=1`. The
-  orchestrator's write route audits fail-closed before sending. Registry at
-  `/var/lib/droplet/device-gateway/registry.json` (named volume
-  `device-gateway-state`, backed up and wiped on factory reset). Bearer
-  `SERVICE_TOKEN_DEVICE_GATEWAY`. README has the full contract.
-
 ## services/file-indexer
 
 - **Purpose:** Filesystem watcher + embedder for RAG (formerly `file-sync`).
@@ -459,11 +493,23 @@ network. Host-published ports and host-network services are called out.
 
 ## services/email-indexer
 
-- **Purpose:** IMAP **IDLE** ingest (one async loop per `EmailAccount`, exponential
+- **Purpose:** IMAP **IDLE** ingest (one async loop per supported `EmailAccount`, exponential
   backoff) → posts canonical MIME to the orchestrator; drains the outbound SMTP
   queue (`EmailDraft.status='queued'`). All writes go through orchestrator REST
   (schema stays centralized), not direct DB writes. Account passwords are
   Fernet-encrypted at rest; only this service holds `EMAIL_KEY_PATH`. Real, not a stub.
+- **Gmail OAuth (WARP-3788):** `EmailAccount.authMode` distinguishes password
+  mailboxes from `GOOGLE_OAUTH`. For Gmail, the worker obtains a short-lived
+  access token from the authenticated orchestrator endpoint before IMAP/SMTP
+  authentication and uses native XOAUTH2. Refresh grants and customer app
+  secrets stay encrypted in the orchestrator. Gmail hosts and TLS ports are
+  fixed. Outgoing mail still requires the existing owner enablement and
+  human-approved draft path.
+- **Transport selection:** database queries allow only `PASSWORD` and
+  `GOOGLE_OAUTH` for IMAP accounts and queued SMTP drafts. `M365_GRAPH` is a
+  read-only Graph archive populated by the orchestrator, with no mailbox
+  password or IMAP/SMTP connection. Shared ingestion preserves deduplication,
+  attachment limits and latest-thread ordering across providers.
 
 ## services/camera-discovery
 
@@ -475,7 +521,15 @@ network. Host-published ports and host-network services are called out.
 - **Gotchas:** fails closed if `DEVICE_SECRET` empty (`/drivers/fix` needs auth);
   subnet sweep is throttled (concurrency cap) to respect the inference host FD limit; RTSP
   URLs validated as RFC-1918 before reaching Frigate; `ONVIF_WS_DISCOVERY_ENABLED`
-  defaults off (FD leak on Python 3.12+).
+  defaults off (FD leak on Python 3.12+). WARP-3508: a host Frigate already pulls a
+  stream from is *managed* — never probed or published (re-read at startup, before
+  `/scan`, every 10th sweep); dismissed cameras persist in `rejected-macs.json` under
+  `CAMERA_DISCOVERY_STATE_DIR` (named volume `camera-discovery-state`; `known_cameras`
+  is deliberately not persisted — it embeds stream credentials); the default-credential
+  ladder has a per-IP failed-login budget because Hanwha-class cameras lock the admin
+  account after ~5 failures; `{mac}` routes take any letter case (pending is keyed
+  lower-case); a sweep re-checks `_already_decided` before writing so it never undoes an
+  accept/reject made while it was probing.
 
 ## services/erp-sql-bridge
 

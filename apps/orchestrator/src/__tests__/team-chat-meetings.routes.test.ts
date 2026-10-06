@@ -29,7 +29,7 @@
  * behavior, service-path attribution against real rows) live in
  * src/__tests__/team-chat-meetings.pg.test.ts.
  */
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import request from "supertest";
 import express, {
   type Request,
@@ -71,6 +71,14 @@ vi.mock("../middleware/space.js", () => ({
 }));
 vi.mock("../services/file-registry.service.js", () => ({
   resolveFileDepartment: vi.fn(),
+}));
+
+// WARP-3485 — capture what the router puts on the event socket's topics.
+const { published } = vi.hoisted(() => ({
+  published: [] as Array<{ topic: string; payload: Record<string, unknown> }>,
+}));
+vi.mock("../services/mqtt.service.js", () => ({
+  publish: (topic: string, payload: Record<string, unknown>) => published.push({ topic, payload }),
 }));
 
 import { createTeamChatRouter } from "../routes/team-chat.js";
@@ -1029,5 +1037,70 @@ describe("acting user — _service:mcp + X-Droplet-User", () => {
       .set("X-Droplet-User", alice.username)
       .send({ kind: "text", body: "voice tries" });
     expect(res.status).toBe(403);
+  });
+});
+
+// ── live events (WARP-3485) ─────────────────────────────────────────
+
+describe("meeting writes publish live team-chat events (IDs only)", () => {
+  // mallory is an admin who is NOT in the conversation.
+  const topics = () => published.map((p) => p.topic).sort();
+  const members = [`droplet/team-chat/${alice.username}`, `droplet/team-chat/${bob.username}`].sort();
+
+  beforeEach(() => {
+    published.length = 0;
+  });
+
+  it("scheduling a meeting publishes the invite card to the members, not to an outsider", async () => {
+    const prisma = baseSeed();
+    const res = await request(buildApp(prisma, asAlice))
+      .post(`/api/team-chat/threads/${THREAD.id}/meetings`)
+      .send({ title: "Budget review", startsAt: futureIso() });
+    expect(res.status).toBe(201);
+    expect(topics()).toEqual(members);
+    for (const p of published) {
+      expect(p.payload).toEqual({
+        kind: "message",
+        conversationId: THREAD.id,
+        messageId: res.body.message.id,
+      });
+    }
+    expect(JSON.stringify(published)).not.toContain("Budget review");
+  });
+
+  it("an RSVP republishes the invite card (its chips changed)", async () => {
+    const meeting = seedMeeting({ inviteMessageId: "msg-invite" });
+    const prisma = baseSeed({ meetings: [meeting] });
+    const res = await request(buildApp(prisma, asBob))
+      .post(`/api/team-chat/meetings/${meeting.id}/rsvp`)
+      .send({ response: "accepted" });
+    expect(res.status).toBe(200);
+    expect(topics()).toEqual(members);
+    for (const p of published) {
+      expect(p.payload).toEqual({ kind: "message", conversationId: THREAD.id, messageId: "msg-invite" });
+    }
+  });
+
+  it("cancelling publishes the cancellation message to the members", async () => {
+    const meeting = seedMeeting();
+    const prisma = baseSeed({ meetings: [meeting] });
+    const res = await request(buildApp(prisma, asAlice)).post(`/api/team-chat/meetings/${meeting.id}/cancel`);
+    expect(res.status).toBe(200);
+    const note = prisma.messages.find((m) => m.kind === "text");
+    expect(topics()).toEqual(members);
+    for (const p of published) {
+      expect(p.payload).toEqual({ kind: "message", conversationId: THREAD.id, messageId: note?.id });
+    }
+  });
+
+  it("an outsider's RSVP or cancel is a 404 and publishes nothing", async () => {
+    const meeting = seedMeeting();
+    const prisma = baseSeed({ meetings: [meeting] });
+    const rsvp = await request(buildApp(prisma, asMallory))
+      .post(`/api/team-chat/meetings/${meeting.id}/rsvp`)
+      .send({ response: "accepted" });
+    const cancel = await request(buildApp(prisma, asMallory)).post(`/api/team-chat/meetings/${meeting.id}/cancel`);
+    expect([rsvp.status, cancel.status]).toEqual([404, 404]);
+    expect(published).toEqual([]);
   });
 });

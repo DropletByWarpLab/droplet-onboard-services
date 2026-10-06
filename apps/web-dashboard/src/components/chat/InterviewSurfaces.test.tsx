@@ -83,12 +83,23 @@ describe("InterviewResumeBanner (§4)", () => {
   it("carries the copy and both actions", () => {
     const onResume = vi.fn();
     const onSkip = vi.fn();
-    render(<InterviewResumeBanner onResume={onResume} onSkipTheRest={onSkip} />);
+    render(<InterviewResumeBanner onResume={onResume} onSkipTheRest={onSkip} onDismiss={vi.fn()} />);
     expect(screen.getByText(INTERVIEW_COPY.resumeBanner)).toBeTruthy();
     fireEvent.click(screen.getByText(INTERVIEW_COPY.resume));
     fireEvent.click(screen.getByText(INTERVIEW_COPY.skipTheRest));
     expect(onResume).toHaveBeenCalledTimes(1);
     expect(onSkip).toHaveBeenCalledTimes(1);
+  });
+
+  it("closes without resuming or wrapping up (WARP-3475)", () => {
+    const onResume = vi.fn();
+    const onSkip = vi.fn();
+    const onDismiss = vi.fn();
+    render(<InterviewResumeBanner onResume={onResume} onSkipTheRest={onSkip} onDismiss={onDismiss} />);
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(onDismiss).toHaveBeenCalledTimes(1);
+    expect(onResume).not.toHaveBeenCalled();
+    expect(onSkip).not.toHaveBeenCalled();
   });
 });
 

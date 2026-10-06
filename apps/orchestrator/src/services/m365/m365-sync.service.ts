@@ -38,21 +38,30 @@
  * resync clears it with the delta link. Without this, a folder over the budget
  * re-read the same pages every tick and never produced a deltaLink.
  *
- * ## What it does with what it reads — nothing, on purpose
+ * ## What it does with what it reads — a decision per workload
  *
- * `handlePage` is injected and the shipped caller counts. This is not an
- * unfinished edge; it is ADR-041 §4 as amended by WARP-2549. That section
- * forbids becoming the first writer of `ErpEntityCache`, whose docstring
- * promises an at-rest encryption that **is not implemented** (WARP-2028) —
- * writing mail there would ship a lie about how the data is protected. The
- * narrow reading WARP-2549 settled permits landing into tables that make no
- * such claim, which is how HubSpot's companies and contacts land today.
+ * `handlePage` is injected, and the landing target is a separate decision per
+ * workload, taken where the schema for it exists. This is ADR-041 §4 as amended
+ * by WARP-2549: the engine must not become the first writer of
+ * `ErpEntityCache`, whose docstring promises an at-rest encryption that **is
+ * not implemented** (WARP-2028) — writing mail there would ship a lie about how
+ * the data is protected.
  *
- * So the engine is complete and the landing target is a separate decision per
- * workload, taken where the schema for it exists. Until then this runs the
- * cursors, proves the transport, and advances `lastSyncedAt` — which is the
- * column the hub renders as "last synced" and which, before WARP-2218, was
- * only ever written by `connect()`.
+ * The shipped caller lands `files` (OneDrive) and `sharepoint` (one cursor per
+ * document library) as METADATA into the
+ * provider-agnostic cloud-file store with its names encrypted
+ * (`drive-landing.service.ts`, WARP-3538), and explicitly enabled `calendar`
+ * events into the person's external calendar source, and explicitly enabled
+ * `mail` bodies into their local email archive. Every other workload is still
+ * counted and discarded: this runs its cursors, proves the transport, and
+ * advances `lastSyncedAt` — the column the hub renders as "last synced" and
+ * which, before WARP-2218, was only ever written by `connect()`.
+ *
+ * What the engine owes a handler that LANDS is the one fact it alone knows: where
+ * in an enumeration a page sits. A run that starts from scratch returns the
+ * current state and says nothing about what was deleted, so the handler sweeps —
+ * and it can only do that if it is told when a full enumeration starts and ends
+ * (`PageContext`).
  *
  * ## Concurrency
  *
@@ -69,6 +78,8 @@ import {
   markNeedsReconnect,
   type EntraClient,
 } from "./m365-auth.service.js";
+import type { M365GrantGeneration, PageHandler } from "./m365-contracts.js";
+export type { PageContext, PageHandler } from "./m365-contracts.js";
 import {
   classifySyncFailure,
   HANDLER_FAILED_CODE,
@@ -89,12 +100,25 @@ import {
   type DueCursor,
 } from "./delta-cursor.service.js";
 import {
+  FOLLOWED_SITES_PATH,
   GRAPH_RESOURCES,
   M365_WORKLOADS,
+  ONEDRIVE_DRIVE_PATH,
+  SHAREPOINT_SITE_SEARCH_PATH,
   SINGLETON_RESOURCE,
   discoveryUrlFor,
   grantCovers,
+  parseOneDrive,
+  parseSharePointLibrary,
+  parseSharePointSite,
+  siteDrivesPath,
+  type SharePointLibrary,
+  type SharePointSite,
 } from "./graph-resources.js";
+import { ensureSource, findSourceId, upsertSource } from "../cloud-files/cloud-file-store.service.js";
+import { pruneSharePointLibraries, purgeSharePointDataForUser } from "./drive-data.service.js";
+import { ensureMicrosoftCalendarCursor, recordMicrosoftCalendarFailure } from "./calendar-landing.service.js";
+import { ensureMicrosoftMailFolder, recordMicrosoftMailFailure, setMicrosoftMailEnabled } from "./mail-settings.service.js";
 
 /**
  * How many pages one cursor may walk in a single tick.
@@ -124,12 +148,6 @@ export interface CursorSyncResult {
   error?: string;
 }
 
-/** What a caller does with a page of changes. Injected — see the module header. */
-export type PageHandler = (
-  cursor: DueCursor,
-  page: GraphPage,
-) => Promise<void> | void;
-
 export interface M365SyncDeps {
   prisma: PrismaClient;
   client: GraphClient;
@@ -152,6 +170,9 @@ export interface M365SyncDeps {
   initialUrlFor: (workload: string, resourceId: string) => string | null;
   handlePage?: PageHandler;
   now?: () => Date;
+  /** Workspace module choices stop the corresponding provider reads. */
+  calendarModuleEnabled?: boolean;
+  mailModuleEnabled?: boolean;
 }
 
 /**
@@ -175,6 +196,26 @@ export async function syncCursor(
     completed: false,
   };
 
+  if (cursor.workload === "mail") {
+    if (deps.mailModuleEnabled === false) return { ...base, error: "Email capability is disabled." };
+    const connection = await deps.prisma.m365Connection.findUnique({ where: { userId: cursor.userId },
+      select: { state: true, mailEnabled: true, emailAccountId: true, grantedScopes: true } });
+    if (connection?.state !== "CONNECTED" || connection.mailEnabled !== true || !connection.emailAccountId) return { ...base, error: "Outlook email import is off." };
+    if (!grantCovers((connection.grantedScopes ?? "").split(/\s+/).filter(Boolean), GRAPH_RESOURCES.mail.leastPrivilegeScope)) return { ...base, error: "Outlook email permission needs reconnecting." };
+  }
+
+  if (cursor.workload === "calendar") {
+    if (deps.calendarModuleEnabled === false) return { ...base, error: "Calendar capability is disabled." };
+    const connection = await deps.prisma.m365Connection.findUnique({ where: { userId: cursor.userId },
+      select: { state: true, calendarEnabled: true, calendarSourceId: true, grantedScopes: true } });
+    if (connection?.state !== "CONNECTED" || connection.calendarEnabled !== true || !connection.calendarSourceId) return { ...base, error: "Outlook calendar import is off." };
+    if (!grantCovers((connection.grantedScopes ?? "").split(/\s+/).filter(Boolean), GRAPH_RESOURCES.calendar.leastPrivilegeScope)) return { ...base, error: "Outlook calendar permission needs reconnecting." };
+  }
+  if (cursor.cursorLinkHash !== undefined) {
+    const connection = await deps.prisma.m365Connection.findUnique({ where: { userId: cursor.userId }, select: { state: true, cursorLinkHash: true } });
+    if (connection?.state !== "CONNECTED" || connection.cursorLinkHash !== cursor.cursorLinkHash) return { ...base, error: "The Microsoft connection changed." };
+  }
+
   // A checkpoint from a run the page budget cut short takes precedence: the
   // pages before it were handled, and starting over would re-read them.
   let url: string | null = cursor.resumeLink ?? cursor.deltaLink;
@@ -196,8 +237,9 @@ export async function syncCursor(
   }
 
   let accessToken: string;
+  let generation: M365GrantGeneration | undefined;
   try {
-    accessToken = await getAccessToken(deps.prisma, deps.entra, cursor.userId, now());
+    accessToken = await getAccessToken(deps.prisma, deps.entra, cursor.userId, now(), (current) => { generation = current; });
   } catch (err) {
     if (err instanceof M365NotConnectedError) {
       // A dead or missing grant. `classifySyncFailure` maps this to AUTH,
@@ -233,13 +275,24 @@ export async function syncCursor(
     };
   }
 
+  if (generation && cursor.cursorLinkHash !== undefined && generation.cursorLinkHash !== cursor.cursorLinkHash) return { ...base, error: "The Microsoft connection changed." };
+  if (cursor.workload === "mail") {
+    const current = await deps.prisma.m365Connection.findUnique({ where: { userId: cursor.userId }, select: { state: true, mailEnabled: true, emailAccountId: true, grantedScopes: true } });
+    if (current?.state !== "CONNECTED" || !current.mailEnabled || !current.emailAccountId || !grantCovers((current.grantedScopes ?? "").split(/\s+/).filter(Boolean), GRAPH_RESOURCES.mail.leastPrivilegeScope)) return { ...base, error: "Outlook email import needs a connected mailbox and permission." };
+  }
   let items = 0;
   let pages = 0;
+
+  // Read off the cursor as CLAIMED (see `PageContext`): a full enumeration is
+  // one that began with no delta link, and its first page is only ever read by a
+  // tick that did not start from a checkpoint.
+  const fullEnumeration = cursor.deltaLink === null;
+  const resuming = cursor.resumeLink !== null;
 
   while (url && pages < MAX_PAGES_PER_TICK) {
     let page: GraphPage;
     try {
-      page = await deps.client.getPage(url, accessToken);
+      page = await deps.client.getPage(url, accessToken, cursor.workload === "mail" ? { mail: true } : {});
     } catch (err) {
       const shaped =
         err instanceof GraphRequestError
@@ -250,7 +303,20 @@ export async function syncCursor(
       // throttled request still spends the tenant's budget.
       const retryAfter = err instanceof GraphRequestError ? err.retryAfterHeader : null;
       await recordFailure(deps.prisma, cursor.id, shaped, retryAfter, now());
-      if (classifySyncFailure(shaped) === "AUTH") {
+      if (cursor.workload === "calendar") await recordMicrosoftCalendarFailure(deps.prisma, cursor.userId, classifySyncFailure(shaped) === "AUTH", generation);
+      if (cursor.workload === "mail") await recordMicrosoftMailFailure(deps.prisma, cursor.userId, classifySyncFailure(shaped) === "AUTH", generation);
+      // 🔴 A 403 on a SHAREPOINT cursor is not a dead grant. Losing access to one
+      // library — a site's permissions changed, the library was locked or
+      // deleted, a policy applies to that one site — answers 403 for that
+      // library's drive while every other call with the same token succeeds.
+      // `markNeedsReconnect` would move the WHOLE connection (mail, calendar,
+      // OneDrive) to NEEDS_RECONNECT and stop its sync because one person lost
+      // one library. The cursor still records its own failure above and backs
+      // off; a COMPLETE discovery prunes the library once Microsoft stops listing
+      // it. A 401 is different: the token itself was refused, which no single
+      // library can cause, so it still reconnects.
+      const lostOneLibrary = cursor.workload === "sharepoint" && shaped.statusCode === 403;
+      if (classifySyncFailure(shaped) === "AUTH" && !lostOneLibrary) {
         // The token refreshed fine and Graph still refused it — resource
         // access revoked, a conditional-access policy, a tenant change. The
         // refresh path never sees this, so nothing else would ever move the
@@ -261,6 +327,7 @@ export async function syncCursor(
           deps.prisma,
           cursor.userId,
           "Microsoft rejected the sync's access to this account.",
+          ...(generation ? [generation] as const : [] as const),
         );
       }
       return {
@@ -279,15 +346,29 @@ export async function syncCursor(
       // but not stored, and advancing would drop it permanently. Treated as a
       // run failure so the whole run repeats from the last good deltaLink.
       try {
-        await deps.handlePage(cursor, page);
+        await deps.handlePage(cursor, page, {
+          fullEnumeration,
+          isFirstPage: pages === 1 && !resuming,
+          isLastPage: page.links.deltaLink !== null,
+          ...(cursor.workload === "mail" ? { accessToken, grantGeneration: generation } : {}),
+        });
       } catch (err) {
+        const shaped = err instanceof GraphRequestError
+          ? { statusCode: err.statusCode, code: err.code, message: err.message }
+          : { statusCode: 0, code: HANDLER_FAILED_CODE, message: "page handling failed" };
         await recordFailure(
           deps.prisma,
           cursor.id,
-          { statusCode: 0, code: HANDLER_FAILED_CODE, message: "page handling failed" },
-          null,
+          shaped,
+          err instanceof GraphRequestError ? err.retryAfterHeader : null,
           now(),
         );
+        if (cursor.workload === "calendar") await recordMicrosoftCalendarFailure(deps.prisma, cursor.userId, false, generation);
+        if (cursor.workload === "mail") {
+          const reconnect = classifySyncFailure(shaped) === "AUTH";
+          await recordMicrosoftMailFailure(deps.prisma, cursor.userId, reconnect, generation);
+          if (reconnect) await markNeedsReconnect(deps.prisma, cursor.userId, "Microsoft rejected access while importing email.", generation);
+        }
         return {
           ...base,
           items,
@@ -343,7 +424,8 @@ export async function runSyncTick(
   limit = 25,
 ): Promise<SyncTickResult> {
   const now = deps.now ?? (() => new Date());
-  const due = await claimDueCursors(deps.prisma, limit, now());
+  const due = (await claimDueCursors(deps.prisma, limit, now(), deps.calendarModuleEnabled === false, deps.mailModuleEnabled === false))
+    .filter((cursor) => (deps.calendarModuleEnabled !== false || cursor.workload !== "calendar") && (deps.mailModuleEnabled !== false || cursor.workload !== "mail"));
 
   const results: CursorSyncResult[] = [];
   for (const cursor of due) {
@@ -391,12 +473,19 @@ async function listFolders(
   deps: M365SyncDeps,
   url: string,
   accessToken: string,
+  mailOwner?: { userId: string; generation?: M365GrantGeneration },
 ): Promise<FoundFolder[]> {
   const found: FoundFolder[] = [];
   let next: string | null = url;
   let pages = 0;
 
   while (next && pages < MAX_PAGES_PER_TICK) {
+    if (mailOwner) {
+      const row = await deps.prisma.m365Connection.findUnique({ where: { userId: mailOwner.userId } });
+      if (row?.state !== "CONNECTED" || !row.mailEnabled || !row.emailAccountId ||
+          !grantCovers((row.grantedScopes ?? "").split(/\s+/).filter(Boolean), GRAPH_RESOURCES.mail.leastPrivilegeScope) ||
+          (mailOwner.generation && (row.tokenCacheEnc !== mailOwner.generation.tokenCacheEnc || row.cursorLinkHash !== mailOwner.generation.cursorLinkHash || row.emailAccountId !== mailOwner.generation.emailAccountId))) throw new Error("Outlook email import changed during folder discovery.");
+    }
     const page: GraphPage = await deps.client.getPage(next, accessToken);
     pages += 1;
     for (const item of page.items) {
@@ -442,45 +531,135 @@ async function listFolders(
  * expected consequence of what was consented to, not a fault. Before this, To
  * Do — whose only delegated permission the connector does not request — was
  * attempted, refused and logged as skipped on every tick for every person.
+ *
+ * SharePoint (WARP-3538) is the first workload that is the PERSON'S choice and
+ * not only a consequence of the grant. One the person has not opted in to is
+ * reported as `disabled` — a third word, because it is neither a refusal
+ * (`notGranted`) nor a break (`skipped`) — and is not even checked against the
+ * grant: a tenant may have approved `Sites.Read.All` for everyone, and a person
+ * who said no must still not be read. Its discovery is a walk over sites, not a
+ * folder tree; see {@link discoverSharePointLibraries}.
  */
 export async function discoverResources(
   deps: M365SyncDeps,
   userId: string,
-): Promise<{ registered: number; skipped: string[]; notGranted: string[] }> {
+): Promise<DiscoveryResult> {
   const now = deps.now ?? (() => new Date());
 
   let accessToken: string;
+  let generation: M365GrantGeneration | undefined;
   try {
-    accessToken = await getAccessToken(deps.prisma, deps.entra, userId, now());
+    accessToken = await getAccessToken(deps.prisma, deps.entra, userId, now(), (value) => { generation = value; });
   } catch {
-    return { registered: 0, skipped: [...M365_WORKLOADS], notGranted: [] };
+    return { registered: 0, skipped: [...M365_WORKLOADS], notGranted: [], disabled: [], sharePoint: null };
   }
 
   // Read AFTER the token: a refresh rewrites `grantedScopes` with what
   // Microsoft granted this time, which may be narrower than last time.
   const connection = (await deps.prisma.m365Connection.findUnique({
     where: { userId },
-    select: { grantedScopes: true },
-  })) as { grantedScopes: string | null } | null;
+    select: { grantedScopes: true, sharePointEnabled: true, calendarEnabled: true, mailEnabled: true, emailAccountId: true },
+  })) as { grantedScopes: string | null; sharePointEnabled?: boolean; calendarEnabled?: boolean; mailEnabled?: boolean; emailAccountId?: string | null } | null;
   const granted = (connection?.grantedScopes ?? "").split(" ").filter(Boolean);
+  // `=== true`, not truthiness: an absent or malformed flag is OFF. Explicit
+  // state, never inferred (WARP-3538).
+  const sharePointEnabled = connection?.sharePointEnabled === true;
 
   let registered = 0;
   const skipped: string[] = [];
   const notGranted: string[] = [];
+  const disabled: string[] = [];
+  let sharePoint: SharePointDiscoveryOutcome | null = null;
 
   for (const workload of M365_WORKLOADS) {
     const spec = GRAPH_RESOURCES[workload];
+
+    if (workload === "mail") {
+      if (deps.mailModuleEnabled === false || connection?.mailEnabled !== true) { disabled.push(workload); continue; }
+      if (!grantCovers(granted, spec.leastPrivilegeScope)) { notGranted.push(workload); continue; }
+      // A successful additive consent may still need its first local mailbox.
+      if (!connection.emailAccountId) {
+        try { if (!await setMicrosoftMailEnabled(deps.prisma, userId, true, deps.entra, deps.client)) { disabled.push(workload); continue; }
+          // Refresh above rotated the cache; folder registration must use that new generation.
+          accessToken = await getAccessToken(deps.prisma, deps.entra, userId, now(), (value) => { generation = value; });
+        } catch { skipped.push(workload); continue; }
+      }
+    }
+
+    if (workload === "calendar") {
+      if (deps.calendarModuleEnabled === false || connection?.calendarEnabled !== true) { disabled.push(workload); continue; }
+      if (!grantCovers(granted, spec.leastPrivilegeScope)) { notGranted.push(workload); continue; }
+      try {
+        if (await ensureMicrosoftCalendarCursor(deps.prisma, userId, now())) registered += 1;
+        else disabled.push(workload);
+      } catch { skipped.push(workload); }
+      continue;
+    }
+
+    // SharePoint: the person's choice first, then the grant, then a walk of its
+    // own. `continue` after every arm, so it can never fall into the folder
+    // walk below and be treated as a singleton with one bogus cursor.
+    if (spec.discovery === "sites") {
+      if (!sharePointEnabled) {
+        disabled.push(workload);
+        // "Off" converges: whatever a discovery that was in flight when the
+        // switch was thrown re-created after its purge is removed here, one
+        // tick later at the worst. Three indexed deletes that find nothing.
+        await purgeSharePointDataForUser(deps.prisma, userId);
+        continue;
+      }
+      if (!grantCovers(granted, spec.leastPrivilegeScope)) {
+        notGranted.push(workload);
+        continue;
+      }
+      try {
+        const walk = await discoverSharePointLibraries(deps, userId, accessToken);
+        if (walk.status === "failed") {
+          skipped.push(workload);
+        } else if (walk.status === "switched_off") {
+          disabled.push(workload);
+          await purgeSharePointDataForUser(deps.prisma, userId);
+        } else {
+          sharePoint = walk.outcome;
+          registered += walk.outcome.registered;
+          // Reported rather than passed over — a partial walk that looks
+          // complete is the silent gap `skipped` exists to close.
+          if (!walk.outcome.complete) skipped.push(`${workload} (partial)`);
+        }
+      } catch {
+        // Per-workload and non-fatal, like every other: a tenant whose SharePoint
+        // is unreachable must still sync its mail and OneDrive.
+        skipped.push(workload);
+      }
+      continue;
+    }
+
     if (!grantCovers(granted, spec.leastPrivilegeScope)) {
       notGranted.push(workload);
       continue;
     }
-    const discovery = discoveryUrlFor(workload);
 
     // A workload with one implicit resource — the drive root, the calendar
     // view. One cursor, no enumeration.
-    if (!discovery) {
+    if (spec.discovery === "singleton") {
       await upsertCursor(deps.prisma, userId, workload, SINGLETON_RESOURCE);
       registered += 1;
+      // OneDrive's files land under a SOURCE that names the drive (the cursor's
+      // own resource is the singleton `-`), so it is registered beside the
+      // cursor. A failure is named, not hidden: until the source exists the
+      // landing handler refuses `files` pages, and "synced" would otherwise
+      // look the same as "nothing to sync".
+      if (workload === "files" && (await ensureOneDriveSource(deps, userId, accessToken)) === "failed") {
+        skipped.push(`${workload} (drive details)`);
+      }
+      continue;
+    }
+
+    const discovery = discoveryUrlFor(workload);
+    if (!discovery) {
+      // A `folders` workload with no collection to list is a hole in the table
+      // (graph-resources.test.ts pins that it cannot happen). Said, not guessed.
+      skipped.push(workload);
       continue;
     }
 
@@ -488,7 +667,8 @@ export async function discoverResources(
       // Breadth-first, depth-bounded. Each level's children are fetched from
       // the child collection, which is the only documented way to see past the
       // root's immediate children.
-      let frontier = await listFolders(deps, discovery, accessToken);
+      const mailOwner = workload === "mail" ? { userId, generation } : undefined;
+      let frontier = await listFolders(deps, discovery, accessToken, mailOwner);
       let depth = 0;
 
       while (frontier.length > 0 && depth < MAX_FOLDER_DEPTH) {
@@ -501,12 +681,14 @@ export async function discoverResources(
         const deeperFolders: FoundFolder[] = [];
 
         for (const folder of frontier) {
-          await upsertCursor(deps.prisma, userId, workload, folder.id);
-          registered += 1;
+          if (workload === "mail") {
+            if (await ensureMicrosoftMailFolder(deps.prisma, userId, folder.id, generation)) registered += 1;
+            else throw new Error("Outlook email import changed during folder discovery.");
+          } else { await upsertCursor(deps.prisma, userId, workload, folder.id); registered += 1; }
 
           if (folder.hasChildren && spec.childCollectionPath) {
             const childUrl = `${GRAPH_API_BASE_URL}${spec.childCollectionPath(folder.id)}`;
-            deeperFolders.push(...(await listFolders(deps, childUrl, accessToken)));
+            deeperFolders.push(...(await listFolders(deps, childUrl, accessToken, mailOwner)));
           }
         }
 
@@ -525,7 +707,327 @@ export async function discoverResources(
     }
   }
 
-  return { registered, skipped, notGranted };
+  return { registered, skipped, notGranted, disabled, sharePoint };
+}
+
+/** What one discovery pass found and did, for the scheduler's log and the tests. */
+export interface DiscoveryResult {
+  /** Cursors the pass registered (singletons, folders and SharePoint libraries). */
+  registered: number;
+  /** Workloads that FAILED, or whose walk was only partial — named, never silent. */
+  skipped: string[];
+  /** Workloads the person's grant does not cover: expected, not a fault. */
+  notGranted: string[];
+  /**
+   * WARP-3538 — workloads the PERSON has switched off. Not `notGranted` (a
+   * refusal) and not `skipped` (a break): a choice, reported as one.
+   */
+  disabled: string[];
+  /** What the SharePoint walk did, or null when it did not run. */
+  sharePoint: SharePointDiscoveryOutcome | null;
+}
+
+// ---------------------------------------------------------------------------
+// The OneDrive source (WARP-3538)
+// ---------------------------------------------------------------------------
+
+/**
+ * Make sure this person's OneDrive is registered as a cloud-file SOURCE.
+ *
+ * Every landed file sits in a source, and the OneDrive cursor cannot name its
+ * own: its resource is the singleton `-`. `GET /me/drive` returns the drive
+ * resource — the id the landing handler files OneDrive's items under, its name
+ * and its browser URL — and `Files.Read`, which the `files` workload already
+ * requires, covers it.
+ *
+ * Read ONCE: when the source already exists the call is not made at all, so a
+ * connected person's ticks pay one indexed lookup for this, not one request to
+ * Microsoft. And it creates and never rewrites (`ensureSource`): a drive's id is
+ * as permanent as the drive, and a refresh that could fail halfway is a way to
+ * replace a good name with a worse one.
+ *
+ * Failure is a RESULT, never a throw — one person's unreachable OneDrive must not
+ * abort discovery for the rest. The caller names it in `skipped`.
+ */
+async function ensureOneDriveSource(
+  deps: M365SyncDeps,
+  userId: string,
+  accessToken: string,
+): Promise<"present" | "registered" | "failed"> {
+  if (await findSourceId(deps.prisma, { userId, provider: "M365", kind: "ONEDRIVE" })) return "present";
+  try {
+    const page = await deps.client.getPage(`${GRAPH_API_BASE_URL}${ONEDRIVE_DRIVE_PATH}`, accessToken);
+    const drive = parseOneDrive(page.raw);
+    if (!drive) return "failed";
+    await ensureSource(deps.prisma, {
+      userId,
+      provider: "M365",
+      sourceId: drive.driveId,
+      kind: "ONEDRIVE",
+      siteId: null,
+      siteName: null,
+      name: drive.name,
+      webUrl: drive.webUrl,
+      followed: false,
+    });
+    return "registered";
+  } catch {
+    return "failed";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// SharePoint library discovery (WARP-3538)
+// ---------------------------------------------------------------------------
+
+/**
+ * How many document libraries one person may have registered.
+ *
+ * Each library is a cursor, and each cursor is a stream of Graph calls against
+ * a SharePoint budget that is per APP per TENANT per minute (1,250 resource
+ * units a minute up to 1,000 licences; delta with a token costs 1, delta without
+ * one costs 2 — SharePoint throttling, 2026-08-10). A person who can open
+ * hundreds of libraries is a tenant-wide read of everything the practice owns,
+ * which is not what "my SharePoint" means and not what a box this size can
+ * afford. A hundred is far past any real working set.
+ *
+ * It is a bound on what is READ, not on what is hidden: the libraries past it
+ * are counted, the count is kept (`M365Connection.sharePointLibrariesCapped`)
+ * and the card says "N more libraries not read" — a silent cap would look
+ * exactly like a library with no files.
+ */
+export const MAX_SHAREPOINT_LIBRARIES_PER_PERSON = 100;
+
+/** What one SharePoint walk registered, dropped and pruned. */
+export interface SharePointDiscoveryOutcome {
+  /** Libraries registered (a cursor and a source row each) — at most the cap. */
+  registered: number;
+  /** Libraries found beyond the cap and NOT registered. */
+  dropped: number;
+  /**
+   * True only when every listing the walk needed ran to its end: no page bound
+   * hit, no listing failed, and the answer is believable. Pruning happens only
+   * then.
+   */
+  complete: boolean;
+  /** Why it was not complete, or null when it was. */
+  incompleteBecause: "listing_failed" | "page_bound" | "empty_answer" | null;
+  /** Libraries removed — cursor, source row and landed items — because a complete walk no longer saw them. */
+  pruned: number;
+}
+
+type SharePointWalk =
+  | { status: "done"; outcome: SharePointDiscoveryOutcome }
+  /** Neither site source answered — nothing is known, nothing is changed. */
+  | { status: "failed" }
+  /** The person switched SharePoint off while the walk was in flight. */
+  | { status: "switched_off" };
+
+/** One shared allowance of page reads, spent by every listing in a walk. */
+interface PageBudget {
+  remaining: number;
+}
+
+interface Listing {
+  items: Record<string, unknown>[];
+  /** The listing was read to its end — or as far as it got before failing: see `ok`. */
+  ok: boolean;
+  /** The budget ran out with pages still to read. */
+  exhausted: boolean;
+}
+
+/**
+ * Read one collection, following `@odata.nextLink`, out of a shared page budget.
+ *
+ * Never throws: a failed listing is a RESULT (`ok: false`) because the walk's
+ * whole policy is built on telling a failed listing from a finished one — the
+ * items read before a failure are kept (registering is additive and idempotent),
+ * but a failure forbids pruning.
+ */
+async function listCollection(
+  deps: M365SyncDeps,
+  url: string,
+  accessToken: string,
+  budget: PageBudget,
+): Promise<Listing> {
+  const items: Record<string, unknown>[] = [];
+  let next: string | null = url;
+  try {
+    while (next) {
+      if (budget.remaining <= 0) return { items, ok: true, exhausted: true };
+      budget.remaining -= 1;
+      const page: GraphPage = await deps.client.getPage(next, accessToken);
+      items.push(...page.items);
+      next = page.links.nextLink;
+    }
+  } catch {
+    return { items, ok: false, exhausted: false };
+  }
+  return { items, ok: true, exhausted: false };
+}
+
+/**
+ * Register a cursor for every SharePoint document library the person can open —
+ * up to the cap — and prune the ones that are gone.
+ *
+ *  1. SITES are the union, by id, of site search (`/sites?search=*`) and the
+ *     sites the person follows (`/me/followedSites`), each paged. Personal sites
+ *     — somebody's OneDrive — are excluded by `parseSharePointSite`. Two sources
+ *     because Microsoft warns the followed list "might" be incomplete and the
+ *     search spelling is undocumented (see `SHAREPOINT_SITE_SEARCH_PATH`): each
+ *     covers for the other.
+ *  2. LIBRARIES are each site's `/sites/{id}/drives`, document libraries only,
+ *     in a DETERMINISTIC order — followed sites first, then by web URL — because
+ *     the cap keeps the first hundred and the order decides which survive it.
+ *  3. REGISTER: a cursor (`upsertCursor` touches nothing on an existing one, so
+ *     re-discovery never resets a delta link) and then an encrypted source row
+ *     (`CloudFileSource`, kind SHAREPOINT_LIBRARY). Cursor first: a crash between
+ *     the two leaves a cursor that syncs and lacks only a display name, never a
+ *     row that claims a library nothing reads.
+ *  4. PRUNE — and this is the dangerous half — ONLY after a COMPLETE walk.
+ *     Pruning on a partial listing would delete a library, its cursor and the
+ *     person's landed file list because Microsoft hiccuped, a page bound was
+ *     hit, or one site's listing failed: "I did not see it" must never be read
+ *     as "it is gone". A walk that finds NOTHING while libraries are registered
+ *     is not trusted either — the search spelling is undocumented, and an empty
+ *     answer to a question that had answers yesterday would otherwise erase the
+ *     whole list in one tick.
+ *
+ * ONE page budget (`MAX_PAGES_PER_TICK`) is shared by every listing, so a tenant
+ * with thousands of sites cannot turn a tick into thousands of requests per
+ * person; hitting it marks the walk incomplete and says so.
+ *
+ * Throws nothing for an expected failure: the caller turns `failed` into
+ * `skipped: ["sharepoint"]`.
+ */
+async function discoverSharePointLibraries(
+  deps: M365SyncDeps,
+  userId: string,
+  accessToken: string,
+): Promise<SharePointWalk> {
+  const budget: PageBudget = { remaining: MAX_PAGES_PER_TICK };
+  // A holder, not a captured `let`: TypeScript does not see assignments made
+  // inside a closure and would narrow the reason to `null` for the rest of the
+  // function. The FIRST reason wins — a failure is the more serious thing to say.
+  const why: { reason: SharePointDiscoveryOutcome["incompleteBecause"] } = { reason: null };
+  const note = (reason: NonNullable<SharePointDiscoveryOutcome["incompleteBecause"]>) => {
+    why.reason ??= reason;
+  };
+
+  const search = await listCollection(deps, `${GRAPH_API_BASE_URL}${SHAREPOINT_SITE_SEARCH_PATH}`, accessToken, budget);
+  const followed = await listCollection(deps, `${GRAPH_API_BASE_URL}${FOLLOWED_SITES_PATH}`, accessToken, budget);
+  if (!search.ok && !followed.ok) return { status: "failed" };
+  if (!search.ok || !followed.ok) note("listing_failed");
+  if (search.exhausted || followed.exhausted) note("page_bound");
+
+  // 1. Sites: the union by id, remembering which ones the person follows.
+  const sites = new Map<string, { site: SharePointSite; followed: boolean }>();
+  for (const item of search.items) {
+    const site = parseSharePointSite(item);
+    if (site && !sites.has(site.id)) sites.set(site.id, { site, followed: false });
+  }
+  for (const item of followed.items) {
+    const site = parseSharePointSite(item);
+    if (site) sites.set(site.id, { site: sites.get(site.id)?.site ?? site, followed: true });
+  }
+  const ordered = [...sites.values()].sort(
+    (a, b) =>
+      Number(b.followed) - Number(a.followed) ||
+      compareText(a.site.webUrl, b.site.webUrl) ||
+      compareText(a.site.id, b.site.id),
+  );
+
+  // 2. Libraries, site by site, in that order.
+  const libraries: Array<SharePointLibrary & { site: SharePointSite; followed: boolean }> = [];
+  const seen = new Set<string>();
+  for (const entry of ordered) {
+    if (budget.remaining <= 0) {
+      note("page_bound");
+      break;
+    }
+    const drives = await listCollection(
+      deps,
+      `${GRAPH_API_BASE_URL}${siteDrivesPath(entry.site.id)}`,
+      accessToken,
+      budget,
+    );
+    if (!drives.ok) note("listing_failed");
+    if (drives.exhausted) note("page_bound");
+    const found = drives.items
+      .map((item) => parseSharePointLibrary(item, entry.site))
+      .filter((lib): lib is SharePointLibrary => lib !== null)
+      .sort((a, b) => compareText(a.name.toLowerCase(), b.name.toLowerCase()) || compareText(a.driveId, b.driveId));
+    for (const lib of found) {
+      if (seen.has(lib.driveId)) continue;
+      seen.add(lib.driveId);
+      libraries.push({ ...lib, site: entry.site, followed: entry.followed });
+    }
+  }
+
+  // The person may have switched SharePoint off while the walk was in flight —
+  // it takes seconds, the click takes a moment. Re-read the flag right before
+  // writing, so the race shrinks from "the whole walk" to a few milliseconds
+  // (and the next tick, finding the switch off, cleans up what is left).
+  const still = (await deps.prisma.m365Connection.findUnique({
+    where: { userId },
+    select: { sharePointEnabled: true },
+  })) as { sharePointEnabled?: boolean } | null;
+  if (still?.sharePointEnabled !== true) return { status: "switched_off" };
+
+  // 3. Register the first hundred; count the rest.
+  const kept = libraries.slice(0, MAX_SHAREPOINT_LIBRARIES_PER_PERSON);
+  const dropped = libraries.length - kept.length;
+  for (const lib of kept) {
+    await upsertCursor(deps.prisma, userId, "sharepoint", lib.driveId);
+    await upsertSource(deps.prisma, {
+      userId,
+      provider: "M365",
+      sourceId: lib.driveId,
+      kind: "SHAREPOINT_LIBRARY",
+      siteId: lib.site.id,
+      siteName: lib.site.displayName,
+      name: lib.name,
+      webUrl: lib.webUrl,
+      followed: lib.followed,
+    });
+  }
+
+  // 4. Prune — only on an answer worth acting on.
+  if (why.reason === null && kept.length === 0) {
+    // "Registered" means CURSORS — what is actually being read — not source rows,
+    // which a crash between the two writes above can leave one short.
+    const registeredBefore = await deps.prisma.m365DeltaCursor.count({
+      where: { userId, workload: "sharepoint" },
+    });
+    if (registeredBefore > 0) note("empty_answer");
+  }
+  const complete = why.reason === null;
+  let pruned = 0;
+  if (complete) {
+    pruned = (await pruneSharePointLibraries(deps.prisma, userId, kept.map((lib) => lib.driveId))).libraries;
+  }
+
+  // Remember the cap's count where the card can read it — written only by a walk
+  // that read enough to know: a complete one, or one that already saw libraries
+  // past the cap. A walk that failed or stopped short and saw nothing past it
+  // does not know, and must not overwrite what an earlier one did. Skipped when
+  // unchanged (the row carries @updatedAt).
+  if (complete || dropped > 0) {
+    await deps.prisma.m365Connection.updateMany({
+      where: { userId, sharePointLibrariesCapped: { not: dropped } },
+      data: { sharePointLibrariesCapped: dropped },
+    });
+  }
+
+  return {
+    status: "done",
+    outcome: { registered: kept.length, dropped, complete, incompleteBecause: why.reason, pruned },
+  };
+}
+
+/** Plain code-unit order: the same on every machine, unlike `localeCompare`. */
+function compareText(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 /**
@@ -536,7 +1038,19 @@ export async function discoverResources(
  * empty or unreadable `grantedScopes`, or a consent that named no workload),
  * the box syncs nothing for that person, and without a line saying so that
  * looks exactly like a mailbox with no mail. The scheduler logs it.
+ *
+ * A workload the person switched OFF (`disabled`, WARP-3538) is not judged: it
+ * is not in `notGranted`, so counting it would make "every other workload is
+ * not granted" read as "some workload is covered", and a person whose grant
+ * covers nothing — who simply never opted in to SharePoint — would never be
+ * warned that nothing syncs for them. `disabled` is optional so a caller that
+ * predates it keeps its meaning.
  */
-export function grantCoversNoWorkload(found: { registered: number; notGranted: string[] }): boolean {
-  return found.registered === 0 && found.notGranted.length === M365_WORKLOADS.length;
+export function grantCoversNoWorkload(found: {
+  registered: number;
+  notGranted: readonly string[];
+  disabled?: readonly string[];
+}): boolean {
+  const judged = M365_WORKLOADS.length - (found.disabled?.length ?? 0);
+  return found.registered === 0 && found.notGranted.length === judged;
 }

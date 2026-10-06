@@ -34,6 +34,7 @@
  * a connector has minted FROM the previous credential and is holding in
  * process memory — see `forgetXeroToken` in the PATCH handler.
  */
+import { randomUUID } from "node:crypto";
 import { Router, type Request, type Response, type NextFunction } from "express";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
@@ -159,36 +160,39 @@ export function createSaasCredentialsRouter(prisma: IntegrationPrisma): Router {
 
         const existing = await findRow(descriptor.id);
 
-        // The row must exist before a credential can be AAD-bound to its id.
-        // Created here, credential-less, rather than lazily inside the resolve
-        // step: the AAD is the row id, so "which row is this sealed for?" has
-        // to be answered before anything is sealed.
-        const row =
-          existing ??
-          ((await prisma.integrationConnection.create({
-            data: {
-              provider: descriptor.id,
-              status: "NOT_CONFIGURED",
-              // The LAN columns are non-null in the schema and meaningless for
-              // a cloud track. Empty strings say "not applicable" explicitly;
-              // `secretRef` keeps the historical pending-pointer convention
-              // rather than becoming this story's first writer of the
-              // unimplemented secret store (ADR-041 §4 / WARP-2028).
-              host: "",
-              databaseName: "",
-              secretRef: `${descriptor.id}:pending`,
-            },
-          })) as SaasConnectionRow);
+        // WARP-3434 — validate FIRST, create the row last. The AAD is the row
+        // id, so a first save has to know the id before it can seal; it used to
+        // get one by creating the row, and a refused body (a malformed field, a
+        // missing credential type) then left a `NOT_CONFIGURED` row behind that
+        // the view reported as `configured: true` for a connector nobody
+        // configured. The id is minted here instead, and the row is inserted
+        // below in ONE statement that already carries what was sealed for it:
+        // there is no state in which the row exists and the save did not.
+        const rowId = existing?.id ?? randomUUID();
 
         const resolved = resolveCredentialUpdate(
           descriptor,
           existing,
           parsed.data.fields,
-          row.id,
+          rowId,
         );
 
+        // A first save with nothing to store (an empty body, or a clear of a
+        // secret that was never there) is not a reason to create a connection.
+        if (
+          !existing &&
+          resolved.providerTokensEnc == null &&
+          resolved.providerConfig === undefined
+        ) {
+          return res.json(buildCredentialView(descriptor, null));
+        }
+
         const data: Record<string, unknown> = {
-          status: statusAfterCredentialUpdate(descriptor, row.status, resolved.hasSecret),
+          status: statusAfterCredentialUpdate(
+            descriptor,
+            existing?.status ?? "NOT_CONFIGURED",
+            resolved.hasSecret,
+          ),
         };
         // `undefined` means "omitted" — the key is absent from the update, so
         // the stored ciphertext is left byte-identical. Writing `undefined`
@@ -201,10 +205,29 @@ export function createSaasCredentialsRouter(prisma: IntegrationPrisma): Router {
           data.providerConfig = resolved.providerConfig;
         }
 
-        const saved = (await prisma.integrationConnection.update({
-          where: { id: row.id },
-          data: data as never,
-        })) as SaasConnectionRow;
+        const saved = (
+          existing
+            ? await prisma.integrationConnection.update({
+                where: { id: existing.id },
+                data: data as never,
+              })
+            : await prisma.integrationConnection.create({
+                data: {
+                  ...data,
+                  id: rowId,
+                  provider: descriptor.id,
+                  // The LAN columns are non-null in the schema and meaningless
+                  // for a cloud track. Empty strings say "not applicable"
+                  // explicitly; `secretRef` keeps the historical
+                  // pending-pointer convention rather than becoming this
+                  // story's first writer of the unimplemented secret store
+                  // (ADR-041 §4 / WARP-2028).
+                  host: "",
+                  databaseName: "",
+                  secretRef: `${descriptor.id}:pending`,
+                } as never,
+              })
+        ) as SaasConnectionRow;
 
         // WARP-2383 — the copy of the OLD credential Postgres cannot reach. The
         // Xero track caches the access token it minted from the client secret
@@ -225,7 +248,7 @@ export function createSaasCredentialsRouter(prisma: IntegrationPrisma): Router {
         // update rather than before, so a failed write leaves the token and the
         // column agreeing with each other. It is a `Map.delete` — it cannot
         // hang, 429, or fail.
-        forgetXeroToken(row.id);
+        forgetXeroToken(rowId);
 
         // AFTER the write commits. Recording first would log a change that a
         // failed update never made — the audit log would be describing a box

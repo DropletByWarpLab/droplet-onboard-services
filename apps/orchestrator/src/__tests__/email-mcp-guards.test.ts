@@ -310,7 +310,6 @@ describe("email guards admit the MCP principal on the five tool routes (WARP-145
   });
 
   it.each([
-    ["get", "/api/email/accounts"],
     ["patch", "/api/email/drafts/d1"],
   ] as const)(
     "%s %s — mcp stays denied (403) on the non-tool human surface",
@@ -323,6 +322,51 @@ describe("email guards admit the MCP principal on the five tool routes (WARP-145
       expect(res.status).toBe(403);
     },
   );
+});
+
+describe("Outlook archive discovery and search", () => {
+  it("discovers mailboxes as the forwarded family identity, with read-only capability", async () => {
+    const prisma = createPrismaShim();
+    prisma.emailAccount.findMany.mockResolvedValue([{ ...ACCOUNT, authMode: "M365_GRAPH" } as never]);
+    const res = await request(buildApp(mcpPrincipal, prisma)).get("/api/email/accounts").set("X-Droplet-User", "u-romain");
+    expect(res.status).toBe(200);
+    expect(prisma.emailAccount.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { userId: "u-romain" } }));
+    expect(res.body.accounts[0]).toMatchObject({ id: "a1", authMode: "M365_GRAPH", canSend: false });
+  });
+  it.each([undefined, "nobody", "_service:mcp"])("refuses unresolvable mailbox discovery identity %s", async (identity) => {
+    const prisma = createPrismaShim();
+    const call = request(buildApp(mcpPrincipal, prisma)).get("/api/email/accounts");
+    if (identity) call.set("X-Droplet-User", identity);
+    expect([401, 404]).toContain((await call).status);
+    expect(prisma.emailAccount.findMany).not.toHaveBeenCalled();
+  });
+  it("searches message bodies inside the authorized mailbox", async () => {
+    const prisma = createPrismaShim();
+    const res = await request(buildApp(mcpPrincipal, prisma)).get("/api/email/a1/threads?query=invoice").set("X-Droplet-User", "romain");
+    expect(res.status).toBe(200);
+    expect(prisma.emailThread.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({
+      accountId: "a1", OR: expect.arrayContaining([{ messages: { some: { accountId: "a1", OR: expect.arrayContaining([
+        { bodyText: { contains: "invoice", mode: "insensitive" } },
+      ]) } } }]),
+    }) }));
+  });
+  it("refuses oversized and structured email search before querying", async () => {
+    const prisma = createPrismaShim();
+    for (const query of [`query=${"x".repeat(201)}`, "query[private]=invoice"]) {
+      expect((await request(buildApp(mcpPrincipal, prisma)).get(`/api/email/a1/threads?${query}`).set("X-Droplet-User", "romain")).status).toBe(400);
+    }
+    expect(prisma.emailThread.findMany).not.toHaveBeenCalled();
+  });
+  it("keeps local Outlook drafts editable but refuses sending before the outbound gate", async () => {
+    const prisma = createPrismaShim();
+    prisma.emailAccount.findUnique.mockResolvedValue({ id: "a1", userId: "u-romain", authMode: "M365_GRAPH" } as never);
+    const res = await request(buildApp(mcpPrincipal, prisma)).post("/api/email/drafts/d1/send").set("X-Droplet-User", "boss");
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe("read_only_mailbox");
+    expect(prisma.emailDraft.updateMany).not.toHaveBeenCalled();
+    expect(ALLOW_GATE.outboundEmailEnabled).not.toHaveBeenCalled();
+  });
+
 });
 
 describe("human sessions: spoofed headers ignored, RBAC unchanged (WARP-1453)", () => {

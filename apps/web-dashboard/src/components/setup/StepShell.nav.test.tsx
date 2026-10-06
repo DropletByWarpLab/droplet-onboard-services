@@ -64,9 +64,9 @@ describe("setup wizard navigation (clickable rail + Back)", () => {
     expect(
       screen.queryByRole("button", { name: "Go to Wi-Fi" }),
     ).toBeNull();
-    // Internet address (idx 6) is past the furthest-reached index → locked.
+    // Internal DNS (idx 6) is past the furthest-reached index → locked.
     expect(
-      screen.queryByRole("button", { name: "Go to Internet address" }),
+      screen.queryByRole("button", { name: "Go to Internal DNS" }),
     ).toBeNull();
     // But an earlier step is reachable.
     expect(

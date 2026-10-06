@@ -65,7 +65,7 @@ const security = dept({
   id: "sec",
   name: "Security",
   slug: "security",
-  profile: { template: "security", icon: "shield-check" },
+  profile: { template: "it", icon: "shield-check" },
 });
 const sales = dept({ id: "sal", name: "Sales", slug: "sales", profile: null });
 const legacy = dept({ id: "leg", name: "Legacy", slug: "legacy" }); // no `profile` key

@@ -1,84 +1,75 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import express from "express";
 import request from "supertest";
+
+const { servedMetadataMock } = vi.hoisted(() => ({ servedMetadataMock: vi.fn() }));
+vi.mock("../lib/served-cert-pin.js", () => ({ servedCertMetadata: servedMetadataMock }));
+vi.mock("../config.js", () => ({ config: { DROPLET_LAN_HOSTNAME: "droplet-ai.lan" } }));
 import { createTlsStatusPublicRouter } from "./tls-status.public.route.js";
 
-function appWith(row: unknown, findFirst?: () => Promise<unknown>) {
-  const prisma = {
-    tlsCert: { findFirst: findFirst ?? (async () => row) },
-  } as never;
-  const app = express();
-  app.use("/api", createTlsStatusPublicRouter(prisma));
-  return app;
+const historicalRead = vi.fn(async () => ({
+  state: "LE_RENEW_FAILED", fqdn: "old.droplet-us.com", notAfter: new Date(0),
+}));
+function app() {
+  const prisma = { tlsCert: { findFirst: historicalRead } } as never;
+  const instance = express();
+  instance.use("/api", createTlsStatusPublicRouter(prisma));
+  return instance;
 }
 
+beforeEach(() => {
+  servedMetadataMock.mockReset().mockReturnValue(null);
+  historicalRead.mockClear();
+});
+
 describe("GET /api/tls/status (public)", () => {
-  it("reports LE_ISSUED WITHOUT a navigation target (WARP-1302)", async () => {
-    // The orchestrator has no DROPLET_LAN_DNS_AUTHORITY knowledge (compose
-    // wires it to the gateway only). On authority=0 shapes the FQDN is
-    // publicly-NXDOMAIN, so a redirectTo here would send LAN clients to a
-    // DNS dead-end. Navigation is nginx's job: the authority-gated 307
-    // (opaqueredirect to the status page's poll) is the ONLY advance signal.
-    const res = await request(
-      appWith({ fqdn: "mybox.droplet-us.com", state: "LE_ISSUED", notAfter: new Date() }),
-    ).get("/api/tls/status");
-    expect(res.status).toBe(200);
-    expect(res.body.state).toBe("LE_ISSUED");
-    expect(res.body.fqdn).toBe("mybox.droplet-us.com");
-    expect(res.body).not.toHaveProperty("redirectTo");
-  });
-
-  it("carries whole days until expiry for the screen (WARP-2944) — null on the bootstrap cert", async () => {
-    const soon = await request(
-      appWith({ fqdn: "mybox.droplet-us.com", state: "LE_RENEW_FAILED", notAfter: new Date(Date.now() + 5.5 * 86_400_000) }),
-    ).get("/api/tls/status");
-    expect(soon.body.daysLeft).toBe(5);
-    const bootstrap = await request(
-      appWith({ fqdn: "mybox.droplet-us.com", state: "BOOTSTRAP_SELF_SIGNED", notAfter: null }),
-    ).get("/api/tls/status");
-    expect(bootstrap.body.daysLeft).toBeNull();
-    // Still no secrets and no navigation target.
-    expect(Object.keys(soon.body).sort()).toEqual(["daysLeft", "fqdn", "hqConfigured", "state"]);
-  });
-
-  it("reports bootstrap state, also without a navigation target", async () => {
-    const res = await request(
-      appWith({ fqdn: "d-abc.devices.warp-lab.ai", state: "BOOTSTRAP_SELF_SIGNED", notAfter: null }),
-    ).get("/api/tls/status");
-    expect(res.status).toBe(200);
-    expect(res.body.state).toBe("BOOTSTRAP_SELF_SIGNED");
-    expect(res.body).not.toHaveProperty("redirectTo");
-  });
-
-  it("handles a box with no TlsCert row yet", async () => {
-    const res = await request(appWith(null)).get("/api/tls/status");
-    expect(res.status).toBe(200);
-    expect(res.body.state).toBe("BOOTSTRAP_SELF_SIGNED");
-    expect(res.body).not.toHaveProperty("redirectTo");
-    expect(typeof res.body.hqConfigured).toBe("boolean");
-  });
-
-  it("keeps the air-gap branch fields (state + hqConfigured) in the payload", async () => {
-    const res = await request(
-      appWith({ fqdn: null, state: "LE_RENEW_FAILED", notAfter: null }),
-    ).get("/api/tls/status");
-    expect(res.status).toBe(200);
-    expect(res.body.state).toBe("LE_RENEW_FAILED");
-    expect(typeof res.body.hqConfigured).toBe("boolean");
-  });
-
-  it("degrades to 503 without leaking when the DB read throws", async () => {
-    const res = await request(
-      appWith(null, async () => {
-        throw new Error("db down");
-      }),
-    ).get("/api/tls/status");
-    expect(res.status).toBe(503);
-    expect(res.body).toEqual({
-      state: "UNKNOWN",
-      fqdn: null,
-      hqConfigured: false,
-      daysLeft: null,
+  it("uses the installed leaf instead of expired fleet metadata, without a pin or redirect", async () => {
+    servedMetadataMock.mockReturnValue({
+      state: "LOCAL_CERTIFICATE", fqdn: "droplet-ai.lan",
+      notAfter: new Date(Date.now() + 5.5 * 86_400_000), coversInternalHostname: true,
     });
+    const res = await request(app()).get("/api/tls/status");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      state: "LOCAL_CERTIFICATE", fqdn: "droplet-ai.lan", daysLeft: 5,
+      internalHostname: "droplet-ai.lan", hqConfigured: false, coversInternalHostname: true,
+    });
+    expect(servedMetadataMock).toHaveBeenCalledWith("droplet-ai.lan");
+    expect(historicalRead).not.toHaveBeenCalled();
+    expect(res.body).not.toHaveProperty("fingerprint");
+    expect(res.body).not.toHaveProperty("redirectTo");
+  });
+
+  it("keeps internal DNS available and reports unknown expiry when the leaf is unreadable", async () => {
+    const res = await request(app()).get("/api/tls/status");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      state: "UNKNOWN", fqdn: null, daysLeft: null, internalHostname: "droplet-ai.lan",
+      hqConfigured: false, coversInternalHostname: null,
+    });
+    expect(historicalRead).not.toHaveBeenCalled();
+  });
+
+  it("reports internal hostname mismatch without exposing the certificate or key", async () => {
+    servedMetadataMock.mockReturnValue({
+      state: "LOCAL_CERTIFICATE", fqdn: "droplet-ai.lan", notAfter: new Date(0),
+      coversInternalHostname: false,
+    });
+    const res = await request(app()).get("/api/tls/status");
+    expect(res.body.coversInternalHostname).toBe(false);
+    expect(res.body.daysLeft).toBeLessThan(0);
+    expect(Object.keys(res.body).sort()).toEqual([
+      "coversInternalHostname", "daysLeft", "fqdn", "hqConfigured", "internalHostname", "state",
+    ]);
+  });
+
+  it("degrades to 503 without leaking an unexpected metadata error", async () => {
+    servedMetadataMock.mockImplementation(() => { throw new Error("secret path"); });
+    const res = await request(app()).get("/api/tls/status");
+    expect(res.status).toBe(503);
+    expect(res.body.state).toBe("UNKNOWN");
+    expect(res.body.internalHostname).toBe("droplet-ai.lan");
+    expect(res.body.fingerprint).toBeUndefined();
+    expect(JSON.stringify(res.body)).not.toContain("secret path");
   });
 });

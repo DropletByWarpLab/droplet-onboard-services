@@ -16,6 +16,7 @@
 #   --skip-drivers     Skip camera-driver / kernel-module setup
 #   --skip-start       Skip starting the Docker Compose stack
 #   --systemd          Install systemd service for auto-start on boot
+#   --edge-router HOST[:PORT]  Use an external OpenWrt edge router (WARP-3835)
 #   --regenerate-env   Force-regenerate .env (backs up existing)
 #   --sync-secrets     Only rewrite Docker secret files from .env, then exit
 #   --verbose          Show full command output
@@ -38,6 +39,7 @@ SKIP_DRIVERS=false
 SKIP_START=false
 INSTALL_SYSTEMD=false
 REGENERATE_ENV=false
+# EDGE_ROUTER stays UNSET unless --edge-router is passed (so an empty value is refused, not ignored)
 SYNC_SECRETS_ONLY=false
 # WARP-2574 (delivery half): focused re-run of the host-artefact installer only
 # (no docker, no build, no stack restart). What droplet-host-integration.service
@@ -84,6 +86,11 @@ Options:
                      add strength. See docs/fips.md.
   --no-fips          Deactivate FIPS mode (DROPLET_FIPS_MODE=0). Restores the
                      default modern-crypto posture (TLS 1.3, OpenSSL defaults).
+  --edge-router HOST[:PORT]
+                     Put this box behind an EXTERNAL OpenWrt edge router: writes
+                     OPENWRT_HOST/PORT (default 80)/USERNAME=droplet-ai to .env.
+                     The router password goes in docker/secrets/openwrt_password
+                     (setup keeps it). Setup FAILS if routing cannot authenticate.
   --regenerate-env   Force-regenerate .env (backs up existing)
   --sync-secrets     Only rewrite Docker secret files from .env, then exit
   --reapply-host-integration
@@ -116,6 +123,8 @@ while [ $# -gt 0 ]; do
     --fips)             FIPS_MODE=true; shift ;;
     --no-fips)          FIPS_MODE=false; shift ;;
     --regenerate-env)   REGENERATE_ENV=true; shift ;;
+    --edge-router)      [ $# -ge 2 ] || { echo "--edge-router needs HOST[:PORT]"; exit 2; }; EDGE_ROUTER="$2"; shift 2 ;;
+    --edge-router=*)    EDGE_ROUTER="${1#*=}"; shift ;;
     --sync-secrets)     SYNC_SECRETS_ONLY=true; shift ;;
     --reapply-host-integration) REAPPLY_HOST_INTEGRATION=true; shift ;;
     --verbose)          VERBOSE=true; shift ;;
@@ -236,10 +245,15 @@ if [ "$SYNC_SECRETS_ONLY" = "true" ]; then
   # the container root pw + routing restart move in lockstep.
   # Print this WARNING first so an operator who just rotated OPENWRT_PASSWORD
   # sees the safe path before the generic restart command.
-  log_warn "  If you rotated OPENWRT_PASSWORD on a single-box, run this INSTEAD"
-  log_warn "  of a bare 'restart routing' (sets the container root pw + restarts"
-  log_warn "  routing in lockstep):"
+  log_warn "  If you rotated OPENWRT_PASSWORD on a single-box (OPENWRT_HOST loopback,"
+  log_warn "  bundled container), run this INSTEAD of a bare 'restart routing' (sets"
+  log_warn "  the container root pw + restarts routing in lockstep):"
   log_warn "    sudo systemctl restart droplet-openwrt-attach.service"
+  # WARP-3738: an external router is never touched by the attach unit, and
+  # sync keeps its password file as written.
+  log_info "  External edge router (OPENWRT_HOST set): write the router's"
+  log_info "  /etc/droplet/droplet-ai-password into docker/secrets/openwrt_password, then:"
+  log_info "    docker compose -f docker/docker-compose.yml up -d --no-deps --force-recreate routing"
   log_info "  For all other secret rotations:"
   log_info "    docker compose -f docker/docker-compose.yml restart"
   exit 0
@@ -288,6 +302,24 @@ _on_error() {
   # Lock release is handled by the EXIT trap (set right after _acquire_lock),
   # so it runs on EVERY exit path — not just this one. exit here fires it.
   exit 1
+}
+
+# --- Verify gate (WARP-3835, decision D1) ---
+# A failed verify.sh FAILS setup. It used to be log_warn, so a box that could
+# not authenticate to its router still printed "Setup Complete". Exits BEFORE
+# close_install_mode_ssh_window so a failed provision keeps the rescue window.
+# Skipped (never fatal) when the stack was not started (--skip-start).
+run_verify_gate() {
+  if [ "$SKIP_START" != "true" ] && [ -x "$SCRIPT_DIR/verify.sh" ]; then
+    if ! "$SCRIPT_DIR/verify.sh"; then
+      log_error "Verification failed — see the FAIL lines above"
+      log_divider
+      printf "\n  ${_BOLD}${_RED}Droplet Edge Platform — Setup finished with FAILED checks${_RESET}\n\n"
+      exit 1
+    fi
+  else
+    log_info "Skipping verification (stack not started or verify.sh not found)"
+  fi
 }
 
 # --- Dry run mode ---
@@ -391,7 +423,10 @@ if [ "$DRY_RUN" = "true" ]; then
   fi
 
   log_step 7 $TOTAL_STEPS "Verify"
-  log_info "  Would run ./scripts/verify.sh"
+  log_info "  Would run ./scripts/verify.sh (a failed check fails setup: exit 1)"
+  if [ -n "${EDGE_ROUTER+x}" ]; then
+    log_info "  Would point .env at external router '$EDGE_ROUTER' (OPENWRT_HOST/PORT/USERNAME=droplet-ai)"
+  fi
   log_info "  Would configure local DNS: mDNS (droplet-ai.local via host avahi)"
   log_info "                              + droplet-ai.lan via OpenWrt dnsmasq (if reachable)"
 
@@ -484,6 +519,12 @@ main() {
   # ROUTING_SERVICE_TOKEN) and (re)materialize Docker bind-mount sources.
   # No-ops on a fresh install; recovers stale installs without --regenerate-env.
   migrate_env
+  # WARP-3835: --edge-router must land in .env BEFORE materialize_artifacts
+  # (sync_openwrt_password_secret keys off OPENWRT_HOST, WARP-3738) and before
+  # configure_single_box_env (keep-the-host block, WARP-1980).
+  if [ -n "${EDGE_ROUTER+x}" ]; then
+    configure_edge_router "$EDGE_ROUTER" || exit 1
+  fi
   materialize_artifacts
   # WARP-232: once /data is a real encrypted mount, relocate the crypto-
   # sensitive secrets (.env carries DEVICE_SECRET_KEY → restic password;
@@ -499,6 +540,13 @@ main() {
   # See scripts/lib/single-box.sh.
   if [ "$SINGLE_BOX_MODE" = "true" ]; then
     configure_single_box_env
+  else
+    # WARP-3452: single-box sizes the context window to its GPU
+    # (configure_gpu_env). Here a remote inference host serves its own window
+    # (droplet-local-LLM defaults to 16384), so pin the orchestrator's
+    # estimator to that rather than the 65536 compose default. Raise both ends
+    # together.
+    grep -qE '^OLLAMA_CONTEXT_LENGTH=' "$REPO_ROOT/.env" || _upsert_env_kv OLLAMA_CONTEXT_LENGTH 16384
   fi
   # WARP-318: FIPS 140-3 per-customer activation. Only acts when the operator
   # EXPLICITLY passed --fips / --no-fips (FIPS_MODE tri-state; "" = leave .env
@@ -567,6 +615,11 @@ main() {
   # (re-running setup.sh self-heals). See scripts/lib/backup.sh.
   install_restic_backup \
     || log_warn "restic backup host integration had issues (continuing)"
+
+  # WARP-3653: daily host timer that renews internal CA leaf certificates
+  # before the 90-day expiry. Non-fatal, idempotent.
+  install_internal_cert_renewal \
+    || log_warn "internal certificate renewal timer had issues (continuing)"
 
   # --- Phase 5: Build ---
   log_step 5 $total_steps "Build"
@@ -638,11 +691,7 @@ main() {
 
   # --- Phase 7: Verify ---
   log_step 7 $total_steps "Verify"
-  if [ "$SKIP_START" != "true" ] && [ -x "$SCRIPT_DIR/verify.sh" ]; then
-    "$SCRIPT_DIR/verify.sh" || log_warn "Some verification checks failed — see output above"
-  else
-    log_info "Skipping verification (stack not started or verify.sh not found)"
-  fi
+  run_verify_gate
 
   # --- Local DNS (mDNS + router dnsmasq) ---
   # Runs after the stack is up so the routing service is ready to accept the
@@ -802,41 +851,38 @@ main() {
 
   log_divider
   printf "\n"
-  printf "  ${_BOLD}${_GREEN}Droplet Edge Platform — Setup Complete${_RESET}\n"
-  printf "\n"
-  # ADR-023 / WARP-1300: surface the publicly-trusted per-device FQDN as the
-  # PRIMARY dashboard URL when it's known — the one address that works at
-  # home AND over the VPN with a green padlock and no per-client install.
-  # Read straight from .env; empty until the box has learned it from HQ on
-  # its first issuance run. Once known, droplet.local itself redirects here
-  # too (the single-box shape writes DROPLET_LAN_DNS_AUTHORITY=1, so the
-  # gateway 307s droplet.local/droplet-ai.local/droplet.lan/droplet-ai.lan
-  # to this FQDN — WARP-1300).
-  _public_fqdn=""
-  if [ -f "$REPO_ROOT/.env" ]; then
-    _public_fqdn="$(grep -E '^DROPLET_PUBLIC_FQDN=' "$REPO_ROOT/.env" | tail -1 | cut -d= -f2- | tr -d '"' || true)"
-  fi
-  if [ -n "$_public_fqdn" ]; then
-    printf "  Dashboard:     ${_CYAN}https://%s${_RESET} (trusted — green padlock, works on LAN and over VPN)\n" "$_public_fqdn"
-    printf "  Shortcut:      type ${_CYAN}droplet.local${_RESET} in any browser on this network — it lands there\n"
-    # WARP-1301 (redirect-design spec §5): every emitted URL prints the FQDN
-    # once it's known — .local survives only as the thing humans type.
-    printf "  API:           ${_CYAN}https://%s/api/health${_RESET}\n" "$_public_fqdn"
+  if [ "${LOG_WARN_COUNT:-0}" -gt 0 ]; then
+    printf "  ${_BOLD}${_YELLOW}Droplet Edge Platform — Setup Complete with %d warnings${_RESET}\n" "$LOG_WARN_COUNT"
+    printf '%s' "$LOG_WARN_LIST" | sed 's/^/    - /'
   else
-    printf "  Dashboard:     ${_CYAN}https://droplet-ai.local${_RESET} (mDNS) or ${_CYAN}https://droplet-ai.lan${_RESET} (router DNS)\n"
-    printf "                 ${_DIM}https://localhost also works on this device${_RESET}\n"
-    printf "  API:           ${_CYAN}https://droplet-ai.local/api/health${_RESET}\n"
+    printf "  ${_BOLD}${_GREEN}Droplet Edge Platform — Setup Complete${_RESET}\n"
   fi
   printf "\n"
-  printf "  ${_BOLD}About the browser padlock${_RESET}\n"
-  printf "  The Droplet gets a publicly-trusted certificate automatically — no\n"
-  printf "  per-device install is needed. The first few minutes after setup it may\n"
-  printf "  serve a temporary self-signed cert (you'll see a one-time \"Not secure\"\n"
-  printf "  warning) until the trusted certificate is issued; it then turns into a\n"
-  printf "  green padlock on its own.\n"
-  printf "  ${_DIM}Offline / air-gapped fallback only: ./scripts/trust-droplet-cert.sh${_RESET}\n"
+  printf "  Dashboard:     ${_CYAN}https://%s${_RESET} (internal DNS)\n" "${DROPLET_LAN_HOSTNAME:-droplet-ai.lan}"
+  printf "  API:           ${_CYAN}https://%s/api/health${_RESET}\n" "${DROPLET_LAN_HOSTNAME:-droplet-ai.lan}"
+  printf "  Trust the Droplet certificate on each client device:\n"
+  printf "  ${_DIM}./scripts/trust-droplet-cert.sh${_RESET}\n"
   printf "  ${_DIM}Windows: powershell -ExecutionPolicy Bypass -File scripts\\trust-droplet-cert.ps1${_RESET}\n"
   printf "\n"
+  # WARP-3414: the certificate's KEY fingerprint, printed HERE — on the box's
+  # own terminal — because this is a channel a person on the LAN cannot
+  # rewrite. A Droplet app that connects to a box using its own certificate
+  # (the Mac app, on a manual connect) shows this same value and asks the
+  # admin to compare; the dashboard also shows it, but over the connection
+  # being checked, so it proves nothing on its own. Same string as the
+  # front screen and `droplet-fingerprint` (scripts/host/usr-local-bin/).
+  # Best-effort: setup must never fail on a display line.
+  _fp_cli="$REPO_ROOT/scripts/host/usr-local-bin/droplet-fingerprint"
+  _fp="$("$_fp_cli" --file "$REPO_ROOT/docker/certs/droplet.crt" 2>/dev/null || true)"
+  if [ -n "$_fp" ]; then
+    printf "  ${_BOLD}Droplet fingerprint${_RESET} (SHA-256 of this Droplet's certificate key)\n"
+    printf '%s\n' "$_fp" | sed 's/^/    /'
+    printf "  Apps show this when they first connect to a Droplet that uses its own\n"
+    printf "  certificate. Compare it with what the app shows. This terminal, the\n"
+    printf "  Droplet's front screen and ${_BOLD}droplet-fingerprint${_RESET} are trustworthy for that;\n"
+    printf "  a web page the Droplet serves is not, by itself.\n"
+    printf "\n"
+  fi
   printf "  Open the dashboard to complete setup — a guided wizard\n"
   printf "  will walk you through creating your admin account.\n"
   printf "\n"

@@ -12,7 +12,13 @@ been built and pushed by digest. Inputs:
   --git-sha   the commit the release was built from
   --channel   release channel — `stable` (main) or `stage` (WARP-1670)
   --registry  image registry/namespace prefix (lowercase; GHCR requires it)
-  --clients   optional clients.json from fetch-client-apps.py (WARP-3120):
+  --registry-host  optional (WARP-3502): the fleet HQ registry host the box
+              pulls from, e.g. registry.example (host
+              or host:port, no scheme, no path). When non-empty every image ref
+              is `<host>/droplet-<name>@<digest>` and --registry is not used
+              for refs; empty keeps --registry (ghcr.io), which is what stage
+              does until HQ is live. Digests never change.
+  --clients  optional clients.json from fetch-client-apps.py (WARP-3120):
               the client installers this release carries, each re-hashed
               here from the file beside it
   --out       where to write release.json
@@ -59,6 +65,9 @@ MIN_ORCHESTRATOR_SCHEMA = 1
 ALLOWED_CHANNELS = {"stable", "stage"}
 
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+# WARP-3502: a bare DNS host (+ optional :port). No scheme/path/uppercase, so the
+# signed `image` can only ever be `<host>/droplet-<name>@sha256:...`.
+HOST_RE = re.compile(r"[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?")
 CLIENT_KEYS = ("platform", "version", "file", "size", "sha256")
 
 
@@ -83,6 +92,7 @@ def main() -> None:
     ap.add_argument("--git-sha", required=True)
     ap.add_argument("--channel", default="stable")
     ap.add_argument("--registry", default="ghcr.io/dropletbywarplab")
+    ap.add_argument("--registry-host", default="")
     ap.add_argument("--clients", type=Path)
     ap.add_argument("--out", required=True, type=Path)
     args = ap.parse_args()
@@ -93,6 +103,10 @@ def main() -> None:
         die(f"--git-sha must be a full 40-hex commit sha, got {args.git_sha!r}")
     if not args.configs.is_file():
         die(f"configs bundle not found: {args.configs}")
+    if args.registry_host and not HOST_RE.fullmatch(args.registry_host):
+        die(f"--registry-host must be a lowercase host[:port] with no scheme or "
+            f"path, got {args.registry_host!r}")
+    image_prefix = args.registry_host or args.registry
 
     services = json.loads(args.services.read_text(encoding="utf-8"))["services"]
     digests = json.loads(args.digests.read_text(encoding="utf-8"))
@@ -135,7 +149,7 @@ def main() -> None:
         "services": [
             {
                 "name": s["name"],
-                "image": f"{args.registry}/droplet-{s['name']}@{digests[s['name']]}",
+                "image": f"{image_prefix}/droplet-{s['name']}@{digests[s['name']]}",
                 "digest": digests[s["name"]],
                 "healthcheck": s["healthcheck"],
             }

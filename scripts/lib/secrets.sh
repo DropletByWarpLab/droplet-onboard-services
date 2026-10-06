@@ -188,8 +188,8 @@ _upsert_env_kv() {
   fi
   # WARP-2537: strip an INDENTED or COMMENTED-OUT assignment of the same key as
   # well as a bare one. Every sed writer this primitive replaces matched
-  # `^[[:space:]]*#?[[:space:]]*KEY=` (droplet-set-box-name.sh,
-  # droplet-set-public-fqdn.sh, and droplet-set-nvr-media.sh before WARP-2522),
+  # `^[[:space:]]*#?[[:space:]]*KEY=` (including the NVR media setter before
+  # WARP-2522),
   # so a plain `^KEY=` strip would leave their commented placeholder behind and
   # append a SECOND line for the same key. Only an assignment form is matched —
   # `# KEY: prose` documentation lines in the generated .env are untouched.
@@ -197,6 +197,29 @@ _upsert_env_kv() {
                  printf '%s=%s\n' "$key" "$val"; } > "$stage" )
   chmod 600 "$stage"
   mv "$stage" "$target"
+}
+
+# WARP-3835: `setup.sh --edge-router HOST[:PORT]` — point this box at an
+# EXTERNAL OpenWrt router. Writes the three keys the keep-the-host block in
+# single-box.sh and sync_openwrt_password_secret (WARP-3738) already key off, so
+# it must run before both (before materialize_artifacts). Returns 1 (and writes
+# nothing) on an empty or loopback host.
+configure_edge_router() {
+  local spec="$1" host port=80
+  host="${spec%%:*}"
+  case "$spec" in *:*) port="${spec#*:}" ;; esac
+  case "$host" in
+    ''|127.0.0.1|localhost|::1)
+      log_error "--edge-router needs a non-loopback router host (got '${spec}')"
+      return 1 ;;
+  esac
+  case "$port" in
+    ''|*[!0-9]*) log_error "--edge-router port must be a number (got '${port}')"; return 1 ;;
+  esac
+  _upsert_env_kv OPENWRT_HOST "$host" || return 1
+  _upsert_env_kv OPENWRT_PORT "$port" || return 1
+  _upsert_env_kv OPENWRT_USERNAME droplet-ai || return 1
+  log_info "Edge router: OPENWRT_HOST=$host OPENWRT_PORT=$port (password lives in docker/secrets/openwrt_password)"
 }
 
 # Remove a key from .env entirely (same atomicity/symlink discipline as
@@ -473,7 +496,7 @@ generate_env() {
   log_info "Generating device-unique secrets..."
 
   # --- Generate all secrets ---
-  local pg_password redis_password nc_password device_secret device_secret_key jwt_secret routing_service_token service_token_voice service_token_display service_token_switch service_token_device_gateway service_token_ai_gateway ops_token service_token_mcp service_token_email service_token_rag_eval orchestrator_sampler_token ai_gateway_sampler_token service_token_egress_audit service_token_erp_bridge ollama_url openwrt_password
+  local pg_password redis_password nc_password device_secret device_secret_key jwt_secret routing_service_token service_token_voice service_token_display service_token_switch service_token_ai_gateway ops_token service_token_mcp service_token_email service_token_rag_eval orchestrator_sampler_token ai_gateway_sampler_token service_token_egress_audit service_token_erp_bridge ollama_url openwrt_password
   # WARP-850: orchestrator -> matter-controller sidecar bearer (X-Droplet-Auth).
   local droplet_matter_service_token
   # WARP-882 / WS-4: shared HS256 secret the OnlyOffice Document Server, the
@@ -484,6 +507,13 @@ generate_env() {
   # WARP-234: per-service Redis ACL identities (least privilege; the shared
   # REDIS_PASSWORD becomes the ping-only `default` user for health probes).
   local redis_orchestrator_password redis_ai_gateway_password redis_mcp_password
+  # WARP-3605: the Nextcloud ACL user gets its own value. Sharing REDIS_PASSWORD
+  # gave the ping-only `default` user and the keyspace-wide `nextcloud` user the
+  # same password, so anyone holding the default credential could AUTH as nextcloud.
+  # Alphanumeric via _gen_password: it is interpolated into PHP's
+  # session.save_path (docs/security/redis-tls-acl.md).
+  local redis_nextcloud_password
+  redis_nextcloud_password=$(_gen_password 24)
   redis_orchestrator_password=$(_gen_password 24)
   redis_ai_gateway_password=$(_gen_password 24)
   redis_mcp_password=$(_gen_password 24)
@@ -519,6 +549,13 @@ generate_env() {
   # + device-bridge.py's BRIDGE_AUTH_TOKEN MUST read the same value;
   # compose wires both ends to ${SERVICE_TOKEN_DISPLAY}.
   service_token_display=$(openssl rand -hex 32)
+  # WARP-3595: the device-bridge's destructive routes (factory reset, pool
+  # operations, Wi-Fi AP, TLS, box name) accept only this token. The orchestrator
+  # sends it as SERVICE_TOKEN_BRIDGE; the host bridge reads it as
+  # BRIDGE_ADMIN_TOKEN (install-device-bridge.sh mirrors it). It is never wired
+  # into the oled-display container, which holds only SERVICE_TOKEN_DISPLAY.
+  local service_token_bridge
+  service_token_bridge=$(openssl rand -hex 32)
   # Shared bearer for orchestrator → switch service HTTP calls (/ports,
   # /vlans, /poe, /provision/*). Same WARP-165 rationale as the display
   # token: the switch container's SERVICE_SECRET previously reused
@@ -531,11 +568,6 @@ generate_env() {
   # MUST read the same value; compose wires both ends to
   # ${SERVICE_TOKEN_SWITCH}.
   service_token_switch=$(openssl rand -hex 32)
-  # Bearer the orchestrator presents to services/device-gateway (BACnet,
-  # Modbus, SNMP, KNX). device-gateway.client.ts and the gateway container's
-  # SERVICE_SECRET MUST read the same value; compose wires both ends to
-  # ${SERVICE_TOKEN_DEVICE_GATEWAY}.
-  service_token_device_gateway=$(openssl rand -hex 32)
   # WARP-560: bearer the orchestrator presents on every outbound call to
   # the ai-gateway. The gateway's ServiceAuthMiddleware requires it on all
   # /ai/* routes (except /ai/health) — before this the gateway had NO
@@ -625,6 +657,17 @@ generate_env() {
   # profile and gets a service that 503s every route with nothing in the logs
   # pointing at a missing secret. Both ends fail CLOSED when it is empty.
   mcp_bridge_service_token=$(openssl rand -hex 32)
+  # >>> WARP-3625 inbound bearers (voice-io, rag-eval, file-indexer) >>>
+  # The orchestrator presents these to three internal APIs that used to rely on
+  # network position alone. Each service fails CLOSED (503 on every
+  # non-/health route) when its side is empty. Kept in its own delimited block
+  # in all three places below (here, the .env heredoc, migrate_env) so it merges
+  # cleanly beside the other token additions.
+  local voice_io_service_token rag_eval_service_token file_indexer_service_token
+  voice_io_service_token=$(openssl rand -hex 32)
+  rag_eval_service_token=$(openssl rand -hex 32)
+  file_indexer_service_token=$(openssl rand -hex 32)
+  # <<< WARP-3625 inbound bearers <<<
   # WARP-468 + WARP-470: bearer the routing service's egress_meter and
   # throughput sampler present on POST /api/network/{off-lan,throughput}-sample-*.
   # Compose wires ORCHESTRATOR_SAMPLER_TOKEN to ${ORCHESTRATOR_SAMPLER_TOKEN}.
@@ -779,8 +822,9 @@ REDIS_URL=rediss://:${redis_password}@cache:6380
 REDIS_PASSWORD_ORCHESTRATOR=$redis_orchestrator_password
 REDIS_PASSWORD_AI_GATEWAY=$redis_ai_gateway_password
 REDIS_PASSWORD_MCP=$redis_mcp_password
-# Nextcloud expects this name for the Redis password (ACL user \`nextcloud\`)
-REDIS_HOST_PASSWORD=$redis_password
+# Nextcloud expects this name for the Redis password (ACL user \`nextcloud\`).
+# Distinct from REDIS_PASSWORD on purpose (WARP-3605).
+REDIS_HOST_PASSWORD=$redis_nextcloud_password
 
 # --- MQTT (WARP-235: mTLS, no shared password — identity = client cert CN) ---
 MQTT_BROKER=mqtts://broker:8883
@@ -862,6 +906,8 @@ ROUTING_SERVICE_TOKEN=$routing_service_token
 # \`sudo systemctl restart droplet-openwrt-attach.service\` (sets the container
 # root pw + restarts routing together) — NOT a bare \`docker compose restart
 # routing\`, which would present the new pw to a container still on the old one.
+# External edge router (OPENWRT_HOST not loopback): the router owns its password;
+# sync keeps docker/secrets/openwrt_password as the operator wrote it (WARP-3738).
 OPENWRT_PASSWORD=$openwrt_password
 
 # --- Voice service bearer (voice-io → orchestrator /api/llm/chat) ---
@@ -881,6 +927,11 @@ SERVICE_TOKEN_VOICE=$service_token_voice
 # value; compose wires all three to \${SERVICE_TOKEN_DISPLAY}.
 SERVICE_TOKEN_DISPLAY=$service_token_display
 
+# --- Device-bridge destructive-route bearer (orchestrator → host bridge) ---
+# WARP-3595. Distinct from SERVICE_TOKEN_DISPLAY on purpose: the display
+# container holds that one and the bridge refuses it on destructive routes.
+SERVICE_TOKEN_BRIDGE=$service_token_bridge
+
 # --- Switch service bearer (orchestrator → switch service HTTP) ---
 # Used by switch.client.ts to authenticate to the switch service's
 # /ports, /vlans, /poe, /provision/* endpoints. Replaces the prior
@@ -890,13 +941,6 @@ SERVICE_TOKEN_DISPLAY=$service_token_display
 # container's SERVICE_SECRET MUST read the same value; compose wires
 # both ends to \${SERVICE_TOKEN_SWITCH}.
 SERVICE_TOKEN_SWITCH=$service_token_switch
-
-# --- Device gateway bearer (orchestrator → device-gateway HTTP) ---
-# The gateway (BACnet/IP, Modbus TCP, SNMP, KNX/IP) runs network_mode: host
-# and fails CLOSED without it. device-gateway.client.ts and the gateway
-# container's SERVICE_SECRET MUST read the same value; compose wires both
-# ends to \${SERVICE_TOKEN_DEVICE_GATEWAY}.
-SERVICE_TOKEN_DEVICE_GATEWAY=$service_token_device_gateway
 
 # --- AI gateway service bearer (orchestrator → ai-gateway HTTP) ---
 # WARP-560. Required by the ai-gateway's ServiceAuthMiddleware on every
@@ -966,6 +1010,12 @@ SERVICE_TOKEN_RAG_EVAL=$service_token_rag_eval
 # gate skips every scheduled slot (0 chunks), so the default never scores
 # an empty corpus. Was hand-set config before, and every re-image lost it.
 RAGAS_EVAL_USER=eval-fixtures
+# WARP-3609: explicit positive gate for /api/admin/retrieval-eval/* (the route
+# the rag-eval container scores through). Off in the orchestrator unless this
+# is 1; written on because the `eval` profile is in the default
+# COMPOSE_PROFILES above. The service principal can name only RAGAS_EVAL_USER.
+# Set to 0 (and drop `eval` from COMPOSE_PROFILES) to take the route down.
+RAG_EVAL_ENABLED=1
 
 # --- Document renderer bearer (orchestrator → doc-render) ---
 # WARP-2211. The orchestrator presents this on POST /render to the
@@ -993,6 +1043,17 @@ SANDBOX_SERVICE_TOKEN=$sandbox_service_token
 # every non-/health route) when its side is empty, and the orchestrator refuses
 # without dialling when its side is.
 MCP_BRIDGE_SERVICE_TOKEN=$mcp_bridge_service_token
+
+# >>> WARP-3625 inbound bearers (voice-io, rag-eval, file-indexer) >>>
+# Orchestrator -> voice-io / rag-eval / file-indexer. Each service reads its
+# own key; the orchestrator (env_file) reads all three. voice-io and rag-eval
+# receive theirs by compose substitution; file-indexer via env_file. Rotate in
+# lockstep: change here, then force-recreate the orchestrator and that service.
+# Every one fails CLOSED (503 on non-/health routes) when empty.
+VOICE_IO_SERVICE_TOKEN=$voice_io_service_token
+RAG_EVAL_SERVICE_TOKEN=$rag_eval_service_token
+FILE_INDEXER_SERVICE_TOKEN=$file_indexer_service_token
+# <<< WARP-3625 inbound bearers <<<
 
 # --- Routing sampler bearers ---
 # WARP-468 (egress meter) + WARP-470 (throughput sampler): the routing
@@ -1056,56 +1117,17 @@ DROPLET_TPM_BACKEND=mock
 # See _derive_device_id in scripts/lib/secrets.sh for the derivation.
 DROPLET_DEVICE_ID=$device_id
 
-# --- Public-CA per-device TLS (ADR-023) ---
-# DROPLET_PUBLIC_FQDN: the opaque per-device subdomain
-#   d-HMAC.devices.warp-lab.ai. The box CANNOT compute the HQ-keyed HMAC, so it
-#   starts EMPTY and is populated when the tls-issuance cron learns the FQDN
-#   from the HQ challenge response and persists it back here. Empty is the
-#   correct first-boot value: the bootstrap self-signed cert keeps the box
-#   serving TLS, and the FQDN becomes the canonical origin + a bootstrap-SAN
-#   entry once known.
-DROPLET_PUBLIC_FQDN=
-# HQ_ISSUANCE_URL: base URL of the fleet HQ issuance API. Defaults to the PUBLIC
-#   (non-secret) fleet-HQ Cloudflare Worker so a plain reflash / --single-box
-#   self-provisions its trusted droplet-us.com cert zero-touch — no SSH-in to
-#   hand-set this. Still overridable from the provisioning environment / manifest
-#   (${HQ_ISSUANCE_URL:-<default>}). Without a value, factory-reset wiped .env and
-#   the box permanently lost its droplet-us.com cert + FQDN → remote access
-#   dead-ends (WARP-978), which is exactly the reflash-self-signed regression the
-#   baked default fixes. Plain outbound HTTPS; no WG tunnel required.
-#   The default MUST be a hostname that exists: the intended vanity name
-#   fleet-hq.droplet-us.com was never bound in DNS (NXDOMAIN as of 2026-07-16),
-#   so every box that inherited it dead-ended issuance at DNS resolution and
-#   silently stayed on the self-signed bootstrap cert. Until the HQ production
-#   cutover binds the vanity name (droplet-fleet-hq HQ-CUTOVER-RUNBOOK), the
-#   default is the live HQ Worker URL; flip it back in the SAME commit that
-#   creates the DNS record.
-HQ_ISSUANCE_URL=${HQ_ISSUANCE_URL:-https://droplet-fleet-hq.rjouffret.workers.dev}
-# OVERLAY_CONNECT_ENABLED: the box half of customer remote access (WARP-1767 /
-#   ADR-031) — outbound long-poll to HQ signaling, STUN mapping discovery, and
-#   the wg0 peer install that lands a hole-punched session. ON by default: this
-#   is the shipped remote-access path, and a box written without it cannot be
-#   reached from outside at all. Overridable from the provisioning environment
-#   for a box that must ship LAN-only. Requires HQ_ISSUANCE_URL (above) and
-#   router supervision; index.ts gates on all three.
-OVERLAY_CONNECT_ENABLED=${OVERLAY_CONNECT_ENABLED:-true}
-OVERLAY_CONNECT_POLL_SECONDS=${OVERLAY_CONNECT_POLL_SECONDS:-15}
-OVERLAY_PEER_IDLE_EXPIRY_HOURS=${OVERLAY_PEER_IDLE_EXPIRY_HOURS:-720}
-# TUNNEL_TOKEN: Cloudflare Tunnel connector token for the remote-access relay
-#   (WARP-974 / ADR-025). PRESERVED from the provisioning environment. Empty =
-#   relay OFF — single-box.sh only activates the \`relay\` compose profile
-#   (cloudflared) when this is set, so an un-provisioned box never brings up a
-#   tokenless connector.
-TUNNEL_TOKEN=${TUNNEL_TOKEN:-}
+# --- Internal DNS and optional fleet registry ---
+DROPLET_LAN_HOSTNAME=${DROPLET_LAN_HOSTNAME:-droplet-ai.lan}
+# HQ_ISSUANCE_URL: optional fleet control-plane origin, explicitly provisioned.
+#   Local WireGuard and internal DNS work with this empty. No Cloudflare Worker
+#   is selected automatically on first boot or reflash.
+HQ_ISSUANCE_URL=${HQ_ISSUANCE_URL:-}
 # DROPLET_PROVISION_TOKEN: one-time HQ-minted provisioning token (WARP-983).
 #   PRESERVED from the provisioning environment / manifest so a fresh or
 #   FACTORY-RESET box can re-enroll itself into the HQ registry. Factory-reset
-#   sends the ADR-023 signed deregister, which DELETES the device from the HQ
-#   registry — on the next boot tls-issuance is then rejected with 404
-#   \`device_id not in registry\` and the box would stay on the self-signed
-#   bootstrap cert forever. When this token is set, the orchestrator self-provisions
-#   (POST /api/issuance/provision with a TPM proof-of-possession over the token)
-#   on that 404, then retries issuance and installs its droplet-us.com cert.
+#   deletes the device from the HQ registry. The token allows the explicitly
+#   configured fleet registry to provision that device again for image access.
 #   Empty disables self-provision (dev / pre-fleet / provisioned by another path).
 DROPLET_PROVISION_TOKEN=${DROPLET_PROVISION_TOKEN:-}
 
@@ -1313,6 +1335,14 @@ migrate_env() {
   # WARP-2627: same backfill for the outbound MCP bridge's bearer. Only-when-
   # missing, so an operator who already set one keeps it.
   _migrate_ensure_key MCP_BRIDGE_SERVICE_TOKEN "$(openssl rand -hex 32)"
+  # >>> WARP-3625 inbound bearers (voice-io, rag-eval, file-indexer) >>>
+  # An existing box has none of these, and the three services fail closed
+  # without them (503), so backfill only-when-missing. docker/ota/env-reconcile.sh
+  # carries the same three for OTA-only boxes.
+  _migrate_ensure_key VOICE_IO_SERVICE_TOKEN "$(openssl rand -hex 32)"
+  _migrate_ensure_key RAG_EVAL_SERVICE_TOKEN "$(openssl rand -hex 32)"
+  _migrate_ensure_key FILE_INDEXER_SERVICE_TOKEN "$(openssl rand -hex 32)"
+  # <<< WARP-3625 inbound bearers <<<
   # INFERENCE_RUNTIME on an EXISTING box backfills to `ollama`, NOT to the
   # fresh-install default of `dmr` (WARP-1870).
   #
@@ -1327,30 +1357,15 @@ migrate_env() {
   # Writing it explicitly also immunises legacy boxes against ai-gateway's
   # import-time "ollama" default being mistaken for a deliberate choice.
   _migrate_ensure_key INFERENCE_RUNTIME "ollama"
-  # WARP-978: ensure the HQ issuance URL + relay tunnel token exist on re-run.
-  # HQ_ISSUANCE_URL is seeded from the provisioning environment or the baked
-  # PUBLIC fleet-HQ Worker default (non-secret) so a reflashed box self-provisions
-  # its droplet-us.com cert zero-touch; TUNNEL_TOKEN stays a secret (empty = relay
-  # off). Pairs with the seed-block defaults above. `_migrate_ensure_key` only
-  # appends when the key is ABSENT, so an existing (even intentionally-empty)
-  # value is never clobbered on re-run.
-  _migrate_ensure_key HQ_ISSUANCE_URL "${HQ_ISSUANCE_URL:-https://droplet-fleet-hq.rjouffret.workers.dev}"
-  _migrate_ensure_key TUNNEL_TOKEN "${TUNNEL_TOKEN:-}"
-  # WARP-1767: backfill the overlay connect agent onto boxes already in the field.
-  # These installs predate the key entirely, so the orchestrator fell back to the
-  # zod default (false) and the connect tick + idle-expiry sweep never registered
-  # — every one of them is unreachable from outside. `_migrate_ensure_key` only
-  # appends when the key is ABSENT, so a box deliberately opted out (explicit
-  # `false`) keeps that value across the re-run.
-  _migrate_ensure_key OVERLAY_CONNECT_ENABLED "${OVERLAY_CONNECT_ENABLED:-true}"
-  _migrate_ensure_key OVERLAY_CONNECT_POLL_SECONDS "${OVERLAY_CONNECT_POLL_SECONDS:-15}"
-  _migrate_ensure_key OVERLAY_PEER_IDLE_EXPIRY_HOURS "${OVERLAY_PEER_IDLE_EXPIRY_HOURS:-720}"
+  # Preserve explicitly provisioned fleet settings. An absent HQ URL stays
+  # empty: local WireGuard and DNS have no fleet issuance prerequisite.
+  _migrate_ensure_key DROPLET_LAN_HOSTNAME "${DROPLET_LAN_HOSTNAME:-droplet-ai.lan}"
+  _migrate_ensure_key HQ_ISSUANCE_URL "${HQ_ISSUANCE_URL:-}"
   # WARP-983: ensure the one-time HQ provisioning token exists on re-run, seeded
   # from the provisioning environment (empty = self-provision disabled). Pairs
   # with the seed-block `${DROPLET_PROVISION_TOKEN:-}` above so a fresh or
-  # factory-reset box that was handed a token can re-enroll into the HQ registry
-  # and re-issue its droplet-us.com cert, instead of dead-ending on the 404
-  # `device_id not in registry` and staying on the self-signed bootstrap cert.
+  # factory-reset box that was handed a token can re-enroll into an explicitly
+  # configured fleet registry. Local access does not require registration.
   _migrate_ensure_key DROPLET_PROVISION_TOKEN "${DROPLET_PROVISION_TOKEN:-}"
   # WARP-834 backfill: existing installs predate the per-box OpenWrt password.
   # Without it sync_openwrt_password_secret() writes an empty secret file and
@@ -1363,6 +1378,9 @@ migrate_env() {
   # display bearer; without this key the orchestrator → oled-display path
   # falls back to the empty-string bearer and 401s on every health probe.
   _migrate_ensure_key SERVICE_TOKEN_DISPLAY "$(openssl rand -hex 32)"
+  # WARP-3595 backfill: destructive device-bridge routes need their own token.
+  # Absent-only, so an existing value is never rotated under a running bridge.
+  _migrate_ensure_key SERVICE_TOKEN_BRIDGE "$(openssl rand -hex 32)"
   # Switch-bearer backfill: existing installs wired the switch container's
   # SERVICE_SECRET to DEVICE_SECRET_KEY while the orchestrator side sent no
   # bearer at all — so any install with a DEVICE_SECRET_KEY in .env had the
@@ -1370,8 +1388,6 @@ migrate_env() {
   # compose rewire to ${SERVICE_TOKEN_SWITCH} on both ends) restores the
   # orchestrator → switch path and keeps DEVICE_SECRET_KEY off the wire.
   _migrate_ensure_key SERVICE_TOKEN_SWITCH "$(openssl rand -hex 32)"
-  # Device-gateway backfill: installs that predate services/device-gateway.
-  _migrate_ensure_key SERVICE_TOKEN_DEVICE_GATEWAY "$(openssl rand -hex 32)"
   # WARP-2131 backfill: existing installs predate the inference-manager
   # sidecar. Without this key its AUTH_TOKEN would expand empty, which is
   # PERMISSIVE mode rather than a startup failure — so the gap would be silent.
@@ -1452,6 +1468,11 @@ migrate_env() {
   # installer, so every re-imaged box lost it and every scheduled RAGAS
   # slot 400'd eval_user_required. Same default as the fresh-install heredoc.
   _migrate_ensure_key RAGAS_EVAL_USER "eval-fixtures"
+  # WARP-3609 backfill: the retrieval-eval route is now gated on this explicit
+  # flag instead of NODE_ENV (which the orchestrator never set). Existing boxes
+  # already run the scheduled eval (the `eval` profile is a default), so keep
+  # it working: only-when-missing, an operator's explicit 0 survives.
+  _migrate_ensure_key RAG_EVAL_ENABLED 1
   # WARP-339 backfill: existing installs predate the mcp service-token
   # path; without this key mcp-server's outbound calls to orchestrator
   # /api/matter/* will 401 when AUTH_ENABLED=true.
@@ -1535,6 +1556,24 @@ migrate_env() {
   _migrate_ensure_key REDIS_PASSWORD_ORCHESTRATOR "$(_gen_password 24)"
   _migrate_ensure_key REDIS_PASSWORD_AI_GATEWAY "$(_gen_password 24)"
   _migrate_ensure_key REDIS_PASSWORD_MCP "$(_gen_password 24)"
+  # WARP-3605: REDIS_HOST_PASSWORD (ACL user `nextcloud`) used to be written
+  # equal to REDIS_PASSWORD (ACL user `default`, ping-only), so the default
+  # credential could AUTH as nextcloud. Give any box that still shares them a
+  # distinct value; a distinct (or operator-set) value is never touched. The
+  # regenerated users.acl + the new nextcloud env only take effect on a
+  # recreate of `cache` and `nextcloud` (docs/security/redis-tls-acl.md); the
+  # Redis keyspace (sessions) is AOF-persisted and keyed independently of this
+  # password, so sessions survive the rotation.
+  local _rhp_now _rp_now
+  _rhp_now="$(grep -E '^REDIS_HOST_PASSWORD=' "$stage" | tail -1 | cut -d= -f2- | tr -d '[:space:]' || true)"
+  _rp_now="$(grep -E '^REDIS_PASSWORD=' "$stage" | tail -1 | cut -d= -f2- | tr -d '[:space:]' || true)"
+  if [ -n "$_rp_now" ] && [ "$_rhp_now" = "$_rp_now" ]; then
+    { grep -vE '^REDIS_HOST_PASSWORD=' "$stage" || true; } > "$stage.rhp"
+    chmod 600 "$stage.rhp"
+    mv "$stage.rhp" "$stage"
+    log_info "Migrated .env: REDIS_HOST_PASSWORD no longer shares REDIS_PASSWORD (WARP-3605); recreate cache + nextcloud to apply"
+  fi
+  _migrate_ensure_key REDIS_HOST_PASSWORD "$(_gen_password 24)"
   # Upgrade the exact legacy plaintext REDIS_URL shape to the TLS listener.
   # Only the default-user URL is rewritten (operators with custom URLs keep
   # theirs); real clients get per-service URLs from docker-compose.yml.
@@ -1822,6 +1861,37 @@ sync_openwrt_password_secret() {
     password=$(grep -E '^OPENWRT_PASSWORD=' "$REPO_ROOT/.env" | head -n 1 | cut -d= -f2- || true)
   fi
 
+  # WARP-3738: an EXTERNAL edge router (OPENWRT_HOST not loopback) owns its own
+  # droplet-ai password, which the operator pastes into the secret file itself.
+  # Overwriting it with the box-generated .env value broke routing on the lab
+  # box (2026-10-05, "OpenWrt rejected the rpcd credentials"). Keep a non-empty
+  # file. WARP-3835: an empty/missing one is NOT seeded either (that value can
+  # never match a router that mints its own password; the ROUTER_AUTH it caused
+  # read like a rotation when the truth is "never paired") - write the empty
+  # placeholder compose needs and tell the operator what to paste.
+  local openwrt_host="${OPENWRT_HOST:-}"
+  if [ -z "$openwrt_host" ] && [ -f "$REPO_ROOT/.env" ]; then
+    openwrt_host=$(grep -E '^OPENWRT_HOST=' "$REPO_ROOT/.env" | tail -1 | cut -d= -f2- || true)
+  fi
+  case "$openwrt_host" in
+    ''|127.0.0.1|localhost|::1) ;;
+    *)
+      if [ -s "$secret_file" ]; then
+        if [ "$(cat "$secret_file")" != "$password" ]; then
+          log_info "External router (OPENWRT_HOST=$openwrt_host): keeping its own password in $secret_file."
+          log_info "  To change it, write the new value into that file and run: docker compose up -d --no-deps --force-recreate routing"
+        fi
+        return 0
+      fi
+      mkdir -p "$secret_dir"
+      chmod 700 "$secret_dir"
+      : > "$secret_file"
+      chmod 600 "$secret_file"
+      log_warn "External router (OPENWRT_HOST=$openwrt_host) configured: put the router's /etc/droplet/droplet-ai-password into $secret_file and re-run ./scripts/setup.sh"
+      return 0
+      ;;
+  esac
+
   mkdir -p "$secret_dir"
   chmod 700 "$secret_dir"
 
@@ -1957,17 +2027,33 @@ _generate_redis_acl() {
     return 0
   fi
   # Pre-WARP-234 .env (fresh generate_env always sets these; migrate_env
-  # backfills on upgrade). Nextcloud reuses REDIS_HOST_PASSWORD.
+  # backfills on upgrade). Nextcloud uses REDIS_HOST_PASSWORD.
   local orch_pw="${REDIS_PASSWORD_ORCHESTRATOR:-}"
   local aigw_pw="${REDIS_PASSWORD_AI_GATEWAY:-}"
   local mcp_pw="${REDIS_PASSWORD_MCP:-}"
-  local nc_pw="${REDIS_HOST_PASSWORD:-$REDIS_PASSWORD}"
-  if [ -z "$orch_pw" ] || [ -z "$aigw_pw" ] || [ -z "$mcp_pw" ]; then
+  local nc_pw="${REDIS_HOST_PASSWORD:-}"
+  if [ -z "$orch_pw" ] || [ -z "$aigw_pw" ] || [ -z "$mcp_pw" ] || [ -z "$nc_pw" ]; then
     log_warn "Per-service Redis passwords missing from .env — skipping ACL generation (run setup.sh to migrate .env first)"
     return 0
   fi
 
   _redis_sha() { printf '%s' "$1" | openssl dgst -sha256 -hex | sed 's/^.*= //'; }
+
+  # WARP-3605: Redis authenticates each username/password pair on its own, so
+  # two users sharing a password share a hash and either password opens both
+  # accounts. Refuse to write an ACL where any two users collide.
+  local _acl_hashes _dup
+  _acl_hashes="$(printf '%s\n' \
+    "default $(_redis_sha "$REDIS_PASSWORD")" \
+    "orchestrator $(_redis_sha "$orch_pw")" \
+    "ai-gateway $(_redis_sha "$aigw_pw")" \
+    "mcp-server $(_redis_sha "$mcp_pw")" \
+    "nextcloud $(_redis_sha "$nc_pw")")"
+  _dup="$(printf '%s\n' "$_acl_hashes" | awk '{ if ($2 in seen) print seen[$2] " and " $1; else seen[$2] = $1 }')"
+  if [ -n "$_dup" ]; then
+    log_error "Redis ACL users share a password (hash collision: $_dup) — each ACL user needs its own .env password; refusing to write users.acl"
+    return 1
+  fi
 
   mkdir -p "$acl_dir"
   chmod 700 "$REPO_ROOT/data/secrets" "$acl_dir" 2>/dev/null || true
@@ -2137,6 +2223,15 @@ _cert_covers_current_ips() {
   return 0
 }
 
+_cert_covers_internal_hostname() {
+  local name="${DROPLET_LAN_HOSTNAME:-droplet-ai.lan}"
+  # x509 -checkhost reports mismatches on stdout but may still exit zero.
+  # Require a DNS SAN and the explicit positive result, including wildcard SANs.
+  openssl x509 -in "$1" -noout -ext subjectAltName 2>/dev/null | grep -q 'DNS:' || return 1
+  openssl x509 -in "$1" -noout -checkhost "$name" 2>/dev/null \
+    | grep -qxF "Hostname $name does match certificate"
+}
+
 _cert_has_all_required_sans() {
   local cert_file="$1"
   local dns_list
@@ -2151,7 +2246,7 @@ _cert_has_all_required_sans() {
               | tr '[:upper:]' '[:lower:]')"
 
   local required
-  for required in "${_REQUIRED_DNS_SANS[@]}"; do
+  for required in "${_REQUIRED_DNS_SANS[@]}" "${DROPLET_LAN_HOSTNAME:-droplet-ai.lan}"; do
     # Compare against the lowercased list — if we can't find an exact match,
     # the cert is incomplete and must be regenerated.
     if ! printf '%s\n' "$dns_list" | grep -qxF "$(printf '%s' "$required" | tr '[:upper:]' '[:lower:]')"; then
@@ -2161,28 +2256,9 @@ _cert_has_all_required_sans() {
   return 0
 }
 
-# ADR-023 PR-2: detect whether the installed leaf is a PUBLIC-CA cert (an
-# LE / ZeroSSL / Google Trust Services fullchain the box-side tls-issuance cron
-# installed) rather than our own self-signed bootstrap cert.
-#
-# Detector: issuer != subject. A self-signed cert has issuer == subject; any
-# CA-signed leaf has a distinct issuer DN. `openssl x509` reads only the FIRST
-# PEM block in the file, so this correctly inspects just the leaf even when
-# cert_file is a fullchain (leaf + intermediate concatenated). NOTE: we do NOT
-# use `openssl verify -CAfile <cert> <cert>` — on a fullchain PEM, OpenSSL
-# loads all PEM blocks as trusted anchors, the intermediate verifies the leaf,
-# and the command exits 0, indistinguishable from self-signed.
-#
-# Deliberately NOT keyed on the literal string "Let's Encrypt": the HQ Worker
-# has CA failover (ZeroSSL primary, Google Trust Services fallback), all
-# non-self-signed — matching on a CA name would miss the fallback issuers.
-#
-# Parse gate: if either DN is unreadable (corrupt/truncated/garbage cert), we
-# require both to be non-empty before trusting the issuer!=subject result. An
-# unparseable droplet.crt is NOT a preservable public-CA leaf — fall through
-# so the normal path regenerates a fresh self-signed cert.
-#
-# Returns 0 (true) when the cert is a public-CA leaf we must preserve.
+# Detect a CA-signed leaf by comparing issuer and subject on the first PEM
+# block. This also handles a leaf followed by its intermediate chain. The
+# generator preserves it only when it covers the configured internal hostname.
 _cert_is_public_ca_leaf() {
   local cert_file="$1"
   [ -f "$cert_file" ] || return 1
@@ -2255,6 +2331,11 @@ _write_tls_bootstrap_copy() {
 }
 
 _generate_tls_cert() {
+  local internal_hostname="${DROPLET_LAN_HOSTNAME:-droplet-ai.lan}"
+  if [[ ! "$internal_hostname" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$ ]]; then
+    log_error "TLS: DROPLET_LAN_HOSTNAME must be a plain DNS hostname"
+    return 1
+  fi
   local cert_dir="$REPO_ROOT/docker/certs"
   local cert_file="$cert_dir/droplet.crt"
   local key_file="$cert_dir/droplet.key"
@@ -2278,31 +2359,14 @@ _generate_tls_cert() {
       return 0
     fi
 
-    # ADR-023 PR-2 — NEVER CLOBBER A PUBLIC-CA LEAF.
-    # The box-side tls-issuance cron installs the HQ-issued publicly-trusted
-    # fullchain into these SAME files. A re-run that reaches here (SAN-incomplete
-    # OR expired trigger) must NOT regenerate a self-signed cert over a live
-    # public-CA leaf — that silently reverts the box to self-signed until the
-    # next 04:00 issuance, and a fresh -newkey also breaks every client that
-    # imported the original cert. If the installed cert is a public-CA leaf,
-    # leave the fullchain in place and return success.
-    if _cert_is_public_ca_leaf "$cert_file"; then
-      if _tls_pair_matches "$cert_file" "$key_file"; then
-        log_success "TLS certificate is a publicly-trusted (public-CA) leaf — preserving it (ADR-023)"
-      else
-        # WARP-595: preserving is still correct — setup cannot mint public-CA
-        # material, and clobbering with self-signed would break the trust
-        # story — but this must NEVER read as a clean success. The 04:00
-        # tls-issuance cron does NOT heal a torn pair outside the ≤30-day
-        # renew window (its decision is DB-state-driven; it never checks the
-        # on-disk key), so a broken public-CA pair can sit unloadable for
-        # weeks while nginx fails to load it. Tell the operator to trigger
-        # re-issuance instead of waiting for the renew window.
-        log_warn "TLS certificate is a public-CA leaf but the private key does NOT match it (torn issuance write)"
-        log_warn "  Preserving the fullchain (setup cannot mint public-CA material) — but nginx may fail to"
-        log_warn "  load this pair. Trigger re-issuance manually rather than waiting for the ≤30-day renew"
-        log_warn "  window (the issuance cron never checks the on-disk key)."
-      fi
+    # A CA-signed leaf is useful only if it covers our configured internal
+    # address and has a valid matching key. An old fleet-only leaf is replaced
+    # with a local certificate around the SAME private key below.
+    if _cert_is_public_ca_leaf "$cert_file" \
+       && _cert_covers_internal_hostname "$cert_file" \
+       && openssl x509 -checkend 86400 -noout -in "$cert_file" >/dev/null 2>&1 \
+       && _tls_pair_matches "$cert_file" "$key_file"; then
+      log_success "TLS: preserving the valid CA certificate for the internal DNS name"
       return 0
     fi
 
@@ -2316,7 +2380,8 @@ _generate_tls_cert() {
     local pair_broken=false
     _tls_pair_matches "$cert_file" "$key_file" || pair_broken=true
     local boot_cert="$cert_file.bootstrap" boot_key="$key_file.bootstrap"
-    if { ! openssl x509 -checkend 86400 -noout -in "$cert_file" >/dev/null 2>&1 \
+    if ! _cert_is_public_ca_leaf "$cert_file" \
+       && { ! openssl x509 -checkend 86400 -noout -in "$cert_file" >/dev/null 2>&1 \
          || [ "$pair_broken" = "true" ]; } \
        && [ -f "$boot_cert" ] && [ -f "$boot_key" ] \
        && openssl x509 -checkend 86400 -noout -in "$boot_cert" >/dev/null 2>&1 \
@@ -2391,7 +2456,7 @@ _generate_tls_cert() {
   # across devices so every Droplet cert trusts the same names.
   local san=""
   local dns
-  for dns in "${_REQUIRED_DNS_SANS[@]}"; do
+  for dns in "${_REQUIRED_DNS_SANS[@]}" "${DROPLET_LAN_HOSTNAME:-droplet-ai.lan}"; do
     san="${san:+$san,}DNS:$dns"
   done
 
@@ -2401,19 +2466,6 @@ _generate_tls_cert() {
   local hn
   hn=$(hostname 2>/dev/null || echo "droplet")
   san="$san,DNS:$hn,DNS:${hn}.local"
-
-  # ADR-023 (C2): the opaque per-device FQDN (`d-<hmac>.devices.warp-lab.ai`).
-  # The box can't compute the HQ-keyed HMAC, so it learns its FQDN from the HQ
-  # challenge response and persists it to .env (DROPLET_PUBLIC_FQDN). When it is
-  # known, add it to the bootstrap self-signed SAN so the box serves a
-  # name-matching cert for the FQDN even BEFORE the first LE cert is issued
-  # (works offline / pre-issuance). The LE cert later overwrites these same
-  # files with a publicly-trusted fullchain. Empty on first ever boot — harmless.
-  local public_fqdn="${DROPLET_PUBLIC_FQDN:-}"
-  if [ -n "$public_fqdn" ]; then
-    san="$san,DNS:$public_fqdn"
-    log_info "  Including per-device FQDN in SAN: $public_fqdn"
-  fi
 
   # Add all non-loopback IPv4 addresses (the same list the skip-guard checks
   # the installed cert against, so the two can never disagree).

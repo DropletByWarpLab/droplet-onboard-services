@@ -9,8 +9,8 @@
  * to sign in on the same tab met both:
  *
  *   1. SWR's cache. Every page reads through `useSWR` with keys that name a
- *      resource and never a person (`/api/security/health`, `/api/departments`,
- *      the Security feed's pages), so the next viewer's FIRST render painted
+ *      resource and never a person (`/api/cameras/pins`, `/api/departments`,
+ *      the camera events pages), so the next viewer's FIRST render painted
  *      the previous viewer's rows, and revalidation only replaced them after.
  *   2. The chat hand-offs. `PENDING_PROMPT_KEY` is AUTO-SENT by the next fresh
  *      /chat, and `PENDING_COMPOSER_KEY` is left in place on purpose when /chat
@@ -31,7 +31,7 @@
  * profile). Nothing narrower is enough. Deleting or mutating each key empties
  * the cache at that instant, and a per-key mutation stamp makes a plain
  * `useSWR` answer already in flight discard itself — but a `useSWRInfinite`
- * page answer (the Security feed, events, reviews) is written straight to its
+ * page answer (the camera events, reviews) is written straight to its
  * page key, past those stamps, so a poll on the wire at sign-out landed A's
  * rows in the cache after it was emptied, and the next person's feed rendered
  * them without asking. `unload()` bumps the cache's unload generation, which

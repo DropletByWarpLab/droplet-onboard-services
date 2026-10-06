@@ -22,25 +22,20 @@ import { parseCircular, parseDependencyTree, shortenTree } from "dpdm";
 const ROOT = path.resolve(__dirname, "..", "..");
 
 /** Cycles that exist at runtime today. Do not add to this list — fix the cycle. */
-const RUNTIME_ALLOWLIST = [
-  // Pre-existing; not part of the WARP-3193 ARCH-1 finding. Follow-up.
-  "src/services/security-events.service.ts -> src/services/security-incidents.service.ts",
-];
+const RUNTIME_ALLOWLIST: string[] = [];
 
 /** Cycles made only of `import type` edges (harmless at runtime). Do not add to this list. */
 const TYPE_ALLOWLIST = [
   "src/middleware/auth.ts -> src/services/extension-principal.ts",
   "src/services/erp-sync/land-money.ts -> src/services/erp-sync/land.ts",
   "src/services/cloud-connection-state.ts -> src/services/integrations.service.ts",
-  "src/services/security-incident-page.ts -> src/services/security-incident-view.ts",
-  "src/services/security-alerts.service.ts -> src/services/security-events.service.ts -> src/services/security-incidents.service.ts",
-  "src/services/security-events.service.ts -> src/services/security-incidents.service.ts -> src/services/security-mode.service.ts",
 ];
 
 /** Rotate a ring so it starts at its smallest member: one spelling per cycle. */
 function canonical(cycle: string[]): string {
-  const start = cycle.indexOf([...cycle].sort()[0]);
-  return [...cycle.slice(start), ...cycle.slice(0, start)].join(" -> ");
+  const paths = cycle.map((file) => file.replaceAll("\\", "/"));
+  const start = paths.indexOf([...paths].sort()[0]);
+  return [...paths.slice(start), ...paths.slice(0, start)].join(" -> ");
 }
 
 async function cycles(transform: boolean): Promise<string[]> {

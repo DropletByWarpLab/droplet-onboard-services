@@ -19,13 +19,13 @@
 # incremental build cost is near-zero.
 
 # --- FIPS provider build stage (byte-identical to the service images) --------
-FROM debian:bookworm-slim AS fips-builder
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS fips-builder
 COPY docker/fips/build-openssl-fips.sh /tmp/build-openssl-fips.sh
 RUN sh /tmp/build-openssl-fips.sh /out
 
 # --- Runtime: Debian-packaged nginx (links the SYSTEM OpenSSL 3, so
 #     OPENSSL_CONF alone activates FIPS — same as the Python images) ----------
-FROM nginx:1.27-bookworm
+FROM nginx:1.27-bookworm@sha256:6784fb0834aa7dbbe12e3d7471e69c290df3e6ba810dc38b34ae33d3c1c05f7d
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends openssl ca-certificates && \
@@ -72,14 +72,19 @@ COPY docker/nginx/tls-status/index.html               /usr/share/nginx/tls-statu
 COPY docker/nginx/docs-engine.collabora.conf  /etc/nginx/docs-engine.collabora.conf
 COPY docker/nginx/docs-engine.onlyoffice.conf /etc/nginx/docs-engine.onlyoffice.conf
 COPY docker/nginx/docker-entrypoint-docs-engine.sh /docker-entrypoint.d/03-docs-engine.sh
+# WARP-3452: renders the peers `location /llm/` refuses (host-originated traffic, guest Wi-Fi)
+# from this container's network at start.
+COPY docker/nginx/render-llm-access.sh /docker-entrypoint.d/04-llm-access.sh
 RUN chmod +x /docker-entrypoint.d/00-fips-profile.sh /docker-entrypoint.d/01-internal-scheme.sh \
              /docker-entrypoint.d/02-canonical-host.sh /docker-entrypoint.d/03-docs-engine.sh \
-             /usr/local/bin/render-canonical-host.sh && \
+             /docker-entrypoint.d/04-llm-access.sh /usr/local/bin/render-canonical-host.sh && \
     # Default the active profile/scheme to the OFF posture so `nginx -t` and
     # a bare run before the entrypoints have selected are well-formed.
     ln -sf /etc/nginx/cipher-profile.default.conf /etc/nginx/cipher-profile.active.conf && \
     ln -sf /etc/nginx/internal-scheme.default.conf /etc/nginx/internal-scheme.active.conf && \
-    ln -sf /etc/nginx/docs-engine.collabora.conf /etc/nginx/docs-engine.active.conf
+    ln -sf /etc/nginx/docs-engine.collabora.conf /etc/nginx/docs-engine.active.conf && \
+    # WARP-3452: bake the CLOSED /llm/ map (no route table → every peer refused).
+    DROPLET_LLM_ACCESS_ROUTES=/dev/null /docker-entrypoint.d/04-llm-access.sh
 
 # --- Build-time nginx-config self-test: both cipher profiles must parse -------
 # The full nginx.conf server block references TLS certs that don't exist in the
@@ -113,12 +118,12 @@ RUN set -eu; \
       -subj /CN=TestCA -days 1 >/dev/null 2>&1; \
     openssl req -newkey rsa:2048 -nodes -keyout /tmp/l.key -out /tmp/l.csr \
       -subj /CN=leaf >/dev/null 2>&1; \
-    printf 'subjectAltName=DNS:test-box.droplet-us.com\n' > /tmp/san.cnf; \
+    printf 'subjectAltName=DNS:test-box.lan\n' > /tmp/san.cnf; \
     openssl x509 -req -in /tmp/l.csr -CA /tmp/ca.crt -CAkey /tmp/ca.key -CAcreateserial \
       -days 1 -extfile /tmp/san.cnf -out /tmp/l.crt >/dev/null 2>&1; \
-    DROPLET_LAN_DNS_AUTHORITY=1 DROPLET_CANONICAL_CERT=/tmp/l.crt \
+    DROPLET_LAN_DNS_AUTHORITY=1 DROPLET_LAN_HOSTNAME=test-box.lan DROPLET_CANONICAL_CERT=/tmp/l.crt \
       DROPLET_CANONICAL_OUT=/tmp/ch-on.conf /usr/local/bin/render-canonical-host.sh; \
-    grep -q 'test-box.droplet-us.com' /tmp/ch-on.conf; \
+    grep -q 'test-box.lan' /tmp/ch-on.conf; \
     for ch in /etc/nginx/canonical-host.active.conf /tmp/ch-on.conf; do \
       printf 'events{}\nhttp{\n resolver 127.0.0.11 valid=10s ipv6=off;\n include %s;\n}\n' "$ch" > /tmp/test-nginx.conf; \
       nginx -t -c /tmp/test-nginx.conf; \
@@ -132,6 +137,24 @@ RUN set -eu; \
       printf 'events{}\nhttp{\n map $http_upgrade $connection_upgrade { default upgrade; "" close; }\n server{\n  listen 8080;\n  include /etc/nginx/docs-engine.%s.conf;\n }\n}\n' "$eng" > /tmp/test-nginx.conf; \
       nginx -t -c /tmp/test-nginx.conf; \
     done; \
+    # WARP-3452: the /llm/ map rendered from a fixture route table carries this
+    # network's gateway and the box address, and parses.
+    printf 'Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\neth0\t00000000\t010012AC\t0003\t0\t0\t0\t00000000\t0\t0\t0\n' > /tmp/route; \
+    DROPLET_LLM_ACCESS_ROUTES=/tmp/route DROPLET_LLM_ACCESS_OUT=/tmp/llm.conf DROPLET_LLM_BOX_IP=192.168.1.87 \
+      /docker-entrypoint.d/04-llm-access.sh; \
+    grep -q ' 172\.18\.0\.1 ' /tmp/llm.conf; \
+    grep -q ' 192\.168\.1\.87 ' /tmp/llm.conf; \
+    printf 'events{}\nhttp{\n include /tmp/llm.conf;\n}\n' > /tmp/test-nginx.conf; \
+    nginx -t -c /tmp/test-nginx.conf; \
+    # The box address comes from the host dnsmasq's last host-record.
+    printf 'host-record=d-old.example,192.168.20.1\nhost-record=d-new.example,192.168.9.250\n' > /tmp/hostdns.conf; \
+    DROPLET_LLM_ACCESS_ROUTES=/tmp/route DROPLET_LLM_ACCESS_OUT=/tmp/llm.conf \
+      DROPLET_LLM_ACCESS_HOST_DNS_CONF=/tmp/hostdns.conf /docker-entrypoint.d/04-llm-access.sh; \
+    grep -q ' 192\.168\.9\.250 ' /tmp/llm.conf; \
+    DROPLET_LLM_ACCESS_ROUTES=/nonexistent DROPLET_LLM_ACCESS_OUT=/tmp/llm.conf \
+      /docker-entrypoint.d/04-llm-access.sh; \
+    grep -qE '^ +default +1;' /tmp/llm.conf; \
+    rm -f /tmp/route /tmp/llm.conf /tmp/hostdns.conf; \
     # WARP-1688: and finally the REAL /etc/nginx/nginx.conf, end to end.
     # Everything above validates an INCLUDE variant in a throwaway config —
     # nothing validated nginx.conf itself, because its server block loads TLS
@@ -149,6 +172,7 @@ RUN set -eu; \
     echo "WARP-1021 nginx cipher-profile self-test OK — default + fips profiles parse"; \
     echo "WARP-1061 internal-scheme self-test OK — default + mtls variants parse"; \
     echo "WARP-1686 docs-engine self-test OK — collabora + onlyoffice variants parse"; \
+    echo "WARP-3452 llm-access self-test OK — the rendered /llm/ map parses"; \
     echo "WARP-1688 full-config self-test OK — /etc/nginx/nginx.conf parses"
 
 # --- WARP-2903 — the docs-discovery leg must REWRITE, not merely parse -------

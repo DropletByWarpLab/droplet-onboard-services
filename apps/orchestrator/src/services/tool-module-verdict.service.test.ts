@@ -326,7 +326,6 @@ describe("one cache with the module gate", () => {
     DROPLET_MATTER_SERVICE_URL: "http://matter:8003",
     ROUTING_SERVICE_URL: "http://routing:8004",
     SWITCH_SERVICE_URL: "http://switch:8005",
-    DOORS_ENABLED: "0",
   };
 
   it("a toggle leaves (and rejoins) the tool list on the same invalidate() that moves the route gate", async () => {

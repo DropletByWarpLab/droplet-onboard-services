@@ -799,6 +799,23 @@ export function credentialFieldsFor(
 }
 
 /**
+ * WARP-3434 — whether a credential saved on this track is PROBED by
+ * `POST /api/integrations/:provider/connect`.
+ *
+ * `cloud` and `rest` land PROVISIONING after a save ("stored, not yet
+ * checked") and have a connector the orchestrator can build from the row; `mcp`
+ * lands CONNECTED on the paste itself and the connect route refuses it. The one
+ * place the rule is written, so the box can put the answer on the credential
+ * list (`SaasCredentialView.probedOnConnect`) and a client without this package
+ * reads it instead of re-deriving it from the track.
+ */
+export function isProbedOnConnect(
+  descriptor: Pick<ProviderDescriptor, "track"> | undefined,
+): boolean {
+  return descriptor?.track === "cloud" || descriptor?.track === "rest";
+}
+
+/**
  * The validated shape of `IntegrationConnection.providerConfig`.
  *
  * Flat and open rather than a per-provider union arm: the union was one of the

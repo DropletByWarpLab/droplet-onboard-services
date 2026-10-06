@@ -2,8 +2,8 @@
 Description=Droplet storage-pool apply (root executor for owner-confirmed mdadm/mkfs ops)
 # ADR-019 follow-up: the device-bridge sandbox (User=droplet +
 # ProtectSystem=strict + NoNewPrivileges) can never run mdadm/mkfs/mount, so
-# the bridge spools the owner-confirmed request into its StateDirectory
-# (/var/lib/droplet-bridge/pool-spool/request.json) and starts THIS unit via
+# the bridge spools the owner-confirmed request into its RuntimeDirectory
+# (/run/droplet-bridge-pool-spool/request.json, on tmpfs) and starts THIS unit via
 # polkit (50-droplet-device-bridge.rules — start verb, this unit only, user
 # droplet only). ExecStart consumes that one request as root, runs the
 # repo-tracked droplet-storage-pool.sh (whose hard pre-flight is the real
@@ -16,6 +16,9 @@ Description=Droplet storage-pool apply (root executor for owner-confirmed mdadm/
 [Service]
 Type=oneshot
 ExecStart=/usr/local/sbin/droplet-storage-pool-apply.sh
+# The final recordings-status guard in the root executor must read the same
+# live .env source as the device-bridge. The installer substitutes this path.
+Environment=REPO_ROOT=@REPO_ROOT@
 # WARP-1338: droplet-storage-pool.sh registers freshly-mounted pool/adopted
 # filesystems with Nextcloud; the container name (NEXTCLOUD_CONTAINER) comes
 # from the SAME env file the automount units load. `-` keeps a box without

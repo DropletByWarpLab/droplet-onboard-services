@@ -188,6 +188,55 @@ else
   fail "migrate_env backfill wrong (lines=${OPENWRT_PASS_LINE_COUNT}, value='${OPENWRT_PASS_MIGRATED:0:4}…')"
 fi
 
+# --- sync_openwrt_password_secret keeps an external router's password (WARP-3738) ---
+# External OPENWRT_HOST: the operator pastes the router's own droplet-ai
+# password into the secret file; sync must not overwrite it with the .env value.
+SYNC_DIR="$TMP_ROOT/docker/secrets"
+SYNC_PW="boxgenerated0123456789abcd"
+SYNC_ROUTER_PW="routerown0123456789abcdef0123"
+SYNC_LOG="$TMP_ROOT/.data/sync-openwrt.log"
+mkdir -p "$SYNC_DIR"
+sync_case() { # <host> <initial file content, or NONE>; sync output goes to $SYNC_LOG
+  rm -f "$SYNC_DIR/openwrt_password"
+  [ "$2" = "NONE" ] || printf '%s' "$2" > "$SYNC_DIR/openwrt_password"
+  ( OPENWRT_HOST="$1" OPENWRT_PASSWORD="$SYNC_PW" sync_openwrt_password_secret ) >"$SYNC_LOG" 2>&1
+}
+
+sync_case 192.168.9.1 "$SYNC_ROUTER_PW"
+if [ "$(cat "$SYNC_DIR/openwrt_password")" = "$SYNC_ROUTER_PW" ]; then
+  pass "sync_openwrt_password_secret keeps an external router's differing password"
+else
+  fail "sync_openwrt_password_secret overwrote the external router's password"
+fi
+if grep -qF "$SYNC_PW" "$SYNC_LOG" || grep -qF "$SYNC_ROUTER_PW" "$SYNC_LOG"; then
+  fail "sync_openwrt_password_secret logged a password"
+else
+  pass "sync_openwrt_password_secret log never contains a password"
+fi
+
+sync_case 127.0.0.1 "$SYNC_ROUTER_PW"
+if [ "$(cat "$SYNC_DIR/openwrt_password")" = "$SYNC_PW" ]; then
+  pass "sync_openwrt_password_secret rewrites from .env for a loopback host"
+else
+  fail "sync_openwrt_password_secret did not rewrite the file for a loopback host"
+fi
+
+for p13_init in "" NONE; do
+  sync_case 192.168.9.1 "$p13_init"
+  if [ -f "$SYNC_DIR/openwrt_password" ] && [ ! -s "$SYNC_DIR/openwrt_password" ] \
+     && grep -q "droplet-ai-password" "$SYNC_LOG" && ! grep -qF "$SYNC_PW" "$SYNC_LOG"; then
+    pass "sync_openwrt_password_secret leaves the secret empty + warns for an external host (initial: ${p13_init:-empty file})"
+  else
+    fail "sync_openwrt_password_secret seeded/skipped the secret for an external host (initial: ${p13_init:-empty file})"
+  fi
+done
+sync_case 127.0.0.1 ""
+if [ "$(cat "$SYNC_DIR/openwrt_password")" = "$SYNC_PW" ]; then
+  pass "sync_openwrt_password_secret still fills an empty file for a loopback host"
+else
+  fail "sync_openwrt_password_secret no longer fills an empty file for a loopback host"
+fi
+
 # --- DROPLET_TPM_BACKEND scaffold guard (IDX-002) -------------------------
 # The 'real' (tpm2-pytss) device-identity backend is an UNFINISHED scaffold:
 # device-identity-svc (services/device-identity-svc/backends/__init__.py)
@@ -430,6 +479,7 @@ EOF
 chmod +x "$SB_STUB_BIN/docker"
 SB_OLD_PATH="$PATH"
 PATH="$SB_STUB_BIN:$PATH"
+printf 'TUNNEL_TOKEN=retired-token\n' >> "$TMP_ROOT/.env"
 
 if configure_single_box_env >/dev/null 2>&1; then
   pass "configure_single_box_env completed without error"
@@ -463,6 +513,15 @@ case "$SB_GPU_VENDOR" in
   *) fail "GPU_VENDOR='$SB_GPU_VENDOR' is not one of nvidia/amd/none" ;;
 esac
 
+# WARP-3452 — the same call writes the context window (configure_gpu_env ->
+# configure_context_env). A GPU-less runner must land on 16384 for both keys.
+SB_CTX="$(grep -E '^DMR_CONTEXT_LENGTH=' "$TMP_ROOT/.env" | tail -1 | cut -d= -f2- || true)/$(grep -E '^OLLAMA_CONTEXT_LENGTH=' "$TMP_ROOT/.env" | tail -1 | cut -d= -f2- || true)"
+if [ "$SB_GPU_VENDOR" != "none" ] || [ "$SB_CTX" = "16384/16384" ]; then
+  pass "context window written with GPU_VENDOR=$SB_GPU_VENDOR ($SB_CTX)"
+else
+  fail "no GPU but context window is '$SB_CTX', expected 16384/16384 — configure_context_env is not wired in"
+fi
+
 # And the runtime profile token must agree with the detected vendor — a CUDA
 # profile beside a ROCm image (or vice versa) is the exact disagreement this
 # change exists to prevent.
@@ -494,6 +553,12 @@ if grep -E '^COMPOSE_PROFILES=' "$TMP_ROOT/.env" | tail -1 | grep -q 'single-box
   pass "COMPOSE_PROFILES includes single-box"
 else
   fail "COMPOSE_PROFILES does not include single-box after configure_single_box_env"
+fi
+
+if grep '^COMPOSE_PROFILES=' "$TMP_ROOT/.env" | grep -q 'relay'; then
+  fail "a retired tunnel token still enabled remote relay provisioning"
+else
+  pass "a retired tunnel token cannot enable a relay profile"
 fi
 
 # Idempotent — a second call must not duplicate the AP-mode knob.
@@ -645,16 +710,8 @@ else
   fail "DISPLAY_SERVICE_URL is '${DISPLAY_URL_EFFECTIVE}' (expected http://${SB_FAKE_GW}:8082)"
 fi
 
-# (4) DEVICE_GATEWAY_URL — derived gateway, host port 8084.
-DEVICE_GATEWAY_URL_EFFECTIVE=$( { grep -E '^DEVICE_GATEWAY_URL=' "$TMP_ROOT/.env" || true; } | tail -1 | cut -d= -f2-)
-if [ "$DEVICE_GATEWAY_URL_EFFECTIVE" = "http://${SB_FAKE_GW}:8084" ]; then
-  pass "DEVICE_GATEWAY_URL is the derived droplet_default gateway (http://${SB_FAKE_GW}:8084)"
-else
-  fail "DEVICE_GATEWAY_URL is '${DEVICE_GATEWAY_URL_EFFECTIVE}' (expected http://${SB_FAKE_GW}:8084)"
-fi
-
-# (AC #2) None of the four may be left as host.docker.internal or docker0.
-if { grep -E '^(ROUTING|SWITCH|DISPLAY)_SERVICE_URL=|^DEVICE_GATEWAY_URL=' "$TMP_ROOT/.env" || true; } \
+# (AC #2) None of the three may be left as host.docker.internal or docker0.
+if { grep -E '^(ROUTING|SWITCH|DISPLAY)_SERVICE_URL=' "$TMP_ROOT/.env" || true; } \
      | grep -qE 'host\.docker\.internal|172\.17\.0\.1'; then
   fail "a host-net SERVICE_URL still points at host.docker.internal/172.17.0.1 (the unreachable docker0)"
 else
@@ -1588,294 +1645,12 @@ else
   fail "bailed hold-off is silent — the WARP-990 skip message must reach stderr"
 fi
 
-# =============================================================================
-# Phase 9: public-FQDN write-back under the bridge sandbox (WARP-985)
-# =============================================================================
-# The TLS boot-tick issued the cert, then the bridge-exec'd
-# droplet-set-public-fqdn.sh died with mktemp EROFS: the bridge unit's
-# ProtectSystem=strict + ProtectHome=read-only had no writable carve-out for
-# the repo dir where .env lives. Two side gaps rode along: the bridge env
-# never carried ROUTING_SERVICE_TOKEN (routing-DNS leg 401'd), and
-# _write_host_dnsmasq_record's sudo failed silently under NoNewPrivileges.
-# Static assertions verify the wiring; behavioural assertions exercise the
-# REAL host script via its DROPLET_PUBLIC_FQDN_ENV_FILE/SKIP_DNS test hooks.
-echo "--- Phase 9: bridge sandbox FQDN write-back (WARP-985) ---"
-
-FQDN_SCRIPT="$REPO_ROOT_REAL/scripts/host/droplet-set-public-fqdn.sh"
-LOCAL_DNS_LIB="$REPO_ROOT_REAL/scripts/lib/local-dns.sh"
-BRIDGE_UNIT="$REPO_ROOT_REAL/services/oled-display/droplet-device-bridge.service"
-
-# (1) Syntax: both touched scripts must pass bash -n.
-if bash -n "$FQDN_SCRIPT" 2>/dev/null; then
-  pass "droplet-set-public-fqdn.sh passes bash -n syntax check"
+# Internal DNS regression suite also runs in the existing setup CI lane.
+if bash "$SCRIPT_DIR/internal-dns-provisioning.test.sh"; then
+  pass "internal DNS provisioning is independent of the retired fleet path"
 else
-  fail "droplet-set-public-fqdn.sh has a bash syntax error"
+  fail "internal DNS provisioning regression"
 fi
-if bash -n "$LOCAL_DNS_LIB" 2>/dev/null; then
-  pass "local-dns.sh passes bash -n syntax check"
-else
-  fail "local-dns.sh has a bash syntax error"
-fi
-
-# (2) Static: the bridge unit must carve the repo dir out of the read-only
-# sandbox (`-` prefix so a moved checkout doesn't fail unit start). The
-# @REPO_ROOT@ placeholder is substituted by install-device-bridge.sh, same as
-# ExecStart.
-if grep -qxF 'ReadWritePaths=-@REPO_ROOT@' "$BRIDGE_UNIT"; then
-  pass "bridge unit carves the repo dir out of the sandbox (ReadWritePaths=-@REPO_ROOT@)"
-else
-  fail "bridge unit has no ReadWritePaths=-@REPO_ROOT@ — the .env write-back dies with mktemp EROFS"
-fi
-
-# ...without losing the per-unit log carve-out that append:/var/log needs.
-if grep -qxF 'ReadWritePaths=/var/log/droplet-device-bridge.log' "$BRIDGE_UNIT"; then
-  pass "bridge unit keeps the log-file ReadWritePaths carve-out"
-else
-  fail "bridge unit lost ReadWritePaths=/var/log/droplet-device-bridge.log (append: logging breaks)"
-fi
-
-# (3) Static: the installer must mirror ROUTING_SERVICE_TOKEN into the bridge
-# env (same set_env_if_blank mechanism as BRIDGE_AUTH_TOKEN) so the host
-# script's routing-DNS leg authenticates instead of 401ing.
-if grep -qE 'set_env_if_blank "ROUTING_SERVICE_TOKEN"' "$BRIDGE_INSTALL"; then
-  pass "install-device-bridge.sh mirrors ROUTING_SERVICE_TOKEN into the bridge env"
-else
-  fail "install-device-bridge.sh does not mirror ROUTING_SERVICE_TOKEN — POST /dhcp/hostnames 401s from the bridge"
-fi
-
-# (4) Static: _write_host_dnsmasq_record must probe non-interactive sudo before
-# using it (NoNewPrivileges blocks sudo silently under the bridge sandbox).
-if grep -qE 'sudo -n true' "$LOCAL_DNS_LIB"; then
-  pass "local-dns.sh probes non-interactive sudo before the host dnsmasq write"
-else
-  fail "local-dns.sh has no 'sudo -n true' probe — the dnsmasq write fails silently under the bridge sandbox"
-fi
-
-# --- Behavioural: the real host script via its test hooks ---------------------
-FQDN_ENV="$TMP_ROOT/fqdn.env"
-rm -f "$FQDN_ENV"
-
-# (5) Fresh file: a valid opaque per-device FQDN is upserted.
-if DROPLET_PUBLIC_FQDN_ENV_FILE="$FQDN_ENV" DROPLET_PUBLIC_FQDN_SKIP_DNS=1 \
-     bash "$FQDN_SCRIPT" 'd-b5839920cb1b0d09.droplet-us.com' >/dev/null 2>&1 \
-   && grep -qxF 'DROPLET_PUBLIC_FQDN=d-b5839920cb1b0d09.droplet-us.com' "$FQDN_ENV"; then
-  pass "droplet-set-public-fqdn.sh writes DROPLET_PUBLIC_FQDN to a fresh .env"
-else
-  fail "droplet-set-public-fqdn.sh did not write DROPLET_PUBLIC_FQDN (got: $(cat "$FQDN_ENV" 2>/dev/null || echo '<missing>'))"
-fi
-
-# (6) Idempotent: a re-run with the same name leaves the file byte-identical.
-FQDN_ENV_BEFORE="$(cat "$FQDN_ENV" 2>/dev/null || true)"
-if DROPLET_PUBLIC_FQDN_ENV_FILE="$FQDN_ENV" DROPLET_PUBLIC_FQDN_SKIP_DNS=1 \
-     bash "$FQDN_SCRIPT" 'd-b5839920cb1b0d09.droplet-us.com' >/dev/null 2>&1 \
-   && [ "$(cat "$FQDN_ENV")" = "$FQDN_ENV_BEFORE" ]; then
-  pass "droplet-set-public-fqdn.sh re-run is byte-identical (idempotent upsert)"
-else
-  fail "droplet-set-public-fqdn.sh re-run changed the .env (not idempotent)"
-fi
-
-# (7) Replace-in-place: an existing commented/stale line is replaced, and no
-# duplicate key is appended.
-printf '# DROPLET_PUBLIC_FQDN=\nOTHER_KEY=keepme\n' > "$FQDN_ENV"
-if DROPLET_PUBLIC_FQDN_ENV_FILE="$FQDN_ENV" DROPLET_PUBLIC_FQDN_SKIP_DNS=1 \
-     bash "$FQDN_SCRIPT" 'd-b5839920cb1b0d09.droplet-us.com' >/dev/null 2>&1 \
-   && grep -qxF 'DROPLET_PUBLIC_FQDN=d-b5839920cb1b0d09.droplet-us.com' "$FQDN_ENV" \
-   && grep -qxF 'OTHER_KEY=keepme' "$FQDN_ENV" \
-   && [ "$(grep -c 'DROPLET_PUBLIC_FQDN=' "$FQDN_ENV")" -eq 1 ]; then
-  pass "droplet-set-public-fqdn.sh replaces a commented line in place (no dup, keeps other keys)"
-else
-  fail "droplet-set-public-fqdn.sh mishandled an existing commented line (got: $(cat "$FQDN_ENV" 2>/dev/null))"
-fi
-
-# (8) Validation: a metacharacter-bearing name is refused BEFORE any write.
-FQDN_ENV_BEFORE="$(cat "$FQDN_ENV")"
-if DROPLET_PUBLIC_FQDN_ENV_FILE="$FQDN_ENV" DROPLET_PUBLIC_FQDN_SKIP_DNS=1 \
-     bash "$FQDN_SCRIPT" 'evil;rm -rf.example.com' >/dev/null 2>&1; then
-  fail "droplet-set-public-fqdn.sh accepted an fqdn with shell metacharacters"
-else
-  if [ "$(cat "$FQDN_ENV")" = "$FQDN_ENV_BEFORE" ]; then
-    pass "droplet-set-public-fqdn.sh refuses a bad fqdn and writes nothing"
-  else
-    fail "droplet-set-public-fqdn.sh refused the bad fqdn but still modified the .env"
-  fi
-fi
-
-# (9) Validation: a newline-bearing name is refused BEFORE any write. grep is
-# LINE-based, so 'ok.example.com<LF>INJECTED=1' passed the old `printf|grep -Eq`
-# check on its first line and appended a second .env assignment; the [[ =~ ]]
-# whole-string match must refuse it outright.
-FQDN_ENV_BEFORE="$(cat "$FQDN_ENV")"
-if DROPLET_PUBLIC_FQDN_ENV_FILE="$FQDN_ENV" DROPLET_PUBLIC_FQDN_SKIP_DNS=1 \
-     bash "$FQDN_SCRIPT" $'ok.example.com\nINJECTED=1' >/dev/null 2>&1; then
-  fail "droplet-set-public-fqdn.sh accepted an fqdn with an embedded newline (env injection)"
-else
-  if [ "$(cat "$FQDN_ENV")" = "$FQDN_ENV_BEFORE" ] \
-     && ! grep -qxF 'INJECTED=1' "$FQDN_ENV"; then
-    pass "droplet-set-public-fqdn.sh refuses a newline-bearing fqdn and writes nothing"
-  else
-    fail "droplet-set-public-fqdn.sh let a newline-bearing fqdn touch the .env (got: $(cat "$FQDN_ENV" 2>/dev/null))"
-  fi
-fi
-
-# --- Behavioural: the sudo guard defers instead of failing silently -----------
-# Source the REAL library, point its host-dnsmasq conf at a fixture, and put a
-# stub `sudo` (always exits 1, so `sudo -n true` fails) first on PATH — the
-# same environment the bridge sandbox presents. The write must return 0, warn
-# about the deferral, and leave the conf untouched.
-# shellcheck source=../scripts/lib/local-dns.sh
-source "$LOCAL_DNS_LIB"
-
-_HOST_DNSMASQ_CONF="$TMP_ROOT/lan-dhcp.conf"
-printf 'dhcp-range=192.168.20.50,192.168.20.150,12h\n' > "$_HOST_DNSMASQ_CONF"
-DNSMASQ_CONF_BEFORE="$(cat "$_HOST_DNSMASQ_CONF")"
-DROPLET_PUBLIC_FQDN='d-b5839920cb1b0d09.droplet-us.com'
-DROPLET_PUBLIC_FQDN_IP='192.168.20.1'
-
-SUDO_STUB_BIN="$TMP_ROOT/no-sudo-bin"
-mkdir -p "$SUDO_STUB_BIN"
-printf '#!/usr/bin/env bash\nexit 1\n' > "$SUDO_STUB_BIN/sudo"
-chmod +x "$SUDO_STUB_BIN/sudo"
-
-WARN_CAPTURE="$TMP_ROOT/dnsmasq-warn.txt"
-if ( PATH="$SUDO_STUB_BIN:$PATH" _write_host_dnsmasq_record ) \
-     >/dev/null 2>"$WARN_CAPTURE"; then
-  pass "_write_host_dnsmasq_record returns 0 when non-interactive sudo is unavailable"
-else
-  fail "_write_host_dnsmasq_record returned non-zero without sudo (breaks the best-effort contract)"
-fi
-
-if grep -q 'deferred to the next boot/setup run' "$WARN_CAPTURE"; then
-  pass "_write_host_dnsmasq_record warns that the host-record is deferred (no silent no-op)"
-else
-  fail "_write_host_dnsmasq_record did not warn about the deferral (got: $(cat "$WARN_CAPTURE" 2>/dev/null))"
-fi
-
-if [ "$(cat "$_HOST_DNSMASQ_CONF")" = "$DNSMASQ_CONF_BEFORE" ]; then
-  pass "_write_host_dnsmasq_record left the dnsmasq conf untouched without sudo"
-else
-  fail "_write_host_dnsmasq_record modified the dnsmasq conf despite sudo being unavailable"
-fi
-
-# =============================================================================
-# Phase 10: droplet-set-public-fqdn.sh AP-resolver propagation (WARP-986)
-# =============================================================================
-# Live gap on the .87 single-box (2026-07-01): the script's two DNS legs never
-# reach the dnsmasq-ap instance inside the droplet-openwrt container — the ONLY
-# resolver AP (Wi-Fi) clients use — so the learned public FQDN stayed
-# unresolvable on AP Wi-Fi until the next boot. The fix adds a best-effort
-# _propagate_ap_resolver leg: when passwordless sudo is available, re-run
-# droplet-openwrt-attach.service (which now emits the FQDN into
-# /etc/dnsmasq-ap.conf); otherwise log and stay non-fatal. Static assertions
-# verify the wiring; behavioural assertions exercise the REAL function
-# extracted from the script (mirrors the Phase 7 lock-function extraction).
-echo "--- Phase 10: droplet-set-public-fqdn.sh AP-resolver propagation ---"
-
-SET_FQDN_SH="$REPO_ROOT_REAL/scripts/host/droplet-set-public-fqdn.sh"
-
-# (1) Static: privileged host script — syntax must be valid (same posture as
-# install-device-bridge.sh in Phase 4).
-if bash -n "$SET_FQDN_SH" 2>/dev/null; then
-  pass "droplet-set-public-fqdn.sh passes bash -n syntax check"
-else
-  fail "droplet-set-public-fqdn.sh has a bash syntax error"
-fi
-
-# (2) Static: the propagation leg exists, gates on passwordless sudo, and
-# restarts the attach unit (never a hand-rolled dnsmasq poke).
-if grep -qE 'sudo -n true' "$SET_FQDN_SH" \
-   && grep -qE 'systemctl restart droplet-openwrt-attach\.service' "$SET_FQDN_SH"; then
-  pass "propagation leg gates on 'sudo -n true' and restarts droplet-openwrt-attach.service"
-else
-  fail "propagation leg missing the sudo gate or the attach-unit restart (WARP-986)"
-fi
-
-if grep -qE '^_propagate_ap_resolver$' "$SET_FQDN_SH"; then
-  pass "_propagate_ap_resolver is invoked"
-else
-  fail "_propagate_ap_resolver is not invoked"
-fi
-
-# --- Behavioural: extract the real function and exercise it ------------------
-eval "$(awk '/^_propagate_ap_resolver\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$SET_FQDN_SH")"
-
-PF_WORK="$TMP_ROOT/pf"
-PF_STUB_BIN="$PF_WORK/bin"
-mkdir -p "$PF_STUB_BIN"
-
-# sudo stub: '-n true' answers per the sudo-ok flag; '-n systemctl restart <u>'
-# records the unit and answers per the restart-ok flag. systemctl stub exists
-# only so the function's `command -v systemctl` probe succeeds.
-cat > "$PF_STUB_BIN/sudo" <<EOF
-#!/usr/bin/env bash
-if [ "\$1" = "-n" ] && [ "\$2" = "true" ]; then
-  [ -f "$PF_WORK/sudo-ok" ] && exit 0 || exit 1
-fi
-if [ "\$1" = "-n" ] && [ "\$2" = "systemctl" ] && [ "\$3" = "restart" ]; then
-  printf '%s\n' "\$4" >> "$PF_WORK/restarts"
-  [ -f "$PF_WORK/restart-ok" ] && exit 0 || exit 1
-fi
-exit 0
-EOF
-printf '#!/usr/bin/env bash\nexit 0\n' > "$PF_STUB_BIN/systemctl"
-chmod +x "$PF_STUB_BIN/sudo" "$PF_STUB_BIN/systemctl"
-
-PF_OLD_PATH="$PATH"
-PATH="$PF_STUB_BIN:$PATH"
-FQDN="d-0123456789abcdef.droplet-us.com"
-err() { printf 'droplet-set-public-fqdn: %s\n' "$*" >> "$PF_WORK/err.log"; }
-
-# (3) sudo ok + restart ok -> the attach unit is restarted and success is logged.
-: > "$PF_WORK/restarts"; : > "$PF_WORK/err.log"
-touch "$PF_WORK/sudo-ok" "$PF_WORK/restart-ok"
-PF_OUT="$( (_propagate_ap_resolver) 2>/dev/null || true)"
-if printf '%s' "$PF_OUT" | grep -q 'AP resolver refreshed' \
-   && grep -qx 'droplet-openwrt-attach.service' "$PF_WORK/restarts"; then
-  pass "passwordless sudo -> restarts droplet-openwrt-attach.service (FQDN live for AP clients now)"
-else
-  fail "expected attach-unit restart + success log, got out='$PF_OUT' restarts='$(cat "$PF_WORK/restarts" 2>/dev/null)'"
-fi
-
-# (4) No passwordless sudo (the device-bridge shape) -> non-fatal skip, no
-# restart attempted, next-boot breadcrumb logged.
-: > "$PF_WORK/restarts"; : > "$PF_WORK/err.log"
-rm -f "$PF_WORK/sudo-ok"
-if (_propagate_ap_resolver) >/dev/null 2>&1 \
-   && [ ! -s "$PF_WORK/restarts" ] \
-   && grep -q 'no passwordless sudo' "$PF_WORK/err.log"; then
-  pass "no passwordless sudo -> returns 0, no restart, next-boot breadcrumb logged"
-else
-  fail "sudo-less path wrong (rc/restarts/log): restarts='$(cat "$PF_WORK/restarts" 2>/dev/null)' log='$(cat "$PF_WORK/err.log" 2>/dev/null)'"
-fi
-
-# (5) Restart fails -> still non-fatal (returns 0) with a loud breadcrumb —
-# the .env write-back above it must never be failed by this leg.
-: > "$PF_WORK/restarts"; : > "$PF_WORK/err.log"
-touch "$PF_WORK/sudo-ok"; rm -f "$PF_WORK/restart-ok"
-if (_propagate_ap_resolver) >/dev/null 2>&1 \
-   && grep -q 'restart failed' "$PF_WORK/err.log"; then
-  pass "attach restart failure stays non-fatal (rc 0) with a breadcrumb"
-else
-  fail "restart-failure path wrong: log='$(cat "$PF_WORK/err.log" 2>/dev/null)'"
-fi
-
-# (6) Full-script run with the SKIP_DNS hook: .env upsert happens, exit 0, and
-# the propagation leg is NOT reached (the hook means "write .env only").
-PF_ENV="$PF_WORK/dotenv"
-rm -f "$PF_ENV"; : > "$PF_WORK/restarts"
-touch "$PF_WORK/sudo-ok" "$PF_WORK/restart-ok"
-if DROPLET_PUBLIC_FQDN_SKIP_DNS=1 DROPLET_PUBLIC_FQDN_ENV_FILE="$PF_ENV" \
-     bash "$SET_FQDN_SH" "$FQDN" >/dev/null 2>&1 \
-   && grep -qxF "DROPLET_PUBLIC_FQDN=$FQDN" "$PF_ENV" \
-   && [ ! -s "$PF_WORK/restarts" ]; then
-  pass "SKIP_DNS hook: .env upserted, exit 0, propagation leg not reached"
-else
-  fail "SKIP_DNS run wrong (env='$(cat "$PF_ENV" 2>/dev/null)' restarts='$(cat "$PF_WORK/restarts" 2>/dev/null)')"
-fi
-
-# Restore PATH and drop the test-local err() shadow.
-PATH="$PF_OLD_PATH"
-unset -f err _propagate_ap_resolver
-
 
 # =============================================================================
 # Phase 11: interrupted re-run convergence (WARP-595)
@@ -2353,6 +2128,252 @@ if printf '%s' "$P12_BUILD_BODY" | grep -qF '${CI:-}'; then
 else
   fail "drift guard has no CI gate — either devices hard-fail on drift or CI never does"
 fi
+
+# =============================================================================
+# Phase 13: WARP-3835 — --edge-router flag + fatal verify
+# =============================================================================
+echo "--- Phase 13: edge-router flag and verify gate (WARP-3835) ---"
+
+P13_ENV="$TMP_ROOT/p13.env"
+p13_get() { grep -E "^$1=" "$P13_ENV" | tail -1 | cut -d= -f2-; }
+
+# (1) the flag writes the three keys; port defaults to 80
+printf 'FOO=bar\n' > "$P13_ENV"
+ENV_FILE="$P13_ENV" configure_edge_router 192.168.9.1 >/dev/null
+if [ "$(p13_get OPENWRT_HOST)|$(p13_get OPENWRT_PORT)|$(p13_get OPENWRT_USERNAME)" = "192.168.9.1|80|droplet-ai" ]; then
+  pass "--edge-router HOST writes OPENWRT_HOST/PORT=80/USERNAME=droplet-ai"
+else
+  fail "--edge-router HOST wrote wrong keys: $(grep OPENWRT "$P13_ENV" | tr '\n' ' ')"
+fi
+
+# (2) HOST:PORT, and idempotent (one line per key after re-running)
+ENV_FILE="$P13_ENV" configure_edge_router 10.0.0.1:8080 >/dev/null
+ENV_FILE="$P13_ENV" configure_edge_router 10.0.0.1:8080 >/dev/null
+if [ "$(p13_get OPENWRT_HOST)|$(p13_get OPENWRT_PORT)" = "10.0.0.1|8080" ] \
+   && [ "$(grep -c '^OPENWRT_' "$P13_ENV")" = "3" ] && grep -q '^FOO=bar$' "$P13_ENV"; then
+  pass "--edge-router HOST:PORT is idempotent and leaves other keys alone"
+else
+  fail "--edge-router not idempotent: $(cat "$P13_ENV" | tr '\n' ' ')"
+fi
+
+# (3) refuses empty and loopback, and writes nothing
+before="$(cat "$P13_ENV")"
+p13_ok=true
+for bad in '' 127.0.0.1 localhost ::1 127.0.0.1:80 ':80' 'h:notaport'; do
+  if ENV_FILE="$P13_ENV" configure_edge_router "$bad" >/dev/null 2>&1; then p13_ok=false; fi
+done
+if $p13_ok && [ "$before" = "$(cat "$P13_ENV")" ]; then
+  pass "--edge-router refuses empty, loopback and bad ports without touching .env"
+else
+  fail "--edge-router accepted an empty/loopback/bad-port host or modified .env"
+fi
+
+# A write failure must escape the conditional call in setup.sh. Bash disables
+# errexit inside a function used with `||`, so each writer needs its own guard.
+for p13_failed_key in OPENWRT_HOST OPENWRT_PORT OPENWRT_USERNAME; do
+  if (
+    p13_calls=""
+    _upsert_env_kv() {
+      p13_calls="${p13_calls}${1} "
+      [ "$1" != "$p13_failed_key" ]
+    }
+    if configure_edge_router 192.168.9.1 >/dev/null 2>&1; then exit 1; fi
+    case "$p13_failed_key" in
+      OPENWRT_HOST) [ "$p13_calls" = 'OPENWRT_HOST ' ] ;;
+      OPENWRT_PORT) [ "$p13_calls" = 'OPENWRT_HOST OPENWRT_PORT ' ] ;;
+      OPENWRT_USERNAME) [ "$p13_calls" = 'OPENWRT_HOST OPENWRT_PORT OPENWRT_USERNAME ' ] ;;
+    esac
+  ); then
+    pass "--edge-router rejects a failed $p13_failed_key write and stops writing"
+  else
+    fail "--edge-router ignored a failed $p13_failed_key write or continued writing"
+  fi
+done
+
+# (4) a re-run WITHOUT the flag keeps the host: setup only writes when the flag
+# was passed, and the flag is written before both readers of OPENWRT_HOST.
+P13_SETUP="$REPO_ROOT_REAL/scripts/setup.sh"
+if grep -q 'if \[ -n "${EDGE_ROUTER+x}" \]; then' "$P13_SETUP" \
+   && ! grep -qE '^EDGE_ROUTER=' "$P13_SETUP"; then
+  pass "setup.sh only touches the router when --edge-router was passed (EDGE_ROUTER unset by default)"
+else
+  fail "setup.sh may rewrite OPENWRT_HOST without --edge-router"
+fi
+p13_call="$(grep -n 'configure_edge_router "\$EDGE_ROUTER"' "$P13_SETUP" | head -1 | cut -d: -f1)"
+p13_mat="$(grep -n '^  materialize_artifacts' "$P13_SETUP" | tail -1 | cut -d: -f1)"
+p13_sb="$(grep -n '^    configure_single_box_env' "$P13_SETUP" | head -1 | cut -d: -f1)"
+if [ -n "$p13_call" ] && [ "$p13_call" -lt "$p13_mat" ] && [ "$p13_mat" -lt "$p13_sb" ]; then
+  pass "--edge-router is written before materialize_artifacts and configure_single_box_env"
+else
+  fail "--edge-router write is not ordered before its two readers (call=$p13_call mat=$p13_mat sb=$p13_sb)"
+fi
+
+# (5) verify.sh carries the router-auth check, skips mock/disabled, and the
+# secret check demands a non-empty file.
+P13_VERIFY="$REPO_ROOT_REAL/scripts/verify.sh"
+if grep -q 'check "Routing → router auth" _router_auth' "$P13_VERIFY" \
+   && grep -q '"connected" \*: \*true' "$P13_VERIFY" \
+   && awk '/^case "\$\{ROUTING_MODE:-real\}" in/,/^esac/' "$P13_VERIFY" | grep -q 'mock|disabled) ;;'; then
+  pass "verify.sh checks routing /health connected:true and skips mock/disabled"
+else
+  fail "verify.sh is missing the router-auth check or its ROUTING_MODE skip"
+fi
+if grep -q '\[ -s .*openwrt_password' "$P13_VERIFY" && grep -q 'paste the router.s droplet-ai password' "$P13_VERIFY"; then
+  pass "verify.sh requires a NON-EMPTY openwrt_password secret"
+else
+  fail "verify.sh still only checks that the openwrt_password file exists"
+fi
+
+# Exercise the shipping probe without running verify.sh's other stack checks.
+# The curl stub refuses an HTTPS health request unless all three host-admin
+# paths arrive as intact arguments (the checkout path can contain spaces).
+p13_routing_probe() (
+  ITLS_SCHEME="$1" ROUTING_SERVICE_URL="$2"
+  _itls_host_bundle="$TMP_ROOT/host admin"
+  P13_CONNECTED="$3"
+  P13_PROBE_URL="$4"
+  curl() {
+    local ca="" cert="" key="" url=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --cacert) ca="$2"; shift ;;
+        --cert) cert="$2"; shift ;;
+        --key) key="$2"; shift ;;
+        http://*|https://*) url="$1" ;;
+      esac
+      shift
+    done
+    [ "$url" = "$P13_PROBE_URL" ] || return 1
+    if [ "$ITLS_SCHEME" = https ]; then
+      [ "$ca|$cert|$key" = "$_itls_host_bundle/ca.pem|$_itls_host_bundle/cert.pem|$_itls_host_bundle/key.pem" ] || return 1
+    else
+      [ -z "$ca$cert$key" ] || return 1
+    fi
+    printf '{"connected":%s}\n' "$P13_CONNECTED"
+  }
+  eval "$(awk '/^_routing_health\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$P13_VERIFY")"
+  eval "$(grep '^_routing_connected()' "$P13_VERIFY")"
+  _routing_connected
+)
+if p13_routing_probe http '' true http://localhost:8080/health \
+   && p13_routing_probe http http://192.168.50.10:18080/ true http://192.168.50.10:18080/health; then
+  pass "routing health: plain HTTP keeps the default or configured endpoint without client certificates"
+else
+  fail "routing health: plain HTTP endpoint or credential behavior changed"
+fi
+if p13_routing_probe https http://192.168.50.10:18080/ true https://192.168.50.10:18080/health \
+   && p13_routing_probe https https://localhost:8080 true https://localhost:8080/health; then
+  pass "routing health: TLS upgrades HTTP and sends the host-admin CA, certificate and key"
+else
+  fail "routing health: TLS URL or client certificate configuration missing"
+fi
+if ! p13_routing_probe https http://localhost:8080 false https://localhost:8080/health; then
+  pass "routing health: authenticated connected:false still fails router verification"
+else
+  fail "routing health: connected:false incorrectly passed router verification"
+fi
+
+# (6) a failing verify.sh fails setup (exit 1) and the gate precedes the SSH
+# window close; a passing / skipped verify does not fail.
+eval "$(awk '/^run_verify_gate\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$P13_SETUP")"
+P13_DIR="$TMP_ROOT/p13"; mkdir -p "$P13_DIR"
+printf '#!/bin/sh\nexit 1\n' > "$P13_DIR/verify.sh"; chmod +x "$P13_DIR/verify.sh"
+set +e
+( SCRIPT_DIR="$P13_DIR" SKIP_START=false; close_install_mode_ssh_window() { echo CLOSED; }
+  run_verify_gate; close_install_mode_ssh_window ) > "$P13_DIR/out" 2>&1
+p13_rc=$?
+set -e
+if [ "$p13_rc" = "1" ] && grep -q 'FAILED checks' "$P13_DIR/out" && ! grep -q CLOSED "$P13_DIR/out"; then
+  pass "failing verify.sh: setup exits 1 with the FAILED banner, SSH window not closed"
+else
+  fail "failing verify.sh did not exit 1 / reached close_install_mode_ssh_window (rc=$p13_rc)"
+fi
+printf '#!/bin/sh\nexit 0\n' > "$P13_DIR/verify.sh"
+if ( SCRIPT_DIR="$P13_DIR" SKIP_START=false; run_verify_gate ) >/dev/null 2>&1 \
+   && ( SCRIPT_DIR="$P13_DIR" SKIP_START=true; printf '#!/bin/sh\nexit 1\n' > "$P13_DIR/verify.sh"; run_verify_gate ) >/dev/null 2>&1; then
+  pass "passing verify.sh, and --skip-start with a failing one, do not fail setup"
+else
+  fail "verify gate fails when verify passes or is skipped"
+fi
+p13_gate="$(grep -n '^  run_verify_gate' "$P13_SETUP" | head -1 | cut -d: -f1)"
+p13_close="$(grep -n '^  close_install_mode_ssh_window' "$P13_SETUP" | head -1 | cut -d: -f1)"
+if [ -n "$p13_gate" ] && [ -n "$p13_close" ] && [ "$p13_gate" -lt "$p13_close" ]; then
+  pass "run_verify_gate runs before close_install_mode_ssh_window"
+else
+  fail "verify gate is not ordered before close_install_mode_ssh_window"
+fi
+
+# (7) warning counter feeds the banner
+LOG_WARN_COUNT=0; LOG_WARN_LIST=""
+log_warn "first thing" 2>/dev/null; log_warn "second thing" 2>/dev/null
+if [ "$LOG_WARN_COUNT" = "2" ] && [ "$(printf '%s' "$LOG_WARN_LIST" | wc -l | tr -d ' ')" = "2" ] \
+   && grep -q 'Complete with %d warnings' "$P13_SETUP"; then
+  pass "log_warn counts and lists warnings; the banner prints 'Complete with N warnings'"
+else
+  fail "warning counter/banner broken (count=$LOG_WARN_COUNT)"
+fi
+
+# =============================================================================
+# Retired remote-access connector: setup --skip-build still converges.
+# Exercise start_stack with fake Docker functions; no host daemon is contacted.
+# =============================================================================
+RETIRE_DIR="$TMP_ROOT/retired-connector"
+mkdir -p "$RETIRE_DIR/repo"
+printf 'TUNNEL_TOKEN=ignored-legacy-token\n' > "$RETIRE_DIR/repo/.env"
+retirement_start() (
+  eval "$(awk '/^_retire_remote_access_connector\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$COMPOSE_LIB")"
+  eval "$(awk '/^start_stack\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$COMPOSE_LIB")"
+  REPO_ROOT="$RETIRE_DIR/repo"
+  SKIP_BUILD=true
+  COMPOSE_FILE="$REPO_ROOT/docker/docker-compose.yml"
+  COMPOSE_ENV_FILE="$REPO_ROOT/.env"
+  _validate_env() { return 0; }
+  run_with_spinner() { shift; "$@"; }
+  run_nextcloud_post_install_hook() { return 0; }
+  curl() { return 0; }
+  run_docker() {
+    printf '%s\n' "$*" >> "$RETIRE_DIR/calls"
+    case "$1" in
+      ps) printf '%s\n' "${RETIRE_PRESENT:-old-cid}"; return "${RETIRE_PROBE_RC:-0}" ;;
+      rm) return "${RETIRE_REMOVE_RC:-0}" ;;
+    esac
+  }
+  run_docker_compose() {
+    printf 'compose %s\n' "$*" >> "$RETIRE_DIR/calls"
+    case "$*" in
+      *'SELECT 1'*) echo 1 ;;
+      *'ps --status running'*) printf 'running\n%.0s' {1..7} ;;
+    esac
+  }
+  start_stack
+)
+: > "$RETIRE_DIR/calls"
+if retirement_start >/dev/null 2>&1; then
+  pass "setup start succeeds while --skip-build and a stale tunnel token are present"
+else
+  fail "setup start failed during connector retirement"
+fi
+retire_rm="$(grep -n '^rm -f droplet-cloudflared$' "$RETIRE_DIR/calls" | cut -d: -f1 || true)"
+retire_up="$(grep -n ' up -d ' "$RETIRE_DIR/calls" | head -n1 | cut -d: -f1 || true)"
+if [ -n "$retire_rm" ] && [ "$retire_rm" -lt "$retire_up" ] \
+   && ! grep -q -- '--remove-orphans' "$RETIRE_DIR/calls"; then
+  pass "setup --skip-build removes only the retired connector before any compose up"
+else
+  fail "setup start did not retire the exact connector before compose up"
+fi
+for retire_failure in probe remove; do
+  : > "$RETIRE_DIR/calls"
+  RETIRE_PROBE_RC=0; RETIRE_REMOVE_RC=0
+  if [ "$retire_failure" = probe ]; then RETIRE_PROBE_RC=1; else RETIRE_REMOVE_RC=1; fi
+  if retirement_start >/dev/null 2>&1; then
+    fail "setup must fail when retired connector $retire_failure fails"
+  elif grep -q ' up -d ' "$RETIRE_DIR/calls"; then
+    fail "setup started services after retired connector $retire_failure failed"
+  else
+    pass "setup connector $retire_failure failure aborts before starting services"
+  fi
+done
+unset RETIRE_PROBE_RC RETIRE_REMOVE_RC
 
 # =============================================================================
 # Results

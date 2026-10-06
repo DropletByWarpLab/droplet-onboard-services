@@ -114,8 +114,8 @@ export function resolveEffectiveAccessForRequest(
  * WARP-2977 P2b — what a feature gate enforces, readable off the handler.
  *
  * `requireFeatureAccess` returns an anonymous `featureGate` closure, so a
- * router-walk invariant ("every Security write route is gated at exactly its
- * §7 level") had no way to ask a mounted handler what it checks. The marker
+ * router-walk invariant ("every write route of a module is gated at exactly
+ * its level") had no way to ask a mounted handler what it checks. The marker
  * is the `ROLE_GUARD_MARKER` / `isRoleGuard` precedent (middleware/auth.ts):
  * a non-enumerable, non-writable symbol property, so it never shows up in a
  * spread, a JSON dump or Express's own handling. `Symbol.for` so a second copy
@@ -141,7 +141,7 @@ export function readFeatureGateMeta(fn: unknown): FeatureGateMeta | null {
  * Romain, 2026-09-30: an external guest gets NOTHING from company-wide business
  * data unless it is explicitly shared with them, and the box enforces it on
  * every route. The catalog says which modules a tier may hold nothing on
- * (`refuseBelowFloor`: security, crm, projects), and this is the one handler
+ * (`refuseBelowFloor`: crm, projects, money, support), and this is the one handler
  * that turns that fact into a refusal at the prefix — by ROLE, straight off the
  * session, so it holds without a database read and where the per-person gate
  * "has nothing to narrow" (a session with no local User row). Same 404

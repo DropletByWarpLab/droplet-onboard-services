@@ -55,7 +55,7 @@ log_error()   { printf '%s\n' "$*" >> "$TMP/warn.log"; }
 reload_gateway_nginx() { printf 'reload\n' >> "$TMP/reload.log"; return 0; }
 # shellcheck source=../scripts/lib/secrets.sh
 source "$SECRETS"
-unset DROPLET_PUBLIC_FQDN
+unset DROPLET_LAN_HOSTNAME
 
 pin_of() {  # the SPKI pin the apps compute — what must survive a move
   openssl x509 -in "$1" -pubkey -noout 2>/dev/null \
@@ -154,8 +154,9 @@ pin5="$(pin_of "$CERT")"
 # --- 6. a public-CA leaf is never regenerated for a stale address -----------------
 mkdir -p "$TMP/ca"
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$TMP/ca/ca.key" -out "$TMP/ca/ca.crt" -days 2 -subj "/CN=Fixture CA" >/dev/null 2>&1
-openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$KEY" -out "$TMP/ca/leaf.csr" -subj "/CN=d-fixture.devices.warp-lab.ai" >/dev/null 2>&1
-openssl x509 -req -in "$TMP/ca/leaf.csr" -CA "$TMP/ca/ca.crt" -CAkey "$TMP/ca/ca.key" -CAcreateserial -out "$CERT" -days 2 >/dev/null 2>&1
+openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$KEY" -out "$TMP/ca/leaf.csr" -subj "/CN=office.lan" >/dev/null 2>&1
+printf 'subjectAltName=DNS:droplet-ai.lan\n' > "$TMP/ca/local-san.cnf"
+openssl x509 -req -in "$TMP/ca/leaf.csr" -extfile "$TMP/ca/local-san.cnf" -CA "$TMP/ca/ca.crt" -CAkey "$TMP/ca/ca.key" -CAcreateserial -out "$CERT" -days 2 >/dev/null 2>&1
 export DROPLET_TLS_SAN_IPS="192.168.77.1"
 before_cert="$(sha256sum "$CERT" | cut -c1-16)"; before_key="$(sha256sum "$KEY" | cut -c1-16)"
 _generate_tls_cert >/dev/null 2>&1
@@ -255,30 +256,131 @@ lkey_sha="$(sha256sum "$L/docker/certs/droplet.key" | cut -c1-16)"; lcert_sha="$
   && ok "…while the same call WITHOUT the lock (setup.sh's path) still heals the torn pair with a fresh key" \
   || bad "…the lock leaked: setup.sh's path no longer heals a torn pair"
 
-# 9d. a refresh keeps the per-device FQDN SAN (read from .env, as setup.sh does).
-printf 'DROPLET_PUBLIC_FQDN="d-fixture.devices.warp-lab.ai"\nADMIN_TOKEN=not-a-real-token\n' > "$W/.env"
+# 9d. a refresh keeps the internal hostname SAN (read from .env, as setup.sh does).
+printf 'DROPLET_LAN_HOSTNAME="office.lan"\nADMIN_TOKEN=not-a-real-token\n' > "$W/.env"
 out="$(REPO_ROOT="$W" DROPLET_TLS_SAN_IPS="10.99.0.2" bash "$WRAPPER" 2>/dev/null)"
 printf '%s' "$out" | grep -q '"changed":true' && ok "wrapper: a move with a .env present still refreshes ($out)" || bad "wrapper with a .env: $out"
 case "$(dns_sans_of "$WCERT")" in
-  *"DNS:d-fixture.devices.warp-lab.ai"*) ok "…and the regenerated SAN carries the per-device FQDN from .env" ;;
-  *) bad "…the refresh DROPPED the per-device FQDN SAN: $(dns_sans_of "$WCERT")" ;;
+  *"DNS:office.lan"*) ok "…and the regenerated SAN carries the internal hostname from .env" ;;
+  *) bad "…the refresh DROPPED the internal hostname SAN: $(dns_sans_of "$WCERT")" ;;
 esac
-printf 'DROPLET_PUBLIC_FQDN=bad host; rm -rf /\n' > "$W/.env"
+printf 'DROPLET_LAN_HOSTNAME=bad host; rm -rf /\n' > "$W/.env"
 out="$(REPO_ROOT="$W" DROPLET_TLS_SAN_IPS="10.99.0.3" bash "$WRAPPER" 2>/dev/null)"
 case "$(dns_sans_of "$WCERT")" in
-  *"bad"*|*"rm"*) bad "…a malformed DROPLET_PUBLIC_FQDN reached the SAN" ;;
+  *"bad"*|*"rm"*) bad "…a malformed DROPLET_LAN_HOSTNAME reached the SAN" ;;
   *) ok "…a value that is not shaped like a hostname is ignored, not sourced" ;;
 esac
 rm -f "$W/.env"
 
 # 9e. a public-CA leaf: the wrapper says so and stops before the generator.
-openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$WKEY" -out "$TMP/ca/wleaf.csr" -subj "/CN=d-fixture.devices.warp-lab.ai" >/dev/null 2>&1
-openssl x509 -req -in "$TMP/ca/wleaf.csr" -CA "$TMP/ca/ca.crt" -CAkey "$TMP/ca/ca.key" -CAcreateserial -out "$WCERT" -days 2 >/dev/null 2>&1
+openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$WKEY" -out "$TMP/ca/wleaf.csr" -subj "/CN=office.lan" >/dev/null 2>&1
+printf 'subjectAltName=DNS:droplet-ai.lan\n' > "$TMP/ca/wleaf-san.cnf"
+openssl x509 -req -in "$TMP/ca/wleaf.csr" -extfile "$TMP/ca/wleaf-san.cnf" -CA "$TMP/ca/ca.crt" -CAkey "$TMP/ca/ca.key" -CAcreateserial -out "$WCERT" -days 2 >/dev/null 2>&1
 wcert_sha="$(sha256sum "$WCERT" | cut -c1-16)"
 out="$(REPO_ROOT="$W" DROPLET_TLS_SAN_IPS="10.99.0.4" bash "$WRAPPER" 2>/dev/null)"; rc=$?
-[ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q '"reason":"public-CA leaf"' && [ "$(sha256sum "$WCERT" | cut -c1-16)" = "$wcert_sha" ] \
+[ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q '"reason":"CA certificate for internal DNS"' && [ "$(sha256sum "$WCERT" | cut -c1-16)" = "$wcert_sha" ] \
   && ok "wrapper: a public-CA leaf is reported as such and never touched ($out)" \
   || bad "wrapper on a public-CA leaf: rc=$rc $out"
+
+# An old fleet-only leaf is replaced without changing the pairing identity.
+printf 'subjectAltName=DNS:old.devices.warp-lab.ai\n' > "$TMP/ca/wleaf-san.cnf"
+openssl x509 -req -in "$TMP/ca/wleaf.csr" -extfile "$TMP/ca/wleaf-san.cnf" \
+  -CA "$TMP/ca/ca.crt" -CAkey "$TMP/ca/ca.key" -CAcreateserial \
+  -out "$WCERT" -days 2 >/dev/null 2>&1
+legacy_key_sha="$(sha256sum "$WKEY" | cut -c1-16)"
+out="$(REPO_ROOT="$W" DROPLET_TLS_SAN_IPS="10.99.0.4" bash "$WRAPPER" 2>/dev/null)"
+if printf '%s' "$out" | grep -q '"changed":true' \
+   && [ "$(sha256sum "$WKEY" | cut -c1-16)" = "$legacy_key_sha" ] \
+   && dns_sans_of "$WCERT" | grep -q 'DNS:droplet-ai.lan'; then
+  ok "wrapper cuts over a legacy fleet certificate to internal TLS with the same key"
+else bad "wrapper did not cut over old fleet TLS around its current key ($out)"; fi
+
+# --- 10. WARP-3414: `droplet-fingerprint` prints the key fingerprint the apps show
+# A Droplet app confirms a self-signed box by this string; the box prints it on
+# channels a LAN attacker cannot rewrite (this installer output, the front
+# screen, the CLI). It must be the Mac app's format — uppercase hex, 4-char
+# groups, single spaces, 16 groups — and the SAME value the orchestrator
+# (lib/served-cert-pin.ts) and the panel (device-bridge.py) print, which their
+# own suites pin against this very certificate.
+FPCLI="$REPO_ROOT_REAL/scripts/host/usr-local-bin/droplet-fingerprint"
+# The known certificate pinned in apps/orchestrator/src/lib/served-cert-pin.test.ts
+# and services/oled-display/tests/test_device_bridge_pair_qr.py.
+cat > "$TMP/known.pem" <<'PEM'
+-----BEGIN CERTIFICATE-----
+MIIDbjCCAlagAwIBAgIUAlSK5TGY8EIKhYF9BpBMUtmUHIYwDQYJKoZIhvcNAQEL
+BQAwHjEcMBoGA1UEAwwTRHJvcGxldCBFZGdlIERldmljZTAeFw0yNjA4MjQwMDE2
+NTlaFw0zNjA4MjEwMDE2NTlaMB4xHDAaBgNVBAMME0Ryb3BsZXQgRWRnZSBEZXZp
+Y2UwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQDJTowoqlgJIqh2BWAU
+oeF7tWViDbPvgWkQb/GjiiDfy+3mhaYGlME1AUliZ2RFKcfUaZUWl/Hx/m0IB76U
+V4sprx+RBOMGkIUQcX+7XlKuLaUsMFfoKtanTgz3QUu6DL5DZmHseODcSckF5alB
+Di8JsbQ3XORbs4/k+st+rZ7ixcXq8Ew8YMBWyzRSAOTNyuBIRyubpE2ICXTev9Vt
+Cgte5Gfya2XSDyQMe13zCtHQeRTENZrfiMaD6nv7jmP0MemtDUV3MGYS4MT3jONs
+GkHINdp/bxCsNS1/xaw+Zsjf2k62HVnUQU6iSFYv4D2GWZ+grCcckzClS3UbbF8C
+bpNPAgMBAAGjgaMwgaAwfwYDVR0RBHgwdoIJbG9jYWxob3N0ggdkcm9wbGV0gg1k
+cm9wbGV0LmxvY2Fsggtkcm9wbGV0LmxhboIKZHJvcGxldC1haYIQZHJvcGxldC1h
+aS5sb2NhbIIOZHJvcGxldC1haS5sYW6HBMCoCcOHBKwRAAGHBH8AAAGHBKwSAAEw
+HQYDVR0OBBYEFMcORZ7r953P5iWdsn+jxt8IVQXSMA0GCSqGSIb3DQEBCwUAA4IB
+AQAfOcbb8KAdhx0nQ0LAIqjr+dvJGA+aQ7iE0PGS/foH9stCNb0BYUl9u3hw8DeG
+iDuqL9xslTLj59q1CXakQp9Nwcabmuz4g0ecvt/bAlp/hr1wufdwMC4sGfQFd5Mm
+mdhemY5mWxsJ9qK5T0g8RUrsWVQLvA54arkBrlu1B76U94D4mD4PuqvQgjd94oSh
+oBSExYAPhKI1v2xIYyMiyInzx7XLzYJai0lZA2jvzI00Lgl53Gm7OiTZtd3mXTqA
+LShUlCL6TPB4psnOIT1WLAi0VRlAmMiPh9O9guVJ+Uk9NoMXFC+3ANSNebfb1KBF
+uSd9DJAIdEt6/CNInKDHBh7j
+-----END CERTIFICATE-----
+PEM
+KNOWN_FP="F017 AFA8 6AD7 8BED 4ABD E646 90F0 5B7B 8DBB E36B 26E9 C8F4 10E5 36A6 1E3D F25C"
+
+fp_oracle() {  # independent of the CLI: openssl's own hex, then grouped
+  openssl x509 -in "$1" -pubkey -noout 2>/dev/null \
+    | openssl pkey -pubin -outform DER 2>/dev/null \
+    | openssl dgst -sha256 -r | cut -d' ' -f1 | tr 'a-f' 'A-F' \
+    | sed 's/\(....\)/\1 /g; s/ $//'
+}
+
+out="$("$FPCLI" --oneline --file "$TMP/known.pem" 2>&1)"
+[ "$out" = "$KNOWN_FP" ] \
+  && ok "droplet-fingerprint prints the known certificate's fingerprint in the Mac app's format" \
+  || bad "droplet-fingerprint on the known certificate: '$out' (want '$KNOWN_FP')"
+printf '%s' "$out" | grep -Eq '^[0-9A-F]{4}( [0-9A-F]{4}){15}$' \
+  && ok "…16 groups of 4 uppercase hex characters, single-space separated" \
+  || bad "…not 16 groups of 4 uppercase hex: '$out'"
+
+block="$("$FPCLI" --file "$TMP/known.pem" 2>&1)"
+[ "$(printf '%s\n' "$block" | wc -l | tr -d ' ')" = "4" ] \
+  && [ "$(printf '%s\n' "$block" | tr '\n' ' ' | sed 's/ $//')" = "$KNOWN_FP" ] \
+  && ok "…the default form is the same 16 groups, four to a line" \
+  || bad "…the default form is not four lines of four groups: '$block'"
+
+out="$("$FPCLI" --oneline --file "$CERT" 2>&1)"
+[ "$out" = "$(fp_oracle "$CERT")" ] \
+  && ok "a freshly generated bootstrap certificate: the CLI equals openssl's own SPKI hash" \
+  || bad "the CLI disagrees with openssl for the generated certificate: '$out'"
+
+cat "$TMP/known.pem" "$CERT" > "$TMP/fullchain.pem"
+out="$("$FPCLI" --oneline --file "$TMP/fullchain.pem" 2>&1)"
+[ "$out" = "$KNOWN_FP" ] \
+  && ok "a fullchain: it is the LEAF's key (the first certificate), not a later one" \
+  || bad "a fullchain printed '$out', not the leaf's fingerprint"
+
+printf 'not a certificate\n' > "$TMP/garbage.pem"
+out="$("$FPCLI" --oneline --file "$TMP/garbage.pem" 2>/dev/null)"; rc=$?
+[ "$rc" -ne 0 ] && [ -z "$out" ] \
+  && ok "no certificate: a non-zero exit and NO fingerprint (never the hash of nothing, E3B0 C442 …)" \
+  || bad "no certificate: rc=$rc out='$out'"
+
+# The key is never an input: the CLI only ever reads a certificate.
+grep -vE '^\s*#' "$FPCLI" | grep -qiE 'droplet\.key|rsa -in|pkey -in|x509 -noout -text' \
+  && bad "droplet-fingerprint touches key material" \
+  || ok "droplet-fingerprint never reads the private key"
+
+grep -q 'droplet-fingerprint' "$REPO_ROOT_REAL/scripts/host/MANIFEST" \
+  && grep -q 'usr-local-bin/droplet-fingerprint' "$REPO_ROOT_REAL/scripts/lib/single-box.sh" \
+  && ok "it is installed by the host integration and tracked in the manifest" \
+  || bad "droplet-fingerprint is not in the manifest and the host-integration installer"
+
+grep -q 'usr-local-bin/droplet-fingerprint' "$REPO_ROOT_REAL/scripts/setup.sh" \
+  && ok "setup.sh prints the fingerprint in its completion output (a channel the LAN cannot rewrite)" \
+  || bad "setup.sh does not print the fingerprint"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

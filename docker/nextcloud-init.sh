@@ -80,14 +80,20 @@ fi
 #     land in. Without it every registration fails and the dashboard's drive
 #     tiles deep-link into a WebDAV 404. Unlike groupfolders/onlyoffice,
 #     files_external SHIPS INSIDE the Nextcloud image (no appstore fetch), so
-#     a single retry-free enable is the correct shape — occ no-ops when the
-#     app is already enabled. Never fatal under `set -e`: a transient failure
-#     logs and reconciles on the next boot's idempotent re-run (same posture
-#     as the blocks around it).
-if $OCC app:enable files_external; then
-  echo "[droplet] WARP-1338: files_external enabled (external-storage drive browsing)"
-else
-  echo "[droplet] WARP-1338: files_external did NOT enable — drive tiles won't browse until the next boot's idempotent re-run reconciles it" >&2
+#     no appstore fetch is needed. Retry transient database/startup failures
+#     briefly so an otherwise-working SMB share does not stay absent from the
+#     web UI until another container restart. Never abort the rest of the hook.
+files_external_ready=0
+for fe_i in 1 2 3; do
+  if $OCC app:enable files_external; then
+    files_external_ready=1
+    echo "[droplet] WARP-1338: files_external enabled (external-storage drive browsing)"
+    break
+  fi
+  [ "$fe_i" = 3 ] || sleep 2
+done
+if [ "$files_external_ready" != 1 ]; then
+  echo "[droplet] WARP-1338: files_external did NOT enable after 3 attempts — drive tiles won't browse until the next boot's idempotent re-run reconciles it" >&2
 fi
 
 # 1c. Network drive — register the SMB share directory as external storage.
@@ -102,41 +108,83 @@ fi
 #     external mounts tolerate out-of-band writers; `filesystem_check_changes=1`
 #     makes Nextcloud re-stat on access so SMB-side changes appear without a
 #     manual `occ files:scan`. Every step is guarded/idempotent — a re-run
-#     finds the existing "/Droplet" mount and only re-asserts its option.
+#     finds the existing "/Droplet" LOCAL mount and re-asserts its directory
+#     and change-check option without changing its users, groups or permissions.
 # Env-overridable for the hermetic hook tests (which have no volume mount);
 # compose always mounts the volume at the default path.
 DROPLET_SHARE_DIR="${DROPLET_SHARE_DIR:-/droplet-share}"
+reconcile_droplet_share() {
+  local ext_list ext_id created_id
+  if ! ext_list="$($OCC files_external:list --output=json 2>/dev/null)"; then
+    echo "[droplet] network drive: files_external:list failed" >&2
+    return 1
+  fi
+  # Invalid output must not look like an empty listing and create duplicates.
+  # Nextcloud 29's JSON uses a storage class, not the translated label "Local".
+  # A different backend or duplicate /Droplet name is an operator-owned
+  # conflict: do not replace/delete it or expose another directory by accident.
+  if ! ext_id="$(printf '%s' "$ext_list" | php -r '
+      $mounts = json_decode(stream_get_contents(STDIN));
+      if (json_last_error() !== JSON_ERROR_NONE || !is_array($mounts)) { exit(1); }
+      $matches = [];
+      foreach ($mounts as $entry) {
+        if (!is_object($entry)) { exit(1); }
+        $mount = (array) $entry;
+        if (($mount["mount_point"] ?? null) === "/Droplet") { $matches[] = $mount; }
+      }
+      if (!$matches) { exit; }
+      if (count($matches) !== 1) { exit(1); }
+      $mount = $matches[0];
+      if (($mount["storage"] ?? null) !== "\\OC\\Files\\Storage\\Local") { exit(1); }
+      $id = (string) ($mount["mount_id"] ?? "");
+      if (!ctype_digit($id) || (int) $id < 1) { exit(1); }
+      echo $id;
+    ' 2>/dev/null)"; then
+    echo "[droplet] network drive: invalid listing or conflicting /Droplet mount — leaving existing storage unchanged" >&2
+    return 1
+  fi
+  if [ -z "$ext_id" ]; then
+    # JSON output is only the ID. Do not strip arbitrary error/warning text
+    # into an ID; after a failed create, the next attempt re-lists first in
+    # case Nextcloud saved the mount before returning the error.
+    if ! created_id="$($OCC files_external:create "/Droplet" local null::null \
+      -c datadir="$DROPLET_SHARE_DIR" --output=json)"; then
+      echo "[droplet] network drive: files_external:create failed" >&2
+      return 1
+    fi
+    if [[ ! "$created_id" =~ ^[1-9][0-9]*$ ]]; then
+      echo "[droplet] network drive: files_external:create returned an invalid mount id" >&2
+      return 1
+    fi
+    ext_id="$created_id"
+    echo "[droplet] network drive: registered /Droplet external mount (id ${ext_id})"
+  fi
+  if ! $OCC files_external:config "$ext_id" datadir "$DROPLET_SHARE_DIR" \
+    || ! $OCC files_external:option "$ext_id" filesystem_check_changes 1; then
+    echo "[droplet] network drive: /Droplet mount configuration failed (id ${ext_id})" >&2
+    return 1
+  fi
+  echo "[droplet] network drive: /Droplet points at the SMB share and checks desktop changes on access (id ${ext_id})"
+}
 if [ -d "$DROPLET_SHARE_DIR" ]; then
-  # Fresh named volumes materialize root-owned; Nextcloud (and smbd via
-  # `force user` uid 33) writes as www-data. Non-recursive on purpose — only
-  # the root dir's ownership matters for a local mount, and a recursive chown
-  # over a populated share would stall every boot. `|| true`: already-correct
-  # ownership or an unprivileged re-run must not abort the hook.
-  chown www-data:www-data "$DROPLET_SHARE_DIR" 2>/dev/null || true
-  if EXT_LIST="$($OCC files_external:list --output=json 2>/dev/null)"; then
-    EXT_ID="$(printf '%s' "$EXT_LIST" | php -r '
-        $j = json_decode(stream_get_contents(STDIN), true) ?: [];
-        foreach ($j as $m) {
-          if (($m["mount_point"] ?? null) === "/Droplet") { echo $m["mount_id"]; exit; }
-        }
-      ' 2>/dev/null || true)"
-    if [ -z "$EXT_ID" ]; then
-      # `files_external:create` prints "Storage created with id <n>".
-      EXT_ID="$($OCC files_external:create "/Droplet" local null::null \
-        -c datadir="$DROPLET_SHARE_DIR" | tr -dc '0-9' || true)"
-      if [ -n "$EXT_ID" ]; then
-        echo "[droplet] network drive: registered /Droplet external mount (id ${EXT_ID})"
-      else
-        echo "[droplet] network drive: files_external:create failed — the next boot's idempotent re-run reconciles it" >&2
+  # The share root's ownership is set by the compose `nextcloud` entrypoint
+  # (chown 33:33 as root, non-recursive: a recursive chown over a populated
+  # share would stall every boot), NOT here. A fresh named volume is root:root
+  # 755 and this hook runs as www-data (the stock entrypoint's run_as() su's
+  # before-starting hooks), so a chown from here can never take ownership of
+  # it — it was a silent EPERM that left the SMB drive read-only (WARP-3693).
+  share_ready=0
+  if [ "$files_external_ready" = 1 ]; then
+    for share_i in 1 2 3; do
+      if reconcile_droplet_share; then
+        share_ready=1
+        break
       fi
-    else
-      echo "[droplet] network drive: /Droplet external mount already registered (id ${EXT_ID}) — skipping create"
-    fi
-    if [ -n "$EXT_ID" ]; then
-      $OCC files_external:option "$EXT_ID" filesystem_check_changes 1 || true
-    fi
-  else
-    echo "[droplet] network drive: files_external unavailable — /Droplet mount deferred to the next boot's idempotent re-run" >&2
+      [ "$share_i" = 3 ] || sleep 2
+    done
+  fi
+  if [ "$share_ready" != 1 ]; then
+    echo "[droplet] network drive: /Droplet mount is NOT ready — SMB files remain in the share; the next boot's idempotent re-run will retry" >&2
   fi
 else
   echo "[droplet] network drive: /droplet-share volume not mounted — skipping /Droplet registration"
@@ -289,7 +337,7 @@ nc_app_install() {
 # Nextcloud answers HTTP 400 "Access through untrusted domain" for any request
 # whose Host is absent from its STORED `trusted_domains`. docker-compose.yml
 # already renders the correct list into NEXTCLOUD_TRUSTED_DOMAINS — including
-# ADR-023's publicly-trusted per-device FQDN (${DROPLET_PUBLIC_FQDN}) — but the
+# the configured internal DNS name (${DROPLET_LAN_HOSTNAME}) — but the
 # stock `nextcloud:29-apache` image consumes that env var ONLY inside its
 # install branch. A box that learns its FQDN AFTER install (every box does — HQ
 # issues the name later) therefore freezes its stored list at install time and
@@ -373,7 +421,7 @@ reconcile_trusted_domains() {
   # how the space-separated env list is meant to be read, but a token carrying
   # a glob metacharacter would otherwise expand against the CWD — so split with
   # globbing off. `set --` touches only this function's positional parameters,
-  # and empty tokens (the trailing blank when DROPLET_PUBLIC_FQDN is unset) are
+  # and empty tokens (the trailing blank when DROPLET_LAN_HOSTNAME is unset) are
   # dropped by the split itself, so no empty domain can reach a write.
   set -f
   # shellcheck disable=SC2086
@@ -539,6 +587,11 @@ reconcile_overwrite_protocol() {
 #     not apply on its own schedule — the box updates as a unit.
 #   * `support` advertises Nextcloud Enterprise; `weather_status` calls an
 #     external weather API from the user menu; `recommendations` is noise.
+#   * `photos` (WARP-3606) can publish a public album from a plain DAV request
+#     (PROPPATCH under remote.php/dav/photos), a route that mints a
+#     credential-free URL without the owner/admin publish rule or an audit
+#     row. Nothing here uses it: the dashboard reads files and previews
+#     through core, and the mobile apps' auto-upload is plain WebDAV.
 #
 # NOT `dashboard` and NOT `activity`, deliberately. `dashboard` is Nextcloud's
 # default landing app — disabling it changes what the bare /nextcloud/ route
@@ -552,7 +605,7 @@ reconcile_overwrite_protocol() {
 disable_hub_apps() {
   hub_disabled=""
   for hub_app in firstrunwizard updatenotification nextcloud_announcements \
-                 survey_client support weather_status recommendations; do
+                 survey_client support weather_status recommendations photos; do
     # Match the app NAME in the Enabled block, not anywhere in occ's output:
     # every one of these also appears under "Disabled:" once it is off, and a
     # loose grep would retry the disable on every single boot forever.
@@ -871,3 +924,24 @@ for pv in PNG JPEG GIF BMP XBitmap MP3 TXT MarkDown OpenDocument Krita TIFF HEIC
   pv_i=$((pv_i + 1))
 done
 echo "[droplet] WARP-1686: preview providers set (defaults + TIFF/HEIC/SVG)"
+
+# ── WARP-3586 — public-link expiry enforced by Nextcloud itself ──
+#
+# The orchestrator's POST/PUT /files/share route applies a 30-day default and a
+# 90-day ceiling (apps/orchestrator/src/services/share-policy.ts), but
+# Nextcloud's own web UI and OCS endpoints are reachable too, so the same
+# ceiling is set here, re-applied on every start and upgrade (config:app:set
+# is idempotent). With enforce=yes `shareapi_expire_after_n_days` is both the
+# default for a link created without a date and the maximum. 90 matches the
+# route's ceiling; the route's tighter 30-day default applies on its path.
+# Deliberately NOT set here: shareapi_allow_public_upload (it would also stop
+# an owner/admin's folder upload link) and shareapi_enforce_links_password
+# (the assistant tool and dashboard create passwordless links by design today).
+for kv in \
+  "shareapi_default_expire_date=yes" \
+  "shareapi_enforce_expire_date=yes" \
+  "shareapi_expire_after_n_days=90"; do
+  occ_www config:app:set core "${kv%%=*}" --value="${kv#*=}" >/dev/null \
+    || echo "nextcloud-init: could not set ${kv%%=*} — reconciles on the next boot" >&2
+done
+echo "[droplet] WARP-3586: public-link expiry enforced (default on, max 90 days)"

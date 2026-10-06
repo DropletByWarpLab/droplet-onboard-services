@@ -21,7 +21,9 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { __setColumnCryptoKeyForTest } from "../column-crypto.service.js";
 import { createHash } from "node:crypto";
 
+import { makeFakeCloudFileDb } from "../../__tests__/helpers/fake-cloud-files.js";
 import { sealPendingFlow, sealTokenCache, unsealPendingFlow } from "./token-cache.js";
+import { M365_BASE_SCOPES } from "./scopes.js";
 import {
   beginAuthCodeConnect,
   beginDeviceCodeConnect,
@@ -29,6 +31,7 @@ import {
   disconnect,
   getConnectionView,
   getAccessToken,
+  markNeedsReconnect,
   purgeM365ForUser,
   M365AppRequiredError,
   M365NotConnectedError,
@@ -51,11 +54,28 @@ const sha256 = (v: string) => createHash("sha256").update(v).digest("hex");
 /** Minimal in-memory stand-in for prisma.m365Connection. */
 function fakePrisma(seed: Record<string, unknown> | null = null) {
   let row: Record<string, unknown> | null = seed ? { ...seed } : null;
+  const person = { username: "sam", directoryStatus: "ACTIVE", deletionStatus: "NONE" };
+  const matches = (where: any) => Object.entries(where ?? {}).every(([key, value]: [string, any]) => {
+    if (key === "user") return Object.entries(value.is).every(([field, expected]) => person[field as keyof typeof person] === expected);
+    return row?.[key] === value;
+  });
   // WARP-3059 — the person's delta cursors, so a purge shows as rows gone
   // rather than only as a call made.
   let cursors: Array<{ id: string; userId: string; resourceId: string }> = [];
-  return {
+  // WARP-3538 — and the files LANDED from them: disconnect, a leaver's deletion
+  // and a reconnect as somebody else must remove those too, and the evaluating
+  // tables make "gone" a thing the tests can see.
+  const cloud = makeFakeCloudFileDb();
+  const db = {
     __row: () => row,
+    __person: () => person,
+    user: { findFirst: vi.fn(async ({ where }: any) => Object.entries(where).every(([field, value]) => field === "id" || person[field as keyof typeof person] === value) ? { ...person } : null) },
+    cloudOAuthApp: { findUnique: vi.fn(async () => null) },
+    __cloud: cloud,
+    cloudFileItem: cloud.cloudFileItem,
+    cloudFileSource: cloud.cloudFileSource,
+    calendarSource: { findFirst: vi.fn(async () => null) },
+    $transaction: async <T>(work: (tx: unknown) => Promise<T>): Promise<T> => work(db),
     __cursors: () => cursors,
     __addCursors: (...resourceIds: string[]) => {
       for (const resourceId of resourceIds) {
@@ -67,8 +87,7 @@ function fakePrisma(seed: Record<string, unknown> | null = null) {
       // so a fake that ignored the key would pass a lookup that should miss.
       findUnique: vi.fn(async ({ where }: any) => {
         if (!row) return null;
-        const matches = Object.entries(where ?? {}).every(([k, v]) => (row as any)[k] === v);
-        return matches ? { ...row } : null;
+        return matches(where) ? { ...row } : null;
       }),
       upsert: vi.fn(async ({ create, update }: any) => {
         row = row ? { ...row, ...update } : { id: "row-1", userId: USER, ...create };
@@ -83,10 +102,7 @@ function fakePrisma(seed: Record<string, unknown> | null = null) {
       // fake must honour it rather than always writing.
       updateMany: vi.fn(async ({ where, data }: any) => {
         if (!row) return { count: 0 };
-        const matches = Object.entries(where).every(
-          ([k, v]) => (row as any)[k] === v,
-        );
-        if (!matches) return { count: 0 };
+        if (!matches(where)) return { count: 0 };
         row = { ...row, ...data };
         return { count: 1 };
       }),
@@ -107,6 +123,7 @@ function fakePrisma(seed: Record<string, unknown> | null = null) {
       }),
     },
   };
+  return db;
 }
 
 function authResult(over: Partial<EntraAuthResult> = {}): EntraAuthResult {
@@ -191,6 +208,74 @@ describe("getConnectionView", () => {
       pendingFlowExpiresAt: new Date(Date.now() + 60_000),
     });
     expect((await getConnectionView(prisma as never, USER)).state).toBe("PENDING_CONSENT");
+  });
+
+  describe("sharePoint (WARP-3538)", () => {
+    const BASE = "offline_access User.Read Mail.ReadWrite Mail.Send Calendars.ReadWrite Contacts.ReadWrite Files.ReadWrite.All";
+    const viewOf = async (over: Record<string, unknown>) =>
+      (
+        await getConnectionView(
+          fakePrisma({ id: "row-1", userId: USER, state: "CONNECTED", grantedScopes: BASE, ...over }) as never,
+          USER,
+        )
+      ).sharePoint;
+
+    it("says nothing is on, granted or needed for a person who never connected", async () => {
+      const view = await getConnectionView(fakePrisma(null) as never, USER);
+      expect(view.sharePoint).toEqual({ enabled: false, granted: false, needsConsent: false });
+    });
+
+    it("is off, not granted and needs nothing for an existing connection that never asked for it", async () => {
+      expect(await viewOf({})).toEqual({ enabled: false, granted: false, needsConsent: false });
+    });
+
+    it("needs consent when the person switched it on and the grant lacks Sites.Read.All", async () => {
+      // 🔴 This is what an EXISTING connection looks like the moment its owner
+      // flips the switch: the base grant reads drives but cannot find one.
+      expect(await viewOf({ sharePointEnabled: true })).toEqual({ enabled: true, granted: false, needsConsent: true });
+    });
+
+    it("needs nothing once the grant holds Sites.Read.All", async () => {
+      expect(await viewOf({ sharePointEnabled: true, grantedScopes: `${BASE} Sites.Read.All` })).toEqual({
+        enabled: true,
+        granted: true,
+        needsConsent: false,
+      });
+    });
+
+    it("judges the grant exactly as discovery does — a broader Sites grant and a resource-qualified one count, Sites.Selected does not", async () => {
+      // The view and the engine must agree about whether a person has to act:
+      // a card that says "needs consent" while discovery reads their libraries
+      // (or the reverse) is worse than either alone.
+      const granted = (grantedScopes: string) => viewOf({ sharePointEnabled: true, grantedScopes }).then((v) => v.granted);
+      expect(await granted("Sites.ReadWrite.All")).toBe(true);
+      expect(await granted("https://graph.microsoft.com/Sites.Read.All")).toBe(true);
+      expect(await granted("sites.read.all")).toBe(true);
+      expect(await granted("Sites.Selected")).toBe(false);
+      expect(await granted("Files.ReadWrite.All")).toBe(false);
+    });
+
+    it("reports a held grant even while the switch is off — `granted` is about Microsoft, `enabled` is about the person", async () => {
+      expect(await viewOf({ sharePointEnabled: false, grantedScopes: `${BASE} Sites.Read.All` })).toEqual({
+        enabled: false,
+        granted: true,
+        needsConsent: false,
+      });
+    });
+
+    it("reads an absent or non-boolean switch as OFF — explicit state, never inferred", async () => {
+      for (const sharePointEnabled of [undefined, null, "true", 1, "yes"]) {
+        expect((await viewOf({ sharePointEnabled })).enabled, String(sharePointEnabled)).toBe(false);
+      }
+    });
+
+    it("reads a legacy row with no recorded grant as not granted", async () => {
+      expect(await viewOf({ sharePointEnabled: true, grantedScopes: null })).toEqual({
+        enabled: true,
+        granted: false,
+        needsConsent: true,
+      });
+    });
   });
 });
 
@@ -319,6 +404,86 @@ describe("disconnect", () => {
     await expect(disconnect(prisma as never, USER)).resolves.not.toThrow();
   });
 
+  describe("and the files that were landed (WARP-3538)", () => {
+    const OTHER = "user-2";
+    function landed(prisma: ReturnType<typeof fakePrisma>) {
+      const c = prisma.__cloud;
+      for (const user of [USER, OTHER]) {
+        c.seedSource({ userId: user, provider: "M365", kind: "ONEDRIVE", sourceId: `od-${user}`, nameEnc: "dcv1:x" });
+        c.seedSource({ userId: user, provider: "M365", kind: "SHAREPOINT_LIBRARY", sourceId: `lib-${user}`, nameEnc: "dcv1:x" });
+        c.seedItem({ userId: user, provider: "M365", sourceId: `od-${user}`, externalId: "f1", isFolder: false, nameEnc: "dcv1:x" });
+        c.seedItem({ userId: user, provider: "M365", sourceId: `lib-${user}`, externalId: "f2", isFolder: false, nameEnc: "dcv1:x" });
+      }
+      // The same person's files in ANOTHER cloud: Google Drive and Dropbox land into the same tables.
+      c.seedItem({ userId: USER, provider: "GOOGLE", sourceId: "g1", externalId: "g-f", isFolder: false, nameEnc: "dcv1:x" });
+    }
+    const connected = () => ({
+      id: "row-1",
+      userId: USER,
+      state: "CONNECTED",
+      tokenCacheEnc: sealTokenCache(USER, CACHE),
+      homeAccountId: "uid.utid",
+      sharePointEnabled: true,
+      sharePointLibrariesCapped: 7,
+      ...APP_COLUMNS,
+    });
+    const mineLeft = (prisma: ReturnType<typeof fakePrisma>) =>
+      prisma.__cloud.items.filter((r) => r.userId === USER).map((r) => `${r.provider}:${r.externalId}`).sort();
+
+    it("deletes every landed item and source the person has from Microsoft 365 — ADR-041: deletion is a real operation", async () => {
+      // A file name in a practice carries a patient's. A disconnect that left the
+      // list behind would keep copies of those names for a person who asked
+      // Droplet to let go.
+      const prisma = fakePrisma(connected());
+      landed(prisma);
+
+      await disconnect(prisma as never, USER);
+
+      expect(prisma.__cloud.sources.filter((r) => r.userId === USER && r.provider === "M365")).toEqual([]);
+      expect(mineLeft(prisma)).toEqual(["GOOGLE:g-f"]);
+    });
+
+    it("never touches another person's files", async () => {
+      // Mutation: drop `userId` from the purge and one person's disconnect
+      // empties the whole box's file lists.
+      const prisma = fakePrisma(connected());
+      landed(prisma);
+      await disconnect(prisma as never, USER);
+      expect(prisma.__cloud.items.filter((r) => r.userId === OTHER)).toHaveLength(2);
+      expect(prisma.__cloud.sources.filter((r) => r.userId === OTHER)).toHaveLength(2);
+    });
+
+    it("removes the cursors BEFORE the files, so a failure between them leaves residue and never a reader", async () => {
+      // If the file purge throws, what is left is rows nothing refreshes — not a
+      // cursor still reading Microsoft for a person who has disconnected.
+      const prisma = fakePrisma(connected());
+      landed(prisma);
+      prisma.__addCursors("inbox");
+      prisma.__cloud.cloudFileItem.deleteMany.mockRejectedValueOnce(new Error("disk full"));
+
+      await expect(disconnect(prisma as never, USER)).rejects.toThrow("disk full");
+      expect(prisma.__cursors()).toEqual([]);
+    });
+
+    it("resets the SharePoint opt-in and the cap count — a disconnect is a clean slate", async () => {
+      // A person who reconnects next month must be asked for the base set only
+      // until they say otherwise: a scope they did not ask for can fail the whole
+      // sign-in. The app registration stays (reconnecting is one click).
+      const prisma = fakePrisma(connected());
+      await disconnect(prisma as never, USER);
+      expect(prisma.__row()).toMatchObject({ sharePointEnabled: false, sharePointLibrariesCapped: 0, ...APP_COLUMNS });
+    });
+
+    it("does NOT reset the opt-in when a sign-in is merely cancelled", async () => {
+      // A cancelled sign-in also lands in DISCONNECTED (it shares the UNLINKED
+      // state), but nothing was disconnected: the person's choice stands.
+      const prisma = fakePrisma({ ...connected(), state: "CONNECTED" });
+      const { state, entra } = await started(prisma);
+      await completeAuthCodeConnect(prisma as never, entra, { state, browserState: state, error: "access_denied" });
+      expect(prisma.__row()).toMatchObject({ sharePointEnabled: true });
+    });
+  });
+
   // --- review #1658 finding 4 --------------------------------------------
   it("cannot be undone by a device-code flow that resolves after it", async () => {
     // The race that reversed ADR-041's purge guarantee: connect → disconnect
@@ -371,6 +536,21 @@ describe("purgeM365ForUser", () => {
     expect(prisma.m365DeltaCursor.deleteMany).toHaveBeenCalledWith({ where: { userId: USER } });
   });
 
+  it("removes the file names landed from the deleted person's Microsoft 365 (WARP-3538)", async () => {
+    // A leaver's OneDrive and SharePoint file list must not outlive them in a
+    // table nobody can reach through the API.
+    const prisma = fakePrisma({ id: "row-1", userId: USER, state: "CONNECTED", tokenCacheEnc: sealTokenCache(USER, CACHE) });
+    const c = prisma.__cloud;
+    c.seedSource({ userId: USER, provider: "M365", kind: "ONEDRIVE", sourceId: "od", nameEnc: "dcv1:x" });
+    c.seedItem({ userId: USER, provider: "M365", sourceId: "od", externalId: "f1", isFolder: false, nameEnc: "dcv1:x" });
+    c.seedItem({ userId: "user-2", provider: "M365", sourceId: "od2", externalId: "f9", isFolder: false, nameEnc: "dcv1:x" });
+
+    await purgeM365ForUser(prisma as never, USER);
+
+    expect(c.items.map((r) => r.externalId)).toEqual(["f9"]);
+    expect(c.sources).toEqual([]);
+  });
+
   it("is a no-op for a user who never connected", async () => {
     const prisma = fakePrisma(null);
     expect(await purgeM365ForUser(prisma as never, USER)).toBe(0);
@@ -378,6 +558,59 @@ describe("purgeM365ForUser", () => {
 });
 
 describe("getAccessToken", () => {
+  it("passes the acquired mail ownership and selection in the grant generation", async () => {
+    const prisma = await connectedAsAWithCursors();
+    Object.assign(prisma.__row()!, { mailEnabled: true, emailAccountId: "mailbox", mailSyncState: "CONNECTED" });
+    const onGrant = vi.fn();
+    await getAccessToken(prisma as never, fakeEntra(), USER, new Date(), onGrant);
+    expect(onGrant).toHaveBeenCalledWith(expect.objectContaining({ mailEnabled: true, emailAccountId: "mailbox", tokenCacheEnc: prisma.__row()!.tokenCacheEnc }));
+  });
+
+  it("an old Graph refusal cannot downgrade a newly consented grant", async () => {
+    const prisma = await connectedAsAWithCursors();
+    let generation: any;
+    await getAccessToken(prisma as never, fakeEntra(), USER, new Date(), (current) => { generation = current; });
+    await connectAs(prisma, A);
+    const newer = structuredClone(prisma.__row());
+    await markNeedsReconnect(prisma as never, USER, "Old Graph request failed", generation);
+    expect(prisma.__row()).toEqual(newer);
+  });
+
+  it.each(["disconnect", "same-account-reconnect", "different-account-reconnect", "calendar-off", "mail-off"])("a late successful refresh cannot overwrite %s or return its bearer", async (action) => {
+    const prisma = await connectedAsAWithCursors();
+    if (action === "calendar-off") Object.assign(prisma.__row()!, { calendarEnabled: true, calendarSourceId: "s1", calendarSyncState: "CONNECTED" });
+    let release!: (result: EntraAuthResult) => void;
+    const entra = fakeEntra({ acquireSilent: vi.fn(() => new Promise<EntraAuthResult>((resolve) => { release = resolve; })) });
+    const pending = getAccessToken(prisma as never, entra, USER).catch((error: unknown) => error);
+    await vi.waitFor(() => expect(entra.acquireSilent).toHaveBeenCalledTimes(1));
+    if (action === "calendar-off") Object.assign(prisma.__row()!, { calendarEnabled: false, calendarSourceId: null, calendarSyncState: "DISCONNECTED" });
+    else {
+      await disconnect(prisma as never, USER);
+      if (action !== "disconnect") await connectAs(prisma, action === "same-account-reconnect" ? A : B);
+    }
+    const current = structuredClone(prisma.__row());
+    release(authResult({ accessToken: "STALE_SECRET_BEARER" }));
+    const error = await pending;
+    expect(error).toBeInstanceOf(Error);
+    expect(String(error)).not.toContain("STALE_SECRET_BEARER");
+    expect(prisma.__row()).toEqual(current);
+  });
+
+  it.each(["same-account-reconnect", "calendar-off", "mail-off"])("a failed old refresh cannot downgrade %s", async (action) => {
+    const prisma = await connectedAsAWithCursors();
+    if (action === "calendar-off") Object.assign(prisma.__row()!, { calendarEnabled: true, calendarSourceId: "s1", calendarSyncState: "CONNECTED" });
+    let reject!: (error: unknown) => void;
+    const entra = fakeEntra({ acquireSilent: vi.fn(() => new Promise<EntraAuthResult>((_resolve, fail) => { reject = fail; })) });
+    const pending = getAccessToken(prisma as never, entra, USER).catch((error: unknown) => error);
+    await vi.waitFor(() => expect(entra.acquireSilent).toHaveBeenCalledTimes(1));
+    if (action === "calendar-off") Object.assign(prisma.__row()!, { calendarEnabled: false, calendarSourceId: null, calendarSyncState: "DISCONNECTED" });
+    else { await disconnect(prisma as never, USER); await connectAs(prisma, A); }
+    const current = structuredClone(prisma.__row());
+    reject({ errorCode: "invalid_grant", errorMessage: "expired" });
+    await pending;
+    expect(prisma.__row()).toEqual(current);
+  });
+
   it("refuses when no account is linked", async () => {
     const prisma = fakePrisma(null);
     await expect(getAccessToken(prisma as never, fakeEntra(), USER)).rejects.toBeInstanceOf(
@@ -447,6 +680,43 @@ describe("getAccessToken", () => {
 
     await expect(getAccessToken(prisma as never, fakeEntra(), USER)).rejects.toBeTruthy();
     expect((prisma.__row() as any).state).toBe("NEEDS_RECONNECT");
+  });
+
+  it("an unreadable cache makes the reconnect RE-LAND everything: the file names are sealed under the key that is gone (WARP-3538)", async () => {
+    // The key that sealed the landed file names is the one that just failed to
+    // open the token. The rows survive and can never be read again, and the
+    // cursors would carry on landing only what changes from here — an empty
+    // search for everything that already existed. Forgetting the link hash makes
+    // the same person's reconnect count as "a different account", which purges
+    // the cursors and the unreadable files and starts from nothing. This is what
+    // makes "a factory reset crypto-shreds the landed metadata" safe: the data
+    // re-syncs. (Mutation: drop `cursorLinkHash: null` from the unreadable-cache
+    // branch and the files survive the reconnect.)
+    const prisma = fakePrisma({
+      id: "row-1",
+      userId: USER,
+      state: "CONNECTED",
+      homeAccountId: "uid.utid",
+      tokenCacheEnc: sealTokenCache("someone-else", CACHE), // sealed under a key we no longer have
+      cursorLinkHash: "hash-of-the-link-the-cursors-were-built-under",
+      ...APP_COLUMNS,
+    });
+    prisma.__addCursors("inbox");
+    prisma.__cloud.seedSource({ userId: USER, provider: "M365", kind: "ONEDRIVE", sourceId: "od", nameEnc: "dcv1:sealed-under-the-old-key" });
+    prisma.__cloud.seedItem({ userId: USER, provider: "M365", sourceId: "od", externalId: "f1", isFolder: false, nameEnc: "dcv1:sealed-under-the-old-key" });
+
+    await expect(getAccessToken(prisma as never, fakeEntra(), USER)).rejects.toBeTruthy();
+    expect(prisma.__row()).toMatchObject({ state: "NEEDS_RECONNECT", cursorLinkHash: null });
+
+    // The person signs in again — as the SAME account.
+    const entra = fakeEntra({ acquireByAuthorizationCode: vi.fn(async () => authResult()) });
+    const begun = await beginAuthCodeConnect(prisma as never, entra, USER, { app: APP, redirectUri: REDIRECT });
+    await completeAuthCodeConnect(prisma as never, entra, { state: begun.state, browserState: begun.state, code: "c" });
+
+    expect((prisma.__row() as any).state).toBe("CONNECTED");
+    expect(prisma.__cursors()).toEqual([]);
+    expect(prisma.__cloud.items).toEqual([]);
+    expect(prisma.__cloud.sources).toEqual([]);
   });
 
   // --- review #1658 finding 2 --------------------------------------------
@@ -650,6 +920,62 @@ describe("beginAuthCodeConnect (WARP-2704)", () => {
 });
 
 describe("completeAuthCodeConnect (WARP-2704)", () => {
+  it.each(["success", "failure"])("an old device-code %s cannot settle a newer browser flow", async (outcome) => {
+    const prisma = fakePrisma(null);
+    let release!: (result: EntraAuthResult) => void;
+    let reject!: (error: unknown) => void;
+    const old = fakeEntra({ acquireByDeviceCode: vi.fn(async (_app, { onCode }) => {
+      onCode({ userCode: "OLD", verificationUri: "https://microsoft.com/devicelogin", expiresAt: new Date(Date.now() + 60_000), message: "old" });
+      return new Promise<EntraAuthResult>((resolve, fail) => { release = resolve; reject = fail; });
+    }) });
+    await beginDeviceCodeConnect(prisma as never, old, USER, { app: APP });
+    const oldFlow = prisma.__row()!.pendingFlowEnc;
+    await disconnect(prisma as never, USER);
+    const next = await started(prisma);
+    const current = structuredClone(prisma.__row());
+    if (outcome === "success") release(authResult());
+    else reject({ errorCode: "invalid_grant", errorMessage: "expired old poll" });
+    await vi.waitFor(() => expect(prisma.m365Connection.updateMany.mock.calls.some(([args]) => args.where.pendingFlowEnc === oldFlow)).toBe(true));
+    expect(prisma.__row()).toEqual(current);
+    expect(await completeAuthCodeConnect(prisma as never, next.entra, { state: next.state, browserState: next.state, code: "new" })).toBe("connected");
+  });
+
+  it.each(["success", "failure"])("an old exchange %s cannot overwrite or cancel a newer pending flow", async (outcome) => {
+    const prisma = fakePrisma(null);
+    let release!: (result: EntraAuthResult) => void;
+    let reject!: (error: unknown) => void;
+    const old = await started(prisma, fakeEntra({ acquireByAuthorizationCode: vi.fn(() => new Promise<EntraAuthResult>((resolve, fail) => { release = resolve; reject = fail; })) }));
+    const completion = completeAuthCodeConnect(prisma as never, old.entra, { state: old.state, browserState: old.state, code: "old" });
+    await vi.waitFor(() => expect(old.entra.acquireByAuthorizationCode).toHaveBeenCalledTimes(1));
+    await disconnect(prisma as never, USER);
+    const next = await started(prisma);
+    const current = structuredClone(prisma.__row());
+    if (outcome === "success") release(authResult());
+    else reject({ errorCode: "invalid_grant", errorMessage: "expired old exchange" });
+    await completion;
+    expect(prisma.__row()).toEqual(current);
+    expect(await completeAuthCodeConnect(prisma as never, next.entra, { state: next.state, browserState: next.state, code: "new" })).toBe("connected");
+  });
+
+  it("a callback cannot retain a grant for a deactivated person", async () => {
+    const prisma = fakePrisma(null);
+    const begun = await started(prisma);
+    prisma.__person().directoryStatus = "DEACTIVATED";
+    expect(await completeAuthCodeConnect(prisma as never, begun.entra, { state: begun.state, browserState: begun.state, code: "c" })).toBe("cancelled");
+    expect(prisma.__row()!.tokenCacheEnc).toBeNull();
+  });
+
+  it("calendar OFF during the exchange remains OFF after the same-account callback", async () => {
+    const prisma = await connectedAsAWithCursors();
+    Object.assign(prisma.__row()!, { calendarEnabled: true, calendarSourceId: "calendar-a", calendarSyncState: "CONNECTED" });
+    const begun = await started(prisma, fakeEntra({ acquireByAuthorizationCode: vi.fn(async () => {
+      Object.assign(prisma.__row()!, { calendarEnabled: false, calendarSourceId: null, calendarSyncState: "DISCONNECTED" });
+      return authResult(A);
+    }) }));
+    expect(await completeAuthCodeConnect(prisma as never, begun.entra, { state: begun.state, browserState: begun.state, code: "c" })).toBe("connected");
+    expect(prisma.__row()).toMatchObject({ calendarEnabled: false, calendarSourceId: null, calendarSyncState: "DISCONNECTED" });
+  });
+
   it("connects when the callback carries the state this browser started with", async () => {
     const prisma = fakePrisma(null);
     const { state, entra } = await started(prisma);
@@ -669,6 +995,7 @@ describe("completeAuthCodeConnect (WARP-2704)", () => {
       redirectUri: REDIRECT,
       codeVerifier: flow.codeVerifier,
       nonce: flow.nonce,
+      scopes: [...M365_BASE_SCOPES],
     });
     const row = prisma.__row() as any;
     expect(row).toMatchObject({ state: "CONNECTED", accountUpn: "sam@practice.com", ...APP_COLUMNS });
@@ -835,6 +1162,7 @@ describe("completeAuthCodeConnect (WARP-2704)", () => {
       codeVerifier: "v",
       nonce: "n",
       redirectUri: REDIRECT,
+      scopes: [...M365_BASE_SCOPES],
     });
     const outcome = await completeAuthCodeConnect(prisma as never, entra, {
       state,
@@ -978,7 +1306,7 @@ describe("a reconnect leaves no credential of the old link behind (#2344 review)
       ...connectedRow(),
       state: "PENDING_CONSENT",
       pendingStateHash: sha256(state),
-      pendingFlowEnc: sealPendingFlow(USER, { codeVerifier: "v", nonce: "n", redirectUri: REDIRECT }),
+      pendingFlowEnc: sealPendingFlow(USER, { codeVerifier: "v", nonce: "n", redirectUri: REDIRECT, scopes: [...M365_BASE_SCOPES] }),
       pendingFlowExpiresAt: new Date(Date.now() + 60_000),
     });
 
@@ -1068,6 +1396,34 @@ function grantDied(prisma: ReturnType<typeof fakePrisma>) {
 }
 
 describe("a reconnect as someone else starts their sync from nothing (#2347 review)", () => {
+  it("requires explicit disconnect before switching an identity with copied calendar events", async () => {
+    const prisma = await connectedAsAWithCursors();
+    Object.assign(prisma.__row()!, { calendarEnabled: true, calendarSourceId: "a-calendar", calendarSyncState: "CONNECTED" });
+    prisma.m365DeltaCursor.deleteMany.mockClear();
+    grantDied(prisma);
+
+    expect(await connectAs(prisma, B)).toBe("different_account");
+
+    expect(prisma.__row()).toMatchObject({ state: "ERROR", calendarEnabled: true,
+      calendarSourceId: "a-calendar", calendarSyncState: "NEEDS_RECONNECT", tokenCacheEnc: null,
+      lastError: "Your copied Outlook emails and calendar were kept. Disconnect Outlook before linking a different Microsoft account." });
+    expect(prisma.__cursors().map((cursor) => cursor.resourceId)).toEqual(["inbox-of-a", "archive-of-a"]);
+    expect(prisma.m365DeltaCursor.deleteMany).not.toHaveBeenCalled();
+    expect(prisma.__row()!.pendingStateHash).toBeNull();
+    expect(JSON.stringify(prisma.__row()!.lastError)).not.toContain(B.accountUpn);
+  });
+
+  it("preserves calendar opt-in and its source when the same identity reconnects", async () => {
+    const prisma = await connectedAsAWithCursors();
+    Object.assign(prisma.__row()!, { calendarEnabled: true, calendarSourceId: "a-calendar", calendarSyncState: "CONNECTED" });
+    grantDied(prisma);
+
+    expect(await connectAs(prisma, A)).toBe("connected");
+    expect(prisma.__row()).toMatchObject({ state: "CONNECTED", calendarEnabled: true,
+      calendarSourceId: "a-calendar", calendarSyncState: "WAITING" });
+    expect(prisma.__cursors().map((cursor) => cursor.resourceId)).toEqual(["inbox-of-a", "archive-of-a"]);
+  });
+
   it("purges the cursors when the sign-in that completes is a different mailbox", async () => {
     const prisma = await connectedAsAWithCursors();
     grantDied(prisma);
@@ -1213,5 +1569,200 @@ describe("a reconnect as someone else starts their sync from nothing (#2347 revi
 
     expect(prisma.__row()).toMatchObject({ state: "CONNECTED", accountUpn: A.accountUpn });
     expect(prisma.__cursors()).toHaveLength(2);
+  });
+});
+
+// --- WARP-3538: which scopes a sign-in and a refresh ask for -----------------
+
+describe("the scopes a sign-in asks for follow the person's SharePoint opt-in (WARP-3538)", () => {
+  /** A connected person whose row carries the given opt-in value. */
+  const rowWith = (sharePointEnabled: unknown) => ({
+    id: "row-1",
+    userId: USER,
+    state: "DISCONNECTED",
+    ...APP_COLUMNS,
+    ...(sharePointEnabled === undefined ? {} : { sharePointEnabled }),
+  });
+  const authCodeScopes = (entra: EntraClient) => vi.mocked(entra.getAuthCodeUrl).mock.calls[0]![1].scopes;
+
+  it.each([
+    ["off", false],
+    ["absent", undefined],
+    ["not a boolean (explicit state — never inferred)", "true"],
+  ])("asks for the base set only when the flag is %s", async (_label, flag) => {
+    // 🔴 A tenant that has not approved Sites.Read.All fails the WHOLE sign-in
+    // ("Need admin approval") for a scope the person never asked for — mail and
+    // calendar included. (Mutation: always add the SharePoint scope and this
+    // goes red.)
+    const prisma = fakePrisma(rowWith(flag));
+    const { entra } = await started(prisma);
+    expect(authCodeScopes(entra)).toEqual([...M365_BASE_SCOPES]);
+    expect(authCodeScopes(entra)).not.toContain("Sites.Read.All");
+  });
+
+  it("asks for Sites.Read.All too when the person has opted in", async () => {
+    const prisma = fakePrisma(rowWith(true));
+    const { entra } = await started(prisma);
+    expect(authCodeScopes(entra)).toEqual([...M365_BASE_SCOPES, "Sites.Read.All"]);
+  });
+
+  it("a first-time connect has no row, and so asks for the base set", async () => {
+    const prisma = fakePrisma(null);
+    const { entra } = await started(prisma);
+    expect(authCodeScopes(entra)).toEqual([...M365_BASE_SCOPES]);
+  });
+
+  it("the device-code fallback follows the same rule", async () => {
+    for (const [flag, expected] of [
+      [false, [...M365_BASE_SCOPES]],
+      [true, [...M365_BASE_SCOPES, "Sites.Read.All"]],
+    ] as const) {
+      const prisma = fakePrisma(rowWith(flag));
+      const entra = fakeEntra();
+      await beginDeviceCodeConnect(prisma as never, entra, USER, { app: APP });
+      expect(vi.mocked(entra.acquireByDeviceCode).mock.calls[0]![1].scopes).toEqual(expected);
+      await vi.waitFor(() => expect((prisma.__row() as any).state).toBe("CONNECTED"));
+    }
+  });
+
+  it("seals the scopes into the pending flow, so the callback redeems with the ones it was issued for", async () => {
+    const prisma = fakePrisma(rowWith(true));
+    await started(prisma);
+    const flow = unsealPendingFlow(USER, (prisma.__row() as any).pendingFlowEnc);
+    expect(flow.scopes).toEqual([...M365_BASE_SCOPES, "Sites.Read.All"]);
+  });
+
+  it.each([
+    ["turned ON", false, true, [...M365_BASE_SCOPES]],
+    ["turned OFF", true, false, [...M365_BASE_SCOPES, "Sites.Read.All"]],
+  ])("redeems with the scopes the authorize leg used even if the person %s SharePoint while they were on Microsoft's page", async (_label, before, after, expected) => {
+    // Entra wants the redemption's scopes equal to, or a subset of, the
+    // authorize leg's. Re-reading the row at the callback would redeem a code
+    // issued for one set with another. (Mutation: read the flag again in
+    // completeAuthCodeConnect and both cases go red.)
+    const prisma = fakePrisma(rowWith(before));
+    const { state, entra } = await started(prisma);
+    await prisma.m365Connection.update({ where: { userId: USER }, data: { sharePointEnabled: after } } as never);
+
+    expect(await completeAuthCodeConnect(prisma as never, entra, { state, browserState: state, code: "c" })).toBe("connected");
+    expect(vi.mocked(entra.acquireByAuthorizationCode).mock.calls[0]![1].scopes).toEqual(expected);
+  });
+
+  it("redeems a flow sealed by the build before this one with the base set — it asked for nothing else", async () => {
+    // The person was on Microsoft's page when the box updated; their 15-minute
+    // window is still open and the sealed flow has no `scopes`.
+    const prisma = fakePrisma(rowWith(true));
+    const { state, entra } = await started(prisma);
+    const flow = unsealPendingFlow(USER, (prisma.__row() as any).pendingFlowEnc);
+    const { scopes: _omitted, ...legacy } = flow;
+    (prisma.__row() as any).pendingFlowEnc = sealPendingFlow(USER, legacy as never);
+
+    expect(await completeAuthCodeConnect(prisma as never, entra, { state, browserState: state, code: "c" })).toBe("connected");
+    expect(vi.mocked(entra.acquireByAuthorizationCode).mock.calls[0]![1].scopes).toEqual([...M365_BASE_SCOPES]);
+  });
+});
+
+describe("a silent refresh asks only for what the connection already holds (WARP-3538)", () => {
+  const BASE_GRANT = "Mail.ReadWrite Files.ReadWrite.All Calendars.ReadWrite Contacts.ReadWrite Mail.Send User.Read profile openid email";
+  const connectedWith = (over: Record<string, unknown>) => ({
+    id: "row-1",
+    userId: USER,
+    state: "CONNECTED",
+    homeAccountId: "uid.utid",
+    tokenCacheEnc: sealTokenCache(USER, CACHE),
+    ...APP_COLUMNS,
+    ...over,
+  });
+  const refreshScopes = (entra: EntraClient) => vi.mocked(entra.acquireSilent).mock.calls[0]![3];
+
+  it("a connection granted only the base set refreshes with the base set, even after the person turned SharePoint on", async () => {
+    // 🔴 They flipped the switch but have not signed in again, so Microsoft has
+    // never been asked for Sites.Read.All. A refresh that asked for it now would
+    // fail with a consent error and push a healthy connection into
+    // NEEDS_RECONNECT. (Mutation: pass [...M365_BASE_SCOPES, "Sites.Read.All"]
+    // whenever the flag is on and this goes red.)
+    const prisma = fakePrisma(connectedWith({ sharePointEnabled: true, grantedScopes: BASE_GRANT }));
+    const entra = fakeEntra();
+
+    await getAccessToken(prisma as never, entra, USER);
+
+    expect(refreshScopes(entra)).toEqual([...M365_BASE_SCOPES]);
+    expect(refreshScopes(entra)).not.toContain("Sites.Read.All");
+    expect((prisma.__row() as any).state).toBe("CONNECTED");
+  });
+
+  it("a connection that DOES hold Sites.Read.All keeps asking for it — also after the person switches SharePoint off", async () => {
+    // What a refresh returns is stored over `grantedScopes`: asking for less would
+    // silently shrink what the grant is recorded as holding, and turning
+    // SharePoint back on would then look like it needs consent again.
+    for (const flag of [true, false]) {
+      const prisma = fakePrisma(connectedWith({ sharePointEnabled: flag, grantedScopes: `${BASE_GRANT} Sites.Read.All` }));
+      const entra = fakeEntra();
+      await getAccessToken(prisma as never, entra, USER);
+      expect(refreshScopes(entra)).toEqual([...M365_BASE_SCOPES, "Sites.Read.All"]);
+    }
+  });
+
+  it.each([
+    ["null (a legacy row)", null],
+    ["empty", ""],
+  ])("a connection with %s grantedScopes refreshes with the base set", async (_label, grantedScopes) => {
+    const prisma = fakePrisma(connectedWith({ grantedScopes }));
+    const entra = fakeEntra();
+    await getAccessToken(prisma as never, entra, USER);
+    expect(refreshScopes(entra)).toEqual([...M365_BASE_SCOPES]);
+  });
+
+  it("stores back what Microsoft returned, as it always has", async () => {
+    const prisma = fakePrisma(connectedWith({ grantedScopes: BASE_GRANT }));
+    const entra = fakeEntra({ acquireSilent: vi.fn(async () => ({ ...authResult({ grantedScopes: "Mail.ReadWrite User.Read" }), accessToken: "tok" })) });
+    await getAccessToken(prisma as never, entra, USER);
+    expect((prisma.__row() as any).grantedScopes).toBe("Mail.ReadWrite User.Read");
+  });
+});
+
+// --- WARP-3538: a sign-in as somebody else also starts their files from nothing ---
+
+describe("a reconnect as someone else removes the files landed from the old account (WARP-3538)", () => {
+  const OLD = { homeAccountId: "old-oid.tid", tenantId: "tenant-a", accountUpn: "old@practice.com" };
+  const NEW = { homeAccountId: "new-oid.tid", tenantId: "tenant-a", accountUpn: "new@practice.com" };
+
+  /** A connection made as OLD, then a new sign-in pressed: parked PENDING_CONSENT, link hash kept. */
+  async function relink(who: typeof OLD, opts: { capped: number }) {
+    const prisma = fakePrisma(null);
+    const first = await started(prisma, fakeEntra({ acquireByAuthorizationCode: vi.fn(async () => authResult({ ...OLD })) }));
+    await completeAuthCodeConnect(prisma as never, first.entra, { state: first.state, browserState: first.state, code: "c" });
+    await prisma.m365Connection.update({ where: { userId: USER }, data: { sharePointEnabled: true, sharePointLibrariesCapped: opts.capped } } as never);
+
+    const c = prisma.__cloud;
+    c.seedSource({ userId: USER, provider: "M365", kind: "ONEDRIVE", sourceId: "od-old", nameEnc: "dcv1:x" });
+    c.seedItem({ userId: USER, provider: "M365", sourceId: "od-old", externalId: "f1", isFolder: false, nameEnc: "dcv1:x" });
+    c.seedItem({ userId: "user-2", provider: "M365", sourceId: "od-x", externalId: "f9", isFolder: false, nameEnc: "dcv1:x" });
+
+    const second = await started(prisma, fakeEntra({ acquireByAuthorizationCode: vi.fn(async () => authResult({ ...who })) }));
+    await completeAuthCodeConnect(prisma as never, second.entra, { state: second.state, browserState: second.state, code: "c2" });
+    return prisma;
+  }
+
+  it("deletes the previous account's landed items and sources, and nobody else's", async () => {
+    // The new account's sweep only covers drives it reads, so nothing else would
+    // ever remove the old account's file names — and a person who signs in as
+    // somebody else must not search them.
+    const prisma = await relink(NEW, { capped: 3 });
+    expect(prisma.__cloud.items.map((r) => r.externalId)).toEqual(["f9"]);
+    expect(prisma.__cloud.sources).toEqual([]);
+  });
+
+  it("clears the previous account's cap count, and keeps the person's SharePoint choice", async () => {
+    const prisma = await relink(NEW, { capped: 3 });
+    expect(prisma.__row()).toMatchObject({ state: "CONNECTED", sharePointLibrariesCapped: 0, sharePointEnabled: true });
+  });
+
+  it("keeps the files — and the cap count — when the SAME account signs in again", async () => {
+    // Reconnecting after NEEDS_RECONNECT is the ordinary recovery path: the
+    // landed list is still right, and re-landing it would be a full re-read.
+    const prisma = await relink(OLD, { capped: 3 });
+    expect(prisma.__cloud.items.map((r) => r.externalId).sort()).toEqual(["f1", "f9"]);
+    expect(prisma.__row()).toMatchObject({ state: "CONNECTED", sharePointLibrariesCapped: 3 });
   });
 });

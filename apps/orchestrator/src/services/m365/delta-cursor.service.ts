@@ -43,6 +43,8 @@ export interface DueCursor {
    *  where this run picks up. Takes precedence over `deltaLink`. */
   resumeLink: string | null;
   state: string;
+  /** Identity whose resources were claimed; never replay them against a replacement link. */
+  cursorLinkHash?: string | null;
 }
 
 /**
@@ -59,29 +61,51 @@ export interface DueCursor {
  * `getAccessToken`, every tick, and pins the failure on a cursor that did
  * nothing wrong. `M365DeltaCursor.userId` is not a relation, so this is two
  * reads rather than a join.
+ *
+ * 🔴 In a DETERMINISTIC order — least recently synced first, a cursor that has
+ * never synced before all of them (WARP-3538). `take: limit` with no order
+ * returns whichever rows the planner reaches first, which is usually the same
+ * ones every tick. That was harmless while a person had a handful of cursors, but
+ * a mailbox has one per folder and, since SharePoint, a person has one per
+ * document library: past `limit` due cursors the same few are served forever and
+ * the rest NEVER run — no error, no log, the data just never arrives. Serving
+ * the oldest first gives every due cursor its turn: a cursor that runs moves its
+ * `lastSyncedAt` to now and falls behind everyone still waiting. (A cursor that
+ * keeps failing does not advance, so it stays near the front — but its backoff
+ * keeps it out of the due set between attempts, so it takes a slot once per
+ * window, not every tick.) `createdAt` breaks ties, so the order is total.
  */
 export async function claimDueCursors(
   prisma: PrismaClient,
   limit: number,
   now: Date = new Date(),
+  excludeCalendar = false,
+  excludeMail = false,
 ): Promise<DueCursor[]> {
   const owners = (await prisma.m365Connection.findMany({
     where: { state: "CONNECTED" },
-    select: { userId: true },
-  })) as Array<{ userId: string }>;
+    select: { userId: true, cursorLinkHash: true, mailEnabled: true },
+  })) as Array<{ userId: string; cursorLinkHash?: string | null; mailEnabled?: boolean }>;
   if (owners.length === 0) return [];
 
   const rows = await prisma.m365DeltaCursor.findMany({
     where: {
       userId: { in: owners.map((o) => o.userId) },
+      AND: [
+        ...(excludeCalendar ? [{ workload: { not: "calendar" } }] : []),
+        { OR: [{ workload: { not: "mail" } }, ...(excludeMail ? [] : [{ workload: "mail", userId: { in: owners.filter((o) => o.mailEnabled === true).map((o) => o.userId) } }])] },
+      ],
       state: { in: [...CLAIMABLE_STATES] },
       // Never attempted, or its backoff window has elapsed.
       OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }],
     },
+    orderBy: [{ lastSyncedAt: { sort: "asc", nulls: "first" } }, { createdAt: "asc" }],
     take: limit,
   });
 
-  return rows as unknown as DueCursor[];
+  const links = new Map(owners.map((owner) => [owner.userId, owner.cursorLinkHash]));
+  return rows.map((cursor) => ({ ...cursor, ...(links.get(cursor.userId) !== undefined
+    ? { cursorLinkHash: links.get(cursor.userId) } : {}) })) as DueCursor[];
 }
 
 /**

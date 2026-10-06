@@ -33,7 +33,6 @@
 import type { NetworkSummary } from "../types/network.js";
 import { config } from "../config.js";
 import { fetchNetworkSummary } from "../services/openwrt.client.js";
-import { parseIpv4 } from "../services/overlay-placement.service.js";
 import { createLogger } from "./logger.js";
 
 const logger = createLogger("vpn-lan");
@@ -62,8 +61,21 @@ function envRouting(): VpnLanRouting {
   };
 }
 
-/** Packed big-endian u32, or null — on the same octet validator the
- *  placement observer applies to the same summary. */
+/** Parse a validated IPv4 literal for the LAN subnet calculation. */
+function parseIpv4(ip: string): [number, number, number, number] | null {
+  const parts = ip.trim().split(".");
+  if (parts.length !== 4) return null;
+  const nums: number[] = [];
+  for (const p of parts) {
+    if (!/^\d{1,3}$/.test(p)) return null;
+    const n = Number(p);
+    if (n > 255) return null;
+    nums.push(n);
+  }
+  return nums as [number, number, number, number];
+}
+
+/** Packed big-endian u32, or null for an invalid IPv4 address. */
 function packIpv4(addr: string): number | null {
   const o = parseIpv4(addr);
   if (!o) return null;

@@ -1,8 +1,8 @@
 name: shell-validation-tests
 
 # WARP-996 — hermetic pytest suites for the scripts/host + scripts/lib
-# shell-script validation guards (WARP-988 box-name, WARP-994 public-fqdn,
-# WARP-995 local-dns hostname). They live in scripts/test/pytest/ — a
+# shell-script validation guards, including local DNS hostname validation.
+# They live in scripts/test/pytest/ — a
 # deliberately conftest-free home with NO service-module import at collection
 # time — so these security guards run independently of any service's import
 # health (they previously sat under services/oled-display/tests/, whose
@@ -71,13 +71,20 @@ concurrency:
   group: shell-validation-tests-${{ github.ref }}
   cancel-in-progress: true
 
+# WARP-3677: least privilege. Every job here only checks out the repo and
+# runs tests (no step uses the token for anything else), so read is all the
+# GITHUB_TOKEN needs. Stated explicitly so a new job cannot inherit a wider
+# repository default by omission.
+permissions:
+  contents: read
+
 jobs:
   shell-validation:
     runs-on: ubuntu-latest
     # Local subprocesses + tmpdirs only; a hung test must fail fast.
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Run shell-script validation tests
         run: |
           python3 -m pip install --upgrade pip pytest

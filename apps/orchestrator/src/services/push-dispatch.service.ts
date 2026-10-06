@@ -184,21 +184,21 @@ export interface PushPayload {
    *  the person taps the notification. Absent on the camera detection
    *  fan-out, which writes no row. */
   notificationId?: string;
-  /** WARP-2978 (ADR-059 P3 D37) — `alert` makes the dial long-lived and urgent
-   *  (`PUSH_ALERT_OPTIONS`) and tells the service worker to keep the
-   *  notification until it is handled. Absent: the default best-effort dial. */
+  /** `alert` makes the dial long-lived and urgent (`pushDialOptions`) and
+   *  tells the service worker to keep the notification until it is handled.
+   *  Absent: the default best-effort dial. */
   priority?: NotificationPriority;
 }
 
-/** WARP-2978 — the one priority there is. A Security alert (§6.7). */
+/** The one priority there is: an alert. */
 export type NotificationPriority = "alert";
 
 /** Best-effort: a notification nobody could receive within a minute is stale. */
 export const PUSH_DEFAULT_TTL_S = 60;
 /**
- * WARP-2978 (D37) — an alert about someone inside after hours must still reach
- * a phone that has been asleep for longer than a minute: kept by the push
- * service for an hour, delivered with `Urgency: high`.
+ * An alert must still reach a phone that has been asleep for longer than a
+ * minute: kept by the push service for an hour, delivered with
+ * `Urgency: high`.
  */
 export const PUSH_ALERT_TTL_S = 3600;
 
@@ -353,7 +353,7 @@ export async function dispatchToUser(
           },
           body,
           // TTL: best-effort, stale notifications past 1 min are useless —
-          // except an alert (WARP-2978), which is kept for an hour.
+          // except an alert, which is kept for an hour.
           pushDialOptions(payload.priority),
         );
         sent++;

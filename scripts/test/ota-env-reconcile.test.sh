@@ -51,7 +51,12 @@ ExecReload=/usr/bin/docker compose --env-file $box/.env -f $box/docker/docker-co
 EOF
 }
 
-reconcile() { DROPLET_OTA_UNIT_FILE="$1/droplet.service" /bin/sh "$RECONCILE" "$1" "$2"; }
+# WARP-3452: the VRAM probe runs hermetic. Stubs shadow nvidia-smi and docker
+# (both fail by default: an unreadable probe), and SYS_DRM_ROOT is empty.
+STUB="$TMP/stub"; mkdir -p "$STUB" "$TMP/no-drm"
+stub() { printf '#!/bin/sh\n%s\n' "$2" > "$STUB/$1"; chmod +x "$STUB/$1"; }
+stub nvidia-smi 'exit 1'; stub docker 'exit 1'
+reconcile() { PATH="$STUB:$PATH" SYS_DRM_ROOT="$TMP/no-drm" DROPLET_OTA_UNIT_FILE="$1/droplet.service" /bin/sh "$RECONCILE" "$1" "$2"; }
 
 echo "env-reconcile: first run on an old box"
 BOX="$TMP/box"
@@ -67,6 +72,8 @@ grep -qx "DROPLET_OTA_APPLY_SCRIPT=$BOX/docker/ota/apply-update.sh" "$BOX/.env" 
   && pass "OTA apply enabled with the release-shipped helper path (WARP-3007)" || fail "DROPLET_OTA_APPLY_SCRIPT not added"
 grep -q '^NVR_MEDIA_SOURCE=nvrdata$' "$BOX/.env" \
   && pass "missing literal-default key added" || fail "NVR_MEDIA_SOURCE literal missing"
+grep -qx 'HQ_ISSUANCE_URL=' "$BOX/.env" \
+  && pass "absent HQ origin stays empty for local WireGuard and DNS" || fail "HQ origin was defaulted to an external service"
 grep -q '^COMPOSE_PROFILES=linux,display,eval,email$' "$BOX/.env" \
   && pass "missing profile token appended to COMPOSE_PROFILES" || fail "email token not appended ($(grep COMPOSE_PROFILES "$BOX/.env"))"
 [ "$(grep -c '^COMPOSE_PROFILES=' "$BOX/.env")" -eq 1 ] \
@@ -104,7 +111,23 @@ echo "$OUT" | grep -q '"SERVICE_TOKEN_VOICE"' && fail "report lists an existing 
 python3 -c 'import json,sys; json.loads(sys.argv[1])' "$OUT" 2>/dev/null \
   && pass "report is valid JSON" || fail "report is not JSON: $OUT"
 
+[ -L "$BOX/docker/.env" ] && [ "$(readlink "$BOX/docker/.env")" = "../.env" ] \
+  && pass "docker/.env link to ../.env created (compose interpolation source, WARP-3588)" \
+  || fail "docker/.env is not a symlink to ../.env after reconcile"
+
+echo "env-reconcile: a forked regular docker/.env is replaced by the link"
+BOXF="$TMP/boxf"; make_box "$BOXF"
+printf 'STALE_ONLY=1\n' > "$BOXF/docker/.env"
+reconcile "$BOXF" updf >/dev/null 2>&1
+[ -L "$BOXF/docker/.env" ] && [ -f "$BOXF/docker/.env.forked-updf" ] && grep -q '^STALE_ONLY=1$' "$BOXF/docker/.env.forked-updf" \
+  && pass "regular docker/.env backed up as .forked-<id> and relinked" || fail "forked docker/.env not repaired"
+
 echo "env-reconcile: second run is a no-op"
+BOXHQ="$TMP/boxhq"; make_box "$BOXHQ"
+printf 'HQ_ISSUANCE_URL=https://hq.example.invalid\n' >> "$BOXHQ/.env"
+reconcile "$BOXHQ" upd-hq >/dev/null 2>&1
+grep -qx 'HQ_ISSUANCE_URL=https://hq.example.invalid' "$BOXHQ/.env" \
+  && pass "explicitly provisioned HQ origin is preserved" || fail "explicit HQ origin was changed"
 cp "$BOX/.env" "$TMP/env.after1"; cp "$BOX/droplet.service" "$TMP/unit.after1"
 OUT2="$(reconcile "$BOX" upd2 2>"$TMP/err")"; RC=$?
 [ "$RC" -eq 0 ] && cmp -s "$BOX/.env" "$TMP/env.after1" && cmp -s "$BOX/droplet.service" "$TMP/unit.after1" \
@@ -170,6 +193,44 @@ grep -q '^DEVICE_SECRET=[0-9a-f]\{64\}$' "$BOX/.env" \
   && pass "absent DEVICE_SECRET generated" || fail "DEVICE_SECRET not added to an old box"
 grep -q '^export DEVICE_SECRET=operator-set$' "$BOX5/.env" \
   && pass "present DEVICE_SECRET untouched" || fail "operator DEVICE_SECRET touched"
+
+echo "env-reconcile: WARP-3452 context window, by setup's VRAM rule"
+ctx_of() { printf '%s/%s' "$(grep '^DMR_CONTEXT_LENGTH=' "$1/.env" | cut -d= -f2)" "$(grep '^OLLAMA_CONTEXT_LENGTH=' "$1/.env" | cut -d= -f2)"; }
+ctx_case() {
+  # $1 = name, $2 = extra .env lines, $3 = expected "DMR/OLLAMA", $4 = label
+  local b="$TMP/ctx-$1"; make_box "$b"; printf '%b' "$2" >> "$b/.env"
+  reconcile "$b" "ctx-$1" >/dev/null 2>"$TMP/err-$1"
+  [ "$(ctx_of "$b")" = "$3" ] && pass "$4" || fail "$4 — got '$(ctx_of "$b")' ($(cat "$TMP/err-$1"))"
+}
+stub nvidia-smi 'echo 16311'
+ctx_case big 'GPU_VENDOR=nvidia\n' 65536/65536 "16 GB card (16311 MiB) -> both keys 65536"
+stub nvidia-smi 'echo 12282'
+ctx_case small 'GPU_VENDOR=nvidia\n' 16384/16384 "12 GB card -> both keys 16384"
+stub nvidia-smi 'echo 16311'
+ctx_case keep 'GPU_VENDOR=nvidia\nDMR_CONTEXT_LENGTH=32768\nOLLAMA_CONTEXT_LENGTH=32768\n' 32768/32768 \
+  "existing values kept on a 16 GB card"
+[ "$(grep -c '_CONTEXT_LENGTH=' "$TMP/ctx-keep/.env")" -eq 2 ] \
+  && pass "existing values not duplicated" || fail "context keys duplicated"
+ctx_case lone-ollama 'GPU_VENDOR=nvidia\nOLLAMA_CONTEXT_LENGTH=65536\n' 65536/65536 \
+  "lone OLLAMA_ key copied to DMR_ (never a 64k budget over a 16k server)"
+ctx_case lone-dmr 'GPU_VENDOR=nvidia\nDMR_CONTEXT_LENGTH=32768\n' 32768/32768 \
+  "lone DMR_ key copied to OLLAMA_"
+stub nvidia-smi 'echo "Failed to initialize NVML: Unknown Error"'
+ctx_case blind 'GPU_VENDOR=nvidia\n' 16384/16384 "unreadable probe -> 16384, never 64k blind"
+ctx_case old '' 16384/16384 "pre-GPU_VENDOR box with nothing readable -> 16384"
+# The path an NVIDIA box really takes under OTA: the helper's container cannot
+# open the GPU, so the running DMR container's nvidia-smi answers.
+stub docker 'echo 16311'
+ctx_case dmr 'GPU_VENDOR=nvidia\n' 65536/65536 "host nvidia-smi blocked, DMR container reports 16 GB -> 65536"
+stub docker 'exit 1'
+mkdir -p "$TMP/drm/card0/device" "$TMP/drm/card1/device"
+echo 536870912 > "$TMP/drm/card0/device/mem_info_vram_total"
+echo 17163091968 > "$TMP/drm/card1/device/mem_info_vram_total"
+B="$TMP/ctx-amd"; make_box "$B"; echo 'GPU_VENDOR=amd' >> "$B/.env"
+PATH="$STUB:$PATH" SYS_DRM_ROOT="$TMP/drm" DROPLET_OTA_UNIT_FILE="$B/droplet.service" /bin/sh "$RECONCILE" "$B" ctx-amd >/dev/null 2>&1
+[ "$(ctx_of "$B")" = "65536/65536" ] && pass "AMD 16 GB card via sysfs (beside a 512 MiB iGPU) -> 65536" \
+  || fail "AMD sysfs case got '$(ctx_of "$B")'"
+stub nvidia-smi 'exit 1'
 
 echo "env-reconcile: drift vs migrate_env"
 MIGRATE_KEYS="$(awk '/^migrate_env\(\)/,/^}/' "$SECRETS_SH" | grep -o '_migrate_ensure_key [A-Z0-9_]*' | awk '{print $2}' | sort -u)"

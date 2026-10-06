@@ -1,6 +1,8 @@
 # ADR-019: Storage pool (software-RAID) management
 
-- **Status:** Accepted — shipped (status corrected 2026-07-27; see Status audit below)
+> **Partly superseded by [ADR-070](ADR-070-camera-recording-storage.md) (2026-10-03).** D2's "Nothing is ever automatic" no longer holds for camera recordings: the box now chooses, sizes and migrates the recordings slice on its own. Nothing else in D2, and nothing else in this ADR, changes.
+
+- **Status:** Accepted — shipped (status corrected 2026-07-27; see Status audit below). D2 is partly superseded by [ADR-070](ADR-070-camera-recording-storage.md), 2026-10-03, for camera recordings only.
 - **Date:** 2026-06-04
 - **Authors:** Stefan Cruceru
 - **Related tickets:** BUG-3 (drives page + RAID/drive-pool management)
@@ -152,8 +154,9 @@ narrowly-scoped polkit grant), adapted because `mdadm` is a direct binary with
 no unit of its own to polkit-restart:
 
 1. The bridge writes `{request_id, operation, params}` atomically to
-   `/var/lib/droplet-bridge/pool-spool/request.json` — inside its own 0700
-   `StateDirectory`, so only the bridge (or root) can place a request.
+   `/run/droplet-bridge-pool-spool/request.json` — inside its own 0700
+   systemd `RuntimeDirectory` on tmpfs, shared with the root executor. The
+   one-time recovery-key result therefore never lands on persistent OS storage.
 2. It then runs `systemctl start droplet-storage-pool-apply.service` — a
    D-Bus ask to PID 1, authorized for the `droplet` user by
    `services/oled-display/50-droplet-device-bridge.rules` (that one unit,
@@ -163,7 +166,9 @@ no unit of its own to polkit-restart:
    spooled request, runs `droplet-storage-pool.sh` — whose D4.3 pre-flight now
    probes with root and therefore actually bites — and writes
    `pool-spool/result.json` (`{request_id, rc, stdout, stderr}`) back for the
-   bridge to read, verify against its `request_id`, and delete.
+   bridge to read, verify against its `request_id`, and delete. Recovery-key
+   stdout/stderr capture also stays on `/run`; reveal fails closed if that path
+   is unavailable or is not tmpfs.
 
 A blocking `systemctl start` of a oneshot returns when `ExecStart` exits, so
 the bridge reads the result synchronously; concurrent POSTs are refused by a

@@ -369,21 +369,9 @@ describe("POST /api/llm/chat — history replay on a cloud turn (WARP-2991)", ()
     expect(JSON.stringify(runOpts().messages)).not.toContain(EARLIER_LOCAL_ANSWER);
   });
 
-  // WARP-2979 (ADR-059 P4 §6.13, D27) — Security never leaves the box, not even with consent.
-  it("GRANTED, but an on-box answer used a Security tool: only the user's own messages go", async () => {
-    sessionRow = { cloudHistoryConsent: "granted", cloudHistoryConsentAt: T1 };
-    messageRows = [{ role: "assistant", provider: "local", createdAt: T0, toolCalls: [{ name: "security_list_incidents" }] }];
-    const app = buildApp({ id: OWNER_ID, username: "stefan", role: "owner" });
-
-    expect((await sendCloudTurn(app)).status).toBe(200);
-    expect(sentConversation().map((m) => m.role)).toEqual(["user", "user"]);
-    expect(JSON.stringify(runOpts().messages)).not.toContain(EARLIER_LOCAL_ANSWER);
-    expect(historyAuditRefs().historyReplay).toBe("user_only");
-  });
-
-  // Review #2420 (item 8): the Security rule reads each answer's toolCalls, written when the turn FINALIZES — and a
-  // finalize failure is only logged. An on-box answer left pending or streaming may have used Security unrecorded,
-  // so it is never sent: the conversation replays the user's own messages, whatever the consent.
+  // Review #2420 (item 8): the never-sent rule reads each answer's toolCalls, written when the turn FINALIZES — and a
+  // finalize failure is only logged. An on-box answer left pending or streaming may have used a never-sent tool
+  // unrecorded, so it is never sent: the conversation replays the user's own messages, whatever the consent.
   it.each(["pending", "streaming"])("GRANTED, but an on-box answer never finalized (%s): only the user's own messages go", async (status) => {
     sessionRow = { cloudHistoryConsent: "granted", cloudHistoryConsentAt: T1 };
     messageRows = [{ role: "assistant", provider: "local", createdAt: T0, toolCalls: null, status }];
@@ -413,18 +401,6 @@ describe("POST /api/llm/chat — history replay on a cloud turn (WARP-2991)", ()
     const app = buildApp({ id: OWNER_ID, username: "stefan", role: "owner" });
     expect((await sendCloudTurn(app)).status).toBe(200);
     expect(historyAuditRefs().historyReplay).toBe("full");
-  });
-
-  it("GRANTED, and the Security answer is the OLDEST of several covered ones: still only the user's messages", async () => {
-    sessionRow = { cloudHistoryConsent: "granted", cloudHistoryConsentAt: T2 };
-    messageRows = [
-      { role: "assistant", provider: null, createdAt: T0, toolCalls: [{ name: "security_search_events" }] },
-      onBoxAnswerAt(T1),
-    ];
-    const app = buildApp({ id: OWNER_ID, username: "stefan", role: "owner" });
-
-    expect((await sendCloudTurn(app)).status).toBe(200);
-    expect(sentConversation().map((m) => m.role)).toEqual(["user", "user"]);
   });
 
   it("a consent does not cover an on-box answer produced AFTER it", async () => {
@@ -517,20 +493,7 @@ describe("/api/llm/conversations/:id/cloud-history (WARP-2991)", () => {
     });
   });
 
-  it("WARP-2979: GET says Security answers are never sent — even when the consent covers them", async () => {
-    sessionRow = { cloudHistoryConsent: "granted", cloudHistoryConsentAt: T1 };
-    messageRows = [
-      { role: "user", provider: null, createdAt: T0, toolCalls: null },
-      { role: "assistant", provider: "local", createdAt: T0, toolCalls: [{ name: "security_zone_status" }] },
-    ];
-    const app = buildApp({ id: OWNER_ID, username: "stefan", role: "owner" });
-
-    const res = await request(app).get(`/api/llm/conversations/${CONV_ID}/cloud-history`);
-    expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({ consent: "granted", uncoveredOnBoxAnswers: 0, neverSent: ["Security"], drewOn: [] });
-  });
-
-  it("WARP-2979: GET's neverSent is empty when no answer used Security", async () => {
+  it("GET's neverSent is empty when no answer used a never-sent tool", async () => {
     sessionRow = { cloudHistoryConsent: "not_asked", cloudHistoryConsentAt: null };
     messageRows = [onBoxAnswerAt(T0)];
     const app = buildApp({ id: OWNER_ID, username: "stefan", role: "owner" });

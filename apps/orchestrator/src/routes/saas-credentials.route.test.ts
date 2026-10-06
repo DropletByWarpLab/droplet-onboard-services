@@ -135,13 +135,16 @@ function createPrismaStub(initial: StubRow | null) {
       findFirst: vi.fn(async ({ where }: { where: { provider: string } }) =>
         row && row.provider === where.provider ? row : null,
       ),
+      // WARP-3434 — a first save is ONE insert that carries the sealed
+      // credential and the id it was sealed for, so the stub honours `data`
+      // instead of returning an empty row for a later update to fill in.
       create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
         row = {
-          id: ROW_ID,
+          id: String(data.id ?? ROW_ID),
           provider: String(data.provider),
           status: String(data.status),
-          providerTokensEnc: null,
-          providerConfig: null,
+          providerTokensEnc: (data.providerTokensEnc as string | undefined) ?? null,
+          providerConfig: data.providerConfig ?? null,
           updatedAt: new Date(),
         };
         return row;
@@ -392,7 +395,7 @@ describe("PATCH — three-way resolution against the persisted column", () => {
     expect(data).not.toHaveProperty("apiCredentialsEnc");
   });
 
-  it("creates the row before sealing, so the AAD names a real connection", async () => {
+  it("seals for the id the new row is inserted with, so the AAD names a real connection", async () => {
     const prisma = createPrismaStub(null);
     const app = buildApp(prisma);
 
@@ -401,10 +404,282 @@ describe("PATCH — three-way resolution against the persisted column", () => {
       .send({ fields: { accountId: "acct-1", apiKey: "rk_test_ok" } });
 
     expect(res.status).toBe(200);
-    expect(prisma.integrationConnection.create).toHaveBeenCalled();
-    expect(openSaasCredentials(ROW_ID, prisma._row()?.providerTokensEnc as string)).toEqual({
+    // WARP-3434 — one insert, carrying the sealed credential; no empty row
+    // first and a second write to fill it.
+    expect(prisma.integrationConnection.create).toHaveBeenCalledTimes(1);
+    expect(prisma.integrationConnection.update).not.toHaveBeenCalled();
+    const stored = prisma._row();
+    expect(stored?.id).toBeTruthy();
+    expect(openSaasCredentials(stored?.id as string, stored?.providerTokensEnc as string)).toEqual({
       apiKey: "rk_test_ok",
     });
+  });
+});
+
+/**
+ * WARP-3434 — a refused save leaves no connection row behind.
+ *
+ * The PATCH used to create the row (`NOT_CONFIGURED`, `secretRef: <provider>:pending`)
+ * BEFORE validating, so every 400 on a first save left a row for the view to
+ * report as `configured: true` for a connector nobody configured.
+ *
+ * Mutation: move the insert back ahead of `resolveCredentialUpdate` → every
+ * test here goes red on `create` having been called.
+ */
+describe("PATCH — a refused first save creates nothing", () => {
+  async function refusedFirstSave(fields: Record<string, string>, provider = FIXTURE.id) {
+    const prisma = createPrismaStub(null);
+    const res = await request(buildApp(prisma))
+      .patch(`/api/integrations/${provider}/credentials`)
+      .send({ fields });
+    return { res, prisma };
+  }
+
+  it("a value the descriptor refuses leaves no row, and the view still says not configured", async () => {
+    const { res, prisma } = await refusedFirstSave({
+      accountId: "acct-1",
+      apiKey: "sk_live_wrong",
+    });
+
+    expect(res.status).toBe(400);
+    expect(prisma.integrationConnection.create).not.toHaveBeenCalled();
+    expect(prisma._row()).toBeNull();
+
+    const view = await request(buildApp(prisma)).get(
+      `/api/integrations/${FIXTURE.id}/credentials`,
+    );
+    expect(view.body.configured).toBe(false);
+    expect(view.body.state).toBe("NOT_CONFIGURED");
+    // The refused value is named by field and never echoed.
+    expect(JSON.stringify(res.body)).not.toContain("sk_live_wrong");
+  });
+
+  it("a missing required field leaves no row", async () => {
+    const { res, prisma } = await refusedFirstSave({ apiKey: "rk_test_ok" });
+
+    expect(res.status).toBe(400);
+    expect(res.body.details.fieldErrors).toHaveProperty("accountId");
+    expect(prisma.integrationConnection.create).not.toHaveBeenCalled();
+    expect(prisma._row()).toBeNull();
+  });
+
+  it("a provider whose first save names no credential type leaves no row", async () => {
+    const { res, prisma } = await refusedFirstSave(
+      { clientId: "FAKE-XERO-CLIENT-ID", clientSecret: "FAKE-XERO-SECRET" },
+      "xero",
+    );
+
+    expect(res.status).toBe(400);
+    expect(res.body.details.fieldErrors.credentialVariant).toEqual([
+      "Choose which credential type this is.",
+    ]);
+    expect(prisma.integrationConnection.create).not.toHaveBeenCalled();
+    expect(prisma._row()).toBeNull();
+    expect(JSON.stringify(res.body)).not.toContain("FAKE-XERO-SECRET");
+  });
+
+  it("a failed insert leaves no row and surfaces as an error, not a success", async () => {
+    const prisma = createPrismaStub(null);
+    prisma.integrationConnection.create.mockRejectedValueOnce(new Error("db down"));
+
+    const res = await request(buildApp(prisma))
+      .patch(`/api/integrations/${FIXTURE.id}/credentials`)
+      .send({ fields: { accountId: "acct-1", apiKey: "rk_test_ok" } });
+
+    expect(res.status).toBeGreaterThanOrEqual(500);
+    expect(prisma._row()).toBeNull();
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+
+  it("a first save with nothing to store creates no row either", async () => {
+    registerProviderDescriptor({
+      id: "fixture-token-only",
+      displayName: "Fixture Token Only",
+      category: "CRM",
+      track: "cloud",
+      credentialFields: [
+        {
+          name: "token",
+          label: "Token",
+          type: "string",
+          required: true,
+          secret: true,
+          storage: "encrypted",
+        },
+      ],
+      egressHosts: ["api.fixture-token-only.invalid"],
+      datasets: ["invoice"],
+    });
+    // Clearing a secret that was never stored is not a connection.
+    const { res, prisma } = await refusedFirstSave({ token: "" }, "fixture-token-only");
+
+    expect(res.status).toBe(200);
+    expect(res.body.configured).toBe(false);
+    expect(prisma.integrationConnection.create).not.toHaveBeenCalled();
+    expect(prisma._row()).toBeNull();
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * WARP-3434 — the first Xero key is saveable from this page.
+ *
+ * Xero declares `credentialVariants`; the box records which path a connection
+ * is on and refuses a first save that does not name one. The credential list
+ * now says which path its fields belong to (`variant`), so a client can send it
+ * back, which is what the page and the Mac app do.
+ */
+describe("PATCH — a first Xero credential", () => {
+  const XERO_SECRET = "FAKE-XERO-CLIENT-SECRET-do-not-use-0001";
+
+  it("the list names the path the fields belong to, before anything is saved", async () => {
+    const res = await request(buildApp(createPrismaStub(null))).get(
+      "/api/integrations/xero/credentials",
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body.variant).toBe("custom-connection");
+    expect(res.body.fields.map((f: { name: string }) => f.name)).toEqual([
+      "clientId",
+      "clientSecret",
+    ]);
+  });
+
+  it("saves when the body names that path, and records it on the row", async () => {
+    const prisma = createPrismaStub(null);
+    const res = await request(buildApp(prisma))
+      .patch("/api/integrations/xero/credentials")
+      .send({
+        fields: {
+          credentialVariant: "custom-connection",
+          clientId: "FAKE-XERO-CLIENT-ID",
+          clientSecret: XERO_SECRET,
+        },
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.variant).toBe("custom-connection");
+    expect(res.body.hasCredentials).toBe(true);
+    expect(res.body.state).toBe("PROVISIONING");
+    expect(res.body.values.clientId).toBe("FAKE-XERO-CLIENT-ID");
+
+    const stored = prisma._row();
+    expect(stored?.providerConfig).toMatchObject({
+      credentialVariant: "custom-connection",
+      clientId: "FAKE-XERO-CLIENT-ID",
+    });
+    expect(openSaasCredentials(stored?.id as string, stored?.providerTokensEnc as string)).toEqual({
+      clientSecret: XERO_SECRET,
+    });
+    // Rule 19: the secret reaches neither the response nor the audit row.
+    expect(JSON.stringify(res.body)).not.toContain(XERO_SECRET);
+    expect(JSON.stringify(recordActivityMock.mock.calls)).not.toContain(XERO_SECRET);
+  });
+
+  it("a later save keeps the recorded path without being told it again", async () => {
+    const prisma = createPrismaStub(null);
+    const app = buildApp(prisma);
+    await request(app)
+      .patch("/api/integrations/xero/credentials")
+      .send({
+        fields: {
+          credentialVariant: "custom-connection",
+          clientId: "FAKE-XERO-CLIENT-ID",
+          clientSecret: XERO_SECRET,
+        },
+      });
+
+    const res = await request(app)
+      .patch("/api/integrations/xero/credentials")
+      .send({ fields: { clientId: "FAKE-XERO-CLIENT-ID-2" } });
+
+    expect(res.status).toBe(200);
+    expect(res.body.values.clientId).toBe("FAKE-XERO-CLIENT-ID-2");
+    expect(res.body.variant).toBe("custom-connection");
+  });
+});
+
+/**
+ * WARP-3434 — number fields round-trip as numbers.
+ *
+ * `validateCredentialFieldValue` accepts a `positiveInteger` only as a JSON
+ * number. The web page used to send "5000", and every later Save of that
+ * connector's form failed with "… is not in the expected format." The page now
+ * sends the number; the box's contract is unchanged and pinned here.
+ */
+describe("PATCH — a positiveInteger field is a number end to end", () => {
+  it("stores 5000 as a number and the view returns it as a number", async () => {
+    const prisma = createPrismaStub(null);
+    const app = buildApp(prisma);
+
+    const res = await request(app)
+      .patch("/api/integrations/quickbooks-online/credentials")
+      .send({ fields: { realmId: "9130350000000001", callCeiling: 5000 } });
+
+    expect(res.status).toBe(200);
+    expect(res.body.values.callCeiling).toBe(5000);
+    expect(prisma._row()?.providerConfig).toMatchObject({ callCeiling: 5000 });
+
+    const read = await request(app).get("/api/integrations/quickbooks-online/credentials");
+    expect(read.body.values.callCeiling).toBe(5000);
+    expect(typeof read.body.values.callCeiling).toBe("number");
+  });
+
+  it("a later save of the same form (number again) still passes", async () => {
+    const prisma = createPrismaStub(null);
+    const app = buildApp(prisma);
+    await request(app)
+      .patch("/api/integrations/quickbooks-online/credentials")
+      .send({ fields: { realmId: "9130350000000001", callCeiling: 5000 } });
+
+    const res = await request(app)
+      .patch("/api/integrations/quickbooks-online/credentials")
+      .send({ fields: { realmId: "9130350000000002", callCeiling: 6000 } });
+
+    expect(res.status).toBe(200);
+    expect(res.body.values.callCeiling).toBe(6000);
+  });
+
+  it('refuses the text "5000" by field name, and leaves no row', async () => {
+    const prisma = createPrismaStub(null);
+    const res = await request(buildApp(prisma))
+      .patch("/api/integrations/quickbooks-online/credentials")
+      .send({ fields: { realmId: "9130350000000001", callCeiling: "5000" } });
+
+    expect(res.status).toBe(400);
+    expect(res.body.details.fieldErrors).toHaveProperty("callCeiling");
+    expect(prisma._row()).toBeNull();
+  });
+});
+
+/**
+ * WARP-3434 — the credential list carries the connector kind.
+ */
+describe("GET — the list says which kind of connector each one is", () => {
+  it("carries track, probedOnConnect and variant on every entry", async () => {
+    const res = await request(buildApp(createPrismaStub(null))).get(
+      "/api/integrations/credentials",
+    );
+
+    expect(res.status).toBe(200);
+    const byId = Object.fromEntries(
+      res.body.providers.map((p: { provider: string }) => [p.provider, p]),
+    );
+    expect(byId[FIXTURE.id]).toMatchObject({
+      track: "cloud",
+      probedOnConnect: true,
+      variant: null,
+    });
+    expect(byId.xero).toMatchObject({
+      track: "cloud",
+      probedOnConnect: true,
+      variant: "custom-connection",
+    });
+    for (const p of res.body.providers) {
+      expect(["cloud", "rest", "mcp"]).toContain(p.track);
+      expect(typeof p.probedOnConnect).toBe("boolean");
+      expect(p.probedOnConnect).toBe(p.track !== "mcp");
+    }
   });
 });
 

@@ -287,8 +287,8 @@ export function computeEffectiveAccess(inputs: EffectiveAccessInputs): Effective
     for (const f of ALWAYS_ON_FEATURES) levelByModule.set(f.moduleId, f.level);
     for (const grant of user.accessRole.featureGrants) {
       if (!isGateableModuleId(grant.moduleId)) continue; // chat rows never exist; defensive
-      // `null`: the tier may hold nothing on this module (security below family,
-      // doors below admin), so a grant stored before that floor existed is inert
+      // `null`: the tier may hold nothing on this module (crm, projects, money
+      // and support below family), so a grant stored before that floor existed is inert
       // rather than honoured.
       const level = clampLevel(tier, grant.moduleId, grant.level);
       if (level !== null) levelByModule.set(grant.moduleId, level);

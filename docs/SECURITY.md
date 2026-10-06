@@ -37,8 +37,9 @@ file.
 | `ci.yml` job `semgrep` | semgrep 1.136.0, `p/owasp-top-ten` + `.semgrep/droplet.yaml` | yes (new findings only) — blocks via the required `ci-summary` fan-in since WARP-2481; before that it was red-but-advisory | code, excl. tests (`.semgrepignore`) | diff-aware `--baseline-commit`; `// nosemgrep: <rule-id>` with reviewer sign-off |
 | `ci.yml` job `hadolint` | hadolint 2.14.0 | yes — via the required `ci-summary` fan-in (WARP-2493); previously `hadolint.yml`, red-but-advisory | all tracked Dockerfiles | `.hadolint.yaml` ignored rules (DL3008/DL3059/DL4006, reasons inline) |
 | `docker-build.yml` (Trivy step) | trivy-action 0.36.0, **DB pinned by digest** | **no** — advisory today. Its verdict IS a job exit status (`exit-code: "1"`, no SARIF upload) and it already fans into `docker-build ok`, but that context is **not required** and cannot be as written: `docker-build.yml` is path-filtered, so on an out-of-scope PR it never reports (WARP-2172). See [Trivy is a job status, and still does not block](#trivy-blocking) | every image the PR rebuilds | `.trivyignore` baseline + `.github/trivy-db-version` (see [Trivy determinism](#trivy-determinism)) |
+| `ci.yml` job `gitleaks`, step "Trivy dependency scan" (WARP-3665) | trivy-action 0.36.0 `scan-type: fs`, **same DB pin** | yes (new findings only) — blocks via the required `ci-summary` fan-in; runs on a PR only when a lockfile, requirements file, `.trivyignore`, the DB pin or either scan workflow changed, and on every main push | npm production lockfiles, pinned `requirements.txt` dependencies and Python runtime/dev `requirements*.lock` resolutions (fixable HIGH/CRITICAL) | the same `.trivyignore` baseline, each entry with an `exp:` expiry. Both scans add the `pip:requirements[^/]*\.lock$` file pattern: Trivy's pip default recognizes only `requirements.txt`, while the hash locks contain exact transitive versions. Default detection and version-range handling remain unchanged. The release scan is a step of `publish-release.yml`'s `gate-node` job, so a release dispatch fails before anything is built, pushed or signed |
 | `codeql.yml` | CodeQL (JS/TS + Python + Actions) | no — advisory signal only (not a required check; no `code_scanning` ruleset rule exists — see [CodeQL ownership](#codeql)) | code paths + `.github/workflows/**` | GitHub per-PR alert diffing |
-| `osv-nightly.yml` | osv-scanner 2.3.8 action | no (nightly signal) | lockfiles + requirements | `osv-scanner.toml` |
+| `osv-nightly.yml` | osv-scanner 2.3.8 action | no (nightly signal) | lockfiles + requirements | `osv-scanner.toml` (every ignore has `ignoreUntil`, WARP-3667) |
 | `egress-gate.yml` | `scripts/check-egress-allowlist.py` | yes | outbound destinations | `docs/security/allowed-egress.yaml` (security review required) |
 | Dependabot | `.github/dependabot.yml` | n/a (opens fix PRs) | npm ×2, pip ×13, actions | grouped weekly, limits per ecosystem |
 
@@ -71,6 +72,16 @@ removed under WARP-2493.
 Until one of those lands: **a fixable HIGH/CRITICAL in a rebuilt image turns
 `docker-build ok` red and does not stop the merge.** Treat it as review-blocking
 by convention, not by machine.
+
+**What does block today (WARP-3665).** The image scan above is unchanged. What
+reaches `ci-summary` is a second Trivy pass over the dependency inputs
+(lockfiles and requirements files) with the same pinned DB and the same
+`.trivyignore` baseline, a step of the `gitleaks` job in `ci.yml`, plus the
+same step in `publish-release.yml`'s `gate-node` job. It blocks a new fixable
+HIGH/CRITICAL in a dependency a PR adds or bumps, and a release dispatch on a
+tree carrying one. It does not see OS packages or bundled Go binaries; those
+remain covered only by the image scan, so making `docker-build ok` a required
+context (WARP-2172) is still the open item for them.
 
 ### CodeQL ownership: this repo runs advanced setup only (WARP-2167) {#codeql}
 
@@ -167,6 +178,19 @@ reproducible while still failing a genuinely NEW fixable vuln:
    finding *not* in the baseline, i.e. one a PR introduces or a DB-pin bump
    newly surfaces. `ignore-unfixed` drops un-patchable base CVEs on top.
 
+**Everything frozen has an expiry (WARP-3667).** Each `.trivyignore` entry
+carries `exp:YYYY-MM-DD` (Trivy stops ignoring it that day, so the finding
+fails the build again), each `osv-scanner.toml` ignore carries `ignoreUntil`,
+and `scripts/check-vuln-exceptions.sh` (a `ci.yml` `detect` step) fails a PR
+when an entry has no expiry, is past due, or the pinned DB snapshot is more
+than 35 days old. The same check runs in the release `gate-node` job before
+the dependency scan, so a quiet branch cannot publish with a stale DB pin.
+Extend an exception by editing its date in a reviewed PR;
+never delete one to make a scan pass. The initial dates are 2027-01-02 (90 days
+from 2026-10-04) for every entry, the conservative choice; owners shorten or
+extend per finding. The monthly refresh is a manual PR today; a scheduled job
+that opens it is a CI-spend decision (see the WARP-3667 proposal in the PR).
+
 **Bumping the pin is a reviewable event, not a silent one.** Update the
 digest in `.github/trivy-db-version`, re-run the scan locally, and reconcile
 any newly-surfaced fixable IDs into `.trivyignore` (patch via the dep bump,
@@ -183,12 +207,77 @@ security updates are repo settings, enabled one-time by an admin:
     gh api -X PUT repos/DropletByWarpLab/droplet-onboard-services/vulnerability-alerts
     gh api -X PUT repos/DropletByWarpLab/droplet-onboard-services/automated-security-fixes
 
+The security-updates setting is the repository owner's to change; the
+runbook is in shared_brain pull request 37 (not repeated here). The
+remediation deadline by severity is policy, drafted in shared_brain pull
+request 34; this file will link to the adopted text rather than restate it.
+
+### Base-image digest pins and the Python hash-lock runbook (WARP-3670)
+
+Every Dockerfile `FROM` (and the one `COPY --from=<image>`) is pinned
+`tag@sha256:<digest>`. `scripts/check-dockerfile-base-pins.sh` enforces it in
+the `hadolint` leg of `ci.yml` (self-test: `tests/check-dockerfile-base-pins.test.sh`),
+and the `docker` ecosystem in `.github/dependabot.yml` moves the pins in one
+grouped pull request a month. The digests are the multi-architecture index
+digests, so one pin serves amd64 and arm64.
+
+Every Python service image installs a hash-locked requirements file with
+`pip install --require-hashes --no-deps -r <lock>` (inference-manager does the
+same through `uv pip install`). `scripts/check-dockerfile-hash-locks.sh` fails
+the `hadolint` leg of `ci.yml` when a Dockerfile installs from a requirements
+file without `--require-hashes` (self-test:
+`tests/check-dockerfile-hash-locks.test.sh`; the exemption list in the script is
+empty). The layout is `inference-manager`'s: `requirements.txt` keeps the
+human-written specifiers and `requirements.lock` is the resolver output that
+the image installs. ops-console and voice-io install `requirements-dev.txt`
+(it begins with `-r requirements.txt`), so they lock that file as
+`requirements-dev.lock`; voice-io also locks its one `--no-deps` package in
+`requirements-openwakeword.txt` / `.lock`.
+
+A resolver is needed to produce hashes, so a lock is refreshed by a person on
+the test box (a throwaway `python:3.12-slim` container), never hand-written
+and never on a laptop. Per service, in `services/<name>/`, with the Python
+version of that service's Dockerfile base image:
+
+    pip install uv==0.12.23
+    uv pip compile --universal --python-version 3.12 --generate-hashes \
+        -o requirements.lock requirements.txt
+
+`--universal` makes one lock that covers every platform (the appliance is
+x86_64; the lock also carries the arm64 and other hashes), so there is no
+per-architecture file. A change to a specifier in `requirements.txt` needs the
+lock recompiled in the same pull request, or the image keeps installing the old
+set. Dependabot's pip ecosystem edits `requirements.txt` only; recompile the
+lock on its pull request before merging. Two things to know:
+
+- **ai-gateway**: `requirements.txt` carries
+  `torch --index-url https://download.pytorch.org/whl/cpu`. pip ignores an
+  option written on a requirement line, so today's image installs torch from
+  PyPI (the CUDA-enabled build, with its nvidia and triton packages), and uv
+  rejects the line. The lock therefore keeps exactly what the image installs
+  today and is compiled from the same file with that one line reduced to
+  `torch`: `sed 's/^torch --index-url .*/torch/' requirements.txt | uv pip compile --universal --python-version 3.12 --generate-hashes -o requirements.lock -`.
+  Moving ai-gateway to the CPU-only torch build is a separate decision (image
+  size, any GPU use of the gateway); it needs `--index-url`/`--extra-index-url`
+  at compile and install time and a check that the CPU wheels cover the
+  appliance platform.
+- **device-identity-svc** builds `tpm2-pytss` from source (it needs the apt
+  packages the Dockerfile installs), so its lock could only be resolved, not
+  trial-installed, outside the image; CI's image build is the install test.
+
 ## osv nightly
 
 Red-on-findings by design and NOT PR-blocking. The initial baseline
 (2026-07-04) is ~85 vulnerable entries — burning down via Dependabot
 upgrades; watch the trend, not the binary status, until it is green, then
 treat any new red as a same-day fix.
+
+Every ignore in `osv-scanner.toml` has an `ignoreUntil` date (WARP-3667), so an
+accepted advisory reappears on its expiry day instead of staying hidden. The
+nightly stays advisory because its absolute result is not green today (it
+reports advisories that are in no baseline); dependency findings that block a
+merge or a release come from the Trivy dependency scan above, which has a
+reviewed baseline.
 
 ## Known baseline debt (tracked, not blocking)
 
@@ -337,11 +426,11 @@ app sources, not probed on a live box.
 Left open on purpose, for the reasons in the table. Three things the audit
 found that are NOT OCS and are NOT closed here, for a follow-up:
 
-- **Photos public albums** (and CalDAV `publish-calendar`) mint a public URL
-  from a DAV request (`PROPPATCH`/`POST` under `remote.php/dav/…`), not from
-  OCS. Not confirmed on the pinned image. Options: deny
-  `/nextcloud/remote.php/dav/photos/`, or disable `photos` in
-  `nextcloud-init.sh` the way `disable_hub_apps` does.
+- **Photos public albums** mint a public URL from a DAV request
+  (`PROPPATCH`/`POST` under `remote.php/dav/photos/…`), not from OCS. Closed
+  (WARP-3606): `nextcloud-init.sh` disables the `photos` app on every start via
+  `disable_hub_apps`. CalDAV `publish-calendar` is a separate route in the
+  `dav` app and is still open.
 - **richdocuments' non-OCS routes still mint WOPI `access_token` URLs**, and
   they are reachable through BOTH spellings: the `/nextcloud/` leg
   (`/nextcloud/index.php/apps/richdocuments/…`) and the root
@@ -371,6 +460,60 @@ verifies before pulling, and how anyone can verify independently.
 > `droplet-pi-platform` to `droplet-onboard-services`. All signing
 > identities use the current name. Ticket texts referencing the old name
 > refer to this repository.
+
+## Personal API tokens and calendar links (WARP-3533) {#personal-api-tokens}
+
+Two credentials let a tool outside the dashboard read Projects as a person: a
+personal API token (`dpm_…`) for scripts, and a calendar link (an ICS feed URL)
+for calendar apps. Both are bearer credentials, so both follow the
+`CalendarFeedToken` / `ModelAccessToken` (ADR-067) shape.
+
+| | API token | Calendar link |
+|---|---|---|
+| Format | `dpm_` + 32 random bytes, base64url | `<row id>.<32 random bytes>` in `?token=` |
+| Stored | sha256 of the whole token, unique; an 8-character display prefix | sha256 of the secret half |
+| Shown | once, when created | once, when created or rotated |
+| Reaches | `/api/pm/*` and `/api/support/*` only, with the holder's gates unchanged | one feed only: the person's calendar, "my work", or one project |
+| Narrowed by | scopes `pm:read` / `pm:write` / `support:read` / `support:write` (write implies read) | its feed |
+| Ends when | revoked, expired (optional), the holder is deactivated, or the holder's role changes | rotated, revoked, expired (180 days), or the holder is deactivated |
+| Switch | Settings -> Developer, owner/admin, **off by default**; off = every token 401, none deleted | none; the `projects` module must be on |
+
+How the API token is held to "its holder, with less":
+
+- `authMiddleware` resolves it to the holder's **current** row on every
+  request, so the role, module and feature gates run exactly as they do for the
+  holder's own session. The role it was issued under is stored; a promotion or a
+  demotion ends the token at its next use even when the revoke hook did not
+  land. A token never carries an MFA stamp, so a step-up route is out of its reach.
+- `middleware/pm-api-token-guard.ts`, mounted right after `authMiddleware`,
+  confines it to the two prefixes and to its scopes, and rate-limits it at 300 a
+  minute **per token**. Everywhere else, including `/api/developer` (so a token
+  cannot mint a token or a calendar link or flip the switch), a `dpm_` bearer is
+  a 403 before the database is asked, and that refusal writes **no audit row**: the
+  caller has not authenticated, so a row would let anyone append signed entries
+  of their own wording. Admin configuration under the two prefixes (webhooks,
+  project and desk settings: `SESSION_ONLY_ROUTES` in `pm-api-token.service.ts`)
+  is session-only too, so a leaked owner token cannot point a webhook anywhere.
+  A `dpm_` value in a cookie, or on a WebSocket, is refused.
+- A GET, HEAD or OPTIONS needs `<area>:read` and every other method
+  `<area>:write`, with one tiny exception: `READ_ONLY_POSTS` lists the POSTs that
+  only read (the work-item query, whose filter is too large for a query string).
+  A test checks that no parameterised write route can answer one of those URLs.
+- It is never logged: the request logger redacts `Authorization`, the query
+  scrubber redacts `token`, and every audit row (created, revoked, refused,
+  switch changed) carries the row id and nothing from the secret. The tests
+  plant a token and search every log line, audit row and response for it.
+
+Calendar links are served ahead of every gate (a phone subscribes with no
+session), so the handler re-checks what the gates would have: the `projects`
+module, the guest tier floor (the person's role read at that request), directory
+status, expiry and the username in the path. The items are found by `User.id`,
+never by the username in the URL.
+
+Not done here, and worth a follow-up: minting either credential needs only the
+signed-in session, with no step-up (`createRequireCredentialStepUp`), as with
+the ADR-067 tokens and the existing calendar link. A hijacked session can
+therefore mint a token that outlives it until someone revokes it.
 
 ## Two trust layers
 
@@ -441,14 +584,27 @@ cosign verify \
 - **Fail closed.** Any non-verification refuses the pull; the update row
   records `failureReason: image_signature_failed`. There is **no bypass
   environment variable**.
+- **Credential (WARP-3503, ADR-068).** The images are private. The box pulls
+  them from the fleet HQ registry with a short-lived (10 min) HQ device token:
+  the orchestrator proves possession of the device key to HQ (nonce challenge,
+  signature through device-identity-svc) and gets a `registry:pull` JWT. It
+  reaches the helper as an env var for one `pull-images` call, is written as
+  `{"auths":{"<hq-host>":{"registrytoken":"<JWT>"}}}` into the helper's
+  ephemeral `DOCKER_CONFIG` (0600, removed on exit) that both cosign and
+  `docker pull` read, and is never in argv or a log. It is sent only to the
+  HQ host. A box HQ will not serve (unreachable, not enrolled, revoked) gets
+  no token: the apply logs `update.registry_auth_failed` with the reason,
+  keeps its current release and retries next window. A GitHub token for
+  `ghcr.io` refs (`DROPLET_OTA_GITHUB_TOKEN`) remains as a lab-only fallback
+  and is never provisioned on an appliance (ADR-045).
 - **Why fail closed is safe on an offline appliance:** verification runs
-  only when pulling, and pulling already requires ghcr.io reachability. An
+  only when pulling, and pulling already requires the HQ registry to be reachable. An
   offline box never reaches the verifier — it simply has no update to
   apply. Rollback recreates from images already on the box (`--pull
   never`) and never re-pulls, so a refusal can block an update but never
   the running stack.
 - **No new egress:** `--offline=true` verifies the signature bundle
-  (stored in GHCR alongside the image) against the trust root embedded in
+  (stored in the registry alongside the image) against the trust root embedded in
   the checksum-pinned cosign binary vendored in the orchestrator image.
   No Rekor or TUF endpoints are contacted from the appliance.
 - **Break-glass:** a human with host shell access can `docker pull` and
@@ -456,12 +612,134 @@ cosign verify \
   surface on purpose — it requires the same physical/SSH trust as any
   other host-level intervention.
 
+## Image packages: pre-push secret scan {#public-packages}
+
+The first-party packages `ghcr.io/dropletbywarplab/droplet-*` stay **private**
+(Romain, 2026-10-03). A box carries no GitHub token (ADR-045), so box pulls are
+to become device-authenticated instead (WARP-3423; ADR-066's anonymous-delivery
+decision is to be superseded). Whatever the transport, an image must never
+carry a secret, so `publish-release.yml` scans it before it is pushed
+(WARP-3429):
+
+- **Secret scan before the push.** Each image is built, exported with
+  `docker save`, and scanned with the pinned gitleaks (v8.30.1, same as
+  `ci.yml`) before `docker push`: the image config (Env, history — where
+  build args land) and every layer on its own, so a secret deleted by a later
+  layer is still found (`scripts/release/scan-ghcr-secrets.py --docker-save`).
+  Findings under vendor paths (`node_modules`, `site-packages`, `/usr/lib`, …)
+  are reported but do not block; any other finding that is not in the reviewed
+  baseline `scripts/release/image-secret-baseline.txt` fails the publish
+  before the image reaches the registry. The baseline is `<rule> <path>` per
+  line (no line number, no digest, so it survives a rebuild) and starts empty:
+  a real secret is never baselined — rotate it and fix the image; only a
+  reviewed false positive is. The failing step prints the exact lines to add.
+  The image config is split into one pseudo-file per key before scanning, so
+  its fingerprints name the key (`config.json#Env.<NAME>`,
+  `config.json#Labels.<label>`, `config.json#history.<hash>`): a baseline line
+  can never excuse a rule across a whole config.
+  gitleaks runs with `scripts/release/gitleaks-images.toml`: the default rules
+  plus one allowlist entry, the python base images' public `GPG_KEY`
+  fingerprint (exactly `GPG_KEY=` and 40 uppercase hex characters, matched on
+  the finding's match text, not the whole line). That is the only built-in
+  exception; do not baseline it.
+  `ghcr-secret-scan.yml` (WARP-3423) runs the same scanner and config over
+  every version already in the registry, on demand (dispatch only). Its inputs
+  `package`, `shards` and `digests` scan a single package, split it over N jobs
+  (`--shard K/N` scans `versions[K::N]`), or rescan only the versions whose
+  digest starts with the given prefixes.
+
+## R2 registry mirror (private images, WARP-3502) {#r2-registry-mirror}
+
+Because the packages stay private, a box pulls from the fleet HQ read-only
+registry (a Cloudflare Worker in front of an R2 bucket, device-authenticated;
+fleet contract v1 section 3), not from GHCR. CI is the only writer of that
+bucket. After the images are pushed, keyless-signed and self-verified, and
+before the GitHub Release exists, `publish-release.yml` runs
+`scripts/release/mirror-to-r2.py copy`, which for every image in the release:
+
+- reads the image by digest from GHCR with the pinned `crane`: the manifest (or
+  the index and each child manifest), the config blob and every layer blob;
+- reads the cosign signature artifact at tag `sha256-<hex>.sig` the same way
+  (the publish fails if an image has none, since a box could never verify it);
+- writes them with the pinned `aws` CLI to R2's S3 endpoint in the layout the
+  Worker serves: `oci/blobs/sha256/<hex>`, `oci/manifests/sha256/<hex>` with
+  `Content-Type` = the manifest media type, and
+  `oci/tags/droplet-<name>/sha256-<hex>.sig` = text `sha256:<manifest hex>`.
+
+Properties that matter for the trust model: the copy is by digest and every
+blob and manifest is re-hashed before it is stored, so R2 cannot hold bytes
+that do not match their name; blobs are written first, then manifests, then
+tags, so nothing in the bucket points at missing content; a copy failure fails
+the job before the Release exists, so no signed `release.json` can name a
+digest the registry cannot serve; and an object already present with the right
+size is skipped. Multipart uploads use one explicit 64MB part size because R2
+requires equal-sized parts.
+
+`release.json` names the HQ host (`<host>/droplet-<name>@sha256:…`, same
+digests) only when the `OTA_REGISTRY_HOST` repo variable is set; empty keeps
+`ghcr.io`. With no R2 secrets and no variable the mirror is skipped with a
+warning, with the variable set missing secrets fail the publish before the
+build. The secrets, the variable and the one-time setup are in
+`scripts/README.md` ("R2 registry mirror: one-time setup").
+
+## Signed channel index (`ota-index`) {#channel-index}
+
+After the Release exists, the workflow's `index` job publishes a **signed
+pointer** to the newest release of the channel, so a box can find it with one
+anonymous download instead of listing releases through the GitHub API. The
+pointers live on one rolling release, `ota-index`, at stable URLs:
+
+```
+https://github.com/DropletByWarpLab/droplet-onboard-services/releases/download/ota-index/channel-<stage|stable>.json
+https://github.com/DropletByWarpLab/droplet-onboard-services/releases/download/ota-index/channel-<stage|stable>.json.sig
+```
+
+`channel-<channel>.json` (`scripts/release/gen-channel-pointer.py`; compact
+JSON, fixed key order, UTF-8, trailing newline):
+
+```json
+{"schemaVersion":1,"kind":"droplet-ota-channel-pointer","channel":"stage","tag":"ota-stage-<run>-g<sha7>","gitSha":"<40 hex>","builtAt":"<release.builtAt, verbatim>","manifestSha256":"<sha256 of the uploaded release.json>","publishedAt":"<UTC ISO-8601>"}
+```
+
+- It is signed exactly like `release.json`: the same org cosign key,
+  `--tlog-upload=false`, `.sig` beside it; verify the same way
+  (`cosign verify-blob --key cosign.pub --signature channel-stage.json.sig
+  --insecure-ignore-tlog=true channel-stage.json`). `manifestSha256` is
+  computed over the `release.json` bytes GitHub serves for the release, so it
+  pins exactly the manifest a box will download.
+- **It is a hint and an integrity pin, never the trust decision.** The box
+  still verifies `release.json.sig` and re-checks the channel inside the
+  signed manifest before accepting anything (same rule as the release tag).
+- `ota-index` is a **prerelease, never `latest`**, and its tag does not start
+  with `ota-stage-` / `ota-stable-`, so neither `/releases/latest` (stable
+  boxes) nor the `ota-<channel>-` prefix match (older boxes) can ever select
+  it as a release. Do not delete it: it is created once and rewritten in
+  place (`--clobber`) on every publish.
+- A box that fetches between the `.json` and `.sig` uploads sees a pair that
+  fails verification and retries on its next poll. If the `index` job alone
+  fails, use **Re-run failed jobs**: it re-runs only that job, not the
+  two-hour build.
+
 ## Third-party images
 
-Upstream images in the compose file (nginx, Nextcloud, Frigate, Ollama,
-mosquitto, …) are not built or signed by our CI and are out of scope for
-this policy; they are version- or digest-pinned in
-`docker/docker-compose.yml` and never flow through the OTA pull path.
+Upstream images in the compose file (Postgres, Redis, mosquitto, Nextcloud,
+the document server, Frigate, Ollama, the voice and model-runner images, …)
+are not built or signed by our CI and are out of scope for this policy. Each
+is pinned as `name:tag@sha256:<digest>` in `docker/docker-compose.yml` (and
+`docker/docker-compose.dev.yml`), keeping the tag for readability; the digest
+is the multi-architecture index digest, so amd64 and arm64 hosts both resolve.
+They never flow through the OTA pull path: the updater pulls and verifies only
+the first-party images named in the signed release manifest, by digest.
+
+`scripts/check-pinned-images.sh` (a `ci.yml` `detect` step, so it reports under
+the required `ci-summary`) fails any `image:` that is not digest-pinned.
+Services with a `build:` key are exempt. A variable default is checked at its
+default, so the digest lives inside it (`${FRIGATE_IMAGE:-repo:tag@sha256:…}`);
+an operator who overrides the variable in `.env` opts out of the pin on
+purpose. To bump an image, change tag and digest together in one PR.
+
+Not yet done (WARP-3601): recording these digests in the signed release
+manifest, and verifying upstream signatures where a publisher provides them.
 
 ## Key handling
 

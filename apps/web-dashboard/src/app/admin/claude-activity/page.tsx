@@ -1,6 +1,13 @@
 /**
  * WARP-279 — /admin/claude-activity page.
  *
+ * WARP-3433: this is Warp Lab's own engineering dashboard, not a customer
+ * feature. It SHIPS DARK, and dark means ABSENT: the
+ * `claudeActivity` capability is on only when the box runs with the developer
+ * flag DROPLET_DEV_ENGINEERING_DASHBOARD, so the page renders NOTHING until the
+ * capability probe has answered, and is a plain 404 (`notFound()`) when it is
+ * not on. No poll of /api/admin/claude-activity is made before then.
+ *
  * Polls GET /api/admin/claude-activity every 30s with `If-Modified-Since`
  * so a 304 short-circuits when nothing's moved. Renders 7 widgets across
  * a responsive grid; admin-only by client check + orchestrator role gate.
@@ -13,6 +20,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { notFound } from "next/navigation";
 import { ShieldOff, Activity } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { isAdminRole } from "@/lib/access";
@@ -27,10 +35,19 @@ import { DecisionsLog } from "@/components/claude-activity/DecisionsLog";
 import { CIStatusBoard } from "@/components/claude-activity/CIStatusBoard";
 import type { ClaudeActivityResponse } from "@/components/claude-activity/types";
 import { relativeTime } from "@/components/claude-activity/time";
+import { useCapabilityState } from "@/lib/hooks/useCapabilities";
 
 const POLL_MS = 30_000;
 
 export default function ClaudeActivityPage() {
+  const gate = useCapabilityState("claudeActivity");
+  if (gate === "unresolved") return null;
+  if (gate === "off") notFound();
+  return <ClaudeActivitySurface />;
+}
+
+/** Only mounted once the capability is on: nothing here runs, or asks the box anything, before. */
+function ClaudeActivitySurface() {
   const { user, isLoading: authLoading } = useAuth();
   const [data, setData] = useState<ClaudeActivityResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -122,7 +139,7 @@ export default function ClaudeActivityPage() {
             <span className="eh">Admin access required</span>
             <span>
               This dashboard is only visible to <code>admin</code> / <code>owner</code> roles. Ask an
-              admin to grant you the <code>admin</code> Nextcloud group membership.
+              admin to grant you the <code>admin</code> group membership.
             </span>
           </div>
         </div>

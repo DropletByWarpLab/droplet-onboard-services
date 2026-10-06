@@ -10,7 +10,7 @@
 
 # Which checks run on this box (space-separated). Anything not listed reports
 # an explicit not_applicable in status.json — never silently absent.
-#DROPLET_WATCHDOG_CHECKS="wifi voice_dsp docker_dns container_crashloop host_unit_staleness host_artefacts relay_dns"
+#DROPLET_WATCHDOG_CHECKS="wifi voice_dsp docker_dns container_crashloop host_unit_staleness host_artefacts app_downloads router_auth"
 
 # Escalation: consecutive heal failures before a check goes `escalated`
 # (CRITICAL log + suspended heals), and how many runs between suspended
@@ -45,11 +45,14 @@
 # the default is safe on any shape. Override only for a non-standard location.
 #DROPLET_WATCHDOG_HOST_UNITS_BIN=/usr/local/sbin/droplet-host-units
 
-# Relay DNS origin (WARP-2189): the helper that owns the "answer for a name at
-# an address => listen on that address" pairing, and the connector container
-# the check will start if it is found stopped. The helper self-gates
-# (not_applicable) on a box with no split-horizon FQDN, so these defaults are
-# safe everywhere. To opt a box OUT of the automatic conf repair entirely, drop
-# relay_dns from DROPLET_WATCHDOG_CHECKS above rather than blanking these.
-#DROPLET_WATCHDOG_RELAY_DNS_BIN=/usr/local/sbin/droplet-relay-dns
-#DROPLET_WATCHDOG_RELAY_CONTAINER=droplet-cloudflared
+# Router auth (WARP-3838): detect-only. Reads routing's /health and reports
+# heal_failed with the health `error` text when routing cannot authenticate to
+# the router (never heals; re-pairing credentials is a human action).
+# not_applicable when routing does not answer or ROUTING_MODE is not `real`.
+# setup.sh adds DROPLET_ENV_FILE pointing at the deployment .env. The watchdog
+# reads its DROPLET_INTERNAL_TLS flag and, when enabled, uses HTTPS with the
+# deployment's data/secrets/service-tls/host-admin bundle. Explicit
+# DROPLET_INTERNAL_TLS and DROPLET_TLS_CA/CERT/KEY here override those defaults.
+#DROPLET_ENV_FILE=/path/to/droplet/.env
+#DROPLET_WATCHDOG_ROUTING_URL=http://localhost:8080
+#ROUTING_MODE=real

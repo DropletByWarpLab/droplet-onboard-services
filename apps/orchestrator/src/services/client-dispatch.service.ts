@@ -7,9 +7,9 @@
  *   - `droplet/client-hello/{deviceId}`      (client → box) capability hello.
  *       Validated against the row's stored per-tool consent map (default-
  *       deny, ADR-014 §③): every advertised tool must be consented
- *       (`allow` | `confirm`). Valid hello bumps `lastSeenWsAt`.
+ *       (`allow` | `confirm`). Valid hello bumps `lastSeenWsAt` + `lastSeen`.
  *   - `droplet/client-presence/{deviceId}`   (client → box) heartbeat.
- *       Bumps `lastSeenWsAt` + persists the pause toggle.
+ *       Bumps `lastSeenWsAt` + `lastSeen` + persists the pause toggle.
  *   - `droplet/llm-tool-dispatch/{deviceId}` (box → client) tool dispatch.
  *       Published by `dispatchClientToolCall()`.
  *   - `droplet/llm-tool-response/{deviceId}` (client → box) signed outcome.
@@ -325,12 +325,24 @@ async function handleClientHello(
 
   await prisma.deviceClient.update({
     where: { id: deviceId },
-    data: { lastSeenWsAt: new Date() },
+    data: seenNow(),
   });
   logger.info(
     { deviceId, tools: parsed.data.tools },
     "client-hello accepted",
   );
+}
+
+/**
+ * The box just heard from this client. `lastSeen` is what the devices lists
+ * show as "last seen" (WARP-3382/3384), so it moves with the WS liveness stamp:
+ * the one place the box itself observes a paired client. A client that never
+ * connects the bridge (a Finder / File Explorer drive login, a sync-only app)
+ * keeps `lastSeen` = the pairing time, which the clients already read as "paired".
+ */
+function seenNow(): { lastSeenWsAt: Date; lastSeen: Date } {
+  const now = new Date();
+  return { lastSeenWsAt: now, lastSeen: now };
 }
 
 async function handleClientPresence(
@@ -362,7 +374,7 @@ async function handleClientPresence(
   pausedByDevice.set(deviceId, parsed.data.paused);
   await prisma.deviceClient.update({
     where: { id: deviceId },
-    data: { lastSeenWsAt: new Date() },
+    data: seenNow(),
   });
 }
 

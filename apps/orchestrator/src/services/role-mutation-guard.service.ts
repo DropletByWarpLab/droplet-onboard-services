@@ -87,6 +87,12 @@ import {
 } from "./vpn-peer-revoke.service.js";
 import { recordActivity } from "./activity.singleton.js";
 import type { ActivityActor } from "./activity.service.js";
+import { revokeModelAccessTokensForUser } from "./model-access-token.service.js";
+import { revokePmApiTokensForUser } from "./pm/pm-api-token.service.js";
+import {
+  revokeDeviceClientsForUser,
+  type DeviceClientSweepReason,
+} from "./device-client-revoke.service.js";
 import {
   adminBasicToken,
   DROPLET_ADMINS_GROUP,
@@ -757,6 +763,16 @@ export async function runRoleChangePostEffects(args: {
     args.nextRole === "guest" && args.previousRole !== "guest"
       ? await revokeLeaverDevices(args.devices, args.target.username, args.actor, "role_change")
       : null;
+  // WARP-3452: nor may a guest hold a coding-tool token.
+  if (args.nextRole === "guest" && args.previousRole !== "guest") {
+    await revokeModelAccessTokensForUser(args.target.id, "role_guest", args.actor);
+  }
+  // WARP-3533: a personal API token acts as its holder, so ANY change of role
+  // ends it — a promotion as much as a demotion: it was minted for the person
+  // they were. Best-effort, never throws; every use re-checks the role anyway.
+  if (args.previousRole !== args.nextRole) {
+    await revokePmApiTokensForUser(args.target.id, "role_changed", args.actor);
+  }
   await syncAdminTierGroup({
     userId: args.target.id,
     nextcloudUsername: args.target.nextcloudUsername,
@@ -813,6 +829,23 @@ async function revokeLeaverDevices(
 }
 
 /**
+ * WARP-3384 — a deactivated or deleted person also loses every paired device
+ * client (file-sync app passwords, drive logins). Same `devices` selector as
+ * {@link revokeLeaverDevices}: `null` means the caller revokes them itself,
+ * before it disables the Nextcloud account (see `revokeDeviceClientsForUser`).
+ * Best-effort, never throws; the outcome is on the sweep's own audit row.
+ */
+async function revokeLeaverDeviceClients(
+  devices: LeaverDevices | undefined,
+  defaultUsername: string,
+  actor: ActivityActor,
+  reason: DeviceClientSweepReason,
+): Promise<void> {
+  if (devices === null) return;
+  await revokeDeviceClientsForUser(devices?.username ?? defaultUsername, actor, reason);
+}
+
+/**
  * Post-effects of a committed removal (WARP-490 hard revocation + audit).
  * `targetUserId: null` is the legacy NC-only path (no local row): nothing
  * to revoke or denylist, but the mandatory-emit audit row still lands —
@@ -832,8 +865,10 @@ export async function runRemovalPostEffects(args: {
   targetRole: Role | null;
   actorUsername: string | null;
   actor: ActivityActor;
-  /** WARP-3160: the person's VPN devices are revoked with the account. */
+  /** WARP-3160: the person's VPN devices are revoked with the account (and, WARP-3384, their paired file-sync devices). */
   devices?: LeaverDevices;
+  /** WARP-3600: counts of what the final purge removed, recorded on the row. Counts and ids only. */
+  purged?: Record<string, unknown>;
 }): Promise<void> {
   let revokeError: { err: unknown } | null = null;
   if (args.targetUserId) {
@@ -841,6 +876,7 @@ export async function runRemovalPostEffects(args: {
     await denylistUser(args.targetUserId, ACCESS_TOKEN_TTL_SECONDS);
   }
   const vpn = await revokeLeaverDevices(args.devices, args.targetUsername, args.actor, "removal");
+  await revokeLeaverDeviceClients(args.devices, args.targetUsername, args.actor, "removal");
   await recordActivity({
     kind: "auth",
     severity: "warn",
@@ -854,6 +890,7 @@ export async function runRemovalPostEffects(args: {
       role: args.targetRole,
       ...(vpn ? { vpnDevicesRevoked: vpn.revoked, vpnDevicesFailed: vpn.failed } : {}),
       ...(revokeError ? { sessionRevoke: "failed" } : {}),
+      ...(args.purged && Object.keys(args.purged).length > 0 ? { purged: args.purged } : {}),
     },
     actor: args.actor,
   });
@@ -886,7 +923,7 @@ export async function runDisablePostEffects(args: {
    * provisioned), so the local DEACTIVATED is the entire disable.
    */
   ncMirror?: NcMirror;
-  /** WARP-3160: a deactivated person loses their VPN devices too. */
+  /** WARP-3160: a deactivated person loses their VPN devices too (and, WARP-3384, their paired file-sync devices). */
   devices?: LeaverDevices;
 }): Promise<void> {
   let sessionsRevoked: number | null = 0;
@@ -900,6 +937,13 @@ export async function runDisablePostEffects(args: {
     }
   }
   const vpn = await revokeLeaverDevices(args.devices, args.username, args.actor, "deactivation");
+  await revokeLeaverDeviceClients(args.devices, args.username, args.actor, "deactivation");
+  // WARP-3452: and their coding-tool tokens (best-effort, never throws).
+  if (args.targetUserId) {
+    await revokeModelAccessTokensForUser(args.targetUserId, "user_deactivated", args.actor);
+    // WARP-3533: and their personal API tokens (same: best-effort, never throws).
+    await revokePmApiTokensForUser(args.targetUserId, "user_deactivated", args.actor);
+  }
   await recordActivity({
     kind: "auth",
     severity: "warn",

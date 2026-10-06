@@ -79,9 +79,6 @@ const LIVE_TOOLS = [
   // WARP-2990 — the business profile / CRM / brain-findings door.
   { name: "business_profile_get" },
   { name: "business_find" },
-  // WARP-2979 — Security: presence and location data (ADR-059 DS-007).
-  { name: "security_list_incidents" },
-  { name: "security_zone_status" },
   { name: "get_network_status" },
   { name: "list_smart_home_devices" },
 ];
@@ -301,15 +298,11 @@ describe("the withheld set is DERIVED from the tool catalog", () => {
     }
   });
 
-  it("WARP-2979: withholds every Security tool, and the notice says Security stays on the Droplet", () => {
-    expect(OFF_LAN_WITHHELD_DOMAINS.has("security")).toBe(true);
-    // WARP-2980 — the fifth, security_explain_pattern, is withheld by its domain like the four.
-    for (const name of ["security_list_incidents", "security_get_incident", "security_search_events", "security_zone_status", "security_explain_pattern"]) {
-      expect(OFF_LAN_WITHHELD_TOOLS.has(name), name).toBe(true);
-    }
-    expect(withholdStoredContentTools(["security_search_events", "get_network_status"])).toEqual(["get_network_status"]);
-    expect(OFF_LAN_WITHHELD_NOTICE).toMatch(/Security tools are offered/);
-    expect(OFF_LAN_WITHHELD_NOTICE).toMatch(/Security events/);
+  it("the notice says what is withheld and that it stays on the Droplet", () => {
+    expect(OFF_LAN_WITHHELD_NOTICE).toMatch(/no file, memory or business-record tools are offered/);
+    // WARP-3570 — the notice names the other withheld surfaces too.
+    expect(OFF_LAN_WITHHELD_NOTICE).toMatch(/email, calendar, team chat, camera/);
+    expect(OFF_LAN_WITHHELD_NOTICE).toMatch(/it stays on the Droplet/);
   });
 
   it("leaves unrelated domains alone — it subtracts, it does not empty", () => {
@@ -362,9 +355,6 @@ describe("POST /api/llm/chat — a cloud turn carries no stored content", () => 
     expect(allowed).not.toContain("memory_recall");
     expect(allowed).not.toContain("business_profile_get");
     expect(allowed).not.toContain("business_find");
-    // WARP-2979 — Security never goes to a cloud model.
-    expect(allowed).not.toContain("security_list_incidents");
-    expect(allowed).not.toContain("security_zone_status");
     // The other half of the contract: it subtracted, it didn't nuke.
     expect(allowed).toContain("get_network_status");
   });
@@ -390,8 +380,6 @@ describe("POST /api/llm/chat — a cloud turn carries no stored content", () => 
     expect(allowed).toContain("memory_recall");
     expect(allowed).toContain("business_profile_get");
     expect(allowed).toContain("business_find");
-    expect(allowed).toContain("security_list_incidents");
-    expect(allowed).toContain("security_zone_status");
   });
 
   it("withholds them from the OWNER too — the role most likely to be on a cloud model", async () => {
@@ -644,5 +632,69 @@ describe("withholdPromptBlocksForOffLan — the one definition", () => {
       blocks: { memory: "", business: "", brain: "" },
       withheld: ["memory", "brain"],
     });
+  });
+});
+
+// ── WARP-3692 — tool-returned images (camera snapshots, show_file) ─────────
+//
+// The same egress rule, applied to the images the model's own tools fetch
+// mid-turn. The route builds one `toolVision` per turn from the turn's
+// off-LAN verdict; these cases pin that wiring end to end through the route
+// (the policy itself is pinned in services/tool-vision.service.test.ts).
+// `inspect` is driven with a real tools-core snapshot descriptor; both cases
+// below return before any network call, so nothing is dialled.
+import * as aiGatewayMock from "../services/ai-gateway.client.js";
+import { cameraSnapshotMedia } from "@droplet/shared-types";
+import type { ToolVision } from "../services/tool-vision.service.js";
+
+describe("POST /api/llm/chat — images a tool returns (WARP-3692)", () => {
+  const snapshot = { camera: "front_door", media: cameraSnapshotMedia("front_door") };
+  const toolVisionOf = (): ToolVision | undefined =>
+    (mockRunAgent.mock.calls[0][1] as { toolVision?: ToolVision }).toolVision;
+
+  it("a CLOUD turn's tool vision withholds the bytes (even though the model can see)", async () => {
+    mockGetModelProvider.mockResolvedValue("anthropic");
+    vi.mocked(aiGatewayMock.getModelCapabilities).mockResolvedValue({ vision: true } as never);
+    const app = buildApp({ id: OWNER_ID, username: "stefan", role: "owner" });
+    const res = await request(app)
+      .post("/api/llm/chat")
+      .send({
+        model: "claude-opus-4-20250514",
+        provider: "anthropic",
+        messages: [{ role: "user", content: "is anyone at the door?" }],
+      });
+    expect(res.status).toBe(200);
+    const tv = toolVisionOf();
+    expect(tv).toBeDefined();
+    const out = await tv!.inspect("get_camera_snapshot", snapshot);
+    expect(out.blocks).toEqual([]);
+    expect(out.attached).toBe(0);
+    expect(out.notes.join(" ")).toMatch(/withheld/);
+  });
+
+  it("a LOCAL turn on a non-vision model is told so, and fetches nothing", async () => {
+    mockGetModelProvider.mockResolvedValue("local");
+    vi.mocked(aiGatewayMock.getModelCapabilities).mockResolvedValue({ vision: false } as never);
+    const app = buildApp({ id: OWNER_ID, username: "stefan", role: "owner" });
+    const res = await request(app)
+      .post("/api/llm/chat")
+      .send({
+        model: "llama3:8b",
+        provider: "local",
+        messages: [{ role: "user", content: "is anyone at the door?" }],
+      });
+    expect(res.status).toBe(200);
+    const out = await toolVisionOf()!.inspect("get_camera_snapshot", snapshot);
+    expect(out.blocks).toEqual([]);
+    expect(out.notes.join(" ")).toMatch(/not viewable by the current model/);
+  });
+
+  it("a SERVICE principal (voice, MCP) gets no tool vision at all", async () => {
+    const app = buildApp({ username: "voice", role: "service" });
+    const res = await request(app)
+      .post("/api/llm/chat")
+      .send({ model: "llama3:8b", messages: [{ role: "user", content: "hi" }] });
+    expect(res.status).toBe(200);
+    expect(toolVisionOf()).toBeUndefined();
   });
 });

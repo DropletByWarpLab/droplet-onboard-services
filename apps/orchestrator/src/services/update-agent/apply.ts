@@ -16,9 +16,14 @@
  * The nine apply steps (design §WARP-539):
  *   1. snapshot previous digests + configs + DB schema into
  *      .data/updates/<id>/backup/;
- *   2. pull the release images BY DIGEST;
- *   3. stage the release configs (sha256-gated against the VERIFIED
- *      manifest before a byte is unpacked);
+ *   2. pull the release images BY DIGEST with a short-lived HQ device token
+ *      (WARP-3503, ADR-068; a cosign refusal rejects the update; no token —
+ *      HQ unreachable, box revoked or not enrolled — or a registry that
+ *      refuses AUTH, the `registry-auth:` marker, only retries and keeps the
+ *      current release, since no signature was ever judged);
+ *   3. stage the release configs, downloaded from `<download base>/<tag>/`
+ *      (WARP-3430: anonymous, by the row's own tag), sha256-gated against
+ *      the VERIFIED manifest before a byte is unpacked;
  *   3b. WARP-2995: reconcile the HOST .env (additive keys, COMPOSE_PROFILES
  *      tokens, boot-unit profile flags) with the staged
  *      docker/ota/env-reconcile.sh; a failure refuses the release
@@ -85,6 +90,20 @@
  *     its health gate (WARP-538 convention: NOT a new enum value).
  *   - `env_reconcile_failed` — rides `rejected`: the host .env reconcile
  *     (step 3b) failed; configs were restored and nothing was swapped.
+ *   - `not_newer` / `channel_mismatch` — ride `superseded` (WARP-3430): the
+ *     row went stale before it could apply — see STALE ROWS below.
+ *
+ * STALE ROWS (WARP-3430) — the poller refuses a release that is not newer than
+ * the installed one, but only when it CREATES a row; a row can wait (parked
+ * `verifying` after a transient failure such as a registry refusing auth) while
+ * a newer release is created, applied and committed. Every apply path picks the
+ * newest `pending|verifying` row and would then apply the old one: a downgrade.
+ * So applyClaimedRow re-reads the floor (transitions.ts `installedRelease`, the
+ * poller's own query) and the box's channel BEFORE any side effect, and retires
+ * a row that is not strictly newer than the newest committed one, or that
+ * belongs to another channel than the box now follows, to `superseded`
+ * (`stale_superseded`). The poller also retires unclaimed `verifying` rows when
+ * it creates a newer one; this is the backstop for the window in between.
  *
  * OUTCOME (WARP-3007) — `DeviceUpdate.outcome` is the explicit verdict an
  * operator acts on, written in the same guarded write as the status:
@@ -108,6 +127,7 @@ import type { PrismaClient } from "@prisma/client";
 import type pino from "pino";
 import { createLogger } from "../../lib/logger.js";
 import { getSetupState } from "../setup.service.js";
+import { releaseAssetDownloadUrl } from "./download-urls.js";
 import {
   parseReleaseManifest,
   type ReleaseClient,
@@ -117,6 +137,7 @@ import {
 } from "./manifest.js";
 import { getUpdateAgentSettings } from "./settings.js";
 import {
+  installedRelease,
   recordCommittedOutcome,
   transitionDeviceUpdate,
   type DeviceUpdateOutcomeName,
@@ -314,8 +335,14 @@ export function imageRefMatchesDigest(ref: string | null, digest: string): boole
 export interface ApplyUpdateOptions {
   prisma: PrismaClient;
   runner: ApplyRunner;
-  /** GitHub Releases `latest` endpoint (config.DROPLET_OTA_RELEASES_URL). */
-  releasesLatestUrl: string;
+  /**
+   * WARP-3430 — base of the anonymous release downloads
+   * (config.DROPLET_OTA_DOWNLOAD_BASE). The configs tarball and client
+   * installers come from `<base>/<row.releaseTag>/<name>` (download-urls.ts):
+   * no REST API, never `latest`. Required, so an unwired caller fails `tsc`.
+   */
+  downloadBase: string;
+  /** Bearer for a private repo — LAB/DEV ONLY (ADR-045: none on an appliance). */
   githubToken?: string;
   fetchImpl?: typeof fetch;
   logger?: pino.Logger;
@@ -355,6 +382,16 @@ export type ApplyUpdateResult =
       detail: string;
     }
   | { outcome: "retry_later"; deviceUpdateId: string; detail: string }
+  /**
+   * WARP-3430 — the row was no longer the release this box should take (not
+   * strictly newer than the installed one, or another channel's): retired to
+   * `superseded` before anything was touched. Nothing was applied.
+   */
+  | {
+      outcome: "stale_superseded";
+      deviceUpdateId: string;
+      reason: "not_newer" | "channel_mismatch";
+    }
   | { outcome: "rolled_back"; deviceUpdateId: string }
   | { outcome: "failed"; deviceUpdateId: string }
   | { outcome: "self_swap_started"; deviceUpdateId: string };
@@ -385,8 +422,12 @@ export type ApplyWindowResult =
 interface DeviceUpdateRowSlice {
   id: string;
   status: string;
+  /** The manifest's channel at discovery. */
+  channel: string;
   releaseTag: string | null;
   gitSha: string;
+  /** The signed `release.builtAt` — what the never-go-backwards floor compares. */
+  builtAt: Date;
   manifestJson: unknown;
 }
 
@@ -396,7 +437,14 @@ async function setStatus(
   prisma: PrismaClient,
   log: pino.Logger,
   id: string,
-  status: "verifying" | "applying" | "committed" | "rolled_back" | "failed" | "rejected",
+  status:
+    | "verifying"
+    | "applying"
+    | "committed"
+    | "rolled_back"
+    | "failed"
+    | "rejected"
+    | "superseded",
   failureReason: string | null = null,
   outcome?: DeviceUpdateOutcomeName,
 ): Promise<void> {
@@ -648,59 +696,24 @@ function githubAuthHeaders(opts: ApplyUpdateOptions): Record<string, string> {
 }
 
 /**
- * WARP-3419 — `…/releases/latest` → `…/releases/tags/<tag>`. `latest` skips
+ * The download URL of one asset of the release this row tracks:
+ * `<download base>/<row.releaseTag>/<name>` — an anonymous file download, no
+ * REST API (WARP-3430) and never `latest` (WARP-3419: `latest` skips
  * prereleases, and every stage release is one, so a stage row could never
- * find its own assets there. Null when the URL is not a `latest` endpoint
- * (a test fake, a mirror): the caller keeps the configured URL.
+ * find its own assets there; asking for the wrong release's bytes would then
+ * look like a `configs_mismatch` attack). A row with no tag cannot be located
+ * without guessing, so it is a transient failure rather than a lookup of
+ * whatever is newest; the poller writes the tag on every row it creates. A
+ * failed download is transient too: the poller supersedes a row whose
+ * release moved on.
  */
-export function releaseByTagUrl(releasesLatestUrl: string, tag: string): string | null {
-  let url: URL;
-  try {
-    url = new URL(releasesLatestUrl);
-  } catch {
-    return null;
-  }
-  if (!url.pathname.endsWith("/releases/latest")) return null;
-  url.pathname = `${url.pathname.slice(0, -"/latest".length)}/tags/${encodeURIComponent(tag)}`;
-  return url.toString();
-}
-
-/**
- * Find one asset of the release this row tracks, by exact name. Every
- * failure is transient: the poller supersedes a row whose release moved on.
- */
-async function releaseAssetUrl(
+function releaseAssetUrl(
   opts: ApplyUpdateOptions,
   row: DeviceUpdateRowSlice,
   name: string,
-): Promise<{ ok: true; url: string } | { ok: false; detail: string }> {
-  const fetchImpl = opts.fetchImpl ?? fetch;
-  const authHeaders = githubAuthHeaders(opts);
-  const releaseUrl =
-    (row.releaseTag && releaseByTagUrl(opts.releasesLatestUrl, row.releaseTag)) || opts.releasesLatestUrl;
-  try {
-    const res = await fetchImpl(releaseUrl, {
-      headers: { accept: "application/vnd.github+json", ...authHeaders },
-    });
-    if (!res.ok) return { ok: false, detail: `releases endpoint HTTP ${res.status}` };
-    const release = (await res.json()) as {
-      tag_name?: string;
-      assets?: Array<{ name: string; url: string }>;
-    };
-    if (row.releaseTag && release.tag_name && release.tag_name !== row.releaseTag) {
-      // Only reachable on the configured-URL fallback: the latest release
-      // moved on mid-apply; the poller will supersede this row on its next
-      // tick. Retry semantics keep us honest.
-      return { ok: false, detail: `latest release is ${release.tag_name}, row tracks ${row.releaseTag}` };
-    }
-    const url = release.assets?.find((a) => a.name === name)?.url;
-    return url ? { ok: true, url } : { ok: false, detail: `release has no ${name} asset` };
-  } catch (err) {
-    return {
-      ok: false,
-      detail: `releases endpoint unreachable: ${err instanceof Error ? err.message : String(err)}`,
-    };
-  }
+): { ok: true; url: string } | { ok: false; detail: string } {
+  if (!row.releaseTag) return { ok: false, detail: "the update row tracks no release tag" };
+  return { ok: true, url: releaseAssetDownloadUrl(opts.downloadBase, row.releaseTag, name) };
 }
 
 /**
@@ -715,7 +728,7 @@ async function downloadClientAsset(
   client: ReleaseClient,
   dest: string,
 ): Promise<void> {
-  const lookup = await releaseAssetUrl(opts, row, client.file);
+  const lookup = releaseAssetUrl(opts, row, client.file);
   if (!lookup.ok) throw new Error(lookup.detail);
   const res = await (opts.fetchImpl ?? fetch)(lookup.url, {
     headers: { accept: "application/octet-stream", ...githubAuthHeaders(opts) },
@@ -807,7 +820,7 @@ async function fetchConfigsAsset(
   | { ok: false; kind: "mismatch"; detail: string }
 > {
   const fetchImpl = opts.fetchImpl ?? fetch;
-  const lookup = await releaseAssetUrl(opts, row, manifest.configs.file);
+  const lookup = releaseAssetUrl(opts, row, manifest.configs.file);
   if (!lookup.ok) return { ok: false, kind: "transient", detail: lookup.detail };
   const assetUrl = lookup.url;
   const authHeaders = githubAuthHeaders(opts);
@@ -851,23 +864,32 @@ async function fetchConfigsAsset(
  */
 const IMAGE_VERIFY_REFUSAL_MARKER = "image-verify:";
 
-function isImageSignatureRefusal(err: unknown): boolean {
-  const e = err as Error & { stderr?: string };
-  if (typeof e?.stderr === "string" && e.stderr.includes(IMAGE_VERIFY_REFUSAL_MARKER)) {
-    return true;
-  }
-  return e instanceof Error && e.message.includes(IMAGE_VERIFY_REFUSAL_MARKER);
-}
+/**
+ * WARP-3430 — the other canonical prefix: the registry refused AUTH (401,
+ * UNAUTHORIZED, DENIED) before any signature could be judged. WARP-3503: the
+ * runner raises the same prefix when HQ will not issue the pull token
+ * (unreachable, revoked, not enrolled, bad signature), with the reason in the
+ * line. That is not a signature verdict, so it must NOT land in
+ * `rejected`/`image_signature_failed`: the update is fine, the box just
+ * cannot read the registry yet. Transient — the row stays `verifying`, the
+ * box keeps its current release, and the next window retries.
+ */
+const REGISTRY_AUTH_REFUSAL_MARKER = "registry-auth:";
 
-function imageSignatureRefusalDetail(err: unknown): string {
+/**
+ * The helper's one-line refusal carrying `marker` (stderr first, then the
+ * error message), or null when the failure is not that refusal.
+ */
+function helperRefusalDetail(err: unknown, marker: string): string | null {
   const e = err as Error & { stderr?: string };
   const src =
-    typeof e?.stderr === "string" && e.stderr.includes(IMAGE_VERIFY_REFUSAL_MARKER)
+    typeof e?.stderr === "string" && e.stderr.includes(marker)
       ? e.stderr
-      : e instanceof Error
+      : e instanceof Error && e.message.includes(marker)
         ? e.message
-        : String(err);
-  const line = src.split("\n").find((l) => l.includes(IMAGE_VERIFY_REFUSAL_MARKER));
+        : null;
+  if (src === null) return null;
+  const line = src.split("\n").find((l) => l.includes(marker));
   return (line ?? src).trim().slice(0, 500);
 }
 
@@ -988,6 +1010,41 @@ async function applyClaimedRow(
   const probe = opts.probe ?? httpHealthProbe();
   const { prisma, runner } = opts;
 
+  // ── never go backwards (WARP-3430), before ANY status write or side effect ──
+  // The poller checked this when it created the row; a row can have waited
+  // since (parked `verifying`, an apply window that never came) while a newer
+  // release committed. Same floor query as the poller, strictly newer or
+  // nothing — and a row for another channel than the box follows now is not
+  // this box's release either. Retired, not applied: pending|verifying →
+  // superseded are both allowed edges.
+  const { channel } = await getUpdateAgentSettings(prisma);
+  const installed = await installedRelease(prisma);
+  const staleReason: "not_newer" | "channel_mismatch" | null =
+    row.channel !== channel
+      ? "channel_mismatch"
+      : installed && row.builtAt.getTime() <= installed.builtAt.getTime()
+        ? "not_newer"
+        : null;
+  if (staleReason !== null) {
+    await setStatus(prisma, log, row.id, "superseded", staleReason);
+    log.warn(
+      {
+        event: "update.stale_superseded",
+        deviceUpdateId: row.id,
+        reason: staleReason,
+        gitSha: row.gitSha,
+        releaseTag: row.releaseTag,
+        rowChannel: row.channel,
+        deviceChannel: channel,
+        builtAt: row.builtAt.toISOString(),
+        installedGitSha: installed?.gitSha ?? null,
+        installedBuiltAt: installed?.builtAt.toISOString() ?? null,
+      },
+      "OTA apply skipped — this update is no longer the release this box should take; retired to superseded, nothing touched",
+    );
+    return { outcome: "stale_superseded", deviceUpdateId: row.id, reason: staleReason };
+  }
+
   // ── setup gate: never swap containers under a mid-wizard customer ──
   const setup = await getSetupState(prisma);
   if (setup.appliance !== "ready") {
@@ -1088,8 +1145,12 @@ async function applyClaimedRow(
   try {
     await runner.pullImages(manifest.services);
   } catch (err) {
-    if (isImageSignatureRefusal(err)) {
-      const detail = imageSignatureRefusalDetail(err);
+    // The signature verdict is checked FIRST: both prefixes come from the
+    // helper's own `die`, so they never co-occur honestly, and if replayed
+    // registry text ever carried the auth marker beside a real refusal, the
+    // stricter classification must win.
+    const detail = helperRefusalDetail(err, IMAGE_VERIFY_REFUSAL_MARKER);
+    if (detail !== null) {
       await setStatus(prisma, log, row.id, "rejected", "image_signature_failed");
       log.warn(
         {
@@ -1106,6 +1167,16 @@ async function applyClaimedRow(
         failureReason: "image_signature_failed",
         detail,
       };
+    }
+    // WARP-3430 — the registry refused auth: transient, and said so by name
+    // so an operator can tell "no HQ token / revoked box" from "attack".
+    const authDetail = helperRefusalDetail(err, REGISTRY_AUTH_REFUSAL_MARKER);
+    if (authDetail !== null) {
+      log.warn(
+        { event: "update.registry_auth_failed", deviceUpdateId: row.id, detail: authDetail },
+        "OTA apply paused — no registry credential (HQ token not issued, or the registry refused it); the box keeps its current release, row stays verifying for the next window",
+      );
+      return { outcome: "retry_later", deviceUpdateId: row.id, detail: authDetail };
     }
     // Transient (network/registry) — rethrow so the row stays `verifying`
     // and the next apply window retries, same as every other step-2 error

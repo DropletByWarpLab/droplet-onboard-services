@@ -290,27 +290,15 @@ EOF
   sudo install -d -m 0755 /etc/droplet
 
   # --- /etc/droplet-host-net/ -----------------------------------------
-  # NOTE: this install is unconditional, so it OVERWRITES the live conf on
-  # every setup run. Anything a box needs beyond the static baseline has to be
-  # re-generated afterwards, not hand-edited here — see droplet-relay-dns
-  # below, and setup_local_dns() (scripts/lib/local-dns.sh), which runs later
-  # in the same pass and re-applies both managed blocks.
+  # Full setup replaces the baseline, then setup_local_dns() regenerates its
+  # managed host-record/listener blocks. Focused host re-apply exits before that
+  # step: preserve the existing presence-policy conf, including runtime blocks.
+  # A first install still needs the template in either mode.
   sudo install -d -m 0755 /etc/droplet-host-net
-  sudo install -m 0644 "$host_src/etc-droplet-host-net/lan-dhcp.conf" \
-    /etc/droplet-host-net/lan-dhcp.conf
-
-  # --- relay DNS origin (WARP-2189) ---------------------------------------
-  # The template above names ONE listen-address (the .20.1 LAN leg) and
-  # dnsmasq runs with bind-interfaces, so nothing binds any other leg. On a
-  # box reached over the ADR-025 cloudflared relay the connector dials
-  # DROPLET_PUBLIC_FQDN_IP:53 for every off-site lookup, and when that address
-  # is a different leg the dial gets connection refused — a healthy tunnel
-  # that cannot resolve the box's own name. Twice this was fixed by hand and
-  # twice the install above wiped it. This helper owns the pairing "answer for
-  # a name at an address => listen on that address" and is invoked from
-  # setup_local_dns() (setup time) and droplet-watchdog (runtime self-heal).
-  sudo install -m 0755 "$host_src/droplet-relay-dns.sh" \
-    /usr/local/sbin/droplet-relay-dns
+  if [ "${REAPPLY_HOST_INTEGRATION:-false}" != "true" ] || [ ! -f /etc/droplet-host-net/lan-dhcp.conf ]; then
+    sudo install -m 0644 "$host_src/etc-droplet-host-net/lan-dhcp.conf" \
+      /etc/droplet-host-net/lan-dhcp.conf
+  fi
 
   # --- bootstrap-certificate refresh (WARP-2944, ADR-058) -------------------
   # The device-bridge's TlsRefreshWatcher execs this when the uplink address
@@ -322,6 +310,14 @@ EOF
   # box calling a wrapper that is not there, ten minutes at a time, forever.
   sudo install -m 0755 "$host_src/droplet-tls-bootstrap-refresh.sh" \
     /usr/local/sbin/droplet-tls-bootstrap-refresh.sh
+
+  # --- certificate key fingerprint CLI (WARP-3414) -------------------------
+  # `droplet-fingerprint`: the box's certificate key fingerprint, in the form
+  # the Droplet apps show, for an admin at the console or in the `support`
+  # shell. One of the channels an attacker on the LAN cannot rewrite (the
+  # dashboard shows it too, but over the connection under question).
+  sudo install -m 0755 "$host_src/usr-local-bin/droplet-fingerprint" \
+    /usr/local/bin/droplet-fingerprint
 
   # --- network self-heal (WARP-1680) --------------------------------------
   # Backstop for a NIC rename / dead uplink leaving the box with no IPv4 and
@@ -462,6 +458,13 @@ EOF
     sudo install -m 0644 "$host_src/etc-default/droplet-watchdog" \
       /etc/default/droplet-watchdog
   fi
+  # The oneshot does not inherit setup.sh's environment. Give it a pointer to
+  # the deployment so router_auth can read the TLS flag and host-admin bundle.
+  # Backfill existing tuning files without replacing any operator setting.
+  if ! sudo grep -q '^[[:space:]]*DROPLET_ENV_FILE[[:space:]]*=' /etc/default/droplet-watchdog; then
+    printf '\nDROPLET_ENV_FILE="%s/.env"\n' "$REPO_ROOT" \
+      | sudo tee -a /etc/default/droplet-watchdog >/dev/null
+  fi
   # Migration: the standalone WARP-869 timer is superseded — the unified
   # watchdog invokes the same helper, and two independent schedulers could
   # race a PCI remove/rescan. The helper script itself stays installed.
@@ -530,6 +533,18 @@ EOF
   sudo install -m 0644 "$host_src/etc-systemd-system/droplet-host-integration.service" \
     /etc/systemd/system/droplet-host-integration.service
   log_success "Installed /usr/local/sbin/droplet-reapply-host-integration (+ boot re-apply unit)"
+
+  # --- WARP-3841 on-demand deploy (epic WARP-3834) ----------------------------
+  # droplet-deploy.service is the repo-tracked root deploy (backup, setup.sh as
+  # droplet, host hook, gate). Deliberately NOT enabled (no [Install]): the
+  # `droplet` user starts it through the polkit rule below, start verb only.
+  sudo install -m 0755 "$host_src/droplet-deploy.sh" \
+    /usr/local/sbin/droplet-deploy
+  sudo install -m 0644 "$host_src/etc-systemd-system/droplet-deploy.service" \
+    /etc/systemd/system/droplet-deploy.service
+  sudo install -m 0644 "$host_src/50-droplet-deploy.rules" \
+    /etc/polkit-1/rules.d/50-droplet-deploy.rules
+  log_success "Installed /usr/local/sbin/droplet-deploy (+ on-demand unit, polkit start rule)"
 
   # --- XVF3800 DSP control tool (xvf_host) for voice_dsp self-heal (WARP-1408) -
   # Both the host watchdog (droplet-watchdog.sh) and voice-io's POST
@@ -853,9 +868,9 @@ provision_single_box_openwrt() {
 # ============================================================================
 #
 # Derive the box's default-route egress source IPv4 — the LAN address a
-# same-network client dials the overlay WireGuard endpoint at. This is the
-# value `WIREGUARD_HOME_ENDPOINT_HOST` pins so the issued overlay profile
-# carries a REACHABLE `lan` candidate.
+# same-network client dials the WireGuard endpoint at. This is the
+# value `WIREGUARD_HOME_ENDPOINT_HOST` pins so the issued WireGuard profile
+# carries a reachable endpoint.
 #
 # Why derive it here rather than leave the env empty and let the orchestrator
 # discover it at request time (the vpn-home-endpoint.ts design):
@@ -1181,20 +1196,6 @@ configure_single_box_env() {
     *)        merged_profiles="${merged_profiles},eval" ;;
   esac
 
-  # Cloudflare Tunnel relay (`relay` profile, WARP-974 / ADR-025) — the outbound
-  # remote-access connector (cloudflared) that replaces DuckDNS + the inbound
-  # WireGuard port. OPT-IN: activate `relay` ONLY when a TUNNEL_TOKEN is present in
-  # .env, so an un-provisioned box never brings up (and crash-loops) a tokenless
-  # connector. The token is provisioned out-of-band (fleet HQ / operator) — the
-  # cloudflared container reads it straight from .env via env_file.
-  if grep -qE '^TUNNEL_TOKEN=.+' "$env_file" 2>/dev/null; then
-    case ",${merged_profiles}," in
-      *,relay,*) : ;;                                # already present — idempotent
-      ,,)        merged_profiles="relay" ;;
-      *)         merged_profiles="${merged_profiles},relay" ;;
-    esac
-  fi
-
   # Document engine (`docs` profile, WARP-882 / WARP-1686 / ADR-027 WS-4) —
   # RAM GATED. The engine (Collabora CODE by default per ADR-034 — no
   # licensing fee; OnlyOffice CE via DOCS_ENGINE=onlyoffice) is a ~2 GB
@@ -1386,13 +1387,13 @@ EOF
   case "$docs_engine" in
     onlyoffice)
       upsert_env DOCS_ENGINE        onlyoffice
-      upsert_env DOCS_ENGINE_IMAGE  "onlyoffice/documentserver:8.2"
+      upsert_env DOCS_ENGINE_IMAGE  "onlyoffice/documentserver:8.2@sha256:fb1c76177e578918f0d7ad51eda5006d728b9f2f071f93d18054c1f91edec78b"
       upsert_env DOCS_INTERNAL_URL  http://docserver
       log_info "Document engine: onlyoffice (OEM-licensed SKU posture — AGPLv3 CE otherwise)"
       ;;
     *)
       upsert_env DOCS_ENGINE        collabora
-      upsert_env DOCS_ENGINE_IMAGE  "collabora/code:26.04.2.4.1"
+      upsert_env DOCS_ENGINE_IMAGE  "collabora/code:26.04.2.4.1@sha256:1f864ce3f0c49e867787b6dd303bd6ba989542d3023f6809df558eafd04c1b97"
       upsert_env DOCS_INTERNAL_URL  "http://docserver:9980/docs"
       log_info "Document engine: collabora (Collabora CODE — LibreOffice, no licensing fee)"
       ;;
@@ -1451,7 +1452,7 @@ EOF
   upsert_env WIREGUARD_LAN_CIDR  192.168.20.0/24
   upsert_env WIREGUARD_DNS       192.168.20.1
   # WARP-1947: pin the box's home-facing endpoint IP so a same-network client's
-  # overlay profile carries a REACHABLE `lan` candidate. See the
+  # WireGuard profile carries a reachable endpoint. See the
   # derive_single_box_home_endpoint() banner above for the full why — in short,
   # request-time discovery cannot find it on this shape, and a stale hardcode
   # (this box shipped a dead 192.168.1.87) is worse than none. Derived + upserted
@@ -1476,7 +1477,7 @@ EOF
     upsert_env DROPLET_TRUSTED_LAN_IPS "$_lan_ips"
     log_info "DROPLET_TRUSTED_LAN_IPS derived from the box's interfaces: $_lan_ips"
   else
-    log_warn "could not enumerate the box's LAN IPv4 addresses — leaving DROPLET_TRUSTED_LAN_IPS unchanged; browsing this box BY IP may answer 400 on Nextcloud legs (the embedded editor included) until the next setup run"
+    log_warn "could not enumerate the box's LAN IPv4 addresses — leaving DROPLET_TRUSTED_LAN_IPS unchanged; browsing this box BY IP may answer 400 on File Store legs (the embedded editor included) until the next setup run"
   fi
   # WARP-1772: the inference runtime is a durable, operator-set property, and
   # upsert_env is an OVERWRITE — before this guard, any re-run of setup on a
@@ -1808,10 +1809,6 @@ EOF
   # WARP-850: matter-controller is the 4th host-net service on the ladder
   # (:8083) — same WARP-806 reasoning as the three above.
   upsert_env DROPLET_MATTER_SERVICE_URL "http://${bridge_gw}:8083"
-  # device-gateway is the 5th host-net service on the ladder (:8084,
-  # network_mode: host for BACnet Who-Is UDP broadcast + KNX multicast) —
-  # same WARP-806 reasoning as the four above.
-  upsert_env DEVICE_GATEWAY_URL "http://${bridge_gw}:8084"
   # WARP-895: hand the Droplet AP's SSID (and an operator-set PSK, if any)
   # to the Matter controller so BLE-first Matter devices can join the LAN.
   # SSID matches the AP written above (~line 201).
@@ -1847,5 +1844,5 @@ EOF
   # reads never depend on docker0 being up.
   upsert_env DEVICE_BRIDGE_URL   "http://${bridge_gw}:9090"
 
-  log_success "Wrote single-box knobs to .env (idempotent upsert — COMPOSE_PROFILES=${merged_profiles}, DOCS_ENABLED=${docs_enabled_val} (RAM-gated, ${mem_gb} GiB vs ${docs_min_gib} GiB), CAMERA_SUBNET=auto (edge-router derived, WARP-1805), WIREGUARD_LAN_CIDR=192.168.20.0/24, WIREGUARD_DNS=192.168.20.1, OLLAMA_URL + RAGAS_OLLAMA_URL (judge → in-network ollama), FIPS off, TPM=mock, OpenWrt 127.0.0.1:8181, LLM_MODEL=gpt-oss:20b, DROPLET_AP_MODE=hostapd, SWITCH_AUTOPROVISION=1 flat-lan, ROUTING/SWITCH/DISPLAY/DEVICE_BRIDGE/DEVICE_GATEWAY URLs → ${bridge_net} gateway ${bridge_gw})"
+  log_success "Wrote single-box knobs to .env (idempotent upsert — COMPOSE_PROFILES=${merged_profiles}, DOCS_ENABLED=${docs_enabled_val} (RAM-gated, ${mem_gb} GiB vs ${docs_min_gib} GiB), CAMERA_SUBNET=auto (edge-router derived, WARP-1805), WIREGUARD_LAN_CIDR=192.168.20.0/24, WIREGUARD_DNS=192.168.20.1, OLLAMA_URL + RAGAS_OLLAMA_URL (judge → in-network ollama), FIPS off, TPM=mock, OpenWrt 127.0.0.1:8181, LLM_MODEL=gpt-oss:20b, DROPLET_AP_MODE=hostapd, SWITCH_AUTOPROVISION=1 flat-lan, ROUTING/SWITCH/DISPLAY/DEVICE_BRIDGE URLs → ${bridge_net} gateway ${bridge_gw})"
 }

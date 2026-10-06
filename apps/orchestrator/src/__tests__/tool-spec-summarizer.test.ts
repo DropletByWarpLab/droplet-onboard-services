@@ -94,8 +94,8 @@ describe("renderFacts", () => {
 
   it("renders any other error CODE as could-not-read with its message — Nextcloud down is news", () => {
     expect(
-      renderFacts([failed("list_recent_files", toolError("RECENT_FAILED", "nextcloud returned 503"))]),
-    ).toBe("- list_recent_files: COULD NOT BE READ (nextcloud returned 503)");
+      renderFacts([failed("list_recent_files", toolError("RECENT_FAILED", "the File Store returned 503"))]),
+    ).toBe("- list_recent_files: COULD NOT BE READ (the File Store returned 503)");
   });
 
   it("keeps failures alongside successes rather than filtering them out", () => {
@@ -196,7 +196,7 @@ describe("fallbackSummary (WARP-3409) — the write-up when the model could not 
     const out = fallbackSummary(
       [
         ok("get_system_health", { components: [{ name: "redis", status: "ok" }, { name: "nextcloud", status: "down" }] }),
-        failed("list_recent_files", envelope("RECENT_FAILED", "nextcloud returned 503")),
+        failed("list_recent_files", envelope("RECENT_FAILED", "the File Store returned 503")),
         ok("get_camera_health", { system: { cameraCount: 3, camerasLive: 2 } }),
         ok("list_events", { count: 1 }),
       ],
@@ -422,10 +422,10 @@ describe("createToolSpecSummarizer", () => {
 
   it("sends the facts and the spec's prompt to the model", async () => {
     const s = createToolSpecSummarizer(activeModel);
-    await s.summarize("Focus on the money.", [ok("erp_get_ar_summary", { totalBalance: 10 })]);
+    await s.summarize("Focus on the money.", [ok("get_system_health", { totalBalance: 10 })]);
     const arg = completeOnceMock.mock.calls[0][0];
     expect(arg.text).toMatch(/Focus on the money\./);
-    expect(arg.text).toMatch(/erp_get_ar_summary/);
+    expect(arg.text).toMatch(/get_system_health/);
     expect(arg.text).toMatch(/totalBalance/);
   });
 
@@ -476,10 +476,9 @@ describe("createToolSpecSummarizer — follows the active model (WARP-3047)", ()
   });
 });
 
-// WARP-2979 (#2420 review 2b; ADR-059 P4 §6.13) — a routine's `summarize` step writes up the results of the
-// steps before it. When any of those came from a domain that never goes to a cloud model
-// (OFF_LAN_WITHHELD_DOMAINS: files, memory, business, security), the prose is written on the box's LOCAL model
-// — never the active model, which may be a cloud one — or not at all.
+// A routine's `summarize` step writes up the results of the steps before it. When any of those came from a
+// domain that never goes to a cloud model (OFF_LAN_WITHHELD_DOMAINS), the prose is
+// written on the box's LOCAL model — never the active model, which may be a cloud one — or not at all.
 describe("summarize after a withheld domain's step: the local model only", () => {
   const localModel = vi.fn(async (): Promise<string | null> => "gpt-oss:20b");
 
@@ -489,19 +488,27 @@ describe("summarize after a withheld domain's step: the local model only", () =>
   });
 
   it.each([
-    ["security", "security_list_incidents"],
     ["files", "search_files"],
+    ["memory", "memory_recall"],
+    ["business", "business_find"],
+    ["email", "email_search"],
+    ["calendar", "list_events"],
+    ["team_chat", "team_chat_send_message"],
+    ["cameras", "list_camera_events"],
+    ["cloud", "cloud_query_dataset"],
+    ["money", "money_list_open_documents"],
+    ["erp", "erp_get_schedule_today"],
   ])("a %s step before it → the LOCAL model writes the summary, whatever the active model", async (_d, tool) => {
     const summarizer = createToolSpecSummarizer(activeModel, localModel);
-    await summarizer.summarize("Write it up.", [ok(tool, { incidents: [] }), ok("get_system_health", { status: "ok" })]);
+    await summarizer.summarize("Write it up.", [ok(tool, { results: [] }), ok("get_system_health", { status: "ok" })]);
     expect(localModel).toHaveBeenCalled();
     expect(completeOnceMock).toHaveBeenCalled();
     for (const [args] of completeOnceMock.mock.calls) expect(args.model).toBe("gpt-oss:20b");
   });
 
-  it("a FAILED security step counts too: its error text still reaches the prompt", async () => {
+  it("a FAILED withheld-domain step counts too: its error text still reaches the prompt", async () => {
     const summarizer = createToolSpecSummarizer(activeModel, localModel);
-    await summarizer.summarize("Write it up.", [failed("security_get_incident", "INCIDENT_NOT_FOUND")]);
+    await summarizer.summarize("Write it up.", [failed("read_file", "FILE_NOT_FOUND")]);
     expect(completeOnceMock.mock.calls[0]![0].model).toBe("gpt-oss:20b");
   });
 
@@ -512,7 +519,7 @@ describe("summarize after a withheld domain's step: the local model only", () =>
       .mockResolvedValueOnce({ content: "  ", model: "m", reasoning: "…", finishReason: "length" })
       .mockResolvedValueOnce({ content: "Done.", model: "m", reasoning: "", finishReason: "stop" });
     const summarizer = createToolSpecSummarizer(activeModel, localModel);
-    await summarizer.summarize("Write it up.", [ok("security_list_incidents", { incidents: [] })]);
+    await summarizer.summarize("Write it up.", [ok("search_files", { results: [] })]);
     expect(completeOnceMock).toHaveBeenCalledTimes(2);
     for (const [args] of completeOnceMock.mock.calls) expect(args.provider).toBe("local");
   });
@@ -520,13 +527,13 @@ describe("summarize after a withheld domain's step: the local model only", () =>
   it("no local model → the step fails plainly; nothing is sent to any model", async () => {
     localModel.mockResolvedValue(null);
     const summarizer = createToolSpecSummarizer(activeModel, localModel);
-    await expect(summarizer.summarize("Write it up.", [ok("security_search_events", { events: [] })])).rejects.toThrow(/on this Droplet/);
+    await expect(summarizer.summarize("Write it up.", [ok("business_find", { results: [] })])).rejects.toThrow(/on this Droplet/);
     expect(completeOnceMock).not.toHaveBeenCalled();
   });
 
   it("no withheld domain → the active model, as before; the local resolver is not even asked", async () => {
     const summarizer = createToolSpecSummarizer(activeModel, localModel);
-    await summarizer.summarize("Write it up.", [ok("get_system_health", { status: "ok" }), ok("list_cameras", { cameras: [] })]);
+    await summarizer.summarize("Write it up.", [ok("get_system_health", { status: "ok" }), ok("list_network_devices", { devices: [] })]);
     expect(completeOnceMock.mock.calls[0]![0].model).toBe("claude-sonnet-4");
     expect(Object.keys(completeOnceMock.mock.calls[0]![0])).not.toContain("provider");
     expect(localModel).not.toHaveBeenCalled();

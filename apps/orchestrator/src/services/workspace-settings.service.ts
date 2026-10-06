@@ -72,6 +72,13 @@ export const WORKSPACE_SETTING_DEFAULTS: readonly WorkspaceSettingDefault[] = [
   { key: "workspace.name", section: "workspace", type: "string", value: "Droplet Home" },
   { key: "workspace.locale", section: "workspace", type: "enum", value: "en-US" },
   { key: "workspace.default_scope", section: "workspace", type: "enum", value: "team" },
+  // WARP-3533 — the box-wide switch for personal API tokens (`dpm_…`), the
+  // credential a script uses on /api/pm and /api/support. Default OFF, like the
+  // coding-tool tokens (ADR-067): while it is off every token answers 401, and
+  // none is deleted. Written by PUT /api/developer/settings (owner/admin,
+  // audited); the generic /api/settings PATCH is the same authority and also
+  // audits it.
+  { key: "workspace.api_tokens_enabled", section: "workspace", type: "bool", value: false },
 
   // ── memory_privacy ──
   // Brain memory defaults — whether new memory items are pinned by
@@ -83,14 +90,11 @@ export const WORKSPACE_SETTING_DEFAULTS: readonly WorkspaceSettingDefault[] = [
   { key: "memory_privacy.allow_chat_writes", section: "memory_privacy", type: "bool", value: true },
 
   // ── off_lan ──
-  // Off-LAN posture — whether WireGuard peer minting is enabled and how
-  // aggressively the orchestrator should renew peer keys. The box's public
-  // address is no longer a stored setting: it comes from the per-device
-  // droplet-us.com FQDN (ADR-023) resolved in vpn.ts, not a DDNS hostname
-  // (WARP-974 removed the DuckDNS path end-to-end).
+  // Legacy preferences retained for stored-setting compatibility. They do not
+  // control peer minting or schedule key renewal. Direct WireGuard reachability
+  // uses WIREGUARD_ENDPOINT_HOST; the web address uses internal DNS.
   { key: "off_lan.vpn_enabled", section: "off_lan", type: "bool", value: false },
-  // Peer-renewal cadence; surfaces in the dashboard's VPN panel as a
-  // configurable interval. Default 30 days (in seconds).
+  // Historical renewal preference (30 days in seconds); no renewal job reads it.
   { key: "off_lan.peer_renewal_interval", section: "off_lan", type: "duration_seconds", value: 2_592_000 },
 
   // ── hardware ──
@@ -132,6 +136,10 @@ export const WORKSPACE_SETTING_DEFAULTS: readonly WorkspaceSettingDefault[] = [
   // installed model. NOT editable via the generic /api/settings PATCH:
   // `ai` is intentionally absent from that route's SECTION_VALUES.
   { key: "ai.model.chat", section: "ai", type: "string", value: "" },
+  // WARP-3452 — the box-wide switch "Coding tools can use the local model".
+  // Default OFF. Written only by PUT /api/llm-access/settings (owner/admin,
+  // audited); `ai` keeps it off the generic /api/settings PATCH, as above.
+  { key: "ai.llm_access.enabled", section: "ai", type: "bool", value: false },
 ];
 
 export interface SeedResult {
@@ -160,7 +168,8 @@ export interface OffLanChannelDefault {
     | "web_fetch"
     | "ambient_data"
     | "web_push"
-    | "place_lookup";
+    | "place_lookup"
+    | "work_integrations";
   enabled: boolean;
   requiresAdmin: boolean;
 }
@@ -186,6 +195,11 @@ export const OFF_LAN_CHANNEL_DEFAULTS: readonly OffLanChannelDefault[] = [
   // OFF by default: the text someone types in an event's place field is
   // company data. Owner-only to turn on (settings.ts OWNER_ONLY_CHANNELS).
   { key: "place_lookup", enabled: false, requiresAdmin: true },
+  // WARP-3532 (ADR-069 §9) — work webhooks and Slack / Teams / Discord /
+  // Google Chat notifications. OFF by default: a work item title is company
+  // data and this is the switch that lets it leave. Owner-only to turn on
+  // (settings.ts OWNER_ONLY_CHANNELS). LAN destinations never need it.
+  { key: "work_integrations", enabled: false, requiresAdmin: true },
 ];
 
 /**

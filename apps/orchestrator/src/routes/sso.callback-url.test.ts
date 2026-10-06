@@ -14,7 +14,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 vi.mock("../config.js", () => ({
   config: {
-    WIREGUARD_ENDPOINT_HOST: "",
+    DROPLET_LAN_HOSTNAME: "",
     corsAllowedOrigins: ["https://droplet-ai.local"],
     agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
@@ -49,7 +49,7 @@ const CB = "/api/sso/oidc/callback?code=abc123&state=fixed-state";
 beforeEach(() => {
   vi.clearAllMocks();
   _resetTrustedOriginCacheForTests();
-  (config as { WIREGUARD_ENDPOINT_HOST: string }).WIREGUARD_ENDPOINT_HOST = "";
+  (config as { DROPLET_LAN_HOSTNAME: string }).DROPLET_LAN_HOSTNAME = "";
   (config as { corsAllowedOrigins: string[] }).corsAllowedOrigins = [
     "https://droplet-ai.local",
   ];
@@ -85,7 +85,7 @@ describe("buildSsoCallbackUrl (currentUrl for openid-client)", () => {
   });
 
   it("builds from the configured canonical origin", async () => {
-    (config as { WIREGUARD_ENDPOINT_HOST: string }).WIREGUARD_ENDPOINT_HOST =
+    (config as { DROPLET_LAN_HOSTNAME: string }).DROPLET_LAN_HOSTNAME =
       "studio.example.com";
     const url = await buildSsoCallbackUrl(
       fakeReq({

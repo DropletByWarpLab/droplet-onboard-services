@@ -1670,9 +1670,7 @@ run_check_tls_invariants() {
   # ADR-023 (C2/C3): invariants the public-CA per-device TLS work must hold so
   # the box never ships certless and the LE cert installs without an nginx
   # config change. Three static asserts:
-  #   1. _generate_tls_cert adds the per-device FQDN (DROPLET_PUBLIC_FQDN) to the
-  #      bootstrap self-signed SAN — so the box serves a name-matching cert for
-  #      the FQDN even before the first LE issuance / offline.
+  #   1. Bootstrap generation and its skip guard include the internal DNS name.
   #   2. nginx.conf still references droplet.crt + droplet.key on the :443 server
   #      block — the LE fullchain overwrites droplet.crt, so a rename of those
   #      paths would silently break the zero-config handoff.
@@ -1688,12 +1686,12 @@ run_check_tls_invariants() {
   local factory_reset="$REPO_ROOT/scripts/factory-reset.sh"
   local failures=0
 
-  # 1. Bootstrap SAN includes the per-device FQDN.
+  # 1. Bootstrap generation and its skip guard cover the internal DNS name.
   if [ -f "$secrets_sh" ]; then
-    if ! grep -qE 'DNS:\$public_fqdn|DNS:\$\{DROPLET_PUBLIC_FQDN' "$secrets_sh" \
-       && ! grep -qE 'DROPLET_PUBLIC_FQDN.*san|san.*public_fqdn' "$secrets_sh"; then
-      printf "  ${_RED}FAIL${_RESET}  %s — _generate_tls_cert does not add the FQDN to the bootstrap SAN\n" "$label"
-      printf "    | (ADR-023 C2: add DNS:\$public_fqdn near the hostname SAN in secrets.sh.)\n" >&2
+    local hostname_refs
+    hostname_refs="$(grep -cF '"${_REQUIRED_DNS_SANS[@]}" "${DROPLET_LAN_HOSTNAME:-droplet-ai.lan}"' "$secrets_sh" || true)"
+    if [ "$hostname_refs" -lt 2 ]; then
+      printf "  ${_RED}FAIL${_RESET}  %s — bootstrap generation or skip guard does not cover the internal hostname\n" "$label"
       failures=$((failures + 1))
     fi
   else
@@ -1759,7 +1757,7 @@ run_check_tls_invariants() {
   fi
 
   if [ "$failures" -eq 0 ]; then
-    printf "  ${_GREEN}PASS${_RESET}  %s (FQDN SAN + nginx cert paths + factory-reset FQDN + signed HQ release/deregister)\n" "$label"
+    printf "  ${_GREEN}PASS${_RESET}  %s (internal DNS SAN + nginx cert paths + legacy reset cleanup)\n" "$label"
     _record_result "$label" pass
     return 0
   fi

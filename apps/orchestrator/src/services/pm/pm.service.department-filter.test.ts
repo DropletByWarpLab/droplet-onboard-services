@@ -42,6 +42,8 @@ function makePrisma() {
         seen.workItem = args.where;
         return [];
       },
+      // WARP-3371 — every list now counts the filtered set for its `total`.
+      count: async () => 0,
       groupBy: async () => [],
     },
   } as never;
@@ -123,7 +125,7 @@ describe("searchWorkItems — the department filter", () => {
     // item on the box to answer it is not an improvement.
     const { prisma, seen } = makePrisma();
     const out = await searchWorkItems(prisma, { q: "   " });
-    expect(out).toEqual([]);
+    expect(out).toEqual({ items: [], nextCursor: null, total: 0 });
     expect(seen.workItem).toBeUndefined();
   });
 
@@ -171,7 +173,7 @@ describe("searchWorkItems — the department filter", () => {
     // does the workspace filter. They must not clobber each other.
     const { prisma, seen } = makePrisma();
     await searchWorkItems(prisma, { q: "", departmentId: DEPT, workspaceSlug: "main" });
-    expect(seen.workItem?.project).toEqual({ workspace: { slug: "main" } });
+    expect(seen.workItem?.project).toEqual({ kind: "PROJECT", workspace: { slug: "main" } });
     expect(seen.workItem?.AND).toBeDefined();
   });
 });

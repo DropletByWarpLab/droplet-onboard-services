@@ -3,20 +3,38 @@ import express from "express";
 import request from "supertest";
 
 vi.mock("../config.js", () => ({
-  config: { DROPLET_PUBLIC_FQDN: "", HQ_ISSUANCE_URL: "https://hq.example" },
+  config: { DROPLET_LAN_HOSTNAME: "droplet-ai.lan", HQ_ISSUANCE_URL: "https://hq.example" },
 }));
 
-// The gate is exercised separately (middleware/auth.test.ts); here it is a
-// pass-through so the view is what's under test. The mount itself is checked
-// in the last case — a route that forgot its requireRole would be an
+// The gate is exercised in full in middleware/auth.test.ts; here it is a
+// faithful stand-in — it admits exactly the roles the route registers and
+// answers 403 to everyone else, like the real one — so the route's own
+// allowlist is what the role-split cases below actually test. The mount
+// itself is checked too: a route that forgot its requireRole would be an
 // unauthenticated owner surface.
 const requireRoleSpy = vi.fn(
-  (..._roles: string[]) =>
-    (_req: unknown, _res: unknown, next: () => void) =>
-      next(),
+  (...roles: string[]) =>
+    (
+      req: { user?: { role?: string } },
+      res: { status: (n: number) => { json: (b: unknown) => void } },
+      next: () => void,
+    ) =>
+      roles.includes(String(req.user?.role))
+        ? next()
+        : res.status(403).json({ error: "Forbidden: role not permitted" }),
 );
 vi.mock("../middleware/auth.js", () => ({
   requireRole: (...roles: string[]) => requireRoleSpy(...roles),
+}));
+
+// WARP-3414: the served certificate's key fingerprint comes from the leaf on
+// disk (lib/served-cert-pin.ts, tested on its own); a fixed value here.
+const FINGERPRINT =
+  "F017 AFA8 6AD7 8BED 4ABD E646 90F0 5B7B 8DBB E36B 26E9 C8F4 10E5 36A6 1E3D F25C";
+const { servedMetadataMock } = vi.hoisted(() => ({ servedMetadataMock: vi.fn() }));
+vi.mock("../lib/served-cert-pin.js", () => ({
+  servedCertFingerprint: () => FINGERPRINT,
+  servedCertMetadata: servedMetadataMock,
 }));
 
 import { certificateView, createTlsCertificateRouter } from "./tls-certificate.js";
@@ -24,40 +42,47 @@ import { certificateView, createTlsCertificateRouter } from "./tls-certificate.j
 const NOW = new Date("2026-09-20T12:00:00Z");
 const day = 86_400_000;
 
-function appWith(row: unknown) {
-  const prisma = { tlsCert: { findFirst: async () => row } } as never;
+// `role: null` is an anonymous request (an explicit `undefined` would take the default).
+function appWith(row: unknown, role: string | null = "owner") {
+  servedMetadataMock.mockReturnValue(row);
+  // The historical row is deliberately wrong; status must read the served leaf.
+  const prisma = { tlsCert: { findFirst: async () => ({ state: "LE_RENEW_FAILED", notAfter: new Date(0) }) } } as never;
   const app = express();
+  app.use((req, _res, next) => {
+    if (role) (req as unknown as { user: { role: string } }).user = { role };
+    next();
+  });
   app.use("/api", createTlsCertificateRouter(prisma));
   return app;
 }
 
 describe("certificateView — the arithmetic the card and the screen share", () => {
-  it("an issued certificate: days left, when the box renews, not yet expiring", () => {
+  it("an issued certificate: days left, no scheduled fleet renewal, not yet expiring", () => {
     const v = certificateView(
-      { state: "LE_ISSUED", fqdn: "mybox.droplet-us.com", notAfter: new Date(NOW.getTime() + 60 * day), updatedAt: NOW },
+      { state: "LOCAL_CERTIFICATE", fqdn: "droplet-ai.lan", notAfter: new Date(NOW.getTime() + 60 * day), updatedAt: NOW },
       NOW,
     );
-    expect(v.state).toBe("LE_ISSUED");
-    expect(v.fqdn).toBe("mybox.droplet-us.com");
+    expect(v.state).toBe("LOCAL_CERTIFICATE");
+    expect(v.fqdn).toBe("droplet-ai.lan");
     expect(v.daysLeft).toBe(60);
-    // Renewal starts inside the last 30 days.
-    expect(v.renewsInDays).toBe(30);
+    // Remote issuance has been retired, including on an existing HQ install.
+    expect(v.renewsInDays).toBeNull();
     expect(v.expiringSoon).toBe(false);
-    expect(v.hqConfigured).toBe(true);
+    expect(v.hqConfigured).toBe(false);
     expect(v.checkedAt).toBe(NOW.toISOString());
   });
 
-  it("inside the renew window renewsInDays is 0, and inside the last week it is expiring", () => {
+  it("near expiry renewal is still unavailable, and inside the last week it is expiring", () => {
     const inWindow = certificateView(
-      { state: "LE_RENEW_FAILED", fqdn: "mybox.droplet-us.com", notAfter: new Date(NOW.getTime() + 12 * day) },
+      { state: "LOCAL_CERTIFICATE", fqdn: "droplet-ai.lan", notAfter: new Date(NOW.getTime() + 12 * day) },
       NOW,
     );
     expect(inWindow.daysLeft).toBe(12);
-    expect(inWindow.renewsInDays).toBe(0);
+    expect(inWindow.renewsInDays).toBeNull();
     expect(inWindow.expiringSoon).toBe(false);
 
     const lastWeek = certificateView(
-      { state: "LE_RENEW_FAILED", fqdn: "mybox.droplet-us.com", notAfter: new Date(NOW.getTime() + 6 * day + 3600_000) },
+      { state: "LOCAL_CERTIFICATE", fqdn: "droplet-ai.lan", notAfter: new Date(NOW.getTime() + 6 * day + 3600_000) },
       NOW,
     );
     expect(lastWeek.daysLeft).toBe(6);
@@ -65,17 +90,17 @@ describe("certificateView — the arithmetic the card and the screen share", () 
 
     // Past expiry: negative days, still expiring, never NaN.
     const expired = certificateView(
-      { state: "LE_RENEW_FAILED", fqdn: "mybox.droplet-us.com", notAfter: new Date(NOW.getTime() - 2 * day) },
+      { state: "LOCAL_CERTIFICATE", fqdn: "droplet-ai.lan", notAfter: new Date(NOW.getTime() - 2 * day) },
       NOW,
     );
     expect(expired.daysLeft).toBe(-2);
-    expect(expired.renewsInDays).toBe(0);
+    expect(expired.renewsInDays).toBeNull();
     expect(expired.expiringSoon).toBe(true);
   });
 
-  it("no row at all is the bootstrap self-signed certificate with nothing to count down", () => {
+  it("an unreadable leaf reports unknown status with nothing to count down", () => {
     const v = certificateView(null, NOW);
-    expect(v.state).toBe("BOOTSTRAP_SELF_SIGNED");
+    expect(v.state).toBe("UNKNOWN");
     expect(v.fqdn).toBeNull();
     expect(v.daysLeft).toBeNull();
     expect(v.renewsInDays).toBeNull();
@@ -87,15 +112,42 @@ describe("certificateView — the arithmetic the card and the screen share", () 
 describe("GET /api/tls/certificate", () => {
   it("serves the view for the newest state row, owner/admin only", async () => {
     const res = await request(
-      appWith({ state: "LE_ISSUED", fqdn: "mybox.droplet-us.com", notAfter: new Date(Date.now() + 45 * day), updatedAt: new Date() }),
+      appWith({ state: "LOCAL_CERTIFICATE", fqdn: "droplet-ai.lan", notAfter: new Date(Date.now() + 45 * day), updatedAt: new Date() }),
     ).get("/api/tls/certificate");
     expect(res.status).toBe(200);
-    expect(res.body.state).toBe("LE_ISSUED");
+    expect(res.body.state).toBe("LOCAL_CERTIFICATE");
     expect(res.body.daysLeft).toBeGreaterThanOrEqual(44);
     expect(res.body.expiringSoon).toBe(false);
     // The gate: exactly owner + admin. A route that forgot it would be an
     // unauthenticated owner surface; one that widened it would show the
     // certificate's lifecycle to every family member.
     expect(requireRoleSpy).toHaveBeenCalledWith("owner", "admin");
+  });
+
+  // WARP-3414: the key fingerprint is public data, but it is shown only over
+  // the box's authenticated, owner/admin surface — never to a member or an
+  // external guest, and never by an anonymous request.
+  it("carries the served key fingerprint to an owner and an admin", async () => {
+    for (const role of ["owner", "admin"]) {
+      const res = await request(appWith(null, role)).get("/api/tls/certificate");
+      expect(res.status).toBe(200);
+      expect(res.body.fingerprint).toBe(FINGERPRINT);
+    }
+  });
+
+  it("gives a member (family), an external guest and an anonymous request no fingerprint", async () => {
+    for (const role of ["family", "guest", null]) {
+      const res = await request(appWith(null, role)).get("/api/tls/certificate");
+      expect(res.status).toBe(403);
+      expect(JSON.stringify(res.body)).not.toContain("F017");
+      expect(res.body.fingerprint).toBeUndefined();
+    }
+  });
+});
+
+describe("certificateView — fingerprint", () => {
+  it("is null unless the caller supplies one (an unreadable leaf shows nothing, not a placeholder)", () => {
+    expect(certificateView(null, NOW).fingerprint).toBeNull();
+    expect(certificateView(null, NOW, FINGERPRINT).fingerprint).toBe(FINGERPRINT);
   });
 });

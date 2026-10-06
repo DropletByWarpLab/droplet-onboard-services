@@ -1,59 +1,123 @@
-# Onboarding — first-run state machine (scaffold)
+# Onboarding — first-run state machine
 
-> **Status: DRAFT scaffold — no implementation in this PR.** Spec for a future
-> session. Part of the Aurora login + onboarding initiative. Refs WARP-___.
+The implemented wizard resumes from the singleton `ApplianceSetup` row,
+independently of Nextcloud installation status. `AuthGate` consumes
+`GET /api/setup/state`; `GET /api/auth/setup` reports whether a local owner
+still needs to be created. These are separate questions.
 
-## Purpose
+## Current sequence
 
-Make first-run **resumable and explicit**. Today setup is stateless — derived
-from Nextcloud's `installed` flag (`GET /api/auth/setup`) — so a refresh mid-
-wizard loses place and there's no `unclaimed → ready` model. Replace with an
-explicit server-side state.
-
-## State
-
-```
-UNCLAIMED ──claim──▶ CLAIMING ──ok──▶ SETUP(step) ──finish──▶ READY
-  any sign-in ▶ AUTHENTICATING ▶ (MFA?) ▶ session
-  first sign-in, tour_completed=false ▶ TOUR ▶ dashboard
+```text
+welcome → claim → account → org → twofactor → wifi → address → storage
+        → discovery → cameras → vpn → ai → voice → accounts → team → done
 ```
 
-## Backend contract
+Accounts offers optional Google mail/calendar and Microsoft work or school
+connections. Provider consent connects services; it does not replace local
+Droplet sign-in. Continuing or skipping proceeds to team setup. Existing
+appliances at `team` or `done` retain their position.
 
-- `GET /setup/state` → `{ appliance: "unclaimed"|"ready", setup_step, user_tour_completed }`.
-- The web app routes: unclaimed → wizard@step; ready + tour pending → tour; else dashboard.
-- `AuthGate` (`apps/web-dashboard/src/components/AuthGate.tsx`) consumes this instead of the boolean `setupRequired`.
+## Persisted state
 
-## Data model (Prisma)
+The lifecycle has two explicit values: `unclaimed` while setup is unfinished,
+and `ready` once the owner finishes. Physical device claim is separate; a
+claimed device remains `unclaimed` in this lifecycle until setup finishes.
 
-```prisma
-enum SetupStep { welcome claim account org internet storage discovery cameras vpn ai team done }
-model ApplianceSetup {
-  id         String    @id @default(uuid())
-  state      String    // "unclaimed" | "ready"  (explicit, never derived)
-  setupStep  SetupStep @default(welcome)
-  updatedAt  DateTime  @updatedAt
-}
+Persisted steps, in authoritative wizard order:
+
+```text
+welcome claim account org internet storage discovery cameras vpn ai accounts team done
 ```
 
-## Architecture rules (must hold)
+The additive database migration does not change existing rows. The service's
+ordered `SETUP_STEPS` tuple governs comparisons, not database enum order.
+`twofactor` is client-only; `wifi` and `address` persist as `internet`; `voice`
+persists as `ai`. Refreshing those presentation steps resumes at the preceding
+persisted step. Accounts is durable because provider consent leaves the page.
 
-- **State is an explicit column, never derived from absence** (no `IS NULL`)
-  — canonical WARP-218 `BrainMemoryItemStatus` precedent.
-- Persist on the encrypted NVMe (`FEATURES.md §10`).
-- No `while True`; no new `MATTER_*` env vars.
+Wizard and workspace writes advance monotonically using a serializable
+transaction with bounded conflict retries. Back/rail navigation never lowers
+progress. A delayed earlier write cannot displace `team` or terminal `done`.
+The exception is a legacy late pointer without an owner: the next legitimate
+claim/account write repairs it durably. First-owner creation also repairs the
+pointer inside its transaction, covering a resumed account form that sends no
+progress write before creating the owner.
 
-## Dependencies
+## HTTP and session contract
 
-Unblocks every other onboarding workstream (claim, org, team route off this).
+- `GET /api/setup/state` returns `{ appliance, setup_step, user_tour_completed }`
+  without writing. Before a row exists it returns the welcome baseline. Legacy
+  unfinished rows that point past account creation without a local owner resume
+  at `claim` or, for an already claimed device, `account`.
+- `PATCH /api/setup/state { setup_step }` validates step membership and advances
+  the resume position. Anonymous first-run progress is limited to `welcome`,
+  `claim`, and `account`. Later steps and all completed-appliance writes require
+  a live owner session, including revocation and denylist checks.
+- `POST /api/setup/org` requires that owner session before saving the workspace
+  and advancing progress. Unauthorized mixed progress requests fail before any
+  state transition.
+- `PATCH /api/setup/state { appliance: "ready" }` requires a live owner session,
+  including revocation and denylist checks before first-run finishes. Existing
+  user rows never authorize anonymous completion. The transition lands on
+  `done` and is idempotent.
+- `PATCH /api/setup/state { user_tour_completed: true }` records the tour
+  separately. Done owns the flourish and embedded tour; refreshing Done does
+  not restart setup.
+- Claimed-device and serializable first-owner checks prevent creating another
+  owner. Serialization conflicts retry up to three times; exhaustion returns
+  retryable `503 SETUP_RETRY_REQUIRED`, while `409 OWNER_EXISTS` requires an
+  observed owner. The owner account auto-signs in before authenticated steps
+  mount.
 
-## Acceptance criteria
+A cold refresh after account creation waits for the session probe. An expired
+session renders a sign-in-only AccountStep with authenticator/recovery support.
+Signing in restores the saved step without creating another owner or resetting
+progress. Two-factor verification freezes wizard navigation until its recovery
+codes arrive, so enabling it cannot strand codes in an unmounted component.
+Protected workspace, consent-progress, finish, and tour writes renew an expired
+access cookie through the normal refresh flow before retrying. Authentication
+failures return 401; an authenticated caller without the required role gets 403.
 
-- Refresh mid-wizard returns to the same `setup_step`.
-- `AuthGate` routes off `/setup/state`; existing setup tests updated.
-- Migration + unit tests for the state transitions.
+## Provider handoff
 
-## References
+Accounts reuses the Settings cards and one-time registration. Before leaving,
+it awaits a successful progress PATCH; failure leaves a retryable error.
+Skipping during an in-flight save/start suppresses navigation from that card.
 
-`FEATURES.md §10`; `apps/orchestrator/src/routes/auth.ts` (`/auth/setup`);
-`apps/web-dashboard/src/lib/auth.tsx`, `components/AuthGate.tsx`.
+Google and Microsoft store an allowlisted local `returnTo` inside encrypted
+pending consent state. Settings retains `/settings`; onboarding uses
+`/setup?step=accounts`. The callback selects this stored destination only after
+browser cookie and state match, and preserves it for success, denial, expiry,
+and provider failure. Arbitrary URLs are rejected.
+
+The query hint can reopen accounts only if already reached and setup has not
+finished. It preserves furthest progress, cannot bypass owner creation, and
+is consumed once. Provider outcome parameters remain available to their card.
+Registration guides open a separate tab, and `/help` descendants remain
+reachable during setup.
+
+## Current limits and release checks
+
+Provider apps need the exact callback URI displayed in Account connection
+setup. Google hostname/verification and Microsoft tenant consent rules still
+apply. See [Google's authorization guide](https://developers.google.com/identity/protocols/oauth2/web-server)
+and [Microsoft's authorization guide](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-auth-code-flow).
+Keep provider secrets and tokens out of browser responses and tracked files.
+
+Local tests cover claim, owner creation, workspace, invitation delivery,
+monotonic resume, expired sessions, completion, consent outcomes, and existing
+network/storage/discovery/AI/voice screens. Live appliance checks must also
+exercise real consent, first mail/calendar sync, network hardware, storage,
+cameras, voice I/O and reboot recovery. Mocked tests and previews do not
+certify those device integrations.
+
+`REQUIRE_ADMIN_TWO_STEP=true` is documented as unsupported by the dashboard's
+current enrollment policy. This change does not claim that mode works.
+
+## Source of truth
+
+- `apps/orchestrator/src/services/setup.service.ts`
+- `apps/orchestrator/src/routes/setup.ts`
+- `apps/web-dashboard/src/components/setup/wizard-steps.ts`
+- `apps/web-dashboard/src/app/setup/page.tsx`
+- `apps/web-dashboard/src/components/AuthGate.tsx`

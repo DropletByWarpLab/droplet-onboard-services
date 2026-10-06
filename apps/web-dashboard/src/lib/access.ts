@@ -278,45 +278,6 @@ export const ACCESS_FEATURES: AccessFeatureDef[] = [
       },
     ],
   },
-  // WARP-2977 (ADR-059 §6). Value-identical to the orchestrator's catalog:
-  // view and act floored at family (presence data — no guest tier), manage
-  // at admin (areas, hours and what counts as expected are business policy).
-  // Camera rows inside it still need a camera grant. WARP-2977 P2b: "Areas"
-  // is the UI noun for what the code calls zones (ADR-002 lists "zones" as
-  // installer jargon).
-  {
-    moduleId: "security",
-    label: "Security",
-    description: "One feed for cameras, camera health, and network warnings",
-    levels: [
-      {
-        value: "view",
-        label: "View",
-        grants: "The security feed, for the cameras they can already see",
-        minTier: FAMILY,
-        dropNoun: "See the security feed",
-        dropVerb: "see the security feed",
-      },
-      {
-        value: "act",
-        label: "Respond",
-        grants: "Everything in View, plus acknowledge and set the mode",
-        minTier: FAMILY,
-        dropNoun: "Respond to security events",
-        dropVerb: "respond to security events",
-      },
-      {
-        value: "manage",
-        label: "Manage",
-        // WARP-2978 — choosing who is told about alerts is manage (P3 route 22).
-        // WARP-2979 — so is deciding on Droplet's links and what its AI may do.
-        grants: "Areas, opening hours, who's told about alerts, Droplet's links and what counts as expected",
-        minTier: ADMIN,
-        dropNoun: "Manage security",
-        dropVerb: "manage security",
-      },
-    ],
-  },
   {
     moduleId: "smart_home",
     label: "Devices",
@@ -518,6 +479,43 @@ export const ACCESS_FEATURES: AccessFeatureDef[] = [
     ],
   },
   {
+    // WARP-3528 (ADR-069 §1). Value-identical ladder to the server's
+    // access-catalog entry; only the copy lives here. `view` is a REFUSAL below
+    // the member floor, as Customers and Projects above: a ticket is a
+    // customer's own words, so an external guest holds none of it. No
+    // `requires`: /support is its own surface, and a front desk runs it with
+    // Projects off.
+    moduleId: "support",
+    label: "Support",
+    description: "Customer requests, replies and internal notes",
+    levels: [
+      {
+        value: "view",
+        label: "View",
+        grants: "See tickets and conversations",
+        minTier: FAMILY,
+        dropNoun: "See tickets",
+        dropVerb: "see tickets",
+      },
+      {
+        value: "act",
+        label: "Work",
+        grants: "Reply, add notes and move tickets",
+        minTier: FAMILY,
+        dropNoun: "Work on tickets",
+        dropVerb: "reply to tickets",
+      },
+      {
+        value: "manage",
+        label: "Manage",
+        grants: "Set up and archive service desks",
+        minTier: ADMIN,
+        dropNoun: "Manage service desks",
+        dropVerb: "set up service desks",
+      },
+    ],
+  },
+  {
     // WARP-2018/2032.
     moduleId: "contacts",
     label: "Contacts",
@@ -619,11 +617,6 @@ export const TOOL_DOMAIN_GROUPS: ToolDomainGroup[] = [
   { id: "files", label: "Files", domains: ["files"], feature: "files" },
   { id: "smart-home", label: "Device control", domains: ["smart-home"], feature: "smart_home", locks: true },
   { id: "cameras", label: "Cameras", domains: ["cameras"], feature: "cameras" },
-  // WARP-2979 (ADR-059 P4 §6.12.7) — the read-only Security tools, so a custom
-  // role can be granted them (effective access counts only granted domains).
-  // Gated by the Security feature: switching Security off for a role takes
-  // the tools with it.
-  { id: "security", label: "Security", domains: ["security"], feature: "security" },
   { id: "switch", label: "Switch", domains: ["switch"], feature: "managed_switch" },
   {
     id: "calendar",

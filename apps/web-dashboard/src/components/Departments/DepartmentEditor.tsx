@@ -13,7 +13,7 @@
  *     (`navChoices` runs their own gates) — and a saved href the editor
  *     cannot see is kept, not silently deleted (`mergeNavSelection`). A
  *     manager without Integrations must not strip it from the owner's
- *     Security profile by saving.
+ *     IT profile by saving.
  *   · A widget id this dashboard does not know is kept on save too (appended
  *     after the ones it does), so an older dashboard never erases what a
  *     newer one added.

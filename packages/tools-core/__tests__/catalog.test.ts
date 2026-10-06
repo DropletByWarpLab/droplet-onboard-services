@@ -94,6 +94,10 @@ describe("TOOL_CATALOG (WARP-555)", () => {
     );
     expect(byName.get("list_network_devices")?.domain).toBe("network");
     expect(byName.get("list_files")?.domain).toBe("files");
+    // WARP-3538 — cloud-drive (OneDrive / SharePoint) file search is a
+    // files-domain read, so it is gated by the Files module and reached by the
+    // files vocabulary.
+    expect(byName.get("search_cloud_files")?.domain).toBe("files");
     expect(byName.get("list_cameras")?.domain).toBe("cameras");
     expect(byName.get("run_scene")?.domain).toBe("smart-home");
     expect(byName.get("email_search")?.domain).toBe("email");

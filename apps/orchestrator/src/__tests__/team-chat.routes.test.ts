@@ -80,6 +80,14 @@ vi.mock("../services/file-registry.service.js", () => ({
   resolveFileDepartment: resolveFileDepartmentMock,
 }));
 
+// WARP-3485 — capture what the router puts on the event socket's topics.
+const { published } = vi.hoisted(() => ({
+  published: [] as Array<{ topic: string; payload: Record<string, unknown> }>,
+}));
+vi.mock("../services/mqtt.service.js", () => ({
+  publish: (topic: string, payload: Record<string, unknown>) => published.push({ topic, payload }),
+}));
+
 import { createTeamChatRouter } from "../routes/team-chat.js";
 
 // ── In-memory prisma stub ───────────────────────────────────────────
@@ -340,7 +348,7 @@ function createTeamChatPrisma(seed: {
         async (args: {
           where: {
             userId?: string | { not: string };
-            threadId?: { in: string[] };
+            threadId?: string | { in: string[] };
           };
         }) =>
           participants.filter((p) => {
@@ -351,7 +359,9 @@ function createTeamChatPrisma(seed: {
               p.userId === w.userId.not
             )
               return false;
-            if (w.threadId && !w.threadId.in.includes(p.threadId)) return false;
+            // WARP-3485 — one thread by id (the live-events recipient read).
+            if (typeof w.threadId === "string" && p.threadId !== w.threadId) return false;
+            if (typeof w.threadId === "object" && !w.threadId.in.includes(p.threadId)) return false;
             return true;
           }),
       ),
@@ -551,6 +561,7 @@ function seedParticipant(
 
 beforeEach(() => {
   vi.clearAllMocks();
+  published.length = 0;
   // Default: file unregistered (personal-space fallback) + space allowed.
   resolveFileDepartmentMock.mockResolvedValue(null);
   checkSpaceAccessMock.mockResolvedValue({ allowed: true, departmentId: "dep-1" });
@@ -1403,5 +1414,132 @@ describe("transcript + unread count", () => {
     expect(threads.status).toBe(200);
     expect(threads.body.threads[0].unreadCount).toBe(0);
     expect(threads.body.threads[0].lastMessage.body).toBe("ping");
+  });
+});
+
+// ── Live events (WARP-3485) ─────────────────────────────────────────
+
+describe("team-chat live events on the event socket (WARP-3485)", () => {
+  // gus is an external guest who belongs to NO conversation here.
+  const gus: UserRow = {
+    id: "uuid-gus",
+    username: "gus",
+    displayName: "Gus G",
+    role: "guest",
+    directoryStatus: "ACTIVE",
+  };
+  const asCarol = { id: carol.id, username: carol.username, role: carol.role };
+  const topicOf = (u: UserRow) => `droplet/team-chat/${u.username}`;
+  const topics = () => published.map((p) => p.topic).sort();
+
+  // alice + bob (members) and carol (an external guest ADDED to the thread).
+  function world() {
+    const t = seedThread({ id: "thread-abc", kind: "group", title: "Launch plan" });
+    return createTeamChatPrisma({
+      users: [alice, bob, carol, gus],
+      threads: [t],
+      participants: [
+        seedParticipant(t.id, alice.id),
+        seedParticipant(t.id, bob.id),
+        seedParticipant(t.id, carol.id),
+      ],
+    });
+  }
+
+  it("a posted message reaches every member, a member guest included, and nobody else", async () => {
+    const res = await request(buildApp(world(), asAlice))
+      .post("/api/team-chat/threads/thread-abc/messages")
+      .send({ kind: "text", body: "the quarterly numbers are bad" });
+    expect(res.status).toBe(201);
+
+    expect(topics()).toEqual([topicOf(alice), topicOf(bob), topicOf(carol)].sort());
+    // gus is a guest who is NOT in the conversation: nothing for him.
+    expect(topics()).not.toContain(topicOf(gus));
+    for (const p of published) {
+      expect(p.payload).toEqual({
+        kind: "message",
+        conversationId: "thread-abc",
+        messageId: res.body.message.id,
+      });
+    }
+  });
+
+  it("the payload is IDs and a kind only: no text, no caption, no title, no names", async () => {
+    const prisma = world();
+    await request(buildApp(prisma, asAlice))
+      .post("/api/team-chat/threads/thread-abc/messages")
+      .send({ kind: "text", body: "the quarterly numbers are bad" });
+    await request(buildApp(prisma, asBob)).post("/api/team-chat/threads/thread-abc/read");
+    await request(buildApp(prisma, asAlice))
+      .post("/api/team-chat/threads")
+      .send({ kind: "group", participantIds: [bob.id, carol.id], title: "Secret project" });
+
+    expect(published.length).toBeGreaterThan(0);
+    const allowed = new Set(["kind", "conversationId", "messageId"]);
+    const wire = JSON.stringify(published);
+    for (const p of published) {
+      expect(Object.keys(p.payload).every((k) => allowed.has(k))).toBe(true);
+      expect(p.payload).not.toHaveProperty("body");
+      expect(p.payload).not.toHaveProperty("title");
+    }
+    for (const leak of ["quarterly", "Secret project", "Launch plan", "Alice", "Bob B", "Carol"]) {
+      expect(wire).not.toContain(leak);
+    }
+  });
+
+  it("a non-member who tries to post gets 404 and nothing is published", async () => {
+    const res = await request(buildApp(world(), { id: gus.id, username: gus.username, role: gus.role }))
+      .post("/api/team-chat/threads/thread-abc/messages")
+      .send({ kind: "text", body: "hi" });
+    expect(res.status).toBe(404);
+    expect(published).toEqual([]);
+  });
+
+  it("a guest member's own post reaches the staff in the conversation and never a guest outside it", async () => {
+    const res = await request(buildApp(world(), asCarol))
+      .post("/api/team-chat/threads/thread-abc/messages")
+      .send({ kind: "text", body: "thanks" });
+    expect(res.status).toBe(201);
+    expect(topics()).toEqual([topicOf(alice), topicOf(bob), topicOf(carol)].sort());
+    expect(topics()).not.toContain(topicOf(gus));
+  });
+
+  it("the read cursor publishes {kind: read} to the reader only, not to the other members", async () => {
+    const res = await request(buildApp(world(), asBob)).post("/api/team-chat/threads/thread-abc/read");
+    expect(res.status).toBe(204);
+    expect(published).toEqual([
+      { topic: topicOf(bob), payload: { kind: "read", conversationId: "thread-abc" } },
+    ]);
+  });
+
+  it("a non-member's read is a 404 and publishes nothing", async () => {
+    const res = await request(
+      buildApp(world(), { id: gus.id, username: gus.username, role: gus.role }),
+    ).post("/api/team-chat/threads/thread-abc/read");
+    expect(res.status).toBe(404);
+    expect(published).toEqual([]);
+  });
+
+  it("creating a conversation publishes {kind: conversation} to every member; a deduped direct thread publishes nothing", async () => {
+    const prisma = createTeamChatPrisma({ users: [alice, bob, carol, gus] });
+    const created = await request(buildApp(prisma, asAlice))
+      .post("/api/team-chat/threads")
+      .send({ kind: "group", participantIds: [bob.id, carol.id] });
+    expect(created.status).toBe(201);
+    expect(topics()).toEqual([topicOf(alice), topicOf(bob), topicOf(carol)].sort());
+    for (const p of published) {
+      expect(p.payload).toEqual({ kind: "conversation", conversationId: created.body.thread.id });
+    }
+
+    const first = await request(buildApp(prisma, asAlice))
+      .post("/api/team-chat/threads")
+      .send({ kind: "direct", participantIds: [bob.id] });
+    expect(first.status).toBe(201);
+    published.length = 0;
+    const again = await request(buildApp(prisma, asAlice))
+      .post("/api/team-chat/threads")
+      .send({ kind: "direct", participantIds: [bob.id] });
+    expect(again.status).toBe(200);
+    expect(published).toEqual([]);
   });
 });

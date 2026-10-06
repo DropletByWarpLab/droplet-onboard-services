@@ -32,6 +32,7 @@ import { z } from "zod";
 import { requireRole } from "../middleware/auth.js";
 import { createLogger } from "../lib/logger.js";
 import { internalBaseUrl, internalFetch } from "../lib/internal-tls.js";
+import { serviceBearerHeader, VOICE_IO_TOKEN_ENV } from "../lib/service-bearer.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import type { ActivitySeverityName } from "../services/audit-signing.service.js";
@@ -43,8 +44,8 @@ const DEFAULT_VOICE_IO_URL = "http://voice-io:8086";
 /** Status/devices are in-memory reads on voice-io — fast. */
 const READ_TIMEOUT_MS = 10_000;
 
-/** `/voice/say` blocks for Piper synthesis + full playback duration. */
-const SAY_TIMEOUT_MS = 30_000;
+/** `/voice/say` waits for CPU synthesis and playback. */
+const SAY_TIMEOUT_MS = 90_000;
 
 /**
  * WARP-1055 — `/audio/measure` blocks for the requested capture window
@@ -61,6 +62,23 @@ const ECHO_CHECK_TIMEOUT_MS = 30_000;
  * that so a slow USB control write never reads as "voice unavailable".
  */
 const RESTART_TIMEOUT_MS = 20_000;
+
+/**
+ * WARP-3710 - `/voice/mic/restart` waits (up to ~15 s) for the replacement
+ * capture stream, optionally after a DSP reboot (<= 10 s) and a second
+ * re-pick once the chip has re-enumerated, so it can legitimately run
+ * ~40 s. Sized above that so a slow-but-successful restart never reads as
+ * "voice unavailable".
+ */
+const MIC_RESTART_TIMEOUT_MS = 50_000;
+
+/**
+ * WARP-3710 - `/voice/mic/test` captures up to 10 s and, when asked,
+ * plays the clip back (another <= 10 s) before answering.
+ */
+const MIC_TEST_TIMEOUT_MS = 35_000;
+const MIC_TEST_SECONDS_MIN = 1;
+const MIC_TEST_SECONDS_MAX = 10;
 
 /**
  * WARP-1599 — `/voice/enabled` is not a read, so it does not get the
@@ -83,6 +101,8 @@ const ENABLED_TIMEOUT_MS = 40_000;
 
 /** Mirrors voice-io's own SayRequest bound (main.py: max 2000 chars). */
 const MAX_SAY_TEXT_CHARS = 2000;
+const voiceIdSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/);
+const speakingVoiceSchema = z.object({ voice: voiceIdSchema }).strict();
 
 /** Mirrors voice-io's MeasureRequest bounds (main.py). */
 const MEASURE_KINDS = new Set(["noise_floor", "speech_peak"]);
@@ -248,7 +268,8 @@ async function proxyWithPayload(
   try {
     const init: RequestInit = {
       method,
-      headers: { Accept: "application/json" },
+      // WARP-3625: voice-io fails closed without the shared service bearer.
+      headers: { Accept: "application/json", ...serviceBearerHeader(VOICE_IO_TOKEN_ENV) },
       signal: AbortSignal.timeout(timeoutMs),
     };
     if (method === "POST") {
@@ -328,8 +349,10 @@ export function createVoiceRouter(): Router {
     );
   });
 
+  // WARP-3710: inputs/outputs with score + bus, best first, and the active
+  // pair. A superset of the old /audio/devices answer (its keys survive).
   router.get("/voice/devices", guard, async (_req, res) => {
-    await proxy(res, "GET", "/audio/devices");
+    await proxy(res, "GET", "/voice/devices");
   });
 
   router.post("/voice/say", guard, async (req, res) => {
@@ -342,10 +365,41 @@ export function createVoiceRouter(): Router {
       res.status(400).json({ error: "text_too_long" });
       return;
     }
-    // Only `text` is forwarded — the voice (Piper model) stays the
-    // box-configured default; the wizard's speaker test has no business
-    // switching voices.
-    await proxy(res, "POST", "/voice/say", { text }, SAY_TIMEOUT_MS);
+    const voice: unknown = req.body?.voice;
+    if (voice !== undefined && !voiceIdSchema.safeParse(voice).success) {
+      res.status(400).json({ error: "invalid_voice" });
+      return;
+    }
+    // A temporary preview. voice-io checks the running service's installed
+    // allowlist; the preview never changes the persisted speaking voice.
+    const body: { text: string; voice?: string } = { text };
+    if (typeof voice === "string") body.voice = voice;
+    await proxy(res, "POST", "/voice/say", body, SAY_TIMEOUT_MS);
+  });
+
+  router.get("/voice/speaking-voice", guard, async (_req, res) => {
+    await proxy(res, "GET", "/voice/speaking-voice");
+  });
+
+  router.post("/voice/speaking-voice", guard, async (req, res) => {
+    const parsed = speakingVoiceSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_voice" });
+      return;
+    }
+    const { status, payload } = await proxyWithPayload(res, "POST", "/voice/speaking-voice", parsed.data);
+    if (status < 200 || status >= 300) return;
+    // The response also carries an optional storage fault; read only the
+    // validated voice for the audit row, never client-supplied copy.
+    const voice = typeof payload === "object" && payload !== null
+      ? (payload as { voice?: unknown }).voice : undefined;
+    if (!voiceIdSchema.safeParse(voice).success) return;
+    void recordActivity({
+      kind: "voice", severity: "info", sourceIcon: "volume-2",
+      what: "Speaking voice changed", sub: null,
+      refs: { surface: "voice-speaking-voice", voice, upstreamStatus: status },
+      actor: actorFromRequest(req),
+    });
   });
 
   // ── WARP-1055: calibration wizard measurement + persistence ──
@@ -490,6 +544,73 @@ export function createVoiceRouter(): Router {
       refs: { surface: "voice-restart-processor", upstreamStatus: status },
       actor: actorFromRequest(req),
     });
+  });
+
+  // ── WARP-3710: mic recovery - restart (re-pick + reopen) and test ──
+
+  router.post("/voice/mic/restart", guard, async (req: Request, res) => {
+    // Strict boolean, no coercion - voice-io's model is StrictBool too, so a
+    // truthy string can never reboot hardware by accident.
+    const dspReboot: unknown = req.body?.dspReboot;
+    if (dspReboot !== undefined && typeof dspReboot !== "boolean") {
+      res.status(400).json({ error: "invalid_dsp_reboot" });
+      return;
+    }
+    const body: { dspReboot?: boolean } = {};
+    if (typeof dspReboot === "boolean") body.dspReboot = dspReboot;
+    const { status, payload } = await proxyWithPayload(
+      res,
+      "POST",
+      "/voice/mic/restart",
+      body,
+      MIC_RESTART_TIMEOUT_MS,
+    );
+    // A write that drives hardware always leaves an activity row, success
+    // or failure (same posture as restart-processor). Fire-and-forget
+    // after the response is committed.
+    const ok = status >= 200 && status < 300;
+    const device =
+      ok && typeof payload === "object" && payload !== null
+        ? (payload as { device?: unknown }).device
+        : undefined;
+    void recordActivity({
+      kind: "voice",
+      severity: ok ? "info" : "err",
+      sourceIcon: "mic",
+      what: ok ? "Microphone restarted" : "Microphone restart failed",
+      sub:
+        typeof device === "string"
+          ? `Now using ${device}${body.dspReboot ? " · DSP rebooted" : ""}`
+          : body.dspReboot
+            ? "Device re-pick with DSP reboot"
+            : "Device re-pick",
+      refs: { surface: "voice-mic-restart", upstreamStatus: status },
+      actor: actorFromRequest(req),
+    });
+  });
+
+  router.post("/voice/mic/test", guard, async (req, res) => {
+    const playback: unknown = req.body?.playback;
+    if (playback !== undefined && typeof playback !== "boolean") {
+      res.status(400).json({ error: "invalid_playback" });
+      return;
+    }
+    const seconds: unknown = req.body?.duration_s;
+    if (seconds !== undefined) {
+      if (
+        typeof seconds !== "number" ||
+        !Number.isFinite(seconds) ||
+        seconds < MIC_TEST_SECONDS_MIN ||
+        seconds > MIC_TEST_SECONDS_MAX
+      ) {
+        res.status(400).json({ error: "invalid_duration" });
+        return;
+      }
+    }
+    const body: { playback?: boolean; duration_s?: number } = {};
+    if (typeof playback === "boolean") body.playback = playback;
+    if (typeof seconds === "number") body.duration_s = seconds;
+    await proxy(res, "POST", "/voice/mic/test", body, MIC_TEST_TIMEOUT_MS);
   });
 
   // ── WARP-1599: the voice kill switch ──

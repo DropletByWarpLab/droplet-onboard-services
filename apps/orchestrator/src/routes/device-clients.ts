@@ -2,7 +2,7 @@ import { Router, Request } from "express";
 import { randomInt, timingSafeEqual } from "node:crypto";
 import { Buffer } from "node:buffer";
 import { z } from "zod";
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient, type DeviceClient } from "@prisma/client";
 import { config } from "../config.js";
 import {
   ncGenerateAppPassword,
@@ -77,6 +77,25 @@ const deviceTypeSchema = z.enum(["desktop", "mobile"]);
 
 function getUser(req: Request): string {
   return req.user?.username || "dev";
+}
+
+/**
+ * One client row on the wire, for the caller's own list and the owner/admin
+ * list alike. NEVER the encrypted app password. `kind` says which flow minted
+ * the row — a paired app or a Finder / File Explorer drive login (WARP-3384).
+ */
+function clientJson(c: DeviceClient) {
+  return {
+    id: c.id,
+    deviceName: c.deviceName,
+    deviceType: c.deviceType,
+    platform: c.platform,
+    appVersion: c.appVersion,
+    kind: c.kind,
+    lastSeen: c.lastSeen.toISOString(),
+    status: c.status,
+    createdAt: c.createdAt.toISOString(),
+  };
 }
 
 function generatePairingCode(): string {
@@ -388,11 +407,11 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
       if (!minted.ok) {
         if (minted.reason === "no_session") {
           res.status(401).json({
-            error: "Nextcloud session unavailable — please log in again",
+            error: "File Store session unavailable — please log in again",
           });
         } else {
           res.status(502).json({
-            error: "Failed to generate device credentials from Nextcloud",
+            error: "Failed to generate device credentials from the File Store",
           });
         }
         return;
@@ -560,7 +579,7 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
             res.status(409).json({ error: "nc_credential_unavailable" });
           } else {
             res.status(502).json({
-              error: "Failed to generate drive credentials from Nextcloud",
+              error: "Failed to generate drive credentials from the File Store",
             });
           }
           return;
@@ -669,18 +688,7 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
         where: { userId: user },
         orderBy: { createdAt: "desc" },
       });
-      res.json({
-        clients: rows.map((c) => ({
-          id: c.id,
-          deviceName: c.deviceName,
-          deviceType: c.deviceType,
-          platform: c.platform,
-          appVersion: c.appVersion,
-          lastSeen: c.lastSeen.toISOString(),
-          status: c.status,
-          createdAt: c.createdAt.toISOString(),
-        })),
-      });
+      res.json({ clients: rows.map(clientJson) });
     } catch (err) {
       next(err);
     }
@@ -720,6 +728,119 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
       next(err);
     }
   });
+
+  // ── GET /api/admin/devices/clients?userId= ──
+  // WARP-3384: the owner/admin view of a person's paired devices — "which
+  // computers hold our files, and did the person who left take one?". One row
+  // per client, every status, with the owner's name and whether that person is
+  // `active`, `deactivated` or `removed` (a deleted person's rows are kept, so
+  // the leaver case still answers). `userId` is the row's owner as the rows name
+  // them (the directory username); omitted, it lists every person's clients.
+  // Members, external guests and service principals are refused.
+  router.get(
+    "/admin/devices/clients",
+    requireRole("owner", "admin"),
+    async (req, res, next) => {
+      try {
+        const query = z
+          .object({ userId: z.string().min(1).max(256).optional() })
+          .safeParse(req.query);
+        if (!query.success) {
+          res.status(400).json({ error: "Invalid userId" });
+          return;
+        }
+        const rows = await prisma.deviceClient.findMany({
+          where: query.data.userId ? { userId: query.data.userId } : {},
+          orderBy: { createdAt: "desc" },
+        });
+        const owners = await prisma.user.findMany({
+          where: { username: { in: [...new Set(rows.map((c) => c.userId))] } },
+          select: { username: true, displayName: true, directoryStatus: true },
+        });
+        const byUsername = new Map(owners.map((o) => [o.username, o]));
+        res.json({
+          clients: rows.map((c) => {
+            const owner = byUsername.get(c.userId);
+            return {
+              ...clientJson(c),
+              userId: c.userId,
+              displayName: owner?.displayName ?? c.userId,
+              personStatus: !owner
+                ? "removed"
+                : owner.directoryStatus === "ACTIVE"
+                  ? "active"
+                  : "deactivated",
+            };
+          }),
+        });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // ── DELETE /api/admin/devices/clients/:id ──
+  // WARP-3384: an owner/admin revokes ANOTHER person's client. Same revoke path
+  // as the person's own DELETE, but the audit row names the actor AND the
+  // person, and the answer says whether Nextcloud confirmed deleting the app
+  // password (WARP-3383): `appPasswordDeleted: false` means the row is marked
+  // revoked but the device may still sync — never reported as a clean success.
+  // `null` = it was already revoked, nothing was attempted. Idempotent.
+  router.delete(
+    "/admin/devices/clients/:id",
+    requireRole("owner", "admin"),
+    async (req, res, next) => {
+      try {
+        const row = await prisma.deviceClient.findUnique({
+          where: { id: req.params.id },
+        });
+        if (!row) {
+          res.status(404).json({ error: "Device not found" });
+          return;
+        }
+
+        const outcome = await revokeDeviceClient(prisma, row);
+        if (outcome === "already_revoked") {
+          res.json({ revoked: row.id, appPasswordDeleted: null });
+          return;
+        }
+
+        const deleted = outcome === "deleted";
+        // WARP-237: credential revocation — mandatory-emit key operation.
+        await recordActivity({
+          kind: "auth",
+          severity: deleted ? "warn" : "err",
+          sourceIcon: "smartphone",
+          what: deleted
+            ? "Device client revoked by an admin"
+            : "Device client revoked by an admin, but its app password may still work",
+          sub: `${row.deviceName} · ${row.userId}`,
+          refs: {
+            clientId: row.id,
+            kind: row.kind,
+            targetUsername: row.userId,
+            actor: req.user?.username ?? null,
+            appPasswordDeleted: deleted,
+            via: "admin",
+          },
+          actor: actorFromRequest(req),
+        });
+
+        res.json({
+          revoked: row.id,
+          appPasswordDeleted: deleted,
+          ...(deleted
+            ? {}
+            : {
+                warning:
+                  "The device is marked revoked, but Nextcloud did not confirm deleting its file-sync password, so it may still be able to sync.",
+              }),
+        });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
 
   // ── Web Push (Phase 7.2 + 7.3) ────────────────────────────────────
   //

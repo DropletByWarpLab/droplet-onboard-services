@@ -135,47 +135,37 @@ persist_ap_ssid
 # WARP-986: the dnsmasq-ap instance this script regenerates below is the ONLY
 # resolver AP (Wi-Fi) clients use — the uci hostrecord leg the routing service
 # writes lands in a dnsmasq that is NOT running in single-box AP mode, and the
-# host-net dnsmasq has DNS disabled (port=0). So unless dnsmasq-ap itself
-# answers the ADR-023 public per-device FQDN, AP clients can never resolve the
-# box's publicly-trusted cert name and the green-padlock path is dead on AP
-# Wi-Fi (proven live on the .87 box, 2026-07-01). Resolution order: an explicit
-# DROPLET_PUBLIC_FQDN env (via /etc/default/droplet-openwrt-attach) wins;
-# otherwise read the value droplet-set-public-fqdn.sh persisted into the repo
-# .env (same fixed repo path the OPENWRT_PASSWORD_FILE / DROPLET_RPCD_ACL
-# defaults use). Re-validated here with the SAME conservative shape
-# droplet-set-public-fqdn.sh enforces (1-253 chars of lowercase [a-z0-9.-],
-# no leading/trailing dot or hyphen, must contain a dot) because root must not
-# trust the file and the value is interpolated into the dnsmasq-ap config — an
-# invalid value is dropped (name simply not served), never emitted.
-# Sentinel-delimited so it is unit-testable in isolation
-# (tests/openwrt-attach-public-fqdn.test.sh), mirroring resolve_ap_psk.
-# >>> resolve_public_fqdn (WARP-986)
-PUBLIC_FQDN="${DROPLET_PUBLIC_FQDN:-}"
-REPO_ENV_FILE="${DROPLET_PUBLIC_FQDN_ENV_FILE:-/home/droplet/edge-platform/.env}"
-resolve_public_fqdn() {
-  if [ -z "$PUBLIC_FQDN" ] && [ -f "$REPO_ENV_FILE" ]; then
-    PUBLIC_FQDN="$(grep -m1 '^DROPLET_PUBLIC_FQDN=' "$REPO_ENV_FILE" 2>/dev/null | cut -d= -f2- | tr -d '\r\n')"
+# host-net dnsmasq has DNS disabled (port=0). Register the internal hostname
+# directly in dnsmasq-ap so it works on AP/WireGuard clients too.
+# >>> resolve_internal_hostname (WARP-986)
+INTERNAL_HOSTNAME="${DROPLET_LAN_HOSTNAME:-}"
+REPO_ENV_FILE="${DROPLET_ENV_FILE:-/home/droplet/edge-platform/.env}"
+resolve_internal_hostname() {
+  if [ -z "$INTERNAL_HOSTNAME" ] && [ -f "$REPO_ENV_FILE" ]; then
+    INTERNAL_HOSTNAME="$(grep -m1 '^DROPLET_LAN_HOSTNAME=' "$REPO_ENV_FILE" 2>/dev/null | cut -d= -f2- | tr -d '\r\n')"
+    INTERNAL_HOSTNAME="${INTERNAL_HOSTNAME%\"}"; INTERNAL_HOSTNAME="${INTERNAL_HOSTNAME#\"}"
+    INTERNAL_HOSTNAME="${INTERNAL_HOSTNAME%\'}"; INTERNAL_HOSTNAME="${INTERNAL_HOSTNAME#\'}"
   fi
-  [ -n "$PUBLIC_FQDN" ] || return 0
-  if [ "${#PUBLIC_FQDN}" -gt 253 ] || \
-     ! printf '%s' "$PUBLIC_FQDN" | grep -Eq '^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$'; then
-    echo "droplet-openwrt-attach: WARN: DROPLET_PUBLIC_FQDN is not a valid hostname — dnsmasq-ap will not serve it"
-    PUBLIC_FQDN=""
+  [ -n "$INTERNAL_HOSTNAME" ] || INTERNAL_HOSTNAME="droplet-ai.lan"
+  if [ "${#INTERNAL_HOSTNAME}" -gt 253 ] || \
+     ! printf '%s' "$INTERNAL_HOSTNAME" | grep -Eq '^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$'; then
+    echo "droplet-openwrt-attach: WARN: DROPLET_LAN_HOSTNAME is not a valid hostname — dnsmasq-ap will not serve it"
+    INTERNAL_HOSTNAME=""
     return 0
   fi
-  case "$PUBLIC_FQDN" in
+  case "$INTERNAL_HOSTNAME" in
     *.*)
-      echo "droplet-openwrt-attach: public FQDN resolved — dnsmasq-ap will answer $PUBLIC_FQDN -> 192.168.20.1"
+      echo "droplet-openwrt-attach: internal hostname resolved — dnsmasq-ap will answer $INTERNAL_HOSTNAME -> 192.168.20.1"
       ;;
     *)
-      echo "droplet-openwrt-attach: WARN: DROPLET_PUBLIC_FQDN is not a dotted FQDN — dnsmasq-ap will not serve it"
-      PUBLIC_FQDN=""
+      echo "droplet-openwrt-attach: WARN: DROPLET_LAN_HOSTNAME is not a dotted FQDN — dnsmasq-ap will not serve it"
+      INTERNAL_HOSTNAME=""
       ;;
   esac
   return 0
 }
-resolve_public_fqdn
-# <<< resolve_public_fqdn (WARP-986)
+resolve_internal_hostname
+# <<< resolve_internal_hostname (WARP-986)
 
 # Which wireless phy to move into the container netns, and what interface name
 # it surfaces with. These are AUTO-DETECTED below (detect_ap_radio) so the
@@ -194,6 +184,32 @@ GATEWAY_CONTAINER="${DROPLET_GATEWAY_CONTAINER:-droplet-gateway-1}"
 # Phase L: root password for OpenWrt rpcd. Read from the docker secret
 # the routing service also reads, so both sides stay in lockstep.
 OPENWRT_PASSWORD_FILE="${OPENWRT_PASSWORD_FILE:-/home/droplet/edge-platform/docker/secrets/openwrt_password}"
+# WARP-3839: is the router external? Same case as sync_openwrt_password_secret()
+# in scripts/lib/secrets.sh: anything but ''|127.0.0.1|localhost|::1. On such a
+# box docker/secrets/openwrt_password holds the EXTERNAL router's droplet-ai
+# password (WARP-3738), so it must never be set as the bundled container root
+# password (one device's credential on another). OPENWRT_ROOT_PW then comes from
+# the box-owned OPENWRT_PASSWORD. Both keys are read from the fixed repo .env
+# (REPO_ENV_FILE) by the same whitelist grep as DROPLET_LAN_HOSTNAME above —
+# never sourced. EXT_NOTE prefixes every failure line so a harmless failure of
+# the bundled container is not read as a Network-tab outage.
+# >>> external_router_creds (WARP-3839)
+ROUTER_EXTERNAL=0
+EXT_NOTE=""
+resolve_external_router() {
+  _xh="${OPENWRT_HOST:-}"
+  if [ -z "$_xh" ] && [ -f "$REPO_ENV_FILE" ]; then
+    _xh="$(grep -m1 '^OPENWRT_HOST=' "$REPO_ENV_FILE" 2>/dev/null | cut -d= -f2- | tr -d '\r\n')"
+  fi
+  case "$_xh" in *[[:cntrl:]]*) _xh="";; esac
+  case "$_xh" in
+    ''|127.0.0.1|localhost|::1) return 0 ;;
+  esac
+  ROUTER_EXTERNAL=1
+  EXT_NOTE="[external router $_xh: the Network tab does not depend on the bundled droplet-openwrt container] "
+}
+resolve_external_router
+# <<< external_router_creds (WARP-3839)
 # --------------------------------------------------------------------------
 
 # WARP-819: resolve the per-box AP PSK. Replaces the old shared hardcoded
@@ -246,7 +262,7 @@ resolve_ap_psk() {
     # low-entropy Wi-Fi password silently shipping is worse than a loud failure a
     # human can fix. (Unreachable on the box; both sources are always present.)
     if [ "${#gen}" -lt 15 ]; then
-      echo "droplet-openwrt-attach: FATAL — no strong entropy source (openssl or readable /dev/urandom) to generate the AP PSK; refusing to ship a weak Wi-Fi password. Install openssl or make /dev/urandom readable, then retry." >&2
+      echo "${EXT_NOTE}droplet-openwrt-attach: FATAL — no strong entropy source (openssl or readable /dev/urandom) to generate the AP PSK; refusing to ship a weak Wi-Fi password. Install openssl or make /dev/urandom readable, then retry." >&2
       exit 1
     fi
     # Leading digit (2-9) sampled UNIFORMLY from the SAME strong source (no PRNG)
@@ -259,7 +275,7 @@ resolve_ap_psk() {
     # (~89 bits); this only debiases the one leading digit.
     rbyte="$( { openssl rand -hex 1 2>/dev/null || head -c 1 /dev/urandom 2>/dev/null | od -An -tx1; } | tr -dc '0-9a-f' | cut -c1-2 )"
     if [ -z "$rbyte" ]; then
-      echo "droplet-openwrt-attach: FATAL — no strong entropy source (openssl or readable /dev/urandom) to sample the AP PSK leading digit; refusing to ship a weak Wi-Fi password." >&2
+      echo "${EXT_NOTE}droplet-openwrt-attach: FATAL — no strong entropy source (openssl or readable /dev/urandom) to sample the AP PSK leading digit; refusing to ship a weak Wi-Fi password." >&2
       exit 1
     fi
     first=$(( 2 + (0x$rbyte % 8) ))
@@ -499,7 +515,7 @@ for i in $(seq 1 60); do
   [ "$state" = "true" ] && break
   sleep 1
 done
-[ "$state" = "true" ] || { echo "droplet-openwrt not running"; exit 1; }
+[ "$state" = "true" ] || { echo "${EXT_NOTE}droplet-openwrt not running"; exit 1; }
 
 PID=$(docker inspect -f '{{.State.Pid}}' droplet-openwrt)
 IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' droplet-openwrt)
@@ -515,7 +531,7 @@ GW=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}' 
 GATEWAY_IP=""
 for _gwtry in $(seq 1 30); do
   _gw=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$GATEWAY_CONTAINER" 2>/dev/null) || {
-    echo "$GATEWAY_CONTAINER container not found — cannot wire DNAT"; exit 1
+    echo "${EXT_NOTE}$GATEWAY_CONTAINER container not found — cannot wire DNAT"; exit 1
   }
   case "$_gw" in
     ''|*[!0-9.]*) sleep 2 ;;
@@ -532,19 +548,44 @@ for _gwtry in $(seq 1 30); do
     *) sleep 2 ;;
   esac
 done
-[ -n "$GATEWAY_IP" ] || { echo "$GATEWAY_CONTAINER has no valid IPv4 after waiting — cannot wire DNAT"; exit 1; }
+[ -n "$GATEWAY_IP" ] || { echo "${EXT_NOTE}$GATEWAY_CONTAINER has no valid IPv4 after waiting — cannot wire DNAT"; exit 1; }
 
 # Phase L: read OpenWrt root password from the docker secret so we can
 # (re)set it inside the container on every attach. Empty -> skip the set,
 # but log so the operator notices.
+# >>> root_pw (WARP-3839)
 OPENWRT_ROOT_PW=""
-if [ -r "$OPENWRT_PASSWORD_FILE" ]; then
-  OPENWRT_ROOT_PW=$(tr -d '\n' < "$OPENWRT_PASSWORD_FILE")
+if [ "$ROUTER_EXTERNAL" = 1 ]; then
+  # WARP-3839: external router -> the secret file is the ROUTER's credential;
+  # never read it here. Use the box-owned OPENWRT_PASSWORD (env, else .env).
+  OPENWRT_ROOT_PW="${OPENWRT_PASSWORD:-}"
+  if [ -z "$OPENWRT_ROOT_PW" ] && [ -f "$REPO_ENV_FILE" ]; then
+    OPENWRT_ROOT_PW="$(grep -m1 '^OPENWRT_PASSWORD=' "$REPO_ENV_FILE" 2>/dev/null | cut -d= -f2- | tr -d '\r\n')"
+  fi
+  case "$OPENWRT_ROOT_PW" in *[[:cntrl:]]*) OPENWRT_ROOT_PW="";; esac
+  if [ -z "$OPENWRT_ROOT_PW" ]; then
+    # Stock root may have an empty hash (WARP-834). Stop the bundled container
+    # before any management/network bring-up; failure of a oneshot alone does
+    # not protect it. Never reuse the external router's secret.
+    if ! docker stop droplet-openwrt >/dev/null 2>&1; then
+      docker kill droplet-openwrt >/dev/null 2>&1 || {
+        echo "${EXT_NOTE}droplet-openwrt-attach: ERROR: cannot stop unprotected bundled container; stop droplet-openwrt manually" >&2
+        exit 1
+      }
+    fi
+    echo "${EXT_NOTE}droplet-openwrt-attach: ERROR: no box-owned OPENWRT_PASSWORD in .env; bundled container stopped; run setup.sh --sync-secrets" >&2
+    exit 1
+  fi
+else
+  if [ -r "$OPENWRT_PASSWORD_FILE" ]; then
+    OPENWRT_ROOT_PW=$(tr -d '\n' < "$OPENWRT_PASSWORD_FILE")
+  fi
+  if [ -z "$OPENWRT_ROOT_PW" ]; then
+    echo "warn: OpenWrt password secret at $OPENWRT_PASSWORD_FILE is empty or unreadable"
+    echo "       routing service will not be able to auth to ubus until this is set"
+  fi
 fi
-if [ -z "$OPENWRT_ROOT_PW" ]; then
-  echo "warn: OpenWrt password secret at $OPENWRT_PASSWORD_FILE is empty or unreadable"
-  echo "       routing service will not be able to auth to ubus until this is set"
-fi
+# <<< root_pw (WARP-3839)
 
 # Move the AP phy into the container netns (no-op if it's already there
 # from a prior attach run). Phy choice driven by $AP_PHY so the operator
@@ -621,7 +662,7 @@ docker exec -i \
   -e AP_IFACE="$AP_IFACE" -e AP_BRIDGE="$AP_BRIDGE" \
   -e AP_ATTACH="$AP_ATTACH" \
   -e AP_DOMAIN="$AP_DOMAIN" -e AP_HOSTNAME="$AP_HOSTNAME" \
-  -e PUBLIC_FQDN="$PUBLIC_FQDN" \
+  -e INTERNAL_HOSTNAME="$INTERNAL_HOSTNAME" \
   -e GUEST_SSID="$GUEST_SSID" -e GUEST_PSK \
   -e GUEST_ENABLED="$GUEST_ENABLED" -e GUEST_IFACE="$GUEST_IFACE" \
   -e GUEST_GW="$GUEST_GW" \
@@ -1303,19 +1344,19 @@ address=/$AP_DOMAIN/192.168.20.1
 DNSMASQ
 
   # WARP-986 / ADR-023: dnsmasq-ap is the ONLY resolver AP clients use, so the
-  # public per-device FQDN must be answered HERE for the green-padlock cert
-  # name to resolve on AP Wi-Fi. Appended only when the outer script resolved
-  # AND validated the name (resolve_public_fqdn); the CHANGED gate below then
-  # bounces dnsmasq so a newly-learned name goes live without a reboot.
+  # internal DNS name must be answered here for WireGuard/AP clients.
+  # Appended only when the outer script resolved
+  # AND validated the name (resolve_internal_hostname); the CHANGED gate below then
+  # bounces dnsmasq so a configured name goes live without a reboot.
   # NB: NO APOSTROPHES in this block (single-quoted docker exec body).
-  # >>> dnsmasq_ap_public_fqdn (WARP-986)
-  if [ -n "$PUBLIC_FQDN" ]; then
+  # >>> dnsmasq_ap_internal_hostname (WARP-986)
+  if [ -n "$INTERNAL_HOSTNAME" ]; then
     cat >> /etc/dnsmasq-ap.conf.new <<DNSMASQFQDN
-# Public per-device FQDN -> openwrt IP (WARP-986 / ADR-023 split horizon)
-address=/$PUBLIC_FQDN/192.168.20.1
+# Internal DNS name -> openwrt IP
+address=/$INTERNAL_HOSTNAME/192.168.20.1
 DNSMASQFQDN
   fi
-  # <<< dnsmasq_ap_public_fqdn (WARP-986)
+  # <<< dnsmasq_ap_internal_hostname (WARP-986)
 
   DNSMASQ_CHANGED=0
   if [ ! -f /etc/dnsmasq-ap.conf ] || ! cmp -s /etc/dnsmasq-ap.conf /etc/dnsmasq-ap.conf.new; then
@@ -1564,7 +1605,7 @@ EXEC_RC=$?
 # 192.168.20.0/24 to the host-net dnsmasq — which shipped with DNS off
 # (port=0) and no local names, because dnsmasq-ap used to answer them for
 # Wi-Fi clients. Port the WARP-986 name set (AP hostname/domain + validated
-# public FQDN -> 192.168.20.1) into lan-dhcp.conf via a sentinel-managed
+# internal hostname -> 192.168.20.1) into lan-dhcp.conf via a sentinel-managed
 # block, drop port=0, and bounce droplet-host-net only when the file really
 # changed (same CHANGED-gate discipline as hostapd/dnsmasq-ap).
 # >>> host_lan_dns (WARP-1364)
@@ -1582,7 +1623,7 @@ if [ "$AP_BRIDGE" = 1 ]; then
       echo "server=8.8.8.8"
       echo "address=/$AP_HOSTNAME/192.168.20.1"
       echo "address=/$AP_DOMAIN/192.168.20.1"
-      [ -n "$PUBLIC_FQDN" ] && echo "address=/$PUBLIC_FQDN/192.168.20.1"
+      [ -n "$INTERNAL_HOSTNAME" ] && echo "address=/$INTERNAL_HOSTNAME/192.168.20.1"
       echo "# <<< droplet-ap-bridge dns (WARP-1364)"
     } >> "$_lantmp"
     if ! cmp -s "$_lantmp" "$LAN_DHCP_CONF"; then
@@ -1613,8 +1654,7 @@ fi
 #
 # The compose publish is now REMOVED. These two host rules replace it and,
 # crucially, PRESERVE source port 51820 on egress so inbound and outbound share
-# one public mapping (that shared mapping IS the punch — the box's STUN probe in
-# device-bridge observes it from the SAME source port):
+# one consistent mapping for direct WireGuard traffic:
 #   (a) DNAT inbound udp/51820 (arriving on the uplink, destined to the box's
 #       own uplink IP) -> the openwrt container's :51820 where wg0 listens.
 #   (b) source-port-PRESERVING masquerade for container-sourced udp sport 51820
@@ -1625,9 +1665,6 @@ fi
 # container re-IP is picked up and the rules survive container re-attach (a
 # hot-applied rule would vanish on the next attach — the same discipline the
 # container-side wg0 dashboard DNAT already follows).
-#
-# LIVE-APPLY IS STEFAN-GATED: applying on .87 also needs the compose port
-# removed (done) + `systemctl restart droplet-openwrt-attach`. Code + tests only.
 #
 # WARP-2183 — SHAPE GATE. Every rule below exists ONLY to compensate for wg0
 # living in a container behind docker-proxy. On the edge-router shape the tunnel
@@ -1750,14 +1787,14 @@ elif command -v nft >/dev/null 2>&1; then
     fi
     echo "droplet-openwrt-attach: installed host WG overlay NAT (dnat udp/51820 on {${OVERLAY_UPLINK_ADDRS}} -> ${OVERLAY_OPENWRT_IP}:51820, src-port-preserving masq out ${OVERLAY_UPLINK_IFACE}, DOCKER-USER accept)"
   else
-    echo "droplet-openwrt-attach: WARN: could not resolve openwrt container IP / uplink for host WG overlay NAT — direct remote-access punch will not work until the next successful attach (openwrt_ip='${OVERLAY_OPENWRT_IP}', uplink_iface='${OVERLAY_UPLINK_IFACE}', uplink_ip='${OVERLAY_UPLINK_IP}')" >&2
+    echo "droplet-openwrt-attach: WARN: could not resolve openwrt container IP / uplink for host WG overlay NAT — direct WireGuard connections will not work until the next successful attach (openwrt_ip='${OVERLAY_OPENWRT_IP}', uplink_iface='${OVERLAY_UPLINK_IFACE}', uplink_ip='${OVERLAY_UPLINK_IP}')" >&2
   fi
 fi
 # <<< overlay_wg_host_nat (WARP-1385)
 
 echo "droplet-openwrt-attach: done (gateway=$GATEWAY_IP, ssid=$AP_SSID, domain=$AP_DOMAIN, ap_mode=$([ "$AP_BRIDGE" = 1 ] && echo bridged || echo routed))"
 if [ "$EXEC_RC" -ne 0 ]; then
-  echo "droplet-openwrt-attach: WARN: container bring-up reported failure (rc=$EXEC_RC) — AP/package prerequisites did not satisfy; see errors above. Continuing host-side recovery, then failing the unit." >&2
+  echo "${EXT_NOTE}droplet-openwrt-attach: WARN: container bring-up reported failure (rc=$EXEC_RC) — AP/package prerequisites did not satisfy; see errors above. Continuing host-side recovery, then failing the unit." >&2
 fi
 
 # Fresh-provision fix: install the droplet rpcd ACL so the routing service
@@ -1783,17 +1820,17 @@ if [ -r "$DROPLET_RPCD_ACL" ]; then
       echo "droplet-openwrt-attach: installed rpcd ACL (umdns browse/update + file reads) and restarted rpcd"
     else
       RPCD_RESTART_RC=$?
-      echo "droplet-openwrt-attach: ERROR: rpcd restart failed (rc=$RPCD_RESTART_RC) after ACL copy — new grants will not load until rpcd restarts. Failing the unit so systemd retries." >&2
+      echo "${EXT_NOTE}droplet-openwrt-attach: ERROR: rpcd restart failed (rc=$RPCD_RESTART_RC) after ACL copy — new grants will not load until rpcd restarts. Failing the unit so systemd retries." >&2
       EXEC_RC=1
     fi
   else
-    echo "droplet-openwrt-attach: ERROR: rpcd ACL copy failed — /dhcp/leases + /aps/discovered will answer 500 (Access denied) until it lands. Failing the unit so systemd retries." >&2
+    echo "${EXT_NOTE}droplet-openwrt-attach: ERROR: rpcd ACL copy failed — /dhcp/leases + /aps/discovered will answer 500 (Access denied) until it lands. Failing the unit so systemd retries." >&2
     EXEC_RC=1
   fi
 elif docker exec droplet-openwrt test -r /usr/share/rpcd/acl.d/droplet-ai.json 2>/dev/null; then
   echo "droplet-openwrt-attach: WARN: host ACL source unreadable at $DROPLET_RPCD_ACL — relying on the image-baked ACL already in the container (may be stale)." >&2
 else
-  echo "droplet-openwrt-attach: ERROR: rpcd ACL missing from container AND source unreadable at $DROPLET_RPCD_ACL — network reads will answer 500 (Access denied). Failing the unit so systemd retries." >&2
+  echo "${EXT_NOTE}droplet-openwrt-attach: ERROR: rpcd ACL missing from container AND source unreadable at $DROPLET_RPCD_ACL — network reads will answer 500 (Access denied). Failing the unit so systemd retries." >&2
   EXEC_RC=1
 fi
 

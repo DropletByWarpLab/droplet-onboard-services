@@ -49,6 +49,8 @@ import {
   credentialExpiryVerdict,
   credentialFieldsFor,
   credentialSecretFieldsFor,
+  credentialVariantFor,
+  isProbedOnConnect,
   parseProviderConfigWith,
   providerConfigVariantId,
   providerDescriptor,
@@ -58,6 +60,7 @@ import {
   type CredentialExpiryVerdict,
   type CredentialFieldDef,
   type ProviderDescriptor,
+  type ProviderTrack,
   // WARP-2639 — the ONE `IntegrationStatus`, imported under the name this
   // module has always exported it as. Re-exported below.
   type IntegrationStatus as IntegrationStatusName,
@@ -205,6 +208,32 @@ export interface SaasCredentialView {
    */
   credentialsPurged: boolean;
   configured: boolean;
+  /**
+   * WARP-3434 — which kind of connector this is: the descriptor's own `track`
+   * (`cloud`, `rest` or `mcp` on this page). Additive. A client without
+   * `@droplet/shared-types` (the Mac app) read it off nothing and hand-mapped
+   * it from the provider id.
+   */
+  track: ProviderTrack;
+  /**
+   * WARP-3434 — whether the client should `POST /:provider/connect` after a
+   * save, so the vendor is asked and the verdict written. Decided once, by
+   * `isProbedOnConnect`, rather than re-derived from {@link track} by each
+   * client. Additive.
+   */
+  probedOnConnect: boolean;
+  /**
+   * WARP-3434 — the id of the credential path {@link fields} belongs to, or
+   * `null` for a provider declaring no variants. For a row that records no
+   * path yet this is the FIRST variant, because that is the path `fields`
+   * renders (`credentialVariantFor`'s documented fallback).
+   *
+   * It is what a client sends back as `credentialVariant`: a first save on a
+   * variants-declaring provider is refused ("Choose which credential type this
+   * is.") unless the body names the path, and a form that renders a path's
+   * fields is asking the person to fill in THAT path. Additive.
+   */
+  variant: string | null;
   fields: SaasCredentialFieldView[];
   /** Current values of the NON-secret fields only. Secrets never appear here. */
   values: Record<string, string | number>;
@@ -512,6 +541,9 @@ export function buildCredentialView(
       row ?? { status: "NOT_CONFIGURED", apiCredentialsEnc: null, providerTokensEnc: null },
     ),
     configured: row !== null,
+    track: descriptor.track,
+    probedOnConnect: isProbedOnConnect(descriptor),
+    variant: credentialVariantFor(descriptor, variantId)?.id ?? null,
     fields,
     values,
     updatedAt: row?.updatedAt ? row.updatedAt.toISOString() : null,

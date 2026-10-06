@@ -39,7 +39,9 @@ autoinstall:
   # operator sets a real password on first login; SSH key auth is the intended
   # path (see ssh: below). NOTE: this is NOT a secret — it grants no access.
   identity:
-    hostname: droplet
+    # `droplet-sys` is the name the edge router pins to 192.168.9.10 (ADR-057,
+    # droplet-edge.conf FABRIC_ROLE_PINS) — WARP-3840. Keep the two in step.
+    hostname: droplet-sys
     username: droplet
     # `!` = locked account password (crypt sentinel). NOT a real credential.
     password: "!"
@@ -106,9 +108,15 @@ autoinstall:
   # Docker, and the real network stack, not the installer's).
   # ---------------------------------------------------------------------------
   late-commands:
-    # Clone the platform into the operator's home on the TARGET filesystem.
+    # Fetch the platform into the operator's home on the TARGET filesystem, at
+    # the ONE commit this image was built for (WARP-3599). build-iso.sh requires
+    # --ref and scripts/image/pin-seed.sh bakes the resolved commit in below, so
+    # an image never installs "whatever the default branch is today". The fetch
+    # is by exact commit and the result is checked against it: a different
+    # commit FAILS THE INSTALL here. droplet-firstboot-verify (installed below)
+    # re-checks the tree before setup.sh runs.
     # Retry up to 3x (autoinstall networking is racy just after the NIC comes
-    # up), then FAIL THE INSTALL loudly if the clone never lands. The old
+    # up), then FAIL THE INSTALL loudly if the fetch never lands. The old
     # `|| true` swallowed a network failure: the install exited 0, the next
     # chown no-op'd on a missing dir, and droplet-firstboot.service then crash-
     # looped forever on a non-existent WorkingDirectory — a booted box with no
@@ -117,12 +125,19 @@ autoinstall:
       curtin in-target --target=/target -- bash -c '
         for attempt in 1 2 3; do
           rm -rf /home/droplet/edge-platform
-          git clone --depth 1 https://github.com/DropletByWarpLab/droplet-onboard-services.git /home/droplet/edge-platform && break
-          echo "droplet: clone attempt $attempt failed; retrying in 5s" >&2
+          git init -q /home/droplet/edge-platform \
+            && git -C /home/droplet/edge-platform remote add origin https://github.com/DropletByWarpLab/droplet-onboard-services.git \
+            && git -C /home/droplet/edge-platform fetch -q --depth 1 origin __DROPLET_COMMIT__ \
+            && git -C /home/droplet/edge-platform checkout -q --detach FETCH_HEAD && break
+          echo "droplet: fetch attempt $attempt failed; retrying in 5s" >&2
           sleep 5
         done
-        test -d /home/droplet/edge-platform/.git || { echo "FATAL: droplet platform clone failed during autoinstall; aborting so this surfaces now, not as a crash-looping first boot." >&2; exit 1; }
+        test "$(git -C /home/droplet/edge-platform rev-parse HEAD 2>/dev/null)" = "__DROPLET_COMMIT__" || { echo "FATAL: droplet platform fetch failed or is not the pinned commit __DROPLET_COMMIT__; aborting so this surfaces now, not as a crash-looping first boot." >&2; exit 1; }
       '
+    # WARP-3599: the root-owned pin check the firstboot unit runs before setup.sh.
+    # Copied from the ISO (build-iso.sh renders the commit into it); a missing
+    # file fails the install.
+    - install -D -m 0755 -o root -g root /cdrom/server/droplet-firstboot-verify /target/usr/local/sbin/droplet-firstboot-verify
     # WARP-3174: the client installers this image carries. build-iso.sh stages
     # them (clients.lock.json, size/sha256-verified, plus any hand stage) and
     # maps the staging root to /server/app-downloads; git-ignored files never
@@ -140,6 +155,13 @@ autoinstall:
     # on the FIRST real boot, then disables itself. setup.sh is the single
     # source of provisioning truth (ADR-020 §D1) — no second copy of the
     # install logic here.
+    # WARP-3599: the temporary NOPASSWD grant must never outlive an attempt.
+    # ExecStartPost removes it on success only (it does not run when ExecStart
+    # fails), so ExecStopPost=+ (root, `+` ignores User=) removes it on EVERY
+    # exit: success, failure or timeout. A retry on the next boot gets a fresh
+    # grant from the ExecStartPre=-+ line (best-effort: the late-command grant
+    # below still covers the first attempt) and only after
+    # droplet-firstboot-verify has confirmed the tree is the pinned commit.
     # WARP-2100: TimeoutStartSec is GENEROUS but FINITE (first boot
     # legitimately pulls images for many minutes) — never 0/infinity, which
     # let a queued cryptsetup ask-password prompt wedge first boot forever;
@@ -156,8 +178,11 @@ autoinstall:
       Type=oneshot
       User=droplet
       WorkingDirectory=/home/droplet/edge-platform
+      ExecStartPre=/usr/local/sbin/droplet-firstboot-verify
+      ExecStartPre=-+/bin/bash -c "echo \"droplet ALL=(ALL) NOPASSWD: ALL\" > /etc/sudoers.d/droplet-firstboot && chmod 440 /etc/sudoers.d/droplet-firstboot"
       ExecStart=/bin/bash -lc "./scripts/setup.sh --single-box --systemd"
       ExecStartPost=/bin/bash -lc "sudo mkdir -p /var/lib/droplet && sudo touch /var/lib/droplet/.firstboot-done; if id -nG droplet 2>/dev/null | grep -qw lxd; then sudo gpasswd -d droplet lxd; fi; sudo rm -f /etc/sudoers.d/droplet-firstboot"
+      ExecStopPost=+/bin/rm -f /etc/sudoers.d/droplet-firstboot
       RemainAfterExit=yes
       TimeoutStartSec=45min
       StandardInput=null

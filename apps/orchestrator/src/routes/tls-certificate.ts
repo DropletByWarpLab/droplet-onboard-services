@@ -1,49 +1,39 @@
 import { Router } from "express";
 import type { PrismaClient } from "@prisma/client";
-import { config } from "../config.js";
 import { requireRole } from "../middleware/auth.js";
-import { EXPIRY_WARNING_DAYS } from "../services/tls-issuance.service.js";
+import { servedCertFingerprint, servedCertMetadata } from "../lib/served-cert-pin.js";
+import { config } from "../config.js";
+const EXPIRY_WARNING_DAYS = 7;
 
-/**
- * WARP-2944 (ADR-058 slice 7) — the certificate lifecycle, for the owner.
- *
- * The public `GET /api/tls/status` carries the minimum a plain-HTTP status
- * page needs before any login exists (state, CT-public FQDN, whether HQ is
- * configured). Settings → Device information needs more — how long the
- * current certificate has left, when the box will renew it, whether renewal
- * is failing — and that is an OWNER's view: authenticated, `owner`/`admin`,
- * mounted after authMiddleware like the settings router. Read-only; it reads
- * the same state row the daily tls-issuance tick maintains and adds no
- * polling of its own.
- *
- * `daysLeft` / `renewsInDays` are computed here, once, so the dashboard card
- * and the screen never disagree on the arithmetic: renewal starts inside the
- * last 30 days (tls-issuance RENEW_THRESHOLD_DAYS); the owner is warned
- * inside the last EXPIRY_WARNING_DAYS.
- */
-const RENEW_THRESHOLD_DAYS = 30;
-
+/** Read-only certificate metadata and served-key fingerprint for owners.
+ * Read the installed leaf, since historical fleet rows may describe an old cert.
+ * This deployment uses local TLS and does not schedule HQ renewal. */
 export interface TlsCertificateView {
   state: string;
   fqdn: string | null;
   notAfter: string | null;
-  /** Whole days until `notAfter`; null without a public certificate. */
+  /** Whole days until the installed leaf expires; null when unreadable. */
   daysLeft: number | null;
-  /** Whole days until the box starts renewing on its own (0 = now). */
+  /** Retained compatibility field; no automatic fleet renewal is scheduled. */
   renewsInDays: number | null;
   /** True inside the last EXPIRY_WARNING_DAYS — what the card and screen warn on. */
   expiringSoon: boolean;
   hqConfigured: boolean;
-  /** When the state row last changed — the last tick that touched it. */
+  /** When the installed certificate file was last updated. */
   checkedAt: string | null;
+  /** WARP-3414: SHA-256 of the served leaf's DER SPKI, uppercase hex in
+   *  16 groups of 4 (`F017 AFA8 …`); null when the leaf is unreadable. */
+  fingerprint: string | null;
+  coversInternalHostname: boolean | null;
 }
 
 export function certificateView(
-  row: { state: string; fqdn: string | null; notAfter: Date | null; updatedAt?: Date | null } | null,
+  row: { state: string; fqdn: string | null; notAfter: Date | null; updatedAt?: Date | null; coversInternalHostname?: boolean | null } | null,
   now: Date = new Date(),
+  fingerprint: string | null = null,
 ): TlsCertificateView {
-  const state = row?.state ?? "BOOTSTRAP_SELF_SIGNED";
-  const fqdn = row?.fqdn || config.DROPLET_PUBLIC_FQDN || null;
+  const state = row?.state ?? "UNKNOWN";
+  const fqdn = row?.fqdn || null;
   const notAfter = row?.notAfter ?? null;
   const daysLeft = notAfter ? Math.floor((notAfter.getTime() - now.getTime()) / 86_400_000) : null;
   return {
@@ -51,19 +41,21 @@ export function certificateView(
     fqdn,
     notAfter: notAfter ? notAfter.toISOString() : null,
     daysLeft,
-    renewsInDays: daysLeft === null ? null : Math.max(0, daysLeft - RENEW_THRESHOLD_DAYS),
+    renewsInDays: null,
     expiringSoon: daysLeft !== null && daysLeft < EXPIRY_WARNING_DAYS,
-    hqConfigured: Boolean(config.HQ_ISSUANCE_URL),
+    hqConfigured: false,
     checkedAt: row?.updatedAt ? row.updatedAt.toISOString() : null,
+    fingerprint,
+    coversInternalHostname: row?.coversInternalHostname ?? null,
   };
 }
 
-export function createTlsCertificateRouter(prisma: PrismaClient): Router {
+export function createTlsCertificateRouter(_prisma: PrismaClient): Router {
   const router = Router();
 
   router.get("/tls/certificate", requireRole("owner", "admin"), async (_req, res) => {
-    const row = await prisma.tlsCert.findFirst({ orderBy: { updatedAt: "desc" } });
-    res.json(certificateView(row));
+    const row = servedCertMetadata(config.DROPLET_LAN_HOSTNAME);
+    res.json(certificateView(row, new Date(), servedCertFingerprint()));
   });
 
   return router;

@@ -327,7 +327,7 @@ export function createToolsRouter(
    * inference backend, the same reason `dispatcher` is a parameter. Defaults
    * to the on-box summarizer; a spec with no summarize step never calls it.
    */
-  // WARP-2979 (#2420 review 2b) — a summary of a withheld domain's results (security, files, memory, business)
+  // WARP-2979 (#2420 review 2b) — a summary of a withheld domain's results (files, memory, business)
   // is written on the LOCAL model only: the filing worker's local-only resolver, never the active (maybe cloud) one.
   summarizer: Summarizer = createToolSpecSummarizer(
     () => resolveActiveModel(prisma),
@@ -829,6 +829,18 @@ export function createToolsRouter(
         // run rules below unchanged.
         if (!spec || !canSeeToolSpec(actor, spec)) {
           res.status(404).json({ error: "Spec not found" });
+          return;
+        }
+        // Optional for existing clients, required by native review: dispatch
+        // the same steps the person inspected. Use the loaded snapshot below,
+        // so a concurrent later edit cannot substitute different targets.
+        const version = z.number().int().positive().safeParse(req.body?.expectedVersion);
+        if (req.body?.expectedVersion !== undefined && !version.success) {
+          res.status(400).json({ error: "invalid_expected_version" });
+          return;
+        }
+        if (version.success && version.data !== spec.version) {
+          res.status(409).json({ error: "routine_changed", detail: "Refresh and review this routine before running it." });
           return;
         }
         // Drafts and suggested specs CANNOT run-now from the dashboard's

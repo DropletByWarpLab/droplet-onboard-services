@@ -1,5 +1,5 @@
 /**
- * ADR-055 — the modules that SHIP DARK, and are ABSENT rather than off.
+ * The modules that SHIP DARK, and are ABSENT rather than off.
  *
  * While unavailable the orchestrator does not list such a module at all
  * (`listedWhenUnavailable: false`), so it is missing from `GET /api/modules`
@@ -24,5 +24,8 @@
  * the registry, true only of the modules named here. Keep it in step with the
  * registry's `listedWhenUnavailable: false` rows. Its own file so the guard can
  * read it without importing the hook module.
+ *
+ * No module ships dark in this build, so the list is empty and every gate that
+ * reads it behaves exactly as if it were not there.
  */
-export const ABSENT_UNLESS_LISTED: ReadonlySet<string> = new Set(["doors"]);
+export const ABSENT_UNLESS_LISTED: ReadonlySet<string> = new Set<string>();

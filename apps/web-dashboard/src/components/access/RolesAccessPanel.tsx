@@ -823,7 +823,7 @@ export function RolesAccessPanel({
   function renderBuiltinAxisSummary(tier: AccessTier) {
     const chips = ACCESS_FEATURES.flatMap((def) => {
       // A module whose lowest level is floored above this tier is not held at
-      // all (Security, Customers and Projects for an external guest, which the
+      // all (Customers and Projects for an external guest, which the
       // box refuses outright) — no chip, rather than one claiming "view".
       const lowest = def.levels[0]!;
       if (lowest.minTier && TIER_RANK[tier] < TIER_RANK[lowest.minTier]) return [];

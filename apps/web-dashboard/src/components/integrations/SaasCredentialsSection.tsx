@@ -15,7 +15,12 @@ import {
   type SaasConnectionState,
 } from "@/lib/api";
 import { connectCloudProvider } from "@/lib/api.erp";
-import { providerDescriptor } from "@droplet/shared-types";
+import {
+  CREDENTIAL_VARIANT_FIELD,
+  credentialVariantFor,
+  isProbedOnConnect,
+  providerDescriptor,
+} from "@droplet/shared-types";
 
 /**
  * WARP-2275 — the admin-only credential configurator.
@@ -55,19 +60,22 @@ type Status =
   | { kind: "loadFailed" };
 
 /**
- * WARP-2842 — the tracks whose pasted credential the box PROBES on connect.
+ * WARP-3434 — the typed text of one non-secret field, in the type the box
+ * accepts.
  *
- * `cloud` and `rest` land PROVISIONING after a save ("stored, not yet
- * checked") and the orchestrator can build their connector from the row;
- * `mcp` lands CONNECTED on the paste itself and the connect route refuses it.
- * Read off the descriptor — the same declaration the orchestrator branches on
- * — so this page and the box agree on which providers get checked by reading
- * ONE field. Not a vendor name: the descriptor is under-specified if one is
- * ever needed here.
+ * Every draft is a string, but `validateCredentialFieldValue` accepts a
+ * `positiveInteger` only as a JSON number, so "5000" was refused with "… is not
+ * in the expected format." — and, once such a field held a value, so was every
+ * later Save of that connector's form, a key rotation included. (The shipped
+ * case is a metered-calls ceiling.) Blank stays
+ * `""` (clear). Text that is not a number goes as typed, so the box names the
+ * field instead of the request dying on a `null` from `JSON.stringify(NaN)`.
  */
-function isProbedOnConnect(provider: string): boolean {
-  const track = providerDescriptor(provider)?.track;
-  return track === "cloud" || track === "rest";
+export function fieldPayload(field: SaasCredentialField, typed: string): string | number {
+  if (field.type !== "positiveInteger") return typed;
+  if (typed.trim() === "") return "";
+  const n = Number(typed);
+  return Number.isFinite(n) ? n : typed;
 }
 
 /** What each state means to a person, in their words rather than the enum's. */
@@ -220,7 +228,7 @@ function ProviderForm({
    *  typed secret. Returning the outcome rather than reading it back off
    *  `status` keeps the clearing tied to THIS submit, not to whatever the
    *  shared status happened to be when the component next rendered. */
-  onSave: (provider: string, fields: Record<string, string>) => Promise<boolean>;
+  onSave: (provider: string, fields: Record<string, string | number>) => Promise<boolean>;
   /** Fired after the box confirmed a disconnect — the panel answers by
    *  re-reading, which is what refreshes `credentialsPurged` and the state
    *  line derived from it. */
@@ -242,8 +250,16 @@ function ProviderForm({
   const stateCopy = stateCopyFor(view);
   const expiryCopy = expiryCopyFor(view);
 
+  // WARP-3434 — the credential path this form's fields belong to. The box
+  // refuses a first save on a provider with variants unless the body
+  // names it, and the form is asking the person to fill in exactly this one.
+  const variant = view.variant
+    ? credentialVariantFor(providerDescriptor(view.provider), view.variant)
+    : undefined;
+
   async function submit() {
-    const fields: Record<string, string> = {};
+    const fields: Record<string, string | number> = {};
+    if (view.variant) fields[CREDENTIAL_VARIANT_FIELD] = view.variant;
     for (const f of view.fields) {
       const typed = drafts[f.name];
       if (f.secret) {
@@ -253,7 +269,7 @@ function ProviderForm({
         if (typed !== undefined && typed !== "") fields[f.name] = typed;
         continue;
       }
-      if (typed !== undefined) fields[f.name] = typed;
+      if (typed !== undefined) fields[f.name] = fieldPayload(f, typed);
     }
 
     const ok = await onSave(view.provider, fields);
@@ -324,6 +340,16 @@ function ProviderForm({
         >
           How to create this credential
         </a>
+      )}
+
+      {variant && (
+        <p
+          className="type-caption-1"
+          style={{ color: "var(--text-muted)" }}
+          data-testid={`variant-${view.provider}`}
+        >
+          {variant.description ?? variant.label}
+        </p>
       )}
 
       {view.fields.length === 0 ? (
@@ -422,7 +448,7 @@ function SaasCredentialsPanel() {
 
   const handleSave = async (
     provider: string,
-    fields: Record<string, string>,
+    fields: Record<string, string | number>,
   ): Promise<boolean> => {
     setStatus({ kind: "saving", provider });
     let saved: SaasCredentialView;
@@ -453,14 +479,18 @@ function SaasCredentialsPanel() {
      * A save that CLEARED the secret has nothing to check; the box already
      * said NOT_CONFIGURED and a probe would only say it again.
      */
-    if (!isProbedOnConnect(provider) || !saved.hasCredentials) {
+    // The box's own answer when it gave one (WARP-3434), the descriptor's
+    // otherwise — the same rule either way, `isProbedOnConnect`.
+    const probed =
+      saved.probedOnConnect ?? isProbedOnConnect(providerDescriptor(provider));
+    if (!probed || !saved.hasCredentials) {
       setStatus({ kind: "saved", provider });
       return true;
     }
     try {
-      const probed = await connectCloudProvider(provider);
+      const verdict = await connectCloudProvider(provider);
       setViews((cur) =>
-        cur.map((v) => (v.provider === provider ? { ...v, state: probed.status } : v)),
+        cur.map((v) => (v.provider === provider ? { ...v, state: verdict.status } : v)),
       );
       setStatus({ kind: "saved", provider });
     } catch {

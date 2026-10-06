@@ -930,3 +930,80 @@ describe("buildCredentialView — expiry is about a credential that exists", () 
     ).toBeNull();
   });
 });
+
+// ===========================================================================
+// WARP-3434 — the view says which kind of connector it is
+// ===========================================================================
+
+/**
+ * A client without `@droplet/shared-types` (the Mac app) used to hand-map the
+ * connector kind from the provider id. The view now carries the descriptor's
+ * own answer, so the three additive fields are asserted here for each kind.
+ */
+describe("buildCredentialView — the connector kind", () => {
+  const MCP_FIXTURE: ProviderDescriptor = {
+    id: "fixture-mcp",
+    displayName: "Fixture MCP",
+    category: "CRM",
+    track: "mcp",
+    mcpServerId: "fixture-mcp",
+    description: "Fixture MCP.",
+    setupGuideHref: "/help/integrations/fixture-mcp",
+    credentialFields: [],
+    egressHosts: ["mcp.fixture-mcp.invalid"],
+    datasets: [],
+  };
+
+  it("carries the descriptor's track, and says a cloud track is probed on connect", () => {
+    const view = buildCredentialView(FIXTURE, null);
+    expect(view.track).toBe("cloud");
+    expect(view.probedOnConnect).toBe(true);
+  });
+
+  it("says an mcp track is NOT probed — the paste is the connection", () => {
+    const view = buildCredentialView(MCP_FIXTURE, null);
+    expect(view.track).toBe("mcp");
+    expect(view.probedOnConnect).toBe(false);
+  });
+
+  it("says a rest track is probed on connect, like cloud", () => {
+    const view = buildCredentialView({ ...FIXTURE, track: "rest" } as ProviderDescriptor, null);
+    expect(view.track).toBe("rest");
+    expect(view.probedOnConnect).toBe(true);
+  });
+
+  it("names no path for a provider that declares none", () => {
+    expect(buildCredentialView(FIXTURE, null).variant).toBeNull();
+  });
+
+  it("names the FIRST path for a connection that records none — the fields it renders", () => {
+    const view = buildCredentialView(VARIANT_FIXTURE, null);
+    expect(view.variant).toBe("custom-connection");
+    expect(view.fields.map((f) => f.name)).toEqual([
+      "tenantId",
+      "connectionName",
+      "customSecret",
+    ]);
+  });
+
+  it("names the RECORDED path once one is stored", () => {
+    const view = buildCredentialView(
+      VARIANT_FIXTURE,
+      variantRow({
+        providerConfig: {
+          provider: VARIANT_FIXTURE.id,
+          [CREDENTIAL_VARIANT_FIELD]: "pkce-app",
+          tenantId: "t-1",
+          pkceClientId: "c-1",
+        },
+      }),
+    );
+    expect(view.variant).toBe("pkce-app");
+  });
+
+  it("adds the three fields without disturbing the redaction", () => {
+    const view = buildCredentialView(VARIANT_FIXTURE, variantRow());
+    expect(JSON.stringify(view)).not.toContain(SEEDED_SECRET);
+    expect(JSON.stringify(view)).not.toContain("providerTokensEnc");
+  });
+});

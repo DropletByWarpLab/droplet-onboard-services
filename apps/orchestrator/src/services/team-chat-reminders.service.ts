@@ -24,6 +24,7 @@
  */
 import type { PrismaClient } from "@prisma/client";
 import { sendNotification } from "./notifications.service.js";
+import { publishTeamChatEvent } from "./team-chat-events.service.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("team-chat-reminders");
@@ -96,8 +97,8 @@ export async function runTeamChatMeetingReminderSweep(
         },
         data: { reminderStatus: "sent" },
       });
-      if (claimed.count === 0) return false;
-      await tx.teamChatMessage.create({
+      if (claimed.count === 0) return null;
+      const card = await tx.teamChatMessage.create({
         data: {
           threadId: meeting.threadId,
           senderId: meeting.createdById,
@@ -109,10 +110,15 @@ export async function runTeamChatMeetingReminderSweep(
         where: { id: meeting.threadId },
         data: { lastMessageAt: new Date() },
       });
-      return true;
+      return card.id;
     });
     if (!posted) continue;
     remindersSent++;
+    await publishTeamChatEvent(prisma, {
+      kind: "message",
+      conversationId: meeting.threadId,
+      messageId: posted,
+    });
 
     // Best-effort toasts — participants except the organizer, keyed by
     // USERNAME (NotificationLog.username / the MQTT topic are

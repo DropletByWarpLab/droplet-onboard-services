@@ -86,6 +86,7 @@ import {
 import { useCameras } from "@/lib/hooks/useCameras";
 import { useSmartHome } from "@/lib/hooks/useSmartHome";
 import { useVoiceHealthSummary } from "@/lib/hooks/useVoice";
+import { useModuleGateState } from "@/lib/hooks/useModuleGate";
 import { useCalendarEvents } from "@/lib/hooks/useCalendar";
 import {
   useNotes,
@@ -700,21 +701,26 @@ function StatusWidget({ w, h }: WidgetProps) {
   const { user } = useAuth();
   const isAdmin = isAdminRole(user?.role);
   const isGuest = user?.role === "guest";
-  const { items: recents } = useRecents(50);
+  const filesModuleOn = useModuleGateState("files") === "on";
+  const camerasModuleOn = useModuleGateState("cameras") === "on";
+  const smartHomeModuleOn = useModuleGateState("smart_home") === "on";
+  const voiceModuleOn = useModuleGateState("voice") === "on";
+  const { items: recents } = useRecents(50, { enabled: filesModuleOn });
   const { models } = useModels();
   // WARP-3157 — no camera polls for a guest: every camera route 403s them
-  // and each 403 writes an audited "Access denied" row.
-  const { totalCameras } = useCameras({ enabled: !isGuest });
-  const { totalDevices } = useSmartHome();
+  // and each 403 writes an audited "Access denied" row. The workspace module
+  // gate also stops these polls until Cameras is positively enabled.
+  const { totalCameras } = useCameras({ enabled: camerasModuleOn && !isGuest });
+  const { totalDevices } = useSmartHome({ enabled: smartHomeModuleOn });
   // WARP-1055 — the Home surface's Voice status line lives inside this
   // existing system-health tile (design brief §2), not a new tile.
   // WARP-3157 — GET /api/voice/status is owner/admin only; a member or
   // guest polling it forever gets a 403 and the row read "— · checking…"
   // with no way to resolve. The hook still runs (rules of hooks) but with
-  // its poll disabled — each 403 would write an audited "Access denied"
-  // row — and the row below is dropped from `stats` for non-admins.
+  // its poll disabled for non-admins and while the Voice module is off or
+  // unresolved. The row is dropped unless both gates allow it.
   const { state: voiceState, unavailable: voiceUnavailable } =
-    useVoiceHealthSummary({ enabled: isAdmin });
+    useVoiceHealthSummary({ enabled: isAdmin && voiceModuleOn });
 
   const local = models.filter((m) => isLocalProvider(m.provider)).length;
   const cloud = models.length - local;
@@ -743,17 +749,21 @@ function StatusWidget({ w, h }: WidgetProps) {
                 : voice("—", "not calibrated yet", "var(--color-label-quaternary)");
 
   const stats: StatRow[] = [
-    { icon: Folder, label: "Files", value: recents.length ? String(recents.length) : "—", sub: "recent files", dot: "var(--success)", href: "/files" },
+    ...(filesModuleOn
+      ? [{ icon: Folder, label: "Files", value: recents.length ? String(recents.length) : "—", sub: "recent files", dot: "var(--success)", href: "/files" } satisfies StatRow]
+      : []),
     // WARP-3157 — every camera route refuses role `guest`; showing this stat
     // to a guest would report "none yet" as if the box had no cameras.
-    ...(isGuest
+    ...(isGuest || !camerasModuleOn
       ? []
       : [{ icon: Video, label: "Cameras", value: totalCameras ? String(totalCameras) : "—", sub: totalCameras ? "live feeds" : "none yet", dot: "var(--brand)", href: "/cameras" } satisfies StatRow]),
-    { icon: Network, label: "Devices", value: totalDevices ? String(totalDevices) : "—", sub: "devices online", dot: "var(--success)", href: "/devices" },
+    ...(smartHomeModuleOn
+      ? [{ icon: Network, label: "Devices", value: totalDevices ? String(totalDevices) : "—", sub: "devices online", dot: "var(--success)", href: "/devices" } satisfies StatRow]
+      : []),
     { icon: Cpu, label: "AI models", value: models.length ? String(models.length) : "—", sub: `${local} local · ${cloud} cloud`, dot: "var(--success)", href: "/models" },
     // WARP-3157 — GET /api/voice/status is owner/admin only; hide the row
     // for everyone else rather than a permanent "— · checking…".
-    ...(isAdmin ? [voiceRow] : []),
+    ...(isAdmin && voiceModuleOn ? [voiceRow] : []),
   ];
 
   if (w <= 2 || h <= 2) {
@@ -1738,34 +1748,22 @@ export function RemoteAccessWidget(_: WidgetProps) {
     void load();
   }, [load]);
 
-  const endpointBlocked = !status?.endpointConfigured;
-  // WARP-1391: the one-tap mint is HOME mode — Endpoint = the box's discovered
-  // home-facing LAN IP (resolveHomeEndpointHost), NOT the away-mode default's
-  // split-horizon public FQDN (that FQDN is public-NXDOMAIN by design —
-  // WARP-954 / ADR-023 — so an away conf shows keepalive but zero handshakes).
-  // Without a discovered home LAN IP a home mint 503s, so the switch must be
-  // inert here too — same posture as remote-access/page.tsx and VpnStep. Only
-  // applies once status has loaded; missing ⇒ "not reachable at home yet" (the
-  // WARP-993 never-over-promise convention). A null status (load failure) is
-  // already covered by endpointBlocked.
+  const endpointBlocked = !status || (!status.endpointConfigured && !status.homeEndpointHost);
+  // The one-tap office configuration requires a discovered LAN endpoint.
   const homeBlocked = loaded && Boolean(status) && !status?.homeEndpointHost;
   const blocked = endpointBlocked || homeBlocked;
   const on = peers.length > 0;
   const mine = user?.username
     ? peers.filter((p) => p.userId === user.username)
     : [];
-  const fqdn = status?.publicFqdn?.trim() || status?.endpointHost || null;
+  const hostname = status?.internalHostname?.trim() || null;
 
   // Mint with the auto-derived label — the WARP-979 one-tap path.
   const connect = async () => {
     setError(null);
     setSubmitting(true);
     try {
-      // WARP-1391: mint HOME mode explicitly. The orchestrator route defaults to
-      // "away" (a byte-identical pre-hybrid compat contract, PR #897) which bakes
-      // the split-horizon public FQDN Endpoint — public-NXDOMAIN by design, so the
-      // conf shows keepalive but zero handshakes. Home bakes the box LAN IP and
-      // works today; the switch is gated inert on homeEndpointHost above.
+      // Home mode creates an office-only WireGuard configuration.
       const result = await createVpnPeer("This device", "home");
       setCreated(result);
       await load();
@@ -1810,7 +1808,7 @@ export function RemoteAccessWidget(_: WidgetProps) {
   const sub = !loaded
     ? "Checking…"
     : endpointBlocked
-      ? "Web address not ready yet"
+      ? "Network endpoint not ready yet"
       : homeBlocked
         ? "Local address not ready yet"
         : submitting
@@ -1904,10 +1902,10 @@ export function RemoteAccessWidget(_: WidgetProps) {
       )}
 
       <div className="w-remote-addr">
-        {fqdn ? (
-          <span className="addr">https://{fqdn}</span>
+        {hostname ? (
+          <span className="addr">https://{hostname}</span>
         ) : (
-          <span className="ph">your secure address</span>
+          <span className="ph">internal DNS name not configured</span>
         )}
         <a className="w-remote-link" href="/remote-access">
           Remote access
@@ -1962,16 +1960,11 @@ export function RemoteAccessWidget(_: WidgetProps) {
                   <strong className="font-mono break-all">
                     {dashboardUrlFromConf(
                       created.conf,
-                      status?.publicFqdn ?? undefined,
+                      status?.internalHostname ?? undefined,
                     )}
                   </strong>{" "}
                   in the browser —{" "}
-                  {/* WARP-993: only promise "from anywhere" when the minted
-                      conf is actually routable off-LAN (echoed on the create
-                      response; missing ⇒ stay honest). */}
-                  {created.offLanReachable === true
-                    ? "that’s this Droplet from anywhere."
-                    : "that’s this Droplet on your local network."}
+                  this office configuration works on your local network.
                 </li>
               </ol>
               <div className="flex justify-center">

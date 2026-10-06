@@ -42,6 +42,7 @@ import { GATEABLE_MODULE_IDS } from "../services/access-catalog.js";
 import { createModuleGate } from "../middleware/module-gate.js";
 import { MODULES, type AvailabilityConfig } from "./module-registry.js";
 import type { AuthUser } from "../middleware/auth.js";
+import type { EffectiveAccessResolver } from "../middleware/feature-gate.js";
 import type { EffectiveAccessResult } from "../services/effective-access.service.js";
 import type { FeatureLevel } from "../services/access-catalog.js";
 
@@ -58,7 +59,6 @@ const CFG: AvailabilityConfig = {
   DROPLET_MATTER_SERVICE_URL: "http://matter:8083",
   ROUTING_SERVICE_URL: "http://routing:8080",
   SWITCH_SERVICE_URL: "http://switch:8081",
-  DOORS_ENABLED: "1",
 };
 
 /** A prisma stub for `createModuleGate` — only `moduleSetting.findMany` is read. */
@@ -115,16 +115,20 @@ const PERSON: AuthUser = {
 function appWith(opts: {
   disabledModules?: ModuleId[];
   features: Array<[ModuleId, FeatureLevel]>;
+  /** The caller; defaults to a family member. */
+  person?: AuthUser;
+  /** Replaces the stub resolver, so a test can assert it was never asked. */
+  resolve?: EffectiveAccessResolver;
 }): Express {
   const app = express();
   app.use((req, _res, next) => {
-    req.user = PERSON;
+    req.user = opts.person ?? PERSON;
     next();
   });
   mountModuleGates(
     app,
     createModuleGate(prismaWith(opts.disabledModules ?? []), CFG, 0),
-    async () => grants(opts.features),
+    opts.resolve ?? (async () => grants(opts.features)),
   );
   // The REAL route shapes, in the REAL registration order (files.ts registers
   // `/files/docs/status` before the `:filePath(*)` wildcard):
@@ -139,6 +143,9 @@ function appWith(opts: {
   app.get("/api/files/:filePath(*)/editor-session", (_q, res) => { res.json({ hit: "editor" }); });
   app.get("/api/files/:filePath(*)/comments", (_q, res) => { res.json({ hit: "comments" }); });
   app.get("/api/cameras/list", (_q, res) => { res.json({ hit: "cameras" }); });
+  // WARP-3528 — the service desk. The prefix is what the gates guard; this
+  // stands in for the support router, whose real paths are not under test.
+  app.get(SUPPORT, (_q, res) => { res.json({ hit: "support" }); });
   // WARP-2875 — the PM surface, in the shapes routes/pm/{native,relations}.ts
   // actually serve. `/api/pm/projects*` is only PART of it: work-items,
   // workspaces, summary, states, labels and relations all sit OUTSIDE that
@@ -171,8 +178,31 @@ const PM_ROUTES = [
   ["get", "/api/pm/workspaces"],
   ["get", "/api/pm/workspaces/default"],
   ["get", "/api/pm/summary"],
+  ["get", "/api/pm/insights"],
   ["patch", "/api/pm/states/s1"],
   ["patch", "/api/pm/labels/l1"],
+  // WARP-3521 planning routes mount below /api too; every route must follow
+  // the same Projects module switch as the older PM surface.
+  ["get", "/api/pm/projects/p1/cycles"],
+  ["post", "/api/pm/projects/p1/cycles"],
+  ["get", "/api/pm/projects/p1/backlog"],
+  ["get", "/api/pm/cycles/c1"],
+  ["patch", "/api/pm/cycles/c1"],
+  ["delete", "/api/pm/cycles/c1"],
+  ["post", "/api/pm/cycles/c1/start"],
+  ["post", "/api/pm/cycles/c1/complete"],
+  ["get", "/api/pm/cycles/c1/burndown"],
+  ["get", "/api/pm/cycles/c1/work-items"],
+  ["get", "/api/pm/projects/p1/modules"],
+  ["post", "/api/pm/projects/p1/modules"],
+  ["get", "/api/pm/modules/m1"],
+  ["patch", "/api/pm/modules/m1"],
+  ["delete", "/api/pm/modules/m1"],
+  ["get", "/api/pm/modules/m1/work-items"],
+  ["post", "/api/pm/modules/m1/work-items"],
+  ["delete", "/api/pm/modules/m1/work-items"],
+  ["delete", "/api/pm/modules/m1/work-items/w1"],
+  ["get", "/api/pm/work-items/w1/modules"],
   // routes/mobile/pm.ts — the same pm.service.ts reads behind a role check,
   // on a prefix the segment-bounded `/api/pm` gate cannot reach.
   ["get", "/api/mobile/pm/workspaces"],
@@ -181,6 +211,7 @@ const PM_ROUTES = [
   ["get", "/api/mobile/pm/work-items/w1"],
 ] as const satisfies ReadonlyArray<readonly ["get" | "post" | "patch" | "delete", string]>;
 
+const SUPPORT = "/api/support/x";
 const KNOWLEDGE = "/api/files/knowledge/recent";
 const DOCS = "/api/files/docs/status";
 const FILES = "/api/files/spaces";
@@ -406,6 +437,73 @@ describe("WARP-2875 — the Projects toggle reaches the WHOLE PM surface", () =>
   });
 });
 
+describe("WARP-3528 — support is gated at both layers from day one", () => {
+  // The service desk ships with its access ladder AND its per-person gate in
+  // the same change (ADR-069 §1). `crm` and `money` shipped the ladder without
+  // the gate and the panel advertised a permission the box did not enforce.
+  //
+  // Driven through the real mount, so each case names the one edit that turns
+  // it red.
+  const GUEST: AuthUser = { id: "u-g", username: "gus", displayName: "Gus", role: "guest" };
+
+  it("a person whose role lacks `support` is denied with the SAME 404 a switched-off module gives", async () => {
+    // MUTATION: drop "support" from FEATURE_GATED_MODULES → the first request
+    // serves 200, because layer 2 is what narrows a person below the box.
+    const narrowed = await request(appWith({ features: [["files", "view"]] })).get(SUPPORT);
+    const switchedOff = await request(
+      appWith({ disabledModules: ["support"], features: [["support", "view"]] }),
+    ).get(SUPPORT);
+    expect(narrowed.status).toBe(404);
+    expect(narrowed.body).toEqual({ error: "module_disabled", module: "support" });
+    // A caller cannot tell a per-person denial from a box-wide toggle.
+    expect(switchedOff.status).toBe(narrowed.status);
+    expect(switchedOff.body).toEqual(narrowed.body);
+  });
+
+  it("a guest is refused by the tier floor, before the per-person gate is asked", async () => {
+    // The resolver hands the guest a STALE support grant, as a row stored
+    // before a floor existed would. Only the tier floor (`refuseBelowFloor`,
+    // derived by tierRefusingModuleIds) can refuse them, and it answers by
+    // role without a database read — so the resolver is never called.
+    // MUTATION: drop `refuseBelowFloor` from support's `view` → the stale grant
+    // clears layer 2 and this serves 200.
+    const resolve = vi.fn(async () => grants([["support", "view"]]));
+    const res = await request(appWith({ person: GUEST, features: [], resolve })).get(SUPPORT);
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: "module_disabled", module: "support" });
+    expect(resolve).not.toHaveBeenCalled();
+  });
+
+  it.each(["family", "admin", "owner"] as const)(
+    "a %s holding `support` passes both gates",
+    async (role) => {
+      const app = appWith({ person: { ...PERSON, role }, features: [["support", "view"]] });
+      const res = await request(app).get(SUPPORT);
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ hit: "support" });
+    },
+  );
+
+  it("has no parent: it serves with Projects switched off box-wide and no Projects grant", async () => {
+    // ADR-069 §1: no `requires` edge between support and projects. A dental
+    // front desk runs Support with Projects off.
+    // MUTATION: `requires: "projects"` on the registry entry → this 404s.
+    const app = appWith({ disabledModules: ["projects"], features: [["support", "view"]] });
+    expect((await request(app).get(SUPPORT)).status).toBe(200);
+  });
+
+  it("is a surface of its own in the other direction too: Support off leaves Projects serving, and a Projects grant does not open Support", async () => {
+    // ADR-069 §1: the `pm` grant never becomes a back door into customer
+    // conversations — a ticket is not a /api/pm route and /support is not
+    // reachable on a Projects grant.
+    const supportOff = appWith({ disabledModules: ["support"], features: [] });
+    expect((await request(supportOff).get("/api/pm/work-items")).status).toBe(200);
+    expect((await request(supportOff).get(SUPPORT)).status).toBe(404);
+    const projectsOnly = appWith({ features: [["projects", "manage"]] });
+    expect((await request(projectsOnly).get(SUPPORT)).status).toBe(404);
+  });
+});
+
 describe("mount composition", () => {
   it("gates every non-core module and never gates a core one", async () => {
     const app = appWith({ disabledModules: ["chat"], features: [["cameras", "view"]] });
@@ -434,20 +532,18 @@ describe("FEATURE_GATED_MODULES — every module whose grant the panel offers", 
     //
     // `crm` and `money` were absent while `access-catalog.ts` shipped ladders
     // for both and the Access panel offered them as grants — the box
-    // advertising a permission it did not enforce.
+    // advertising a permission it did not enforce. `support` (WARP-3528) joins
+    // the set in the change that adds its ladder, so it never repeats that.
     expect([...FEATURE_GATED_MODULES].sort()).toEqual([
       "cameras",
       "crm",
       "docs",
-      // ADR-055 — gated from the day it exists, so a role narrowed away from
-      // Doors never reaches /api/doors.
-      "doors",
       "files",
       "knowledge",
       "money",
       "network",
-      "security",
       "smart_home",
+      "support",
     ]);
   });
 

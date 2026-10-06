@@ -291,10 +291,14 @@ export function Dialog({
       if (e.key !== "Tab") return;
       const root = containerRef.current;
       if (!root) return;
+      // A dialog opened from inside this one is portal-mounted elsewhere in the
+      // DOM but is still our React descendant, so ITS keydowns bubble here. The
+      // topmost dialog owns focus: acting on them would pull focus out of it.
+      if (!root.contains(e.target as Node)) return;
       const focusables = Array.from(
         root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
       ).filter(
-        (el) => !(el as HTMLButtonElement | HTMLInputElement).disabled,
+        (el) => !el.matches(":disabled"),
       );
       if (focusables.length === 0) return;
       const first = focusables[0];

@@ -14,8 +14,8 @@
  *   - zod validation of grant/exception module ids.
  *
  * Floor model (ADR-004 via brief §9): `view` is not floored on ordinary
- * features, and is REFUSED below family on `security`, `crm`, `projects` and
- * `money` (`refuseBelowFloor`); `act`/
+ * features, and is REFUSED below family on `crm`, `projects`, `money` and
+ * `support` (`refuseBelowFloor`); `act`/
  * `manage` floor at the FAMILY tier on ordinary features; network and
  * managed-switch writes floor at ADMIN; voice `act` is deliberately
  * un-floored (guests may talk to the assistant). The always-on trio of the
@@ -66,15 +66,15 @@ interface CatalogLevelDef {
   /** Minimum starting-point tier that may hold this level; absent = un-floored. */
   minTier?: "family" | "admin";
   /**
-   * ADR-055 — meaningful on a module's `view` only. `view` is the lowest rung,
+   * Meaningful on a module's `view` only. `view` is the lowest rung,
    * so a tier below its `minTier` normally clamps DOWN to it and holds it
    * anyway: the floor is documentation the routes back with `requireRole`.
    * `true` makes the floor a REFUSAL: a tier below `minTier` holds no grant on
    * the module at all (`maxLevelFor` / `clampLevel` answer `null`), so the role
    * writer stores none and the resolver hands none out. Opt-in per module:
-   * `security` (family floor, ADR-059), `crm` and `projects` (family floor,
-   * WARP-3365 / WARP-3369: external guests get nothing from company-wide
-   * business data), and `doors` (admin floor, ADR-055). The same fact drives the role floor on the routes
+   * `crm`, `projects`, `money` and `support` (family floor, WARP-3365 /
+   * WARP-3369 / WARP-3528: external guests get nothing from company-wide
+   * business data). The same fact drives the role floor on the routes
    * (`requireModuleTierFloor`) and on the assistant's data hops
    * (`requireMcpActingUserToolDomain`), so the three cannot disagree.
    */
@@ -113,38 +113,6 @@ const CATALOG: Record<Exclude<ModuleId, "chat">, CatalogLevelDef[]> = {
     { level: "act", minTier: "admin" },
     { level: "manage", minTier: "admin" },
   ],
-  // WARP-2977 (ADR-059 §6). `view` is the feed; `act` is acknowledging, the
-  // expected/not-expected verdicts and the mode (P2b/P3); `manage` is zones,
-  // links, schedule, suppressions, routing and retention. Presence data about
-  // identifiable people, so even `view` is floored at family — no guest tier.
-  // `manage` is business policy (a suppression can hide a real intrusion), so
-  // it is floored at admin. `refuseBelowFloor` makes the family floor on `view`
-  // bite: `view` is the lowest rung, so without it a guest role could store
-  // security:view, advertising reach every /api/security route refuses (each
-  // refusal is a denial row that becomes a threat incident).
-  security: [
-    { level: "view", minTier: "family", refuseBelowFloor: true },
-    { level: "act", minTier: "family" },
-    { level: "manage", minTier: "admin" },
-  ],
-  // ADR-055 (P4a). `view` only — deliberately no `act` or `manage` rung. §11.4:
-  // door authority is the OWNER's, "not admin", and does not inherit the rank
-  // ladder that lets an admin escalate on some update paths. Every write route
-  // floors at `owner` (routes/doors.ts) and an owner holds every catalog level
-  // through the §3 bypass, so a `manage` rung could only advertise a
-  // permission that no one but the owner may use. Add one when there is a
-  // door-group grant for it to mean something (AC-017).
-  //
-  // The `view` floor is `admin`, not `family`: with no per-door-group grants
-  // yet (§11.4 — out of scope, they depend on AC-017) the module's own grant
-  // is the ONLY narrowing, and access logs identify people entering places at
-  // times. Default-deny until a narrower grant exists; widening is this one
-  // line and the router's role list. `refuseBelowFloor` is what makes the floor
-  // bite: without it `view` is the lowest rung and a family or guest role could
-  // store doors:view, advertising reach the routes refuse.
-  doors: [
-    { level: "view", minTier: "admin", refuseBelowFloor: true },
-  ],
   smart_home: [
     { level: "view" },
     { level: "act", minTier: "family" },
@@ -169,7 +137,7 @@ const CATALOG: Record<Exclude<ModuleId, "chat">, CatalogLevelDef[]> = {
   // business data unless it is explicitly shared with them). Work items,
   // comments and the activity feed are the company's own, and nothing in
   // Projects is shared with a guest per item, so `view` is a REFUSAL below the
-  // family floor (ADR-055 `refuseBelowFloor`, the `security` pattern): a guest
+  // family floor (`refuseBelowFloor`): a guest
   // holds no Projects grant, the role writer stores none, and
   // `requireModuleTierFloor` (middleware/feature-gate.ts) answers 404 on every
   // /api/pm and /api/mobile/pm route for the tier.
@@ -201,6 +169,18 @@ const CATALOG: Record<Exclude<ModuleId, "chat">, CatalogLevelDef[]> = {
   // the prefix and the assistant's data hop now say the same thing.
   money: [
     { level: "view", minTier: "family", refuseBelowFloor: true },
+    { level: "manage", minTier: "admin" },
+  ],
+  // WARP-3528 (ADR-069 §1). The service desk. `act` is answering and working
+  // tickets (reply, note, move, assign); `manage` is running the desks
+  // themselves (create, rename, archive), which is admin work, so it floors at
+  // `admin` the way money's does. `view` is a REFUSAL below the family floor
+  // (`refuseBelowFloor`): a ticket is a customer's own words, and an external
+  // guest is someone outside the company — the WARP-3365 / WARP-3369 ruling,
+  // same mechanism as crm / projects / money.
+  support: [
+    { level: "view", minTier: "family", refuseBelowFloor: true },
+    { level: "act", minTier: "family" },
     { level: "manage", minTier: "admin" },
   ],
   // WARP-2018/2032. `manage` is where connecting an address-book SOURCE will
@@ -256,7 +236,7 @@ function tierMayHold(tier: Role, def: CatalogLevelDef): boolean {
   return TIER_RANK[tier] >= TIER_RANK[def.minTier];
 }
 
-/** ADR-055 — a module whose `view` floor is a refusal, and a tier below it: that tier may hold nothing on the module. */
+/** A module whose `view` floor is a refusal, and a tier below it: that tier may hold nothing on the module. */
 function tierRefused(tier: Role, moduleId: GateableModuleId): boolean {
   const view = CATALOG[moduleId].find((d) => d.level === "view");
   return view?.refuseBelowFloor === true && !tierMayHold(tier, view);
@@ -265,7 +245,7 @@ function tierRefused(tier: Role, moduleId: GateableModuleId): boolean {
 /**
  * The highest §9 level `tier` may hold on `moduleId`. Every module offers a
  * `view`, so the result is at least "view" — except where `view` itself is a
- * refusal below its floor (`refuseBelowFloor`: security, doors): `null` = the tier may
+ * refusal below its floor (`refuseBelowFloor`: crm, projects, money, support): `null` = the tier may
  * hold nothing on this module.
  */
 export function maxLevelFor(tier: Role, moduleId: GateableModuleId): FeatureLevel | null {
@@ -283,7 +263,7 @@ export function maxLevelFor(tier: Role, moduleId: GateableModuleId): FeatureLeve
 /**
  * The modules some human tier may hold NOTHING on (`refuseBelowFloor`), derived
  * from the catalog so the route gate, the assistant gate and the role writer
- * all read the same fact. Today: `security`, `crm`, `projects`, `money`. A `service`
+ * all read the same fact. Today: `crm`, `projects`, `money`, `support`. A `service`
  * principal is not a human tier and is excluded from the probe.
  */
 export function tierRefusingModuleIds(): GateableModuleId[] {

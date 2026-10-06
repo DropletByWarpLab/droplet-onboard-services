@@ -85,18 +85,7 @@ export type ToolDomain =
   // WARP-2896 (ADR-056 §6.2) — the workshop's workspace tools. Its own
   // domain: they are reachable inside a workshop run only, and the run
   // worker admits them structurally (agent-run-worker WORKSPACE_TOOLS).
-  | "workspace"
-  // WARP-2979 (ADR-059 P4 §6.12) — the Security command center's READ-ONLY
-  // tools. Slug matches the `security` ModuleId, which claims it, so the
-  // module toggle and the per-person Security level gate the domain. It never
-  // holds a write or confirming tool (the registry pin), and it is withheld
-  // from every cloud turn (the orchestrator's OFF_LAN_WITHHELD_DOMAINS).
-  | "security"
-  // ADR-055 (P4b) — doors. Slug matches the `doors` ModuleId, which claims it,
-  // so the module toggle gates the domain (WARP-2972: absent from the chat pool,
-  // /api/llm/tools and MCP while the module is off). Read-only by rule (§11.5):
-  // see interceptor.ts's doors_ guard.
-  | "doors";
+  | "workspace";
 
 export interface ToolCatalogEntry {
   name: string;
@@ -152,6 +141,7 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
   files: [
     "list_files",
     "read_file",
+    "show_file",
     "search_files",
     "search_content",
     "read_document_text",
@@ -177,6 +167,10 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "analyze_file_cleanup",
     "organize_files",
     "delete_files",
+    // WARP-3538 — the person's own cloud-drive file lists (OneDrive and
+    // SharePoint today), read through the orchestrator. Metadata only; the
+    // `files` module gates it with the rest of the file tools.
+    "search_cloud_files",
   ],
   "smart-home": [
     "list_smart_home_devices",
@@ -192,9 +186,6 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "create_scene",
     // WARP-1447: room assignment (auto-creates the room when missing)
     "assign_device_room",
-    // Device gateway: BACnet/IP, Modbus TCP, SNMP, KNX/IP.
-    "get_building_devices",
-    "set_building_point",
   ],
   cameras: [
     "list_cameras",
@@ -234,6 +225,7 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
   reminders: ["create_reminder", "list_reminders", "complete_reminder", "set_timer"],
   notifications: ["send_notification", "list_notifications"],
   email: [
+    "email_accounts",
     "email_search",
     "email_read",
     "email_summarize_thread",
@@ -255,10 +247,6 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
   // EXCLUDED_FROM_CHAT_TOOLS) while the base-prompt budget tripwire stands,
   // so it is MCP- and API-reachable and never advertised on a chat turn.
   money: ["money_list_open_documents"],
-  // ADR-055 (P4b) — doors. Two reads, no write, ever (§11.5). In the chat pool
-  // when the module is on, and withheld from it, /api/llm/tools and MCP when
-  // it is off (WARP-2972, module-gate.ts).
-  doors: ["doors_list", "doors_recent_events"],
   // ADR-045 — EMPTY for the same reason as `pm` above: slice C took the five
   // reads, slice D took `crm_log_activity` (now `business_create({entity:"note"})`)
   // and `crm_move_deal_stage` (now `business_update({entity:"deal", state})`).
@@ -305,8 +293,6 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "workspace_run",
     "workspace_propose",
   ],
-  // WARP-2979 — reads, and only reads (WARP-2980 P5 PR-E added the fifth).
-  security: ["security_list_incidents", "security_get_incident", "security_search_events", "security_zone_status", "security_explain_pattern"],
   system: [
     "get_system_health",
     "get_gpu_status",
@@ -388,6 +374,7 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   // Files
   list_files: "Browse the files on your Droplet",
   read_file: "Open and read one of your files",
+  show_file: "Show you a file or picture right in the chat",
   search_files: "Find files by name",
   search_content: "Search inside your files for what you need",
   read_document_text: "Read a whole PDF or scanned document end to end",
@@ -411,6 +398,10 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   analyze_file_cleanup: "See what is cluttering a folder before anything is touched",
   organize_files: "Sort a folder's files into tidy subfolders",
   delete_files: "Clear out a list of files you have agreed to delete",
+  // WARP-3538 — says whose files and where from: this one is the person's own
+  // cloud drives, not the files on the Droplet. Names the two that exist today
+  // as examples ("like"), so a later drive does not make it untrue.
+  search_cloud_files: "Find files in your cloud drives, like OneDrive and SharePoint",
   // Device control
   list_smart_home_devices: "See all your connected devices",
   get_smart_home_device: "Check the status of one connected device",
@@ -422,8 +413,6 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   remove_device: "Remove a device you no longer use (asks first)",
   create_scene: "Save a new routine like 'open up' from a list of device actions",
   assign_device_room: "Put a device in a room, like 'the heater is in the conference room'",
-  get_building_devices: "See building systems like heating, meters, printers and UPSes, and their readings",
-  set_building_point: "Change a building setting, like a temperature setpoint (asks first)",
   // Cameras
   list_cameras: "See all your security cameras and their status",
   list_discovered_cameras: "See new cameras found but not yet added",
@@ -478,6 +467,7 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   memory_extract_fact: "Remember a preference so your Droplet recalls it later",
   memory_forget: "Make your Droplet forget something it remembered",
   // Email
+  email_accounts: "List connected mailboxes you can read",
   email_search: "Search your email",
   email_read: "Open and read an email conversation",
   email_summarize_thread: "Get a quick summary of an email conversation",
@@ -498,8 +488,6 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   erp_schedule_appointment: "Book or move an appointment (you approve it before it's saved)",
   // Money (invoices and bills landed from a connected ledger)
   money_list_open_documents: "See what you are owed and what you owe, from your accounting systems",
-  doors_list: "See your doors and what each one last reported",
-  doors_recent_events: "See what your doors have reported lately",
   // Cloud connectors (Stripe / HubSpot / Mailchimp)
   cloud_query_dataset:
     "Look up payments, customers, deals, or mailing-list activity from your connected online accounts",
@@ -566,13 +554,6 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   workspace_commit: "Save a version of the extension being built",
   workspace_run: "Run the extension's tests, build or checks",
   workspace_propose: "Hand the finished extension to you for review",
-  // WARP-2979 (ADR-059 P4 §6.12.3) — Security, read-only.
-  security_list_incidents: "See what Security flagged, like someone inside after hours",
-  security_get_incident: "Open one Security incident and see why it was flagged",
-  security_search_events: "Look back through camera activity",
-  security_zone_status: "Check which areas are covered and which cameras are reporting",
-  // WARP-2980 (ADR-059 P5 §6.18).
-  security_explain_pattern: "See what's usual for an area at a given time",
 };
 
 /** Humanized fallback for a tool with no home description yet — turns

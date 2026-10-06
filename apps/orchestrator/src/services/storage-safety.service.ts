@@ -1,11 +1,19 @@
 /**
  * BUG-3 / ADR-019 — Storage safety-tier service.
  *
- * Gates the data-destroying pool operations. Every storage mutation is
- * Tier-3-class: blocked for the AI, dashboard-owner-only, and executable only
+ * Gates the data-destroying pool operations and Tier-2 recordings allocation
+ * changes. Storage writes are blocked for the AI and require confirmation;
+ * pool operations are Tier 3 and owner-only, while recordings allocation is
+ * Tier 2 and owner/admin. The token is executable only
  * via a single-use, short-TTL confirmation token BOUND TO {service, resourceId}.
  * A token minted to destroy `md0` cannot confirm a destroy of `md1`, nor a
  * format of `md0` — both the operation and the resource must match.
+ *
+ * WARP-3513: the one-time recovery-key reveal rides the same machinery as a
+ * Tier-2 operation. The tier in every response and CommandAuditLog row is the
+ * classification's (it used to be a hard-coded 3), and a confirmation can be
+ * restricted to the services an endpoint is able to execute, so a token minted
+ * for the reveal can never be spent at the generic confirm route.
  *
  * Mirrors network-safety.service.ts (same in-memory pending map, same
  * CommandAuditLog dual-write shape, same WARP-41 operation-mismatch defense),
@@ -16,9 +24,11 @@ import { randomBytes } from "node:crypto";
 import { PrismaClient } from "@prisma/client";
 import {
   classifyStorageCommand,
+  endpointMismatchReason,
   STORAGE_CONFIRMATION_TOKEN_EXPIRY_MS,
   STORAGE_MAX_PENDING_CONFIRMATIONS,
 } from "../config/storage-safety-rules.js";
+import type { SafetyTier } from "../config/safety-rules.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("storage-safety");
@@ -31,6 +41,7 @@ interface PendingConfirmation {
   resourceId: string;
   params?: Record<string, unknown>;
   userId?: string;
+  tier: SafetyTier;
   expiresAt: number;
 }
 
@@ -38,24 +49,28 @@ interface PendingConfirmation {
 const pendingConfirmations = new Map<string, PendingConfirmation>();
 
 export type EvaluateStorageResult =
-  | { allowed: false; blocked: true; reason: string; tier: number }
+  | { allowed: false; blocked: true; reason: string; tier: SafetyTier }
   | {
       allowed: false;
       requiresConfirmation: true;
       confirmationToken: string;
       reason: string;
-      tier: number;
+      tier: SafetyTier;
     };
 
 /**
- * Evaluate a destructive storage command.
+ * Evaluate a storage command.
  *
- * - `source: "ai"` → BLOCKED. The AI can never destroy storage. (Belt to the
- *   braces of D5: the destructive ops aren't in tools-core at all, so the AI
+ * - `source: "ai"` → BLOCKED. The AI can never mutate storage. (Belt to the
+ *   braces of D5: these operations aren't in tools-core at all, so the AI
  *   can't even name them — this is the second layer.)
  * - `source: "api"` (the dashboard owner) → returns a single-use confirm token
  *   bound to {service, resourceId}. Nothing executes here; the caller must
  *   confirm via confirmStorageCommand to run it.
+ *
+ * Every result and audit row carries the operation's OWN tier
+ * (classifyStorageCommand): 3 for the erase ops and for unrecognised ones, 2
+ * for the recovery-key reveal and recording allocation changes.
  */
 export async function evaluateStorageCommand(
   prisma: PrismaClient,
@@ -66,14 +81,16 @@ export async function evaluateStorageCommand(
   source: "api" | "ai" = "api",
 ): Promise<EvaluateStorageResult> {
   const classification = classifyStorageCommand(service);
+  const tier = classification.tier;
 
-  // Tier 3 + AI → hard block.
+  // All storage writes + AI → hard block.
   if (source === "ai") {
-    await logStorageCommand(prisma, {
+    await logStorageCommandAudit(prisma, {
       userId,
       resourceId,
       service,
       params,
+      tier: classification.tier,
       confirmed: false,
       blocked: true,
       reason: classification.reason,
@@ -84,7 +101,7 @@ export async function evaluateStorageCommand(
       reason:
         classification.reason ||
         `Storage operation '${service}' is not available via AI`,
-      tier: 3,
+      tier: classification.tier,
     };
   }
 
@@ -95,7 +112,7 @@ export async function evaluateStorageCommand(
       allowed: false,
       blocked: true,
       reason: "Too many pending storage confirmations — try again shortly",
-      tier: 3,
+      tier: classification.tier,
     };
   }
   const confirmationToken = randomBytes(32).toString("hex");
@@ -105,14 +122,16 @@ export async function evaluateStorageCommand(
     resourceId,
     params,
     userId,
+    tier: classification.tier,
     expiresAt: Date.now() + STORAGE_CONFIRMATION_TOKEN_EXPIRY_MS,
   });
 
-  await logStorageCommand(prisma, {
+  await logStorageCommandAudit(prisma, {
     userId,
     resourceId,
     service,
     params,
+    tier: classification.tier,
     confirmed: false,
     blocked: false,
     reason: classification.reason,
@@ -125,7 +144,7 @@ export async function evaluateStorageCommand(
     requiresConfirmation: true,
     confirmationToken,
     reason: classification.reason || "This storage operation requires confirmation",
-    tier: 3,
+    tier: classification.tier,
   };
 }
 
@@ -134,7 +153,14 @@ export type ConfirmStorageCommandError =
   | "TOKEN_MISSING"
   | "TOKEN_EXPIRED"
   | "TOKEN_USER_MISMATCH"
-  | "TOKEN_OPERATION_MISMATCH";
+  | "TOKEN_OPERATION_MISMATCH"
+  | "TOKEN_ENDPOINT_MISMATCH";
+
+export interface ExpectedStorageConfirmation {
+  service?: string;
+  resourceId?: string;
+  allowedServices?: ReadonlySet<string>;
+}
 
 /**
  * Confirm + consume a storage confirm token.
@@ -144,12 +170,18 @@ export type ConfirmStorageCommandError =
  * rejected with TOKEN_OPERATION_MISMATCH (WARP-41 defense generalised to the
  * {service, resourceId} binding). Single-use: the token is consumed whether or
  * not it matched-and-executed, and is gone on a second call.
+ *
+ * `expected.allowedServices` (WARP-3513) is checked LAST, after the requesting
+ * user: a different user cannot burn the owner's token by presenting it at the
+ * wrong endpoint, but the owner presenting it there loses it (a confused or
+ * forged caller must start over). Nothing is audited as confirmed in that case:
+ * nothing ran.
  */
 export async function confirmStorageCommand(
   prisma: PrismaClient,
   confirmationToken: string,
   userId?: string,
-  expected?: { service?: string; resourceId?: string },
+  expected?: ExpectedStorageConfirmation,
 ): Promise<
   | { confirmed: true; service: string; resourceId: string; params?: Record<string, unknown> }
   | { confirmed: false; code: ConfirmStorageCommandError; reason: string }
@@ -197,14 +229,24 @@ export async function confirmStorageCommand(
     };
   }
 
+  if (expected?.allowedServices && !expected.allowedServices.has(pending.service)) {
+    pendingConfirmations.delete(confirmationToken);
+    return {
+      confirmed: false,
+      code: "TOKEN_ENDPOINT_MISMATCH",
+      reason: endpointMismatchReason(pending.service),
+    };
+  }
+
   // Consume (single-use).
   pendingConfirmations.delete(confirmationToken);
 
-  await logStorageCommand(prisma, {
+  await logStorageCommandAudit(prisma, {
     userId: userId || pending.userId,
     resourceId: pending.resourceId,
     service: pending.service,
     params: pending.params,
+    tier: pending.tier,
     confirmed: true,
     blocked: false,
   });
@@ -224,13 +266,14 @@ export async function confirmStorageCommand(
 
 // ── Audit logging (reuses CommandAuditLog like network-safety) ──
 
-async function logStorageCommand(
+export async function logStorageCommandAudit(
   prisma: PrismaClient,
   entry: {
     userId?: string;
     resourceId: string;
     service: string;
     params?: Record<string, unknown>;
+    tier?: SafetyTier;
     confirmed: boolean;
     blocked: boolean;
     reason?: string;
@@ -244,7 +287,7 @@ async function logStorageCommand(
         domain: DOMAIN,
         service: entry.service,
         data: entry.params ? JSON.parse(JSON.stringify(entry.params)) : undefined,
-        tier: 3,
+        tier: entry.tier ?? 3,
         confirmed: entry.confirmed,
         blocked: entry.blocked,
         reason: entry.reason || null,

@@ -12,7 +12,7 @@
  * All chrome copy ships verbatim from INTERVIEW_COPY (§9). The aurora wash +
  * serif capsule follow the voice-packet capsule pattern.
  */
-import { History, Info, Sparkles } from "lucide-react";
+import { History, Info, Sparkles, X } from "lucide-react";
 import {
   INTERVIEW_COPY,
   TOPIC_COUNT,
@@ -141,9 +141,12 @@ export function InterviewProgress({
 export function InterviewResumeBanner({
   onResume,
   onSkipTheRest,
+  onDismiss,
 }: {
   onResume: () => void;
   onSkipTheRest: () => void;
+  /** WARP-3475 — hide the banner without resuming or wrapping up. */
+  onDismiss: () => void;
 }) {
   return (
     <div
@@ -168,6 +171,14 @@ export function InterviewResumeBanner({
           className="type-footnote text-label-secondary hover:text-label-primary"
         >
           {INTERVIEW_COPY.skipTheRest}
+        </button>
+        <button
+          type="button"
+          onClick={onDismiss}
+          aria-label="Close"
+          className="flex-none text-label-secondary hover:text-label-primary"
+        >
+          <X size={14} aria-hidden="true" />
         </button>
       </span>
     </div>

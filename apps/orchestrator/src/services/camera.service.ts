@@ -14,7 +14,9 @@ import {
   fetchConfig,
   fetchEvents,
   fetchEventsFiltered,
+  fetchLastRecordingEnd,
   fetchRecordings,
+  fetchRecordingsStorage,
   fetchRecordingsSummary,
   fetchReviews,
   fetchStats,
@@ -28,6 +30,14 @@ import {
   type FrigateSearchFilter,
 } from "./frigate.client.js";
 import { cacheGet, cacheSet, cacheDel } from "./cache.service.js";
+import {
+  isPlaceholderName,
+  rankForSurvival,
+  readCameraKeySnapshot,
+  realMac,
+  sameDeviceRows,
+} from "./camera-adoption.service.js";
+import { toDisplayName, toFrigateKey } from "./camera-key.js";
 import { dispatchDetectionEvent } from "./push-dispatch.service.js";
 import { processCameraEvent } from "./camera-event-gate.js";
 import {
@@ -39,6 +49,7 @@ import { config } from "../config.js";
 import { mqttConnectOptions } from "../lib/internal-tls.js";
 import type {
   CameraInfo,
+  CameraRecordingState,
   DetectionEvent,
   DiscoveredCamera,
   CameraSSEEvent,
@@ -51,18 +62,20 @@ import type {
 } from "../types/camera.js";
 import { createLogger } from "../lib/logger.js";
 import { retainsFootage } from "./camera-retention-defaults.js";
-import { frigateEndToDraft, parseFrigateStatus } from "./security-event-ingest.js";
-import { createInflightTracker, type OngoingSource } from "./security-inflight.js";
 import {
-  createStatusTracker,
-  noteFrigateConnectionLost,
-  noteFrigateMessage,
-  noteFrigateSubscribeFailed,
-  noteFrigateSubscription,
-  recordSecurityEvent,
-  SECURITY_FRIGATE_TOPICS,
-  type StatusTracker,
-} from "./security-events.service.js";
+  createBusinessHoursClassifier,
+  emptyCameraBusinessHours,
+  getCameraBusinessHours,
+  type BusinessHoursFilter,
+} from "./camera-business-hours.service.js";
+import { retentionFromFrigateConfig } from "./camera-recording-state.js";
+export { retentionFromFrigateConfig } from "./camera-recording-state.js";
+import {
+  buildRecordingState,
+  degradedRecordingState,
+  indexStorageByCamera,
+  type StorageBytes,
+} from "./camera-recording-state.js";
 
 const logger = createLogger("camera-service");
 
@@ -72,26 +85,27 @@ const CACHE_TTL = 5; // seconds
 
 let _mqttClient: mqtt.MqttClient | null = null;
 let _initialized = false;
-let _statusTracker: StatusTracker | null = null;
-
-/** WARP-2977 — the camera/Frigate health the /security header shows. */
-export function securityStatusSnapshot(): ReturnType<StatusTracker["snapshot"]> {
-  return _statusTracker?.snapshot() ?? new Map();
-}
+/** Pairs of ADOPTED rows already reported as sharing one device (see upsertCameraRecord). */
+const _warnedSharedDevices = new Set<string>();
 
 /**
- * WARP-2978 PR-D (ADR-059 P3 §6.12) — the people Frigate is tracking right
- * now, fed from the raw `frigate/events` messages below (before the gate).
- * The incident engine reads it each tick: a person in view for 30 s gets one
- * `detection_ongoing` row, and their incident is held open until their `end`
- * row joins it. In memory; a restart forgets it (then only `end` alerts).
+ * The Frigate 0.17 topics this service reads. Frigate's per-camera health
+ * topic is `frigate/<camera>/status/<role>`; MQTT's `+` matches exactly one
+ * level, so a one-level `frigate/+/status` never delivers it. Only the
+ * `detect` role is read: a camera whose detect stream is down is blind.
+ * One list, shared with the SUBACK check, so a topic can never be subscribed
+ * without being verified (or verified without being asked for).
  */
-const _inflight = createInflightTracker();
+const FRIGATE_TOPICS = ["frigate/events", "frigate/+/status/detect"] as const;
 
-/** The in-flight map, as the incident engine reads it (index.ts wires it in). */
-export function securityOngoingSource(): OngoingSource {
-  return _inflight;
-}
+/** What a camera's detect stream reports on `frigate/<camera>/status/detect`. */
+type CameraHealth = "online" | "offline" | "disabled";
+
+/** Frigate's own naming rule for a camera segment of a topic. */
+const FRIGATE_CAMERA_NAME = /^[a-zA-Z0-9_-]{1,64}$/;
+
+/** The last health heard per camera, so only a TRANSITION is broadcast. In memory; a restart forgets it. */
+const _cameraHealth = new Map<string, CameraHealth>();
 
 // SSE subscribers
 type SSECallback = (event: CameraSSEEvent) => void;
@@ -119,24 +133,25 @@ export async function initCameraService(prisma: PrismaClient): Promise<void> {
       ...mqttConnectOptions(config.MQTT_BROKER),
     });
 
-    _statusTracker = createStatusTracker(prisma);
-
     _mqttClient.on("connect", () => {
       logger.info("Camera service connected to MQTT");
       _mqttClient!.subscribe("droplet/cameras/discovered", { qos: 1 });
-      // WARP-2977 — the Security event store's topics. Until then this
-      // subscribed to `frigate/+/status`, which Frigate never publishes: its
-      // health topic is `frigate/<camera>/status/<role>`, and MQTT's `+` is
-      // exactly one level, so camera online/offline never arrived. The SUBACK
-      // is checked: a refused topic is an ingest that is down, not a quiet
-      // site, and /security says so.
-      // One list, shared with the SUBACK check, so a topic can never be
-      // subscribed without being verified (or verified without being asked for).
+      // The SUBACK is checked: a topic the broker refused (QoS 128, e.g. an
+      // ACL that no longer allows `frigate/#`) is detections and camera health
+      // that never arrive, and that must not be silent.
       _mqttClient!.subscribe(
-        Object.fromEntries(SECURITY_FRIGATE_TOPICS.map((t) => [t, { qos: 1 as const }])),
+        Object.fromEntries(FRIGATE_TOPICS.map((t) => [t, { qos: 1 as const }])),
         (err, granted) => {
-          if (err) noteFrigateSubscribeFailed(err);
-          else noteFrigateSubscription(granted ?? []);
+          if (err) {
+            logger.error({ err }, "Camera service could not subscribe to the Frigate topics");
+            return;
+          }
+          const refused = FRIGATE_TOPICS.filter(
+            (t) => !(granted ?? []).some((g) => g.topic === t && g.qos >= 0 && g.qos <= 2),
+          );
+          if (refused.length > 0) {
+            logger.error({ refused }, "broker refused Frigate topics — camera events and status will not arrive");
+          }
         },
       );
     });
@@ -148,20 +163,6 @@ export async function initCameraService(prisma: PrismaClient): Promise<void> {
     _mqttClient.on("error", (err) => {
       logger.error({ err }, "Camera MQTT error");
     });
-
-    // WARP-2977 — a dropped broker is an ingest that is down, not a quiet
-    // site. mqtt.js reconnects on its own; the next `connect` resubscribes and
-    // its SUBACK marks the feed live again.
-    // WARP-2978 PR-D: a dropped broker forgets nobody in the in-flight map.
-    // mqtt.js emits `close` on every reconnect cycle, and a person standing
-    // still may get no `update` after it: forgetting them would let their
-    // `end` open a second incident, and a second alert. An `end` sent while
-    // the broker was away is never redelivered (clean session); that person's
-    // hold still stops at the span cap and their entry at the 6 h age limit
-    // (security-inflight.ts). Frigate itself going away is its LWT
-    // (`frigate/available` offline), which handleMqttMessage still forgets on.
-    _mqttClient.on("close", () => noteFrigateConnectionLost());
-    _mqttClient.on("offline", () => noteFrigateConnectionLost());
   } catch (err) {
     logger.warn("Camera MQTT connection failed: %s", err);
   }
@@ -177,12 +178,41 @@ export async function shutdownCameraService(): Promise<void> {
     _mqttClient = null;
   }
   _sseSubscribers.clear();
-  _statusTracker = null;
-  _inflight.forgetCamera(null);
+  _cameraHealth.clear();
+  _warnedSharedDevices.clear();
   _initialized = false;
 }
 
 // --- MQTT message handling ---
+
+/** `frigate/<camera>/status/detect` and its bare-string payload → the camera and its health, or null for anything else. */
+function parseCameraStatus(topic: string, payload: string): { camera: string; health: CameraHealth } | null {
+  const m = /^frigate\/([^/]+)\/status\/detect$/.exec(topic);
+  if (!m || !FRIGATE_CAMERA_NAME.test(m[1])) return null;
+  const value = payload.trim().toLowerCase();
+  if (value === "online" || value === "offline" || value === "disabled") return { camera: m[1], health: value };
+  return null;
+}
+
+/**
+ * The SSE event a health reading is news for, or null. Every reading moves
+ * the remembered health forward; only a change is news:
+ *
+ *   · a repeat of what was last heard (or a retained replay on reconnect) is
+ *     not;
+ *   · first sight of a healthy camera is not — nothing changed — but first
+ *     sight of an offline one is;
+ *   · `disabled` is the owner turning a camera off. It is remembered but never
+ *     broadcast, so the next `online` after it is not reported as a recovery.
+ */
+function cameraStatusChange(camera: string, health: CameraHealth): "camera_online" | "camera_offline" | null {
+  const previous = _cameraHealth.get(camera);
+  _cameraHealth.set(camera, health);
+  if (health === previous) return null;
+  if (health === "disabled") return null;
+  if (health === "online" && (previous === undefined || previous === "disabled")) return null;
+  return health === "offline" ? "camera_offline" : "camera_online";
+}
 
 function handleMqttMessage(
   topic: string,
@@ -191,33 +221,15 @@ function handleMqttMessage(
 ): void {
   const raw = payload.toString();
 
-  // Frigate health: `frigate/<camera>/status/detect` and `frigate/available`
-  // carry bare strings (online | offline | disabled), not JSON. Only a
-  // TRANSITION is stored or broadcast — both topics are retained, so every
-  // reconnect replays the current state.
-  if (topic === "frigate/available" || /^frigate\/[^/]+\/status\/detect$/.test(topic)) {
-    noteFrigateMessage();
-    // WARP-2978 PR-D — a camera that is down (or switched off) is tracking
-    // nobody, and Frigate going offline ends every track without an `end`:
-    // forget those people now, so they neither get a late "still in view"
-    // row nor hold an incident open.
-    const reading = parseFrigateStatus(topic, raw);
-    if (reading && reading.health !== "online") _inflight.forgetCamera(reading.camera);
-    void _statusTracker
-      ?.observe(topic, raw)
-      .then((observation) => {
-        // Broadcast every change, stored or not: a failed database write
-        // must not hide a camera going dark from the live surface.
-        const change = observation?.broadcast;
-        if (change?.camera) {
-          broadcastSSE({
-            type: change.kind === "camera_online" ? "camera_online" : "camera_offline",
-            camera: change.camera,
-            timestamp: Date.now(),
-          });
-        }
-      })
-      .catch((err) => logger.warn({ err, topic }, "security status ingest failed"));
+  // Frigate health: `frigate/<camera>/status/detect` carries a bare string
+  // (online | offline | disabled), not JSON. Only a TRANSITION is broadcast —
+  // the topic is retained, so every reconnect replays the current state.
+  if (/^frigate\/[^/]+\/status\/detect$/.test(topic)) {
+    const reading = parseCameraStatus(topic, raw);
+    const change = reading ? cameraStatusChange(reading.camera, reading.health) : null;
+    if (reading && change) {
+      broadcastSSE({ type: change, camera: reading.camera, timestamp: Date.now() });
+    }
     return;
   }
 
@@ -230,19 +242,6 @@ function handleMqttMessage(
   }
 
   if (topic === "frigate/events") {
-    noteFrigateMessage();
-    // WARP-2977 — persist BEFORE the gate, from the raw message. The gate
-    // below drops a second object while one is tracked and anything in the
-    // cooldown, and the `end` of a dropped event then reads as stale: behind
-    // it, the store would lose exactly the busy moments. One row per object,
-    // on `end`; a redelivered `end` is absorbed by the dedupe key.
-    const securityDraft = frigateEndToDraft(data);
-    if (securityDraft) void recordSecurityEvent(prisma, securityDraft);
-    // WARP-2978 PR-D — the same raw message keeps the in-flight map: `new` and
-    // `update` track a person, `end` forgets them. Nothing is written here;
-    // the incident engine writes the one "still in view" row.
-    _inflight.observe(data, new Date());
-
     const after = data.after as Record<string, unknown> | undefined;
     const before = data.before as Record<string, unknown> | undefined;
 
@@ -363,37 +362,14 @@ function handleMqttMessage(
   }
 }
 
-function toDisplayName(name: string): string {
-  return name.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-}
-
-/**
- * The camera's hardware address, or null when camera-discovery only had a
- * placeholder.
- *
- * `_synthetic_lease_records` / the ONVIF branch in
- * `services/camera-discovery/main.py` key a camera by `ip:<addr>` or
- * `onvif_<addr>` when DHCP hasn't produced a real MAC yet. Those tokens are
- * per-IP, not per-device: the same camera carries `ip:192.168.9.219` on one
- * sweep and `e4:30:22:50:2a:fd` on the next. Storing them in `macAddress`
- * made them look like two different cameras to every reader.
- */
-function realMac(mac: unknown): string | null {
-  const m = typeof mac === "string" ? mac.trim().toLowerCase() : "";
-  if (!m || m.startsWith("ip:") || m.startsWith("onvif_")) return null;
-  return m;
-}
-
-/** `camera_<ip>` is `_sanitize_camera_name`'s no-hostname fallback, not a name. */
-function isPlaceholderName(name: string): boolean {
-  return /^camera_\d{1,3}_\d{1,3}_\d{1,3}_\d{1,3}$/.test(name);
-}
-
 async function upsertCameraRecord(
   prisma: PrismaClient,
   camera: Record<string, unknown>
 ): Promise<void> {
-  const name = String(camera.name || "");
+  // The camera's Frigate key. camera-discovery already derives lower-case
+  // [a-z0-9_] names, so this is a no-op for it — but `Camera.name` IS the
+  // Frigate key (WARP-3506), so it is enforced here rather than assumed.
+  const name = toFrigateKey(String(camera.name || ""));
   if (!name) return;
 
   // WARP-1847: a discovery event covers two very different things, and the row
@@ -402,14 +378,16 @@ async function upsertCameraRecord(
   // (`needs_setup`, `pending`) is a candidate still being re-probed every 30 s,
   // and creating it as `enabled: true` (the schema default this code used to
   // inherit) both put an un-streamable camera in the operator's grid and made
-  // the `enabled: false` filter behind GET /cameras/discovered unmatchable.
+  // the candidate list unmatchable.
   //
-  // `enabled` is set on CREATE only. On update it is deliberately left alone:
-  // POST /cameras/:name/disable writes `enabled: false` for a working camera,
-  // and discovery re-publishes that same camera as active every sweep — echoing
-  // status into `enabled` here would silently undo the operator's disable.
-  // Promotion from candidate to camera is the accept path's job.
-  const isAdopted = camera.status === "active";
+  // WARP-3510: that distinction is now an explicit column, `adoption`
+  // (ADOPTED | CANDIDATE), no longer inferred from `enabled`. `enabled` is a
+  // different thing — the operator's detection toggle — and is written on
+  // CREATE only (plus a CANDIDATE's promotion below): POST /cameras/:name/disable
+  // writes `enabled: false` for a working camera, and discovery re-publishes
+  // that same camera as active, so echoing status into `enabled` would silently
+  // undo the operator's disable.
+  const isActive = camera.status === "active";
   const ip = String(camera.ip || "");
   const mac = realMac(camera.mac);
 
@@ -425,93 +403,134 @@ async function upsertCameraRecord(
   // is still a placeholder. `name` stays in the OR so a row this name already
   // owns is found even when its IP moved — without it the create below would
   // hit the unique constraint on `name`.
-  const matches = await prisma.camera.findMany({
-    where: {
-      OR: [
-        ...(mac ? [{ macAddress: { equals: mac, mode: "insensitive" as const } }] : []),
-        ...(ip ? [{ ipAddress: ip }] : []),
-        { name },
-      ],
-    },
-    orderBy: { createdAt: "asc" },
-  });
+  //
+  // Find and write are ONE transaction, and every status check that guards a
+  // write is in that write's own WHERE (not only in the code that read the
+  // row): a row the operator adopts while this merge is in flight must survive.
+  const merged = await prisma.$transaction(async (tx) => {
+    const matches = await tx.camera.findMany({
+      where: {
+        OR: [
+          ...(mac ? [{ macAddress: { equals: mac, mode: "insensitive" as const } }] : []),
+          ...(ip ? [{ ipAddress: ip }] : []),
+          { name },
+        ],
+      },
+      orderBy: { createdAt: "asc" },
+    });
+    const sameDevice = sameDeviceRows(matches, name, mac);
 
-  // An IP match alone is not proof: DHCP recycles addresses. When both sides
-  // carry a real MAC, the MAC is the only thing that decides.
-  const sameDevice = matches.filter((row) => {
-    if (row.name === name) return true;
-    const rowMac = realMac(row.macAddress);
-    if (mac && rowMac) return rowMac === mac;
-    return true;
-  });
+    if (sameDevice.length === 0) {
+      await tx.camera.create({
+        data: {
+          name,
+          displayName: toDisplayName(name),
+          manufacturer: (camera.manufacturer as string) || null,
+          model: (camera.model as string) || null,
+          ipAddress: ip,
+          macAddress: mac,
+          enabled: isActive,
+          autoDiscovered: true,
+          adoption: isActive ? "ADOPTED" : "CANDIDATE",
+          lastSeen: new Date(),
+        },
+      });
+      return { deletedCandidates: 0, kept: name, removed: [] as string[] };
+    }
 
-  if (sameDevice.length === 0) {
-    await prisma.camera.create({
+    // ADOPTED outranks age. The oldest row used to win outright — and the
+    // oldest is usually the discovery placeholder, so when the operator had
+    // added the device by hand (a newer, ADOPTED row with no MAC to match on)
+    // this merge deleted their live camera and pruned it from Frigate, taking
+    // the credentials-bearing stream config with it: the Camera row stores no
+    // RTSP URL. Only CANDIDATE rows are ever victims.
+    const [survivor, ...others] = rankForSurvival(sameDevice);
+    const victims = others.filter((r) => r.adoption === "CANDIDATE");
+    const adoptedOthers = others.filter((r) => r.adoption === "ADOPTED");
+    if (survivor.adoption === "ADOPTED" && adoptedOthers.length > 0) {
+      // Two cameras the operator owns on one device — a second stream profile,
+      // or a double add. Neither is ours to delete, and which one is "the"
+      // camera is the operator's call: leave both, and say so — once per pair
+      // per process, because discovery republishes the device every 30 s.
+      const adopted = [survivor.name, ...adoptedOthers.map((r) => r.name)];
+      const pair = [...adopted].sort().join("|");
+      if (!_warnedSharedDevices.has(pair)) {
+        _warnedSharedDevices.add(pair);
+        logger.warn({ adopted, mac, ip }, "Two adopted camera rows share one device; leaving both");
+      }
+    }
+
+    let deletedCandidates = 0;
+    if (victims.length > 0) {
+      const deleted = await tx.camera.deleteMany({
+        where: { id: { in: victims.map((v) => v.id) }, adoption: "CANDIDATE" },
+      });
+      deletedCandidates = deleted.count;
+    }
+
+    await tx.camera.update({
+      where: { id: survivor.id },
       data: {
-        name,
-        displayName: toDisplayName(name),
-        manufacturer: (camera.manufacturer as string) || null,
-        model: (camera.model as string) || null,
-        ipAddress: ip,
-        macAddress: mac,
-        enabled: isAdopted,
-        autoDiscovered: true,
+        ipAddress: ip || survivor.ipAddress,
+        // Only ever upgrade toward a real MAC — a sweep that lost the DHCP lease
+        // must not wipe the hardware address we already learned.
+        ...(mac ? { macAddress: mac } : {}),
+        manufacturer: (camera.manufacturer as string) || undefined,
+        model: (camera.model as string) || undefined,
         lastSeen: new Date(),
       },
     });
-    cacheDel(CACHE_KEY_CAMERAS);
-    return;
-  }
 
-  // Oldest row wins: it is the one carrying the operator's history — group
-  // membership, retention budget, and the Frigate recordings filed under its
-  // name. Everything newer for the same hardware is a duplicate this function
-  // used to mint.
-  const [survivor, ...duplicates] = sameDevice;
+    // Rename and promotion are for a CANDIDATE survivor only — never an
+    // ADOPTED one, whatever its `enabled` says: Frigate is keyed by the row's
+    // exact name and a reconcile prunes any key no row owns, so renaming an
+    // adopted row deletes the live camera out from under the operator.
+    //
+    // A CANDIDATE takes the discovered name when that is a real hostname — or
+    // when the camera is ACTIVE, because then the name IS the Frigate key
+    // discovery just added, and a row filed under any other name would be
+    // pruned as an orphan. It is skipped if a victim could not be deleted
+    // (it was adopted meanwhile and still holds the name).
+    if (survivor.adoption === "CANDIDATE") {
+      const rename =
+        survivor.name !== name &&
+        (isActive || !isPlaceholderName(name)) &&
+        deletedCandidates === victims.length;
+      if (rename || isActive) {
+        await tx.camera.updateMany({
+          where: { id: survivor.id, adoption: "CANDIDATE" },
+          data: {
+            ...(rename ? { name, displayName: toDisplayName(name) } : {}),
+            // Discovery says it is verified and in Frigate: it is a camera now.
+            ...(isActive ? { adoption: "ADOPTED", enabled: true } : {}),
+          },
+        });
+      }
+    }
 
-  // Frigate is keyed by the camera's exact name and reconcileFrigateCameras()
-  // prunes any Frigate entry missing from this table, so renaming an adopted
-  // row would delete the live camera out from under the operator. Only a row
-  // that was never adopted may take the new name, and only when that name is
-  // an actual hostname rather than the `camera_<ip>` fallback.
-  const rename =
-    !survivor.enabled && survivor.name !== name && !isPlaceholderName(name);
-
-  await prisma.camera.update({
-    where: { id: survivor.id },
-    data: {
-      ...(rename ? { name, displayName: toDisplayName(name) } : {}),
-      ipAddress: ip || survivor.ipAddress,
-      // Only ever upgrade toward a real MAC — a sweep that lost the DHCP lease
-      // must not wipe the hardware address we already learned.
-      ...(mac ? { macAddress: mac } : {}),
-      manufacturer: (camera.manufacturer as string) || undefined,
-      model: (camera.model as string) || undefined,
-      lastSeen: new Date(),
-    },
+    return { deletedCandidates, kept: survivor.name, removed: victims.map((v) => v.name) };
   });
 
-  if (duplicates.length > 0) {
-    await prisma.camera.deleteMany({
-      where: { id: { in: duplicates.map((d) => d.id) } },
-    });
+  cacheDel(CACHE_KEY_CAMERAS);
+
+  if (merged.deletedCandidates > 0) {
     logger.info(
-      { kept: survivor.name, removed: duplicates.map((d) => d.name), mac, ip },
+      { kept: merged.kept, removed: merged.removed, mac, ip },
       "Merged duplicate camera rows for one physical camera"
     );
     // getCameras() re-adds any Frigate camera absent from the DB, so a merge
     // that only touched the DB would see the duplicate reappear as a phantom
     // tile on the next poll. Best-effort: a Frigate that is down just means
-    // the next add/accept/reject/delete reconcile picks this up.
+    // the next add/accept/reject/delete reconcile picks this up. The DB
+    // snapshot is read inside Frigate's config lock, and the prune refuses to
+    // remove any key an ADOPTED row owns (frigate.client.ts), so a merge can
+    // never take a live camera out of Frigate.
     try {
-      const all = await prisma.camera.findMany({ select: { name: true } });
-      await syncCamerasFromDb(all.map((c) => c.name));
+      await syncCamerasFromDb(() => readCameraKeySnapshot(prisma));
     } catch (err) {
       logger.warn({ err }, "Frigate prune after duplicate merge failed (non-fatal)");
     }
   }
-
-  cacheDel(CACHE_KEY_CAMERAS);
 }
 
 // --- SSE subscriptions ---
@@ -548,40 +567,24 @@ export function subscribeCameraEvents(
 // --- Camera listing ---
 
 /**
- * Map a camera's RESOLVED Frigate config into the shape `retainsFootage`
- * expects.
- *
- * Reads the resolved tree deliberately: it is what Frigate will actually
- * enforce, inherited defaults included. The authored config is the right
- * source for WRITES (it round-trips; the resolved tree does not), but the
- * wrong one for asking "what is this camera really doing right now".
- *
- * Note the asymmetry in Frigate 0.17's schema — `continuous` and `motion`
- * carry `days` directly, while `alerts` and `detections` nest theirs under
- * `retain`. Reading the wrong depth yields `undefined`, which coerces to
- * "nothing retained" and would put every healthy camera in the warning
- * state. Hence the explicit reads rather than a generic walk.
+ * Per-call budget for the Frigate reads that only ENRICH the camera list
+ * (storage usage, the newest segment). A slow Frigate must not hold the whole
+ * list — and every tile behind it — for the default ten seconds.
  */
-export function retentionFromFrigateConfig(configEntry: unknown): {
-  enabled?: boolean;
-  continuousDays: number;
-  motionDays: number;
-  alertsRetainDays: number;
-  detectionsRetainDays: number;
-} {
-  const record = ((configEntry as Record<string, unknown> | undefined)?.record ??
-    {}) as Record<string, Record<string, Record<string, unknown>>>;
-  const num = (v: unknown): number => {
-    const n = Number(v ?? 0);
-    return Number.isFinite(n) && n > 0 ? n : 0;
-  };
-  return {
-    enabled: (record as unknown as { enabled?: boolean }).enabled,
-    continuousDays: num(record.continuous?.days),
-    motionDays: num(record.motion?.days),
-    alertsRetainDays: num(record.alerts?.retain?.days),
-    detectionsRetainDays: num(record.detections?.retain?.days),
-  };
+const RECORDING_READ_TIMEOUT_MS = 2000;
+
+/** What `/api/stats` reports per camera; only the two rates read here. */
+type CameraStatsEntry = { camera_fps?: number; detection_fps?: number };
+
+type Read<T> = { ok: true; value: T } | { ok: false; err: unknown };
+
+/** Keep a read's failure instead of throwing it away. */
+async function settle<T>(read: Promise<T>): Promise<Read<T>> {
+  try {
+    return { ok: true, value: await read };
+  } catch (err) {
+    return { ok: false, err };
+  }
 }
 
 export async function getCameras(
@@ -590,40 +593,106 @@ export async function getCameras(
   const cached = await cacheGet<CameraInfo[]>(CACHE_KEY_CAMERAS);
   if (cached) return cached;
 
-  // Fetch from Frigate + DB in parallel
-  const [frigateCameras, frigateConfig, dbCameras] = await Promise.all([
-    fetchCameras().catch(() => ({} as Record<string, unknown>)),
-    fetchConfig().catch(() => ({} as Record<string, unknown>)),
+  // Fetch from Frigate + DB in parallel.
+  //
+  // WARP-3511: a failed Frigate read used to be swallowed into `{}`, which is
+  // indistinguishable from "Frigate sees no cameras" — so an outage (or the
+  // seconds Frigate takes to restart after a settings save) served, and
+  // cached, a healthy-looking list with every camera Offline. The failure is
+  // kept now and said on every camera's `recording.degraded`.
+  const [statsRead, configRead, dbCameras, storageUsage] = await Promise.all([
+    settle(fetchCameras()),
+    settle(fetchConfig()),
     prisma.camera.findMany({ orderBy: { createdAt: "desc" } }),
+    // Enrichment, not a basis for the status: if this fails the usage figures
+    // are unknown, and the list is not degraded for it.
+    fetchRecordingsStorage({ timeoutMs: RECORDING_READ_TIMEOUT_MS }).catch((err) => {
+      logger.warn({ err }, "could not read Frigate storage usage; camera usage is unknown");
+      return null;
+    }),
   ]);
 
-  const configCameras = (frigateConfig as any)?.cameras || {};
+  // Status and the recording block both rest on stats AND config.
+  const degraded = !statsRead.ok || !configRead.ok;
+  if (degraded) {
+    logger.warn(
+      { statsFailed: !statsRead.ok, configFailed: !configRead.ok },
+      "Frigate could not be read; serving a degraded camera list",
+    );
+  }
+
+  const frigateCameras = (statsRead.ok ? statsRead.value : {}) as Record<string, CameraStatsEntry>;
+  const configCameras =
+    ((configRead.ok ? configRead.value : {}) as { cameras?: Record<string, unknown> }).cameras || {};
+  const storageByCamera: Map<string, StorageBytes> = storageUsage
+    ? indexStorageByCamera(storageUsage, configCameras)
+    : new Map();
+
+  // 🔴 Frame rate says the camera is ALIVE. It says nothing about whether
+  // anything is being KEPT — and this used to report "recording" on the
+  // strength of `camera_fps > 0` alone. A camera with every retention
+  // window at zero decodes, detects, and stores nothing, while the badge
+  // told the household their footage was safe (WARP-1974).
+  //
+  // The config entry is exactly what answers the question. When the config
+  // could not be read, retention is UNKNOWN — not "keeps nothing", which
+  // would put a false "not saving" warning on every healthy camera — so the
+  // frame rate alone decides and `recording.degraded` carries the caveat.
+  const retentionOf = (name: string) => retentionFromFrigateConfig(configCameras[name]);
+  const retainingOf = (name: string) => (configRead.ok ? retainsFootage(retentionOf(name)) : true);
+
+  // When did each camera last write? Only cameras Frigate can see and that
+  // keep something can have — a bounded read each, in parallel, and a failed
+  // one leaves that camera's time unknown rather than failing the list.
+  const names = [
+    ...dbCameras.map((c) => c.name),
+    ...Object.keys(frigateCameras).filter((n) => !dbCameras.some((c) => c.name === n)),
+  ];
+  const lastSegmentEnd = new Map<string, number | null>();
+  const lastSegmentReadFailed = new Set<string>();
+  if (!degraded) {
+    await Promise.all(
+      names
+        .filter((n) => frigateCameras[n] && retainingOf(n))
+        .map(async (n) => {
+          lastSegmentEnd.set(
+            n,
+            await fetchLastRecordingEnd(n, { timeoutMs: RECORDING_READ_TIMEOUT_MS }).catch((err) => {
+              logger.debug({ err, camera: n }, "could not read when the camera last saved footage");
+              lastSegmentReadFailed.add(n);
+              return null;
+            }),
+          );
+        }),
+    );
+  }
+
+  const recordingOf = (name: string): CameraRecordingState =>
+    degraded
+      ? degradedRecordingState()
+      : buildRecordingState({
+          retention: retentionOf(name),
+          storage: storageByCamera.get(name),
+          lastSegmentEnd: lastSegmentEnd.get(name) ?? null,
+          lastSegmentReadFailed: lastSegmentReadFailed.has(name),
+        });
+
   const cameras: CameraInfo[] = [];
 
   // Merge Frigate status with DB records
   for (const dbCam of dbCameras) {
-    const frigateStatus = (frigateCameras as any)?.[dbCam.name];
-    const configEntry = configCameras[dbCam.name];
-
-    // 🔴 Frame rate says the camera is ALIVE. It says nothing about whether
-    // anything is being KEPT — and this used to report "recording" on the
-    // strength of `camera_fps > 0` alone. A camera with every retention
-    // window at zero decodes, detects, and stores nothing, while the badge
-    // told the household their footage was safe (WARP-1974).
-    //
-    // `configEntry` was declared here and never read. It is exactly what
-    // answers the question, so it is now the thing that does.
-    const retaining = retainsFootage(retentionFromFrigateConfig(configEntry));
+    const frigateStatus = frigateCameras[dbCam.name];
+    const retaining = retainingOf(dbCam.name);
 
     let status: CameraInfo["status"] = "offline";
     if (frigateStatus) {
-      if (frigateStatus.camera_fps > 0 && !retaining) {
+      if ((frigateStatus.camera_fps ?? 0) > 0 && !retaining) {
         // Healthy stream, nothing retained. Deliberately NOT "recording",
         // and deliberately not "idle" either — the camera is working; it
         // just has nowhere to put anything.
         status = "live";
-      } else if (frigateStatus.detection_fps > 0) status = "detecting";
-      else if (frigateStatus.camera_fps > 0) status = "recording";
+      } else if ((frigateStatus.detection_fps ?? 0) > 0) status = "detecting";
+      else if ((frigateStatus.camera_fps ?? 0) > 0) status = "recording";
       else status = "idle";
     }
 
@@ -639,6 +708,7 @@ export async function getCameras(
       status,
       lastSeen: dbCam.lastSeen.toISOString(),
       lastDetection: null, // Populated lazily
+      recording: recordingOf(dbCam.name),
     });
   }
 
@@ -656,18 +726,21 @@ export async function getCameras(
         autoDiscovered: false,
         // Same rule as above: a live stream with nothing retained is
         // "live", never "recording".
-        status: !((stats as any)?.camera_fps > 0)
+        status: !((stats?.camera_fps ?? 0) > 0)
           ? "idle"
-          : retainsFootage(retentionFromFrigateConfig(configCameras[name]))
+          : retainingOf(name)
             ? "recording"
             : "live",
         lastSeen: new Date().toISOString(),
         lastDetection: null,
+        recording: recordingOf(name),
       });
     }
   }
 
-  await cacheSet(CACHE_KEY_CAMERAS, cameras, CACHE_TTL);
+  // A degraded list is not cached: it heals on the next poll instead of
+  // being served as fact for the TTL (same rule as the empty /system status).
+  if (!degraded) await cacheSet(CACHE_KEY_CAMERAS, cameras, CACHE_TTL);
   return cameras;
 }
 
@@ -739,15 +812,80 @@ export async function getRecentEvents(
 export interface FilteredEventsResult {
   events: EventDetail[];
   nextCursor: number | null;
+  scanLimitReached?: boolean;
+  /** Semantic search filters only its bounded ranked candidate set. */
+  searchLimitReached?: boolean;
+}
+
+export interface CameraEventFilter extends FrigateEventFilter { businessHours?: BusinessHoursFilter }
+export interface CameraReviewFilter extends FrigateReviewFilter { businessHours?: BusinessHoursFilter }
+export interface CameraSearchFilter extends FrigateSearchFilter { businessHours?: BusinessHoursFilter }
+
+type CameraRow = Record<string, unknown>;
+const HOURS_SCAN_BATCH = 1000;
+const HOURS_SCAN_MAX_BATCHES = 5;
+
+/** Filter before paging: a quiet first batch must not conceal older matches.
+ * Continue scanning until a page is filled, the upstream ends, or the bounded
+ * scan budget is reached. The latter returns a resumable cursor explicitly.
+ * Keep equal-time rows together rather than cutting a timestamp boundary. */
+async function cameraRowsWithHours<F extends FrigateEventFilter | FrigateReviewFilter>(
+  filter: F & { businessHours?: BusinessHoursFilter },
+  scope: CameraScope,
+  prisma: PrismaClient | undefined,
+  fetchRows: (filter: F) => Promise<unknown[]>,
+  matches?: (row: CameraRow) => boolean,
+): Promise<{ rows: Array<CameraRow & { outsideBusinessHours: boolean | null }>; nextCursor: number | null; scanLimitReached: boolean }> {
+  const { businessHours, ...upstreamFilter } = filter;
+  const hours = prisma ? await getCameraBusinessHours(prisma) : emptyCameraBusinessHours();
+  const classify = createBusinessHoursClassifier(hours);
+  const cameras = narrowCameraFilter(scope, filter.cameras);
+  if (cameras?.length === 0 || (businessHours && !hours.configured)) {
+    return { rows: [], nextCursor: null, scanLimitReached: false };
+  }
+  const limit = filter.limit ?? 50;
+  const scanning = Boolean(businessHours || matches);
+  const batchLimit = scanning ? HOURS_SCAN_BATCH : limit;
+  const maxBatches = scanning ? HOURS_SCAN_MAX_BATCHES : 1;
+  let before = filter.before;
+  const rows: Array<CameraRow & { outsideBusinessHours: boolean | null }> = [];
+  for (let batch = 0; batch < maxBatches; batch++) {
+    const raw = (await fetchRows({ ...upstreamFilter, cameras, before, limit: batchLimit } as F)) as CameraRow[];
+    // Frigate lists newest first. Sorting also keeps an upstream tie adjacent.
+    raw.sort((a, b) => Number(b.start_time) - Number(a.start_time));
+    let pageBoundary: number | null = null;
+    for (const row of raw) {
+      const start = Number(row.start_time ?? 0);
+      if (pageBoundary !== null && start < pageBoundary) {
+        return { rows, nextCursor: pageBoundary, scanLimitReached: false };
+      }
+      if (!inCameraScope(scope, String(row.camera ?? ""))) continue;
+      if (matches && !matches(row)) continue;
+      const end = row.end_time === null || row.end_time === undefined ? null : Number(row.end_time);
+      const outsideBusinessHours = classify(start, end);
+      if (businessHours && outsideBusinessHours !== (businessHours === "outside")) continue;
+      rows.push({ ...row, outsideBusinessHours });
+      if (rows.length >= limit) pageBoundary = start;
+    }
+    const oldest = raw.length ? Number(raw[raw.length - 1].start_time) : null;
+    if (raw.length < batchLimit) return { rows, nextCursor: null, scanLimitReached: false };
+    if (pageBoundary !== null) return { rows, nextCursor: pageBoundary, scanLimitReached: false };
+    // A non-advancing upstream cannot be scanned indefinitely or truthfully
+    // presented as exhausted. Preserve the last cursor and show the scan cap.
+    if (oldest === null || !Number.isFinite(oldest) || (before !== undefined && oldest >= before)) {
+      return { rows, nextCursor: before ?? oldest, scanLimitReached: true };
+    }
+    before = oldest;
+  }
+  return { rows, nextCursor: before ?? null, scanLimitReached: scanning };
 }
 
 export async function getEventsFiltered(
-  filter: FrigateEventFilter,
+  filter: CameraEventFilter,
   scope: CameraScope,
+  prisma?: PrismaClient,
 ): Promise<FilteredEventsResult> {
-  const limit = filter.limit ?? 50;
-  const cameras = narrowCameraFilter(scope, filter.cameras);
-  const rawEvents = (await fetchEventsFiltered({ ...filter, cameras })) as Array<Record<string, unknown>>;
+  const { rows: rawEvents, nextCursor, scanLimitReached } = await cameraRowsWithHours(filter, scope, prisma, fetchEventsFiltered);
 
   const events: EventDetail[] = rawEvents
     .filter((e) => inCameraScope(scope, String(e.camera ?? "")))
@@ -763,6 +901,7 @@ export async function getEventsFiltered(
       score: Number(e.top_score ?? e.score ?? 0),
       startTime: Number(e.start_time ?? 0),
       endTime: e.end_time !== null && e.end_time !== undefined ? Number(e.end_time) : null,
+      outsideBusinessHours: e.outsideBusinessHours,
       thumbnail: `/api/cameras/events/${encodeURIComponent(id)}/thumbnail`,
       hasClip,
       hasSnapshot,
@@ -794,17 +933,7 @@ export async function getEventsFiltered(
     };
   });
 
-  // If Frigate returned a full page, the next call should fetch events
-  // strictly older than the oldest one we just got. Subtract a tiny
-  // epsilon (1ms in seconds) so we don't double-include the boundary
-  // event — Frigate's `before` is exclusive but only on whole-second
-  // precision, and start_times can collide.
-  const nextCursor =
-    events.length === limit && events.length > 0
-      ? Math.min(...events.map((ev) => ev.startTime))
-      : null;
-
-  return { events, nextCursor };
+  return { events, nextCursor, scanLimitReached };
 }
 
 /**
@@ -825,15 +954,24 @@ export async function setEventRetention(
 export interface FilteredReviewsResult {
   reviews: ReviewItem[];
   nextCursor: number | null;
+  scanLimitReached?: boolean;
 }
 
 export async function getReviewsFiltered(
-  filter: FrigateReviewFilter,
+  filter: CameraReviewFilter,
   scope: CameraScope,
+  prisma?: PrismaClient,
 ): Promise<FilteredReviewsResult> {
-  const limit = filter.limit ?? 50;
-  const cameras = narrowCameraFilter(scope, filter.cameras);
-  const raw = (await fetchReviews({ ...filter, cameras })) as Array<Record<string, unknown>>;
+  // Frigate 0.17.1 accepts one severity enum, not a comma-separated set.
+  // Multiple severities must be filtered before page assembly; filtering only
+  // the first upstream page would conceal older motion-only activity.
+  const severities = [...new Set(filter.severity ?? [])];
+  const multiple = severities.length > 1;
+  const { rows: raw, nextCursor, scanLimitReached } = await cameraRowsWithHours(
+    multiple ? { ...filter, severity: undefined } : filter,
+    scope, prisma, fetchReviews,
+    multiple ? (row) => severities.includes(String(row.severity)) : undefined,
+  );
 
   const reviews: ReviewItem[] = raw
     .filter((r) => inCameraScope(scope, String(r.camera ?? "")))
@@ -875,19 +1013,17 @@ export async function getReviewsFiltered(
       audio,
       zones,
       detectionIds,
-      // Frigate serves preview clips at /api/review/<id>/preview.{mp4,gif}.
-      // We proxy through the orchestrator so camera/file URLs stay LAN-side.
+      outsideBusinessHours: r.outsideBusinessHours,
+      // Frigate serves the preview clip at /api/review/<id>/preview?format=mp4|gif
+      // and the thumbnail as the /clips/review/ file named by the review's
+      // thumb_path (WARP-3509). We proxy both through the orchestrator so
+      // camera/file URLs stay LAN-side.
       previewUrl: `/api/cameras/reviews/${encodeURIComponent(id)}/preview`,
       thumbnailUrl: `/api/cameras/reviews/${encodeURIComponent(id)}/thumbnail`,
     };
   });
 
-  const nextCursor =
-    reviews.length === limit && reviews.length > 0
-      ? Math.min(...reviews.map((rv) => rv.startTime))
-      : null;
-
-  return { reviews, nextCursor };
+  return { reviews, nextCursor, scanLimitReached };
 }
 
 export async function setReviewViewed(reviewId: string): Promise<void> {
@@ -909,12 +1045,18 @@ export async function setReviewViewed(reviewId: string): Promise<void> {
  * the route translates to 503 + a hint for the operator.
  */
 export async function searchEventsSemanticTyped(
-  filter: FrigateSearchFilter,
+  filter: CameraSearchFilter,
   scope: CameraScope,
+  prisma?: PrismaClient,
 ): Promise<FilteredEventsResult> {
   const limit = filter.limit ?? 50;
+  const { businessHours, ...upstreamFilter } = filter;
+  const hours = prisma ? await getCameraBusinessHours(prisma) : emptyCameraBusinessHours();
+  const classify = createBusinessHoursClassifier(hours);
   const cameras = narrowCameraFilter(scope, filter.cameras);
-  const raw = (await searchEventsSemantic({ ...filter, cameras })) as Array<Record<string, unknown>>;
+  if (cameras?.length === 0 || (businessHours && !hours.configured)) return { events: [], nextCursor: null };
+  const searchLimit = businessHours ? HOURS_SCAN_BATCH : limit;
+  const raw = (await searchEventsSemantic({ ...upstreamFilter, cameras, limit: searchLimit })) as Array<Record<string, unknown>>;
   const events: EventDetail[] = raw
     .filter((e) => inCameraScope(scope, String(e.camera ?? "")))
     .map((e) => {
@@ -929,6 +1071,8 @@ export async function searchEventsSemanticTyped(
       score: Number(e.top_score ?? e.score ?? 0),
       startTime: Number(e.start_time ?? 0),
       endTime: e.end_time !== null && e.end_time !== undefined ? Number(e.end_time) : null,
+      outsideBusinessHours: classify(Number(e.start_time ?? 0),
+        e.end_time !== null && e.end_time !== undefined ? Number(e.end_time) : null),
       thumbnail: `/api/cameras/events/${encodeURIComponent(id)}/thumbnail`,
       hasClip,
       hasSnapshot,
@@ -963,11 +1107,11 @@ export async function searchEventsSemanticTyped(
   // start_time-based cursor we use for /events doesn't apply here.
   // We just return the page; if the operator wants more, they'll
   // narrow the query.
-  const nextCursor =
-    events.length === limit && events.length > 0
-      ? Math.min(...events.map((ev) => ev.startTime))
-      : null;
-  return { events, nextCursor };
+  const matching = businessHours
+    ? events.filter((event) => event.outsideBusinessHours === (businessHours === "outside"))
+    : events;
+  return { events: matching.slice(0, limit), nextCursor: null,
+    searchLimitReached: raw.length === searchLimit || matching.length > limit };
 }
 
 // --- Recordings + timeline ---

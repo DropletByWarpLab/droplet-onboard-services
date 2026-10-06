@@ -12,9 +12,8 @@ const PAGES: DashboardPage[] = [
   { href: "/files", label: "Files", section: "Work" },
   { href: "/files/trash", label: "Trash", section: "Work › Files", keywords: ["deleted"] },
   { href: "/calendar", label: "Calendar", section: "Work" },
-  { href: "/security", label: "Security", section: "Systems" },
-  { href: "/security/settings", label: "Opening hours", section: "Systems › Security" },
   { href: "/network", label: "Network", section: "Systems", keywords: ["wifi", "internet", "router"] },
+  { href: "/network/settings", label: "Open ports", section: "Systems › Network" },
   { href: "/voice", label: "Voice", section: "Systems › Network", keywords: ["microphone", "wake word"] },
   { href: "/settings", label: "Settings", section: "Admin" },
   {
@@ -53,9 +52,9 @@ describe("resolveDashboardPage", () => {
   });
 
   it("takes an exact path or an exact label outright", () => {
-    expect(resolveDashboardPage(PAGES, "/security/settings")).toMatchObject({
+    expect(resolveDashboardPage(PAGES, "/network/settings")).toMatchObject({
       kind: "match",
-      page: { href: "/security/settings" },
+      page: { href: "/network/settings" },
     });
     expect(resolveDashboardPage(PAGES, "/files/trash/")).toMatchObject({
       kind: "match",
@@ -86,13 +85,13 @@ describe("resolveDashboardPage", () => {
 
   it("reports a near tie as ambiguous instead of picking one", () => {
     const pages: DashboardPage[] = [
-      { href: "/security/zones", label: "Areas", section: "Systems › Security" },
-      { href: "/security/patterns", label: "Patterns", section: "Systems › Security" },
+      { href: "/files/recents", label: "Recent", section: "Work › Files" },
+      { href: "/files/shared", label: "Shared", section: "Work › Files" },
     ];
-    const r = resolveDashboardPage(pages, "security");
+    const r = resolveDashboardPage(pages, "files");
     expect(r.kind).toBe("ambiguous");
     if (r.kind === "ambiguous") {
-      expect(hrefs(r.candidates).sort()).toEqual(["/security/patterns", "/security/zones"]);
+      expect(hrefs(r.candidates).sort()).toEqual(["/files/recents", "/files/shared"]);
     }
   });
 
@@ -103,8 +102,8 @@ describe("resolveDashboardPage", () => {
 
   // "take me to it" names no page: the model has to resolve "it" from the
   // conversation. Real copy is full of filler — the Assistant blurb below is
-  // nav-config's, and "open" prefix-matches "Opening hours" — so matching on
-  // it would move the person somewhere they never named.
+  // nav-config's, and "open" is a word of the "Open ports" label — so matching
+  // on it would move the person somewhere they never named.
   it.each(["it", "take me to it", "it please", "open it", "the page", "show me that"])(
     "reports nothing for %j, which is filler alone",
     (reference) => {
@@ -132,8 +131,8 @@ describe("findDashboardPages", () => {
   });
 
   it("is deterministic", () => {
-    const a = findDashboardPages(PAGES, "security settings", 5);
-    const b = findDashboardPages(PAGES, "security settings", 5);
+    const a = findDashboardPages(PAGES, "network settings", 5);
+    const b = findDashboardPages(PAGES, "network settings", 5);
     expect(hrefs(a)).toEqual(hrefs(b));
   });
 });

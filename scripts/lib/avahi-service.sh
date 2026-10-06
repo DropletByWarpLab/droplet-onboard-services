@@ -12,7 +12,7 @@
 #                              windows lan_discovery.rs, then iOS/Android):
 #                              a type, not a display string, with two TXT
 #                              hints:
-#                                fqdn=<DROPLET_PUBLIC_FQDN or empty>
+#                                fqdn=<DROPLET_LAN_HOSTNAME or empty>
 #                                state=<bootstrap|issued>
 #
 # THE TXT RECORDS ARE UNAUTHENTICATED AND STAY HINTS. mDNS is whatever the
@@ -79,18 +79,19 @@ avahi_tls_state() {
   fi
 }
 
-# avahi_public_fqdn — DROPLET_PUBLIC_FQDN from the environment, else from
+# avahi_internal_hostname — DROPLET_LAN_HOSTNAME from the environment, else from
 # $REPO_ROOT/.env (the tls-reload host wrapper has REPO_ROOT but not the
 # sourced .env). Validated as a plain RFC-1123 name with [[ =~ ]] (whole-
 # string, newline-safe — the same reasoning as local-dns.sh::_valid_hostname);
 # anything else renders as empty rather than as a TXT record of junk.
-avahi_public_fqdn() {
-  local fqdn="${DROPLET_PUBLIC_FQDN:-}"
+avahi_internal_hostname() {
+  local fqdn="${DROPLET_LAN_HOSTNAME:-}"
   if [ -z "$fqdn" ] && [ -n "${REPO_ROOT:-}" ] && [ -f "$REPO_ROOT/.env" ]; then
-    fqdn="$(grep -E '^DROPLET_PUBLIC_FQDN=' "$REPO_ROOT/.env" 2>/dev/null | tail -n1 | cut -d= -f2-)"
+    fqdn="$(grep -E '^DROPLET_LAN_HOSTNAME=' "$REPO_ROOT/.env" 2>/dev/null | tail -n1 | cut -d= -f2-)"
     fqdn="${fqdn%\"}"; fqdn="${fqdn#\"}"
     fqdn="${fqdn%\'}"; fqdn="${fqdn#\'}"
   fi
+  [ -n "$fqdn" ] || fqdn="droplet-ai.lan"
   if [[ "$fqdn" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$ ]]; then
     printf '%s' "$fqdn"
   else
@@ -166,7 +167,7 @@ write_avahi_service_file() {
   local cert_file="${1:-${REPO_ROOT:-}/docker/certs/droplet.crt}"
   local target="${AVAHI_SERVICE_DIR}/${AVAHI_SERVICE_FILE}"
   local rendered
-  rendered="$(avahi_service_xml "$(avahi_public_fqdn)" "$(avahi_tls_state "$cert_file")")"
+  rendered="$(avahi_service_xml "$(avahi_internal_hostname)" "$(avahi_tls_state "$cert_file")")"
   if [ -f "$target" ] && [ "$(cat "$target" 2>/dev/null)" = "$rendered" ]; then
     return 0
   fi

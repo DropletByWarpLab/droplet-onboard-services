@@ -1,6 +1,6 @@
 """Wake-detection + STT pipeline — background thread that streams mic
 audio into a wake-word detector, then on detection streams the next
-few seconds to a Wyoming-protocol Whisper sidecar and emits a
+utterance to a Wyoming-protocol STT sidecar and emits a
 transcript.
 
 Architecture:
@@ -19,8 +19,8 @@ Architecture:
       │                       (opens Wyoming session, starts streaming)
       │
       ├─ state=transcribing  → send each frame as Wyoming audio-chunk
-      │                       → after STT_MAX_RECORD_S, send audio-stop
-      │                       → block briefly for transcript event
+      │                       → on end-of-speech or STT_MAX_RECORD_S,
+      │                         send audio-stop and await transcript
       │                       → state=transcript_ready
       │
       └─ state=transcript_ready → ignore until visual-decay; status()
@@ -29,9 +29,9 @@ Architecture:
                                   WAKE_VISUAL_DECAY_S.
 
 Single thread. The Wyoming `finish()` call blocks for the final
-transcript event (typically <1 s for small.en on CPU); during that
+transcript event (bounded by the STT client's CPU inference budget); during that
 window the mic stream isn't being drained and may overflow into a
-log line, which is harmless and brief. We don't bridge to asyncio
+log line. We don't bridge to asyncio
 because the wake loop is already a blocking thread and the gain
 isn't worth the threading-model complication. The one exception is a
 spoken reply: while it plays on this thread, a short-lived per-turn
@@ -45,7 +45,7 @@ we'd fire 10+ WakeEvents back-to-back. `WAKE_DEBOUNCE_S` enforces a
 minimum gap between events — defaults to 2 s. Once we transition into
 transcribing, the wake detector is paused entirely, so debounce only
 matters for the wake→wake re-fire window (which becomes very rare in
-practice since the STT capture takes 5 s).
+practice since wake detection pauses for the captured utterance).
 
 Status:
   state ∈ {idle, loading, listening, wake_detected, transcribing,
@@ -113,6 +113,16 @@ class _DeviceError(Exception):
     and caught by the supervising loop, which re-resolves + reopens. Kept
     private — callers see the public state machine (state='no_mic' while
     recovering), never this type."""
+
+
+class _ReopenRequested(_DeviceError):
+    """WARP-3710 — raised out of a healthy capture session when something
+    asked for the input to be re-enumerated + reopened in-process (the
+    flatline self-heal on a non-XVF device, a hot-plug rescan, or an
+    operator's POST /voice/mic/restart). A subclass of `_DeviceError` so
+    any code that treats a device error as "close the stream" stays true,
+    but the supervisor handles it WITHOUT the no_mic backoff: nothing is
+    broken, the stream is being swapped on purpose."""
 
 
 class DspRestartSkipped(Exception):
@@ -273,21 +283,33 @@ def transcript_is_actionable(transcript: str) -> bool:
     """
     return bool(re.search(r"[a-zA-Z]{3,}", transcript or ""))
 
+
+def strip_wake_prefix(transcript: str, wake_words: str) -> str:
+    """Remove one configured wake address at the start of a transcript.
+
+    Capture can include the wake phrase's tail. Keep mentions inside the
+    actual command and words that only begin with the configured phrase.
+    """
+    phrases = [spec.replace("_", " ").strip() for spec in wake_words.split(",")]
+    for phrase in sorted(phrases, key=len, reverse=True):
+        if not phrase:
+            continue
+        pattern = r"^\s*" + r"\s+".join(re.escape(word) for word in phrase.split())
+        pattern += r"(?=$|[\s,.:;!?])[\s,.:;!?]*"
+        match = re.match(pattern, transcript, re.IGNORECASE)
+        if match:
+            return transcript[match.end():].strip()
+    return transcript
+
 # Default tuning. Overridable via env at construct time (read by
 # main.py's wiring, not by this module directly).
 DEFAULT_THRESHOLD = 0.3
 DEFAULT_DEBOUNCE_S = 2.0
 DEFAULT_VISUAL_DECAY_S = 2.0
-DEFAULT_STT_MAX_RECORD_S = 5.0  # hard cap on captured audio per wake. The
-                                # end-of-speech VAD cuts sooner when the room
-                                # goes quiet; this cap guarantees the capture
-                                # always stops (e.g. in a room with continuous
-                                # background audio where no silence is ever
-                                # detected). WARP-1434: this 5.0 is the SINGLE
-                                # source of truth — compose, the README, and
-                                # the overview doc all ship 5.0 and the box
-                                # runs 5.0; the old 3.0 code default was drift.
-                                # Overridable via STT_MAX_RECORD_S.
+# End-of-speech VAD finishes ordinary commands sooner. The hard cap allows
+# longer requests and still bounds noisy-room captures. STT_MAX_RECORD_S
+# overrides this default in main.py.
+DEFAULT_STT_MAX_RECORD_S = 30.0
 DEFAULT_UPSTREAM_PROBE_INTERVAL_S = 30.0  # how often to re-probe STT/TTS/LLM
 # Calibration mode (WARP-1059, from WARP-1055 review F6). While the
 # dashboard wizard measures (noise floor / speech peak / echo / wake
@@ -720,6 +742,23 @@ class _SynthAheadChannel:
             return item
 
 
+def pcm_level_dbfs(pcm: np.ndarray) -> tuple[float, float]:
+    """(rms_dbfs, peak_dbfs) of an int16 buffer, floored at
+    RMS_DBFS_FLOOR for pure digital silence (WARP-3710 mic test)."""
+    if pcm.size == 0:
+        return RMS_DBFS_FLOOR, RMS_DBFS_FLOOR
+    wide = pcm.astype(np.float64)
+    rms = math.sqrt(float(np.mean(wide * wide)))
+    peak = float(np.abs(pcm.astype(np.int32)).max())
+
+    def _db(v: float) -> float:
+        if v <= 0.0:
+            return RMS_DBFS_FLOOR
+        return max(RMS_DBFS_FLOOR, 20.0 * math.log10(v / _INT16_FULL_SCALE))
+
+    return _db(rms), _db(peak)
+
+
 class WakePipeline:
     """Owns the wake-detection background thread + status state.
 
@@ -768,6 +807,9 @@ class WakePipeline:
         dsp_recovery_max_attempts: int = DEFAULT_DSP_RECOVERY_MAX_ATTEMPTS,
         dsp_recovery_cooldown_s: float = DEFAULT_DSP_RECOVERY_COOLDOWN_S,
         volume: Optional[VolumeController] = None,
+        active_device_is_xvf: Optional[Callable[[], bool]] = None,
+        device_fingerprint: Optional[Callable[[], Any]] = None,
+        device_rescan_interval_s: float = 0.0,
     ):
         self._detector = detector
         self._input_device_index = input_device_index
@@ -875,6 +917,7 @@ class WakePipeline:
         # `_probe_lock` is held for the whole of each tick so stop() can
         # wait for an in-flight tick with a bounded budget.
         self._probe_scheduler: Optional[BackgroundScheduler] = None
+        self._rescan_scheduler: Optional[BackgroundScheduler] = None
         self._probe_lock = threading.Lock()
         self._shutdown = threading.Event()
         self._lock = threading.Lock()
@@ -919,6 +962,34 @@ class WakePipeline:
         self._dsp_recovery: str = "nominal"  # nominal | restarting | escalated
         self._dsp_restart_attempts: int = 0
         self._dsp_last_restart_at: Optional[float] = None
+        # WARP-3710 — in-process input self-heal. The `xvf_host` reboot
+        # only means something when the ACTIVE device is an XVF3800: on
+        # the motherboard codec it exits 8 ("could not connect") three
+        # times, latches `wedged_escalated` and asks for a power cycle
+        # that would not have helped. `_active_is_xvf` tells the pipeline
+        # which case it is (None = unknown → the legacy DSP-only path);
+        # when it is NOT an XVF a flatline re-picks the device instead.
+        self._active_is_xvf = active_device_is_xvf
+        # Hot-plug rescan: a cheap ALSA-card fingerprint polled by an
+        # APScheduler job. PortAudio can only be re-enumerated while NO
+        # stream is open (a process-wide terminate/initialize under a live
+        # stream is the WARP-1619 hazard), so a CHANGED fingerprint does
+        # not poll PortAudio — it asks the capture loop to close its
+        # stream, re-init, re-pick and reopen (see `request_reopen`).
+        self._device_fingerprint = device_fingerprint
+        self._device_rescan_interval_s = max(0.0, device_rescan_interval_s)
+        self._last_fingerprint: Any = None
+        self._repick_last_at: Optional[float] = None
+        # Reopen handshake. `_reopen_requested` is read by the capture
+        # loop between frames; `_session_generation` counts successful
+        # stream opens so an API caller can wait for the NEXT one.
+        self._reopen_requested = threading.Event()
+        self._reopen_reason: Optional[str] = None
+        self._reopen_reset_recovery: bool = False
+        self._session_generation: int = 0
+        self._session_cv = threading.Condition(self._lock)
+        # Raw-PCM tap for POST /voice/mic/test (None = not capturing).
+        self._capture_tap: Optional[list[np.ndarray]] = None
         # Calibration mode (WARP-1059) — wall-clock expiry of the
         # wizard's suppression window; None = off. Deliberately
         # in-memory only: a restart must never come back deaf.
@@ -939,6 +1010,7 @@ class WakePipeline:
         # filled by prime_cues on the warm-up thread, read by the synth
         # producer).
         self._cue_cache: dict[str, SynthesizedAudio] = {}
+        self._cue_voice_cache_key: Optional[str] = None
 
         # Whether the STT server is reachable. Probed lazily on first
         # use (start()), cached for the process lifetime. Surfaced via
@@ -1004,6 +1076,7 @@ class WakePipeline:
             )
             sched.start()
             self._probe_scheduler = sched
+        self._start_rescan_job()
 
     def stop(self, timeout: float = 5.0) -> bool:
         """Signal shutdown and join the threads. Idempotent.
@@ -1023,6 +1096,11 @@ class WakePipeline:
         and ``running`` reports the difference.
         """
         self._shutdown.set()
+        rescan = self._rescan_scheduler
+        if rescan is not None:
+            if rescan.running:
+                rescan.shutdown(wait=False)
+            self._rescan_scheduler = None
         t = self._thread
         if t is not None and t.is_alive():
             t.join(timeout=timeout)
@@ -1131,6 +1209,10 @@ class WakePipeline:
                 self._check_flatline_transition()
             except Exception:  # pragma: no cover
                 logger.exception("flatline transition check crashed")
+            try:
+                self._maybe_repick_flatlined_input()
+            except Exception:  # pragma: no cover
+                logger.exception("input re-pick tick crashed")
             try:
                 self._maybe_auto_recover_dsp()
             except Exception:  # pragma: no cover
@@ -1285,6 +1367,13 @@ class WakePipeline:
         """
         if self._dsp_restart is None:
             return
+        if self._active_is_xvf is not None and not self._active_is_xvf():
+            # WARP-3710 - `xvf_host REBOOT 1` can only reach an XVF3800.
+            # Anything else (the onboard codec picked before the USB array
+            # enumerated) is handled by `_maybe_repick_flatlined_input`:
+            # re-pick the device, never burn the bounded DSP budget on a
+            # reboot that exits 8 and latch a power-cycle escalation.
+            return
         flatlined = self.status().input_flatlined
         now = time.time()
         with self._lock:
@@ -1359,6 +1448,243 @@ class WakePipeline:
             )
         except Exception as exc:
             logger.warning("auto DSP restart attempt %d failed: %s", attempt, exc)
+
+    # ──────────────────────────────────────────────────────────────
+    # In-process input self-heal (WARP-3710)
+    # ──────────────────────────────────────────────────────────────
+
+    def request_reopen(self, reason: str, reset_recovery: bool = False) -> int:
+        """Ask the capture loop to close its stream, re-initialise
+        PortAudio, re-pick the best input and reopen - in this process.
+
+        Thread-safe and non-blocking: it only records the request and
+        sets the flag the capture loop polls between frames (~80 ms). The
+        stream is NEVER torn down from the caller's thread, so the
+        process-wide `sd._terminate()` always runs with no stream open.
+        Returns the current session generation; pass it to
+        `wait_for_session` to block until the replacement stream is up.
+        `reset_recovery` clears the wedge latch + attempt counters once
+        the reopen lands (an operator restart, or a flatline re-pick)."""
+        with self._lock:
+            generation = self._session_generation
+            self._reopen_reason = reason
+            self._reopen_reset_recovery = (
+                self._reopen_reset_recovery or reset_recovery
+            )
+            # Keep this under the same lock as the session-ready handshake.
+            # Otherwise a fresh stream can be counted as ready in the small
+            # gap between publishing the request and setting its event.
+            self._reopen_requested.set()
+        return generation
+
+    def _consume_reopen_request(self) -> tuple[str, bool]:
+        with self._lock:
+            reason = self._reopen_reason or "reopen requested"
+            reset = self._reopen_reset_recovery
+            self._reopen_reason = None
+            self._reopen_reset_recovery = False
+            self._reopen_requested.clear()
+        return reason, reset
+
+    def wait_for_session(self, after_generation: int, timeout: float) -> bool:
+        """Block until a capture session newer than `after_generation` is
+        listening. False on timeout or shutdown."""
+        deadline = time.monotonic() + max(0.0, timeout)
+        with self._session_cv:
+            while self._session_generation <= after_generation:
+                if self._shutdown.is_set():
+                    return False
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._session_cv.wait(remaining)
+            return True
+
+    def _reset_recovery_state(self, why: str) -> None:
+        """Back to nominal: clears `wedged_escalated` / the attempt
+        counters (and so `mic_fault`) after a successful re-pick."""
+        with self._lock:
+            had_state = (
+                self._dsp_recovery != "nominal" or self._dsp_restart_attempts
+            )
+            self._dsp_recovery = "nominal"
+            self._dsp_restart_attempts = 0
+            self._dsp_last_restart_at = None
+        if had_state:
+            logger.info(
+                "voice mic fault cleared and DSP restart counters reset (%s)",
+                why,
+            )
+
+    def _maybe_repick_flatlined_input(self) -> None:
+        """A flatlined input on a device that is NOT an XVF3800 is the
+        wrong-device wedge (WARP-3710): the onboard analog codec was picked
+        because the USB array had not enumerated yet, and it is silent.
+        There is no DSP to reboot, so re-run device selection instead -
+        bounded by the same cooldown as the DSP path. No-op when the
+        pipeline doesn't know what the device is (legacy wiring)."""
+        if self._active_is_xvf is None:
+            return
+        if not self.status().input_flatlined:
+            # A healthy stream ends the retry cooldown. A reopen that
+            # found the same silent device must preserve it or the probe
+            # loop would tear down that stream again on every tick.
+            with self._lock:
+                self._repick_last_at = None
+            return
+        if self._active_is_xvf():
+            return  # a real XVF - the DSP path owns this
+        now = time.time()
+        with self._lock:
+            last = self._repick_last_at
+            if last is not None and now - last < self._dsp_recovery_cooldown_s:
+                return
+            self._repick_last_at = now
+        logger.warning(
+            "voice input flatlined on a device that is not an XVF3800 - "
+            "re-running device selection instead of a DSP reboot",
+        )
+        self.request_reopen(
+            "input flatlined on a non-XVF device", reset_recovery=True,
+        )
+
+    def _start_rescan_job(self) -> None:
+        """Hot-plug rescan as an APScheduler interval job (no `while`
+        loop). Needs a fingerprint source and an interval."""
+        if (
+            self._device_fingerprint is None
+            or self._device_rescan_interval_s <= 0
+        ):
+            return
+        try:
+            self._last_fingerprint = self._device_fingerprint()
+        except Exception:  # pragma: no cover - defensive
+            self._last_fingerprint = None
+        sched = BackgroundScheduler(daemon=True)
+        sched.add_job(
+            self._rescan_tick,
+            "interval",
+            seconds=self._device_rescan_interval_s,
+            id="device-rescan",
+            max_instances=1,
+            coalesce=True,
+        )
+        sched.start()
+        self._rescan_scheduler = sched
+
+    def _rescan_tick(self) -> None:
+        """Scheduler job: when the host's audio-card set changed (a USB
+        array enumerated late, or re-enumerated), re-pick. Cheap - one
+        sysfs listing; PortAudio is only re-initialised by the capture
+        loop once its stream is closed."""
+        if self._shutdown.is_set() or self._device_fingerprint is None:
+            return
+        try:
+            fingerprint = self._device_fingerprint()
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("device fingerprint raised", exc_info=True)
+            return
+        if fingerprint is None:
+            return  # sysfs unavailable - can't tell, don't churn
+        if self._last_fingerprint is None:
+            self._last_fingerprint = fingerprint
+            return
+        if fingerprint == self._last_fingerprint:
+            return
+        logger.info(
+            "audio hardware changed (%s -> %s) - rescanning input devices",
+            self._last_fingerprint, fingerprint,
+        )
+        self._last_fingerprint = fingerprint
+        self.request_reopen("audio hardware changed")
+
+    @property
+    def input_device_index(self) -> Optional[int]:
+        return self._input_device_index
+
+    def set_output_device_index(self, index: Optional[int]) -> None:
+        """Follow a re-enumeration on the output side: PortAudio indices
+        shift when cards come and go, and the speaker path would otherwise
+        keep playing to a stale index."""
+        if index is None:
+            return
+        if index != self._output_device_index:
+            logger.info(
+                "wake pipeline: output device index %s -> %s",
+                self._output_device_index, index,
+            )
+        self._output_device_index = index
+
+    @property
+    def flatline_gate_dbfs(self) -> float:
+        """The raw-domain level at/below which a capture counts as
+        digital silence (gain-compensated, same gate as the watchdog)."""
+        return self._flatline_dbfs - 20.0 * math.log10(self._input_gain)
+
+    def capture_input(self, duration_s: float) -> np.ndarray:
+        """Tap `duration_s` of RAW mono 16 kHz int16 off the wake loop's
+        already-open stream (never a second PortAudio stream - the mic is
+        exclusive). Safe while the wake pipeline runs: the loop just
+        copies frames into the tap. Raises MeasurementUnavailable."""
+        with self._lock:
+            if self._capture_tap is not None:
+                raise MeasurementUnavailable(
+                    "A mic test is already in progress - try again in a moment."
+                )
+            if self._state in ("error", "no_mic", "idle"):
+                raise MeasurementUnavailable(
+                    "The microphone isn't capturing right now "
+                    f"(state={self._state}) - no live audio to test."
+                )
+            self._capture_tap = []
+        try:
+            self._shutdown.wait(max(0.0, float(duration_s)))
+        finally:
+            with self._lock:
+                frames = self._capture_tap
+                self._capture_tap = None
+        if not frames:
+            raise MeasurementUnavailable(
+                "No audio arrived during the test window - the microphone "
+                "stopped delivering audio."
+            )
+        pcm = np.concatenate(frames)
+        if pcm.size < 0.5 * duration_s * WAKE_SAMPLE_RATE:
+            raise MeasurementUnavailable(
+                "The microphone delivered only part of the test window."
+            )
+        return pcm
+
+    def play_capture(self, pcm: np.ndarray) -> bool:
+        """Play a captured clip (16 kHz int16 mono) through the output at
+        the current volume, wake detection suppressed while it plays (the
+        speaker bleeding into the mic must not fire the wake word).
+        False when something else is speaking."""
+        from voice.audio_io import play as _play
+        if not self._speak_lock.acquire(blocking=False):
+            return False
+        try:
+            with self._lock:
+                prev_state = self._state
+                if prev_state not in ("error", "no_mic"):
+                    self._state = "speaking"
+            try:
+                out = pcm
+                if self._volume is not None:
+                    gain = self._volume.gain()
+                    if gain <= 0.0:
+                        return True
+                    out = apply_gain(pcm, gain)
+                _play(
+                    out,
+                    samplerate=WAKE_SAMPLE_RATE,
+                    device=self._output_device_index,
+                )
+            finally:
+                self._restore_state_after_speak(prev_state)
+            return True
+        finally:
+            self._speak_lock.release()
 
     # ──────────────────────────────────────────────────────────────
     # Speak — synthesize text + play through the speaker
@@ -1776,7 +2102,11 @@ class WakePipeline:
     def _cue_audio(self, kind: str) -> Optional[SynthesizedAudio]:
         """The cue's PCM — cached, else synthesized now. None when it can't
         be had: a cue is optional and never fails a turn."""
+        voice_key = getattr(self._tts, "voice_cache_key", None)
         with self._lock:
+            if voice_key != self._cue_voice_cache_key:
+                self._cue_cache.clear()
+                self._cue_voice_cache_key = voice_key
             cached = self._cue_cache.get(kind)
         if cached is not None:
             return cached
@@ -1786,6 +2116,7 @@ class WakePipeline:
         text = CUE_PHRASES.get(kind)
         if not text or self._tts is None:
             return None
+        voice_key = getattr(self._tts, "voice_cache_key", None)
         try:
             audio = self._tts.synthesize(text)
         except Exception as exc:  # noqa: BLE001 — a cue is optional
@@ -1793,7 +2124,14 @@ class WakePipeline:
             return None
         if not audio.pcm:
             return None
+        # A settings save may arrive while synthesis is in progress. That
+        # utterance can finish, but its audio must not become the new voice's cue.
+        if voice_key != getattr(self._tts, "voice_cache_key", None):
+            return audio
         with self._lock:
+            if voice_key != self._cue_voice_cache_key:
+                self._cue_cache.clear()
+                self._cue_voice_cache_key = voice_key
             self._cue_cache[kind] = audio
         return audio
 
@@ -2161,6 +2499,30 @@ class WakePipeline:
                 # Clean return == shutdown requested (or scripted EOF in
                 # tests). Nothing to recover; leave the loop.
                 return
+            except _ReopenRequested:
+                if self._shutdown.is_set():
+                    return
+                # WARP-3710 - a deliberate swap, not a fault: the stream
+                # context already closed on the way out, so NOW (and only
+                # now) PortAudio can be re-initialised safely. Re-init,
+                # re-pick (best score wins - voice/devices.py stays
+                # authoritative) and go round again with no backoff.
+                reason, reset_recovery = self._consume_reopen_request()
+                previous = self._input_device_index
+                logger.info(
+                    "wake pipeline: reopening the input in-process (%s)",
+                    reason,
+                )
+                self._set_state("loading")
+                self._refresh_audio_enumeration(sd)
+                self._reresolve_input_device()
+                if reset_recovery or self._input_device_index != previous:
+                    # A fresh device (or an operator's explicit restart)
+                    # voids the old wedge history: clear the latch and the
+                    # attempt counters so mic_fault can read healthy again.
+                    self._reset_recovery_state(reason)
+                backoff = self._recover_backoff_initial_s
+                continue
             except _DeviceError as exc:
                 if self._shutdown.is_set():
                     return
@@ -2168,12 +2530,28 @@ class WakePipeline:
                 self._set_state("no_mic")
                 # Refresh PortAudio's cached device list, then re-resolve
                 # the (possibly shifted) input index BEFORE the next open.
+                previous = self._input_device_index
                 self._refresh_audio_enumeration(sd)
                 self._reresolve_input_device()
+                if self._reopen_requested.is_set():
+                    # An operator can request a restart while the stream
+                    # is already absent. No live session can raise
+                    # _ReopenRequested in that state, so consume the
+                    # request here instead of skipping backoff forever
+                    # with a permanently-set flag.
+                    reason, reset_recovery = self._consume_reopen_request()
+                    if reset_recovery or self._input_device_index != previous:
+                        self._reset_recovery_state(reason)
+                    backoff = self._recover_backoff_initial_s
+                    continue
                 # Bounded, interruptible backoff so a genuinely-absent mic
                 # doesn't hot-loop. Stays in no_mic while waiting; drops
                 # out instantly if stop() fires mid-wait.
-                if self._shutdown.wait(backoff):
+                if not self._reopen_requested.is_set() and self._shutdown.wait(
+                    backoff
+                ):
+                    return
+                if self._shutdown.is_set():
                     return
                 backoff = min(
                     self._recover_backoff_max_s,
@@ -2274,7 +2652,26 @@ class WakePipeline:
             with self._lock:
                 self._audio_watch_started_at = time.time()
             self._set_state("listening")
+            with self._lock:
+                # A mic restart can arrive while the supervisor is retrying
+                # an absent device. Do not tell its waiter that this stream
+                # is ready if it was opened against the pre-restart device
+                # cache and a re-pick is still pending. The context manager
+                # closes this stream before the supervisor re-initializes
+                # PortAudio and resolves the current device list.
+                reopen_pending = self._reopen_requested.is_set()
+                if not reopen_pending:
+                    self._session_generation += 1
+                    self._session_cv.notify_all()
+            if reopen_pending:
+                raise _ReopenRequested(
+                    self._reopen_reason or "reopen requested",
+                )
             while not self._shutdown.is_set():
+                if self._reopen_requested.is_set():
+                    raise _ReopenRequested(
+                        self._reopen_reason or "reopen requested",
+                    )
                 # Tight device-I/O scope: ONLY the read is wrapped, so a
                 # re-enumeration mid-stream becomes a recoverable
                 # _DeviceError. _on_frame() runs outside this scope.
@@ -2465,6 +2862,9 @@ class WakePipeline:
         # collector is swapped in/out under _lock by _start/_finish_measure.
         # Peak costs an extra pass, so it's only computed while collecting.
         # Widen to int32 first: abs(-32768) overflows int16.
+        tap = self._capture_tap
+        if tap is not None:
+            tap.append(frame.copy())
         collector = self._measure_collector
         if collector is not None:
             collector.append(
@@ -2639,6 +3039,9 @@ class WakePipeline:
             scores = self._detector.predict(frame)
         except Exception as exc:
             self._set_error(f"detector.predict raised: {exc}")
+            return
+        if self._detector.load_error:
+            self._set_error(self._detector.load_error)
             return
         if not scores:
             return
@@ -2832,6 +3235,10 @@ class WakePipeline:
             self._abort_transcription(f"finish: {exc}")
             return
         session.close()
+        wake_words = getattr(self._detector, "requested_wake_word", None)
+        transcript = strip_wake_prefix(
+            transcript, wake_words or self._detector.model_name,
+        )
         if self._turn_timing is not None:
             self._turn_timing.transcript_at = time.monotonic()  # WARP-3124
 

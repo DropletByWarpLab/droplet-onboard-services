@@ -16,10 +16,15 @@
  * lines plus one `RESULT <json>` line):
  *   settings --channel <name> [--auto-apply true|false]
  *       saveUpdateAgentSettings — the strict-validated production writer.
- *   check [--releases-url URL] [--expect a,b]
+ *   check [--releases-url URL] [--download-base URL] [--expect a,b]
  *       One poll tick (checkForUpdate). URL defaults to the container's
- *       DROPLET_OTA_RELEASES_URL.
- *   apply-window [--releases-url URL] [--expect a,b]
+ *       DROPLET_OTA_RELEASES_URL — since WARP-3430 the FALLBACK discovery
+ *       path, used only while the box's channel has no signed pointer under
+ *       --download-base (default: the container's DROPLET_OTA_DOWNLOAD_BASE).
+ *   apply-window [--releases-url URL] [--download-base URL] [--expect a,b]
+ *       (--releases-url is accepted for the workflow's sake but UNUSED here
+ *       since WARP-3430: apply downloads the row's assets from
+ *       <download base>/<row tag>/, not from an API.)
  *       One maintenance-window tick (applyWindowTick) over the REAL
  *       compose-over-socket runner. Requires DROPLET_OTA_APPLY_SCRIPT to
  *       be provisioned on the box; refuses loudly otherwise. NOTE: when
@@ -51,11 +56,15 @@ import {
   getUpdateAgentSettings,
   saveUpdateAgentSettings,
 } from "./dist/services/update-agent/settings.js";
+// The orchestrator's own parsed config, so the download base has ONE default
+// (an empty compose value falls back to the canonical publisher there).
+import { config } from "./dist/config.js";
 
 const prisma = new PrismaClient();
 
 const env = {
   releasesUrl: process.env.DROPLET_OTA_RELEASES_URL ?? "",
+  downloadBase: config.DROPLET_OTA_DOWNLOAD_BASE,
   githubToken: process.env.DROPLET_OTA_GITHUB_TOKEN || undefined,
   applyScript: process.env.DROPLET_OTA_APPLY_SCRIPT ?? "",
   composeFile:
@@ -107,6 +116,7 @@ const { values: flags } = parseArgs({
     channel: { type: "string" },
     "auto-apply": { type: "string" },
     "releases-url": { type: "string" },
+    "download-base": { type: "string" },
     "git-sha": { type: "string" },
     expect: { type: "string" },
   },
@@ -134,6 +144,7 @@ try {
       const result = await checkForUpdate({
         prisma,
         releasesLatestUrl: flags["releases-url"] ?? env.releasesUrl,
+        downloadBase: flags["download-base"] ?? env.downloadBase,
         githubToken: env.githubToken,
       });
       emit(result);
@@ -145,7 +156,7 @@ try {
       const result = await applyWindowTick({
         prisma,
         runner: buildRunner(),
-        releasesLatestUrl: flags["releases-url"] ?? env.releasesUrl,
+        downloadBase: flags["download-base"] ?? env.downloadBase,
         githubToken: env.githubToken,
       });
       emit(result);

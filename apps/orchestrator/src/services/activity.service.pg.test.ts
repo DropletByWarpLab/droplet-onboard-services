@@ -27,11 +27,6 @@ import {
 import { createHmacSigner, hashSignature } from "./audit-signing.service.js";
 import { verifyActivityChain } from "./audit-verify.service.js";
 import { _setActivityRecorderForTests, recordActivityInTx } from "./activity.singleton.js";
-import {
-  SecurityAuditUnavailableError,
-  auditSecurityInTx,
-  isSecurityAuditUnavailable,
-} from "./security-audit.js";
 import { READ_COMMITTED_TX } from "../lib/prisma-tx.js";
 
 // The global unit setup (src/__tests__/setup.ts) mocks @prisma/client so
@@ -67,9 +62,12 @@ describe.skipIf(!RUN)(
     });
 
     beforeEach(async () => {
-      await prisma.$executeRawUnsafe(
-        'TRUNCATE TABLE "ActivityRow" RESTART IDENTITY',
-      );
+      // WARP-3628: ActivityRow's trigger refuses TRUNCATE unless the
+      // transaction opens the purge gate (a test-only reset, never app code).
+      await prisma.$transaction([
+        prisma.$executeRawUnsafe("SELECT set_config('droplet.activity_purge', 'on', true)"),
+        prisma.$executeRawUnsafe('TRUNCATE TABLE "ActivityRow" RESTART IDENTITY'),
+      ]);
     });
 
     it("25 concurrent record() calls never fork the chain", async () => {
@@ -234,6 +232,50 @@ describe.skipIf(!RUN)(
       expect(rows[0]!.t).toBe("2026-09-23 12:34:56.789");
     });
 
+    // ── WARP-3628: the table is insert-only at the database ───────────────
+
+    it("UPDATE, DELETE and TRUNCATE on ActivityRow are refused; the purge function still deletes", async () => {
+      const recorder = createActivityRecorder({ prisma, signer });
+      const row = await recorder.record({
+        kind: "system",
+        severity: "info",
+        sourceIcon: "shield",
+        what: "insert-only probe",
+        actor: { type: "system" },
+      });
+      const id = row.id;
+
+      await expect(
+        prisma.$executeRawUnsafe('UPDATE "ActivityRow" SET "what" = \'tampered\' WHERE "id" = $1', id),
+      ).rejects.toThrow(/insert-only/);
+      await expect(
+        prisma.$executeRawUnsafe('DELETE FROM "ActivityRow" WHERE "id" = $1', id),
+      ).rejects.toThrow(/insert-only/);
+      await expect(prisma.activityRow.deleteMany({})).rejects.toThrow(/insert-only/);
+      await expect(
+        prisma.$executeRawUnsafe('TRUNCATE TABLE "ActivityRow"'),
+      ).rejects.toThrow(/insert-only/);
+      expect(await prisma.activityRow.count()).toBe(1);
+
+      // The gate does not leak: after the purge function ran, a plain DELETE is refused again.
+      const res = await prisma.$queryRawUnsafe<Array<{ n: bigint }>>(
+        "SELECT droplet_purge_activity_rows($1::text[]::bigint[]) AS n",
+        [id.toString()],
+      );
+      expect(Number(res[0].n)).toBe(1);
+      expect(await prisma.activityRow.count()).toBe(0);
+      await recorder.record({
+        kind: "system",
+        severity: "info",
+        sourceIcon: "shield",
+        what: "second",
+        actor: { type: "system" },
+      });
+      await expect(
+        prisma.$executeRawUnsafe('DELETE FROM "ActivityRow"'),
+      ).rejects.toThrow(/insert-only/);
+    });
+
     // ── WARP-2977 P2b: the in-transaction append (one code path) ──────────
 
     const AT = new Date("2026-09-24T09:00:00.000Z");
@@ -263,7 +305,11 @@ describe.skipIf(!RUN)(
       // Back to an empty chain by deleting exactly those rows (this file's
       // beforeEach started it empty), never a second TRUNCATE: the in-tx rows
       // then start from the same genesis. Only the ids differ.
-      await prisma.activityRow.deleteMany({ where: { id: { in: viaRecord.map((r) => r.id) } } });
+      // WARP-3628: through the sanctioned purge function; a plain DELETE is refused.
+      await prisma.$queryRawUnsafe(
+        "SELECT droplet_purge_activity_rows($1::text[]::bigint[])",
+        viaRecord.map((r) => r.id.toString()),
+      );
       for (const p of CHAIN) {
         await prisma.$transaction((tx) => appendActivityRowInTx(tx, signer, p));
       }
@@ -331,7 +377,7 @@ describe.skipIf(!RUN)(
       await expect(
         prisma.$transaction(async (tx) => {
           await appendActivityRowInTx(tx, signer, CHAIN[1]!);
-          // The security change after its audit append fails → both roll back.
+          // The change after its audit append fails → both roll back.
           throw new Error("change refused");
         }),
       ).rejects.toThrow("change refused");
@@ -370,7 +416,7 @@ describe.skipIf(!RUN)(
 
     // ── WARP-2977 P2b: the append's preconditions, on the real database ───
     //
-    // A Security write is `CAS on its row → audit LAST`, so the caller's
+    // An audited write is `CAS on its row → audit LAST`, so the caller's
     // transaction has ALWAYS run a statement (taken a snapshot) before it
     // waits for the chain lock. Under READ COMMITTED the tail read after the
     // lock takes a fresh snapshot; under REPEATABLE READ / SERIALIZABLE it
@@ -659,68 +705,28 @@ describe.skipIf(!RUN)(
       expect(await verifyActivityChain(prisma, signer)).toEqual({ ok: true, rowsChecked: 1, brokenAtId: null });
     });
 
-    it("…through Security audits too, and a real tx passed directly still chains linearly", async () => {
-      _setActivityRecorderForTests(createActivityRecorder({ prisma, signer }), signer);
-      try {
-        await createActivityRecorder({ prisma, signer }).record(sys("seed"));
-        const refused = prisma.$transaction(
-          (tx) =>
-            Promise.all(
-              [1, 2, 3].map((i) =>
-                auditSecurityInTx({ $queryRawUnsafe: tx.$queryRawUnsafe.bind(tx), activityRow: tx.activityRow }, USER_REQ, {
-                  action: "zone.update",
-                  what: `w${i}`,
-                }),
-              ),
-            ),
-          READ_COMMITTED_TX,
-        );
-        // A programming error, never AUDIT_UNAVAILABLE.
-        await expect(refused).rejects.toBeInstanceOf(ActivityChainPreconditionError);
-        await expect(refused).rejects.not.toBeInstanceOf(SecurityAuditUnavailableError);
-        await prisma.$transaction(
-          (tx) => Promise.all([1, 2, 3].map((i) => auditSecurityInTx(tx, USER_REQ, { action: "zone.update", what: `d${i}` }))),
-          READ_COMMITTED_TX,
-        );
-        const rows = await stored();
-        expect(rows.map((r) => r.what)).toEqual(["seed", "d1", "d2", "d3"]);
-        linear(rows);
-        expect(await verifyActivityChain(prisma, signer)).toEqual({ ok: true, rowsChecked: 4, brokenAtId: null });
-      } finally {
-        _setActivityRecorderForTests(null, null);
+    it("a COPY of the real tx ({...tx}, Object.assign, {...tx, requestId}) keeps the id but not the methods: refused before any statement — a precondition error, not a retryable one (s0-rereview-3)", async () => {
+      await createActivityRecorder({ prisma, signer }).record(sys("seed"));
+      const copies: Array<[string, (tx: Prisma.TransactionClient) => unknown]> = [
+        ["{...tx}", (tx) => ({ ...tx })],
+        ["Object.assign({}, tx)", (tx) => Object.assign({}, tx)],
+        ["{...tx, requestId}", (tx) => ({ ...tx, requestId: "req-1" })],
+      ];
+      for (const [name, copy] of copies) {
+        const seen: { copy?: Record<symbol, unknown> } = {};
+        const attempt = prisma.$transaction(async (tx) => {
+          seen.copy = copy(tx) as Record<symbol, unknown>;
+          return appendActivityRowInTx(seen.copy as never, signer, sys(`copy ${name}`));
+        }, READ_COMMITTED_TX);
+        await expect(attempt, name).rejects.toBeInstanceOf(ActivityChainPreconditionError);
+        await expect(attempt, name).rejects.toThrow(/transaction client itself/);
+        // The premise, on the real client: the copy DOES carry the id.
+        expect(typeof seen.copy?.[PRISMA_TX_ID], name).toBe("string");
       }
-    });
-
-    it("a COPY of the real tx ({...tx}, Object.assign, {...tx, requestId}) keeps the id but not the methods: refused before any statement — a 500-class precondition, never AUDIT_UNAVAILABLE (s0-rereview-3)", async () => {
-      _setActivityRecorderForTests(createActivityRecorder({ prisma, signer }), signer);
-      try {
-        await createActivityRecorder({ prisma, signer }).record(sys("seed"));
-        const copies: Array<[string, (tx: Prisma.TransactionClient) => unknown]> = [
-          ["{...tx}", (tx) => ({ ...tx })],
-          ["Object.assign({}, tx)", (tx) => Object.assign({}, tx)],
-          ["{...tx, requestId}", (tx) => ({ ...tx, requestId: "req-1" })],
-        ];
-        for (const [name, copy] of copies) {
-          const seen: { copy?: Record<symbol, unknown> } = {};
-          const attempt = prisma.$transaction(async (tx) => {
-            seen.copy = copy(tx) as Record<symbol, unknown>;
-            return auditSecurityInTx(seen.copy as never, USER_REQ, { action: "zone.update", what: `copy ${name}` });
-          }, READ_COMMITTED_TX);
-          await expect(attempt, name).rejects.toBeInstanceOf(ActivityChainPreconditionError);
-          await expect(attempt, name).rejects.not.toBeInstanceOf(SecurityAuditUnavailableError);
-          await expect(attempt, name).rejects.toThrow(/transaction client itself/);
-          const err = await attempt.catch((e: unknown) => e);
-          expect(isSecurityAuditUnavailable(err), name).toBe(false);
-          // The premise, on the real client: the copy DOES carry the id.
-          expect(typeof seen.copy?.[PRISMA_TX_ID], name).toBe("string");
-        }
-        expect((await stored()).map((r) => r.what)).toEqual(["seed"]);
-        expect(await verifyActivityChain(prisma, signer)).toEqual({ ok: true, rowsChecked: 1, brokenAtId: null });
-        const locks = await prisma.$queryRawUnsafe<Array<{ n: bigint }>>("SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory'");
-        expect(Number(locks[0]!.n)).toBe(0);
-      } finally {
-        _setActivityRecorderForTests(null, null);
-      }
+      expect((await stored()).map((r) => r.what)).toEqual(["seed"]);
+      expect(await verifyActivityChain(prisma, signer)).toEqual({ ok: true, rowsChecked: 1, brokenAtId: null });
+      const locks = await prisma.$queryRawUnsafe<Array<{ n: bigint }>>("SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory'");
+      expect(Number(locks[0]!.n)).toBe(0);
     });
 
     it("the queue is keyed on the TRANSACTION, not the object: fresh wrappers that forward the tx's id chain linearly, in call order", async () => {
@@ -756,29 +762,22 @@ describe.skipIf(!RUN)(
     // one tx committed 4 rows with 2 duplicate predecessors, and
     // verifyActivityChain = {ok: false, brokenAtId: '3'} for good.
 
-    const USER_REQ = { user: { id: "11111111-1111-4111-8111-111111111111", role: "owner" } };
-
-    it("Promise.all of three Security audits on one transaction chains linearly, in call order, and verifies", async () => {
-      _setActivityRecorderForTests(createActivityRecorder({ prisma, signer }), signer);
-      try {
-        await createActivityRecorder({ prisma, signer }).record(sys("seed"));
-        await prisma.$transaction(
-          (tx) =>
-            Promise.all([
-              auditSecurityInTx(tx, USER_REQ, { action: "zone.update", what: "p1" }),
-              auditSecurityInTx(tx, USER_REQ, { action: "zone.update", what: "p2" }),
-              auditSecurityInTx(tx, USER_REQ, { action: "zone.update", what: "p3" }),
-            ]),
-          READ_COMMITTED_TX,
-        );
-        const rows = await stored();
-        expect(rows.map((r) => r.what)).toEqual(["seed", "p1", "p2", "p3"]);
-        expect(new Set(rows.map((r) => r.prevSignatureHash)).size).toBe(4);
-        linear(rows);
-        expect(await verifyActivityChain(prisma, signer)).toEqual({ ok: true, rowsChecked: 4, brokenAtId: null });
-      } finally {
-        _setActivityRecorderForTests(null, null);
-      }
+    it("Promise.all of three appends on one transaction chains linearly, in call order, and verifies", async () => {
+      await createActivityRecorder({ prisma, signer }).record(sys("seed"));
+      await prisma.$transaction(
+        (tx) =>
+          Promise.all([
+            appendActivityRowInTx(tx, signer, sys("p1")),
+            appendActivityRowInTx(tx, signer, sys("p2")),
+            appendActivityRowInTx(tx, signer, sys("p3")),
+          ]),
+        READ_COMMITTED_TX,
+      );
+      const rows = await stored();
+      expect(rows.map((r) => r.what)).toEqual(["seed", "p1", "p2", "p3"]);
+      expect(new Set(rows.map((r) => r.prevSignatureHash)).size).toBe(4);
+      linear(rows);
+      expect(await verifyActivityChain(prisma, signer)).toEqual({ ok: true, rowsChecked: 4, brokenAtId: null });
     });
 
     it("a rejected append in the middle does not wedge the next one on the same transaction", async () => {
@@ -836,44 +835,10 @@ describe.skipIf(!RUN)(
       expect(await verifyActivityChain(prisma, signer)).toEqual({ ok: true, rowsChecked: 1, brokenAtId: null });
     });
 
-    it("safe-integer refs round-trip through a Security audit and verify; a 17-digit double is refused by securityRefs before any statement", async () => {
-      _setActivityRecorderForTests(createActivityRecorder({ prisma, signer }), signer);
-      try {
-        const refs = { max: Number.MAX_SAFE_INTEGER, min: Number.MIN_SAFE_INTEGER, zero: 0, negZero: -0, minutes: 90, list: [1, -2, 3] };
-        const row = await prisma.$transaction(
-          (tx) => auditSecurityInTx(tx, USER_REQ, { action: "hours.set", what: "Security: opening hours changed", refs }),
-          READ_COMMITTED_TX,
-        );
-        const back = await prisma.activityRow.findUniqueOrThrow({ where: { id: row.id } });
-        expect(back.refs).toEqual({ ...refs, negZero: 0, surface: "security", action: "hours.set" });
-        // In the table itself, not only through the client.
-        const text = await prisma.$queryRawUnsafe<Array<{ t: string }>>(
-          'SELECT "refs"::text AS t FROM "ActivityRow" ORDER BY "id" DESC LIMIT 1',
-        );
-        expect(text[0]!.t).toContain("9007199254740991");
-        expect(text[0]!.t).toContain("-9007199254740991");
-        expect(await verifyActivityChain(prisma, signer)).toEqual({ ok: true, rowsChecked: 1, brokenAtId: null });
-
-        // securityRefs keeps Security refs to safe integers (minutes, versions,
-        // counts): a fraction is refused as bad input (a 500), never
-        // AUDIT_UNAVAILABLE. (The chain itself stores any finite double exactly
-        // since WARP-3011 — see the float32 cases above.)
-        const bad = prisma.$transaction(
-          (tx) => auditSecurityInTx(tx, USER_REQ, { action: "hours.set", what: "x", refs: { n: 0.1 + 0.2 } }),
-          READ_COMMITTED_TX,
-        );
-        await expect(bad).rejects.toThrow(/at n is not a safe integer/);
-        await expect(bad).rejects.not.toBeInstanceOf(SecurityAuditUnavailableError);
-        expect(await prisma.activityRow.count()).toBe(1);
-      } finally {
-        _setActivityRecorderForTests(null, null);
-      }
-    });
-
     // ── WARP-3011 on the in-transaction path ─────────────────────────────
     //
-    // record() and every in-tx caller (recordActivityInTx, so auditSecurityInTx
-    // and the Security services) share appendActivityRowInTx's one INSERT. A
+    // record() and every in-tx caller (recordActivityInTx) share
+    // appendActivityRowInTx's one INSERT. A
     // float32 value widened to a double — an openWakeWord score — needs 17
     // significant digits; Prisma's Json write kept 16 and broke the chain.
 
@@ -896,7 +861,7 @@ describe.skipIf(!RUN)(
         });
 
         // Straight through appendActivityRowInTx, and through the singleton's
-        // recordActivityInTx (the Security audit path) — one transaction each.
+        // recordActivityInTx — one transaction each.
         const direct = await prisma.$transaction((tx) => appendActivityRowInTx(tx, signer, voice("in-tx", refs)), READ_COMMITTED_TX);
         const viaSingleton = await prisma.$transaction(
           (tx) => recordActivityInTx(tx, voice("in-tx via recordActivityInTx", { score: Math.fround(0.3) })),
@@ -948,60 +913,10 @@ describe.skipIf(!RUN)(
       expect(await verifyActivityChain(prisma, signer)).toEqual({ ok: true, rowsChecked: 1, brokenAtId: null });
     });
 
-    it("a caller transaction that expires waiting for the chain lock is AUDIT_UNAVAILABLE (cause P2028) and writes nothing", async () => {
-      _setActivityRecorderForTests(createActivityRecorder({ prisma, signer }), signer);
-      try {
-        let release!: () => void;
-        const held = new Promise<void>((r) => (release = r));
-        let locked!: () => void;
-        const lockTaken = new Promise<void>((r) => (locked = r));
-        // Holder: appends (takes the chain lock) and keeps its transaction open.
-        const holder = prisma.$transaction(async (tx) => {
-          await appendActivityRowInTx(tx, signer, sys("holder"));
-          locked();
-          await held;
-        }, { ...READ_COMMITTED_TX, timeout: 20_000 });
-        await lockTaken;
-        // Waiter: a Security write whose audit waits on that lock past its timeout.
-        const waiter = prisma.$transaction(
-          (tx) => auditSecurityInTx(tx, { user: { id: "11111111-1111-4111-8111-111111111111", role: "owner" } }, {
-            action: "mode.close",
-            what: "Security: closed up",
-          }),
-          { ...READ_COMMITTED_TX, timeout: 600, maxWait: 5_000 },
-        );
-        // The holder keeps the lock well past the waiter's 600 ms timeout.
-        const releaseTimer = setTimeout(() => release(), 1_500);
-        const err = await waiter.then(
-          () => null,
-          (e: unknown) => e,
-        );
-        clearTimeout(releaseTimer);
-        release();
-        await holder;
-        // Measured on pg16 + Prisma 5.22: the engine expires the transaction
-        // while its lock statement waits; when the lock frees, that statement
-        // fails P2028 ("Transaction already closed … expired transaction"),
-        // which the audit wraps. (Had the append finished just before expiry,
-        // the COMMIT would fail and `$transaction` would reject with a bare
-        // P2028 instead — the next test pins that one.)
-        expect(err).toBeInstanceOf(SecurityAuditUnavailableError);
-        expect(((err as Error).cause as { code?: unknown }).code).toBe("P2028");
-        expect(isSecurityAuditUnavailable(err)).toBe(true);
-        // Let the waiter's backend finish its (rolled-back) statement.
-        await new Promise((r) => setTimeout(r, 300));
-        const rows = await stored();
-        expect(rows.map((r) => r.what)).toEqual(["holder"]);
-        expect((await verifyActivityChain(prisma, signer)).ok).toBe(true);
-      } finally {
-        _setActivityRecorderForTests(null, null);
-      }
-    });
-
-    it("a bare P2028 thrown by $transaction itself is classified AUDIT_UNAVAILABLE too", async () => {
+    it("a bare P2028 thrown by $transaction itself (no free connection within maxWait) writes nothing", async () => {
       // One pooled connection, held by another transaction: the audited write
       // cannot even start within maxWait, and `$transaction` rejects with a
-      // raw PrismaClientKnownRequestError P2028 — outside auditSecurityInTx.
+      // raw PrismaClientKnownRequestError P2028.
       const { PrismaClient: RealPrismaClient } = await vi.importActual<typeof import("@prisma/client")>("@prisma/client");
       const url = new URL(process.env.DATABASE_URL!);
       url.searchParams.set("connection_limit", "1");
@@ -1027,8 +942,6 @@ describe.skipIf(!RUN)(
         release();
         await holder;
         expect((err as { code?: unknown } | null)?.code).toBe("P2028");
-        expect(err).not.toBeInstanceOf(SecurityAuditUnavailableError);
-        expect(isSecurityAuditUnavailable(err)).toBe(true);
         expect(await prisma.activityRow.count()).toBe(0);
       } finally {
         await one.$disconnect();

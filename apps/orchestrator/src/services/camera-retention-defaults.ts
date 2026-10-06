@@ -37,6 +37,8 @@
  * Keep the two in sync — `camera_retention_defaults.py` mirrors this file.
  */
 
+import { CAMERA_RETENTION_DAYS_MAX } from "@droplet/shared-types";
+
 /**
  * Frigate 0.17's `RecordConfig` bounds `pre_capture` and `post_capture`
  * at `le=60`. Verified against the running container's own pydantic model
@@ -53,8 +55,13 @@
  */
 export const MAX_CAPTURE_PADDING_SEC = 60;
 
-/** Frigate rejects retention windows above this; keep the UI in step. */
-export const MAX_RETENTION_DAYS = 90;
+/**
+ * The appliance's cap on every retention window, in days. One number, shared
+ * with the settings validation and the dashboard's sliders
+ * (`@droplet/shared-types`). It is a product limit rather than Frigate's:
+ * Frigate 0.17's config bounds a retention `days` below only (`ge=0`).
+ */
+export const MAX_RETENTION_DAYS = CAMERA_RETENTION_DAYS_MAX;
 
 export interface CameraRetentionDefaults {
   /** Days of 24/7 footage. 0 = don't keep any. */

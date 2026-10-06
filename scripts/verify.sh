@@ -207,9 +207,12 @@ if _docker ps --format '{{.Names}}' 2>/dev/null | grep -q 'voice-io-1$'; then
   check_warn "Voice orchestrator /health" \
     _docker exec droplet-voice-io-1 \
       curl -sf -o /dev/null --max-time 5 $ITLS_CONTAINER_ARGS "$ITLS_SCHEME://localhost:8086/health"
+  # WARP-3625: every route but /health needs the service bearer. It is read
+  # from the container's own environment and handed to curl on stdin (-K -), so
+  # the token never appears on a command line (SEC-DATA-12).
   check_warn "Voice orchestrator /audio/devices" \
-    _docker exec droplet-voice-io-1 \
-      curl -sf -o /dev/null --max-time 5 $ITLS_CONTAINER_ARGS "$ITLS_SCHEME://localhost:8086/audio/devices"
+    _docker exec droplet-voice-io-1 sh -c \
+      'printf "header = \"Authorization: Bearer %s\"\n" "$VOICE_IO_SERVICE_TOKEN" | curl -sf -o /dev/null --max-time 5 -K - '"$ITLS_CONTAINER_ARGS"' "'"$ITLS_SCHEME"'://localhost:8086/audio/devices"'
 fi
 
 # --- Status display service (oled-display) ---
@@ -238,8 +241,43 @@ check ".env exists (chmod 600)" \
 # missing on a started stack, the corresponding container failed to start
 # (Compose errors with "bind source path does not exist"). Re-run:
 #   ./scripts/setup.sh --sync-secrets
-check "Docker secret: openwrt_password" \
-  bash -c '[ -f "'"$REPO_ROOT/docker/secrets/openwrt_password"'" ]' || true
+_openwrt_secret() {
+  [ -s "$REPO_ROOT/docker/secrets/openwrt_password" ] && return 0
+  case "${OPENWRT_HOST:-}" in
+    ''|127.0.0.1|localhost|::1) ;;
+    *) echo "external router $OPENWRT_HOST: paste the router's droplet-ai password into docker/secrets/openwrt_password" ;;
+  esac
+  return 1
+}
+check "Docker secret: openwrt_password" _openwrt_secret || true
+
+# WARP-3835: the secret FILE existing says nothing about whether routing can
+# log in to the router with it (the lab box ran unpaired and setup said "ok").
+# Require routing's own /health to report connected:true; on failure print its
+# `error` field, which names ROUTER_AUTH (wrong password) vs unreachable.
+# Skip under the same ROUTING_MODE guard as lib/local-dns.sh.
+_routing_health() {
+  local url="${ROUTING_SERVICE_URL:-http://localhost:8080}"
+  local -a tls_args=()
+  if [ "$ITLS_SCHEME" = https ]; then
+    url="${url/#http:/https:}"
+    tls_args=(--cacert "$_itls_host_bundle/ca.pem" --cert "$_itls_host_bundle/cert.pem" --key "$_itls_host_bundle/key.pem")
+  fi
+  curl -sf --max-time 5 "${tls_args[@]}" "${url%/}/health"
+}
+_routing_connected() { _routing_health | grep -Eq '"connected" *: *true'; }
+_router_auth() {
+  wait_for "routing router auth" 60 _routing_connected && return 0
+  local body err
+  body="$(_routing_health 2>/dev/null || true)"
+  err="$(printf '%s' "$body" | sed -n 's/.*"error" *: *"\([^"]*\)".*/\1/p')"
+  echo "routing is not connected to the router: ${err:-no /health response from ${ROUTING_SERVICE_URL:-http://localhost:8080}}"
+  return 1
+}
+case "${ROUTING_MODE:-real}" in
+  mock|disabled) ;;
+  *) check "Routing → router auth" _router_auth || true ;;
+esac
 
 check "TLS certificate" \
   bash -c '[ -f "'"$REPO_ROOT/docker/certs/droplet.crt"'" ] && [ -f "'"$REPO_ROOT/docker/certs/droplet.key"'" ]' || true

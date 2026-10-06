@@ -53,7 +53,7 @@ vi.mock("../services/frigate.client.js", () => ({
   fetchKnownPlates: vi.fn(), fetchFaceImage: vi.fn(), deleteKnownFace: vi.fn(),
   deleteFaceImage: vi.fn(), deleteKnownPlate: vi.fn(), nameKnownPlate: vi.fn(),
   regenerateEventDescription: vi.fn(), tagEventAsFace: vi.fn(), openBirdseyeStream: vi.fn(),
-  openMjpegStream: vi.fn(), enableDetection: vi.fn(), disableDetection: vi.fn(),
+  openMjpegStream: vi.fn(),
   deleteCamera: vi.fn(), addCamera: vi.fn(), syncCamerasFromDb: vi.fn().mockResolvedValue([]),
   fetchEvents: vi.fn(), buildRecordingClipUrl: vi.fn(), buildVodMasterUrl: vi.fn(),
   buildVodSegmentUrl: vi.fn(), fetchHlsPlaylist: vi.fn(), fetchPtzCapabilities: vi.fn(),
@@ -161,6 +161,13 @@ describe("POST /api/cameras/clips/share — first (unconfirmed) call", () => {
       .post("/api/cameras/clips/share")
       .send({ nc_path: "/Clips/../../etc/passwd" });
     expect(res.status).toBe(400);
+  });
+
+  it("rejects a path outside the clips folder before minting any token (400)", async () => {
+    for (const nc_path of ["/Documents/payroll.pdf", "/Clipsy/x.mp4", "/Clips"]) {
+      const res = await request(buildApp(owner)).post("/api/cameras/clips/share").send({ nc_path });
+      expect(res.status, nc_path).toBe(400);
+    }
   });
 });
 

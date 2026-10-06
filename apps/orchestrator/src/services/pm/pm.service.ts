@@ -22,8 +22,14 @@
  */
 
 import type { Prisma, PrismaClient } from "@prisma/client";
-import { SERIALIZABLE_TX } from "../../lib/prisma-tx.js";
+import { PM_REACTION_EMOJI } from "@droplet/shared-types";
+import { READ_COMMITTED_TX, SERIALIZABLE_TX } from "../../lib/prisma-tx.js";
 import { sanitizePmHtml } from "./sanitize-html.js";
+import { finishQueuedAttachmentCleanup, queueAttachmentCleanup } from "./pm-attachment-cleanup.js";
+import { PM_PLANNING_ERRORS, lockAttachableCycle } from "./pm-planning.js";
+import { nudgeOutbox } from "./pm-outbox.js";
+import { recordMentions, resolveCommentMentions } from "./pm-mentions.js";
+import { autoWatch } from "./pm-watchers.js";
 import {
   DEPARTMENT_SELECT,
   PM_DEPARTMENT_ERRORS,
@@ -34,6 +40,22 @@ import {
   type DepartmentRefRow,
   type PmDepartmentRef,
 } from "./pm-department.js";
+import { dateToDateOnly, parseDateInput, todayDateOnly } from "./pm-dates.js";
+import {
+  INVALID_CURSOR,
+  ORDER_ACTIVITY,
+  ORDER_ARCHIVED,
+  ORDER_ASSIGNED,
+  ORDER_BOARD,
+  ORDER_COMMENTS,
+  ORDER_SEARCH,
+  clampLimit,
+  decodeCursor,
+  encodeCursor,
+  keysetAfter,
+  sliceToPage,
+  type Page,
+} from "./pm-paging.js";
 
 // ── Stable error codes ────────────────────────────────────────────────────────
 // Shared so catch sites import the same string literals the throw sites emit;
@@ -58,10 +80,36 @@ export const PM_ERRORS = {
    *  A guest is admitted to the ONE work item assigned to them, never to a
    *  project, so "project lead" names a role they cannot hold. */
   LEAD_IS_GUEST: "lead_is_guest",
+  /** WARP-3520 -- archive of an item that already is, and restore of one that is not. */
+  WORK_ITEM_ARCHIVED: "work_item_archived",
+  WORK_ITEM_NOT_ARCHIVED: "work_item_not_archived",
+  /** WARP-3520 -- a new project default must be a state work STARTS in. */
+  STATE_DEFAULT_TERMINAL: "state_default_terminal",
+  /** WARP-3520 -- a reorder that does not list every row exactly once. */
+  INVALID_ORDER: "invalid_order",
+  /** WARP-3371 — a `cursor` this list did not mint. The route answers 400. */
+  INVALID_CURSOR,
+  /** WARP-3370 — hard delete is for an ARCHIVED project only. The route answers 409. */
+  PROJECT_NOT_ARCHIVED: "project_not_archived",
+  /** WARP-3370 — the identifier typed to confirm a hard delete is not the project's. 422. */
+  IDENTIFIER_MISMATCH: "identifier_mismatch",
+  /** WARP-3371 — a re-parent that would make an item its own ancestor. 422. */
+  PARENT_CYCLE: "parent_cycle",
+  /** WARP-3371 — a work item keeps a state; PATCH state_id:null is refused. 422. */
+  STATE_REQUIRED: "state_required",
+  /** WARP-3371 — a label id that is unknown or belongs to another project. 422, with the ids. */
+  INVALID_LABEL: "invalid_label",
+  /** WARP-3371 — an assignee id that is not an active person. 422, with the ids. */
+  INVALID_ASSIGNEE: "invalid_assignee",
   // ADR-045 §5.3 — the department dimension's codes live beside its rules in
   // pm-department.ts and are folded in here so `mapServiceError` keeps ONE
   // vocabulary to switch on.
   ...PM_DEPARTMENT_ERRORS,
+  // WARP-3521 — cycles and modules. Same arrangement: the codes live in the
+  // leaf both the cycle/module services and this file import, and are folded in
+  // here. `cycle_not_found` / `invalid_cycle` / `cycle_completed` are the ones
+  // createWorkItem / updateWorkItem can throw (planning an item into a cycle).
+  ...PM_PLANNING_ERRORS,
 } as const;
 
 // ── Default workspace + state set ────────────────────────────────────────────
@@ -90,7 +138,9 @@ export const DEFAULT_STATES: ReadonlyArray<{
 
 // ── Prisma include shapes + row types ────────────────────────────────────────
 
-const WORK_ITEM_INCLUDE = {
+// Exported for the query API (filter/query.ts), which must return the SAME shape
+// as every other work-item read — one include, one mapper.
+export const WORK_ITEM_INCLUDE = {
   state: true,
   assignees: true,
   labels: { include: { label: true } },
@@ -101,7 +151,13 @@ const WORK_ITEM_INCLUDE = {
   // card. `searchWorkItems` is the one cross-project reader and adds the join
   // itself.
   department: { select: DEPARTMENT_SELECT },
-  _count: { select: { comments: true, children: true } },
+  // WARP-3519: a deleted comment is a tombstone, not a comment — the board's
+  // count must drop when one is deleted.
+  _count: { select: { comments: { where: { isDeleted: false } }, children: true } },
+  // WARP-3520 -- custom-field values travel with the item. One batched query per
+  // list (Prisma resolves a to-many include with a single `IN` lookup), never one
+  // per card.
+  propertyValues: { select: { propertyId: true, value: true } },
 } satisfies Prisma.PmWorkItemInclude;
 
 const PROJECT_INCLUDE = {
@@ -160,6 +216,8 @@ export interface ApiPmSummary {
   itemsOpen: number;
   doneThisWeek: number;
   overdue: number;
+  /** Open items with nobody assigned (ADR-044 follow-up, WARP-3524). */
+  unassigned: number;
 }
 
 type PmStateGroup = StateRow["group"];
@@ -189,6 +247,26 @@ export interface ApiLabel {
   color: string | null;
 }
 
+/** WARP-3520 -- what KIND of work an item is (the Prisma `PmWorkItemType`). */
+export type ApiWorkItemType = WorkItemRow["type"];
+
+/** The six kinds, in the order the dashboard lists them. The routes build their
+ *  zod enum from this list, so the checks below are what stops the route, the
+ *  service and the Prisma enum drifting apart: a new enum value fails to compile
+ *  until it is added here, and a stray entry here fails the `satisfies`. */
+export const WORK_ITEM_TYPES = [
+  "task",
+  "bug",
+  "feature",
+  "improvement",
+  "question",
+  "incident",
+] as const satisfies readonly ApiWorkItemType[];
+const _typesCoverEnum: Exclude<ApiWorkItemType, (typeof WORK_ITEM_TYPES)[number]> extends never
+  ? true
+  : never = true;
+void _typesCoverEnum;
+
 export interface ApiWorkItem {
   id: string;
   projectId: string;
@@ -200,6 +278,17 @@ export interface ApiWorkItem {
   stateId: string | null;
   state: ApiState | null;
   priority: WorkItemRow["priority"];
+  /** WARP-3520 -- the item's kind; `task` unless somebody said otherwise. */
+  type: ApiWorkItemType;
+  /** WARP-3520 -- story points; null means "not estimated" (not 0). */
+  estimate: number | null;
+  /** WARP-3520 -- archived items are hidden from the board and list. */
+  isArchived: boolean;
+  archivedAt: string | null;
+  /** WARP-3520 -- custom-field values keyed by property id, in the type-tagged
+   *  JSON the value was validated into (see pm-properties.service.ts). `{}` when
+   *  the item has none. */
+  properties: Record<string, Prisma.JsonValue>;
   parentId: string | null;
   cycleId: string | null;
   /** ADR-045 §5.3 — the department that owns this item, ALREADY RESOLVED: the
@@ -209,7 +298,9 @@ export interface ApiWorkItem {
   department: PmDepartmentRef | null;
   assignees: string[];
   labels: ApiLabel[];
+  /** WARP-3372 — a CALENDAR DATE, `YYYY-MM-DD`, never an instant (pm-dates.ts). */
   startDate: string | null;
+  /** WARP-3372 — a CALENDAR DATE, `YYYY-MM-DD`, never an instant (pm-dates.ts). */
   dueDate: string | null;
   sortOrder: number;
   completedAt: string | null;
@@ -220,13 +311,31 @@ export interface ApiWorkItem {
   updatedAt: string;
 }
 
+/** One emoji's tally on one comment. `userIds` is in the order people reacted. */
+export interface ApiReaction {
+  emoji: string;
+  count: number;
+  userIds: string[];
+}
+
 export interface ApiComment {
   id: string;
   workItemId: string;
   authorId: string | null;
+  /** Empty for a tombstone — the body of a deleted comment is cleared. */
   commentHtml: string;
   createdAt: string;
   updatedAt: string;
+  /** WARP-3519 — when the AUTHOR last changed the body; null = never edited. */
+  editedAt: string | null;
+  /** WARP-3519 — a deleted comment stays in the thread as a tombstone. */
+  deleted: boolean;
+  deletedAt: string | null;
+  deletedById: string | null;
+  /** User ids @mentioned in the comment (derived server-side, never client-supplied). */
+  mentions: string[];
+  /** Per-emoji tallies, in `PM_REACTION_EMOJI` order, only emoji somebody used. */
+  reactions: ApiReaction[];
 }
 
 // ── Mappers ──────────────────────────────────────────────────────────────────
@@ -273,7 +382,7 @@ function mapLabel(row: LabelRow): ApiLabel {
   return { id: row.id, projectId: row.projectId, name: row.name, color: row.color };
 }
 
-function mapWorkItem(
+export function mapWorkItem(
   row: WorkItemRow,
   identifier: string,
   // ADR-045 §5.3 — the OWNING PROJECT's department, so the override can be
@@ -292,13 +401,23 @@ function mapWorkItem(
     stateId: row.stateId,
     state: row.state ? mapState(row.state) : null,
     priority: row.priority,
+    // WARP-3520 -- the `??` defaults are for the DB-less route suites' Prisma
+    // fake, which never learned these columns (the real columns are NOT NULL /
+    // nullable with the same defaults).
+    type: row.type ?? "task",
+    estimate: row.estimate ?? null,
+    isArchived: row.isArchived ?? false,
+    archivedAt: row.archivedAt ? row.archivedAt.toISOString() : null,
+    properties: Object.fromEntries(
+      (row.propertyValues ?? []).map((v) => [v.propertyId, v.value]),
+    ),
     parentId: row.parentId,
     cycleId: row.cycleId,
     department: resolveDepartmentRef(row.department, projectDepartment),
     assignees: row.assignees.map((a) => a.userId),
     labels: row.labels.map((l) => mapLabel(l.label)),
-    startDate: row.startDate ? row.startDate.toISOString() : null,
-    dueDate: row.dueDate ? row.dueDate.toISOString() : null,
+    startDate: row.startDate ? dateToDateOnly(row.startDate) : null,
+    dueDate: row.dueDate ? dateToDateOnly(row.dueDate) : null,
     sortOrder: row.sortOrder,
     completedAt: row.completedAt ? row.completedAt.toISOString() : null,
     createdById: row.createdById,
@@ -309,7 +428,11 @@ function mapWorkItem(
   };
 }
 
-function mapComment(row: CommentRow): ApiComment {
+function mapComment(
+  row: CommentRow,
+  extras: { mentions?: string[]; reactions?: ApiReaction[] } = {},
+): ApiComment {
+  const deleted = Boolean(row.isDeleted);
   return {
     id: row.id,
     workItemId: row.workItemId,
@@ -317,18 +440,94 @@ function mapComment(row: CommentRow): ApiComment {
     commentHtml: row.commentHtml,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
+    editedAt: row.editedAt ? row.editedAt.toISOString() : null,
+    deleted,
+    deletedAt: row.deletedAt ? row.deletedAt.toISOString() : null,
+    deletedById: row.deletedById ?? null,
+    // A tombstone carries nothing: its mention and reaction rows are removed at
+    // delete time, and a reaction that raced the delete must still not show.
+    mentions: deleted ? [] : (extras.mentions ?? []),
+    reactions: deleted ? [] : (extras.reactions ?? []),
   };
+}
+
+/**
+ * Map comment rows to the wire shape with their mentions and reactions — TWO
+ * queries for the whole set, however many comments (no N+1). Tombstones are
+ * never looked up: they have none.
+ */
+export async function hydrateComments(db: Db, rows: CommentRow[]): Promise<ApiComment[]> {
+  const live = rows.filter((r) => !r.isDeleted).map((r) => r.id);
+  if (live.length === 0) return rows.map((r) => mapComment(r));
+
+  const [reactionRows, mentionRows] = await Promise.all([
+    db.pmCommentReaction.findMany({
+      where: { commentId: { in: live } },
+      orderBy: { createdAt: "asc" },
+      select: { commentId: true, userId: true, emoji: true },
+    }),
+    db.pmCommentMention.findMany({
+      where: { commentId: { in: live } },
+      orderBy: { createdAt: "asc" },
+      select: { commentId: true, userId: true },
+    }),
+  ]);
+
+  const mentionsBy = new Map<string, string[]>();
+  for (const m of mentionRows) {
+    const list = mentionsBy.get(m.commentId) ?? [];
+    list.push(m.userId);
+    mentionsBy.set(m.commentId, list);
+  }
+  const reactionsBy = new Map<string, Map<string, string[]>>();
+  for (const r of reactionRows) {
+    const byEmoji = reactionsBy.get(r.commentId) ?? new Map<string, string[]>();
+    const users = byEmoji.get(r.emoji) ?? [];
+    users.push(r.userId);
+    byEmoji.set(r.emoji, users);
+    reactionsBy.set(r.commentId, byEmoji);
+  }
+
+  return rows.map((row) => {
+    const byEmoji = reactionsBy.get(row.id);
+    // Allowlist order, so the bar never reshuffles between reads; an emoji that
+    // somehow is not on the list (it cannot be written, but a row is a row) is
+    // not shown rather than rendered unvetted.
+    const reactions: ApiReaction[] = byEmoji
+      ? PM_REACTION_EMOJI.flatMap((emoji) => {
+          const userIds = byEmoji.get(emoji);
+          return userIds && userIds.length > 0 ? [{ emoji, count: userIds.length, userIds }] : [];
+        })
+      : [];
+    return mapComment(row, { mentions: mentionsBy.get(row.id) ?? [], reactions });
+  });
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 /** A Prisma client OR an interactive-transaction handle — service helpers that
  *  run inside `$transaction` take this so callers compose them atomically. */
-type Db = PrismaClient | Prisma.TransactionClient;
+export type Db = PrismaClient | Prisma.TransactionClient;
+
+/**
+ * WARP-3528 (ADR-069 §1) — a SERVICE_DESK project, and everything under it
+ * (states, labels, items, comments, activity, relations, assignments), belongs
+ * to /api/support. Every PM reader answers for such a row exactly as it does for
+ * one that does not exist -- same error, same status -- so the `pm` grant is
+ * never a way into a customer conversation.
+ *
+ * Takes the row a lookup already fetched, so the lookup MUST carry `kind`: the
+ * parameter type is the compiler's proof it does (a check on a field the query
+ * did not select would read `undefined` and fail open). The column is NOT NULL,
+ * so only PROJECT and SERVICE_DESK occur.
+ */
+export function isServiceDesk(row: { kind: ProjectRow["kind"] } | null | undefined): boolean {
+  return row?.kind === "SERVICE_DESK";
+}
 
 /** Derive a project key prefix from its name: up to 5 uppercase alphanumerics,
  *  falling back to "PROJ". Caller resolves collisions within the workspace. */
-function deriveIdentifier(name: string): string {
+export function deriveIdentifier(name: string): string {
   const base = name.replace(/[^a-zA-Z0-9]/g, "").toUpperCase().slice(0, 5);
   return base.length > 0 ? base : "PROJ";
 }
@@ -364,30 +563,84 @@ export function isPrismaCode(
   return typeof err === "object" && err !== null && (err as { code?: unknown }).code === code;
 }
 
-async function writeActivity(
-  db: Db,
-  input: {
-    workItemId: string;
-    actorId: string | null;
-    // PmActivity.verb is the PmActivityVerb enum (schema), so type the helper
-    // to the generated enum rather than a bare string — keeps the call sites
-    // honest and satisfies the Prisma create input.
-    verb: Prisma.PmActivityCreateManyInput["verb"];
-    field?: string | null;
-    oldValue?: string | null;
-    newValue?: string | null;
-  },
-): Promise<void> {
-  await db.pmActivity.create({
-    data: {
-      workItemId: input.workItemId,
-      actorId: input.actorId ?? null,
-      verb: input.verb,
-      field: input.field ?? null,
-      oldValue: input.oldValue ?? null,
-      newValue: input.newValue ?? null,
-    },
-  });
+/**
+ * WARP-3527 (ADR-069 WS-11) — what the IMPORT RUNNER supplies on a write, and
+ * nobody else: `services/pm/import/` builds it, the HTTP create/patch routes
+ * never do, so a client cannot forge provenance through them.
+ *
+ * Imports go through `createWorkItem` / `updateWorkItem` and not around them
+ * because everything those two guarantee is the point: the per-project
+ * sequence counter bumped under its row lock, the same-project parent guard,
+ * the isCompleted / completedAt sync, HTML sanitising, and one activity row per
+ * change. What an import adds on top is exactly this:
+ *   - the idempotency key (`externalSystem` + `externalId`, UNIQUE per project),
+ *   - the source's own timestamps, so lead/cycle-time insights are not zero for
+ *     every imported item,
+ *   - the history marker: the `created` row carries `field: "import"` and
+ *     `newValue: "<source>:<jobId>"`, and every activity row an import writes is
+ *     born `not_needed` for the notification sweep. A migration is history, not
+ *     news: without that, 3,000 imported issues would digest-notify every
+ *     assignee on every 60 s tick for as long as the import ran.
+ */
+export interface PmImportedWrite {
+  jobId: string;
+  /** `PmImportSource` — written into the history marker. */
+  source: string;
+  externalSystem: string;
+  externalId: string;
+  /** The source's reporter when it resolves to a user; otherwise the importing user. */
+  createdById?: string | null;
+  createdAt?: Date;
+  updatedAt?: Date;
+  /** Honoured only when the landing state is terminal. */
+  completedAt?: Date | null;
+}
+
+export interface ActivityInput {
+  workItemId: string;
+  actorId: string | null;
+  // PmActivity.verb is the PmActivityVerb enum (schema), so type the helper
+  // to the generated enum rather than a bare string — keeps the call sites
+  // honest and satisfies the Prisma create input.
+  verb: Prisma.PmActivityCreateManyInput["verb"];
+  field?: string | null;
+  oldValue?: string | null;
+  newValue?: string | null;
+  /** WARP-3527: imported history does not produce notifications. */
+  notifyStatus?: Prisma.PmActivityCreateManyInput["notifyStatus"];
+  nudge?: boolean;
+}
+
+function activityData(input: ActivityInput) {
+  return {
+    workItemId: input.workItemId,
+    actorId: input.actorId ?? null,
+    verb: input.verb,
+    field: input.field ?? null,
+    oldValue: input.oldValue ?? null,
+    newValue: input.newValue ?? null,
+    ...(input.notifyStatus ? { notifyStatus: input.notifyStatus } : {}),
+  };
+}
+
+/**
+ * The one way an activity row is written. Exported (WARP-3537) so a writer that
+ * lives in another file — the bulk edit — appends through the same mapper inside
+ * its own transaction instead of growing a second way to shape a row.
+ *
+ * An ARRAY is one INSERT. A 500-item bulk edit writes thousands of rows, and a
+ * round trip per row inside an open transaction is how a batch outlives Prisma's
+ * 5 s transaction budget; one statement is the same rows, the same mapper.
+ */
+export async function writeActivity(db: Db, input: ActivityInput | ActivityInput[]): Promise<void> {
+  if (Array.isArray(input)) {
+    if (input.length > 0) await db.pmActivity.createMany({ data: input.map(activityData) });
+    if (input.some((entry) => entry.nudge !== false)) nudgeOutbox();
+    return;
+  }
+  await db.pmActivity.create({ data: activityData(input) });
+  // WARP-3532 (ADR-069 §7) — defer the outbox wake until the caller's transaction commits.
+  if (input.nudge !== false) nudgeOutbox();
 }
 
 /** Re-fetch a work item with all includes and map it. Throws if it vanished
@@ -401,6 +654,107 @@ async function loadWorkItem(
   const row = await db.pmWorkItem.findUnique({ where: { id }, include: WORK_ITEM_INCLUDE });
   if (!row) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
   return mapWorkItem(row, identifier, projectDepartment);
+}
+
+// ── Reference validation (WARP-3371) ─────────────────────────────────────────
+
+/** A reference id the caller sent that points at nothing usable. `ids` names
+ *  every offender, so the 422 can say WHICH ones, not just that one was wrong. */
+export class PmRefError extends Error {
+  constructor(
+    message: string,
+    readonly ids: string[],
+  ) {
+    super(message);
+    this.name = "PmRefError";
+  }
+}
+
+const uniq = (ids: readonly string[]): string[] => [...new Set(ids)];
+
+/** The roles a person on this box can hold and still be named on, or assigned,
+ *  PM work — everyone but the machines. `listPeople` and assignee validation
+ *  share it: who can be shown is who can be assigned. */
+const PM_PERSON_ROLES = ["owner", "admin", "family", "guest"] as const;
+
+/**
+ * Every label id must EXIST and belong to THIS project. An unknown id used to
+ * pass this check (only the ids that came back were inspected), reach the
+ * insert, trip the foreign key and surface as `invalid_parent` or a 500. Scoping
+ * the lookup to the project makes "unknown" and "another project's" the same
+ * answer — missing — and every offender is named. Duplicates are folded: the
+ * join table is unique per (item, label) and a repeated id would be a P2002.
+ */
+async function assertLabelsInProject(
+  db: Db,
+  projectId: string,
+  labelIds: readonly string[],
+): Promise<string[]> {
+  const wanted = uniq(labelIds);
+  if (wanted.length === 0) return wanted;
+  const found = await db.pmLabel.findMany({
+    where: { id: { in: wanted }, projectId },
+    select: { id: true },
+  });
+  const have = new Set(found.map((l) => l.id));
+  const missing = wanted.filter((id) => !have.has(id));
+  if (missing.length > 0) throw new PmRefError(PM_ERRORS.INVALID_LABEL, missing);
+  return wanted;
+}
+
+/**
+ * Every assignee id must be a person who exists and is ACTIVE (never a service
+ * principal, never someone deactivated). Assignee ids are plain strings, not a
+ * foreign key, so nothing else would notice `"Bob"` or a leaver's id: the item
+ * would carry it and the board would render "Former member" for a person who
+ * was never one.
+ */
+export async function assertAssignable(db: Db, userIds: readonly string[]): Promise<void> {
+  const wanted = uniq(userIds);
+  if (wanted.length === 0) return;
+  const found = await db.user.findMany({
+    where: { id: { in: wanted }, directoryStatus: "ACTIVE", role: { in: [...PM_PERSON_ROLES] } },
+    select: { id: true },
+  });
+  const have = new Set(found.map((u) => u.id));
+  const missing = wanted.filter((id) => !have.has(id));
+  if (missing.length > 0) throw new PmRefError(PM_ERRORS.INVALID_ASSIGNEE, missing);
+}
+
+/** Levels the parent walk climbs before it refuses — the relations BFS's bound
+ *  (RELATION_SCAN_MAX_DEPTH), restated here because pm-relations imports this file. */
+const PARENT_WALK_MAX_DEPTH = 32;
+
+/**
+ * Would making `parentId` the parent of `itemId` close a loop? Walk UP from the
+ * proposed parent: if the chain reaches the item, the item is that parent's
+ * ancestor and the move would make it its own. One query per level, bounded.
+ *
+ * Fails CLOSED: a chain that revisits a node (a loop already in the data — only
+ * self-parenting used to be refused) or is deeper than the bound is refused
+ * rather than extended; walking on could not end, or would only guess.
+ */
+async function assertNoParentCycle(db: Db, itemId: string, parentId: string): Promise<void> {
+  const seen = new Set<string>();
+  let cursor: string | null = parentId;
+  for (let depth = 0; cursor !== null; depth += 1) {
+    if (cursor === itemId || depth >= PARENT_WALK_MAX_DEPTH || seen.has(cursor)) {
+      throw new Error(PM_ERRORS.PARENT_CYCLE);
+    }
+    seen.add(cursor);
+    const row: { parentId: string | null } | null = await db.pmWorkItem.findUnique({
+      where: { id: cursor },
+      select: { parentId: true },
+    });
+    cursor = row?.parentId ?? null;
+  }
+}
+
+/** The SERIALIZABLE loser of a re-parent (P2034): nothing was applied; the
+ *  route answers 409 and the client retries. */
+function rethrowSerializationLoser(err: unknown): never {
+  if (isPrismaCode(err, "P2034")) throw new Error(PM_ERRORS.CONCURRENT_MUTATION);
+  throw err;
 }
 
 // ── Workspaces ───────────────────────────────────────────────────────────────
@@ -426,6 +780,43 @@ export async function getWorkspaceBySlug(prisma: PrismaClient, slug: string): Pr
   return mapWorkspace(row);
 }
 
+// ── People ───────────────────────────────────────────────────────────────────
+
+/** A person a PM id can name — the whole of what Projects needs to render one. */
+export interface ApiPerson {
+  id: string;
+  displayName: string;
+  /** Always null today: the box stores no avatar images. The field is part of
+   *  the contract so a future avatar source needs a server change and nothing
+   *  else; the dashboard draws initials until then. */
+  avatarUrl: string | null;
+}
+
+/**
+ * WARP-3372 — the people a lead, assignee, creator, comment author or activity
+ * actor id can name: every ACTIVE person on the box, owner and admin through
+ * member and external guest (a guest can be assigned an item, WARP-3369).
+ *
+ * Why this exists: the roster the dashboard read for names, GET /auth/users,
+ * is owner/admin-only, so a member saw "User 1a2b" for every colleague. PM is
+ * household-shared — every role that can read the board has to be able to name
+ * the people on it — and this is the minimal projection that lets them: id,
+ * name, avatar. No email, no role, no source, no deletion state.
+ *
+ * Who is NOT here, on purpose: service principals (machines), and anyone
+ * deactivated or on their way out — their ids still sit on old work, and the
+ * dashboard renders an id this list does not know as "Former member" rather
+ * than keep a leaver's name in circulation.
+ */
+export async function listPeople(prisma: PrismaClient): Promise<ApiPerson[]> {
+  const rows = await prisma.user.findMany({
+    where: { directoryStatus: "ACTIVE", role: { in: [...PM_PERSON_ROLES] } },
+    select: { id: true, displayName: true },
+    orderBy: [{ displayName: "asc" }, { id: "asc" }],
+  });
+  return rows.map((r) => ({ id: r.id, displayName: r.displayName, avatarUrl: null }));
+}
+
 // ── Projects ─────────────────────────────────────────────────────────────────
 
 export async function listProjects(
@@ -448,7 +839,8 @@ export async function listProjects(
     departmentId?: string | null;
   } = {},
 ): Promise<ApiProject[]> {
-  const where: Prisma.PmProjectWhereInput = {};
+  // WARP-3528 — projects only; a service desk is listed by /api/support.
+  const where: Prisma.PmProjectWhereInput = { kind: "PROJECT" };
   if (opts.workspaceSlug) where.workspace = { slug: opts.workspaceSlug };
   if (!opts.includeArchived) where.isArchived = false;
   if (opts.departmentId !== undefined) {
@@ -457,8 +849,7 @@ export async function listProjects(
         ? null
         : { in: await expandDepartmentScope(prisma, opts.departmentId) };
   }
-  const take =
-    opts.perPage !== undefined ? Math.max(1, Math.min(200, opts.perPage)) : undefined;
+  const take = opts.perPage !== undefined ? clampLimit(opts.perPage) : undefined;
   const rows = await prisma.pmProject.findMany({
     where,
     include: PROJECT_INCLUDE,
@@ -494,49 +885,49 @@ export async function listProjects(
   return projects;
 }
 
-/** Index KPI strip: active projects, open items, done in the last 7 days, and
- *  overdue (open items past their due date). One scan over the workspace. */
+/** Index KPI strip: active projects, open items, done in the last 7 days,
+ *  overdue (open items past their due date) and unassigned (open items nobody
+ *  owns). Four counts in the database, not a scan of every row in JS — the
+ *  numbers must stay exact however many items the workspace holds.
+ *
+ *  "Open" is the same rule as `listProjects`: a state in backlog / unstarted /
+ *  started, or no state at all (WARP-884 / finding #5). `doneThisWeek` counts
+ *  anything with `isCompleted` — cancelled included — which is what the strip
+ *  has always shown and what finding #6 pinned. `now` is injectable for tests. */
 export async function getSummary(
   prisma: PrismaClient,
   workspaceSlug: string = HOME_WORKSPACE_SLUG,
+  today: string = todayDateOnly(),
+  now: Date = new Date(),
 ): Promise<ApiPmSummary> {
+  const startOfToday = parseDateInput(today);
+  // The route validates `today` at the boundary; a bad value here is a bug in a
+  // caller, not input to guess about.
+  if (!startOfToday) throw new Error("invalid_today");
   const projects = await prisma.pmProject.findMany({
-    where: { workspace: { slug: workspaceSlug }, isArchived: false },
+    where: { workspace: { slug: workspaceSlug }, isArchived: false, kind: "PROJECT" },
     select: { id: true },
   });
   if (projects.length === 0) {
-    return { activeProjects: 0, itemsOpen: 0, doneThisWeek: 0, overdue: 0 };
+    return { activeProjects: 0, itemsOpen: 0, doneThisWeek: 0, overdue: 0, unassigned: 0 };
   }
-  const items = await prisma.pmWorkItem.findMany({
-    where: { projectId: { in: projects.map((p) => p.id) }, isArchived: false },
-    select: {
-      dueDate: true,
-      completedAt: true,
-      isCompleted: true,
-      state: { select: { group: true } },
-    },
-  });
-  const now = new Date();
   const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-  let itemsOpen = 0;
-  let doneThisWeek = 0;
-  let overdue = 0;
-  for (const it of items) {
-    const g = it.state?.group;
-    // Stateless items are uncategorised-but-open (mirrors listProjects bucketing
-    // them as "unstarted"); count them in itemsOpen so the KPI strip isn't
-    // understated, not silently dropped (finding #5).
-    const open = g === undefined || g === "backlog" || g === "unstarted" || g === "started";
-    if (open) {
-      itemsOpen += 1;
-      if (it.dueDate && it.dueDate < now) overdue += 1;
-    }
-    // WARP-884: `isCompleted` is the canonical completion signal — no longer
-    // re-derived from `state.group` combined with a `completedAt` truthy
-    // check (the exact dual-signal split-brain this ticket closes).
-    if (it.isCompleted && it.completedAt && it.completedAt >= weekAgo) doneThisWeek += 1;
-  }
-  return { activeProjects: projects.length, itemsOpen, doneThisWeek, overdue };
+  const inScope: Prisma.PmWorkItemWhereInput = {
+    projectId: { in: projects.map((p) => p.id) },
+    isArchived: false,
+  };
+  const open: Prisma.PmWorkItemWhereInput = {
+    OR: [{ stateId: null }, { state: { group: { in: OPEN_GROUPS } } }],
+  };
+  const [itemsOpen, overdue, doneThisWeek, unassigned] = await Promise.all([
+    prisma.pmWorkItem.count({ where: { ...inScope, ...open } }),
+    prisma.pmWorkItem.count({ where: { ...inScope, ...open, dueDate: { lt: startOfToday } } }),
+    // WARP-884: `isCompleted` is the canonical completion signal — not
+    // re-derived from `state.group` plus a `completedAt` check.
+    prisma.pmWorkItem.count({ where: { ...inScope, isCompleted: true, completedAt: { gte: weekAgo } } }),
+    prisma.pmWorkItem.count({ where: { ...inScope, ...open, assignees: { none: {} } } }),
+  ]);
+  return { activeProjects: projects.length, itemsOpen, doneThisWeek, overdue, unassigned };
 }
 
 export async function getProject(prisma: PrismaClient, projectId: string): Promise<ApiProject> {
@@ -544,7 +935,7 @@ export async function getProject(prisma: PrismaClient, projectId: string): Promi
     where: { id: projectId },
     include: PROJECT_INCLUDE,
   });
-  if (!row) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
+  if (!row || isServiceDesk(row)) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
   return mapProject(row);
 }
 
@@ -709,11 +1100,10 @@ export async function updateProject(
      * what a person may do.
      */
     companyId?: string | null;
-    archived?: boolean;
   },
 ): Promise<ApiProject> {
   const existing = await prisma.pmProject.findUnique({ where: { id: projectId } });
-  if (!existing) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
+  if (!existing || isServiceDesk(existing)) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
   const data: Prisma.PmProjectUpdateInput = {};
   if (fields.name !== undefined) data.name = fields.name;
   if (fields.description !== undefined) data.description = fields.description;
@@ -754,12 +1144,9 @@ export async function updateProject(
       ? { connect: { id: fields.companyId } }
       : { disconnect: true };
   }
-  if (fields.archived !== undefined) {
-    // isArchived is the canonical signal (WARP-884); archivedAt stays the
-    // audit timestamp, written/cleared alongside it so the two never diverge.
-    data.isArchived = fields.archived;
-    data.archivedAt = fields.archived ? new Date() : null;
-  }
+  // WARP-3370 — archive / restore is NOT a field of this update any more: it has
+  // its own function (`setProjectArchived`) because a change of that kind has to
+  // say whether it actually moved the project, so the caller can audit it.
   // Same FK race as `createProject`: the existence check above and this write
   // are two round-trips, and the customer can vanish in between.
   let updated;
@@ -776,23 +1163,144 @@ export async function updateProject(
   return mapProject(updated);
 }
 
-export async function deleteProject(prisma: PrismaClient, projectId: string): Promise<void> {
-  const existing = await prisma.pmProject.findUnique({ where: { id: projectId } });
-  if (!existing) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
+/**
+ * WARP-3370 — archive or restore a project.
+ *
+ * Archiving is the reversible half of "delete project": the project leaves the
+ * index (behind its Archived filter), its work items stay where they are, and
+ * restoring puts it back. `isArchived` is the canonical signal (WARP-884);
+ * `archivedAt` is its audit timestamp, written and cleared with it so the two
+ * never diverge.
+ *
+ * The write is a compare-and-set on the CURRENT value, so two concurrent
+ * requests move the project once, and `changed` tells the caller whether THIS
+ * call was the one that did — the route audits a transition, never a no-op
+ * repeat. Asking for the state a project is already in is not an error.
+ */
+export async function setProjectArchived(
+  prisma: PrismaClient,
+  projectId: string,
+  archived: boolean,
+): Promise<{ project: ApiProject; changed: boolean }> {
+  const moved = await prisma.pmProject.updateMany({
+    where: { id: projectId, kind: "PROJECT", isArchived: !archived },
+    data: { isArchived: archived, archivedAt: archived ? new Date() : null },
+  });
+  // Also the existence check: a project that is not there is a 404 either way.
+  const project = await getProject(prisma, projectId);
+  return { project, changed: moved.count === 1 };
+}
+
+/** What the audit row for a hard delete is told about the project that is going. */
+export interface DeletedProjectInfo {
+  id: string;
+  name: string;
+  identifier: string;
+  /** How many work items went with it — the number an audit reader needs. */
+  workItemCount: number;
+}
+
+/** A project with thousands of items cascades through several tables; the
+ *  interactive-transaction default of 5s is not a bound this delete can promise. */
+const DELETE_TX_TIMEOUT_MS = 60_000;
+
+/**
+ * WARP-3370 — delete a project, its work items and everything under them, for
+ * good. Three conditions, each its own refusal, checked in this order:
+ *
+ *   1. the project is ARCHIVED (`project_not_archived`, 409) — archiving is the
+ *      step that makes a deletion deliberate, and until then nothing here runs;
+ *   2. the caller typed the project's identifier (`identifier_mismatch`, 422) —
+ *      the route also pins who may ask (owner / admin only);
+ *   3. the project is still archived when the delete lands. The delete is a
+ *      compare-and-set on `isArchived: true`, so a restore that wins the race
+ *      cancels it (409) instead of being cascaded away.
+ *
+ * `audit` appends the ActivityRow INSIDE the delete's transaction
+ * (`recordActivityInTx`): a project is never destroyed without its audit row,
+ * because the row and the delete commit together — and if the row cannot be
+ * written the delete rolls back. It runs AFTER the delete, as that helper
+ * requires (row-locking writes first, the chain-append lock last).
+ */
+export async function deleteProject(
+  prisma: PrismaClient,
+  projectId: string,
+  opts: {
+    /** The identifier the caller typed. Compared exactly. */
+    confirmIdentifier: string;
+    audit: (tx: Prisma.TransactionClient, project: DeletedProjectInfo) => Promise<unknown>;
+  },
+): Promise<void> {
+  const existing = await prisma.pmProject.findUnique({
+    where: { id: projectId },
+    select: { id: true, name: true, identifier: true, isArchived: true, kind: true },
+  });
+  if (!existing || isServiceDesk(existing)) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
+  if (!existing.isArchived) throw new Error(PM_ERRORS.PROJECT_NOT_ARCHIVED);
+  if (opts.confirmIdentifier !== existing.identifier) throw new Error(PM_ERRORS.IDENTIFIER_MISMATCH);
+
+  // WARP-1505: the cascade below drops every PmAttachment ROW under this project,
+  // and the files are on a volume the database cannot reach. The keys are read
+  // INSIDE a READ COMMITTED transaction, required by the audit chain append.
+  // Lock the project and its items BEFORE the key read: their FK key-share locks
+  // make new item/attachment inserts wait, and a prior upload must commit before
+  // this fresh read can proceed. No cascaded blob can be missed. The files go
+  // only after commit; audit failure rolls back both deletion and cleanup intent.
+  let blobKeys: string[] = [];
+  let cleanupKeys: string[] = [];
   // findUnique + delete is two round-trips: a concurrent delete between them
   // makes this delete throw Prisma P2025. Map it to the same 404 the existence
   // check would have raised (review finding: delete-helper TOCTOU → P2025).
   try {
-    await prisma.pmProject.delete({ where: { id: projectId } });
+    await prisma.$transaction(
+      async (tx) => {
+        await tx.$queryRaw`SELECT "id" FROM "PmProject" WHERE "id" = ${projectId} FOR UPDATE`;
+        await tx.$queryRaw`SELECT "id" FROM "PmWorkItem" WHERE "projectId" = ${projectId} ORDER BY "id" FOR UPDATE`;
+        blobKeys = (
+          await tx.pmAttachment.findMany({
+            where: { workItem: { projectId } },
+            select: { storageKey: true },
+          })
+        ).map((a) => a.storageKey);
+        cleanupKeys = await queueAttachmentCleanup(tx, blobKeys);
+        const workItemCount = await tx.pmWorkItem.count({ where: { projectId } });
+        const gone = await tx.pmProject.deleteMany({ where: { id: projectId, kind: "PROJECT", isArchived: true } });
+        // Restored (or already deleted) between the read above and here. Throwing
+        // rolls back; nothing was applied.
+        if (gone.count === 0) throw new Error(PM_ERRORS.PROJECT_NOT_ARCHIVED);
+        await opts.audit(tx, {
+          id: existing.id,
+          name: existing.name,
+          identifier: existing.identifier,
+          workItemCount,
+        });
+      },
+      { ...READ_COMMITTED_TX, timeout: DELETE_TX_TIMEOUT_MS },
+    );
   } catch (err) {
+    if (err instanceof Error && err.message === PM_ERRORS.PROJECT_NOT_ARCHIVED) {
+      // Which of the two it was: restored (409) or deleted by someone else (404).
+      const still = await prisma.pmProject.findUnique({ where: { id: projectId }, select: { id: true } });
+      throw new Error(still ? PM_ERRORS.PROJECT_NOT_ARCHIVED : PM_ERRORS.PROJECT_NOT_FOUND);
+    }
     if (isPrismaCode(err, "P2025")) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
+    // A concurrency failure applies nothing; the route answers 409 for retry.
+    if (isPrismaCode(err, "P2034")) throw new Error(PM_ERRORS.CONCURRENT_MUTATION);
     throw err;
   }
+  await finishQueuedAttachmentCleanup(prisma, cleanupKeys);
 }
 
 // ── States ───────────────────────────────────────────────────────────────────
 
 export async function listStates(prisma: PrismaClient, projectId: string): Promise<ApiState[]> {
+  // Still no 404 for an id that is not there (an empty list, as ever); a desk's
+  // id is project_not_found (WARP-3528), never its states.
+  const project = await prisma.pmProject.findUnique({
+    where: { id: projectId },
+    select: { kind: true },
+  });
+  if (isServiceDesk(project)) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
   const rows = await prisma.pmState.findMany({
     where: { projectId },
     orderBy: { sortOrder: "asc" },
@@ -806,7 +1314,7 @@ export async function createState(
   input: { name: string; group: ApiState["group"]; color?: string; sortOrder?: number },
 ): Promise<ApiState> {
   const project = await prisma.pmProject.findUnique({ where: { id: projectId } });
-  if (!project) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
+  if (!project || isServiceDesk(project)) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
   const row = await prisma.pmState.create({
     data: {
       projectId,
@@ -828,17 +1336,46 @@ function isTerminalGroup(group: ApiState["group"]): boolean {
 export async function updateState(
   prisma: PrismaClient,
   stateId: string,
-  fields: { name?: string; group?: ApiState["group"]; color?: string | null; sortOrder?: number },
+  fields: {
+    name?: string;
+    group?: ApiState["group"];
+    color?: string | null;
+    sortOrder?: number;
+    /** WARP-3520 -- only `true` exists: a project always has exactly one default
+     *  landing state, so you MOVE the default by making another state the
+     *  default, never by clearing this one. */
+    isDefault?: true;
+  },
 ): Promise<ApiState> {
-  const existing = await prisma.pmState.findUnique({ where: { id: stateId } });
-  if (!existing) throw new Error(PM_ERRORS.STATE_NOT_FOUND);
+  const existing = await prisma.pmState.findUnique({
+    where: { id: stateId },
+    include: { project: { select: { kind: true } } },
+  });
+  if (!existing || isServiceDesk(existing.project)) throw new Error(PM_ERRORS.STATE_NOT_FOUND);
 
-  const groupChanged = fields.group !== undefined && fields.group !== existing.group;
+  const { isDefault, ...columns } = fields;
+  const groupChanged = columns.group !== undefined && columns.group !== existing.group;
   const wasTerminal = isTerminalGroup(existing.group);
-  const willBeTerminal = isTerminalGroup(fields.group ?? existing.group);
+  const willBeTerminal = isTerminalGroup(columns.group ?? existing.group);
+  // Work must START in the default state: an item born in Done/Cancelled would
+  // be created already complete. An already-default state is an idempotent no-op.
+  const makeDefault = isDefault === true && !existing.isDefault;
+  if (makeDefault && willBeTerminal) throw new Error(PM_ERRORS.STATE_DEFAULT_TERMINAL);
 
   const row = await prisma.$transaction(async (tx) => {
-    const updated = await tx.pmState.update({ where: { id: stateId }, data: fields });
+    // The partial unique index `PmState_projectId_isDefault_key` allows ONE
+    // default per project, so the old one is unset BEFORE the new one is set,
+    // in the same transaction -- a reader never sees zero or two.
+    if (makeDefault) {
+      await tx.pmState.updateMany({
+        where: { projectId: existing.projectId, isDefault: true },
+        data: { isDefault: false },
+      });
+    }
+    const updated = await tx.pmState.update({
+      where: { id: stateId },
+      data: { ...columns, ...(makeDefault ? { isDefault: true } : {}) },
+    });
     // WARP-884: a state's group is the canonical "is this column terminal"
     // signal. When it flips terminal <-> non-terminal, every work item
     // currently sitting in this state must have its completion signal
@@ -858,9 +1395,18 @@ export async function updateState(
   return mapState(row);
 }
 
-export async function deleteState(prisma: PrismaClient, stateId: string): Promise<void> {
-  const existing = await prisma.pmState.findUnique({ where: { id: stateId } });
-  if (!existing) throw new Error(PM_ERRORS.STATE_NOT_FOUND);
+export async function deleteState(
+  prisma: PrismaClient,
+  stateId: string,
+  /** WARP-3520 -- where the deleted state's items go. Omitted: the project's
+   *  default state, as before. */
+  opts: { reassignTo?: string } = {},
+): Promise<void> {
+  const existing = await prisma.pmState.findUnique({
+    where: { id: stateId },
+    include: { project: { select: { kind: true } } },
+  });
+  if (!existing || isServiceDesk(existing.project)) throw new Error(PM_ERRORS.STATE_NOT_FOUND);
   // A project must always retain at least one state, and never lose its sole
   // default landing state — otherwise createWorkItem's fallback chain finds no
   // default and no states, silently setting stateId=null on every new item and
@@ -873,6 +1419,15 @@ export async function deleteState(prisma: PrismaClient, stateId: string): Promis
     });
     if (otherDefaults === 0) throw new Error(PM_ERRORS.STATE_IS_DEFAULT);
   }
+  // The chosen landing state must be a DIFFERENT state of THIS project: the same
+  // cross-project isolation every other state reference in this file enforces.
+  let chosen: StateRow | null = null;
+  if (opts.reassignTo !== undefined) {
+    if (opts.reassignTo === stateId) throw new Error(PM_ERRORS.INVALID_STATE);
+    chosen = await prisma.pmState.findUnique({ where: { id: opts.reassignTo } });
+    if (!chosen) throw new Error(PM_ERRORS.STATE_NOT_FOUND);
+    if (chosen.projectId !== existing.projectId) throw new Error(PM_ERRORS.INVALID_STATE);
+  }
   try {
     await prisma.$transaction(async (tx) => {
       // WARP-885: `stateId ON DELETE SET NULL` would otherwise strand every
@@ -882,9 +1437,11 @@ export async function deleteState(prisma: PrismaClient, stateId: string): Promis
       // never orphans work — and re-sync the completion signal (WARP-884) in
       // case the deleted state's terminal-ness differs from the default's, so
       // the reassignment itself can't introduce a split-brain.
-      const fallback = await tx.pmState.findFirst({
-        where: { projectId: existing.projectId, isDefault: true, id: { not: stateId } },
-      });
+      const fallback =
+        chosen ??
+        (await tx.pmState.findFirst({
+          where: { projectId: existing.projectId, isDefault: true, id: { not: stateId } },
+        }));
       if (fallback) {
         const wasTerminal = isTerminalGroup(existing.group);
         const willBeTerminal = isTerminalGroup(fallback.group);
@@ -906,9 +1463,47 @@ export async function deleteState(prisma: PrismaClient, stateId: string): Promis
   }
 }
 
+/**
+ * WARP-3520 -- set the column order in ONE request. `stateIds` must name every
+ * state of the project exactly once: a partial list would leave the rest holding
+ * stale `sortOrder`s that interleave with the new ones, so it is refused rather
+ * than guessed at. The writes share a transaction, so a reader never sees half
+ * an order.
+ */
+export async function reorderStates(
+  prisma: PrismaClient,
+  projectId: string,
+  stateIds: string[],
+): Promise<ApiState[]> {
+  const project = await prisma.pmProject.findUnique({ where: { id: projectId }, select: { id: true, kind: true } });
+  if (!project || isServiceDesk(project)) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
+  const current = await prisma.pmState.findMany({ where: { projectId }, select: { id: true } });
+  const have = new Set(current.map((s) => s.id));
+  if (
+    stateIds.length !== have.size ||
+    new Set(stateIds).size !== stateIds.length ||
+    stateIds.some((id) => !have.has(id))
+  ) {
+    throw new Error(PM_ERRORS.INVALID_ORDER);
+  }
+  await prisma.$transaction(async (tx) => {
+    for (const [index, id] of stateIds.entries()) {
+      await tx.pmState.update({ where: { id }, data: { sortOrder: index } });
+    }
+  });
+  return listStates(prisma, projectId);
+}
+
 // ── Labels ───────────────────────────────────────────────────────────────────
 
 export async function listLabels(prisma: PrismaClient, projectId: string): Promise<ApiLabel[]> {
+  // Same shape as listStates: an unknown id stays an empty list, a desk's id is
+  // project_not_found (WARP-3528).
+  const project = await prisma.pmProject.findUnique({
+    where: { id: projectId },
+    select: { kind: true },
+  });
+  if (isServiceDesk(project)) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
   const rows = await prisma.pmLabel.findMany({ where: { projectId }, orderBy: { name: "asc" } });
   return rows.map(mapLabel);
 }
@@ -919,7 +1514,7 @@ export async function createLabel(
   input: { name: string; color?: string },
 ): Promise<ApiLabel> {
   const project = await prisma.pmProject.findUnique({ where: { id: projectId } });
-  if (!project) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
+  if (!project || isServiceDesk(project)) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
   const row = await prisma.pmLabel.create({
     data: { projectId, name: input.name, color: input.color ?? null },
   });
@@ -931,15 +1526,21 @@ export async function updateLabel(
   labelId: string,
   fields: { name?: string; color?: string | null },
 ): Promise<ApiLabel> {
-  const existing = await prisma.pmLabel.findUnique({ where: { id: labelId } });
-  if (!existing) throw new Error(PM_ERRORS.LABEL_NOT_FOUND);
+  const existing = await prisma.pmLabel.findUnique({
+    where: { id: labelId },
+    include: { project: { select: { kind: true } } },
+  });
+  if (!existing || isServiceDesk(existing.project)) throw new Error(PM_ERRORS.LABEL_NOT_FOUND);
   const row = await prisma.pmLabel.update({ where: { id: labelId }, data: fields });
   return mapLabel(row);
 }
 
 export async function deleteLabel(prisma: PrismaClient, labelId: string): Promise<void> {
-  const existing = await prisma.pmLabel.findUnique({ where: { id: labelId } });
-  if (!existing) throw new Error(PM_ERRORS.LABEL_NOT_FOUND);
+  const existing = await prisma.pmLabel.findUnique({
+    where: { id: labelId },
+    include: { project: { select: { kind: true } } },
+  });
+  if (!existing || isServiceDesk(existing.project)) throw new Error(PM_ERRORS.LABEL_NOT_FOUND);
   try {
     await prisma.pmLabel.delete({ where: { id: labelId } });
   } catch (err) {
@@ -999,17 +1600,38 @@ export async function listWorkItems(
      *  Mirrors `parentId`'s explicit three-way encoding directly above. */
     departmentId?: string | null;
     q?: string;
-    perPage?: number;
+    /** Page size, `1..PM_PAGE_MAX`, default `PM_PAGE_DEFAULT`. */
+    limit?: number;
+    /** WARP-3371 — the previous page's `nextCursor`. Wins over `page`. */
+    cursor?: string;
+    /** Legacy 1-based offset page, kept for callers that predate the cursor. */
     page?: number;
+    /** WARP-3520 -- `"only"` lists the project's ARCHIVED items instead of its
+     *  live ones (the "Archived" list). Archived items never appear otherwise. */
+    archived?: "only";
   } = {},
-): Promise<ApiWorkItem[]> {
+): Promise<Page<ApiWorkItem>> {
+  // Decoded before any read: a malformed cursor is the caller's 400, and it
+  // should not cost a query (or be hidden behind a 404 on the project).
+  const onlyArchived = filters.archived === "only";
+  const order = onlyArchived ? ORDER_ARCHIVED : ORDER_BOARD;
+  const after = filters.cursor ? decodeCursor(order, filters.cursor) : null;
+  // This finite sentinel is below every representable Date. It preserves old
+  // archived rows whose archive instant was never recorded, without letting
+  // their cursor collide with any real instant or a live board cursor.
+  const missingArchiveInstant = Number.MIN_SAFE_INTEGER;
+  const archivedKey = onlyArchived && after ? after.key as number : null;
+  if (archivedKey !== null && archivedKey !== missingArchiveInstant &&
+      (!Number.isSafeInteger(archivedKey) || Number.isNaN(new Date(archivedKey).getTime()))) {
+    throw new Error(INVALID_CURSOR);
+  }
   const project = await prisma.pmProject.findUnique({
     where: { id: projectId },
     include: { department: { select: DEPARTMENT_SELECT } },
   });
-  if (!project) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
+  if (!project || isServiceDesk(project)) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
 
-  const where: Prisma.PmWorkItemWhereInput = { projectId, isArchived: false };
+  const where: Prisma.PmWorkItemWhereInput = { projectId, isArchived: onlyArchived };
   if (filters.stateId)
     where.stateId = await resolveStateFilter(prisma, projectId, filters.stateId);
   if (filters.priority) where.priority = filters.priority;
@@ -1020,12 +1642,13 @@ export async function listWorkItems(
   // `where.OR` directly, so putting this there would replace it and turn
   // "items in Clinical matching 'sterilise'" into "items in Clinical". Prisma
   // ANDs the two keys together, which is exactly the intent.
+  const and: Prisma.PmWorkItemWhereInput[] = [];
   if (filters.departmentId !== undefined) {
     const scope =
       filters.departmentId === null
         ? null
         : await expandDepartmentScope(prisma, filters.departmentId);
-    where.AND = [departmentWorkItemWhere(scope)];
+    and.push(departmentWorkItemWhere(scope));
   }
   if (filters.q && filters.q.trim().length > 0) {
     const q = filters.q.trim();
@@ -1034,17 +1657,89 @@ export async function listWorkItems(
       { descriptionHtml: { contains: q, mode: "insensitive" } },
     ];
   }
+  if (and.length > 0) where.AND = and;
 
-  const perPage = Math.max(1, Math.min(200, filters.perPage ?? 100));
-  const page = Math.max(1, filters.page ?? 1);
-  const rows = await prisma.pmWorkItem.findMany({
-    where,
-    include: WORK_ITEM_INCLUDE,
-    orderBy: [{ sortOrder: "asc" }, { sequenceId: "asc" }],
-    skip: (page - 1) * perPage,
-    take: perPage,
+  // WARP-3371 — a page, never a silent ceiling. `total` is counted over the
+  // FILTERED set without the cursor, so it is the same number on every page and
+  // the view can say "100 of 250". The page itself asks for one row more than
+  // it returns: that extra row is the only proof there is a next page.
+  const limit = clampLimit(filters.limit);
+  const archivedAfter: Prisma.PmWorkItemWhereInput | null = onlyArchived && after
+    ? archivedKey === missingArchiveInstant
+      ? { archivedAt: null, id: { gt: after.id } }
+      : { OR: [
+          { archivedAt: { lt: new Date(archivedKey!) } },
+          { archivedAt: null },
+          { archivedAt: new Date(archivedKey!), id: { gt: after.id } },
+        ] }
+    : null;
+  const pageWhere: Prisma.PmWorkItemWhereInput = after
+    ? { ...where, AND: [...and, archivedAfter ?? keysetAfter("sortOrder", "asc", after) as Prisma.PmWorkItemWhereInput] }
+    : where;
+  const skip = after ? 0 : (Math.max(1, filters.page ?? 1) - 1) * limit;
+  const [total, rows] = await Promise.all([
+    prisma.pmWorkItem.count({ where }),
+    prisma.pmWorkItem.findMany({
+      where: pageWhere,
+      include: WORK_ITEM_INCLUDE,
+      // `id` closes the tie: `sortOrder` is not unique (a PATCH can set two
+      // rows to the same value), and a cursor over a non-unique key would skip
+      // or repeat the rows that share it.
+      orderBy: onlyArchived
+        ? [{ archivedAt: { sort: "desc", nulls: "last" } }, { id: "asc" }]
+        : [{ sortOrder: "asc" }, { id: "asc" }],
+      ...(skip > 0 ? { skip } : {}),
+      take: limit + 1,
+    }),
+  ]);
+  const { items, nextCursor } = sliceToPage(rows, limit, (r) =>
+    encodeCursor(order, onlyArchived ? r.archivedAt?.getTime() ?? missingArchiveInstant : r.sortOrder, r.id),
+  );
+  return {
+    items: items.map((r) => mapWorkItem(r, project.identifier, project.department)),
+    nextCursor,
+    total,
+  };
+}
+
+/**
+ * WARP-3521 — a project's work items narrowed by one extra predicate, with the
+ * EXACT total beside them. Backs the cycle detail, the cycle backlog and the
+ * module detail: "this cycle's items" has to be a server-side question, because
+ * the board's own list is a capped page and a cycle's items can sit beyond it.
+ *
+ * It is a sibling of `listWorkItems`, not a parameter on it, so the board's list
+ * (and its callers — the mobile router, the assistant's tools) keep exactly the
+ * signature they have. Archived items are excluded, like every other list.
+ * `perPage` defaults to the 200 maximum: these are scoped sets (one sprint, one
+ * epic), and the caller that wants a smaller page asks for one.
+ */
+export async function listWorkItemsWhere(
+  prisma: PrismaClient,
+  projectId: string,
+  extra: Prisma.PmWorkItemWhereInput,
+  opts: { perPage?: number; page?: number } = {},
+): Promise<{ items: ApiWorkItem[]; total: number }> {
+  const project = await prisma.pmProject.findUnique({
+    where: { id: projectId },
+    include: { department: { select: DEPARTMENT_SELECT } },
   });
-  return rows.map((r) => mapWorkItem(r, project.identifier, project.department));
+  if (!project || isServiceDesk(project)) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
+
+  const where: Prisma.PmWorkItemWhereInput = { AND: [{ projectId, isArchived: false }, extra] };
+  const perPage = Math.max(1, Math.min(200, opts.perPage ?? 200));
+  const page = Math.max(1, opts.page ?? 1);
+  const [rows, total] = await Promise.all([
+    prisma.pmWorkItem.findMany({
+      where,
+      include: WORK_ITEM_INCLUDE,
+      orderBy: [{ sortOrder: "asc" }, { sequenceId: "asc" }],
+      skip: (page - 1) * perPage,
+      take: perPage,
+    }),
+    prisma.pmWorkItem.count({ where }),
+  ]);
+  return { items: rows.map((r) => mapWorkItem(r, project.identifier, project.department)), total };
 }
 
 export async function getWorkItem(prisma: PrismaClient, id: string): Promise<ApiWorkItem> {
@@ -1055,8 +1750,13 @@ export async function getWorkItem(prisma: PrismaClient, id: string): Promise<Api
     include: { department: { select: DEPARTMENT_SELECT } },
   });
   if (!project) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
+  // WARP-3528 — an item in a service desk is a ticket: not found, like a missing one.
+  if (isServiceDesk(project)) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
   return mapWorkItem(row, project.identifier, project.department);
 }
+
+/** `ABC-12`: a project identifier (1..10 alphanumerics) and a sequence number. */
+const ITEM_KEY_RE = /^([A-Za-z0-9]{1,10})-(\d{1,9})$/;
 
 /** Workspace-wide free-text search over work-item name + description. Backs the
  *  `pm_search_work_items` MCP tool, which keys on workspace_slug (not project). */
@@ -1065,20 +1765,26 @@ export async function searchWorkItems(
   opts: {
     workspaceSlug?: string;
     q: string;
-    perPage?: number;
     /** WARP-2719 — same three-way encoding as `listWorkItems`, and the same
      *  override rule: an item's own department wins, and an item with none
      *  inherits its project's. */
     departmentId?: string | null;
+    /** Page size, `1..PM_PAGE_MAX`, default `PM_PAGE_DEFAULT`. */
+    limit?: number;
+    /** WARP-3371 — the previous page's `nextCursor`. */
+    cursor?: string;
   },
-): Promise<ApiWorkItem[]> {
+): Promise<Page<ApiWorkItem>> {
+  const after = opts.cursor ? decodeCursor(ORDER_SEARCH, opts.cursor) : null;
   const q = opts.q.trim();
   // 🔴 An empty `q` used to be an unconditional empty list, which was right
   // while free text was the only filter this reader had. It is now the answer
   // to "what is Front Desk working on?" — a question with no search term in it
   // at all — so the short-circuit narrows to "no filter of any kind".
-  if (q.length === 0 && opts.departmentId === undefined) return [];
-  const perPage = Math.max(1, Math.min(200, opts.perPage ?? 100));
+  if (q.length === 0 && opts.departmentId === undefined) {
+    return { items: [], nextCursor: null, total: 0 };
+  }
+  const limit = clampLimit(opts.limit);
   // 🔴 The free-text `OR` is added CONDITIONALLY, and it did not used to be:
   // it was an unconditional member of this literal, safe only because the
   // guard above made an empty `q` unreachable. With that guard relaxed, an
@@ -1086,40 +1792,73 @@ export async function searchWorkItems(
   // every department-only query.
   const where: Prisma.PmWorkItemWhereInput = { isArchived: false };
   if (q.length > 0) {
+    // WARP-3520 -- a pasted KEY (`INBOX-12`) finds its item. The relation and
+    // parent pickers search by this: people know the key long before they know
+    // the title. Digits are capped so a long number cannot overflow the Int
+    // column and turn a search into a 500.
+    const key = ITEM_KEY_RE.exec(q);
     where.OR = [
       { name: { contains: q, mode: "insensitive" } },
       { descriptionHtml: { contains: q, mode: "insensitive" } },
+      ...(key
+        ? [
+            {
+              sequenceId: Number(key[2]),
+              project: { identifier: { equals: key[1], mode: "insensitive" as const } },
+            },
+          ]
+        : []),
     ];
   }
   // `where.AND`, never `where.OR` — the free-text filter above owns `OR`, and
   // `departmentWorkItemWhere` returns a bare-`OR` fragment for exactly this
   // reason. Writing it to `where.OR` would turn "items in Front Desk matching
   // X" into "items in Front Desk".
+  const and: Prisma.PmWorkItemWhereInput[] = [];
   if (opts.departmentId !== undefined) {
     const scope =
       opts.departmentId === null
         ? null
         : await expandDepartmentScope(prisma, opts.departmentId);
-    where.AND = [departmentWorkItemWhere(scope)];
+    and.push(departmentWorkItemWhere(scope));
   }
-  if (opts.workspaceSlug) where.project = { workspace: { slug: opts.workspaceSlug } };
-  const rows = await prisma.pmWorkItem.findMany({
-    where,
-    // ADR-045 §5.3 — this is the only reader whose rows span projects, so it
-    // joins the project per row. The whole include is respelled rather than
-    // spread-and-overridden: `{ ...WORK_ITEM_INCLUDE, project: ... }` would be
-    // fine today but a later `project` key inside WORK_ITEM_INCLUDE would be
-    // silently clobbered by the later spread member.
-    include: {
-      ...WORK_ITEM_INCLUDE,
-      project: {
-        select: { identifier: true, department: { select: DEPARTMENT_SELECT } },
+  if (and.length > 0) where.AND = and;
+  where.project = {
+    kind: "PROJECT",
+    ...(opts.workspaceSlug ? { workspace: { slug: opts.workspaceSlug } } : {}),
+  };
+  const pageWhere: Prisma.PmWorkItemWhereInput = after
+    ? { ...where, AND: [...and, keysetAfter("updatedAt", "desc", after) as Prisma.PmWorkItemWhereInput] }
+    : where;
+  const [total, rows] = await Promise.all([
+    prisma.pmWorkItem.count({ where }),
+    prisma.pmWorkItem.findMany({
+      where: pageWhere,
+      // ADR-045 §5.3 — this is the only reader whose rows span projects, so it
+      // joins the project per row. The whole include is respelled rather than
+      // spread-and-overridden: `{ ...WORK_ITEM_INCLUDE, project: ... }` would be
+      // fine today but a later `project` key inside WORK_ITEM_INCLUDE would be
+      // silently clobbered by the later spread member.
+      include: {
+        ...WORK_ITEM_INCLUDE,
+        project: {
+          select: { identifier: true, department: { select: DEPARTMENT_SELECT } },
+        },
       },
-    },
-    orderBy: { updatedAt: "desc" },
-    take: perPage,
-  });
-  return rows.map((r) => mapWorkItem(r, r.project.identifier, r.project.department));
+      // Newest change first, `id` closing the tie (two rows can share a
+      // millisecond), so the cursor below names exactly one position.
+      orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
+      take: limit + 1,
+    }),
+  ]);
+  const { items, nextCursor } = sliceToPage(rows, limit, (r) =>
+    encodeCursor(ORDER_SEARCH, r.updatedAt, r.id),
+  );
+  return {
+    items: items.map((r) => mapWorkItem(r, r.project.identifier, r.project.department)),
+    nextCursor,
+    total,
+  };
 }
 
 /** WARP-3407 — the work items assigned to ONE person, across projects, newest
@@ -1129,24 +1868,49 @@ export async function searchWorkItems(
 export async function listAssignedWorkItems(
   prisma: PrismaClient,
   userId: string,
-  opts: { perPage?: number; page?: number } = {},
-): Promise<ApiWorkItem[]> {
-  const perPage = Math.max(1, Math.min(200, opts.perPage ?? 100));
-  const page = Math.max(1, opts.page ?? 1);
-  const rows = await prisma.pmWorkItem.findMany({
-    where: { isArchived: false, assignees: { some: { userId } } },
-    // Spans projects, so it joins the project per row (searchWorkItems' rule).
-    include: {
-      ...WORK_ITEM_INCLUDE,
-      project: {
-        select: { identifier: true, department: { select: DEPARTMENT_SELECT } },
+  opts: {
+    /** Page size, `1..PM_PAGE_MAX`, default `PM_PAGE_DEFAULT`. */
+    limit?: number;
+    /** WARP-3371 — the previous page's `nextCursor`. Wins over `page`. */
+    cursor?: string;
+    /** Legacy 1-based offset page, kept for callers that predate the cursor. */
+    page?: number;
+  } = {},
+): Promise<Page<ApiWorkItem>> {
+  const after = opts.cursor ? decodeCursor(ORDER_ASSIGNED, opts.cursor) : null;
+  const limit = clampLimit(opts.limit);
+  const where: Prisma.PmWorkItemWhereInput = {
+    isArchived: false,
+    assignees: { some: { userId } },
+    project: { kind: "PROJECT" },
+  };
+  const skip = after ? 0 : (Math.max(1, opts.page ?? 1) - 1) * limit;
+  const [total, rows] = await Promise.all([
+    prisma.pmWorkItem.count({ where }),
+    prisma.pmWorkItem.findMany({
+      where: after
+        ? { ...where, AND: [keysetAfter("updatedAt", "desc", after) as Prisma.PmWorkItemWhereInput] }
+        : where,
+      // Spans projects, so it joins the project per row (searchWorkItems' rule).
+      include: {
+        ...WORK_ITEM_INCLUDE,
+        project: {
+          select: { identifier: true, department: { select: DEPARTMENT_SELECT } },
+        },
       },
-    },
-    orderBy: { updatedAt: "desc" },
-    skip: (page - 1) * perPage,
-    take: perPage,
-  });
-  return rows.map((r) => mapWorkItem(r, r.project.identifier, r.project.department));
+      orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
+      ...(skip > 0 ? { skip } : {}),
+      take: limit + 1,
+    }),
+  ]);
+  const { items, nextCursor } = sliceToPage(rows, limit, (r) =>
+    encodeCursor(ORDER_ASSIGNED, r.updatedAt, r.id),
+  );
+  return {
+    items: items.map((r) => mapWorkItem(r, r.project.identifier, r.project.department)),
+    nextCursor,
+    total,
+  };
 }
 
 export async function createWorkItem(
@@ -1163,19 +1927,33 @@ export async function createWorkItem(
     parentId?: string;
     /** ADR-045 §5.3 — overrides the project's department for this item. */
     departmentId?: string;
+    /** WARP-3521 — plan the new item into a cycle of THIS project. */
+    cycleId?: string;
     startDate?: Date;
     dueDate?: Date;
+    /** WARP-3520 -- the item's kind; omitted means the column default, `task`. */
+    type?: ApiWorkItemType;
+    /** WARP-3520 -- story points (the route has already bounded it to 0..1000). */
+    estimate?: number | null;
+    /** WARP-3527 — importer-only provenance; see {@link PmImportedWrite}. */
+    imported?: PmImportedWrite;
   },
 ): Promise<ApiWorkItem> {
   const project = await prisma.pmProject.findUnique({
     where: { id: projectId },
     include: { states: true, department: { select: DEPARTMENT_SELECT } },
   });
-  if (!project) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
+  if (!project || isServiceDesk(project)) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
 
+  // WARP-3528 — a parent / state / label that lives in a service desk is "not
+  // found", never "in another project" (422): the difference would tell a
+  // caller an id they were not given is a ticket's.
   if (input.parentId) {
-    const parent = await prisma.pmWorkItem.findUnique({ where: { id: input.parentId } });
-    if (!parent) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
+    const parent = await prisma.pmWorkItem.findUnique({
+      where: { id: input.parentId },
+      include: { project: { select: { kind: true } } },
+    });
+    if (!parent || isServiceDesk(parent.project)) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
     if (parent.projectId !== projectId) throw new Error(PM_ERRORS.INVALID_PARENT);
   }
 
@@ -1184,22 +1962,20 @@ export async function createWorkItem(
   // findings #4/#1). Missing id → state_not_found (404); wrong project →
   // invalid_state (422).
   if (input.stateId) {
-    const state = await prisma.pmState.findUnique({ where: { id: input.stateId } });
-    if (!state) throw new Error(PM_ERRORS.STATE_NOT_FOUND);
+    const state = await prisma.pmState.findUnique({
+      where: { id: input.stateId },
+      include: { project: { select: { kind: true } } },
+    });
+    if (!state || isServiceDesk(state.project)) throw new Error(PM_ERRORS.STATE_NOT_FOUND);
     if (state.projectId !== projectId) throw new Error(PM_ERRORS.INVALID_STATE);
   }
 
-  // Labels must belong to THIS project — same cross-project isolation invariant
-  // as parentId and stateId.
-  if (input.labelIds?.length) {
-    const labels = await prisma.pmLabel.findMany({
-      where: { id: { in: input.labelIds } },
-      select: { id: true, projectId: true },
-    });
-    for (const label of labels) {
-      if (label.projectId !== projectId) throw new Error("invalid_label");
-    }
-  }
+  // Labels must exist AND belong to THIS project — same cross-project isolation
+  // invariant as parentId and stateId — and assignees must be active people.
+  // Both answer 422 naming the offending ids (WARP-3371).
+  const labelIds = await assertLabelsInProject(prisma, projectId, input.labelIds ?? []);
+  const assignees = uniq(input.assignees ?? []);
+  await assertAssignable(prisma, assignees);
 
   // ADR-045 §5.3 — same shape as the guards above: refuse before the write, not
   // after. Refuses HOUSEHOLD (it is the unit everyone is already in, so routing
@@ -1241,8 +2017,11 @@ export async function createWorkItem(
     : null;
   const initialIsCompleted =
     resolvedStateGroup === "completed" || resolvedStateGroup === "cancelled";
-  const initialCompletedAt = initialIsCompleted ? new Date() : null;
+  const initialCompletedAt = initialIsCompleted
+    ? (input.imported?.completedAt ?? new Date())
+    : null;
 
+  const imp = input.imported;
   let created;
   try {
     created = await prisma.$transaction(async (tx) => {
@@ -1250,6 +2029,12 @@ export async function createWorkItem(
       // checked is the department the row is written against.
       if (input.departmentId !== undefined) {
         await assertAssignableDepartment(tx, input.departmentId);
+      }
+      // WARP-3521 — same place, same reason: the cycle that is checked (and
+      // row-locked, so a racing `completeCycle` cannot finish it under us) is
+      // the cycle the item is written against.
+      if (input.cycleId !== undefined) {
+        await lockAttachableCycle(tx, input.cycleId, projectId);
       }
       // Bump the per-project counter atomically → the work item's number.
       const bumped = await tx.pmProject.update({
@@ -1271,27 +2056,55 @@ export async function createWorkItem(
           priority: input.priority ?? "none",
           parentId: input.parentId ?? null,
           departmentId: input.departmentId ?? null,
-          createdById: actorId,
+          ...(input.cycleId !== undefined ? { cycleId: input.cycleId } : {}),
+          createdById: imp?.createdById ?? actorId,
           startDate: input.startDate ?? null,
           dueDate: input.dueDate ?? null,
+          type: input.type,
+          estimate: input.estimate ?? null,
           sortOrder: sequenceId,
           isCompleted: initialIsCompleted,
           completedAt: initialCompletedAt,
-          assignees: input.assignees?.length
-            ? { create: input.assignees.map((userId) => ({ userId })) }
-            : undefined,
-          labels: input.labelIds?.length
-            ? { create: input.labelIds.map((labelId) => ({ labelId })) }
-            : undefined,
+          // WARP-3527 — importer-only columns; absent (so untouched defaults)
+          // for every other caller.
+          ...(imp
+            ? {
+                externalSystem: imp.externalSystem,
+                externalId: imp.externalId,
+                ...(imp.createdAt ? { createdAt: imp.createdAt } : {}),
+                ...(imp.updatedAt ? { updatedAt: imp.updatedAt } : {}),
+              }
+            : {}),
+          assignees: assignees.length ? { create: assignees.map((userId) => ({ userId })) } : undefined,
+          labels: labelIds.length ? { create: labelIds.map((labelId) => ({ labelId })) } : undefined,
         },
       });
-      await writeActivity(tx, { workItemId: item.id, actorId, verb: "created" });
+      await writeActivity(tx, {
+        workItemId: item.id,
+        actorId,
+        verb: "created",
+        ...(imp
+          ? { field: "import", newValue: `${imp.source}:${imp.jobId}`, notifyStatus: "not_needed" as const }
+          : {}),
+      });
+      // WARP-3521 — planned into a cycle at birth: the burndown reads this row.
+      if (input.cycleId !== undefined) {
+        await writeActivity(tx, {
+          workItemId: item.id,
+          actorId,
+          verb: "cycle_added",
+          field: "cycle",
+          oldValue: null,
+          newValue: input.cycleId,
+          ...(imp ? { notifyStatus: "not_needed" as const } : {}),
+        });
+      }
       // WARP-2587: a create WITH assignees is an assignment, and `created`
       // does not say who. One `assigned` row per assignee, so the notify
       // sweep sees the same shape whether the assignment happened at create
       // time or in a later PATCH. `actorId` is on the row, so somebody who
       // creates an item assigned to themselves is never notified about it.
-      for (const userId of input.assignees ?? []) {
+      for (const userId of assignees) {
         await writeActivity(tx, {
           workItemId: item.id,
           actorId,
@@ -1299,8 +2112,16 @@ export async function createWorkItem(
           field: "assignees",
           oldValue: null,
           newValue: userId,
+          ...(imp ? { notifyStatus: "not_needed" as const } : {}),
         });
       }
+      // WARP-3519: the creator and every assignee hear about the item from now
+      // on. Creator first, so a creator who is also an assignee is recorded as
+      // the creator.
+      await autoWatch(tx, item.id, [
+        { userId: actorId, reason: "CREATOR" },
+        ...(input.assignees ?? []).map((userId) => ({ userId, reason: "ASSIGNEE" as const })),
+      ]);
       return item;
     });
   } catch (err) {
@@ -1334,8 +2155,20 @@ export async function updateWorkItem(
      *  so the item inherits its project's department again (which may itself
      *  be none). */
     departmentId?: string | null;
+    /** WARP-3521 — `undefined` leaves the cycle alone; `null` takes the item out
+     *  of its cycle (back to the backlog); an id plans it into that cycle. */
+    cycleId?: string | null;
     sortOrder?: number;
+    /** WARP-3520 -- `undefined` leaves the kind alone. */
+    type?: ApiWorkItemType;
+    /** WARP-3520 -- `undefined` leaves the estimate alone; `null` clears it
+     *  (an explicit null, not `?? undefined`: Prisma skips `undefined`). */
+    estimate?: number | null;
   },
+  /** WARP-3527 — set only by the import runner: every activity row this call
+   *  writes is born `not_needed`, and an effective change is followed by one
+   *  `updated` / `import` row naming the job. See {@link PmImportedWrite}. */
+  opts: { imported?: { jobId: string; source: string } } = {},
 ): Promise<ApiWorkItem> {
   const existing = await prisma.pmWorkItem.findUnique({
     where: { id },
@@ -1347,6 +2180,8 @@ export async function updateWorkItem(
     include: { department: { select: DEPARTMENT_SELECT } },
   });
   if (!project) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
+  // WARP-3528 — before any validation or write: a ticket is not found here.
+  if (isServiceDesk(project)) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
 
   // When transitioning into/out of a terminal-group state, sync
   // isCompleted/completedAt. isCompleted is the canonical signal (WARP-884);
@@ -1355,15 +2190,20 @@ export async function updateWorkItem(
   let isCompleted: boolean | undefined;
   if (fields.stateId !== undefined && fields.stateId !== existing.stateId) {
     if (fields.stateId === null) {
-      completedAt = null;
-      isCompleted = false;
+      // WARP-3371 — a work item keeps its state: with none, the board has no
+      // column for it and the card silently disappears. (An item that already
+      // has none and is sent null again is not a change, so it never gets here.)
+      throw new Error(PM_ERRORS.STATE_REQUIRED);
     } else {
       // The target state must belong to THIS work item's project. Distinguish
       // "no such state" (404) from "state belongs to another project" (422) so
       // the cross-project guard mirrors the parent check's shape (findings
       // #4/#2) rather than masking it as a generic not-found.
-      const target = await prisma.pmState.findUnique({ where: { id: fields.stateId } });
-      if (!target) throw new Error(PM_ERRORS.STATE_NOT_FOUND);
+      const target = await prisma.pmState.findUnique({
+        where: { id: fields.stateId },
+        include: { project: { select: { kind: true } } },
+      });
+      if (!target || isServiceDesk(target.project)) throw new Error(PM_ERRORS.STATE_NOT_FOUND);
       if (target.projectId !== existing.projectId) throw new Error(PM_ERRORS.INVALID_STATE);
       isCompleted = target.group === "completed" || target.group === "cancelled";
       completedAt = isCompleted ? new Date() : null;
@@ -1375,20 +2215,29 @@ export async function updateWorkItem(
   // Self-referential parent creates an infinite cycle; reject it explicitly.
   if (fields.parentId !== undefined && fields.parentId !== null) {
     if (fields.parentId === id) throw new Error(PM_ERRORS.INVALID_PARENT);
-    const parent = await prisma.pmWorkItem.findUnique({ where: { id: fields.parentId } });
-    if (!parent) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
+    const parent = await prisma.pmWorkItem.findUnique({
+      where: { id: fields.parentId },
+      include: { project: { select: { kind: true } } },
+    });
+    if (!parent || isServiceDesk(parent.project)) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
     if (parent.projectId !== existing.projectId) throw new Error(PM_ERRORS.INVALID_PARENT);
+    // WARP-3520 -- self-parenting is refused above; this refuses the longer loop
+    // (A is B's parent, then B is made A's parent), which only a walk can see.
   }
 
-  // Labels must belong to THIS project before the transaction mutates them.
-  if (fields.labelIds?.length) {
-    const labels = await prisma.pmLabel.findMany({
-      where: { id: { in: fields.labelIds } },
-      select: { id: true, projectId: true },
-    });
-    for (const label of labels) {
-      if (label.projectId !== existing.projectId) throw new Error("invalid_label");
-    }
+  // Labels must exist AND belong to THIS project before the transaction mutates
+  // them, and a person ADDED as an assignee must exist and be active; both name
+  // the offending ids (WARP-3371). Only the assignees this update ADDS are
+  // checked: re-sending a set that still holds someone who has since left must
+  // not block editing the item, and removing them must always work.
+  const labelIds =
+    fields.labelIds === undefined
+      ? undefined
+      : await assertLabelsInProject(prisma, existing.projectId, fields.labelIds);
+  const assignees = fields.assignees === undefined ? undefined : uniq(fields.assignees);
+  if (assignees) {
+    const current = new Set(existing.assignees.map((a) => a.userId));
+    await assertAssignable(prisma, assignees.filter((u) => !current.has(u)));
   }
 
   // ADR-045 §5.3 — guard before the transaction, like every check above.
@@ -1398,7 +2247,22 @@ export async function updateWorkItem(
     await assertAssignableDepartment(prisma, fields.departmentId);
   }
 
+  // WARP-3371 — re-parenting reads a chain and then writes: two concurrent moves
+  // (A under B, B under A) each pass the walk against a graph without the other
+  // and together close a loop. SERIALIZABLE makes one of them lose (P2034 → 409),
+  // as pm-relations does for BLOCKS cycles; only a real re-parent pays for it.
+  const reparentTo = fields.parentId && fields.parentId !== existing.parentId ? fields.parentId : null;
+
   await prisma.$transaction(async (tx) => {
+    // WARP-3527 — every activity row in this function goes through `write`, so
+    // the importer's `not_needed` flag cannot be forgotten at one call site and
+    // the "did anything change" count that gates the provenance row is exact.
+    let wrote = 0;
+    const write = (input: ActivityInput): Promise<void> => {
+      wrote += 1;
+      return writeActivity(tx, opts.imported ? { ...input, notifyStatus: "not_needed" } : input);
+    };
+    if (reparentTo) await assertNoParentCycle(tx, id, reparentTo);
     const data: Prisma.PmWorkItemUpdateInput = {};
     if (fields.name !== undefined) data.name = fields.name;
     if (fields.descriptionHtml !== undefined) {
@@ -1407,6 +2271,8 @@ export async function updateWorkItem(
       data.descriptionHtml = fields.descriptionHtml ? sanitizePmHtml(fields.descriptionHtml) : null;
     }
     if (fields.priority !== undefined) data.priority = fields.priority;
+    if (fields.type !== undefined) data.type = fields.type;
+    if (fields.estimate !== undefined) data.estimate = fields.estimate;
     if (fields.startDate !== undefined) data.startDate = fields.startDate;
     if (fields.dueDate !== undefined) data.dueDate = fields.dueDate;
     if (fields.sortOrder !== undefined) data.sortOrder = fields.sortOrder;
@@ -1425,35 +2291,95 @@ export async function updateWorkItem(
     if (fields.parentId !== undefined) {
       data.parent = fields.parentId ? { connect: { id: fields.parentId } } : { disconnect: true };
     }
-    await tx.pmWorkItem.update({ where: { id }, data });
+    // WARP-3521 — planning into / out of a cycle. The item's CURRENT cycle is
+    // re-read here, inside the transaction, rather than trusted from the read
+    // above: `completeCycle` moves items under a SERIALIZABLE transaction of its
+    // own, and an activity row whose `oldValue` names a cycle the item left a
+    // moment earlier would corrupt exactly the history the burndown is rebuilt
+    // from. `undefined` below means "no cycle change"; `null` is a real
+    // previous value (no cycle).
+    let previousCycleId: string | null | undefined;
+    if (fields.cycleId !== undefined) {
+      const current = await tx.pmWorkItem.findUnique({ where: { id }, select: { cycleId: true } });
+      if (!current) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
+      if (current.cycleId !== fields.cycleId) {
+        // Only an attach is guarded. Taking an item OUT of a cycle (null) is
+        // always allowed, including out of a completed one.
+        if (fields.cycleId !== null) {
+          await lockAttachableCycle(tx, fields.cycleId, existing.projectId);
+        }
+        // Compare-and-set the foreign key so overlapping moves cannot both
+        // write history from the same stale `oldValue`. The target cycle is
+        // locked first (the same cycle→item order as completeCycle), so an
+        // attach cannot slip into a cycle as it completes.
+        let oldCycleId = current.cycleId;
+        let moved = await tx.pmWorkItem.updateMany({
+          where: { id, cycleId: oldCycleId },
+          data: { cycleId: fields.cycleId },
+        });
+        if (moved.count === 0) {
+          const latest = await tx.pmWorkItem.findUnique({ where: { id }, select: { cycleId: true } });
+          if (!latest) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
+          oldCycleId = latest.cycleId;
+          // Another request may already have moved it to this destination. In
+          // that case this request is a no-op; otherwise retry once against the
+          // value that now owns the row.
+          if (oldCycleId !== fields.cycleId) {
+            moved = await tx.pmWorkItem.updateMany({
+              where: { id, cycleId: oldCycleId },
+              data: { cycleId: fields.cycleId },
+            });
+            if (moved.count !== 1) throw new Error(PM_ERRORS.CONCURRENT_MUTATION);
+            previousCycleId = oldCycleId;
+          }
+        } else {
+          previousCycleId = oldCycleId;
+        }
+      }
+    }
+    if (Object.keys(data).length > 0) await tx.pmWorkItem.update({ where: { id }, data });
 
     // Assignees / labels are full-set replacements (delete-all + re-create).
-    if (fields.assignees !== undefined) {
+    if (assignees !== undefined) {
       await tx.pmWorkItemAssignee.deleteMany({ where: { workItemId: id } });
-      if (fields.assignees.length) {
+      if (assignees.length) {
         await tx.pmWorkItemAssignee.createMany({
-          data: fields.assignees.map((userId) => ({ workItemId: id, userId })),
+          data: assignees.map((userId) => ({ workItemId: id, userId })),
         });
       }
     }
-    if (fields.labelIds !== undefined) {
+    if (labelIds !== undefined) {
       await tx.pmWorkItemLabel.deleteMany({ where: { workItemId: id } });
-      if (fields.labelIds.length) {
+      if (labelIds.length) {
         await tx.pmWorkItemLabel.createMany({
-          data: fields.labelIds.map((labelId) => ({ workItemId: id, labelId })),
+          data: labelIds.map((labelId) => ({ workItemId: id, labelId })),
         });
       }
     }
 
     // One activity row per meaningful change.
     if (fields.stateId !== undefined && fields.stateId !== existing.stateId) {
-      await writeActivity(tx, {
+      await write({
         workItemId: id,
         actorId,
         verb: "state_changed",
         field: "state",
         oldValue: existing.stateId,
         newValue: fields.stateId,
+      });
+    }
+    // WARP-3521 — one row per cycle change, `oldValue` / `newValue` being the
+    // cycle left and the cycle joined (either may be null). A move A -> B is ONE
+    // `cycle_added` row {A -> B}; the burndown reads such a row as a leave for A
+    // and a join for B, so the verb only has to say which side is non-null.
+    if (previousCycleId !== undefined) {
+      await write({
+        workItemId: id,
+        actorId,
+        verb: fields.cycleId ? "cycle_added" : "cycle_removed",
+        field: "cycle",
+        oldValue: previousCycleId,
+        newValue: fields.cycleId ?? null,
       });
     }
     // ADR-045 §5.3 — re-routing work is a decision someone made about who owns
@@ -1465,7 +2391,7 @@ export async function updateWorkItem(
       fields.departmentId !== undefined &&
       fields.departmentId !== existing.departmentId
     ) {
-      await writeActivity(tx, {
+      await write({
         workItemId: id,
         actorId,
         verb: "updated",
@@ -1475,10 +2401,10 @@ export async function updateWorkItem(
       });
     }
     if (fields.priority !== undefined && fields.priority !== existing.priority) {
-      await writeActivity(tx, {
+      await write({
         workItemId: id,
         actorId,
-        verb: "updated",
+        verb: "priority_changed",
         field: "priority",
         oldValue: existing.priority,
         newValue: fields.priority,
@@ -1506,12 +2432,14 @@ export async function updateWorkItem(
     // history feed and unnotifiable by anything downstream. The identity-PATCH
     // guard is preserved — `setChanged` still gates the whole block, so
     // re-sending the same assignee set writes nothing.
-    if (setChanged(fields.assignees, existingAssignees)) {
-      const next = new Set(fields.assignees ?? []);
+    if (setChanged(assignees, existingAssignees)) {
+      const next = new Set(assignees ?? []);
       const before = new Set(existingAssignees);
+      const newlyAssigned: string[] = [];
       for (const userId of next) {
         if (before.has(userId)) continue;
-        await writeActivity(tx, {
+        newlyAssigned.push(userId);
+        await write({
           workItemId: id,
           actorId,
           verb: "assigned",
@@ -1520,9 +2448,16 @@ export async function updateWorkItem(
           newValue: userId,
         });
       }
+      // WARP-3519: being assigned watches the item. Taking somebody OFF it
+      // (below) does not unwatch them — they may still care.
+      await autoWatch(
+        tx,
+        id,
+        newlyAssigned.map((userId) => ({ userId, reason: "ASSIGNEE" as const })),
+      );
       for (const userId of before) {
         if (next.has(userId)) continue;
-        await writeActivity(tx, {
+        await write({
           workItemId: id,
           actorId,
           verb: "unassigned",
@@ -1536,7 +2471,7 @@ export async function updateWorkItem(
       fields.dueDate !== undefined &&
       fields.dueDate?.toISOString() !== existing.dueDate?.toISOString();
     if (dueDateChanged) {
-      await writeActivity(tx, {
+      await write({
         workItemId: id,
         actorId,
         verb: "due_date_changed",
@@ -1546,21 +2481,107 @@ export async function updateWorkItem(
       });
     }
 
-    // The residual. `assignees` and `dueDate` are deliberately NOT in this
-    // disjunction any more: they now have verbs that name them, and leaving
-    // them here would write a second, less informative row for the same edit
-    // — which is how the feed gets noisy and how a notifier ends up firing
-    // twice.
-    const scalarChanged =
-      (fields.name !== undefined && fields.name !== existing.name) ||
-      (fields.descriptionHtml !== undefined && fields.descriptionHtml !== existing.descriptionHtml) ||
-      (fields.startDate !== undefined &&
-        fields.startDate?.toISOString() !== existing.startDate?.toISOString()) ||
-      setChanged(fields.labelIds, existingLabelIds);
-    if (scalarChanged) {
-      await writeActivity(tx, { workItemId: id, actorId, verb: "updated", field: "fields" });
+    // WARP-3519 — what used to be ONE generic `updated`/`fields` row for a name,
+    // description, start-date or label change now has a verb that names each, so
+    // the item's timeline can say WHAT changed ("renamed this", "added the label
+    // Bug") instead of "updated this item". `assignees` and `dueDate` already
+    // had theirs (above); leaving a field in two places would write a second,
+    // less informative row for one edit — which is how the feed gets noisy and a
+    // notifier ends up firing twice. None of these verbs is in the notify
+    // sweep's cut (activity-notify.service.ts): board hygiene, visible here.
+    if (fields.name !== undefined && fields.name !== existing.name) {
+      await write({
+        workItemId: id,
+        actorId,
+        verb: "title_changed",
+        field: "name",
+        oldValue: existing.name,
+        newValue: fields.name,
+      });
     }
-  });
+    if (fields.descriptionHtml !== undefined && fields.descriptionHtml !== existing.descriptionHtml) {
+      // No values: a description can be 100 KB, and the diff of a document is
+      // not something to keep in a feed row.
+      await write({
+        workItemId: id,
+        actorId,
+        verb: "description_changed",
+        field: "description",
+      });
+    }
+    if (
+      fields.startDate !== undefined &&
+      fields.startDate?.toISOString() !== existing.startDate?.toISOString()
+    ) {
+      await write({
+        workItemId: id,
+        actorId,
+        verb: "start_date_changed",
+        field: "startDate",
+        oldValue: existing.startDate?.toISOString() ?? null,
+        newValue: fields.startDate?.toISOString() ?? null,
+      });
+    }
+    if (setChanged(fields.labelIds, existingLabelIds)) {
+      const nextLabels = new Set(fields.labelIds ?? []);
+      const beforeLabels = new Set(existingLabelIds);
+      for (const labelId of nextLabels) {
+        if (beforeLabels.has(labelId)) continue;
+        await write({
+          workItemId: id,
+          actorId,
+          verb: "label_added",
+          field: "labels",
+          oldValue: null,
+          newValue: labelId,
+        });
+      }
+      for (const labelId of beforeLabels) {
+        if (nextLabels.has(labelId)) continue;
+        await write({
+          workItemId: id,
+          actorId,
+          verb: "label_removed",
+          field: "labels",
+          oldValue: labelId,
+          newValue: null,
+        });
+      }
+    }
+    // `?? "task"`: the DB-less fake's rows have no kind (see mapWorkItem).
+    if (fields.type !== undefined && fields.type !== (existing.type ?? "task")) {
+      await write({
+        workItemId: id,
+        actorId,
+        verb: "type_changed",
+        field: "type",
+        oldValue: existing.type ?? "task",
+        newValue: fields.type,
+      });
+    }
+    if (fields.estimate !== undefined && fields.estimate !== (existing.estimate ?? null)) {
+      await write({
+        workItemId: id,
+        actorId,
+        verb: "estimate_changed",
+        field: "estimate",
+        oldValue: existing.estimate === null || existing.estimate === undefined ? null : String(existing.estimate),
+        newValue: fields.estimate === null ? null : String(fields.estimate),
+      });
+    }
+    // WARP-3527 — one marker per effective import update, so the item's own
+    // history says which job changed it. Nothing changed, nothing written.
+    if (opts.imported && wrote > 0) {
+      await writeActivity(tx, {
+        workItemId: id,
+        actorId,
+        verb: "updated",
+        field: "import",
+        newValue: `${opts.imported.source}:${opts.imported.jobId}`,
+        notifyStatus: "not_needed",
+      });
+    }
+  }, reparentTo ? SERIALIZABLE_TX : undefined).catch(rethrowSerializationLoser);
 
   return loadWorkItem(prisma, id, project.identifier, project.department);
 }
@@ -1574,15 +2595,107 @@ export async function transitionWorkItem(
   return updateWorkItem(prisma, actorId, id, { stateId });
 }
 
+/**
+ * WARP-3520 -- archive / restore a work item.
+ *
+ * The state check lives IN the write (`updateMany ... where isArchived = X`) and
+ * the branch is on the row count, not on a prior read: two tabs that both click
+ * Archive would otherwise both pass a findUnique guard and the second would
+ * write a second `archived` row for one event. The follow-up read only runs when
+ * the write matched nothing, to say WHICH way it matched nothing (404 vs 409).
+ */
+async function setArchived(
+  prisma: PrismaClient,
+  actorId: string | null,
+  id: string,
+  archived: boolean,
+): Promise<ApiWorkItem> {
+  const changed = await prisma.$transaction(async (tx) => {
+    const res = await tx.pmWorkItem.updateMany({
+      where: { id, isArchived: !archived, project: { kind: "PROJECT" } },
+      // `archivedAt` is the audit timestamp written/cleared alongside the
+      // canonical `isArchived` column, so the two never diverge (WARP-884).
+      data: { isArchived: archived, archivedAt: archived ? new Date() : null },
+    });
+    if (res.count === 0) return false;
+    await writeActivity(tx, { workItemId: id, actorId, verb: archived ? "archived" : "restored" });
+    return true;
+  });
+  if (!changed) {
+    const existing = await prisma.pmWorkItem.findUnique({ where: { id, project: { kind: "PROJECT" } }, select: { id: true } });
+    if (!existing) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
+    throw new Error(archived ? PM_ERRORS.WORK_ITEM_ARCHIVED : PM_ERRORS.WORK_ITEM_NOT_ARCHIVED);
+  }
+  return getWorkItem(prisma, id);
+}
+
+export function archiveWorkItem(
+  prisma: PrismaClient,
+  actorId: string | null,
+  id: string,
+): Promise<ApiWorkItem> {
+  return setArchived(prisma, actorId, id, true);
+}
+
+export function restoreWorkItem(
+  prisma: PrismaClient,
+  actorId: string | null,
+  id: string,
+): Promise<ApiWorkItem> {
+  return setArchived(prisma, actorId, id, false);
+}
+
 export async function deleteWorkItem(
   prisma: PrismaClient,
   actorId: string | null,
   id: string,
 ): Promise<void> {
-  const existing = await prisma.pmWorkItem.findUnique({ where: { id } });
-  if (!existing) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
+  const existing = await prisma.pmWorkItem.findUnique({
+    where: { id },
+    include: { project: { select: { kind: true } } },
+  });
+  if (!existing || isServiceDesk(existing.project)) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
+  // WARP-1505: filled inside the transaction, used after it commits.
+  let blobKeys: string[] = [];
+  let cleanupKeys: string[] = [];
   try {
     await prisma.$transaction(async (tx) => {
+      const assignees = await tx.pmWorkItemAssignee.findMany({
+        where: { workItemId: id },
+        select: { userId: true },
+      });
+      const assignedUserIds = assignees.map(({ userId }) => userId);
+      const guests = assignedUserIds.length === 0
+        ? []
+        : await tx.user.findMany({
+            where: { id: { in: assignedUserIds }, role: "guest" },
+            select: { id: true },
+          });
+      // A detached PmActivity tombstone is the transactional live-update event
+      // for the deleted leaf. Ordinary activity rows cascade with the item;
+      // this snapshot survives and contains only project/item/user IDs.
+      await tx.pmActivity.create({
+        data: {
+          workItemId: null,
+          actorId,
+          verb: "deleted",
+          deletedProjectId: existing.projectId,
+          deletedWorkItemId: id,
+          deletedGuestUserIds: guests.map(({ id: userId }) => userId),
+          notifyStatus: "not_needed",
+        },
+      });
+      // WARP-1505: the cascade drops this item's PmAttachment rows (and its
+      // comments' — they carry the same workItemId), but the bytes are files on
+      // a volume the database cannot reach. Read the keys here, inside the
+      // SERIALIZABLE transaction, so an upload that commits between this read and
+      // the delete aborts the delete (409, retry) instead of being cascaded with
+      // its blob forgotten; the files themselves go after the commit, below.
+      blobKeys = (
+        await tx.pmAttachment.findMany({ where: { workItemId: id }, select: { storageKey: true } })
+      ).map((a) => a.storageKey);
+      cleanupKeys = await queueAttachmentCleanup(tx, blobKeys);
+
       // WARP-885: `parentId ON DELETE SET NULL` would otherwise silently
       // promote every sub-issue to a root item with zero audit trail the
       // instant the parent is deleted. Emit one parent_removed activity row
@@ -1600,6 +2713,7 @@ export async function deleteWorkItem(
           field: "parentId",
           oldValue: id,
           newValue: null,
+          nudge: false,
         });
       }
       // WARP-2586: the PmWorkItemRelation FKs cascade on BOTH ends, so this
@@ -1632,7 +2746,12 @@ export async function deleteWorkItem(
       }
 
       await tx.pmWorkItem.delete({ where: { id } });
-    }, SERIALIZABLE_TX);
+    }, { ...SERIALIZABLE_TX, timeout: 5_000 });
+    // Wake only after the delete and its tombstone have committed. If the
+    // transaction rolls back, no consumer is nudged for an event that vanished.
+    // This one post-commit wake also covers the surviving-end relation audit
+    // rows written directly with createMany above.
+    nudgeOutbox();
   } catch (err) {
     if (isPrismaCode(err, "P2025")) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
     // The SERIALIZABLE loser: an edge was committed under us between the audit
@@ -1641,18 +2760,47 @@ export async function deleteWorkItem(
     if (isPrismaCode(err, "P2034")) throw new Error(PM_ERRORS.CONCURRENT_MUTATION);
     throw err;
   }
+  // Committed: the rows are gone, so the files are unreachable. Never throws.
+  await finishQueuedAttachmentCleanup(prisma, cleanupKeys);
 }
 
 // ── Comments ─────────────────────────────────────────────────────────────────
 
-export async function listComments(prisma: PrismaClient, workItemId: string): Promise<ApiComment[]> {
-  const item = await prisma.pmWorkItem.findUnique({ where: { id: workItemId } });
-  if (!item) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
-  const rows = await prisma.pmComment.findMany({
-    where: { workItemId },
-    orderBy: { createdAt: "asc" },
+/**
+ * A work item's comments, oldest to newest — a PAGE (WARP-3371), like every PM
+ * list: `limit` (default 100, max 500), the previous page's opaque `cursor`, and
+ * an exact `total`. A caller that sends nothing gets the first page and a
+ * `nextCursor` that says whether there is more; it used to get every row, so a
+ * thread of any length was one unbounded response.
+ */
+export async function listComments(
+  prisma: PrismaClient,
+  workItemId: string,
+  opts: { limit?: number; cursor?: string; page?: number } = {},
+): Promise<Page<ApiComment>> {
+  const after = opts.cursor ? decodeCursor(ORDER_COMMENTS, opts.cursor) : null;
+  const item = await prisma.pmWorkItem.findUnique({
+    where: { id: workItemId },
+    include: { project: { select: { kind: true } } },
   });
-  return rows.map(mapComment);
+  if (!item || isServiceDesk(item.project)) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
+  const limit = clampLimit(opts.limit);
+  const where: Prisma.PmCommentWhereInput = { workItemId };
+  const skip = after ? 0 : (Math.max(1, opts.page ?? 1) - 1) * limit;
+  const [total, rows] = await Promise.all([
+    prisma.pmComment.count({ where }),
+    prisma.pmComment.findMany({
+      where: after ? { ...where, ...(keysetAfter("createdAt", "asc", after) as Prisma.PmCommentWhereInput) } : where,
+      // `id` closes the tie: two comments can share a millisecond.
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      ...(skip > 0 ? { skip } : {}),
+      take: limit + 1,
+    }),
+  ]);
+  const { items, nextCursor } = sliceToPage(rows, limit, (r) => encodeCursor(ORDER_COMMENTS, r.createdAt, r.id));
+  // Tombstones and per-page mention/reaction metadata remain part of the
+  // collaboration contract while the response stays bounded by the paging API.
+  return { items: await hydrateComments(prisma, items), nextCursor, total };
 }
 
 export async function addComment(
@@ -1661,19 +2809,39 @@ export async function addComment(
   workItemId: string,
   commentHtml: string,
 ): Promise<ApiComment> {
-  const item = await prisma.pmWorkItem.findUnique({ where: { id: workItemId } });
-  if (!item) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
+  const item = await prisma.pmWorkItem.findUnique({
+    where: { id: workItemId },
+    include: { project: { select: { kind: true } } },
+  });
+  if (!item || isServiceDesk(item.project)) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
   // Comment HTML is rendered via dangerouslySetInnerHTML in the drawer — sanitize
   // against the strict PM allowlist at the write boundary (stored-XSS guard).
-  const safeHtml = sanitizePmHtml(commentHtml);
+  // WARP-3519: the same pass reads the @mentions back out of the SANITIZED html
+  // and keeps only the people who can read this item (pm-mentions.ts).
+  const { html: safeHtml, mentionIds } = await resolveCommentMentions(
+    prisma,
+    workItemId,
+    commentHtml,
+  );
   const row = await prisma.$transaction(async (tx) => {
     const comment = await tx.pmComment.create({
       data: { workItemId, authorId: actorId, commentHtml: safeHtml },
     });
-    await writeActivity(tx, { workItemId, actorId, verb: "commented" });
+    // `newValue` is the comment id: the notify sweep reads it to tell the
+    // people this comment MENTIONS apart from the ones it merely reaches.
+    await writeActivity(tx, {
+      workItemId,
+      actorId,
+      verb: "commented",
+      field: "comment",
+      newValue: comment.id,
+    });
+    // Commenter first: if they mention themselves they stay a COMMENTER.
+    await autoWatch(tx, workItemId, [{ userId: actorId, reason: "COMMENTER" }]);
+    await recordMentions(tx, { workItemId, commentId: comment.id, actorId, mentionIds });
     return comment;
   });
-  return mapComment(row);
+  return mapComment(row, { mentions: mentionIds });
 }
 
 // ── Activity feed ────────────────────────────────────────────────────────────
@@ -1689,25 +2857,51 @@ export interface ApiActivity {
   createdAt: string;
 }
 
-/** Append-only activity for a work item, oldest to newest (timeline order). */
-export async function listActivity(
-  prisma: PrismaClient,
-  workItemId: string,
-): Promise<ApiActivity[]> {
-  const item = await prisma.pmWorkItem.findUnique({ where: { id: workItemId } });
-  if (!item) throw new Error("work_item_not_found");
-  const rows = await prisma.pmActivity.findMany({
-    where: { workItemId },
-    orderBy: { createdAt: "asc" },
-  });
-  return rows.map((r) => ({
+/** One activity row on the wire. Shared with the merged timeline
+ *  (pm-collaboration.service.ts) so the two cannot drift apart. */
+export function mapActivity(r: Prisma.PmActivityGetPayload<object>, workItemId: string): ApiActivity {
+  return {
     id: r.id,
-    workItemId: r.workItemId,
+    workItemId: r.workItemId ?? workItemId,
     actorId: r.actorId,
     verb: r.verb,
     field: r.field,
     oldValue: r.oldValue,
     newValue: r.newValue,
     createdAt: r.createdAt.toISOString(),
-  }));
+  };
+}
+
+/** Append-only activity for a work item, oldest to newest (timeline order). */
+/** Append-only activity for a work item, oldest to newest (timeline order) — a
+ * PAGE (WARP-3371), under the same rules as `listComments`. */
+export async function listActivity(
+  prisma: PrismaClient,
+  workItemId: string,
+  opts: { limit?: number; cursor?: string; page?: number } = {},
+): Promise<Page<ApiActivity>> {
+  const after = opts.cursor ? decodeCursor(ORDER_ACTIVITY, opts.cursor) : null;
+  const item = await prisma.pmWorkItem.findUnique({
+    where: { id: workItemId },
+    include: { project: { select: { kind: true } } },
+  });
+  if (!item || isServiceDesk(item.project)) throw new Error("work_item_not_found");
+  const limit = clampLimit(opts.limit);
+  const where: Prisma.PmActivityWhereInput = { workItemId };
+  const skip = after ? 0 : (Math.max(1, opts.page ?? 1) - 1) * limit;
+  const [total, rows] = await Promise.all([
+    prisma.pmActivity.count({ where }),
+    prisma.pmActivity.findMany({
+      where: after ? { ...where, ...(keysetAfter("createdAt", "asc", after) as Prisma.PmActivityWhereInput) } : where,
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      ...(skip > 0 ? { skip } : {}),
+      take: limit + 1,
+    }),
+  ]);
+  const { items, nextCursor } = sliceToPage(rows, limit, (r) => encodeCursor(ORDER_ACTIVITY, r.createdAt, r.id));
+  return {
+    items: items.map((r) => mapActivity(r, workItemId)),
+    nextCursor,
+    total,
+  };
 }

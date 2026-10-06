@@ -74,7 +74,7 @@ the orchestrator's DB rows and labels each one:
 | Status | Means | Operator action |
 |--------|-------|-----------------|
 | `ready` | ONVIF stream URI, or default credentials answered a real `DESCRIBE` | **Add** — adopts it into Frigate |
-| `needs_credentials` | It's a camera, but the stream needs a username/password or a corrected path (includes the `rtsp_port_open` placeholder) | **Set up** — opens the manual form prefilled |
+| `needs_credentials` | It's a camera, but the stream needs a username/password or a corrected path (includes the `rtsp_port_open` placeholder) | **Set up** — asks for the camera's **Username** and **Password** (camera-discovery re-probes with them and adds the camera); a camera discovery holds no live record for opens the manual form prefilled |
 | `unverified` | Something answered on a camera port; no stream confirmed | Investigate, or ignore the device |
 
 The response is an envelope — `{ cameras, discoveryOnline }`. `discoveryOnline`
@@ -90,15 +90,87 @@ get a redacted URL plus a `hasCredentials` boolean.
 
 Accept/reject accept two id shapes: `mac:<MAC>` routes to camera-discovery (which
 verifies the stream before committing it to Frigate, answering 422 when it can't),
-and a uuid takes the DB path.
+and a uuid takes the DB path. The candidate id carries the upper-case MAC; the
+orchestrator lower-cases it before calling camera-discovery, which keys its pending
+list by the lower-case form (and itself accepts any case, so neither side depends on
+the other getting it right — WARP-3508).
+
+#### A camera you already have is not a candidate (WARP-3508)
+
+camera-discovery only learns about the adoptions it made itself, so a camera added by
+hand (`POST /api/cameras`) used to keep showing up here as "Needs sign-in" for good.
+`GET /api/cameras/discovered` now drops a candidate when any of these holds:
+
+- camera-discovery lists it as known (committed to Frigate by discovery);
+- a **managed** Camera row carries its MAC (any letter case) or its IP — managed
+  meaning `enabled`, or created by hand (`autoDiscovered = false`, even if switched
+  off); `isManagedCameraRow()` in `camera-candidates.service.ts` is the one place that
+  decides this;
+- a Frigate camera input pulls from its IP (`cameras.<name>.ffmpeg.inputs[].path`).
+
+A failed or slow (> 3 s) Frigate read costs only that last exclusion — never the
+list. Known gap: a camera discovery adopted and the operator later *disabled* reads
+as `enabled = false, autoDiscovered = true`, the same shape as a never-adopted
+candidate; the explicit adoption state (WARP-3506/3510) replaces that inference.
+camera-discovery applies the same Frigate rule on its side and stops probing those
+hosts (see its README).
+
+`POST /api/cameras/discovered/:id/credentials` (`mac:` ids only) takes
+`{ username, password }` for a `needs_credentials` camera. camera-discovery tries
+the RTSP stream paths with them — ONVIF is asked for a path only when RTSP found
+none, so a wrong password costs the camera one failed sign-in, not one per
+protocol (Hanwha locks the account after ~5) — and adds the camera on success.
+Failures carry a `code`: `auth_failed`, `locked`, `no_stream_path`, `unreachable`,
+`timeout`, and `invalid_credentials` / `unsupported_password` (nothing was tried
+on the camera). The password is never logged, published or returned.
+
+### Camera identity: key, label, adoption (WARP-3506, WARP-3510)
+
+A camera has ONE name that Frigate and the database share, and a separate label.
+
+- **`Camera.name` is the Frigate key** — always `toFrigateKey(name)`
+  (`apps/orchestrator/src/services/camera-key.ts`): lower case, `[a-z0-9_]` only.
+  Typing `Warp_Lab_Office` or `Front-Door` files the camera as `warp_lab_office` /
+  `front_door` in both Frigate and the DB. What the operator typed becomes
+  `displayName`. Everything that writes to or reads from Frigate's config (add,
+  delete, reconcile, settings, accept, the discovery merge) goes through that one
+  function; camera-discovery's Python `add_camera` applies the same rule.
+- **`Camera.adoption` is an explicit state** — `CANDIDATE` (a placeholder
+  discovery found, not yet in Frigate) or `ADOPTED` (a real camera). It is never
+  inferred from `enabled`, which is only the operator's detection toggle: a
+  disabled live camera is `enabled = false` and still `ADOPTED`.
+  - A discovery merge keeps the `ADOPTED` row (then the oldest), deletes only
+    `CANDIDATE` duplicates, and never renames an `ADOPTED` row. Two `ADOPTED` rows
+    on one device are both left alone and logged.
+  - **Add camera** and **accept** adopt the placeholder row for the device (found
+    by MAC, then IP) in place instead of minting a duplicate.
+  - A reconcile never prunes a Frigate key an `ADOPTED` row owns, and refuses a
+    save that would leave `cameras` empty while `ADOPTED` rows exist.
+
+Every Frigate config writer (add, delete, the reconcile prune, a settings save,
+the retention backfill) holds one process-wide lock across read → edit → save, and
+the reconcile reads the DB inside it. Before each save the YAML it replaces is
+written to `$FRIGATE_CONFIG_PREIMAGE_DIR` (default
+`/data/migration-snapshots/frigate-config/config-<timestamp>.yml`, newest 20 kept,
+mode 0600; skipped when that volume is absent). To undo a bad write, POST the file
+back as `text/plain` to Frigate's `/api/config/save?save_option=restart`.
 
 ### Manual Flow (Dashboard)
 
 1. Go to **Cameras** page in the dashboard
 2. Click **Add Camera** button
-3. Enter camera name and RTSP URL (e.g., `rtsp://192.168.100.101:554/stream1`)
-4. Optionally add manufacturer and model
-5. Click **Add Camera** — it's immediately configured in Frigate
+3. Enter the camera name and its RTSP stream address; the hint shows the detected manufacturer's usual path
+4. If it needs a sign-in, enter **Username** and **Password** in their own fields
+5. Optionally add manufacturer and model
+6. Click **Add Camera** — the camera is written to Frigate, Frigate is restarted
+   (on 0.17 `config/set` only writes `config.yml`; nothing starts until a restart),
+   and the dashboard waits up to ~45 s for the camera to produce a frame before it
+   says it worked
+
+If no frame arrives the camera is still added, but the API answers
+`202 { "status": "added_no_stream", "code", "reason" }` instead of `200 ok` and the
+dialog stays open with the reason — typically a wrong address, path or password.
+Re-adding under the same name updates that camera.
 
 ### Manual Flow (Frigate Config)
 
@@ -110,9 +182,19 @@ cameras:
   front_door:
     ffmpeg:
       inputs:
-        - path: rtsp://user:pass@192.168.100.101:554/stream1
+        - path: rtsp://user:pass@192.168.100.101:554/<your camera's stream path>
           roles: ["detect", "record"]
 ```
+
+Write the password **as typed** — never percent-encoded. For a username made of
+letters, digits, `_` and `-`, Frigate percent-encodes the password itself before
+ffmpeg decodes it once, so a pre-encoded `%40` is encoded again and the camera
+receives the literal `%40` (401, then a lockout). The dashboard and
+camera-discovery already do this; only a hand-written entry needs the care. A
+password written inline cannot contain spaces or curly braces (Frigate runs
+`str.format` over the file and its credential pattern stops at whitespace). The
+`{FRIGATE_CAMERA_FRONT_DOOR_PASSWORD}` placeholder from `.env`, as the baseline
+`docker/frigate/config.yml` shows, keeps the password out of the file.
 
 ### Scan Network
 
@@ -169,6 +251,7 @@ All camera access works through the authenticated Nginx HTTPS gateway. The same 
 | Live snapshot | `GET /api/cameras/{name}/snapshot` | Session cookie or Bearer token |
 | Live MJPEG stream | `GET /api/cameras/{name}/live` | Session cookie or Bearer token |
 | HLS recording playback | `GET /api/cameras/{name}/playback.m3u8` | Session cookie or Bearer token |
+| HLS event clip playback | `GET /api/cameras/events/{id}/playback.m3u8` | Session cookie or Bearer token |
 | Detection events | `GET /api/cameras/events/recent` | Session cookie or Bearer token |
 | Real-time alerts | `GET /api/cameras/events/sse` | Session cookie or Bearer token |
 
@@ -300,9 +383,107 @@ the controller converges on, and the UI says so.
    row, and a Scan action that reports what it found. Doubles as the page's empty
    state when no cameras are set up yet, and carries distinct copy for
    "found nothing" vs "discovery isn't running"
-3. **Camera grid** — snapshot thumbnails (auto-refresh 10s), status badges, last detection
+3. **Camera grid** — snapshot thumbnails (auto-refresh 10s), status badges, last detection,
+   and a recording line on each tile: a mode chip (24/7, Motion, Events or Off, with the
+   camera's own retention on hover), when it last saved, and how much is stored.
+   Detecting is blue and "Live · not saving" is orange. Owners and admins get a settings
+   gear on each tile
 4. **Events timeline** — recent detections with thumbnails, confidence, time
 5. **Detail panel** — larger live view, enable/disable/remove controls, Frigate UI link
+
+### Events Page: Business Hours and Playback (`/events`)
+
+Owners and administrators can save one weekly business-hours schedule and its
+IANA timezone from the Events page. Camera viewers can read it and filter alerts,
+detections and events to activity inside or outside those hours. The schedule is
+stored in the existing `SystemFlag` JSON setting `cameras.business_hours`; it
+does not change Frigate detection or recording settings.
+
+`GET /api/cameras/business-hours` and owner/admin-only `PUT` use
+`{ configured, timezone, days }`. `days` contains all seven lowercase weekday
+names. Each day is either `null` (closed) or `{ open: "09:00", close: "17:00" }`.
+Times use 24-hour `HH:mm`; closing also accepts `24:00`. Equal times are rejected;
+`00:00`–`24:00` means open all day. A close earlier than its open continues into
+the following day, including across Sunday. Configuration writes also require
+the person's `cameras:manage` feature access.
+
+Until configured, list items carry `outsideBusinessHours: null`. After saving,
+`true` means some activity occurred outside the schedule, and `false` means the
+whole span was within it. Opening is inclusive and closing exclusive; a finished
+span is measured as `[startTime, endTime)`, and active activity extends to now.
+The saved timezone handles daylight saving gaps and repeated hours. Editing the
+schedule reclassifies historical items when they are queried.
+
+Event and review listing accept `businessHours=outside|inside`. Filtering occurs
+on the server before pagination. A request scans at most five batches of 1000
+upstream items; `scanLimitReached: true` with `nextCursor` means older activity
+may still match, even when this response contains no matches. Semantic search
+checks a bounded ranked candidate set, exposes `searchLimitReached`, and has no
+time-based continuation cursor; narrow the search when that flag is set.
+
+Review thumbnails use the review's own WebP file under Frigate's
+`/clips/review/` path, validated against the review id and camera. Preview
+playback proxies `/api/review/:id/preview?format=mp4`. The MP4 routes preserve
+browser byte ranges and upstream partial-response headers, and footage is
+authenticated, scoped to the person's cameras and never cached. If a preview or
+event clip cannot play, the dashboard attempts the same activity's HLS recording
+window, then shows a retry and recordings link if footage is unavailable.
+Missing stills show a thumbnail-unavailable placeholder.
+
+### Motion in Retained Recordings
+
+The separate Motion tab reads Frigate's raw per-recording `motion` counts and
+merges contiguous segments with positive counts into activity windows. These
+are independent of detected objects: Frigate 0.17.1 review severities are only
+`alert` and `detection`. The motion count is not a percentage. The normalized
+`/review/activity/motion` endpoint is deliberately avoided because its hourly
+normalization can turn a constant positive count into zero.
+
+`GET /api/cameras/motion` accepts `cameras`, `after`, `before`, `businessHours`,
+`limit` and `cursor`. The default window is the last 24 hours; the maximum is
+26 hours so a calendar day can include a daylight saving transition. Responses
+contain `activity` windows with `id`, `camera`, `startTime`, `endTime`, `motion`,
+`outsideBusinessHours` and an authenticated HLS `playbackUrl`. Keep `after` and
+`before` fixed when sending the returned `nextCursor` as `cursor`.
+
+`coverage` reports the queried bounds and, for each permitted camera,
+`recordedSeconds`, `hasGaps` and `available`; `partial` indicates an unavailable
+camera read. An unavailable read uses `recordedSeconds: null`, distinct from
+zero retained footage. An empty motion result only describes the retained
+recordings in the selected window. Recording gaps cannot establish that no
+movement occurred. All filtering and pagination happens after the bounded
+window's retained data is read, and footage remains scoped per person.
+
+### Recording review
+
+The recording timeline has a continuous time ruler with separate retained
+footage, motion and event lanes. Zoom around the playhead or pointer, pan across
+the day, click an event to seek, or drag an export range. Playback controls add
+event jumps and speed selection. Empty archive gaps remain visible; seeking
+maps archive timestamps to Frigate's concatenated media segments. Local days
+use their actual duration across daylight saving transitions.
+### Recording state and the camera service restarting (WARP-3511)
+
+`CameraInfo.recording` (see `mobile-api-contract.md`) says what each camera keeps: its
+mode, the days each retention window keeps, when the newest segment ended, bytes used
+and a daily rate. The camera screen's rail and the top of each camera's settings page
+show it, with links between the camera's Recordings, Settings, Notifications and the
+Camera system page.
+
+Saving settings restarts the camera service for **every** camera, for a few seconds.
+While it cannot be read the grid and the camera screen show "Camera service
+restarting…" instead of "Offline" on every tile, and make no recording claim either
+way. Enable and Disable on the camera screen are confirmed first for the same reason;
+they write the persisted `detect.enabled` setting (Frigate 0.17 has no
+`/api/<camera>/detect/enable|disable` route).
+
+A camera that is "Live · not saving" can be repaired from its own screen with **Fix**,
+which runs the retention backfill (`GET`/`POST /api/cameras/retention/backfill`, owner
+and admin). It checks first and names every camera it will touch, and states what it
+will keep: the `GET` dry run returns the repair's effective defaults next to the plan
+(the same `resolveRetentionDefaults()` the `POST` applies, set per box through the
+`NVR_DEFAULT_*` variables), so no figure is written into the dashboard's copy. For a
+camera whose retention was switched off on purpose it points at Settings instead.
 
 ### Notifications
 

@@ -83,9 +83,9 @@ describe("feature catalog (one vocabulary — the App-Modules ModuleId enum)", (
         "money",
         "network",
         "projects",
-        // WARP-2977 — the Security command center, on the same terms.
-        "security",
         "smart_home",
+        // WARP-3528 (ADR-069 §1) — the service desk, on the same terms.
+        "support",
         "team_chat",
         "voice",
       ].sort(),
@@ -137,9 +137,37 @@ describe("feature catalog (one vocabulary — the App-Modules ModuleId enum)", (
     // gives it its own /contacts page, and it works with the CRM off.
     expect(GATEABLE_FEATURES.find((f) => f.moduleId === "knowledge")!.requires).toBeUndefined();
     expect(GATEABLE_FEATURES.find((f) => f.moduleId === "contacts")!.requires).toBeUndefined();
+    // WARP-3528 (ADR-069 §1) — Support has no edge to Projects either: /support
+    // is its own surface, and a front desk runs it with Projects off.
+    const support = GATEABLE_FEATURES.find((f) => f.moduleId === "support")!;
+    expect(support.requires).toBeUndefined();
+    expect(support.requiresReason).toBeUndefined();
     expect(
       ACCESS_FEATURES.filter((f) => f.requires).map((f) => f.moduleId).sort(),
     ).toEqual(["docs"]);
+  });
+
+  // WARP-3528 (ADR-069 §1) — value-identical to the orchestrator catalog's
+  // `support` entry (view and act at the member floor, manage at admin); only
+  // the copy lives here. Kept in step by hand: nothing reads the server file.
+  it("support is a gateable row whose ladder matches the server catalog", () => {
+    const support = GATEABLE_FEATURES.find((f) => f.moduleId === "support")!;
+    expect(support).toMatchObject({
+      label: "Support",
+      description: "Customer requests, replies and internal notes",
+    });
+    expect(support.levels.map((l) => [l.value, l.minTier])).toEqual([
+      ["view", "family"],
+      ["act", "family"],
+      ["manage", "admin"],
+    ]);
+    // A grant on it reaches the wire like any other gateable row.
+    const draft = blankRoleDraft("admin");
+    draft.features.support = { on: true, level: "manage" };
+    expect(draftToRolePayload(draft).featureGrants).toContainEqual({
+      moduleId: "support",
+      level: "manage",
+    });
   });
 
   it("every declared parent is a real gateable feature, never self-referential", () => {
@@ -174,14 +202,6 @@ describe("feature catalog (one vocabulary — the App-Modules ModuleId enum)", (
     // The design's grouped calendar row expands to the three real domains.
     const cal = TOOL_DOMAIN_GROUPS.find((g) => g.id === "calendar")!;
     expect(cal.domains).toEqual(["calendar", "reminders", "notifications"]);
-  });
-
-  it("WARP-2979: Security is its own on-box row, gated by the Security feature", () => {
-    // Effective access counts only GRANTED domains (effective-access.service.ts),
-    // so without this row no custom role could ever be given the Security tools.
-    // MUTATION: drop the row, or its feature -> red.
-    const security = TOOL_DOMAIN_GROUPS.find((g) => g.id === "security")!;
-    expect(security).toMatchObject({ label: "Security", domains: ["security"], feature: "security" });
   });
 
   it("business is its own on-box row, and System no longer carries it (WARP-2583)", () => {
@@ -227,6 +247,20 @@ describe("floor clamping (§5.2 — blocked levels shown, never hidden)", () => 
     }
     expect(floorBlockedReason("crm", "view")).toBe("See customers is for members.");
     expect(floorBlockedReason("projects", "view")).toBe("See projects is for members.");
+  });
+
+  // WARP-3528 — Support is refused to an external guest the same way (a ticket
+  // is a customer's own words), and its manage level is admin-floored on top.
+  it("blocks every level of Support for a guest starting point, and manage for a member", () => {
+    for (const level of ["view", "act", "manage"] as const) {
+      expect(isLevelBlocked("guest", "support", level), `guest support ${level}`).toBe(true);
+    }
+    expect(isLevelBlocked("family", "support", "view")).toBe(false);
+    expect(isLevelBlocked("family", "support", "act")).toBe(false);
+    expect(isLevelBlocked("family", "support", "manage")).toBe(true);
+    expect(isLevelBlocked("admin", "support", "manage")).toBe(false);
+    expect(floorBlockedReason("support", "view")).toBe("See tickets is for members.");
+    expect(floorBlockedReason("support", "manage")).toBe("Manage service desks is for admins.");
   });
 
   it("blocks write levels (act/manage) on a guest starting point for family-floored features", () => {

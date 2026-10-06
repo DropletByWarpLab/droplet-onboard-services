@@ -289,6 +289,23 @@ describe("EmailWorkspace", () => {
     );
   });
 
+  it("lets an owner save a local Outlook draft while withholding all send controls", async () => {
+    useEmailAccountsMock.mockReturnValue({ accounts: [{ ...account, authMode: "M365_GRAPH", canSend: false }], isLoading: false, refresh: vi.fn() });
+    useEmailThreadMock.mockReturnValue({ thread: { ...threadDetail, messages: [{ ...threadDetail.messages[0], hasAttachments: true }] }, isLoading: false, refresh: vi.fn() });
+    createDraftMock.mockResolvedValue({ id: "d1", accountId: "acc-1", threadId: "t1", toAddrs: ["naomi@northwind.co"], ccAddrs: null, bccAddrs: null,
+      subject: "Re: PO 4912 revised ETA", body: "Local draft", draftedByDroplet: false, status: "draft", sentAt: null, error: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+    render(<EmailWorkspace initialThreadId="t1" />);
+    expect(screen.getByText(/read-only outlook import/i)).toBeInTheDocument();
+    expect(screen.getByText(/attachments stay in outlook/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /write a reply/i }));
+    expect(screen.getByText(/sending from this mailbox in droplet is not available/i)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText(/reply message/i), { target: { value: "Local draft" } });
+    fireEvent.click(screen.getByRole("button", { name: /save draft/i }));
+    await waitFor(() => expect(createDraftMock).toHaveBeenCalledWith("acc-1", expect.objectContaining({ body: "Local draft" })));
+    await screen.findByText("Local draft");
+    expect(screen.queryByRole("button", { name: /send reply|confirm and send/i })).not.toBeInTheDocument();
+  });
+
   describe("responsive single-pane (below lg)", () => {
     beforeEach(() => setViewport("mobile"));
 

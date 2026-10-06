@@ -143,6 +143,20 @@ describe("the deal ↔ project edge is visible from both ends", () => {
     expect(screen.getByText(/ROLL/)).toBeTruthy();
   });
 
+  // WARP-3522: these linked to `/projects?project=<id>`, a parameter the
+  // Projects page never read — every one of them opened the project INDEX. The
+  // page's deep-link contract is `?p=<IDENTIFIER>`.
+  it("links to the project through the /projects deep-link contract, from both ends", () => {
+    const { container, unmount } = render(
+      <Deals deals={[deal({ projectId: "p1" })]} projects={[project({ id: "p1", identifier: "ROLL" })]} emptyText="none" />,
+    );
+    expect(container.querySelector('a[href="/projects?p=ROLL"]')).not.toBeNull();
+    unmount();
+    const second = render(<Projects projects={[project({ id: "p1", name: "Rollout Q3", identifier: "ROLL" })]} />);
+    expect(second.container.querySelector('a[href="/projects?p=ROLL"]')).not.toBeNull();
+    expect(second.container.querySelector('a[href*="project="]')).toBeNull();
+  });
+
   it("marks a project that came from a deal, and leaves the others plain", () => {
     render(
       <Projects

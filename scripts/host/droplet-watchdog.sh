@@ -52,18 +52,6 @@
 #                        not by preference: the fix is a full `setup.sh` run
 #                        (apt, unit rewrites, service restarts) — an unattended
 #                        provision is not something a 3-minute timer may start.
-#   relay_dns            The ADR-025 cloudflared relay resolves the box's FQDN
-#                        by dialling the box's OWN dnsmasq. dnsmasq binds only
-#                        explicitly listed addresses and the shipped template
-#                        lists one leg, so on a relayed box nothing answers
-#                        where the tunnel dials — a healthy connector that
-#                        cannot resolve the box, which from off-site is
-#                        indistinguishable from a dead box (WARP-2189).
-#                        Delegates detection AND heal to
-#                        /usr/local/sbin/droplet-relay-dns. HEALS: the change
-#                        is one generated conf block, `dnsmasq --test`ed before
-#                        install, verified after, auto-rolled-back on failure.
-#                        Also starts the connector container if it is stopped.
 #
 # Status contract (architecture-guard rule: explicit enums, never inferred
 # from absence): every known check ALWAYS appears in
@@ -104,6 +92,8 @@
 #   DROPLET_WATCHDOG_XVF_HOST            xvf_host stub
 #   DROPLET_WATCHDOG_DOCKER_DAEMON_JSON  daemon.json fixture
 #   DROPLET_WATCHDOG_HOST_UNITS_BIN      droplet-host-units stub
+#   DROPLET_WATCHDOG_ROUTING_URL         routing base URL (router_auth); curl is resolved via PATH
+#   DROPLET_ENV_FILE                    deployment .env (TLS flag + host-admin bundle root)
 #   (docker is resolved via PATH, so a stub earlier on PATH intercepts it)
 # =============================================================================
 # Deliberately NOT `set -e`: a supervisor must survive any single probe
@@ -112,7 +102,7 @@ set -u
 
 # --- configuration (no host-specific defaults; everything overridable) -------
 WD_STATE_DIR="${DROPLET_WATCHDOG_STATE_DIR:-/var/lib/droplet/watchdog}"
-WD_CHECKS_ENABLED="${DROPLET_WATCHDOG_CHECKS:-wifi voice_dsp docker_dns container_crashloop host_unit_staleness host_artefacts relay_dns app_downloads}"
+WD_CHECKS_ENABLED="${DROPLET_WATCHDOG_CHECKS:-wifi voice_dsp docker_dns container_crashloop host_unit_staleness host_artefacts app_downloads router_auth}"
 WD_ESCALATE_AFTER="${DROPLET_WATCHDOG_ESCALATE_AFTER:-2}"
 WD_RETRY_EVERY="${DROPLET_WATCHDOG_ESCALATED_RETRY_EVERY:-5}"
 
@@ -146,12 +136,6 @@ WD_LOG_TAIL="${DROPLET_WATCHDOG_LOG_TAIL:-200}"
 # when absent, so both checks are safe on any shape.
 WD_HOST_UNITS_BIN="${DROPLET_WATCHDOG_HOST_UNITS_BIN:-/usr/local/sbin/droplet-host-units}"
 
-# WARP-2189 — the relay's DNS origin. The check delegates detection AND heal to
-# this helper (single owner of the managed listener block, shared with
-# setup_local_dns); not_applicable when absent, so it is safe on any shape.
-WD_RELAY_DNS_BIN="${DROPLET_WATCHDOG_RELAY_DNS_BIN:-/usr/local/sbin/droplet-relay-dns}"
-WD_RELAY_CONTAINER="${DROPLET_WATCHDOG_RELAY_CONTAINER:-droplet-cloudflared}"
-
 # WARP-2666 — the client-app download surface. The auditor is NOT installed to
 # /usr/local: it reads the checkout's own data/app-downloads, so it must run
 # from the checkout (an installed copy would be stale in exactly the case being
@@ -160,7 +144,12 @@ WD_RELAY_CONTAINER="${DROPLET_WATCHDOG_RELAY_CONTAINER:-droplet-cloudflared}"
 # whose checkout lives somewhere unusual.
 WD_APP_DOWNLOADS_AUDIT="${DROPLET_WATCHDOG_APP_DOWNLOADS_AUDIT:-}"
 
-WD_ALL_CHECKS="wifi voice_dsp docker_dns container_crashloop host_unit_staleness host_artefacts relay_dns app_downloads"
+# WARP-3838 — router_auth reads routing's /health, as scripts/lib/local-dns.sh does.
+WD_ROUTING_URL="${DROPLET_WATCHDOG_ROUTING_URL:-${ROUTING_SERVICE_URL:-http://localhost:8080}}"
+WD_ROUTING_MODE="${ROUTING_MODE:-real}"
+WD_ENV_FILE="${DROPLET_ENV_FILE:-}"
+
+WD_ALL_CHECKS="wifi voice_dsp docker_dns container_crashloop host_unit_staleness host_artefacts app_downloads router_auth"
 WD_STATUS_FILE="$WD_STATE_DIR/status.json"
 WD_HEAL_LOG="$WD_STATE_DIR/heal.log"
 WD_KV_DIR="$WD_STATE_DIR/state"
@@ -852,99 +841,73 @@ wd_check_app_downloads() {
   return 0
 }
 
-# --- relay_dns -----------------------------------------------------------------
-# WARP-2189. Off-site access rides the ADR-025 cloudflared relay, and every
-# off-site lookup is a DNS query the connector dials at the box's own dnsmasq
-# (DROPLET_PUBLIC_FQDN_IP:53, via the Cloudflare Local Domain Fallback). The
-# host dnsmasq binds only explicitly listed addresses, and the shipped template
-# lists one — the .20.1 LAN leg — so on a relayed box nothing answers where the
-# tunnel dials and cloudflared loops "connection refused".
+# --- router_auth ---------------------------------------------------------------
+# WARP-3838. The dashboard already says "Credentials rejected" and /api/health
+# already returns 503, but nothing on the box itself recorded a router-auth
+# failure persistently (the lab box ran unpaired for an unknown time). Routing's
+# auth-exempt /health carries `connected` and the actionable `error` text.
 #
-# This is the failure mode that reads as "the box is down" from outside while
-# the box is entirely healthy: the connector stays up, TCP still answers, but
-# the FQDN goes NXDOMAIN and the name-only certificate makes connecting by IP
-# unvalidatable. It was diagnosed from scratch twice (2026-08-14, 2026-08-26),
-# both times after the hand-applied listener was wiped by a setup.sh re-run.
-#
-# UNLIKE host_unit_staleness this check DOES heal on its own, because the heal
-# is narrow and reversible where that one is broad: one generated conf block,
-# validated with `dnsmasq --test` BEFORE install, one unit restart, verified
-# after, and rolled back automatically if the unit does not come back. The
-# restart momentarily interrupts host LAN DHCP/DNS, but leases are sticky
-# (dhcp-leasefile lives outside /tmp) and the alternative is an invisible total
-# loss of remote support. The helper no-ops when the listener is already bound,
-# so a healthy box never restarts anything.
-wd_check_relay_dns() {
-  if [ ! -x "$WD_RELAY_DNS_BIN" ]; then
+# Detect-only, deliberately no heal: the fix is a human re-pairing the router
+# credentials, which a 3-minute timer must never guess at. not_applicable when
+# routing is unreachable (nothing to judge) or ROUTING_MODE is not `real`
+# (same gate as scripts/lib/local-dns.sh). ROUTING_MODE and ROUTING_SERVICE_URL
+# are read from this unit's environment (/etc/default/droplet-watchdog). The
+# installer also supplies DROPLET_ENV_FILE so the probe follows the deployed
+# internal TLS flag and uses the host-admin client bundle, without sourcing
+# the deployment .env as root.
+wd_check_router_auth() {
+  if [ "$WD_ROUTING_MODE" != "real" ]; then
     CHECK_OUTCOME=not_applicable
-    CHECK_MESSAGE="droplet-relay-dns not installed at $WD_RELAY_DNS_BIN (re-run ./scripts/setup.sh)"
+    CHECK_MESSAGE="ROUTING_MODE=$WD_ROUTING_MODE — no real router to authenticate to"
     return 0
   fi
 
-  local out rc=0
-  out="$("$WD_RELAY_DNS_BIN" check 2>&1)" || rc=$?
-
-  # 3 = no split-horizon FQDN on this box, or the address is not on this host.
-  # Neither is a fault, and neither is repairable from here.
-  if [ "$rc" = 3 ]; then
+  local body connected tls="${DROPLET_INTERNAL_TLS:-}" url="${WD_ROUTING_URL%/}" bundle
+  local -a tls_args=()
+  if [ -z "$tls" ] && [ -r "$WD_ENV_FILE" ]; then
+    tls="$(grep -E '^DROPLET_INTERNAL_TLS=' "$WD_ENV_FILE" | tail -1 | cut -d= -f2- | tr -d "\"'\r")"
+  fi
+  if [ "$tls" = "1" ]; then
+    url="${url/#http:\/\//https://}"
+    bundle="$(dirname "${WD_ENV_FILE:-.}")/data/secrets/service-tls/host-admin"
+    tls_args=(--cacert "${DROPLET_TLS_CA:-$bundle/ca.pem}"
+              --cert "${DROPLET_TLS_CERT:-$bundle/cert.pem}"
+              --key "${DROPLET_TLS_KEY:-$bundle/key.pem}")
+  fi
+  if ! body="$(curl -fsS --max-time 5 "${tls_args[@]}" "${url}/health" 2>/dev/null)" || [ -z "$body" ]; then
     CHECK_OUTCOME=not_applicable
-    CHECK_MESSAGE="${out##*: }"
+    CHECK_MESSAGE="routing service not responding at ${url}/health — no verdict"
     return 0
   fi
-  # Anything other than the documented 0/1/3 means the detector itself failed.
-  # That is not evidence the origin is broken — say so rather than healing on a
-  # verdict we do not have.
-  if [ "$rc" != 0 ] && [ "$rc" != 1 ]; then
+
+  # A service/proxy error is not a router credential verdict. Parse the top
+  # level boolean instead of matching JSON-looking text (including HTML).
+  if ! connected="$(printf '%s' "$body" | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    value = data.get("connected") if isinstance(data, dict) else None
+    if type(value) is not bool:
+        sys.exit(1)
+    print("true" if value else "false")
+except (ValueError, TypeError):
+    sys.exit(1)
+' 2>/dev/null)"; then
     CHECK_OUTCOME=not_applicable
-    CHECK_MESSAGE="droplet-relay-dns check could not run (exit $rc) — inspect '$WD_RELAY_DNS_BIN check'"
+    CHECK_MESSAGE="routing health response is invalid or cannot be parsed at ${url}/health — no verdict"
     return 0
   fi
 
-  if [ "$rc" = 1 ]; then
-    wd_log_heal relay_dns "DNS origin broken (${out##*: }) — running droplet-relay-dns repair"
-    local rout rrc=0
-    rout="$("$WD_RELAY_DNS_BIN" repair 2>&1)" || rrc=$?
-    if [ "$rrc" != 0 ]; then
-      CHECK_OUTCOME=heal_failed
-      CHECK_MESSAGE="the relay's DNS origin is not answering and the repair did not take (exit $rrc): ${rout##*: } — off-site access to this box is blind until this clears; inspect '$WD_RELAY_DNS_BIN check' and 'systemctl status droplet-host-net'"
-      return 0
-    fi
-    # Trust the repair only after an independent re-check.
-    rc=0
-    "$WD_RELAY_DNS_BIN" check >/dev/null 2>&1 || rc=$?
-    if [ "$rc" != 0 ]; then
-      CHECK_OUTCOME=heal_failed
-      CHECK_MESSAGE="droplet-relay-dns repair reported success but the origin still does not answer (re-check exit $rc) — inspect '$WD_RELAY_DNS_BIN check'"
-      return 0
-    fi
-    wd_log_heal relay_dns "DNS origin restored: ${rout##*: }"
-    CHECK_OUTCOME=healed
-    CHECK_MESSAGE="restored the relay's DNS origin: ${rout##*: }"
+  if [ "$connected" = true ]; then
+    CHECK_OUTCOME=ok
+    CHECK_MESSAGE="routing is authenticated to the router"
     return 0
   fi
 
-  # DNS origin is fine. The other half of "reachable from off-site" is the
-  # connector itself. Compose already gives it restart: unless-stopped, so a
-  # STOPPED container means Docker gave up or someone stopped it — start it.
-  # A container that was never created means this box does not run the relay.
-  if command -v docker >/dev/null 2>&1 && docker ps >/dev/null 2>&1; then
-    local state
-    state="$(docker inspect -f '{{.State.Status}}' "$WD_RELAY_CONTAINER" 2>/dev/null)"
-    if [ -n "$state" ] && [ "$state" != running ] && [ "$state" != restarting ]; then
-      wd_log_heal relay_dns "connector $WD_RELAY_CONTAINER is $state — starting it"
-      if docker start "$WD_RELAY_CONTAINER" >/dev/null 2>&1; then
-        CHECK_OUTCOME=healed
-        CHECK_MESSAGE="DNS origin healthy; started the stopped relay connector $WD_RELAY_CONTAINER (was $state)"
-        return 0
-      fi
-      CHECK_OUTCOME=heal_failed
-      CHECK_MESSAGE="DNS origin healthy but the relay connector $WD_RELAY_CONTAINER is $state and would not start — off-site access is down; inspect 'docker logs $WD_RELAY_CONTAINER'"
-      return 0
-    fi
-  fi
-
-  CHECK_OUTCOME=ok
-  CHECK_MESSAGE="${out##*: }"
+  local err
+  err="$(printf '%s' "$body" | sed -n 's/.*"error"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -c 300)"
+  CHECK_OUTCOME=heal_failed
+  CHECK_MESSAGE="routing is not connected to the router: ${err:-no error text in /health}. Detect-only: re-pair the router credentials (detail: routing /health at ${url}/health)"
   return 0
 }
 

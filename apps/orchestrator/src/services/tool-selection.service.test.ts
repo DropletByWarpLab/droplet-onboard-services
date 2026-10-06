@@ -12,7 +12,6 @@ import {
   toolNamesForDomain,
 } from "./tool-selection.service.js";
 import type { RuntimeToolDescriptor } from "./runtime-tool-registry.service.js";
-import { TOOL_CATALOG } from "@droplet/tools-core";
 
 const POOL = [
   "search_content",
@@ -1141,7 +1140,7 @@ describe("WARP-3116 — dashboard navigation is reachable from a fresh turn", ()
       "where is the guest wifi setting",
       "where are my deleted files?",
       "how do I get to the camera recordings",
-      "open the security page",
+      "open the people page",
       "open voice settings",
       "show me the network settings",
     ])("%s advertises the navigation tools", (message) => {
@@ -1207,7 +1206,7 @@ describe("WARP-3116 — dashboard navigation is reachable from a fresh turn", ()
     it.each([
       "take me to voice settings",
       "where do I change the wifi password?",
-      "open the security page",
+      "open the people page",
     ])("%s admits no data tool when the pool holds no navigation tool", (message) => {
       const r = select(PAGELESS_POOL, message);
       expect(r.matchedDomains).not.toContain("data");
@@ -1337,130 +1336,70 @@ describe("WARP-2896 — a workshop run's binding admits the workspace domain; no
   });
 });
 
-describe("WARP-2979 — Security questions reach the security domain (ADR-059 P4 §6.12.6)", () => {
-  const SECURITY = ["security_list_incidents", "security_get_incident", "security_search_events", "security_zone_status", "security_explain_pattern"];
-  const SECURITY_POOL = [...POOL, ...SECURITY];
-  const select = (sentence: string) =>
-    selectAdvertisedTools({ mode: "domains", userMessage: sentence, pool: SECURITY_POOL, conversationToolNames: [] });
+/**
+ * WARP-3538 — OneDrive and SharePoint are asked after by PLACE, not by
+ * container.
+ *
+ * `search_cloud_files` lives in `files`, and nobody who wants it types one of
+ * that rule's nouns: "what did Dana change in the SharePoint this week" holds
+ * no file, document, folder or pdf. It advertised the core four and not the one
+ * tool that can answer it — a tool registered, budgeted and advertised on no
+ * relevant turn, the WARP-2058 / 2454 / 2497 / 2546 class again. The rule claims
+ * the two product names and nothing wider.
+ *
+ * Whole sentences, never a word lifted out of the pattern — and none of them
+ * carries a word the older `files` rules already claim (`document`, `upload`,
+ * `file`, …), or the new rule would be doing no work and deleting it would stay
+ * green. MUTATION: delete the rule and every positive goes red; drop either
+ * product name from it and that name's sentences go red.
+ */
+describe("WARP-3538 — OneDrive and SharePoint reach search_cloud_files from a fresh turn", () => {
+  const CLOUD_FILES_POOL = [...POOL, "search_cloud_files", "list_recent_files"];
 
-  it.each([
-    "anything odd at the back door last night?",
-    "did anything happen while we were away",
-    "any security incidents this week?",
-    "is the stock room covered?",
-    "which areas had people after hours?",
-    // WARP-2980 (P5 PR-E) — what is usual for a place: the box-proof sentence, and the same question asked two ways.
-    "is it normal for someone to be in the stock room at 2 AM?",
-    "was that normal for a Sunday morning?",
-    "what's usual for the loading bay at night?",
-  ])("routes to security: %s", (sentence) => {
-    const r = select(sentence);
-    expect(r.matchedDomains, `"${sentence}" advertised only [${r.advertised.join(", ")}]`).toContain("security");
-    for (const name of SECURITY) expect(r.advertised, name).toContain(name);
-  });
+  const advertisedFor = (userMessage: string, conversationToolNames: string[] = []) =>
+    selectAdvertisedTools({ mode: "domains", userMessage, pool: CLOUD_FILES_POOL, conversationToolNames }).advertised;
 
-  it.each(["add a dentist appointment tomorrow", "block my son's tablet"])("does not route to security: %s", (sentence) => {
-    const r = select(sentence);
-    expect(r.matchedDomains).not.toContain("security");
-    for (const name of SECURITY) expect(r.advertised, name).not.toContain(name);
-  });
-
-  it("is never in the core pool: pulled in by the turn, or not at all", () => {
-    for (const name of SECURITY) expect(CORE_TOOL_NAMES.has(name), name).toBe(false);
-    for (const name of SECURITY) expect(domainOfTool(name), name).toBe("security");
-  });
-
-  it("a follow-up keeps the domain by continuity", () => {
-    const r = selectAdvertisedTools({
-      mode: "domains",
-      userMessage: "and the one before that?",
-      pool: SECURITY_POOL,
-      conversationToolNames: ["security_get_incident"],
+  describe("positives — how a person asks after a file by where it lives", () => {
+    it.each([
+      "what did Dana change in the SharePoint this week?",
+      "has the Front Desk site on SharePoint got the new price list yet?",
+      "ask SharePoint who touched the staff roster last",
+      "is the new staff handbook on OneDrive or only on the Droplet?",
+      "anything Sam edited in my OneDrive since Monday?",
+      "check my One-Drive for the roofer's paperwork",
+    ])("%s", (message) => {
+      const advertised = advertisedFor(message);
+      expect(advertised).toContain("search_cloud_files");
+      // The domain is admitted whole: its siblings come with it.
+      expect(advertised).toContain("list_recent_files");
     });
-    expect(r.advertised).toContain("security_list_incidents");
   });
 
-  // Review #2420 (item 4): the tools' OWN examples — the questions each description tells the model it answers —
-  // must reach them. Read from the catalog, so an example added to a description is checked the day it lands.
-  const EXAMPLE = /(?:^|[\s(])'([^']+\?)'/g;
-  const examples = TOOL_CATALOG.filter((t) => t.domain === "security").flatMap((t) =>
-    [...t.description.matchAll(EXAMPLE)].map((m) => [t.name, m[1]!] as const),
-  );
-
-  it("the descriptions carry examples to check (not vacuous)", () => {
-    expect(examples.length).toBeGreaterThanOrEqual(5);
-    expect(examples.map(([, q]) => q)).toEqual(
-      expect.arrayContaining([
-        "any alerts this week?",
-        "is any camera offline?",
-        "was anyone in the stock room after 9?",
-        // WARP-2980 (PR-E): security_explain_pattern's own.
-        "is it normal for someone to be in the stock room at 2 AM?",
-        "why was this flagged?",
-      ]),
-    );
-  });
-
-  it.each(examples)("%s's own example routes to security: %s", (_tool, question) => {
-    const r = select(question);
-    expect(r.matchedDomains, `"${question}" advertised only [${r.advertised.join(", ")}]`).toContain("security");
-  });
-});
-
-describe("ADR-055 P4b — door questions reach the doors domain", () => {
-  const DOORS = ["doors_list", "doors_recent_events"];
-  const DOORS_POOL = [...POOL, ...DOORS];
-  const select = (sentence: string) =>
-    selectAdvertisedTools({ mode: "domains", userMessage: sentence, pool: DOORS_POOL, conversationToolNames: [] });
-
-  // Whole sentences a person would type, not the pattern's own vocabulary.
-  it.each([
-    "is the front door open?",
-    "which doors are open?",
-    "was the warehouse door left open last night?",
-    "what happened at the back door today?",
-    "did anyone force a door over the weekend",
-    "is the side gate ajar",
-    "has the stock room door been propped open",
-    "show me the doors",
-  ])("routes to doors: %s", (sentence) => {
-    const r = select(sentence);
-    expect(r.matchedDomains, `"${sentence}" advertised only [${r.advertised.join(", ")}]`).toContain("doors");
-    for (const name of DOORS) expect(r.advertised, name).toContain(name);
-  });
-
-  // A word in two rules brings in both domains, and that is fine: the camera
-  // rule already owns "front door" (WARP-1921).
-  it("a place word that is also a camera word pulls both domains", () => {
-    const r = select("is anyone at the front door?");
-    expect(r.matchedDomains).toEqual(expect.arrayContaining(["doors", "cameras"]));
-  });
-
-  it.each([
-    "add an outdoor light to the garden",
-    "what is the indoor temperature",
-    "ring the doorbell",
-    "block my son's tablet",
-    "add a dentist appointment tomorrow",
-  ])("does not route to doors: %s", (sentence) => {
-    const r = select(sentence);
-    expect(r.matchedDomains, sentence).not.toContain("doors");
-    for (const name of DOORS) expect(r.advertised, name).not.toContain(name);
-  });
-
-  it("is never in the core pool: pulled in by the turn, or not at all", () => {
-    for (const name of DOORS) expect(CORE_TOOL_NAMES.has(name), name).toBe(false);
-    for (const name of DOORS) expect(domainOfTool(name), name).toBe("doors");
-  });
-
-  it("a follow-up keeps the domain by continuity", () => {
-    const r = selectAdvertisedTools({
-      mode: "domains",
-      userMessage: "and the one before that?",
-      pool: DOORS_POOL,
-      conversationToolNames: ["doors_list"],
+  describe("negatives — sentences that name neither product", () => {
+    // The files domain is the largest in the catalog, so each of these would
+    // buy ~4K tokens of schema on a turn that wanted none of it.
+    it.each([
+      // `one drive` with a space is a disk in an array, not a product. The
+      // storage question has its own domain; it must not pull `files` in too.
+      "one drive in the raid array has failed, is the storage ok?",
+      // Microsoft 365 alone is not claimed: it is mail and calendar as much as
+      // files, and `microsoft 365` in a calendar question must not buy `files`.
+      "is my Microsoft 365 calendar syncing properly?",
+      "I would like to share a point about the budget at the meeting",
+      // The tool is provider-agnostic, but the word "cloud" is not claimed: this
+      // product's customers type it about backups, cameras and privacy as often
+      // as about files, and each would buy the whole domain.
+      "is any of my camera footage being sent to the cloud?",
+      "should the Droplet back itself up to the cloud overnight?",
+    ])("%s does not advertise the files domain", (message) => {
+      expect(advertisedFor(message)).not.toContain("search_cloud_files");
     });
-    expect(r.advertised).toContain("doors_recent_events");
+  });
+
+  it("a conversation that already searched cloud files keeps the files domain on a bare follow-up", () => {
+    // "and the one before that?" names nothing; continuity carries it.
+    expect(advertisedFor("and the one before that?", ["search_cloud_files"])).toContain("list_recent_files");
+    expect(advertisedFor("and the one before that?")).not.toContain("list_recent_files");
   });
 });
 
@@ -1599,6 +1538,10 @@ describe("WARP-3280 — every domain rule runs in linear time on hostile input",
     ["send then spaces", "send" + " ".repeat(N) + "a message"],
     ["let run", "let ".repeat(N / 4)],
     ["tell a word run", "tell " + "a".repeat(N)],
+    // WARP-3538 — the OneDrive / SharePoint product names and their optional hyphens.
+    ["one-drive run", "one-".repeat(N / 4)],
+    ["share-point run", "share-".repeat(N / 6)],
+    ["onedrive then spaces", "onedrive" + " ".repeat(N) + "x"],
   ])("%s (%#) decides in under 50 ms", (_label, hostile) => {
     for (const pool of [POOL, NAV_POOL]) {
       const started = performance.now();

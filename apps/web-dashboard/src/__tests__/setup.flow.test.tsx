@@ -262,11 +262,17 @@ describe("setup flow → done state", () => {
       await Promise.resolve();
       fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
     });
-    // Voice step → skip → Team. The status fetch resolves "listening"; the
+    // Voice step → skip → Connected accounts. The status fetch resolves "listening"; the
     // Skip link is rendered in every phase of the step.
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();
+      fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+    });
+
+    // Connected accounts is optional; skipping proceeds to team.
+    expect(screen.getByText(/connect your accounts/i)).toBeInTheDocument();
+    await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
     });
 

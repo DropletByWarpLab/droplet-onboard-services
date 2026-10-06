@@ -163,7 +163,7 @@ const MATRIX: GuardedRoute[] = [
   // mount in app.ts had no requireRole wrapper, and the in-handler
   // `evalSwitchCommand` is a WARP-76 safety/confirmation tier, not authz),
   // letting a guest/family session disable PoE/ports/VLANs. Status GETs
-  // (`/api/switch/*`) stay open to every auth role.
+  // (`/api/switch/*`) take the member floor (WARP-3632): never a guest.
   { method: "post", path: "/api/switch/ports/3/enable", allowed: ["owner", "admin"] },
   { method: "post", path: "/api/switch/ports/3/disable", allowed: ["owner", "admin"] },
   { method: "post", path: "/api/switch/vlans", allowed: ["owner", "admin"] },
@@ -259,6 +259,9 @@ const MATRIX: GuardedRoute[] = [
   { method: "get", path: "/api/voice/status", allowed: ["owner", "admin"] },
   { method: "get", path: "/api/voice/devices", allowed: ["owner", "admin"] },
   { method: "post", path: "/api/voice/say", allowed: ["owner", "admin"] },
+  // WARP-3710: mic recovery - same owner+admin posture as the rest of the surface.
+  { method: "post", path: "/api/voice/mic/restart", allowed: ["owner", "admin"] },
+  { method: "post", path: "/api/voice/mic/test", allowed: ["owner", "admin"] },
   // Speaker output volume — same posture as /say: it drives the room
   // speaker, and a mute silences the household's assistant.
   { method: "get", path: "/api/voice/volume", allowed: ["owner", "admin"] },
@@ -729,12 +732,14 @@ describe("switch router RBAC wiring (WARP-559)", () => {
     }
   });
 
-  describe("status GETs stay open to viewers (no over-restriction)", () => {
+  // WARP-3632: switch reads name every port's attached device and the VLAN
+  // layout, so they take the member floor; an external guest is refused.
+  describe("status GETs take the member floor (WARP-3632)", () => {
     for (const path of READS) {
-      it(`GET ${path}: guest → 200`, async () => {
+      it(`GET ${path}: guest → 403`, async () => {
         const app = buildSwitchApp(mkUser("guest"));
         const res = await request(app).get(path);
-        expect(res.status).toBe(200);
+        expect(res.status).toBe(403);
       });
 
       it(`GET ${path}: family → 200`, async () => {

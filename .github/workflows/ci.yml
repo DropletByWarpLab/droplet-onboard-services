@@ -94,7 +94,7 @@ jobs:
       ship-check-suites: ${{ steps.plan.outputs.ship-check-suites }}
       mcp-bridge-suites: ${{ steps.plan.outputs.mcp-bridge-suites }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # WARP-2351 — customer setup-guide drift gate. Deliberately a STEP of
       # this job rather than a leg of its own: `detect` is the only job that
@@ -115,9 +115,33 @@ jobs:
       - name: Customer setup guides — coverage, fact pins, link integrity
         run: bash scripts/check-setup-guides.sh
 
+      # WARP-3601 — third-party image pin gate. Same placement rationale as
+      # the setup-guides step above: `detect` is the one job that runs on
+      # every PR, so this reports under the required ci-summary with no new
+      # leg, no matrix entry and no `paths:` change, in well under a second.
+      # Closes the class "a compose edit reintroduces a floating third-party
+      # tag (postgres, redis, the MQTT broker, ...) that a fresh pull
+      # resolves to whatever the registry serves that day". Locally built
+      # services (those with `build:`) are exempt by construction.
+      - name: Third-party images are pinned by digest
+        run: |
+          bash scripts/check-pinned-images.sh --selfcheck
+          bash scripts/check-pinned-images.sh
+
+      # WARP-3667 — vulnerability exceptions are time-bound. Fails when a
+      # .trivyignore entry or osv-scanner.toml ignore has no expiry or is past
+      # due, or when the pinned Trivy DB snapshot is older than 35 days.
+      # Closes the class "an accepted finding is never looked at again": the
+      # baseline and the DB pin are what make the scans deterministic, so
+      # both must be re-reviewed on a clock. Same placement as above.
+      - name: Vulnerability exceptions have expiries and the Trivy DB pin is fresh
+        run: |
+          bash scripts/check-vuln-exceptions.sh --selfcheck
+          bash scripts/check-vuln-exceptions.sh
+
       - name: Map changed paths to affected legs
         if: github.event_name == 'pull_request'
-        uses: dorny/paths-filter@v4
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4
         id: filter
         with:
           filters: |
@@ -223,8 +247,6 @@ jobs:
               - "services/routing/**"
             switch:
               - "services/switch/**"
-            device-gateway:
-              - "services/device-gateway/**"
             camera-discovery:
               - "services/camera-discovery/**"
               # WARP-1918: this leg's pytest guards the baseline birdseye
@@ -246,6 +268,10 @@ jobs:
               - "services/file-indexer/**"
             voice-io:
               - "services/voice-io/**"
+            qwen-stt:
+              - "services/qwen-stt/**"
+            kokoro-tts:
+              - "services/kokoro-tts/**"
             device-identity-svc:
               - "services/device-identity-svc/**"
               - "proto/**"
@@ -352,6 +378,13 @@ jobs:
               - "**/Dockerfile*"
               - "Dockerfile*"
               - ".hadolint.yaml"
+              # WARP-3670: the digest-pin gate runs in this leg, so a change to
+              # the gate or its self-test must run the leg. Adds one ~1 min leg
+              # to the rare PR that edits those two files, nothing else.
+              - "scripts/check-dockerfile-base-pins.sh"
+              - "tests/check-dockerfile-base-pins.test.sh"
+              - "scripts/check-dockerfile-hash-locks.sh"
+              - "tests/check-dockerfile-hash-locks.test.sh"
             # WARP-2455: the pre-PR gate's own sources. ship-check.sh is
             # mandated by the preflight skill but was executed by NO
             # workflow — all eight `ship-check` mentions under .github/ were
@@ -386,8 +419,8 @@ jobs:
           ALL_PYTHON: >-
             ["ai-gateway","routing","switch","camera-discovery",
             "email-indexer","ops-console","fleet-agent","file-indexer",
-            "voice-io","device-identity-svc","erp-sql-bridge",
-            "inference-manager","doc-render","sandbox","device-gateway"]
+            "voice-io","qwen-stt","kokoro-tts","device-identity-svc","erp-sql-bridge",
+            "inference-manager","doc-render","sandbox"]
           ALL_STORAGE: '["storage"]'
           ALL_FIPS: '["fips"]'
           ALL_HADOLINT: '["hadolint"]'
@@ -494,7 +527,7 @@ jobs:
       matrix:
         suite: ${{ fromJSON(needs.detect.outputs.node-suites) }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # Reused from docker-build.yml: strip preinstalled toolchains we don't
       # use so the ~14GB runner keeps headroom for npm ci + workspace builds.
@@ -517,7 +550,7 @@ jobs:
           df -h /
 
       - name: Set up Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: "20"
           cache: npm
@@ -681,7 +714,9 @@ jobs:
       # #786's gate-node. Resolution is `cosign` on PATH (or DROPLET_COSIGN_BIN).
       - name: Install cosign (update-agent verify suite)
         if: matrix.suite == 'orchestrator'
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v2.6.1 # OTA consumers require the cosign v2 signature format.
 
       # WARP-1011: vitest transforms via esbuild and never typechecks, so
       # compile-time contracts (e.g. the activity log's required
@@ -905,7 +940,7 @@ jobs:
       run:
         working-directory: services/${{ matrix.service }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install system deps
         if: matrix.sysdeps != ''
@@ -919,10 +954,12 @@ jobs:
       # orchestrator leg above and fleet-agent-tests.yml).
       - name: Install cosign (fleet-agent release_verify suite)
         if: matrix.service == 'fleet-agent'
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v2.6.1 # OTA consumers require the cosign v2 signature format.
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
           cache: pip
@@ -954,7 +991,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Run storage-pool unit tests
         run: bash tests/storage-pool-destroy-superblock.test.sh
@@ -1018,10 +1055,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: "20"
           cache: npm
@@ -1076,7 +1113,7 @@ jobs:
     # a wide ceiling for a ~2 min suite.
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Run lint script's own unit tests
         run: ./tests/test-fips-script/run.sh
@@ -1130,11 +1167,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0 # merge-base for --baseline-commit
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
 
@@ -1202,7 +1239,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0 # pass 2 scans the full PR commit range
 
@@ -1224,6 +1261,70 @@ jobs:
           /tmp/gitleaks git . --config .gitleaks.toml --no-banner --redact --exit-code 1 \
             --log-opts "origin/${{ github.base_ref }}..HEAD"
 
+      # WARP-3665 — dependency vulnerability gate that reaches branch
+      # protection. It lives in this job on purpose: `gitleaks` is already an
+      # unfiltered ci-summary leg, so the verdict blocks a merge with no new
+      # required context, no new job and no `paths:` change (docs/ci-required-
+      # checks.md). Closes the class "a PR bumps or adds a vulnerable pinned
+      # dependency and every required check stays green": the Trivy image
+      # gate in docker-build.yml is real but not a required context.
+      #
+      # It is DIFF-SHAPED by construction, not absolute: Trivy scans the
+      # lockfiles and requirements files against the DB snapshot pinned in
+      # .github/trivy-db-version, and .trivyignore is the reviewed baseline of
+      # accepted findings. Only a fixable HIGH/CRITICAL that is not in the
+      # baseline (or whose entry has expired) fails, so the accepted backlog
+      # never turns every PR red. The same scan runs in publish-release.yml's
+      # gate-node job, so a release cannot ship what a PR could not merge.
+      #
+      # Cost: the scope step is ~2 s. The scan (~2 min: Trivy install + DB
+      # download) runs on a PR only when a lockfile, a requirements file, the
+      # baseline, the DB pin or this workflow changed, and always on main
+      # pushes. It runs in parallel with the other legs, so it adds no
+      # wall-clock to them.
+      - name: Dependency scan scope (lockfiles, requirements, baseline, pin)
+        id: depscope
+        run: |
+          set -eu
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if git diff --name-only "origin/${{ github.base_ref }}...HEAD" -- \
+               ':(glob)**/package-lock.json' ':(glob)**/requirements*' \
+               .trivyignore .github/trivy-db-version .github/workflows/ci.yml \
+               .github/workflows/publish-release.yml \
+               | grep -q .; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "No dependency input changed; Trivy dependency scan skipped."
+          fi
+
+      - name: Read pinned Trivy DB digest
+        if: steps.depscope.outputs.run == 'true'
+        id: trivydb
+        run: echo "ref=$(grep -v '^#' .github/trivy-db-version | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Trivy dependency scan (block new HIGH/CRITICAL)
+        if: steps.depscope.outputs.run == 'true'
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_DB_REPOSITORY: ghcr.io/aquasecurity/trivy-db@${{ steps.trivydb.outputs.ref }}
+          TRIVY_SKIP_VERSION_CHECK: "true"
+          # Trivy's pip default recognizes only requirements.txt. Include the
+          # exact pins and transitive packages in our runtime/dev hash locks.
+          TRIVY_FILE_PATTERNS: 'pip:requirements[^/]*\.lock$'
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          trivyignores: .trivyignore
+          skip-dirs: node_modules,.git
+
   # WARP-243 Dockerfile lint over every tracked Dockerfile (27 at time of
   # writing — the git ls-files glob keeps the list live, so a new service's
   # Dockerfile is gated automatically). Moved here from hadolint.yml under
@@ -1240,7 +1341,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install hadolint v2.14.0 (pinned, checksummed)
         run: |
@@ -1256,6 +1357,31 @@ jobs:
           mapfile -t files < <(git ls-files '*Dockerfile*')
           echo "Linting ${#files[@]} Dockerfiles"
           /tmp/hadolint --config .hadolint.yaml --failure-threshold warning "${files[@]}"
+
+      # WARP-3670: why this step exists -- a floating base tag (python:3.12-slim,
+      # node:20-bookworm-slim) lets two builds of one commit ship different base
+      # layers, and the cosign signature covers the resulting image digest, not
+      # how reproducible its contents were. Escape class closed: an unpinned
+      # `FROM` or `COPY --from=<image>` reaching a signed OTA image. A step in
+      # the existing leg, not a new job: same filter, no added minutes.
+      - name: Every Dockerfile image is pinned by digest
+        run: |
+          set -eu
+          bash tests/check-dockerfile-base-pins.test.sh
+          bash scripts/check-dockerfile-base-pins.sh
+
+      # WARP-3670: why this step exists -- an unhashed `pip install -r
+      # requirements.txt` re-resolves on every build, so two builds of one commit
+      # can ship different transitive packages into a signed OTA image. Escape
+      # class closed: a new service, or an edit to an install line, going back to
+      # an unhashed install. Every Python image installs a uv-compiled hash lock
+      # with `--require-hashes` (docs/SECURITY.md); this fails on a regression.
+      # A step in the existing leg, not a new job: same filter, no added minutes.
+      - name: Every Python image installs a hash-locked requirements file
+        run: |
+          set -eu
+          bash tests/check-dockerfile-hash-locks.test.sh
+          bash scripts/check-dockerfile-hash-locks.sh
   # WARP-2455: the pre-PR gate's own gate. scripts/test/ship-check.sh is
   # mandated by the preflight skill, but until this leg NO workflow executed
   # it — all eight `ship-check` mentions under .github/ were comments of the
@@ -1275,7 +1401,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # The runner's own bash (5.x) — the floor ship-check is written for.
       - name: Parse under the runner's bash 5

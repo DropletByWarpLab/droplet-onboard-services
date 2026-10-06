@@ -25,34 +25,30 @@
  *
  * AUTH POSTURE (M1/M2, PR #372 re-review):
  *   - GET is PUBLIC and SIDE-EFFECT-FREE (findUnique; never writes — M5).
- *   - PATCH of `setup_step` / `user_tour_completed` stays PUBLIC: these are
- *     low-sensitivity resumability hints that the wizard needs to persist
- *     pre-claim, and neither can claim the box.
+ *   - First-run PATCH of `setup_step` through account stays PUBLIC so the
+ *     owner can claim the appliance and create their account. Progress after
+ *     account requires a live owner session. Tour completion cannot claim the box.
  *   - PATCH of `appliance:"ready"` — the lifecycle-MUTATING claim transition
  *     — is GATED. It is honored only when the caller proves they're the
- *     legitimate owner: either a valid dashboard session cookie (the wizard
- *     authenticates at the account step, so the finish PATCH rides that
- *     cookie), or — the durable backstop — the service's M2 precondition
- *     that an admin account already exists (`markApplianceReady` rejects an
- *     account-less box with 409). An unauthenticated pre-claim caller can
- *     therefore neither take the box over (flip it ready early) nor lock the
- *     owner out.
+ *     legitimate owner through a live, non-revoked owner session cookie.
+ *     The wizard authenticates at the account step, so the finish PATCH rides
+ *     that cookie. An existing user row never authorizes anonymous completion.
  *
- * The GATE constraint (PR #372) keeps claim / org / team out of SetupStep,
- * so an unknown step is a 400 here (the service's InvalidSetupStepError),
- * never silently coerced onto a resume target the wizard can't render.
+ * The service accepts only shipped resume targets, including optional accounts
+ * and team. Unknown steps are 400s, and progress writes are monotonic so a
+ * delayed earlier PATCH cannot undo a newer resume point or completed setup.
  */
 import { Router, type Request } from "express";
 import { type PrismaClient } from "@prisma/client";
 import { z } from "zod";
 import {
   getSetupState,
-  setSetupStep,
   advanceSetupStepToAtLeast,
   markApplianceReady,
   markTourCompleted,
   isSetupStep,
   STEP_AFTER_CLAIM,
+  SETUP_STEPS,
   InvalidSetupStepError,
   SetupNotCompleteError,
   type SetupState,
@@ -66,25 +62,6 @@ import {
   SlugInvalidError,
   SlugTakenError,
 } from "../services/setup-org.service.js";
-import {
-  checkBoxName,
-  setBoxName,
-  renameBoxName,
-  BoxNameInvalidError,
-  type BoxNameClaimer,
-  type BoxNameReleaser,
-} from "../services/box-name.service.js";
-import {
-  createBridgeBoxNamePersister,
-  createBoxNameClaimer,
-  createBoxNameReleaser,
-} from "../services/tls-issuance.adapters.js";
-import { reissueTlsNow } from "../services/tls-reissue.singleton.js";
-import {
-  boxNameReasonMessage,
-  boxNameToFqdn,
-  validateBoxName,
-} from "@droplet/shared-types";
 import { config } from "../config.js";
 import { getApplianceContract } from "../services/appliance-contract.service.js";
 import {
@@ -99,17 +76,18 @@ import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
 import { kickScreenQRRefresh } from "../services/screen-qr.service.js";
 import { warmActiveModel } from "../services/active-model.service.js";
 import { createLogger } from "../lib/logger.js";
-import { sensitiveRateLimit, standardRateLimit } from "../middleware/rate-limit.js";
+import { sensitiveRateLimit } from "../middleware/rate-limit.js";
 
 const logger = createLogger("setup-route");
 
 /**
- * WARP-3193 SEC-AUTH-5 — the write gate for a SET-UP ("ready") box on this
+ * WARP-3193 SEC-AUTH-5 — the session gate for protected setup writes on this
  * pre-authMiddleware router. `verifyAccessToken` alone accepts ANY role and a
  * revoked-but-unexpired (≤15 min) token, so mirror what authMiddleware would
  * have checked: the hard-revocation denylist, a live session record (a Redis
- * error fails OPEN, as in the middleware and /setup/box-name), then the role.
- * First-run (unclaimed) writes never reach this — onboarding stays open.
+ * error fails OPEN, as in the middleware), then the role.
+ * First-run progress after account, workspace changes, and finish also use
+ * this gate; welcome/claim/account progress stays open.
  */
 type ReadyBoxWriteGate =
   | { ok: true }
@@ -286,17 +264,6 @@ const claimSchema = z.object({
   code: z.string().min(1).max(64),
 });
 
-/**
- * WARP-979 — box-name POST body. `name` is the owner-chosen name for the box's
- * secured address `<name>.droplet-us.com`. The service re-validates it against
- * the shared ruleset (`@droplet/shared-types`) before persisting, so the schema
- * only checks presence/type + a generous length ceiling (the shared validator
- * enforces the real 3–40 bound so the ONE ruleset owns the message).
- */
-const boxNameSchema = z.object({
-  name: z.string().min(1).max(120),
-});
-
 /** Map the camelCase domain object onto the snake_case wire contract. */
 function toWire(state: SetupState): {
   appliance: "unclaimed" | "ready";
@@ -324,9 +291,8 @@ function toWire(state: SetupState): {
  * sent. `storage` is the primary trigger (storage → discovery → cameras →
  * vpn → ai is minutes of wizard time); the later steps cover mid-wizard
  * resumes that land past storage. The warm itself is debounced 10 min
- * inside model-readiness.service, so repeated PATCHes — including abuse of
- * this pre-auth route — are free, and the worst an anonymous caller can do
- * is load the box's own configured model.
+ * inside model-readiness.service, so repeated authenticated owner PATCHes
+ * share the same load instead of restarting it.
  */
 const WARM_TRIGGER_STEPS = new Set([
   "storage",
@@ -350,33 +316,9 @@ const patchSchema = z
     { message: "At least one of setup_step, appliance, user_tour_completed is required" },
   );
 
-/**
- * WARP-979 — the host `.env` writer for the chosen box name. Injectable so the
- * route test passes a fake (the real one POSTs to the device-bridge). Defaults
- * to the production bridge persister.
- */
 export function createSetupRouter(
   prisma: PrismaClient,
   deps?: {
-    persistBoxNameToHost?: (name: string) => Promise<void>;
-    /** WARP-980 — device-auth name claimer. Defaults to the production
-     *  `createBoxNameClaimer()` (real HQ + device-identity); route tests inject a
-     *  fake so no HQ / sidecar is touched. */
-    claimBoxName?: BoxNameClaimer;
-    /** WARP-1109 — device-auth name RELEASER for the rename flow. Frees the box's
-     *  current name at HQ before the new claim. Defaults to the production
-     *  `createBoxNameReleaser()`; route tests inject a fake. */
-    releaseBoxName?: BoxNameReleaser;
-    /** WARP-1109 — trigger an immediate cert re-issue under the new FQDN after a
-     *  rename. Defaults to the process-wide issuance hook (`reissueTlsNow`, a
-     *  no-op until boot registers the composed issuance service); route tests
-     *  inject a spy so no issuance runtime is touched. */
-    reissueTls?: () => Promise<void>;
-    /** WARP-1039 — boot-env fallback for GET /setup/box-name. Defaults to the
-     *  `config` snapshot's DROPLET_BOX_NAME (covers a container restart
-     *  mid-wizard, where the re-read host .env is the only place the name
-     *  survives); tests inject a fake so they never touch the real config. */
-    getEnvBoxName?: () => string;
     /** WARP-1041 — fire-and-forget model pre-warm. Defaults to the
      *  production `warmActiveModel` (WARP-3047: the box's ACTIVE model,
      *  resolved from the cached gateway listing; debounced per model,
@@ -385,12 +327,6 @@ export function createSetupRouter(
   },
 ): Router {
   const router = Router();
-  const persistBoxNameToHost =
-    deps?.persistBoxNameToHost ?? createBridgeBoxNamePersister();
-  const claimBoxNameToHq = deps?.claimBoxName ?? createBoxNameClaimer();
-  const releaseBoxNameFromHq = deps?.releaseBoxName ?? createBoxNameReleaser();
-  const reissueTls = deps?.reissueTls ?? reissueTlsNow;
-  const getEnvBoxName = deps?.getEnvBoxName ?? (() => config.DROPLET_BOX_NAME);
   const warmModel = deps?.warmDefaultModel ?? (() => warmActiveModel(prisma));
 
   // ── GET /api/setup/state ───────────────────────────────────────
@@ -433,24 +369,8 @@ export function createSetupRouter(
         return;
       }
 
-      // M1 — the `appliance:"ready"` claim is the only lifecycle-MUTATING
-      // transition, so it is the only one we gate. A request is allowed to
-      // claim the box when EITHER:
-      //   (a) it carries a valid dashboard session cookie (the wizard's
-      //       account step authenticated the owner, so the finish PATCH
-      //       rides that cookie — this router is mounted before
-      //       authMiddleware so we verify the cookie inline, the same way
-      //       routes/pm.ts does for the OIDC authorize endpoint), OR
-      //   (b) an admin account already exists, in which case the box is
-      //       genuinely claimable and `markApplianceReady` (M2) will honor
-      //       it; the service itself fails CLOSED with 409 when no admin
-      //       exists, so an anonymous pre-claim caller can never flip it.
-      // The session check here is a fast 403 for the common anonymous case;
-      // the M2 precondition in the service is the authoritative backstop.
-      //
-      // WARP-3193 SEC-AUTH-5: none of that applies once the box is SET UP.
-      // Every write then needs a live, non-revoked session; moving the step
-      // or re-asserting `ready` is owner-only. Completing the tour is open to
+      // On a ready box every write needs a live, non-revoked session; moving
+      // the step or re-asserting ready is owner-only. Completing the tour is open to
       // any signed-in member: AuthGate shows the pending tour to whoever
       // signs in first, and owner-only would re-trap everyone else in it.
       const sessionToken = req.cookies?.[SESSION_COOKIE_NAME];
@@ -479,33 +399,40 @@ export function createSetupRouter(
         }
       }
 
-      let claimAuthorized = false;
-      if (body.appliance === "ready") {
-        if (session) {
-          claimAuthorized = true;
-        } else if ((await prisma.user.count()) === 0) {
-          res.status(403).json({
-            error:
-              "Claiming the appliance (appliance:\"ready\") requires an authenticated session or a completed setup.",
-            code: "SETUP_CLAIM_FORBIDDEN",
-          });
+      const needsOwner = body.appliance === "ready" || (body.setup_step !== undefined
+        && SETUP_STEPS.indexOf(body.setup_step) > SETUP_STEPS.indexOf(STEP_AFTER_CLAIM));
+      if (needsOwner) {
+        // The account step signs the owner in before later steps and Done. A local user row
+        // is not proof that the caller owns the box, even during first-run.
+        const gate = await gateReadyBoxWrite(session, ["owner"]);
+        if (!gate.ok) {
+          if (gate.reason === "session_expired") {
+            res.status(401).json(SESSION_EXPIRED_BODY);
+          } else {
+            // A missing or expired access cookie must allow authFetch to
+            // refresh the owner's session and retry the finish transition.
+            res.status(gate.reason === "unauthenticated" ? 401 : 403).json({
+              error: "Continuing setup after account creation requires an authenticated owner session.",
+              code: gate.reason === "unauthenticated"
+                ? body.appliance === "ready" ? "SETUP_CLAIM_FORBIDDEN" : "SETUP_AUTH_REQUIRED"
+                : "SETUP_FORBIDDEN",
+            });
+          }
           return;
         }
       }
 
       // Apply the requested transitions. Order is deliberate: persist the
-      // step first (resumability), then the terminal flips. Each helper
+      // step first (monotonic resumability), then the terminal flips. Each helper
       // upserts the singleton and returns the latest state, so the last
       // one wins as the response.
       let latest: SetupState | null = null;
       if (body.setup_step !== undefined) {
-        latest = await setSetupStep(prisma, body.setup_step);
+        latest = await advanceSetupStepToAtLeast(prisma, body.setup_step);
       }
       if (body.appliance === "ready") {
-        // `authorized` short-circuits the service's admin-count precondition
-        // when a valid session proved ownership (covers the freshly-claimed
-        // window); otherwise the service re-checks admin existence (M2).
-        latest = await markApplianceReady(prisma, { authorized: claimAuthorized });
+        // The live owner session above proves the account step completed.
+        latest = await markApplianceReady(prisma, { authorized: true });
       }
       if (body.user_tour_completed === true) {
         latest = await markTourCompleted(prisma);
@@ -723,31 +650,11 @@ export function createSetupRouter(
   // NEVER sent off it (FEATURES.md §10). This handler makes no outbound call.
   router.post("/setup/org", sensitiveRateLimit, async (req: Request, res, next) => {
     try {
-      // ORCH-04 — this route is on the public allow-list (no authMiddleware),
-      // and `persistOrg` does an UNCONDITIONAL upsert of the Workspace
-      // singleton (clearing optional fields with `?? null` each call). Gate
-      // it the same way the lifecycle-mutating `appliance:"ready"` PATCH is
-      // gated above: a write is allowed when EITHER
-      //   (a) the request carries a valid dashboard session cookie (the
-      //       wizard's account step authenticated the owner before the org
-      //       step, so the org POST rides that cookie — verified inline
-      //       because this router mounts before authMiddleware), OR
-      //   (b) setup is not yet finished (`appliance !== "ready"`), i.e.
-      //       genuine first-run/unclaimed onboarding, which must stay open.
-      // Once the appliance is claimed (`appliance:"ready"`), an anonymous LAN
-      // client must NOT be able to silently rename the workspace, change its
-      // tz/logo, or re-reserve its slug — so we require a session then. This
-      // also closes the unauthenticated slug-uniqueness probe oracle on a
-      // set-up box.
-      //
-      // WARP-3193 SEC-AUTH-5: "a valid session cookie" is not enough on a
-      // set-up box — the signature alone accepts any role and a revoked
-      // token. Owner only (the POST /settings/workspace bar), on a live,
-      // non-revoked session.
+      // The account step signs the owner in before the organization step.
+      // This public router must enforce that session even during first-run.
       const sessionToken = req.cookies?.[SESSION_COOKIE_NAME];
       const session = sessionToken ? verifyAccessToken(sessionToken) : null;
-      const { appliance } = await getSetupState(prisma);
-      if (appliance === "ready") {
+      {
         const gate = await gateReadyBoxWrite(session, ["owner"]);
         if (!gate.ok) {
           if (gate.reason === "unauthenticated") {
@@ -792,7 +699,7 @@ export function createSetupRouter(
       // also advances locally and re-syncs on the next PATCH. (Mirrors the
       // claim route's post-bind step advance.)
       try {
-        await setSetupStep(prisma, STEP_AFTER_ORG);
+        await advanceSetupStepToAtLeast(prisma, STEP_AFTER_ORG);
       } catch (stepErr) {
         logger.warn(
           { err: stepErr },
@@ -816,377 +723,6 @@ export function createSetupRouter(
         return;
       }
       logger.error({ err }, "Failed to persist org settings");
-      next(err);
-    }
-  });
-
-  // ── GET /api/setup/box-name/check?name=<n> ─────────────────────
-  //
-  // WARP-979 — the "Secured / name your box" step polls this (debounced) as the
-  // owner types. Validates `name` against the SHARED ruleset
-  // (@droplet/shared-types, same rules the dashboard runs client-side) and
-  // returns { available, slug, fqdn, reason?, authoritative }.
-  //
-  // MVP posture: format + reserved validity IS the availability answer, with
-  // `authoritative: false` — the AUTHORITATIVE fleet-registry availability check
-  // is a device-authed HQ call that is a COUPLED fleet-hq follow-up. PUBLIC:
-  // this runs during first-run onboarding before any account exists (same
-  // posture as the claim/org steps); it is a read-only validity check that
-  // touches no state and reveals nothing beyond the shared ruleset.
-  router.get("/setup/box-name/check", (req: Request, res, next) => {
-    try {
-      const nameParam = typeof req.query.name === "string" ? req.query.name : "";
-      const result = checkBoxName(nameParam);
-      res.json({
-        available: result.available,
-        slug: result.slug,
-        fqdn: result.fqdn,
-        authoritative: result.authoritative,
-        ...(result.reason
-          ? {
-              reason: result.reason,
-              message: boxNameReasonMessage(result.reason),
-            }
-          : {}),
-      });
-    } catch (err) {
-      logger.error({ err }, "Failed to check box name");
-      next(err);
-    }
-  });
-
-  // ── GET /api/setup/box-name ────────────────────────────────────
-  //
-  // WARP-1039 — surface the CURRENT saved box name back to the wizard:
-  // `{ name, fqdn }`, both null when no name has been chosen yet. Source of
-  // truth is the ApplianceSetup singleton's `boxName` (written by the POST
-  // below), falling back to the boot-env `DROPLET_BOX_NAME` — that covers a
-  // container restart mid-wizard, where the re-read host .env is the only
-  // place the name survived. Values from either source are re-validated with
-  // the shared ruleset (defense-in-depth against a hand-edited .env, same
-  // posture as tls-issuance) and reported as the normalized slug.
-  //
-  // GATED exactly like the POST: a read is allowed when EITHER a valid
-  // dashboard session cookie is present, OR the appliance is not yet `ready`
-  // (genuine first-run onboarding). The FQDN itself is CT-published by design
-  // (vpn.ts), but an anonymous LAN client on a claimed box still gets nothing.
-  router.get("/setup/box-name", standardRateLimit, async (req: Request, res, next) => {
-    try {
-      const sessionToken = req.cookies?.[SESSION_COOKIE_NAME];
-      const session = sessionToken ? verifyAccessToken(sessionToken) : null;
-      if (!session) {
-        const { appliance } = await getSetupState(prisma);
-        if (appliance === "ready") {
-          res.status(401).json({
-            error: "Reading the box name requires an authenticated session.",
-            code: "BOX_NAME_AUTH_REQUIRED",
-          });
-          return;
-        }
-      }
-
-      const row = await prisma.applianceSetup.findUnique({
-        where: { id: "singleton" },
-      });
-      const candidate = (row?.boxName ?? "").trim() || getEnvBoxName().trim();
-      const v = candidate ? validateBoxName(candidate) : null;
-      if (!v?.ok) {
-        res.json({ name: null, fqdn: null });
-        return;
-      }
-      res.json({ name: v.slug, fqdn: boxNameToFqdn(v.slug) });
-    } catch (err) {
-      logger.error({ err }, "Failed to read box name");
-      next(err);
-    }
-  });
-
-  // ── POST /api/setup/box-name { name } ──────────────────────────
-  //
-  // WARP-979 + WARP-980 — persist the owner-chosen name AND make it AUTHORITATIVE
-  // via a device-auth HQ claim. Re-validates server-side (never trust the
-  // client), writes `DROPLET_BOX_NAME=<slug>` to the host .env via the
-  // device-bridge (so the box's tls-issuance ORDER requests
-  // `<name>.droplet-us.com`), THEN drives the device-auth PoP name claim so HQ
-  // honors the name (the claim is the authoritative step; issuance issues UNDER
-  // the claimed name). The claim is NON-FATAL to persistence — a not-yet-
-  // registered / transient failure still persists locally and reports
-  // `authoritative:false`; a 409 name-taken is surfaced with `suggestions`.
-  //
-  //   valid + claimed → 200 { ok, slug, fqdn, authoritative:true, taken:false }
-  //   valid + fallback→ 200 { ok, slug, fqdn, authoritative:false, taken:false }
-  //   valid + taken   → 409 { code:"BOX_NAME_TAKEN", slug, suggestions, taken:true }
-  //   valid + this box already holds a different name (WARP-1109)
-  //                   → 409 { code:"BOX_NAME_ALREADY_NAMED", currentName? }
-  //                     (the wizard offers Rename → POST /setup/box-name/rename)
-  //   invalid         → 400 { code:"BOX_NAME_INVALID", reason, error }
-  //
-  // GATED exactly like the org POST + the appliance:"ready" PATCH: a write is
-  // allowed when EITHER a valid dashboard session cookie is present (the wizard
-  // authenticated at the account step, so this POST rides that cookie), OR the
-  // appliance is not yet `ready` (genuine first-run onboarding). Once claimed,
-  // an anonymous LAN client must not be able to silently rename the box's
-  // secured address.
-  router.post("/setup/box-name", sensitiveRateLimit, async (req: Request, res, next) => {
-    try {
-      const sessionToken = req.cookies?.[SESSION_COOKIE_NAME];
-      const session = sessionToken ? verifyAccessToken(sessionToken) : null;
-      {
-        // ORCH-002: on a claimed ("ready") box, changing the public secure
-        // address is an owner/admin action. verifyAccessToken alone accepts
-        // ANY role and a revoked-but-unexpired (<=15 min) token, so mirror
-        // authMiddleware here: require an elevated role AND a live server-side
-        // session before mutating the box name. First-run (pre-ready) keeps the
-        // anonymous wizard allowance so onboarding still works.
-        const { appliance } = await getSetupState(prisma);
-        if (appliance === "ready") {
-          if (!session) {
-            res.status(401).json({
-              error: "Naming the box requires an authenticated session.",
-              code: "BOX_NAME_AUTH_REQUIRED",
-            });
-            return;
-          }
-          if (session.role !== "owner" && session.role !== "admin") {
-            res.status(403).json({
-              error: "Renaming the box requires an owner or admin.",
-              code: "BOX_NAME_FORBIDDEN",
-            });
-            return;
-          }
-          if (session.sid) {
-            const sess = await checkSession(session.sid);
-            // "ok"/"error" (Redis down → fail-open, same as authMiddleware) pass;
-            // "expired"/"missing" (revoked/GC'd) are dead now despite a valid JWT.
-            if (sess.kind !== "ok" && sess.kind !== "error") {
-              res.status(401).json({ error: "Your session is no longer valid.", code: "SESSION_EXPIRED" });
-              return;
-            }
-          }
-        }
-      }
-
-      const parsed = boxNameSchema.safeParse(req.body);
-      if (!parsed.success) {
-        res.status(400).json({
-          error: "A box name is required.",
-          code: "BOX_NAME_REQUIRED",
-          details: parsed.error.flatten(),
-        });
-        return;
-      }
-
-      const result = await setBoxName(parsed.data.name, {
-        persist: persistBoxNameToHost,
-        claim: claimBoxNameToHq,
-      });
-
-      // WARP-1109 — HQ says THIS box already holds a (different) name. Distinct
-      // 409 so the wizard shows the current address + a Rename affordance
-      // (POST /setup/box-name/rename) instead of the misleading "that name is
-      // taken". `currentName` lets the wizard name the address it already holds.
-      if (result.alreadyNamed) {
-        res.status(409).json({
-          ok: false,
-          code: "BOX_NAME_ALREADY_NAMED",
-          slug: result.slug,
-          fqdn: result.fqdn,
-          taken: false,
-          authoritative: result.authoritative,
-          ...(result.currentName ? { currentName: result.currentName } : {}),
-          error:
-            "This box already holds a secure address — use Rename to change it.",
-        });
-        return;
-      }
-
-      // HQ authoritatively rejected the name as taken by another box. 409 with
-      // suggestions so the wizard shows the real conflict — the name WAS
-      // persisted locally, but it is not authoritative.
-      if (result.taken) {
-        res.status(409).json({
-          ok: false,
-          code: "BOX_NAME_TAKEN",
-          slug: result.slug,
-          fqdn: result.fqdn,
-          taken: true,
-          authoritative: result.authoritative,
-          suggestions: result.suggestions,
-          error: "That name is already taken — pick another.",
-        });
-        return;
-      }
-
-      // WARP-1039 — persist the accepted slug on the ApplianceSetup singleton
-      // alongside the host-.env write-back. The .env write only becomes
-      // visible in-process on the next boot (config is a snapshot), so this
-      // row is what GET /setup/box-name reads back for the wizard. NON-FATAL:
-      // the name is already durable on the host, so a DB hiccup must not fail
-      // the request (mirrors the org step's non-fatal step-advance).
-      try {
-        await prisma.applianceSetup.upsert({
-          where: { id: "singleton" },
-          create: { id: "singleton", boxName: result.slug },
-          update: { boxName: result.slug },
-        });
-      } catch (dbErr) {
-        logger.warn(
-          { err: dbErr },
-          "Box name persisted to the host .env but the ApplianceSetup write-back failed",
-        );
-      }
-
-      res.json({
-        ok: true,
-        slug: result.slug,
-        fqdn: result.fqdn,
-        // WARP-980 — whether HQ device-auth-confirmed the name (true), or we
-        // could only persist + fall back to opaque/bootstrap issuance (false).
-        authoritative: result.authoritative,
-        taken: false,
-      });
-    } catch (err) {
-      if (err instanceof BoxNameInvalidError) {
-        res.status(400).json({
-          error: boxNameReasonMessage(err.reason),
-          code: err.code,
-          reason: err.reason,
-        });
-        return;
-      }
-      logger.error({ err }, "Failed to persist box name");
-      next(err);
-    }
-  });
-
-  // ── POST /api/setup/box-name/rename { name } ───────────────────
-  //
-  // WARP-1109 — CHANGE the box's secured address in place. This is the flow the
-  // wizard's Rename affordance drives once a box already holds a name (the fix
-  // for "every name reads as taken once the box holds one"): it RELEASES the
-  // current name at HQ (device-auth PoP — the same signed release factory-reset
-  // uses), THEN claims the NEW name and triggers a cert re-issue under the new
-  // FQDN. All non-fatal past validation — a post-release claim failure falls back
-  // to opaque/bootstrap issuance (the new name re-claims on the next tick), and a
-  // re-issue-tick failure is retried by the daily renewal cron.
-  //
-  //   valid + claimed → 200 { ok:true, slug, fqdn, authoritative:true }
-  //   valid + fallback→ 200 { ok:true, slug, fqdn, authoritative:false }
-  //   new name taken  → 409 { code:"BOX_NAME_TAKEN", slug, suggestions, taken:true }
-  //   invalid         → 400 { code:"BOX_NAME_INVALID", reason, error }
-  //
-  // GATED exactly like POST /setup/box-name: allowed with a valid session cookie
-  // OR when the appliance is not yet `ready` (first-run). A rename is only ever
-  // reached AFTER a name exists, so in practice the box is claimed and the
-  // authenticated owner drives it — but the same first-run allowance keeps the
-  // wizard flow uniform.
-  router.post("/setup/box-name/rename", sensitiveRateLimit, async (req: Request, res, next) => {
-    try {
-      const sessionToken = req.cookies?.[SESSION_COOKIE_NAME];
-      const session = sessionToken ? verifyAccessToken(sessionToken) : null;
-      {
-        // ORCH-002: on a claimed ("ready") box, changing the public secure
-        // address is an owner/admin action. verifyAccessToken alone accepts
-        // ANY role and a revoked-but-unexpired (<=15 min) token, so mirror
-        // authMiddleware here: require an elevated role AND a live server-side
-        // session before mutating the box name. First-run (pre-ready) keeps the
-        // anonymous wizard allowance so onboarding still works.
-        const { appliance } = await getSetupState(prisma);
-        if (appliance === "ready") {
-          if (!session) {
-            res.status(401).json({
-              error: "Renaming the box requires an authenticated session.",
-              code: "BOX_NAME_AUTH_REQUIRED",
-            });
-            return;
-          }
-          if (session.role !== "owner" && session.role !== "admin") {
-            res.status(403).json({
-              error: "Renaming the box requires an owner or admin.",
-              code: "BOX_NAME_FORBIDDEN",
-            });
-            return;
-          }
-          if (session.sid) {
-            const sess = await checkSession(session.sid);
-            // "ok"/"error" (Redis down → fail-open, same as authMiddleware) pass;
-            // "expired"/"missing" (revoked/GC'd) are dead now despite a valid JWT.
-            if (sess.kind !== "ok" && sess.kind !== "error") {
-              res.status(401).json({ error: "Your session is no longer valid.", code: "SESSION_EXPIRED" });
-              return;
-            }
-          }
-        }
-      }
-
-      const parsed = boxNameSchema.safeParse(req.body);
-      if (!parsed.success) {
-        res.status(400).json({
-          error: "A box name is required.",
-          code: "BOX_NAME_REQUIRED",
-          details: parsed.error.flatten(),
-        });
-        return;
-      }
-
-      const result = await renameBoxName(parsed.data.name, {
-        persist: persistBoxNameToHost,
-        claim: claimBoxNameToHq,
-        release: releaseBoxNameFromHq,
-        reissue: reissueTls,
-        logger,
-      });
-
-      // The NEW name is taken by ANOTHER box. 409 with suggestions so the wizard
-      // shows the real conflict — the old name was already released, so the box
-      // re-issues opaque/bootstrap on the next tick until a free name is chosen.
-      if (result.taken) {
-        res.status(409).json({
-          ok: false,
-          code: "BOX_NAME_TAKEN",
-          slug: result.slug,
-          fqdn: result.fqdn,
-          taken: true,
-          authoritative: result.authoritative,
-          suggestions: result.suggestions,
-          error: "That name is already taken — pick another.",
-        });
-        return;
-      }
-
-      // Persist the accepted slug on the ApplianceSetup singleton so
-      // GET /setup/box-name reads the new name back without a container restart
-      // (mirrors the POST). NON-FATAL: the name is already durable on the host.
-      try {
-        await prisma.applianceSetup.upsert({
-          where: { id: "singleton" },
-          create: { id: "singleton", boxName: result.slug },
-          update: { boxName: result.slug },
-        });
-      } catch (dbErr) {
-        logger.warn(
-          { err: dbErr },
-          "Renamed box name persisted to the host .env but the ApplianceSetup write-back failed",
-        );
-      }
-
-      res.json({
-        ok: true,
-        slug: result.slug,
-        fqdn: result.fqdn,
-        authoritative: result.authoritative,
-        taken: false,
-      });
-    } catch (err) {
-      if (err instanceof BoxNameInvalidError) {
-        res.status(400).json({
-          error: boxNameReasonMessage(err.reason),
-          code: err.code,
-          reason: err.reason,
-        });
-        return;
-      }
-      logger.error({ err }, "Failed to rename box name");
       next(err);
     }
   });

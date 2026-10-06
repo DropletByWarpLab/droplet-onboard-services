@@ -33,6 +33,11 @@ vi.mock("./m365-auth.service.js", async (importOriginal) => {
   };
 });
 
+vi.mock("./mail-settings.service.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./mail-settings.service.js")>();
+  return { ...actual, recordMicrosoftMailFailure: vi.fn(async () => undefined) };
+});
+
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
@@ -43,10 +48,12 @@ import {
   runSyncTick,
   syncCursor,
   type M365SyncDeps,
+  type PageContext,
 } from "./m365-sync.service.js";
 import { GraphRequestError, type GraphPage } from "./graph-client.js";
 import { M365NotConnectedError } from "./m365-auth.service.js";
 import type { DueCursor } from "./delta-cursor.service.js";
+import { makeFakeCloudFileDb } from "../../__tests__/helpers/fake-cloud-files.js";
 
 const USER = "user-1";
 const NOW = new Date("2026-09-04T12:00:00Z");
@@ -93,7 +100,8 @@ function fakePrisma(seed: Row[], connected: string[] = [USER]) {
       rows = rows.filter((r) => r.userId !== userId);
     },
     m365Connection: {
-      findMany: vi.fn(async () => connected.map((userId) => ({ userId }))),
+      findMany: vi.fn(async () => connected.map((userId) => ({ userId, mailEnabled: true }))),
+      findUnique: vi.fn(async () => ({ state: "CONNECTED", mailEnabled: true, emailAccountId: "mailbox", grantedScopes: "Mail.Read" })),
     },
     m365DeltaCursor: {
       findMany: vi.fn(
@@ -162,6 +170,63 @@ beforeEach(() => {
   getAccessTokenMock.mockResolvedValue("tok");
 });
 
+describe("calendar sync requires an enabled capability, explicit opt-in and consent", () => {
+  it("never replays an old identity's cursor against a replacement Microsoft account", async () => {
+    const prisma = fakePrisma([row()]);
+    Object.assign(prisma.m365Connection, { findUnique: vi.fn(async () => ({ state: "CONNECTED", cursorLinkHash: "new-account" })) });
+    const settings = deps(prisma);
+    const result = await syncCursor(settings, due({ cursorLinkHash: "old-account" }));
+    expect(result).toMatchObject({ completed: false, pages: 0 });
+    expect(getAccessTokenMock).not.toHaveBeenCalled();
+    expect(settings.client.getPage).not.toHaveBeenCalled();
+    expect(markNeedsReconnectMock).not.toHaveBeenCalled();
+  });
+  it("passes the acquired grant generation to a Graph auth-failure update", async () => {
+    const prisma = fakePrisma([row()]);
+    const generation = { tokenCacheEnc: "encrypted-cache-marker", cursorLinkHash: "account" };
+    getAccessTokenMock.mockImplementationOnce(async (_prisma, _entra, _user, _now, onGrant) => { onGrant(generation); return "tok"; });
+    const settings = deps(prisma, { client: { getPage: vi.fn(async () => { throw new GraphRequestError({ statusCode: 401, message: "denied" }); }) } as never });
+    await syncCursor(settings, due());
+    expect(markNeedsReconnectMock).toHaveBeenCalledWith(prisma, USER, expect.any(String), generation);
+  });
+
+  it("does not acquire a token or call Graph when the calendar capability is disabled", async () => {
+    const prisma = fakePrisma([row({ workload: "calendar" })]);
+    const settings = deps(prisma, { calendarModuleEnabled: false });
+    expect(await syncCursor(settings, due({ workload: "calendar" }))).toMatchObject({ completed: false, pages: 0 });
+    expect(getAccessTokenMock).not.toHaveBeenCalled();
+    expect(settings.client.getPage).not.toHaveBeenCalled();
+    expect(prisma.m365DeltaCursor.updateMany).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { state: "CONNECTED", calendarEnabled: false, calendarSourceId: "s1", grantedScopes: "Calendars.Read" },
+    { state: "NEEDS_RECONNECT", calendarEnabled: true, calendarSourceId: "s1", grantedScopes: "Calendars.Read" },
+    { state: "CONNECTED", calendarEnabled: true, calendarSourceId: null, grantedScopes: "Calendars.Read" },
+    { state: "CONNECTED", calendarEnabled: true, calendarSourceId: "s1", grantedScopes: "Mail.Read" },
+  ])("does not call Graph for ineligible calendar connection %j", async (connection) => {
+    const prisma = fakePrisma([row({ workload: "calendar" })]);
+    Object.assign(prisma.m365Connection, { findUnique: vi.fn(async () => connection) });
+    const settings = deps(prisma);
+    expect(await syncCursor(settings, due({ workload: "calendar" }))).toMatchObject({ completed: false, pages: 0 });
+    expect(getAccessTokenMock).not.toHaveBeenCalled();
+    expect(settings.client.getPage).not.toHaveBeenCalled();
+  });
+
+  it("keeps other Microsoft workloads running while skipping calendar cursors", async () => {
+    const prisma = fakePrisma([row({ id: "calendar", workload: "calendar" }), row({ id: "mail", state: "IDLE" })]);
+    const settings = deps(prisma, { calendarModuleEnabled: false });
+    const result = await runSyncTick(settings);
+    expect(result).toMatchObject({ cursorsClaimed: 1, cursorsCompleted: 1 });
+    expect(result.results.map((cursor) => cursor.workload)).toEqual(["mail"]);
+    expect(settings.client.getPage).toHaveBeenCalledTimes(1);
+    expect(prisma.m365DeltaCursor.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ AND: expect.arrayContaining([{ workload: { not: "calendar" } }]) }),
+    }));
+    expect(prisma.__rows().find((cursor) => cursor.id === "calendar")?.deltaLink).toBe(DELTA);
+  });
+});
+
 describe("syncCursor — a page handler that throws", () => {
   it("parks the cursor in BACKOFF with its delta link intact, never FAILED", async () => {
     const prisma = fakePrisma([row()]);
@@ -217,6 +282,53 @@ describe("syncCursor — Graph refuses a token that refreshed fine", () => {
       }),
     };
     await syncCursor(deps(prisma, { client: client as never }), due());
+    expect(markNeedsReconnectMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does NOT reconnect the connection on a 403 from a SharePoint library — one lost library is not a dead grant (WARP-3538)", async () => {
+    // A site's permissions changed, the library was locked or deleted: Graph
+    // answers 403 for THAT drive while every other call with the same token
+    // succeeds. Moving the whole connection to NEEDS_RECONNECT would stop the
+    // person's mail, calendar and OneDrive sync because they lost one library.
+    // (Mutation: drop the `lostOneLibrary` exemption and this goes red.)
+    const prisma = fakePrisma([row({ workload: "sharepoint", resourceId: "drive-9" })]);
+    const client = {
+      getPage: vi.fn(async () => {
+        throw new GraphRequestError({ statusCode: 403, code: "accessDenied", message: "no access to this library" });
+      }),
+    };
+    const res = await syncCursor(
+      deps(prisma, { client: client as never }),
+      due({ workload: "sharepoint", resourceId: "drive-9" }),
+    );
+
+    expect(res.completed).toBe(false);
+    expect(markNeedsReconnectMock).not.toHaveBeenCalled();
+    // The cursor still records its own failure and keeps its link: when access
+    // comes back it carries on, and when the library is gone a complete
+    // discovery prunes it.
+    expect(prisma.__first()).toMatchObject({ state: "BACKOFF", deltaLink: DELTA, consecutiveFailures: 1 });
+  });
+
+  it("still reconnects the connection on a 401 from a SharePoint library — the TOKEN was refused, which no library can cause", async () => {
+    const prisma = fakePrisma([row({ workload: "sharepoint", resourceId: "drive-9" })]);
+    const client = {
+      getPage: vi.fn(async () => {
+        throw new GraphRequestError({ statusCode: 401, code: "InvalidAuthenticationToken", message: "expired" });
+      }),
+    };
+    await syncCursor(deps(prisma, { client: client as never }), due({ workload: "sharepoint", resourceId: "drive-9" }));
+    expect(markNeedsReconnectMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("still reconnects the connection on a 403 from OneDrive — the exemption is for SharePoint libraries only", async () => {
+    const prisma = fakePrisma([row({ workload: "files", resourceId: "-" })]);
+    const client = {
+      getPage: vi.fn(async () => {
+        throw new GraphRequestError({ statusCode: 403, code: "accessDenied", message: "nope" });
+      }),
+    };
+    await syncCursor(deps(prisma, { client: client as never }), due({ workload: "files", resourceId: "-" }));
     expect(markNeedsReconnectMock).toHaveBeenCalledTimes(1);
   });
 
@@ -357,8 +469,18 @@ describe("syncCursor — an enumeration bigger than one tick's page budget (WARP
 describe("discoverResources — only what the grant covers (WARP-3059)", () => {
   function discoveryPrisma(grantedScopes: string | null) {
     const upserts: Array<{ workload: string; resourceId: string }> = [];
+    // WARP-3538 — OneDrive's files land under a SOURCE that discovery registers
+    // from GET /me/drive, and a person who has not opted in to SharePoint has
+    // whatever SharePoint left behind removed on every discovery. These fakes
+    // already hold the OneDrive source (so discovery asks Microsoft nothing about
+    // it) and no SharePoint anything (so the removals find nothing); the delegates
+    // must exist to be called.
+    const cloud = makeFakeCloudFileDb();
+    cloud.seedSource({ userId: USER, provider: "M365", kind: "ONEDRIVE", sourceId: "od-1", nameEnc: "dcv1:x" });
     return {
       upserts,
+      cloudFileItem: cloud.cloudFileItem,
+      cloudFileSource: cloud.cloudFileSource,
       m365Connection: { findUnique: vi.fn(async () => ({ grantedScopes })) },
       m365DeltaCursor: {
         upsert: vi.fn(async ({ where }: any) => {
@@ -368,6 +490,8 @@ describe("discoverResources — only what the grant covers (WARP-3059)", () => {
           });
           return {};
         }),
+        findMany: vi.fn(async () => []),
+        deleteMany: vi.fn(async () => ({ count: 0 })),
       },
     };
   }
@@ -378,7 +502,7 @@ describe("discoverResources — only what the grant covers (WARP-3059)", () => {
     }) as unknown as M365SyncDeps["client"];
 
   it("does not attempt To Do without a Tasks grant, and does not report it as a fault", async () => {
-    // What the connector actually requests (M365_SCOPES), as Microsoft returns it.
+    // What the connector actually requests (M365_BASE_SCOPES), as Microsoft returns it.
     const prisma = discoveryPrisma(
       "offline_access User.Read Mail.ReadWrite Mail.Send Calendars.ReadWrite Contacts.ReadWrite Files.ReadWrite.All",
     );
@@ -390,11 +514,14 @@ describe("discoverResources — only what the grant covers (WARP-3059)", () => {
     );
 
     expect(found.notGranted).toEqual(["todo"]);
+    // Calendar and SharePoint are the person's choices: off by default, so neither
+    // a refusal nor a break — its own word.
+    expect(found.disabled).toEqual(["mail", "calendar", "sharepoint"]);
     expect(found.skipped).toEqual([]); // nothing index.ts would log as a fault
     const urls = vi.mocked(client.getPage).mock.calls.map((c) => String(c[0]));
     expect(urls.some((u) => u.includes("/todo/"))).toBe(false);
-    // The singletons still register.
-    expect(prisma.upserts.map((u) => u.workload).sort()).toEqual(["calendar", "files"]);
+    // OneDrive still registers while calendar import is off.
+    expect(prisma.upserts.map((u) => u.workload).sort()).toEqual(["files"]);
   });
 
   it("attempts nothing for a grant it cannot read", async () => {
@@ -406,8 +533,130 @@ describe("discoverResources — only what the grant covers (WARP-3059)", () => {
       { prisma: prisma as never, client, entra: {} as never, initialUrlFor: () => null, now: () => NOW },
       USER,
     );
-    expect(found.notGranted).toEqual(["mail", "calendar", "contacts", "files", "todo"]);
+    expect(found.notGranted).toEqual(["contacts", "files", "todo"]);
+    expect(found.disabled).toEqual(["mail", "calendar", "sharepoint"]);
     expect(client.getPage).not.toHaveBeenCalled();
+  });
+});
+
+// --- WARP-3538: where a page sits in its enumeration ------------------------
+
+describe("syncCursor — what the page handler is told about the enumeration (WARP-3538)", () => {
+  /**
+   * Graph, paginated: `pages` pages, the last carrying the deltaLink. A page
+   * listed in `empty` has no items — the final page of a long enumeration is
+   * often only the delta link.
+   */
+  function pagedClient(pages: number, empty: number[] = []) {
+    const getPage = vi.fn(async (url: string) => {
+      // An incremental run starts from the stored delta link, which names no page.
+      const n = Number(/p=(\d+)/.exec(url)?.[1] ?? 1);
+      return {
+        items: empty.includes(n) ? [] : [{ id: `i${n}` }],
+        links:
+          n < pages
+            ? { nextLink: `https://graph.microsoft.com/v1.0/me/drive/root/delta?p=${n + 1}`, deltaLink: null }
+            : { nextLink: null, deltaLink: `${DELTA}-after-${n}` },
+        raw: {},
+      } as unknown as GraphPage;
+    });
+    return { getPage } as unknown as M365SyncDeps["client"];
+  }
+  const start = () => "https://graph.microsoft.com/v1.0/me/drive/root/delta?p=1";
+
+  /** Run one cursor and return what its handler was told on each page. */
+  async function told(cursor: Partial<DueCursor>, pages: number, empty: number[] = [], failOn?: number) {
+    const seen: PageContext[] = [];
+    const prisma = fakePrisma([row({ workload: "files", resourceId: "-", ...cursor })]);
+    await syncCursor(
+      deps(prisma, {
+        client: pagedClient(pages, empty),
+        initialUrlFor: start,
+        handlePage: async (_cursor, _page, run) => {
+          seen.push(run);
+          if (failOn !== undefined && seen.length === failOn) throw new Error("storage hiccup");
+        },
+      }),
+      due({ workload: "files", resourceId: "-", ...cursor }),
+    );
+    return seen;
+  }
+
+  it("a first sync is a FULL enumeration: first page marks, last page sweeps, the pages between do neither", async () => {
+    expect(await told({ deltaLink: null }, 3)).toEqual([
+      { fullEnumeration: true, isFirstPage: true, isLastPage: false },
+      { fullEnumeration: true, isFirstPage: false, isLastPage: false },
+      { fullEnumeration: true, isFirstPage: false, isLastPage: true },
+    ]);
+  });
+
+  it("a one-page full enumeration is both the first page and the last", async () => {
+    expect(await told({ deltaLink: null }, 1)).toEqual([{ fullEnumeration: true, isFirstPage: true, isLastPage: true }]);
+  });
+
+  it("an incremental run is NOT a full enumeration — it must never be told to sweep", async () => {
+    // A sweep after an incremental run would delete every file the run did not
+    // happen to mention — that is, nearly all of them.
+    // (Mutation: derive fullEnumeration from anything but `deltaLink === null`.)
+    const seen = await told({ deltaLink: DELTA }, 3);
+    expect(seen.every((r) => r.fullEnumeration === false)).toBe(true);
+    expect(seen.map((r) => r.isFirstPage)).toEqual([true, false, false]);
+    expect(seen.map((r) => r.isLastPage)).toEqual([false, false, true]);
+  });
+
+  it("a tick that RESUMES a full enumeration is still full, and never sees its first page", async () => {
+    // The first page was read, and the rows marked, by an earlier tick. Marking
+    // again here would mark the rows that tick had already seen and un-marked,
+    // and the sweep would delete them. (Mutation: ignore resumeLink in `isFirstPage`.)
+    const seen = await told({ deltaLink: null, resumeLink: "https://graph.microsoft.com/v1.0/me/drive/root/delta?p=2" }, 3);
+    expect(seen).toEqual([
+      { fullEnumeration: true, isFirstPage: false, isLastPage: false },
+      { fullEnumeration: true, isFirstPage: false, isLastPage: true },
+    ]);
+  });
+
+  it("a tick that resumes an INCREMENTAL run is not a full enumeration", async () => {
+    const seen = await told({ deltaLink: DELTA, resumeLink: "https://graph.microsoft.com/v1.0/me/drive/root/delta?p=2" }, 3);
+    expect(seen.every((r) => r.fullEnumeration === false && r.isFirstPage === false)).toBe(true);
+  });
+
+  it("reports the last page even when it carries no items — the delta-link-only page", async () => {
+    // The sweep rides on this flag, not on the page having anything in it.
+    const seen = await told({ deltaLink: null }, 3, [3]);
+    expect(seen.at(-1)).toEqual({ fullEnumeration: true, isFirstPage: false, isLastPage: true });
+  });
+
+  it("tells a retried run the same thing it was told the first time", async () => {
+    // A page that failed to land leaves the cursor where it was, so the whole
+    // run repeats. Told the same thing, the handler's mark and sweep are
+    // idempotent; told anything else, a retry could skip the mark or sweep early.
+    const first = await told({ deltaLink: null }, 3, [], 2);
+    const second = await told({ deltaLink: null }, 3);
+    expect(first).toEqual(second.slice(0, 2));
+  });
+
+  it("a full enumeration spread over two ticks is marked once and swept once", async () => {
+    const TOTAL = MAX_PAGES_PER_TICK + 5;
+    const seen: PageContext[] = [];
+    const client = pagedClient(TOTAL);
+    const prisma = fakePrisma([row({ workload: "files", resourceId: "-", deltaLink: null })]);
+    const handlePage = async (_c: DueCursor, _p: GraphPage, run: PageContext) => {
+      seen.push(run);
+    };
+
+    await syncCursor(deps(prisma, { client, initialUrlFor: start, handlePage }), due({ workload: "files", resourceId: "-", deltaLink: null }));
+    const saved = prisma.__first()!;
+    await syncCursor(
+      deps(prisma, { client, initialUrlFor: start, handlePage }),
+      due({ workload: "files", resourceId: "-", deltaLink: saved.deltaLink, resumeLink: saved.resumeLink }),
+    );
+
+    expect(seen).toHaveLength(TOTAL);
+    expect(seen.every((r) => r.fullEnumeration)).toBe(true);
+    expect(seen.filter((r) => r.isFirstPage)).toHaveLength(1);
+    expect(seen.filter((r) => r.isLastPage)).toHaveLength(1);
+    expect(seen[0]!.isFirstPage).toBe(true);
+    expect(seen.at(-1)!.isLastPage).toBe(true);
   });
 });
 
@@ -443,9 +692,17 @@ describe("runSyncTick — a person disconnects while the tick holds their cursor
 
 describe("a grant that covers no workload says so (#2347 review)", () => {
   function prismaWithGrant(grantedScopes: string | null) {
+    const cloud = makeFakeCloudFileDb();
+    cloud.seedSource({ userId: USER, provider: "M365", kind: "ONEDRIVE", sourceId: "od-1", nameEnc: "dcv1:x" });
     return {
+      cloudFileItem: cloud.cloudFileItem,
+      cloudFileSource: cloud.cloudFileSource,
       m365Connection: { findUnique: vi.fn(async () => ({ grantedScopes })) },
-      m365DeltaCursor: { upsert: vi.fn(async () => ({})) },
+      m365DeltaCursor: {
+        upsert: vi.fn(async () => ({})),
+        findMany: vi.fn(async () => []),
+        deleteMany: vi.fn(async () => ({ count: 0 })),
+      },
     };
   }
   const discover = (grantedScopes: string | null) =>
@@ -478,10 +735,19 @@ describe("a grant that covers no workload says so (#2347 review)", () => {
     expect(grantCoversNoWorkload(found)).toBe(false);
   });
 
+  it("judges a person who has not opted in to calendar or SharePoint on the other workloads only", async () => {
+    // A person's off switches are not refusals. Excluding those workloads keeps
+    // a grant that covers nothing from being mistaken for a usable grant.
+    const found = await discover("offline_access User.Read openid profile");
+    expect(found.notGranted).toEqual(["contacts", "files", "todo"]);
+    expect(found.disabled).toEqual(["mail", "calendar", "sharepoint"]);
+    expect(grantCoversNoWorkload(found)).toBe(true);
+  });
+
   it("is false when the grant covers a workload discovery could not list — that is logged as skipped", async () => {
     const found = await discoverResources(
       {
-        prisma: prismaWithGrant("Mail.Read") as never,
+        prisma: (() => { const db = prismaWithGrant("Mail.Read"); db.m365Connection.findUnique.mockResolvedValue({ grantedScopes: "Mail.Read", mailEnabled: true, emailAccountId: "box" } as never); return db; })() as never,
         client: {
           getPage: vi.fn(async () => {
             throw new GraphRequestError({ statusCode: 404, code: "MailboxNotEnabledForRESTAPI", message: "no mailbox" });
@@ -502,6 +768,19 @@ describe("a grant that covers no workload says so (#2347 review)", () => {
     expect(grantCoversNoWorkload(await discover(null))).toBe(false);
   });
 
+  it("index.ts wires drive and calendar landing handlers into the sync tick", () => {
+    // Without `handlePage` the engine reads every OneDrive and SharePoint page and
+    // discards it: the card says "synced", the file search is empty, and nothing
+    // fails. The same source pin as below — index.ts opens sockets on import.
+    const index = readFileSync(resolve(__dirname, "../../index.ts"), "utf8");
+    const deps = index.slice(index.indexOf("const m365Deps: M365SyncDeps = {"), index.indexOf("const m365TickMs"));
+    expect(deps.length).toBeGreaterThan(0);
+    expect(index).toMatch(/const driveLanding\s*=\s*createDriveLandingHandler\(/);
+    expect(index).toMatch(/const calendarLanding\s*=\s*createMicrosoftCalendarPageHandler\(/);
+    expect(deps).toMatch(/await driveLanding\(cursor, page, run\)/);
+    expect(deps).toMatch(/await calendarLanding\(cursor, page, run\)/);
+  });
+
   it("the scheduler logs it: index.ts is the only caller, and the unit lane cannot run it", () => {
     // `notGranted` is never logged on its own (for To Do it is the expected
     // outcome), so without this line a box whose grant covers nothing syncs
@@ -511,5 +790,54 @@ describe("a grant that covers no workload says so (#2347 review)", () => {
     const block = index.slice(index.indexOf("discoverResources(m365Deps, userId)"), index.indexOf("runSyncTick(m365Deps)"));
     expect(block.length).toBeGreaterThan(0);
     expect(block).toMatch(/if \(grantCoversNoWorkload\(found\)\)\s*\{\s*logger\.warn\(/);
+  });
+});
+
+
+describe("Outlook mail requires explicit import and full-body consent", () => {
+  it.each([
+    { state: "CONNECTED", mailEnabled: false, emailAccountId: "mailbox", grantedScopes: "Mail.Read" },
+    { state: "NEEDS_RECONNECT", mailEnabled: true, emailAccountId: "mailbox", grantedScopes: "Mail.Read" },
+    { state: "CONNECTED", mailEnabled: true, emailAccountId: null, grantedScopes: "Mail.Read" },
+    { state: "CONNECTED", mailEnabled: true, emailAccountId: "mailbox", grantedScopes: "Mail.ReadBasic" },
+  ])("does not fetch or refresh for ineligible mailbox %j", async (connection) => {
+    const prisma = fakePrisma([row()]);
+    prisma.m365Connection.findUnique.mockResolvedValue(connection as never);
+    const settings = deps(prisma);
+    expect(await syncCursor(settings, due())).toMatchObject({ pages: 0, completed: false });
+    expect(getAccessTokenMock).not.toHaveBeenCalled();
+    expect(settings.client.getPage).not.toHaveBeenCalled();
+  });
+  it("stops cloud mail reads when the Email module is disabled", async () => {
+    const settings = deps(fakePrisma([row()]), { mailModuleEnabled: false });
+    expect(await syncCursor(settings, due())).toMatchObject({ pages: 0, completed: false });
+    expect(getAccessTokenMock).not.toHaveBeenCalled();
+    expect(settings.client.getPage).not.toHaveBeenCalled();
+  });
+  it("passes immutable-id/text preferences and ephemeral grant context to mail landing", async () => {
+    const generation = { tokenCacheEnc: "sealed", cursorLinkHash: "link", mailEnabled: true, emailAccountId: "mailbox" };
+    getAccessTokenMock.mockImplementationOnce(async (_db, _entra, _user, _now, onGrant) => { onGrant(generation); return "ephemeral-token"; });
+    const landing = vi.fn(async () => undefined);
+    const settings = deps(fakePrisma([row()]), { handlePage: landing });
+    expect(await syncCursor(settings, due())).toMatchObject({ completed: true });
+    expect(settings.client.getPage).toHaveBeenCalledWith(DELTA, "ephemeral-token", { mail: true });
+    expect(landing).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ accessToken: "ephemeral-token", grantGeneration: generation }));
+  });
+  it.each([401, 403])("reconnects the same grant if hydration fails with %s", async (statusCode) => {
+    const prisma = fakePrisma([row()]);
+    const generation = { tokenCacheEnc: "sealed", mailEnabled: true, emailAccountId: "mailbox" };
+    getAccessTokenMock.mockImplementationOnce(async (_db, _entra, _user, _now, onGrant) => { onGrant(generation); return "tok"; });
+    const settings = deps(prisma, { handlePage: async () => { throw new GraphRequestError({ statusCode, message: "hydration denied" }); } });
+    expect(await syncCursor(settings, due())).toMatchObject({ completed: false });
+    expect(markNeedsReconnectMock).toHaveBeenCalledWith(prisma, USER, expect.any(String), generation);
+    expect(prisma.__first()?.deltaLink).toBe(DELTA);
+  });
+  it("preserves Retry-After when message hydration is throttled", async () => {
+    const prisma = fakePrisma([row()]);
+    const settings = deps(prisma, { handlePage: async () => { throw new GraphRequestError({ statusCode: 429, retryAfterHeader: "120", message: "throttled" }); } });
+    expect(await syncCursor(settings, due())).toMatchObject({ completed: false });
+    expect(prisma.__first()?.nextAttemptAt).toEqual(new Date(NOW.getTime() + 120_000));
+    expect(prisma.__first()?.deltaLink).toBe(DELTA);
+    expect(markNeedsReconnectMock).not.toHaveBeenCalled();
   });
 });

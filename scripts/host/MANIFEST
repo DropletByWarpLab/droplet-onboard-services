@@ -94,9 +94,9 @@ file  scripts/host/etc-systemd-system/droplet-host-net.service               /et
 dir   -                                                                      /etc/droplet                                                          -     present  WARP-1035 bind-mounted read-only into matter-controller; must exist before compose up
 dir   -                                                                      /etc/droplet-host-net                                                 -     present  holds the host dnsmasq conf below
 dir   -                                                                      /etc/systemd/system/droplet-openwrt-attach.service.d                   -     present  drop-in dir for the override above
-file  scripts/host/etc-droplet-host-net/lan-dhcp.conf                        /etc/droplet-host-net/lan-dhcp.conf                                   0644  presence  regenerated at runtime — setup_local_dns() (scripts/lib/local-dns.sh) and droplet-relay-dns rewrite managed blocks in place, so a healthy box legitimately differs from the repo baseline
-file  scripts/host/droplet-relay-dns.sh                                      /usr/local/sbin/droplet-relay-dns                                     0755  track
+file  scripts/host/etc-droplet-host-net/lan-dhcp.conf                        /etc/droplet-host-net/lan-dhcp.conf                                   0644  presence  regenerated at runtime — setup_local_dns() (scripts/lib/local-dns.sh) rewrites managed blocks in place, so a healthy box legitimately differs from the repo baseline
 file  scripts/host/droplet-tls-bootstrap-refresh.sh                          /usr/local/sbin/droplet-tls-bootstrap-refresh.sh                      0755  track
+file  scripts/host/usr-local-bin/droplet-fingerprint                          /usr/local/bin/droplet-fingerprint                                    0755  track
 
 # --- network self-heal (WARP-1680) -------------------------------------------
 file  scripts/host/usr-local-sbin/droplet-net-selfheal                       /usr/local/sbin/droplet-net-selfheal                                  0755  track
@@ -168,6 +168,10 @@ file  scripts/host/etc-systemd-system/droplet-host-units.service             /et
 # must itself be delivered, and drift in it means the heal is broken.
 file  scripts/host/usr-local-sbin/droplet-reapply-host-integration           /usr/local/sbin/droplet-reapply-host-integration                      0755  track
 file  scripts/host/etc-systemd-system/droplet-host-integration.service       /etc/systemd/system/droplet-host-integration.service                  0644  track
+
+file  scripts/host/droplet-deploy.sh                                         /usr/local/sbin/droplet-deploy                                        0755  track
+file  scripts/host/etc-systemd-system/droplet-deploy.service                 /etc/systemd/system/droplet-deploy.service                            0644  track
+file  scripts/host/50-droplet-deploy.rules                                   /etc/polkit-1/rules.d/50-droplet-deploy.rules                         0644  track
 
 # --- egress audit collector (WARP-268) ---------------------------------------
 dir   -                                                                      /usr/local/lib/droplet-egress-audit                                   -     present  the collector payload the launcher execs

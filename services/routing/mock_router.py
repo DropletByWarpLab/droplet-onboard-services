@@ -437,7 +437,7 @@ class _MockVpn:
         logger.info("mock: VPN create_interface name=%s port=%s addr=%s", name, listen_port, address)
 
     def add_peer(self, interface: str, public_key: str, allowed_ips: str,
-                 description: str = "", endpoint: str = "",
+                 description: str = "",
                  persistent_keepalive: int = 25) -> None:
         self._section_counter += 1
         section = f"cfg{self._section_counter:02d}wireguard_{interface}"
@@ -450,7 +450,6 @@ class _MockVpn:
             "public_key": public_key,
             "allowed_ips": ip_list,
             "description": description,
-            "endpoint_host": endpoint,
             "persistent_keepalive": str(persistent_keepalive),
         })
         logger.info("mock: VPN add_peer iface=%s ips=%s desc=%s", interface, ip_list, description)

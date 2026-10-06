@@ -59,7 +59,9 @@ import { createSetupRouter } from "./setup.js";
 function createPrismaMock() {
   let workspace: Record<string, unknown> | null = null;
   let setup: Record<string, unknown> | null = null;
-  return {
+  const db = {
+    $transaction: async <T>(work: (tx: unknown) => Promise<T>): Promise<T> => work(db),
+    user: { count: async () => 1 },
     _seedWorkspace: (w: Record<string, unknown> | null) => {
       workspace = w;
     },
@@ -115,6 +117,7 @@ function createPrismaMock() {
       },
     },
   };
+  return db;
 }
 
 function buildApp(prisma: ReturnType<typeof createPrismaMock>) {
@@ -142,6 +145,7 @@ describe("POST /api/setup/org (PR #380)", () => {
   it("persists the workspace, reserves the host, and advances to `internet`", async () => {
     const res = await request(buildApp(prisma))
       .post("/api/setup/org")
+      .set("Cookie", "droplet_session=valid-session")
       .send(VALID_BODY);
 
     expect(res.status).toBe(200);
@@ -160,9 +164,18 @@ describe("POST /api/setup/org (PR #380)", () => {
     expect(prisma._setupStep()).toBe("internet");
   });
 
+  it("replaying the organization save does not move accounts back to internet", async () => {
+    prisma._seedSetup({ id: "singleton", state: "unclaimed", setupStep: "accounts", userTourCompleted: false });
+    const res = await request(buildApp(prisma)).post("/api/setup/org")
+      .set("Cookie", "droplet_session=valid-session").send(VALID_BODY);
+    expect(res.status).toBe(200);
+    expect(prisma._setupStep()).toBe("accounts");
+  });
+
   it("normalizes the slug (trim + lowercase) before reserving", async () => {
     const res = await request(buildApp(prisma))
       .post("/api/setup/org")
+      .set("Cookie", "droplet_session=valid-session")
       .send({ ...VALID_BODY, slug: "  ACME-HQ  " });
     expect(res.status).toBe(200);
     expect(res.body.slug).toBe("acme-hq");
@@ -172,6 +185,7 @@ describe("POST /api/setup/org (PR #380)", () => {
   it("400s a malformed slug with the inline ORG_SLUG_INVALID code (no write)", async () => {
     const res = await request(buildApp(prisma))
       .post("/api/setup/org")
+      .set("Cookie", "droplet_session=valid-session")
       .send({ ...VALID_BODY, slug: "Acme HQ!" });
     expect(res.status).toBe(400);
     expect(res.body.code).toBe("ORG_SLUG_INVALID");
@@ -190,6 +204,7 @@ describe("POST /api/setup/org (PR #380)", () => {
     });
     const res = await request(buildApp(prisma))
       .post("/api/setup/org")
+      .set("Cookie", "droplet_session=valid-session")
       .send(VALID_BODY);
     expect(res.status).toBe(409);
     expect(res.body.code).toBe("ORG_SLUG_TAKEN");
@@ -198,6 +213,7 @@ describe("POST /api/setup/org (PR #380)", () => {
   it("400s when required fields are missing", async () => {
     const res = await request(buildApp(prisma))
       .post("/api/setup/org")
+      .set("Cookie", "droplet_session=valid-session")
       .send({ slug: "acme" }); // no name, no tz
     expect(res.status).toBe(400);
     expect(res.body.code).toBe("ORG_FIELDS_REQUIRED");
@@ -207,6 +223,7 @@ describe("POST /api/setup/org (PR #380)", () => {
   it("accepts a body without industry/size (LOCAL hints are optional)", async () => {
     const res = await request(buildApp(prisma))
       .post("/api/setup/org")
+      .set("Cookie", "droplet_session=valid-session")
       .send({ name: "Solo", slug: "solo", tz: "Europe/Berlin" });
     expect(res.status).toBe(200);
     expect(res.body.slug).toBe("solo");
@@ -263,6 +280,8 @@ describe("POST /api/setup/org (PR #380)", () => {
         .set("Cookie", "droplet_session=valid-session")
         .send({ ...VALID_BODY, name: "Acme Renamed", slug: "acme-2" });
 
+      expect(prisma._setupStep()).toBe("done");
+
       expect(res.status).toBe(200);
       expect(res.body.slug).toBe("acme-2");
       expect(prisma._workspace()!.displayName).toBe("Acme Renamed");
@@ -296,15 +315,16 @@ describe("POST /api/setup/org (PR #380)", () => {
       expect(prisma._workspace()!.slug).toBe("acme");
     });
 
-    it("still allows first-run (unclaimed) setup WITHOUT a session — no regression", async () => {
+    it("refuses anonymous organization setup before the appliance is ready", async () => {
       // No setup row seeded → appliance defaults to "unclaimed" (first run).
       const res = await request(buildApp(prisma))
         .post("/api/setup/org")
         .send(VALID_BODY);
 
-      expect(res.status).toBe(200);
-      expect(res.body.slug).toBe("acme");
-      expect(prisma._workspace()!.orgConfigured).toBe(true);
+      expect(res.status).toBe(401);
+      expect(res.body.code).toBe("ORG_AUTH_REQUIRED");
+      expect(prisma._workspace()).toBeNull();
+      expect(prisma._setupStep()).toBeNull();
     });
   });
 });

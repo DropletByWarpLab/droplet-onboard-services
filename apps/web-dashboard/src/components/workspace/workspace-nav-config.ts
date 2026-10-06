@@ -123,8 +123,9 @@ export const SPACES: SpaceDef[] = [
     id: "business",
     label: "Business",
     icon: Building2,
-    // The ADR-044 group, in its nav-config order.
-    hrefs: ["/business", "/brief", "/customers", "/projects", "/money", "/practice"],
+    // The ADR-044 group, in its nav-config order. WARP-3528: Support is a
+    // child of Customers in the sidebar and a chip beside it here (rule 2).
+    hrefs: ["/business", "/brief", "/customers", "/support", "/projects", "/money", "/practice"],
   },
   {
     id: "ops",
@@ -140,18 +141,15 @@ export const SPACES: SpaceDef[] = [
     // WARP-2967 then tucked both behind Settings in the sidebar; rule 2 keeps
     // them chips here, with their owner/admin gate untouched.
     hrefs: [
-      "/security",
       "/cameras",
       "/events",
-      // ADR-055 (P4b). Gated exactly as the sidebar gates it: the `doors`
-      // module (absent, not just off, until DOORS_ENABLED) and owner/admin.
-      "/doors",
       "/network",
       "/devices",
       "/voice",
       "/remote-access",
       "/integrations",
       "/integrations/credentials",
+      "/integrations/work-notifications",
     ],
   },
   {
@@ -161,7 +159,16 @@ export const SPACES: SpaceDef[] = [
     // Ask AI · Knowledge · Context · Models · Tools, plus the WARP-2823
     // Assistant inspector — it explains what the assistant can reach, which is
     // this space's subject even though nav-config files it under Admin.
-    hrefs: ["/chat", "/knowledge", "/context", "/models", "/tools", "/admin/prompt"],
+    // WARP-3452 — Coding tools sits beside Models, whose model it serves.
+    hrefs: [
+      "/chat",
+      "/knowledge",
+      "/context",
+      "/models",
+      "/settings/coding-tools",
+      "/tools",
+      "/admin/prompt",
+    ],
   },
   {
     id: "admin",
@@ -172,8 +179,11 @@ export const SPACES: SpaceDef[] = [
       "/users",
       "/admin/files",
       "/settings",
+      // WARP-3533 — API tokens and calendar links, a Settings page like the row above.
+      "/settings/developer",
       "/admin/audit",
       "/trust",
+      "/settings/telemetry",
       "/admin/rag-eval",
       "/downloads",
       "/help",

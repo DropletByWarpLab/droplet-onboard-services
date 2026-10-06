@@ -48,6 +48,8 @@ export interface ChatToolCall {
       tool: string;
       fields: { key: string; kind: string; detail: string; value?: boolean }[];
       truncatedFields: number;
+      /** WARP-3569 — decisive values (recipient, path, target), display text only. */
+      shown?: { key: string; text: string }[];
     };
   };
   /**
@@ -667,10 +669,9 @@ export interface Department {
 
 // ── WARP-2976 (ADR-059 P1): department profiles ──
 
-/** The seven templates. A template is data — default nav hrefs, default home
+/** The six templates. A template is data — default nav hrefs, default home
  *  widgets and a headline figure (`lib/departments/templates.ts`). */
 export type DepartmentTemplate =
-  | "security"
   | "sales"
   | "finance"
   | "operations"
@@ -920,23 +921,17 @@ export interface VpnPeerInfo {
   lastHandshakeAt?: string | null;
 }
 
-/** Snapshot the dashboard polls before deciding whether to enable the
- *  "Add device" button. `endpointConfigured` is the most user-actionable
- *  signal — when false, the orchestrator will refuse to mint peers. */
+/** Snapshot before device creation. Either a local endpoint or an explicit
+ * away endpoint makes endpointConfigured true; the selected mode still
+ * requires its own endpoint. */
 export interface VpnStatusInfo {
   configured: boolean;
   endpointConfigured: boolean;
   endpointHost?: string | null;
-  /** ADR-023: the publicly-trusted per-device FQDN `d-<hmac>.devices.warp-lab.ai`.
-   *  The one address that works at home AND over the tunnel with a green padlock.
-   *  Null until the box learns it from HQ. Safe to show to any user (it is
-   *  published to Certificate Transparency anyway, carries no PII, has no A record). */
-  publicFqdn?: string | null;
-  /** WARP-993: is the minted WireGuard conf actually reachable from OUTSIDE
-   *  the home LAN? False while the box is FQDN-only (split-horizon, no public
-   *  A record — ADR-023 §3) until the ADR-025 relay lands. Every
-   *  "from anywhere" surface gates its copy on this; missing ⇒ treat as false
-   *  (never over-promise against an older orchestrator). */
+  /** Unicast name registered with the office DNS resolver; usable over WireGuard. */
+  internalHostname?: string | null;
+  /** Whether an explicit non-LAN WireGuard endpoint is configured. This does
+   *  not probe live connectivity. Missing means unavailable to the UI. */
   offLanReachable?: boolean;
   /** WARP-1391: the box's discovered home-facing LAN IP — the Endpoint a
    *  HOME-mode peer dials directly. Discovered dynamically (DHCP, never
@@ -973,64 +968,6 @@ export interface VpnPeerCreatedInfo {
   /** WARP-993: same honest reachability signal as VpnStatusInfo, echoed on
    *  the create response so the QR step can gate its copy without a refetch. */
   offLanReachable?: boolean;
-}
-
-// ── WARP-1475: overlay QR-enroll (ADR-030) ──
-
-/**
- * One-shot response from `POST /api/vpn/overlay/link-tokens` (owner/admin).
- * The plaintext `token` is returned exactly ONCE — the box persists only its
- * hash. The dashboard encodes {server, token, box_name} into the
- * `droplet://overlay-enroll` QR, shows it, and forgets it on dialog close.
- * Minting again supersedes (expires) the prior token.
- */
-export interface OverlayLinkToken {
-  /** Plaintext link token (base64url). Shown once; NEVER logged. */
-  token: string;
-  /** The endpoint host a scanning device redeems the token against. */
-  server: string;
-  /** Human box name to display in the app while enrolling. */
-  box_name: string;
-  /** ISO-8601 expiry (~5 min TTL). */
-  expires_at: string;
-}
-
-/** Lifecycle of a staged overlay enrollment, mirrored from the orchestrator. */
-export type OverlayEnrollmentState =
-  | "pending"
-  | "approving"
-  | "approved"
-  | "denied"
-  | "expired";
-
-/**
- * A staged, awaiting-owner-review overlay enrollment, from
- * `GET /api/vpn/overlay/pending-enrollments` (owner/admin).
- *
- * `label` is DEVICE-PRESENTED (the scanning phone self-reports it at redeem
- * time) — it is untrusted input and MUST render as text, never as HTML.
- * `conflict:true` marks a security event: a second, different device redeemed
- * the same link token (the box flags it for the owner to review, not a benign
- * expiry).
- */
-export interface PendingOverlayEnrollment {
-  id: string;
-  /** Device-presented label — untrusted; render as text only. */
-  label: string | null;
-  /** First 8 hex of sha256(device sign-key PEM) — the owner eyeball-matches this. */
-  fingerprint_short: string;
-  /** ISO-8601 timestamp the device presented the token. */
-  presented_at: string;
-  state: OverlayEnrollmentState;
-  /** True when a different device redeemed the same token — a security event. */
-  conflict: boolean;
-}
-
-/** Response from the approve endpoint on success (200). */
-export interface OverlayApproveResult {
-  state: "approved";
-  /** HQ device ref for the newly-enrolled overlay device; null if not yet known. */
-  device_id: string | null;
 }
 
 // ── WARP-1036: Voice assistant ──
@@ -1096,6 +1033,19 @@ export interface VoiceSayResult {
   ok: boolean;
   duration_s?: number;
   sample_rate?: number | null;
+}
+
+export interface SpeakingVoiceInfo {
+  available: boolean;
+  selectable: boolean;
+  voice: string | null;
+  voices: { id: string; label: string }[];
+  fault: string | null;
+}
+
+export interface SpeakingVoiceChange {
+  voice: string;
+  fault: string | null;
 }
 
 // --- WARP-1055: /voice surface — calibration + wizard measurements ---
@@ -1286,63 +1236,6 @@ export interface ApDeviceInfo {
   lastOperationId: string | null;
 }
 
-/**
- * WARP-979 — response from GET /api/setup/box-name/check. `available` is the
- * best-effort answer; `authoritative` is false until the HQ device-authed
- * registry check lands (coupled fleet-hq follow-up), so the UI stays honest.
- * `reason` + `message` are present only when the name is invalid.
- */
-export interface BoxNameCheckResult {
-  available: boolean;
-  slug: string;
-  fqdn: string;
-  authoritative: boolean;
-  reason?: string;
-  message?: string;
-}
-
-/**
- * WARP-979 — response from POST /api/setup/box-name.
- *
- * WARP-980 — the persist now also drives a device-auth HQ name CLAIM, so the
- * response carries the AUTHORITATIVE result: `authoritative` is true only when HQ
- * device-auth-confirmed the name belongs to this box (false = persisted but fell
- * back to opaque/bootstrap issuance, e.g. the device isn't registered yet).
- * `taken` + `suggestions` accompany a 409 when HQ says the name is taken.
- */
-export interface BoxNameSetResult {
-  ok: boolean;
-  slug: string;
-  fqdn: string;
-  /** WARP-980 — HQ device-auth-confirmed the name (present on the 2xx path). */
-  authoritative?: boolean;
-  /** WARP-980 — true on a 409 name-taken body. */
-  taken?: boolean;
-  /** WARP-980 — alternate names HQ offered on a 409 name-taken. */
-  suggestions?: string[];
-}
-
-/**
- * WARP-1039 — response from GET /api/setup/box-name: the CURRENTLY saved box
- * name (normalized slug) + its fqdn, both null when no name has been chosen
- * yet. Read by the AddressStep to rehydrate its input on re-entry and by the
- * VpnStep precheck to render the honest "address is being set up" blocked
- * view instead of bouncing the customer back to a step they already finished.
- */
-export interface BoxNameCurrentResult {
-  name: string | null;
-  fqdn: string | null;
-}
-
-/**
- * WARP-1109 — response from POST /api/setup/box-name/rename. Same shape as
- * BoxNameSetResult: the rename RELEASES the current name at HQ then claims the
- * new one, so `authoritative` is true only when HQ device-auth-confirmed the new
- * name (false = the new name was persisted but issuance fell back to
- * opaque/bootstrap and re-claims on the next tick). A 409 name-taken on the NEW
- * name surfaces as a thrown error carrying `code: "BOX_NAME_TAKEN"` + suggestions.
- */
-export type BoxNameRenameResult = BoxNameSetResult;
 // --- Auth types ---
 
 export interface AuthUser {
@@ -1397,7 +1290,7 @@ export const ROSTER_SOURCE_LABEL: Record<RosterSource, string> = {
   local: "Local",
   sso: "SSO",
   scim: "SCIM",
-  nextcloud: "Nextcloud only",
+  nextcloud: "File Store only",
 };
 
 /** WARP-2984 / WARP-2858 — the IdP owns the credential: the box refuses to set
@@ -1552,10 +1445,8 @@ export type AccessModuleId =
   | "crm"
   /** WARP-2581 — invoices and bills landed from a cloud ledger. */
   | "money"
-  /** WARP-2977 — the Security command center (ADR-059). */
-  | "security"
-  /** ADR-055 — the doors this box knows about. Ships dark (DOORS_ENABLED). */
-  | "doors";
+  /** WARP-3528 — the service desk (tickets, requesters, replies and notes). */
+  | "support";
 
 export interface AccessRoleFeatureGrant {
   moduleId: AccessModuleId;
@@ -1943,6 +1834,40 @@ export interface DriveInfo {
    *  an anonymous GUID drive. Absent on an older orchestrator — callers fall
    *  back to the anchored md-device matcher (drivePoolName). */
   pool?: string | null;
+  /** WARP-3513 / ADR-070: at-rest encryption of this drive. Every data drive
+   *  is meant to be LUKS2; `none` is a plain drive that still has to be
+   *  prepared. ABSENT on an orchestrator that predates the field — the UI then
+   *  says nothing about encryption rather than guessing. */
+  encryption?: DriveEncryption;
+  /** WARP-3513: the explicit state the UI branches on (never re-derived from
+   *  `encryption`). `needs_preparing` = a data drive without LUKS2. */
+  preparation?: DrivePreparation;
+  /** WARP-3513 / WARP-3514: what the drive is used for. `role: "recordings"`
+   *  is the active camera-recordings drive; `reservedBytes` is the slice set
+   *  aside for it. */
+  usage?: DriveUsage | null;
+  /** WARP-3513: true when this is the install disk. Defence in depth — it never
+   *  appears in the data-drive list today, but a card that is handed one must
+   *  offer no destructive action. */
+  isSystemDisk?: boolean;
+}
+
+/** WARP-3513 / ADR-070: at-rest encryption of a drive. */
+export type DriveEncryption = "luks2" | "none" | "unknown";
+
+/** WARP-3513: `needs_preparing` = a data drive without LUKS2 (never used for
+ *  allocation, never auto-wiped); `prepared` = encrypted and ready. */
+export type DrivePreparation = "prepared" | "needs_preparing";
+
+/** WARP-3513 / WARP-3514: what a drive is used for. */
+export type DriveUsageRole = "recordings" | "files";
+
+export interface DriveUsage {
+  /** `null` = no Droplet-managed role (a drive that only holds files). */
+  role: DriveUsageRole | null;
+  /** Bytes set aside for the role (the recordings reservation). `null` when
+   *  there is no reservation. */
+  reservedBytes: number | null;
 }
 
 /** WARP-174: response shape for PATCH /api/storage/drives/:uuid. */
@@ -1989,6 +1914,8 @@ export interface DiskInfo {
  *  never appear in any of them (WARP-827 keeps it out, and that stays). A
  *  distinct type is the guardrail: nothing that iterates drives can pick this
  *  up by accident, and passing it where a DriveInfo is expected won't compile. */
+export type DiskEncryptionState = "tpm_sealed" | "recovery_key_only" | "not_encrypted" | "unknown";
+
 export interface SystemDiskInfo {
   /** Whole-disk kernel name, e.g. "nvme0n1". */
   name: string;
@@ -2009,6 +1936,9 @@ export interface SystemDiskInfo {
    *    unavailable — nothing measurable; the pair is null and `filesystems`
    *                  is empty. */
   measurement: "complete" | "partial" | "unavailable";
+  /** WARP-3608: explicit at-rest encryption state of the data volume, decided
+   *  by the bridge. Absent on an older bridge (render as unknown). */
+  encryption?: DiskEncryptionState;
   model: string;
   serial: string;
   bus: string;
@@ -2082,6 +2012,136 @@ export interface PoolsResponse {
   snapshot_at?: string;
   error?: string;
   reason?: string;
+}
+
+// ─── Recording storage (WARP-3512 contract / ADR-070, consumed by WARP-3515) ──
+//
+// Decision record: docs/ADR-070-camera-recording-storage.md.
+//
+// GET /api/storage/recordings. Droplet measures, sizes and allocates the camera
+// recordings slice itself (a project-quota slice on an encrypted bay drive);
+// the dashboard shows it and offers the two owner choices (auto-sized vs whole
+// drive, and which eligible drive). Everything below is exactly the shape the
+// contract spells out — `normalizeRecordingStorage` (lib/recording-storage.ts)
+// is what turns the wire payload into these, defaulting every absent field, so
+// a component never has to guard a missing one.
+
+/** Where the allocation stands. `unknown` is a UI-only fallback for a status
+ *  string this build does not recognise — rendered neutrally, never crashed on. */
+export type RecordingStorageStatus =
+  | "active"
+  | "pending"
+  | "migrating"
+  | "degraded"
+  | "missing"
+  | "no_eligible_drive"
+  | "on_system_disk"
+  | "unknown";
+
+/** `auto_reserved` = a size-capped slice Droplet sizes itself; `full` = the
+ *  whole drive. `null` = no allocation yet. */
+export type RecordingStorageMode = "auto_reserved" | "full";
+
+export interface RecordingStorageDrive {
+  fsUuid: string;
+  label: string;
+  model: string;
+  sizeBytes: number;
+  encrypted: boolean;
+  mountPath: string;
+}
+
+export interface RecordingStorageCamera {
+  /** Frigate-side key (snake_case). */
+  name: string;
+  displayName: string;
+  mbPerHour: number;
+  gbPerDay: number;
+  /** Bytes this camera needs for the whole retention window (incl. headroom). */
+  needBytes: number;
+  usedBytes: number;
+}
+
+export type RecordingMigrationState = "idle" | "running" | "done" | "failed";
+
+export interface RecordingMigration {
+  state: RecordingMigrationState;
+  /** 0–100. */
+  progressPct: number;
+  bytesCopied: number;
+  bytesTotal: number;
+  startedAt: string | null;
+  error: string | null;
+}
+
+export interface RecordingOldFootage {
+  /** True when recordings from before the move are still on the previous
+   *  source (kept until the owner deletes them). */
+  present: boolean;
+  bytes: number;
+  location: string;
+}
+
+/** Warning codes the contract defines. An unrecognised code still renders (the
+ *  server's own message), so this stays an open string at the type level. */
+export type RecordingWarningCode =
+  | "drive_missing"
+  | "read_only"
+  | "near_full"
+  | "cannot_grow"
+  | "on_system_disk"
+  | "smart_failed"
+  | "not_encrypted";
+
+export interface RecordingWarning {
+  code: RecordingWarningCode | (string & {});
+  message: string;
+}
+
+/** A drive Droplet may put recordings on (prepared, encrypted, healthy, not the
+ *  OS disk). */
+export interface EligibleRecordingDrive {
+  fsUuid: string;
+  label: string;
+  sizeBytes: number;
+  freeBytes: number;
+  encrypted: boolean;
+}
+
+export interface RecordingStorage {
+  status: RecordingStorageStatus;
+  mode: RecordingStorageMode | null;
+  drive: RecordingStorageDrive | null;
+  reservedBytes: number;
+  usedBytes: number;
+  freeBytes: number;
+  /** False when Frigate's resolved retention could not be read; absent on older servers. */
+  retentionKnown?: boolean;
+  /** Total the cameras need for `retentionDays` (floor 20 GiB). */
+  needBytes: number;
+  retentionDays: number;
+  /** How many days of footage are on disk right now. */
+  daysStored: number;
+  cameras: RecordingStorageCamera[];
+  migration: RecordingMigration;
+  oldFootage: RecordingOldFootage;
+  warnings: RecordingWarning[];
+  eligibleDrives: EligibleRecordingDrive[];
+}
+
+/** What `fetchRecordingStorage` resolves to. `not_supported` = the endpoint is
+ *  absent (an orchestrator that predates WARP-3514 answers 404); `forbidden` =
+ *  the signed-in role may not read it (403). Neither is an error: the UI hides
+ *  the card or says "not available on this Droplet yet". A transport failure or
+ *  a 5xx still THROWS, so SWR's `error` is the signal for "couldn't load". */
+export type RecordingStorageResult =
+  | { available: true; data: RecordingStorage }
+  | { available: false; reason: "not_supported" | "forbidden" };
+
+/** PUT /api/storage/recordings body. At least one of the two is required. */
+export interface RecordingStorageChange {
+  mode?: RecordingStorageMode;
+  fsUuid?: string;
 }
 
 /** PR #373 — one subsystem descriptor in the onboarding Claim hardware card. */
@@ -2162,6 +2222,8 @@ export interface TeamInviteResult {
   role: TeamInviteRole;
   /** ISO timestamp the invite expires. */
   expires_at: string;
+  /** Invitation issuance and email delivery are separate outcomes. */
+  send_status?: "sent" | "failed";
 }
 
 // --- Health types ---
@@ -2349,6 +2411,41 @@ export interface CameraInfo {
   status: "recording" | "detecting" | "live" | "idle" | "offline";
   lastSeen: string;
   lastDetection: DetectionEvent | null;
+  /**
+   * WARP-3511 — what this camera is keeping. Optional here because payloads
+   * from before the field existed (and other endpoints that list cameras)
+   * omit it; every consumer must render sensibly without it.
+   */
+  recording?: CameraRecordingState;
+}
+
+/**
+ * How footage is kept, named for the broadest retention window that is open:
+ * `continuous` keeps everything, `motion` keeps segments with motion,
+ * `events` keeps only footage overlapping an alert or detection, `off` keeps
+ * nothing.
+ */
+export type RecordingMode = "continuous" | "motion" | "events" | "off";
+
+/**
+ * `null` always means "not known", never "nothing". `degraded: true` means
+ * the camera service could not be read, so every other field — and `status`
+ * — is unknown: show a "service unavailable" state, never a recording claim.
+ */
+export interface CameraRecordingState {
+  degraded: boolean;
+  /** Null only when `degraded`. */
+  mode: RecordingMode | null;
+  /** Days each window keeps footage, as configured. Null only when `degraded`. */
+  retentionDays: RetentionWindows | null;
+  /** When the newest saved segment ended (ISO), from a recent window; null if unread or none was found. */
+  lastSegmentAt: string | null;
+  /** True when the recent-segment read failed, rather than finding no footage. */
+  lastSegmentReadFailed?: boolean;
+  /** Bytes of footage on disk, or null when the camera has none yet / no figure. */
+  usedBytes: number | null;
+  /** Measured write rate scaled to a day, or null when not yet measured. */
+  bytesPerDay: number | null;
 }
 
 export interface DetectionEvent {
@@ -2366,6 +2463,8 @@ export interface DetectionEvent {
 /** Richer event payload returned by GET /api/cameras/events for the
  *  dedicated Events page. Mirrors EventDetail in the orchestrator. */
 export interface EventDetail extends DetectionEvent {
+  /** null until a business-hours schedule has been saved. */
+  outsideBusinessHours?: boolean | null;
   subLabel: string | null;
   subLabelScore: number | null;
   zones: string[];
@@ -2383,6 +2482,7 @@ export interface EventDetail extends DetectionEvent {
  *  /api/cameras/events query string by `fetchEvents`. All fields
  *  optional; the rail starts empty (= "anything"). */
 export interface EventFilter {
+  businessHours?: "outside" | "inside";
   cameras?: string[];
   labels?: string[];
   /** [0, 1] */
@@ -2399,6 +2499,8 @@ export interface EventFilter {
 
 export interface FilteredEventsResult {
   events: EventDetail[];
+  scanLimitReached?: boolean;
+  searchLimitReached?: boolean;
   /** start_time of the oldest event returned, or null if no more pages. */
   nextCursor: number | null;
 }
@@ -2413,6 +2515,7 @@ export type ReviewSeverity = "alert" | "detection" | "significant_motion";
  * triage unit on the Events page's "Alerts" + "Detections" tabs.
  */
 export interface ReviewItem {
+  outsideBusinessHours?: boolean | null;
   id: string;
   camera: string;
   startTime: number;
@@ -2428,6 +2531,7 @@ export interface ReviewItem {
 }
 
 export interface ReviewFilter {
+  businessHours?: "outside" | "inside";
   cameras?: string[];
   severity?: ReviewSeverity[];
   before?: number;
@@ -2439,7 +2543,49 @@ export interface ReviewFilter {
 
 export interface FilteredReviewsResult {
   reviews: ReviewItem[];
+  scanLimitReached?: boolean;
   nextCursor: number | null;
+}
+
+export type BusinessDay = "monday" | "tuesday" | "wednesday" | "thursday" | "friday" | "saturday" | "sunday";
+
+export interface CameraBusinessHours {
+  configured: boolean;
+  timezone: string;
+  /** null means closed. A close before open continues into the next day. */
+  days: Record<BusinessDay, { open: string; close: string } | null>;
+}
+
+/** Raw movement in retained recordings; independent of object reviews. */
+export interface MotionActivity {
+  id: string;
+  camera: string;
+  startTime: number;
+  endTime: number;
+  motion: number;
+  outsideBusinessHours: boolean | null;
+  playbackUrl: string;
+}
+
+export interface MotionFilter {
+  cameras?: string[];
+  after: number;
+  before: number;
+  businessHours?: "outside" | "inside";
+  limit?: number;
+  cursor?: number;
+}
+
+export interface MotionActivityResult {
+  activity: MotionActivity[];
+  nextCursor: number | null;
+  scanLimitReached?: boolean;
+  coverage: {
+    after: number;
+    before: number;
+    partial: boolean;
+    cameras: Array<{ camera: string; recordedSeconds: number | null; hasGaps: boolean; available: boolean }>;
+  };
 }
 
 // --- Recordings + timeline (Phase 3) ---
@@ -2544,9 +2690,13 @@ export type PtzAction =
   | "STOP";
 
 export interface PtzCapabilities {
+  /** WARP-3511 — pan/tilt, zoom or at least one preset. Absent on older boxes. */
+  supported?: boolean;
   supportsPanTilt: boolean;
   supportsZoom: boolean;
   presets: string[];
+  /** True when the camera service could not be asked: "unknown", not "no PTZ". */
+  degraded?: boolean;
 }
 
 // --- Camera system status (Phase 5) ---
@@ -2605,6 +2755,16 @@ export interface RetentionWindows {
   detections: number;
 }
 
+/** WARP-1851 — the budgets, summed, against the volume that has to hold them.
+ *  Mirrors the orchestrator's `OverAllocation` (camera-budget.service.ts). It is
+ *  an advisory — budgets are targets and the oldest footage is evicted first —
+ *  but a person who promised 3 TB on a 2 TB drive should be told. */
+export interface CameraOverAllocation {
+  allocatedBytes: number;
+  capacityBytes: number;
+  overAllocated: boolean;
+}
+
 /** WARP-1851 — a camera's current storage allocation. */
 export interface CameraBudget {
   retentionMode: "MANUAL" | "BUDGET";
@@ -2616,6 +2776,56 @@ export interface CameraBudget {
   applied?: RetentionWindows | null;
   /** Operator-facing note — present when there's something to say. */
   note?: string;
+  /**
+   * WARP-3511 — budgets are per camera but the drive is shared, so one
+   * camera's allocation says nothing on its own: this is every budget added
+   * up against the drive's capacity. Null when the capacity could not be read.
+   */
+  overAllocation?: OverAllocation | null;
+}
+
+export interface OverAllocation {
+  allocatedBytes: number;
+  capacityBytes: number;
+  overAllocated: boolean;
+}
+
+/**
+ * WARP-3511 — what the retention repair would do, camera by camera. Cameras
+ * adopted before retention defaults existed have no retention authored at all;
+ * the repair gives exactly those the standard windows. A camera whose windows
+ * were set to zero on purpose is left alone.
+ */
+export interface RetentionBackfillPlanEntry {
+  camera: string;
+  reason: "no_retention_authored" | "already_authored" | "explicitly_zero" | "not_in_config";
+  willWrite: boolean;
+}
+
+/**
+ * The windows the retention repair would write, as the box reports them. They
+ * are the box's own effective defaults (configurable, and changing by
+ * release), so they are shown from here and never written into copy.
+ */
+export interface RetentionBackfillDefaults {
+  continuousDays: number;
+  motionDays: number;
+  alertsRetainDays: number;
+  detectionsRetainDays: number;
+}
+
+/** The repair's dry run: who it would touch, and what it would write. */
+export interface RetentionBackfillPreview {
+  plan: RetentionBackfillPlanEntry[];
+  /** Absent on a box older than the field; say no figure rather than guess one. */
+  defaults?: RetentionBackfillDefaults;
+}
+
+export interface RetentionBackfillResult {
+  planned: RetentionBackfillPlanEntry[];
+  written: string[];
+  /** True when nothing needed doing. */
+  noop: boolean;
 }
 
 export interface CameraStorageSummary {
@@ -3636,1040 +3846,6 @@ export interface ExtensionToolDecision {
   inputSchemaHash: string;
 }
 
-// ── WARP-2977 (ADR-059 P2): the Security command center feed ──
-
-/** Mirrors the orchestrator's SecurityEventKind enum. */
-export type SecurityEventKind =
-  | "detection"
-  | "detection_low"
-  | "camera_offline"
-  | "camera_online"
-  | "source_offline"
-  | "source_online"
-  | "threat"
-  /** WARP-2977 P2b — the site mode changed. labels = [mode, modeSource, fromMode]; site-wide. */
-  | "mode_changed"
-  /**
-   * WARP-2978 PR-D — a person Frigate has tracked for 30 s and not ended yet:
-   * one row per person, endedAt null; their `end` is still its own
-   * `detection` row. Shown as "Still in view".
-   */
-  | "detection_ongoing"
-  /**
-   * WARP-2977 P2b-2 — a door lock's reading changed. labels = [reading], one of
-   * locked | unlocked | not_fully_locked | unlatched | unknown. Only people with
-   * Devices view get these rows.
-   */
-  | "lock_state";
-
-/** Mirrors the orchestrator's SecurityEventSource enum. */
-export type SecurityEventSource = "frigate" | "frigate_status" | "activity_mirror" | "site_mode" | "matter_lock";
-
-/** An area a feed row belongs to — only areas the viewer can see. */
-export interface SecurityZoneRef {
-  id: string;
-  name: string;
-}
-
-export interface SecurityEvent {
-  /** BigInt id, serialised as a string. */
-  id: string;
-  source: SecurityEventSource;
-  kind: SecurityEventKind;
-  severity: "info" | "notice" | "alert";
-  /** Frigate camera name; null for rows no camera produced. */
-  camera: string | null;
-  labels: string[];
-  cameraZones: string[];
-  score: number | null;
-  startedAt: string;
-  endedAt: string | null;
-  summary: string;
-  /** Set on detections — the clip/thumbnail routes key on it. */
-  frigateEventId: string | null;
-  /**
-   * WARP-2977 P2b — the areas this row happened in, resolved at read time
-   * from the viewer's VISIBLE links of VISIBLE areas (never names a hidden
-   * area). Empty for site-wide rows (threats, Frigate health, mode changes).
-   */
-  zones: SecurityZoneRef[];
-  /**
-   * WARP-2977 P2b-2 — `live`: startedAt is when it happened. `polled`: when
-   * Droplet's 60 s check found it (a door lock changed while the live stream
-   * was down), so the time is not when it happened.
-   */
-  observed: "live" | "polled";
-  /**
-   * WARP-2978 (ADR-059 P3 route 1) — the incident the engine grouped this row
-   * into, or null. A row the viewer can see implies its incident is visible
-   * to them. Absent from a box older than P3.
-   */
-  incident?: { id: string } | null;
-}
-
-export interface SecurityEventsPage {
-  events: SecurityEvent[];
-  nextCursor: string | null;
-}
-
-/**
- * One line of the feed header: what the feed is listening to, and whether it
- * is reporting. Served in the order camera_ingest, camera_system, locks,
- * threat_mirror, site_mode, incidents, alerts, links, patterns, retention.
- * `locks` (WARP-2977 P2b-2) comes only to people with Devices view;
- * `threat_mirror` and `alerts` (WARP-2978) only to owners and admins.
- * `incidents` (WARP-2978) is the incident engine's row, every viewer's.
- * `links` (WARP-2979) is Droplet's link-finding job's row, after `alerts`.
- * `patterns` (WARP-2980) is the baseline job's row. Mirrors the
- * orchestrator's `SecurityHealthId`.
- */
-export interface SecurityHealthRow {
-  id:
-    | "camera_ingest"
-    | "camera_system"
-    | "locks"
-    | "threat_mirror"
-    | "site_mode"
-    | "incidents"
-    | "alerts"
-    | "links"
-    // WARP-2979 P4 PR-2 — Droplet's incident summaries (every viewer), right after `links`.
-    | "summaries"
-    | "patterns"
-    | "retention";
-  state: "ok" | "quiet" | "down" | "not_configured";
-  detail: string;
-  lastSeenAt: string | null;
-}
-
-// ── WARP-2977 P2b (ADR-059 §3.4, §3.6): areas, opening hours, the site mode ──
-// Wire shapes of /api/security/{zones,sources,mode,hours}. Mirrors the
-// orchestrator's views in services/security-zones.service.ts and
-// services/security-mode.service.ts. "Areas" in the UI, `zone` in code.
-
-export type SecurityZoneKind = "entry" | "interior" | "perimeter" | "parking" | "restricted";
-export type SecurityZoneState = "active" | "archived";
-/** `lock` (WARP-2977 P2b-2): one Matter door-lock endpoint; shown only to people with Devices view. */
-export type SecurityZoneSourceKind = "camera" | "camera_zone" | "lock";
-/**
- * `removed` = a person unlinked it. WARP-2979: `proposed` = Droplet suggests it
- * (nothing uses it until a person adds it); `rejected` = a person turned
- * Droplet's suggestion down, or undid Droplet's link. Route 3 lists `active`
- * links only; suggestions come from route 23.
- */
-export type SecurityZoneLinkState = "active" | "removed" | "proposed" | "rejected";
-/** WARP-2979 — who created a link (`origin`) and who set its current state (`setBy`). */
-export type SecurityLinkActor = "person" | "droplet";
-
-/**
- * WARP-2979 (ADR-059 P4 §6.4) — why Droplet linked or suggested a source: the
- * co-occurrence counts it decided on. Every number is an integer
- * (`lambdaMilli` = expected by chance × 1000, `liftTenths` = lift × 10,
- * `confidenceBp` = confidence × 10 000); `pAdj` is a string. The server sends
- * it only to a viewer who can see every source it names (DS-005); the page
- * turns it into sentences (components/security/link-evidence-copy.ts).
- */
-export interface LinkEvidenceDirection {
-  n: number;
-  k: number;
-  excluded: number;
-  lambdaMilli: number;
-  liftTenths: number;
-  confidenceBp: number;
-}
-
-export interface LinkEvidenceSource {
-  sourceKind: "lock" | "camera" | "camera_zone";
-  sourceRef: string;
-  /** The camera's (or lock's) display name when the evidence was computed. */
-  label: string;
-}
-
-export interface LinkEvidenceView {
-  v: 1;
-  kind: "lock_camera" | "camera_camera";
-  /** ISO instants of the 14-day window. */
-  window: { from: string; to: string };
-  anchor: LinkEvidenceSource & { linkId: string };
-  candidate: LinkEvidenceSource;
-  /** The anchor's visits → the candidate. */
-  forward: LinkEvidenceDirection;
-  /** camera_camera only: the candidate's visits → the anchor. */
-  reverse: LinkEvidenceDirection | null;
-  chosen: "whole" | "part" | "lock";
-  wholeK: number | null;
-  /** Names are a tiebreak, never evidence: shown below the numbers. */
-  names: { match: boolean; shared: string[] };
-  hypotheses: number;
-  pAdj: string;
-  gate: "auto" | "propose";
-  /** Up to 5 recent hits, newest first; removed after 30 days (then `samplesTrimmedBefore` is set). */
-  samples: Array<{ anchorAt: string; hitAt: string }>;
-  samplesTrimmedBefore: string | null;
-}
-
-export interface SecurityZoneLinkView {
-  id: string;
-  sourceKind: SecurityZoneSourceKind;
-  /** camera: `<frigateCamera>`; camera_zone: `<frigateCamera>/<frigateZone>`; lock: `matter:<nodeId>/<endpointId>`. */
-  sourceRef: string;
-  /**
-   * ALWAYS the CAMERA's display name — the live camera name when the camera
-   * exists, else the snapshot taken when it was linked — for camera AND
-   * camera_zone links alike. It NEVER includes the part: render a camera_zone
-   * link as "<label> (the '<part>' part of the view)", where the part is always
-   * `sourceRef.slice(sourceRef.indexOf("/") + 1)`. The server snapshots
-   * `sourceLabel` at link time as that same camera display name.
-   * A lock link's label is the lock's name.
-   */
-  label: string;
-  state: SecurityZoneLinkState;
-  stateChangedAt: string;
-  /** WARP-2979 — who created the link: a person, or Droplet (a suggestion or its own link). */
-  origin: SecurityLinkActor;
-  /**
-   * WARP-2979 — who set its current state. `origin droplet` + `setBy droplet`
-   * = "Linked by Droplet" (Keep / Undo); `origin droplet` + `setBy person` =
-   * a suggestion a person added or kept. Only person-set links make alerts.
-   */
-  setBy: SecurityLinkActor;
-  /** WARP-2979 — Droplet's evidence; null unless origin is droplet AND this viewer can see every source it names. */
-  evidence: LinkEvidenceView | null;
-}
-
-export interface SecurityZoneView {
-  id: string;
-  name: string;
-  kind: SecurityZoneKind;
-  state: SecurityZoneState;
-  /** Send back as `expectedVersion` on every edit of this area or its links. */
-  version: number;
-  /** The viewer's visible active links only. */
-  links: SecurityZoneLinkView[];
-}
-
-/**
- * GET /api/security/zones. `include=archived` is honoured only for an owner or
- * admin whose Security level is manage (or has no per-person level at all);
- * for anyone else it is ignored, not refused.
- */
-export interface SecurityZonesResponse {
-  zones: SecurityZoneView[];
-}
-
-export type SecurityLinkStatus = "present" | "missing" | "unknown";
-
-/** One paired door-lock endpoint an area can be linked to (WARP-2977 P2b-2). */
-export interface SecurityLinkableLock {
-  /** `matter:<nodeId>/<endpointId>` — the link's sourceRef. */
-  ref: string;
-  nodeId: string;
-  endpointId: number;
-  label: string;
-  room: string | null;
-  /** Reporting to Droplet right now. A lock that isn't is still paired and linkable. */
-  connected: boolean;
-}
-
-/** GET /api/security/sources — what can be linked, and whether each link still points at something. */
-export interface SecuritySourcesView {
-  frigate: "ok" | "unavailable";
-  /** Visible cameras only. `parts` = the camera's Frigate zones ("parts of the camera's view"). */
-  cameras: Array<{ name: string; label: string; parts: string[] }>;
-  linkStatus: Array<{ linkId: string; status: SecurityLinkStatus }>;
-  /**
-   * WARP-2977 P2b-2. `hidden`: no Devices view (no items, and no lock link is
-   * shown anywhere). `unavailable`: the smart-home service couldn't answer —
-   * never an empty "no locks". `ok`: every paired lock, sorted by label.
-   */
-  locks: { state: "ok" | "hidden" | "unavailable"; items: SecurityLinkableLock[] };
-}
-
-/** POST /api/security/zones. */
-export interface SecurityZoneCreateBody {
-  name: string;
-  kind: SecurityZoneKind;
-}
-
-/** PATCH /api/security/zones/:id — at least one of name/kind. */
-export interface SecurityZonePatchBody {
-  name?: string;
-  kind?: SecurityZoneKind;
-  expectedVersion: number;
-}
-
-/** PUT /api/security/zones/:id/links — the whole desired set, at most 32. */
-export interface SecurityZoneLinksBody {
-  links: Array<{ sourceKind: SecurityZoneSourceKind; sourceRef: string }>;
-  expectedVersion: number;
-}
-
-/** POST /api/security/zones → 201. */
-export interface SecurityZoneCreated {
-  zone: SecurityZoneView;
-}
-
-/** PATCH, archive, unarchive and links → 200. `changed:false` = nothing to do (no audit row). */
-export interface SecurityZoneWriteResult {
-  zone: SecurityZoneView;
-  changed: boolean;
-}
-
-// ── WARP-2979 (ADR-059 P4 §7 routes 23–27): Droplet's links and its AI settings ──
-
-/** What Droplet may do with links on its own (manage). */
-export type SecurityAiLinking = "link_and_suggest" | "suggest_only" | "off";
-/** Whether Droplet writes incident summaries (on this Droplet only). */
-export type SecurityAiSummaries = "on" | "off";
-
-/** One of Droplet's open suggestions (route 23). */
-export interface SecurityLinkProposal {
-  linkId: string;
-  zone: { id: string; name: string; kind: SecurityZoneKind };
-  sourceKind: SecurityZoneSourceKind;
-  sourceRef: string;
-  /** The camera's display name (never the part — see SecurityZoneLinkView.label). */
-  label: string;
-  /** Wilson lower bound, 0..1. */
-  confidence: number;
-  evidence: LinkEvidenceView | null;
-  /** When the evidence behind it was last computed (ISO). */
-  suggestedAt: string;
-}
-
-/**
- * GET /api/security/link-proposals. `proposals` is filled only at manage (or
- * for an owner/admin with no per-person level); below it the list is empty,
- * never refused. Ordered: a name match first, then confidence.
- */
-export interface SecurityLinkProposalsView {
-  level: "view" | "act" | "manage" | null;
-  linking: SecurityAiLinking;
-  proposals: SecurityLinkProposal[];
-}
-
-/** POST /api/security/links/:id/{accept,reject} → 200. `changed:false` = already decided that way (no audit row). */
-export type SecurityLinkDecisionResult = SecurityZoneWriteResult;
-
-/** GET /api/security/ai-settings. */
-export interface SecurityAiSettingsView {
-  linking: SecurityAiLinking;
-  summaries: SecurityAiSummaries;
-  /** Send back as `expectedVersion`. */
-  version: number;
-}
-
-/** PUT /api/security/ai-settings (manage). */
-export interface SecurityAiSettingsBody {
-  linking: SecurityAiLinking;
-  summaries: SecurityAiSummaries;
-  expectedVersion: number;
-}
-
-/** PUT /api/security/ai-settings → 200. `changed:false` = nothing to change (no audit row). */
-export interface SecurityAiSettingsWriteResult extends SecurityAiSettingsView {
-  changed: boolean;
-}
-
-export type SecurityMode = "open" | "closed" | "away";
-export type SecurityModeSource = "schedule" | "manual";
-export type SecurityManualEnd = "none" | "next_opening" | "at_time" | "until_changed";
-
-/** GET /api/security/mode. `mode` is the EFFECTIVE mode. */
-export interface SecurityModeView {
-  mode: SecurityMode;
-  source: SecurityModeSource;
-  manualEnd: SecurityManualEnd;
-  /** When a manual mode ends (next_opening / at_time); null otherwise. */
-  until: string | null;
-  setBy: { id: string; name: string } | null;
-  setAt: string;
-  hours:
-    | { state: "not_set" }
-    | {
-        state: "set";
-        /** The SITE zone — format every time on this page in it, never the browser's. */
-        timezone: string;
-        scheduledMode: "open" | "closed";
-        upcoming: { at: string; mode: "open" | "closed" } | null;
-      };
-  /**
-   * The zone to format EVERY time on the mode card in (setAt, until, upcoming):
-   * the site timezone when the opening hours are set; else Workspace.tz when it
-   * is a valid IANA zone; else null — and then the dashboard formats in
-   * `deviceTimeZone()` (lib/security-time.ts). Never UTC.
-   */
-  displayTimezone: string | null;
-  /** The stored mode lags the effective one, or the opening-hours check is down. */
-  stale: boolean;
-  version: number;
-}
-
-/** POST /api/security/mode — an intent applied to the current state (no version). */
-export type SecurityModeAction =
-  | { action: "close" }
-  | { action: "open"; for: "1h" | "2h" | "4h" }
-  | { action: "away" }
-  | { action: "resume" };
-
-export interface SecurityModeActionResult {
-  mode: SecurityModeView;
-  /** false = already in that state; nothing was written. */
-  changed: boolean;
-  /**
-   * WARP-2977 P2b-2 — on a Close up or Away, for people with Devices view:
-   * the connected door locks last heard open, by name, when `locksChecked` is
-   * true. Never read as "all locked". Absent when `locksChecked` is false, and
-   * for everyone else.
-   */
-  unlockedLocks?: string[];
-  /**
-   * WARP-2977 P2b-2 (rjouffret, review of 4fa950c8) — beside `unlockedLocks`:
-   * the locks Droplet can't vouch for while the others' readings stand (not
-   * reporting, never heard, or unknown), by name. Same presence rules as
-   * `unlockedLocks`.
-   */
-  uncheckedLocks?: string[];
-  /**
-   * WARP-2977 P2b-2 (review F4) — false when every lock reading may be stale
-   * (no lock adapter, not checked yet, or the smart-home service unreachable):
-   * say so, name nothing, never "none open". Absent for people without
-   * Devices view.
-   */
-  locksChecked?: boolean;
-}
-
-export type SecurityHoursState = "not_set" | "set";
-export type SecurityDayKind = "closed" | "open_all_day" | "hours";
-
-export interface SecurityHoursDay {
-  /** ISO weekday, 1 = Monday … 7 = Sunday. */
-  weekday: number;
-  kind: SecurityDayKind;
-  /** 'HH:MM' site-local; null unless kind = hours. closes < opens = closes the next day. */
-  opens: string | null;
-  closes: string | null;
-}
-
-export interface SecurityHoursException {
-  /** Site-local 'YYYY-MM-DD'. */
-  date: string;
-  kind: SecurityDayKind;
-  opens: string | null;
-  closes: string | null;
-  note: string;
-}
-
-/** GET /api/security/hours. */
-export interface SecurityHoursView {
-  state: SecurityHoursState;
-  timezone: string | null;
-  /** Send back as `expectedVersion` on every hours or special-day write. */
-  version: number;
-  /** 7 entries, Monday first. */
-  days: SecurityHoursDay[];
-  /** Upcoming special days (from site-local yesterday), at most 100. */
-  exceptions: SecurityHoursException[];
-  /** The next 7 days of open windows, computed by the server. */
-  preview: Array<{ startsAt: string; endsAt: string }>;
-  hint: {
-    /** The workspace's timezone, only when it is a valid IANA zone. */
-    workspaceTimezone: string | null;
-    /** The business profile's free-text typical day, read-only. "" below owner/admin (the profile's §15 audience ladder). */
-    typicalDay: string;
-  };
-}
-
-/** PUT /api/security/hours. */
-export type SecurityHoursBody =
-  | {
-      state: "set";
-      timezone: string;
-      /** Exactly 7, unique weekdays 1..7. opens/closes 'HH:MM', only for kind = hours. */
-      days: Array<{ weekday: number; kind: SecurityDayKind; opens?: string; closes?: string }>;
-      expectedVersion: number;
-    }
-  | { state: "not_set"; expectedVersion: number };
-
-/** PUT /api/security/hours/exceptions/:date. */
-export interface SecurityHoursExceptionBody {
-  kind: SecurityDayKind;
-  opens?: string;
-  closes?: string;
-  /** At most 80 characters. */
-  note?: string;
-  expectedVersion: number;
-}
-
-/**
- * PUT /api/security/hours and PUT …/exceptions/:date → 200: both views, since
- * the mode may move. Both null = SAVED (committed and audited), but the server
- * could not read them back: re-read. Never an error — a 5xx means nothing changed.
- */
-export interface SecurityHoursWriteResult {
-  hours: SecurityHoursView | null;
-  mode: SecurityModeView | null;
-}
-
-/** Every `error.code` the P2b Security routes answer with (`{error: {code, message, issues?}}`). */
-export type SecurityErrorCode =
-  | "VALIDATION_ERROR"
-  | "ZONES_UNAVAILABLE"
-  | "MODE_UNAVAILABLE"
-  | "HOURS_UNAVAILABLE"
-  | "MODE_CONFLICT"
-  | "AUDIT_UNAVAILABLE"
-  | "VERSION_CONFLICT"
-  | "ZONE_NOT_FOUND"
-  | "ZONE_NAME_TAKEN"
-  | "ZONE_LIMIT"
-  | "ZONE_ARCHIVED"
-  | "SOURCE_NOT_FOUND"
-  | "SOURCE_CHECK_UNAVAILABLE"
-  | "INVALID_TIMEZONE"
-  | "SAME_OPEN_CLOSE"
-  | "HOURS_NOT_SET"
-  | "EXCEPTION_NOT_FOUND"
-  | "EXCEPTION_LIMIT"
-  | "EXCEPTION_OUT_OF_RANGE"
-  // A 500: a programming error on the box (a refused audit precondition, a
-  // TypeError), never an outage — retrying the same request will not help.
-  | "INTERNAL_ERROR"
-  // WARP-2980 (P5 PR-A) — the read-only patterns routes 29–31.
-  | "PATTERNS_UNAVAILABLE"
-  | "PATTERN_NOT_FOUND"
-  | "PATTERNS_NOT_BUILT"
-  | "NO_TIMEZONE"
-  // WARP-2980 (P5 PR-B) — expected activity, routes 32–34 (ZONE_ARCHIVED and
-  // AUDIT_UNAVAILABLE above answer route 33 too).
-  | "SUPPRESSIONS_UNAVAILABLE"
-  | "SUPPRESSION_NOT_FOUND"
-  | "SUPPRESSION_TARGET_NOT_FOUND"
-  | "SUPPRESSION_LIMIT"
-  // WARP-2978 (ADR-059 P3 §7 routes 16–22): incidents and who is told about alerts.
-  | "INCIDENT_NOT_FOUND"
-  | "INCIDENT_CONFLICT"
-  | "NOT_ACTIONABLE"
-  | "INCIDENTS_UNAVAILABLE"
-  | "NO_RECIPIENT"
-  | "NOT_ELIGIBLE"
-  | "ROUTING_UNAVAILABLE"
-  | "USER_NOT_FOUND"
-  // WARP-2979 (ADR-059 P4 §7 routes 23–27): Droplet's links and the AI settings.
-  | "LINK_NOT_FOUND"
-  | "LINK_NOT_DECIDABLE"
-  | "LINK_CONFLICT"
-  | "LINK_LIMIT"
-  | "LINKS_UNAVAILABLE"
-  | "AI_SETTINGS_UNAVAILABLE"
-  // WARP-2979 P4 PR-2 (route 28): Summarise now / Regenerate.
-  | "NARRATIVE_COOLDOWN"
-  | "NARRATIVE_TOO_OLD"
-  | "SUMMARIES_OFF"
-  // WARP-2980 (P5 PR-C) — route 35: nothing this viewer can mark, or a partial view (one body).
-  | "NOT_JUDGEABLE";
-
-/** The error envelope; `archivedZoneId` rides on ZONE_NAME_TAKEN when the name's holder is archived. */
-export interface SecurityApiErrorBody {
-  error: { code: SecurityErrorCode; message: string; issues?: unknown[]; archivedZoneId?: string };
-}
-
-// ── WARP-2980 (ADR-059 P5 PR-A): what normal looks like ──
-// Wire shapes of GET /api/security/patterns{,/cells,/explain} (routes 29–31).
-// Mirrors apps/orchestrator/src/services/security-patterns-read.ts. "Patterns"
-// and "what's usual" in the UI; never "baseline" or "suppression".
-
-export type SecurityPatternCode = "out_of_place" | "unusual_volume" | "long_dwell";
-export type SecurityPatternRelease = "trial" | "live";
-export type SecurityLearningState = "learning" | "active" | "stale";
-export type SecurityDayType = "weekday" | "weekend";
-
-/** Route 29. */
-export interface SecurityPatternsOverview {
-  state: "not_configured" | "not_built" | "ready";
-  reason: "no_timezone" | "no_cameras" | null;
-  timezone: string | null;
-  window: { from: string; to: string; builtAt: string } | null;
-  release: Record<SecurityPatternCode, SecurityPatternRelease>;
-  /** Visible cameras Droplet has heard from. A camera with no row here has never reported. */
-  sources: Array<{
-    camera: string;
-    label: string;
-    state: SecurityLearningState;
-    daysObserved: number;
-    daysNeeded: 14;
-    lastSeenAt: string;
-    detectionsPerDay: number | null;
-  }>;
-  /** Areas first, then cameras; only keys whose every camera the viewer can see. */
-  keys: Array<{
-    zoneKey: string;
-    kind: "area" | "camera";
-    zoneId: string | null;
-    name: string;
-    cameras: string[];
-    labels: string[];
-    learning: boolean;
-  }>;
-  waitingProposals: number;
-  /** WARP-2980 PR-B: how often each pattern code was right — owner/admin only, else null. */
-  precision: SecurityPatternPrecision | null;
-}
-
-/** WARP-2980 PR-B — route 29's precision: per pattern code, counts from the first mark, a percentage from day 30. */
-export interface SecurityPatternPrecision {
-  showAfterDays: 30;
-  codes: Array<{ code: SecurityPatternCode; marked: number; notExpected: number; firstMarkedAt: string; percentRight: number | null }>;
-}
-
-/** One (dayType, hour) of route 30. */
-export interface SecurityPatternCellView {
-  dayType: SecurityDayType;
-  hour: number;
-  daysObserved: number;
-  daysWithEvent: number;
-  /** Enough observed days to judge this hour. */
-  ready: boolean;
-  /** Not usually seen at this hour. */
-  rare: boolean;
-  typicalPerHour: number | null;
-  longestUsualVisitSec: number | null;
-}
-
-/** Route 30: 48 cells, weekdays 0–23 then weekends 0–23. */
-export interface SecurityPatternCells {
-  key: string;
-  label: string;
-  window: { from: string; to: string; builtAt: string };
-  cells: SecurityPatternCellView[];
-}
-
-/** Route 31. */
-export interface SecurityPatternExplainView {
-  key: { zoneKey: string; kind: "area" | "camera"; zoneId: string | null; name: string; cameras: string[] };
-  at: { instant: string; local: string; dayType: SecurityDayType; hour: number; timezone: string };
-  window: { from: string; to: string; builtAt: string };
-  sources: Array<{ camera: string; state: SecurityLearningState; daysObserved: number; daysNeeded: 14; lastSeenAt: string }>;
-  cell: {
-    ready: boolean;
-    daysObserved: number;
-    daysWithEvent: number;
-    smoothed: { daysObserved: number; daysWithEvent: number };
-    rarity: { p: number; flagsBelow: 0.05; wouldFlag: boolean };
-    volume: { typicalPerHour: number | null; flagsFrom: number | null };
-    dwell: { longestUsualVisitSec: number | null; samples: number; wouldFlagAboveSec: number | null };
-    neighbours: Array<{ hour: number; daysObserved: number; daysWithEvent: number }>;
-  } | null;
-  /** WARP-2980 PR-B: why the pattern rules are paused for this key now; every "would flag" is off while set. */
-  paused: "zone_changed" | "stale_build" | "area_changed" | "camera_not_active" | null;
-  /** WARP-2980 PR-B: the active expected activity covering this slot. */
-  expected: Array<{ id: string; text: string; until: string; codes: SecurityPatternCode[] }>;
-  release: Record<SecurityPatternCode, SecurityPatternRelease>;
-}
-
-// ── WARP-2980 (ADR-059 P5 PR-B): expected activity (routes 32–34) ──
-// Mirrors apps/orchestrator/src/services/security-suppressions.service.ts.
-// "Suppression" is the route's and the code's word; the UI says "Expected activity".
-
-export type SecuritySuppressionDays = "every_day" | "weekdays" | "weekends";
-
-/** Route 32's row. */
-export interface SecuritySuppressionView {
-  id: string;
-  target: { kind: "area"; zoneId: string; name: string; archived: boolean } | { kind: "camera"; camera: string; name: string };
-  label: string;
-  days: SecuritySuppressionDays;
-  /** Site-local hour 0–23, and how many hours from it (1–24; wraps past midnight; 24, "All day", only from 0). */
-  hourFrom: number;
-  hourCount: number;
-  codes: SecurityPatternCode[];
-  reason: string;
-  createdByName: string;
-  createdAt: string;
-  expiresAt: string;
-  /** Flags it quietened — owner/admin only; null for anyone else. */
-  quietedFlags: number | null;
-}
-
-/** Route 32. `canManage` is the server's answer: render Add / Remove from it, never from a level guess. */
-export interface SecuritySuppressionList {
-  suppressions: SecuritySuppressionView[];
-  canManage: boolean;
-  limit: number;
-}
-
-/** Route 33's body — exactly these keys. */
-export interface SecuritySuppressionCreateBody {
-  target: { kind: "area"; zoneId: string } | { kind: "camera"; camera: string };
-  label: string;
-  days: SecuritySuppressionDays;
-  hourFrom: number;
-  hourCount: number;
-  codes: SecurityPatternCode[];
-  reason: string;
-  expiresInDays: number;
-}
-
-// ── WARP-2978 (ADR-059 P3 §7, P6 §7.5): incidents, acknowledgement, alert routing ──
-// Wire shapes of routes 16–22, mirrored from the orchestrator's
-// services/security-incident-view.ts and services/security-alerts.service.ts.
-// P6's native clients decode the same shapes. Everything is VIEWER-PROJECTED
-// on the box (DS-005): a hidden camera's codes, counts, acks and notices are
-// simply absent, and the page renders what it is given — it never fills in.
-// The unions are what P3 sends; the copy helpers still render an unknown
-// value (a later code or scope) as a generic line rather than nothing.
-
-export type SecuritySeverity = "info" | "notice" | "alert";
-export type SecurityIncidentScope = "area" | "camera" | "site_threat" | "site_camera_system";
-/** `no_action` = ordinary activity (or no code the viewer can see): nothing to acknowledge. */
-export type SecurityIncidentState = "no_action" | "open" | "acknowledged" | "resolved";
-/** Whether the incident still takes events. Explicit — never inferred from times. */
-export type SecurityIncidentGrouping = "collecting" | "closed";
-/**
- * Mirrors the orchestrator's `SecurityReasonCode` enum: P3's three rules, then
- * P5's pattern codes (WARP-2980). A pattern code reaches `reasonCodes` and
- * `reasons` only once P5 PR-D releases it as counted; until then it is a
- * trial flag, which route 18 sends apart, in `patternFlags` (see
- * IncidentDetail). The copy names every member (incident-copy.ts).
- * WARP-2979 (P4): `camera_offline_during_activity`, an alert — a camera a
- * person linked to an area stopped reporting soon after someone was seen
- * there, while the site was closed or away.
- */
-export type SecurityReasonCode =
-  | "after_hours_presence"
-  | "camera_offline"
-  | "threat_signal"
-  | SecurityPatternCode
-  | "camera_offline_during_activity";
-/** Whether the events behind the incident are still kept (they are trimmed after 30 days; the incident stays a year). */
-export type SecurityIncidentEventsKept = "kept" | "partly_removed" | "removed";
-export type SecurityIncidentAckAction = "acknowledge" | "resolve";
-
-export interface IncidentAckSummary {
-  action: SecurityIncidentAckAction;
-  byName: string;
-  at: string;
-}
-
-/** Route 16's row, route 17's `latest`, and the head of route 18. */
-export interface IncidentSummary {
-  id: string;
-  scope: SecurityIncidentScope;
-  /** The area as it was when the incident opened (a snapshot). */
-  zone: { id: string; name: string; kind: SecurityZoneKind } | null;
-  /** The Frigate camera of a `camera`-scope incident. */
-  camera: string | null;
-  /** Viewer-projected. */
-  state: SecurityIncidentState;
-  /** The viewer's visible severity. */
-  severity: SecuritySeverity;
-  /** The viewer's visible codes. */
-  reasonCodes: SecurityReasonCode[];
-  grouping: SecurityIncidentGrouping;
-  /** The site mode at the first event. */
-  openedInMode: SecurityMode;
-  firstActivityAt: string;
-  lastActivityAt: string;
-  /**
-   * Visible events (survives the 30-day trim) — every row the incident page
-   * lists, a person's "still in view" row (PR-D) included: a 40-second visit
-   * is 2 events, the early row and the finished one.
-   */
-  eventCount: number;
-  /**
-   * Visible counts per label. Keys starting `_` are the box's bookkeeping,
-   * never a label to show: `_status` / `_threat` count status and threat rows,
-   * `_ongoing` a person's "still in view" row (PR-D) — that person is counted
-   * once, under their label, by their finished row.
-   */
-  labels: Record<string, number>;
-  /** The latest acknowledgement, by anyone — only in an actionable view: never a partial one, never plain activity. */
-  lastAck: IncidentAckSummary | null;
-}
-
-/** GET /api/security/incidents — `(lastActivityAt desc, id desc)`. */
-export interface IncidentsPage {
-  incidents: IncidentSummary[];
-  nextCursor: string | null;
-}
-
-/** GET /api/security/incidents/summary. */
-export interface IncidentsSummary {
-  /** Open incidents whose visible severity is alert. */
-  openAlerts: number;
-  /** Open incidents whose visible severity is notice. */
-  openNotices: number;
-  /** At most 3 that need attention, newest first. */
-  latest: IncidentSummary[];
-  /** Opening hours set AND an Inside / Staff only area with a camera: after-hours alerts can fire. */
-  alertsReady: boolean;
-}
-
-export interface IncidentReasonView {
-  code: SecurityReasonCode;
-  severity: SecuritySeverity;
-  /** A snapshot of the event that triggered the code — it outlives the event. */
-  evidence: {
-    eventId: string;
-    camera: string | null;
-    source: string;
-    kind: string;
-    label: string | null;
-    at: string;
-    summary: string;
-  };
-  /**
-   * The rule's numbers: after_hours_presence `{mode, modeSource, nonOpenAt,
-   * zoneKind}`; camera_offline `{offlineForSec, backAt}`; threat_signal
-   * `{activityId, kind}`; a counted pattern code (P5 PR-D) the flag's own
-   * numbers, which P5 PR-C words — this page shows its name alone.
-   * WARP-2979 — camera_offline_during_activity `{offlineForSec, backAt, mode,
-   * modeSource, activity: {eventId, kind, label, at, zoneId, zoneName}}`.
-   */
-  detail: Record<string, string | number | null | Record<string, string | number | null>> | null;
-  /**
-   * WARP-2979 — the second camera the evidence names (camera_offline_during_activity:
-   * where the person was seen), else null. The box sends the reason only when
-   * this viewer can see that camera too.
-   */
-  relatedCamera?: string | null;
-}
-
-export interface IncidentAckView {
-  action: SecurityIncidentAckAction;
-  byName: string;
-  at: string;
-  /** What the device SAID it was — reported, never proof. */
-  client: string | null;
-  /** The ack came from this person's own alert notification for the incident (verified on the box). */
-  viaNotification: boolean;
-  /** Resolve's note; "" when none. */
-  note: string;
-  /**
-   * The sign-in behind the ack — owner/admin ONLY (null for anyone else):
-   * whether the request carried a sign-in id, and whether the box confirmed
-   * that sign-in live. The id itself is never sent, not even truncated.
-   */
-  signIn: { recorded: boolean; confirmedLive: boolean } | null;
-}
-
-export type SecurityNoticeOutcome =
-  | "queued"
-  | "sent"
-  | "not_sent"
-  | "skipped_no_access"
-  | "skipped_not_visible"
-  | "skipped_capped"
-  | "skipped_no_address"
-  /** The delivery's status couldn't be established. */
-  | "outcome_unknown";
-/** `fallback_owner`: nobody chosen could be told (or see the camera), so an owner was told instead. */
-export type SecurityNoticeReason = "routed" | "fallback_owner";
-
-/** Who was told. Owner/admin receive every notice; anyone else only their own. */
-export interface IncidentNoticeView {
-  userId: string;
-  name: string;
-  outcome: SecurityNoticeOutcome;
-  reason: SecurityNoticeReason;
-  /** The channels that took it: "toast", "push" or "toast,push". */
-  channels: string;
-  pushOutcome: "sent" | "no_subscribers" | "refused_gate" | "failed" | null;
-  createdAt: string;
-  settledAt: string | null;
-}
-
-/**
- * A visible member event: the feed row — with `zones`, the viewer's VISIBLE
- * areas from the feed's own resolver, but without route 1's `incident` (every
- * member belongs to this one) — plus `alsoIn`, the other visible areas it
- * matched when it was sorted.
- */
-export type IncidentMemberView = Omit<SecurityEvent, "incident"> & { alsoIn: SecurityZoneRef[] };
-
-/** WARP-2980 (P5 PR-B route 18, PR-C) — Expected / Not expected, as the box keeps it. */
-export type IncidentVerdictState = "unreviewed" | "expected" | "not_expected";
-/** Route 35's body: an answer can change, never go back to unreviewed. */
-export type IncidentVerdict = Exclude<IncidentVerdictState, "unreviewed">;
-
-/**
- * Route 18's verdict — sent only to a viewer who sees every camera and may
- * read threats (null to anyone else: an answer about things they can't see).
- */
-export interface IncidentVerdictView {
-  state: IncidentVerdictState;
-  /** Display-safe; null iff unreviewed. */
-  byName: string | null;
-  at: string | null;
-  /** The codes judged when it was marked. */
-  codes: SecurityReasonCode[];
-}
-
-/**
- * One pattern flag on route 18 (WARP-2980 P5 PR-B): what Droplet would have
- * flagged (`trial` — every pattern code is trial until P5 PR-D) or what
- * expected activity kept quiet (`suppressed`). Neither counts: neither sets
- * the incident's severity or state, and neither told anyone. The box sends
- * flags only to owner/admin who see the flag's cameras.
- */
-export interface IncidentPatternFlagView {
-  code: SecurityPatternCode;
-  effect: "trial" | "suppressed";
-  /** What it would carry if it counted. Never shown as the incident's severity. */
-  severity: SecuritySeverity;
-  key: { kind: "area" | "camera"; zoneId: string | null; camera: string | null };
-  evidence: { eventId: string; camera: string; label: string; at: string; summary: string };
-  /**
-   * The numbers behind it (safe integers and exact strings): every flag
-   * `{dayType, hour, windowFrom, windowTo, mode, zoneKind, rulesetVersion}`;
-   * out_of_place `{daysObserved, daysWithEvent, …}`; unusual_volume `{k,
-   * lambda, typicalPerHour, …}`; long_dwell `{durationSec, p99Sec, …}`.
-   */
-  detail: Record<string, string | number | null> | null;
-  /** effect = suppressed: the expected activity that kept it quiet, as it is NOW; else null. */
-  suppression: { id: string; reason: string; state: "active" | "removed" | "expired" } | null;
-}
-
-/**
- * GET /api/security/incidents/:id — 404 INCIDENT_NOT_FOUND for missing AND hidden alike.
- *
- * WARP-2980 (P5 PR-C) mirrors what P5 PR-B added — `verdict`, `patternFlags`
- * and `viewer.canGiveVerdict` — and route 35 (POST …/verdict, 409
- * NOT_JUDGEABLE), each rendered under its own viewer rule.
- */
-export interface IncidentDetail extends IncidentSummary {
-  reasons: IncidentReasonView[];
-  /** Visible members while their events are kept, newest first. */
-  events: IncidentMemberView[];
-  /** More visible members than `events` carries. */
-  moreEvents: boolean;
-  /** Every acknowledgement when the view is actionable; in a partial view only this viewer's own; plain activity, none. */
-  acks: IncidentAckView[];
-  notices: IncidentNoticeView[];
-  eventsKept: SecurityIncidentEventsKept;
-  /**
-   * Whether THIS viewer can act on it right now: their Security level is at
-   * least act, a code is visible, it is open or acknowledged, and the view is
-   * not PARTIAL. Partial: a reason at the incident's top severity is on a
-   * camera they can't see — then the box sends only their own
-   * acknowledgements, no notices and no lastAck, the state is `open` until
-   * someone resolves it (never `acknowledged`), and routes 19–20 answer 409
-   * NOT_ACTIONABLE. The wire has no `partial` flag, and the page never infers
-   * one: the controls render only when this is true, and when it is false on
-   * an open or acknowledged incident the page says the same thing whatever
-   * the cause.
-   */
-  actionable: boolean;
-  /** WARP-2980: null unless this viewer sees every camera and may read threats. */
-  verdict: IncidentVerdictView | null;
-  /** WARP-2980: the flags this viewer may see, in evidence order (owner/admin only, on the box). */
-  patternFlags: IncidentPatternFlagView[];
-  /**
-   * The viewer's Security level on the box, and whether they have acknowledged
-   * or resolved this incident — kept in a partial view too (their own act).
-   * `canGiveVerdict` (WARP-2980): exactly when route 35 would accept an answer
-   * from them — owner/admin who see everything, at act or above, on a view
-   * that isn't partial, with something to judge. Independent of `actionable`:
-   * a trial-only incident has nothing to acknowledge and can still be judged.
-   */
-  viewer: { level: "view" | "act" | "manage"; acknowledged: boolean; canGiveVerdict: boolean };
-  /**
-   * WARP-2979 P4 PR-2 — "Summary by Droplet" (§6.11.3, DS-005): null unless this
-   * viewer sees every camera and may read threats (owner/admin) AND can see
-   * everything the summary names — every other viewer gets null on every
-   * incident, so the section and its buttons never render for them — and null
-   * with summaries off, for plain activity, and when there is nothing to say.
-   * Absent on a box before PR-2.
-   */
-  narrative?: IncidentNarrativeView | null;
-  /**
-   * WARP-3195 (P4 §6.7.1, §8) — the links only Droplet made that back this
-   * incident. An event matched through Droplet's links alone never alerts, so
-   * the page says "Droplet linked this camera. Keep the link to get alerts
-   * from it." with Keep (route 24, manage). Null unless this viewer is at
-   * manage, owner/admin, and sees every camera and may read threats — a rule
-   * that never reads the incident (DS-005, the R1 pin) — else the list, `[]`
-   * when there is none. Absent on a box before WARP-3195.
-   */
-  dropletLinks?: IncidentDropletLinkView[] | null;
-}
-
-/** WARP-3195 — one link only Droplet set, into the incident's area (route 18's `dropletLinks`). */
-export interface IncidentDropletLinkView {
-  /** Route 24's `:linkId`. */
-  linkId: string;
-  /** The area as it is now. */
-  zone: { id: string; name: string; kind: SecurityZoneKind };
-  sourceKind: SecurityZoneSourceKind;
-  /** camera: `<frigateCamera>`; camera_zone: `<frigateCamera>/<frigateZone>`. */
-  sourceRef: string;
-  /** The Frigate camera the link points at. */
-  camera: string;
-  /** The camera's display name (live, else the link's snapshot) — never the part. */
-  label: string;
-}
-
-/** WARP-2979 P4 PR-2 — route 18's `narrative`, and route 28's 202 body. Written on the box only (DS-007). */
-export interface IncidentNarrativeView {
-  state: "none" | "pending" | "written" | "failed" | "expired";
-  /** Plain text. In `pending` it may be the previous summary, shown until the new one is written. */
-  text: string | null;
-  writtenAt: string | null;
-  model: string | null;
-  promptVersion: number | null;
-}
-
-/** POST …/acknowledge and …/resolve → 200. `changed:false` = nothing new (already done). */
-export interface IncidentActionResult {
-  /** null when, after the write, this person can no longer see the incident (route 18 would answer 404). */
-  incident: IncidentDetail | null;
-  changed: boolean;
-}
-
-/** Why a person can't be told about alerts right now. */
-export type AlertIneligibleReason = "inactive" | "role" | "no_address" | "no_access";
-
-export interface AlertRoutingPerson {
-  userId: string;
-  name: string;
-  role: string;
-  state: "receiving" | "not_receiving";
-  /** `owner_default`: an owner, told by default. null = nobody chose yet (not receiving). */
-  origin: "owner_default" | "chosen" | null;
-  /** Send back as `expectedVersion`; null = no row yet (create). */
-  version: number | null;
-  eligible: boolean;
-  ineligibleReason: AlertIneligibleReason | null;
-  /** Manages a department made from the Security template — a suggestion only, it grants nothing. */
-  managesSecurityDepartment: boolean;
-  /** `push`: a phone is set up and phone notifications are on; else only while Droplet is open. */
-  delivery: "push" | "in_app_only";
-}
-
-/** GET /api/security/alert-routing — the whole list at manage; below it, the viewer's own line. */
-export type AlertRoutingView =
-  | { level: "manage"; people: AlertRoutingPerson[]; fallbackActive: boolean }
-  | { level: "view" | "act"; self: { state: "receiving" | "not_receiving"; eligible: boolean } };
-
-/** PUT /api/security/alert-routing/:userId (manage). */
-export interface AlertRoutingSetBody {
-  state: "receiving" | "not_receiving";
-  expectedVersion: number | null;
-}
-
-// ── WARP-2981 (ADR-059 P6): the Security wall ──
-
-/**
- * The two numbers the wall reads off route 17 (GET
- * /api/security/incidents/summary): open incidents with a visible alert, and
- * open ones with only notices — already this viewer's DS-005 projection. The
- * rest of that body is PR-C's.
- */
-export interface SecurityIncidentCounts {
-  openAlerts: number;
-  openNotices: number;
-}
-
 // ── WARP-2804: notification acknowledgement (routes N1–N4) ──
 
 export type NotificationKind = "reminder" | "event" | "system" | "ai";
@@ -4678,7 +3854,7 @@ export type NotificationKind = "reminder" | "event" | "system" | "ai";
  *  predate WARP-2804 and are never counted as unread (they can still be acked). */
 export type NotificationAckState = "unacked" | "acked" | "untracked";
 
-/** The path that acknowledged it. `incident` is WARP-2978's; no notification route sets it. */
+/** The path that acknowledged it. `incident` is a value the box can record; no notification route sets it. */
 export type NotificationAckMethod = "inbox" | "opened" | "all" | "incident";
 
 /** One of the signed-in person's own notifications, as N1 returns it. The box
@@ -4720,96 +3896,3 @@ export interface NotificationAckAllResult {
   acked: number;
   unread: number;
 }
-
-// ── ADR-055 P4b: the doors page (routes /api/doors/*, ADR-055 P4a) ──
-
-/** Where a door's open/closed report comes from (AccessPoint.doorPositionSource). */
-export type DoorPositionSource = "lock" | "dp1" | "none";
-
-/**
- * What the newest position report says. `unknown` is "no report yet" or "the
- * door's device stopped reporting" — never closed. `not_monitored` is a door
- * with no position source. The server never ages a report into `unknown`
- * itself: that waits for link supervision, so a position is always the LAST
- * report, and `positionSince` is how old it is.
- */
-export type DoorPosition = "open" | "closed" | "unknown" | "not_monitored";
-
-/** Which forced-door claim a door can make; null when it can make none (§9.7). */
-export type DoorForcedClaim = "latch_witnessed" | "unwitnessed_open";
-
-export interface DoorView {
-  id: string;
-  name: string;
-  doorPositionSource: DoorPositionSource;
-  heldOpenSeconds: number;
-  status: "active" | "retired";
-  retiredAt: string | null;
-  position: DoorPosition;
-  /** When the newest position report happened. Null when none has, and for a `none` door. */
-  positionSince: string | null;
-  claims: { forcedDoor: DoorForcedClaim | null; heldOpen: boolean };
-  createdAt: string;
-  updatedAt: string;
-}
-
-/** GET /api/doors[?include=retired]. */
-export interface DoorsResponse {
-  doors: DoorView[];
-}
-
-/** The fourteen AccessEvent kinds (brief §11.3). */
-export type DoorEventKind =
-  | "door_open"
-  | "door_closed"
-  | "latch_retracted"
-  | "latch_extended"
-  | "bolt_thrown"
-  | "bolt_withdrawn"
-  | "rex"
-  | "key_override"
-  | "unlock_granted"
-  | "unlock_denied"
-  | "forced_door"
-  | "held_open"
-  | "tamper"
-  | "trouble";
-
-export interface DoorEventView {
-  id: string;
-  doorId: string;
-  doorName: string;
-  kind: DoorEventKind;
-  /** When the DEVICE says it happened. */
-  occurredAt: string;
-  forcedClaim: DoorForcedClaim | null;
-  troubleCode: "position_unknown" | null;
-  derivedFromId: string | null;
-  correlationKey: string | null;
-}
-
-/** GET /api/doors/events. `nextCursor` is null on the last page. */
-export interface DoorEventsPage {
-  events: DoorEventView[];
-  nextCursor: string | null;
-}
-
-/** POST /api/doors (owner only). */
-export interface DoorCreateBody {
-  name: string;
-  doorPositionSource: DoorPositionSource;
-}
-
-/** PATCH /api/doors/:id (owner only) — at least one field. */
-export interface DoorPatchBody {
-  name?: string;
-  doorPositionSource?: DoorPositionSource;
-}
-
-/** The `error.code`s the doors routes answer with. */
-export type DoorsErrorCode =
-  | "INVALID_NAME"
-  | "DOOR_NOT_FOUND"
-  | "DOOR_RETIRED"
-  | "VALIDATION_ERROR"
-  | "DOORS_UNAVAILABLE";

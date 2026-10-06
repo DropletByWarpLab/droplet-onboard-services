@@ -20,7 +20,7 @@ import { PasskeysSection } from "@/components/settings/PasskeysSection";
 import { FeaturesCard } from "@/components/settings/FeaturesCard";
 import { PersonalityCard } from "@/components/settings/PersonalityCard";
 import { EmailAccountCard } from "@/components/settings/EmailAccountCard";
-import { Microsoft365Card } from "@/components/settings/Microsoft365Card";
+import { ConnectedAccounts } from "@/components/settings/ConnectedAccounts";
 import { EmailChannelSection } from "@/components/settings/EmailChannelSection";
 import { DangerZoneSection } from "@/components/settings/DangerZoneSection";
 import { PersonalDriveCard } from "@/components/settings/PersonalDriveCard";
@@ -30,6 +30,7 @@ import { PlaceLookupSwitch } from "@/components/settings/PlaceLookupSwitch";
 import { LogsSection } from "@/components/settings/LogsSection";
 import { CertificateRows } from "@/components/settings/CertificateRows";
 import { BackupRows } from "@/components/settings/BackupRows";
+import { DiskEncryptionRow } from "@/components/settings/DiskEncryptionRow";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { PasswordRulesChecklist } from "@/components/auth/PasswordRulesChecklist";
 import { validatePassword, isValidEmail } from "@droplet/auth-policy";
@@ -502,10 +503,9 @@ export default function SettingsPage() {
             through. Two halves of mail that people confuse constantly, so they
             sit together and each says which it is. */}
         <EmailAccountCard />
-        {/* WARP-3056 — each person's own Microsoft 365 (mail, calendar,
-            contacts, OneDrive), beside the mailboxes Droplet reads. Renders
-            for owner/admin/family; the callback lands here with ?m365=. */}
-        <Microsoft365Card />
+        {/* WARP-3788 — each person approves their own provider account;
+            administrator registrations are configured once below the cards. */}
+        <ConnectedAccounts />
         <EmailChannelSection />
 
         {/* Device Info */}
@@ -542,13 +542,15 @@ export default function SettingsPage() {
               }
             />
             <InfoRow label="Uptime" value={health ? formatUptime(health.uptime) : "—"} />
-            {/* WARP-2944 — the certificate lifecycle (days left, renewal,
-                the one action when renewal is failing). Owner/admin only;
-                reads the state row the daily tick maintains, no new poll. */}
+            {/* Installed HTTPS certificate expiry, internal hostname coverage,
+                and key fingerprint. Owner/admin only. */}
             <CertificateRows />
             {/* WARP-1405 — backup health: last success, and the reason
                 when backups have stopped. Owner/admin only. */}
             <BackupRows />
+            {/* WARP-3608 — whether the data disk is encrypted at rest, from
+                the box's explicit state. Owner/admin only. */}
+            <DiskEncryptionRow />
           </div>
         </div>
 

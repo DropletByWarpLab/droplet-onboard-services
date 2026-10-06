@@ -236,33 +236,33 @@ describe("requireFeatureAccess — failure posture + cost", () => {
   });
 });
 
-// WARP-2977 P2b — the Security level invariant walks router stacks and asks
-// each mounted handler what it enforces. The marker must say exactly what the
-// gate checks, stay invisible to everything else, and change nothing about
-// how the gate behaves.
-describe("requireFeatureAccess — the meta marker (WARP-2977 P2b)", () => {
+// The route-level level checks (guest-company-data.test.ts,
+// crm-filing.routes.test.ts) walk router stacks and ask each mounted handler
+// what it enforces. The marker must say exactly what the gate checks, stay
+// invisible to everything else, and change nothing about how the gate behaves.
+describe("requireFeatureAccess — the meta marker", () => {
   it("carries exactly {moduleId, level} for every level", () => {
-    expect(readFeatureGateMeta(requireFeatureAccess("security", "act"))).toEqual({ moduleId: "security", level: "act" });
-    expect(readFeatureGateMeta(requireFeatureAccess("security", "manage"))).toEqual({
-      moduleId: "security",
+    expect(readFeatureGateMeta(requireFeatureAccess("crm", "act"))).toEqual({ moduleId: "crm", level: "act" });
+    expect(readFeatureGateMeta(requireFeatureAccess("crm", "manage"))).toEqual({
+      moduleId: "crm",
       level: "manage",
     });
     expect(readFeatureGateMeta(requireFeatureAccess("cameras", "view"))).toEqual({ moduleId: "cameras", level: "view" });
   });
 
   it("defaults to view, the level the gate itself defaults to", () => {
-    expect(readFeatureGateMeta(requireFeatureAccess("security"))).toEqual({ moduleId: "security", level: "view" });
+    expect(readFeatureGateMeta(requireFeatureAccess("crm"))).toEqual({ moduleId: "crm", level: "view" });
   });
 
   it("is null for anything that is not a feature gate", () => {
     expect(readFeatureGateMeta(requireRole("owner"))).toBeNull();
     expect(readFeatureGateMeta(() => undefined)).toBeNull();
     expect(readFeatureGateMeta(undefined)).toBeNull();
-    expect(readFeatureGateMeta({ [FEATURE_GATE_META]: { moduleId: "security", level: "act" } })).toBeNull();
+    expect(readFeatureGateMeta({ [FEATURE_GATE_META]: { moduleId: "crm", level: "act" } })).toBeNull();
   });
 
   it("is non-enumerable, frozen and not writable", () => {
-    const gate = requireFeatureAccess("security", "act");
+    const gate = requireFeatureAccess("crm", "act");
     const descriptor = Object.getOwnPropertyDescriptor(gate, FEATURE_GATE_META);
     expect(descriptor).toMatchObject({ enumerable: false, writable: false, configurable: false });
     // An object spread copies enumerable symbol keys too — the marker must not travel.
@@ -270,9 +270,9 @@ describe("requireFeatureAccess — the meta marker (WARP-2977 P2b)", () => {
     const meta = readFeatureGateMeta(gate)!;
     expect(Object.isFrozen(meta)).toBe(true);
     expect(() => {
-      (gate as unknown as Record<symbol, unknown>)[FEATURE_GATE_META] = { moduleId: "security", level: "view" };
+      (gate as unknown as Record<symbol, unknown>)[FEATURE_GATE_META] = { moduleId: "crm", level: "view" };
     }).toThrow();
-    expect(readFeatureGateMeta(gate)).toEqual({ moduleId: "security", level: "act" });
+    expect(readFeatureGateMeta(gate)).toEqual({ moduleId: "crm", level: "act" });
   });
 
   it("a marked gate still enforces its level (behaviour unchanged)", async () => {
@@ -286,12 +286,12 @@ describe("requireFeatureAccess — the meta marker (WARP-2977 P2b)", () => {
   });
 });
 
-// ADR-059 — the Security view gate over a REAL resolved answer (not a stubbed
-// one): `view` is floored at family and is a refusal, so a guest never reaches
-// the routes' own 403, while the D6 wall account (a Staff role at Security View)
-// still gets the reads and is refused the acts.
-describe("requireFeatureAccess — Security's family floor on a resolved answer (ADR-059)", () => {
-  function resolved(role: AuthUser["role"], grants: Array<{ moduleId: "security" | "cameras"; level: "view" | "act" | "manage" }> | null) {
+// The view gate over a REAL resolved answer (not a stubbed one): for crm,
+// money and support `view` is floored at family and is a refusal, so a guest never reaches
+// the routes' own 403, while a family person narrowed to View still gets the
+// reads and is refused the acts.
+describe("requireFeatureAccess — a family floor on a resolved answer (WARP-3365)", () => {
+  function resolved(role: AuthUser["role"], grants: Array<{ moduleId: "crm" | "money" | "support"; level: "view" | "act" | "manage" }> | null) {
     const access = computeEffectiveAccess({
       user: {
         id: "u-1",
@@ -319,28 +319,51 @@ describe("requireFeatureAccess — Security's family floor on a resolved answer 
     });
     return vi.fn(async () => access);
   }
-  const statusAt = async (role: AuthUser["role"], grants: Parameters<typeof resolved>[1], level: "view" | "act" | "manage") => {
+  const statusAt = async (
+    moduleId: "crm" | "money" | "support",
+    role: AuthUser["role"],
+    grants: Parameters<typeof resolved>[1],
+    level: "view" | "act" | "manage",
+  ) => {
     const resolve = resolved(role, grants);
-    const res = await request(appWith(principal("u-1", "x", role), resolve, [requireFeatureAccess("security", level, resolve)])).get("/api/cameras");
+    const res = await request(appWith(principal("u-1", "x", role), resolve, [requireFeatureAccess(moduleId, level, resolve)])).get("/api/cameras");
     return res.status;
   };
 
-  it("a guest is refused at the view gate, with or without a stored security:view", async () => {
-    expect(await statusAt("guest", null, "view")).toBe(404);
-    expect(await statusAt("guest", [{ moduleId: "security", level: "view" }], "view")).toBe(404);
+  it("a guest is refused at the view gate, with or without a stored crm:view", async () => {
+    expect(await statusAt("crm", "guest", null, "view")).toBe(404);
+    expect(await statusAt("crm", "guest", [{ moduleId: "crm", level: "view" }], "view")).toBe(404);
   });
 
-  it("the D6 wall account (Staff role at Security View) passes view and is refused act and manage", async () => {
-    const wall = [{ moduleId: "security" as const, level: "view" as const }, { moduleId: "cameras" as const, level: "view" as const }];
-    expect(await statusAt("family", wall, "view")).toBe(200);
-    expect(await statusAt("family", wall, "act")).toBe(404);
-    expect(await statusAt("family", wall, "manage")).toBe(404);
+  it("a family role narrowed to crm View passes view and is refused act and manage", async () => {
+    const narrowed = [{ moduleId: "crm" as const, level: "view" as const }];
+    expect(await statusAt("crm", "family", narrowed, "view")).toBe(200);
+    expect(await statusAt("crm", "family", narrowed, "act")).toBe(404);
+    expect(await statusAt("crm", "family", narrowed, "manage")).toBe(404);
   });
 
-  it("family, admin and owner keep what their tier held: family act, admin and owner manage", async () => {
-    expect(await statusAt("family", null, "act")).toBe(200);
-    expect(await statusAt("family", null, "manage")).toBe(404);
-    expect(await statusAt("admin", null, "manage")).toBe(200);
-    expect(await statusAt("owner", null, "manage")).toBe(200);
+  it("family, admin and owner keep what their tier held: crm manage for all three; money view for family, manage for admin and owner", async () => {
+    expect(await statusAt("crm", "family", null, "manage")).toBe(200);
+    expect(await statusAt("crm", "admin", null, "manage")).toBe(200);
+    expect(await statusAt("crm", "owner", null, "manage")).toBe(200);
+    expect(await statusAt("money", "family", null, "view")).toBe(200);
+    expect(await statusAt("money", "family", null, "manage")).toBe(404);
+    expect(await statusAt("money", "admin", null, "manage")).toBe(200);
+    expect(await statusAt("money", "owner", null, "manage")).toBe(200);
+  });
+
+  // WARP-3528 — the service desk's ladder is not crm's (all family) or money's
+  // (view, then admin): `act` is a family rung and `manage` is admin work.
+  it("support: a guest is refused with or without a stored grant; a member acts but does not manage; admin and owner manage", async () => {
+    expect(await statusAt("support", "guest", null, "view")).toBe(404);
+    expect(await statusAt("support", "guest", [{ moduleId: "support", level: "view" }], "view")).toBe(404);
+    expect(await statusAt("support", "family", null, "view")).toBe(200);
+    expect(await statusAt("support", "family", null, "act")).toBe(200);
+    expect(await statusAt("support", "family", null, "manage")).toBe(404);
+    expect(await statusAt("support", "admin", null, "manage")).toBe(200);
+    expect(await statusAt("support", "owner", null, "manage")).toBe(200);
+    const narrowed = [{ moduleId: "support" as const, level: "view" as const }];
+    expect(await statusAt("support", "family", narrowed, "view")).toBe(200);
+    expect(await statusAt("support", "family", narrowed, "act")).toBe(404);
   });
 });

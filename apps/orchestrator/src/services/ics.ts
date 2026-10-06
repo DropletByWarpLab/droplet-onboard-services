@@ -132,7 +132,7 @@ function parseLine(
 
 // The RFC 5545 wall-clock converter (`zoneFormatter`, `timeZoneOffsetMs`,
 // `zonedWallClockToUtc`) moved VERBATIM to lib/zoned-time.ts (WARP-2977 P2b)
-// so the Security opening hours resolve wall clocks through the SAME code this
+// so every caller resolves wall clocks through the SAME code this
 // parser does. Its RFC 5545 §3.3.5 rationale lives there now; this file's
 // tests (src/__tests__/ics.test.ts) still pin it.
 
@@ -239,12 +239,28 @@ function unescapeText(value: string): string {
     .replace(/\\\\/g, "\\");
 }
 
+/**
+ * WARP-3533 — characters that end a content line for SOME consumer although RFC
+ * 5545 ends one only at CRLF: the C0 controls (a bare CR, NUL, ...) other than
+ * TAB and LF, DEL, NEL (U+0085), LINE SEPARATOR (U+2028) and PARAGRAPH SEPARATOR
+ * (U+2029). Anything built on `str.splitlines()` or a Unicode-aware line reader
+ * splits on them, so a work-item name containing one would put a second
+ * property, or a whole VALARM, into a colleague's calendar. They carry no
+ * meaning in text, so each becomes a space. LF is not in the class: the callers
+ * turn `\r?\n` into the `\n` escape first, and that must happen before this.
+ */
+const LINE_BREAKING_CONTROLS = /[\u0000-\u0008\u000B-\u001F\u007F\u0085\u{2028}\u{2029}]/gu;
+
+/** For a value that is never multi-line (a UID): every control, LF and TAB included, becomes a space. */
+const ANY_CONTROL = /[\u0000-\u001F\u007F\u0085\u{2028}\u{2029}]/gu;
+
 function escapeText(value: string): string {
   return value
     .replace(/\\/g, "\\\\")
     .replace(/;/g, "\\;")
     .replace(/,/g, "\\,")
-    .replace(/\r?\n/g, "\\n");
+    .replace(/\r?\n/g, "\\n")
+    .replace(LINE_BREAKING_CONTROLS, " ");
 }
 
 /** Escaper for URI-typed property values (URL, and any future ATTACH /
@@ -253,12 +269,14 @@ function escapeText(value: string): string {
  *  RFC 5545 §3.3.13 types these as URI, not TEXT — §3.3.11's backslash
  *  escaping of `;` `,` and `\` does NOT apply, and applying it corrupts any
  *  link that legitimately contains those characters (a self-hosted Jitsi room
- *  at /Warp,Standup, say). We keep the CR/LF strip alone: stored values come
- *  from the WHATWG URL parser, which already removes raw CR/LF, but this
- *  module's interface is plain and a caller that skipped the parser must not
- *  be able to inject a content line. Defense in depth — do not remove it. */
+ *  at /Warp,Standup, say). We keep the CR/LF escape, and the neutralising of
+ *  the other line-breaking controls (see LINE_BREAKING_CONTROLS), and nothing
+ *  else: stored values come from the WHATWG URL parser, which already removes
+ *  raw CR/LF, but this module's interface is plain and a caller that skipped
+ *  the parser must not be able to inject a content line. Defense in depth — do
+ *  not remove it. */
 function escapeUri(value: string): string {
-  return value.replace(/\r?\n/g, "\\n");
+  return value.replace(/\r?\n/g, "\\n").replace(LINE_BREAKING_CONTROLS, " ");
 }
 
 /** Parse an ICS document into a list of events. Drops malformed events
@@ -436,6 +454,15 @@ function fmtIcsDateTime(d: Date, allDay: boolean): string {
   return d.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
 }
 
+/**
+ * WARP-3533 — the STATUS values `serializeIcs` writes. The first three are the
+ * RFC 5545 VEVENT values (its STATUS section). `COMPLETED` is that section's VTODO
+ * value, written on a VEVENT because the work-item feeds are all-day events
+ * that must say "done" (ADR-069 / WS-17): a client that does not know it shows
+ * the item as an ordinary all-day event, which is the harmless way to fail.
+ */
+export type IcsStatus = "TENTATIVE" | "CONFIRMED" | "CANCELLED" | "COMPLETED";
+
 export interface SerializeInput {
   uid: string;
   summary: string;
@@ -444,6 +471,9 @@ export interface SerializeInput {
   /** WARP-1874 — video-call link, emitted as the RFC 5545 URL property.
    *  Separate from `location`: an event can have both a room and a call. */
   meetingUrl?: string | null;
+  /** WARP-3533 — the RFC 5545 STATUS property. Omitted when absent, so every
+   *  existing caller's output is unchanged. */
+  status?: IcsStatus;
   startsAt: Date;
   endsAt: Date;
   allDay: boolean;
@@ -467,7 +497,9 @@ export function serializeIcs(
   ];
   for (const ev of events) {
     lines.push("BEGIN:VEVENT");
-    lines.push(`UID:${ev.uid}`);
+    // A UID is one token, never text: nothing in it may end a content line. (It was
+    // written raw, and a synced external feed names its own UIDs.)
+    lines.push(`UID:${ev.uid.replace(ANY_CONTROL, " ")}`);
     lines.push(`DTSTAMP:${now}`);
     if (ev.allDay) {
       lines.push(`DTSTART;VALUE=DATE:${fmtIcsDateTime(ev.startsAt, true)}`);
@@ -477,6 +509,9 @@ export function serializeIcs(
       lines.push(`DTEND:${fmtIcsDateTime(ev.endsAt, false)}`);
     }
     lines.push(`SUMMARY:${escapeText(ev.summary)}`);
+    // A closed vocabulary (the type above), so the value needs no escaping and
+    // nothing a caller types can become a content line of its own.
+    if (ev.status) lines.push(`STATUS:${ev.status}`);
     if (ev.description) lines.push(`DESCRIPTION:${escapeText(ev.description)}`);
     if (ev.location) lines.push(`LOCATION:${escapeText(ev.location)}`);
     // URL is what Apple Calendar and Outlook render as a join target, and a

@@ -40,7 +40,6 @@ const CFG: AvailabilityConfig = {
   DROPLET_MATTER_SERVICE_URL: "",
   ROUTING_SERVICE_URL: "",
   SWITCH_SERVICE_URL: "",
-  DOORS_ENABLED: "0",
 };
 
 function fakePrisma(
@@ -83,7 +82,8 @@ describe("GET /api/capabilities", () => {
     // WARP-2545 — `crm` and `contacts` join the contract here. They are
     // `defaultEnabled: false` in the registry, so a fresh box answers false
     // for both, and the dashboard renders the Projects surface it always had.
-    expect(res.body).toEqual({ projects: false, crm: false, contacts: false });
+    // WARP-3528 — `support` joins the same way: off until someone enables it.
+    expect(res.body).toEqual({ projects: false, crm: false, contacts: false, support: false });
   });
 
   it.each(["owner", "admin", "family", "guest", "service"])(
@@ -93,7 +93,7 @@ describe("GET /api/capabilities", () => {
         appWithUser({ role }, [{ moduleId: "projects", enabled: true }]),
       ).get("/api/capabilities");
       expect(res.status).toBe(200);
-      expect(res.body).toEqual({ projects: true, crm: false, contacts: false });
+      expect(res.body).toEqual({ projects: true, crm: false, contacts: false, support: false });
     },
   );
 
@@ -102,7 +102,7 @@ describe("GET /api/capabilities", () => {
       appWithUser({ role: "owner" }, [{ moduleId: "projects", enabled: false }]),
     ).get("/api/capabilities");
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ projects: false, crm: false, contacts: false });
+    expect(res.body).toEqual({ projects: false, crm: false, contacts: false, support: false });
   });
 
   it("answers crm:true with Projects OFF — the CRM has its own route now", async () => {
@@ -126,7 +126,7 @@ describe("GET /api/capabilities", () => {
         { moduleId: "projects", enabled: false },
       ]),
     ).get("/api/capabilities");
-    expect(crmOnProjectsOff.body).toEqual({ projects: false, crm: true, contacts: false });
+    expect(crmOnProjectsOff.body).toEqual({ projects: false, crm: true, contacts: false, support: false });
 
     const bothOn = await request(
       appWithUser({ role: "owner" }, [
@@ -134,7 +134,7 @@ describe("GET /api/capabilities", () => {
         { moduleId: "projects", enabled: true },
       ]),
     ).get("/api/capabilities");
-    expect(bothOn.body).toEqual({ projects: true, crm: true, contacts: false });
+    expect(bothOn.body).toEqual({ projects: true, crm: true, contacts: false, support: false });
   });
 
   it("answers contacts independently of the CRM", async () => {
@@ -143,7 +143,39 @@ describe("GET /api/capabilities", () => {
     const res = await request(
       appWithUser({ role: "owner" }, [{ moduleId: "contacts", enabled: true }]),
     ).get("/api/capabilities");
-    expect(res.body).toEqual({ projects: false, crm: false, contacts: true });
+    expect(res.body).toEqual({ projects: false, crm: false, contacts: true, support: false });
+  });
+
+  it("answers support:true with Projects OFF — the service desk has its own route", async () => {
+    // WARP-3528 (ADR-069 §1) — /support is its own surface, so the registry's
+    // `support` entry declares no `requires` edge and a box that runs the desk
+    // with Projects off (a dental front desk) is a supported shape.
+    //
+    // This route must not re-derive a dependency of its own: edges belong to
+    // `satisfiedModuleIds` inside getEffectiveModuleIds. Mutation: write
+    // `support = effective.has("support") && projects` → the first assertion
+    // below goes red.
+    const supportOnProjectsOff = await request(
+      appWithUser({ role: "owner" }, [
+        { moduleId: "support", enabled: true },
+        { moduleId: "projects", enabled: false },
+      ]),
+    ).get("/api/capabilities");
+    expect(supportOnProjectsOff.body).toEqual({ projects: false, crm: false, contacts: false, support: true });
+
+    // …and the other direction: Projects on says nothing about Support.
+    const projectsOnSupportOff = await request(
+      appWithUser({ role: "owner" }, [{ moduleId: "projects", enabled: true }]),
+    ).get("/api/capabilities");
+    expect(projectsOnSupportOff.body).toEqual({ projects: true, crm: false, contacts: false, support: false });
+
+    const bothOn = await request(
+      appWithUser({ role: "owner" }, [
+        { moduleId: "support", enabled: true },
+        { moduleId: "projects", enabled: true },
+      ]),
+    ).get("/api/capabilities");
+    expect(bothOn.body).toEqual({ projects: true, crm: false, contacts: false, support: true });
   });
 
   it("fails CLOSED for every flag when the enablement read errors — module-gate parity", async () => {
@@ -151,7 +183,7 @@ describe("GET /api/capabilities", () => {
       appWithUser({ role: "owner" }, new Error("db down")),
     ).get("/api/capabilities");
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ projects: false, crm: false, contacts: false });
+    expect(res.body).toEqual({ projects: false, crm: false, contacts: false, support: false });
   });
 
   it("does not override the app-wide no-store (WARP-3097)", async () => {

@@ -342,7 +342,7 @@ describe("optional steps — one unreadable source does not kill the narrative",
     const summarizer: Summarizer = { summarize: vi.fn(async () => "prose") };
     const dispatcher: StepDispatcher = {
       call: vi.fn(async (tool: string) => {
-        if (tool === "list_recent_files") throw new Error("nextcloud returned 503");
+        if (tool === "list_recent_files") throw new Error("the File Store returned 503");
         return { ok: true };
       }),
     };
@@ -548,7 +548,7 @@ describe("WARP-3409 — the report never fails because only its write-up did", (
       ],
       triggeredBy: "romain",
       // Active and local resolvers both name GLM, as on the box (the file
-      // listing makes this a local-only summary, WARP-2979).
+      // listing makes this a local-only summary).
       summarizer: createToolSpecSummarizer(glm, glm),
     });
 

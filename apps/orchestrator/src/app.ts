@@ -10,6 +10,7 @@ import {
   authMiddleware,
   requirePasswordChangeGate,
 } from "./middleware/auth.js";
+import { requireAdminMfaEnrollmentGate } from "./middleware/admin-mfa-enrollment-gate.js";
 import { errorHandler } from "./middleware/error-handler.js";
 import { createRateLimit } from "./middleware/rate-limit.js";
 import { createHealthRouter } from "./routes/health.js";
@@ -28,7 +29,10 @@ import { createBusinessOnboardingRouter } from "./routes/business-onboarding.js"
 import { createIntegrationsRouter } from "./routes/integrations.js";
 import { createSaasCredentialsRouter } from "./routes/saas-credentials.js";
 import { createErpDriftRouter } from "./routes/erp-drift.js";
+import { createCloudFilesRouter } from "./routes/cloud-files.js";
 import { createM365CallbackRouter, createM365Router } from "./routes/m365.js";
+import { createGoogleCallbackRouter, createGoogleRouter } from "./routes/google.js";
+import { createAccountProviderSetupRouter } from "./routes/account-provider-setup.js";
 import { createErpRouter } from "./routes/erp.js";
 import { createSttRouter } from "./routes/stt.js";
 import { createVoiceRouter } from "./routes/voice.js";
@@ -56,6 +60,22 @@ import { createMatterRouter } from "./routes/matter.js";
 import { createPmMobileRouter } from "./routes/mobile/pm.js";
 import { createPmNativeRouter } from "./routes/pm/native.js";
 import { createPmRelationsRouter } from "./routes/pm/relations.js";
+import { createPmPresenceRouter } from "./routes/pm/presence.js";
+import { createPmCollaborationRouter } from "./routes/pm/collaboration.js";
+import { createPmAttachmentsRouter } from "./routes/pm/attachments.js";
+import { createPmQueryRouter } from "./routes/pm/query.js";
+import { createPmViewsRouter } from "./routes/pm/views.js";
+import { createPmBulkRouter } from "./routes/pm/bulk.js";
+import { createPmImportExportRouter } from "./routes/pm/import-export.js";
+import { createPmPlanningRouter } from "./routes/pm/planning.js";
+import { createPmTimeRouter } from "./routes/pm/time.js";
+import { createPmFieldsRouter } from "./routes/pm/fields.js";
+import { createPmWebhooksRouter } from "./routes/pm/webhooks.js";
+import { createPmOpenApiRouter } from "./routes/pm/openapi.js";
+import { createSupportRouter } from "./routes/support/support.routes.js";
+import { createPmInsightsRouter } from "./routes/pm/insights.js";
+import { createPmScheduleRouter } from "./routes/pm/schedule.js";
+import { createPmDevelopmentRouter } from "./routes/pm/development.js";
 import { createCrmRouter } from "./routes/crm.js";
 import { createMoneyRouter } from "./routes/money.js";
 import { createCrmEntityLinksRouter } from "./routes/crm-entity-links.js";
@@ -66,6 +86,8 @@ import { createAgentRunsRouter } from "./routes/agent-runs.js";
 import { createWorkspaceRouter } from "./routes/workspace.js";
 import { createExtensionsRouter } from "./routes/extensions.js";
 import { extensionPrincipalGuard } from "./middleware/extension-principal-guard.js";
+import { pmApiTokenRateLimit, pmApiTokenScopeGuard } from "./middleware/pm-api-token-guard.js";
+import { bindPmApiTokenPrisma } from "./services/pm/pm-api-token.service.js";
 import { createExtensionAttacher, lazyExtensionAttachPort } from "./services/extension-attach.service.js";
 import { bindExtensionPrincipalPrisma } from "./services/extension-principal.js";
 import { createExtensionSandboxClient } from "./services/extension-sandbox.client.js";
@@ -77,19 +99,12 @@ import { createNetworkRouter } from "./routes/network.js";
 import { createNetworkThroughputRouter } from "./routes/network-throughput.js";
 import { createOffLanNetworkRouter } from "./routes/off-lan-network.js";
 import { createEgressAuditRouter } from "./routes/egress-audit.js";
-import { createPanelSecurityRouter } from "./routes/panel-security.js";
 import { createWebRouter } from "./routes/web.js";
 import { createCamerasRouter, createCameraSharePublicRouter } from "./routes/cameras.js";
+import { createCameraBusinessHoursRouter } from "./routes/camera-business-hours.js";
+import { createCameraMotionRouter } from "./routes/camera-motion.js";
 import { createSignedSegmentRouter } from "./services/segment-url-signing.service.js";
-import { createSecurityRouter } from "./routes/security.js";
-import { createSecurityZonesRouter } from "./routes/security-zones.js";
-import { createSecuritySiteRouter } from "./routes/security-site.js";
-import { createSecurityIncidentsRouter } from "./routes/security-incidents.js";
-import { createSecurityPatternsRouter } from "./routes/security-patterns.js";
-import { createSecurityAssistantRouter } from "./routes/security-assistant.js";
-import { createDoorsRouter } from "./routes/doors.js";
 import { createSwitchRouter } from "./routes/switch.js";
-import { createBuildingRouter } from "./routes/building.js";
 import { createDisplayRouter } from "./routes/display.js";
 import { createCalendarRouter, createCalendarPublicRouter } from "./routes/calendar.js";
 import { createNotesRouter } from "./routes/notes.js";
@@ -132,8 +147,10 @@ import { initToolModuleVerdict } from "./services/tool-module-verdict.service.js
 import { createSettingsRouter } from "./routes/settings.js";
 import { createTlsCertificateRouter } from "./routes/tls-certificate.js";
 import { createBackupStatusRouter } from "./routes/backup-status.js";
+import { createBackupKeyRouter } from "./routes/backup-key.js";
 import { createSettingsEmailRouter } from "./routes/settings-email.js";
 import { createUpdatesRouter } from "./routes/updates.js";
+import { createTelemetryRouter } from "./routes/telemetry.js";
 import { createEmailRouter, EMAIL_INGEST_PATH, wireEmailAnalysis } from "./routes/email.js";
 import { createEmailAnalysisFn } from "./services/email-analysis.service.js";
 import { resolveActiveModel } from "./services/active-model.service.js";
@@ -141,6 +158,8 @@ import { createToolsRouter } from "./routes/tools.js";
 import { detachRemoteMcp, mcpClient, remoteCallPolicy } from "./services/mcp-client.singleton.js";
 import { stepResultValue, type StepDispatcher } from "./services/tool-spec-runner.service.js";
 import { createModelsRouter } from "./routes/models.js";
+import { createLlmAccessRouter, exemptLlmAccessInternalCalls } from "./routes/llm-access.js";
+import { createDeveloperRouter } from "./routes/developer.js";
 import { createHardwareRouter } from "./routes/hardware.js";
 import { createHomeRouter } from "./routes/home.js";
 import { createBriefingsRouter } from "./routes/briefings.js";
@@ -260,6 +279,7 @@ export function createApp(
   // session. Only GET /api/m365/callback lives here; every other /m365 route
   // is on the authenticated router below.
   app.use("/api", createM365CallbackRouter(prisma));
+  app.use("/api", createGoogleCallbackRouter(prisma));
 
   // PR #377 — passwordless WebAuthn / passkey authentication. The
   // authenticate/options + authenticate/verify endpoints are how a caller
@@ -324,6 +344,13 @@ export function createApp(
   // request; unbound, every extension bearer is a 401.
   bindExtensionPrincipalPrisma(prisma);
 
+  // WARP-3533 — the `dpm_` API-token lookup in authMiddleware, and the revoke
+  // hooks in role-mutation-guard.service.ts, read the PmApiToken table through
+  // this one binding (the same shape as the extension bearer above). Bound
+  // before the first request; unbound, every API token is a 401 and no revoke
+  // can run.
+  bindPmApiTokenPrisma(prisma);
+
   // WARP-1527 / ADR-032 §3 — bind the effective-access resolver beside the
   // scope loader (same singleton discipline, same reason): layer-2
   // per-person access resolution (features / tools / cloud / connectors /
@@ -342,7 +369,9 @@ export function createApp(
   // fan-out, a folder of thumbnails ≈ 100 requests). Each internal service
   // principal (mcp-server, email-indexer, routing, …) comes from its own
   // container IP so they don't share a bucket with a browser.
-  app.use(authenticatedApiRateLimit);
+  // WARP-3452: ai-gateway's two `/llm/` bookkeeping calls skip it (see
+  // exemptLlmAccessInternalCalls); nothing else does.
+  app.use(exemptLlmAccessInternalCalls(authenticatedApiRateLimit));
 
   // WARP-3122 — a signed recordings-segment URL stands in for the bearer on
   // GET /api/cameras/:name/playback.segment only. This router answers
@@ -360,6 +389,14 @@ export function createApp(
   // an extension either.
   app.use(extensionPrincipalGuard);
 
+  // WARP-3533 — a personal API token (`dpm_…`) authenticates as its holder, so
+  // like the extension principal above it is confined here, right after
+  // authMiddleware and before any router: a per-token rate limit first (so the
+  // denial rows below are bounded by it), then `/api/pm` + `/api/support` only,
+  // narrowed to the token's scopes. Both are no-ops for every other request.
+  app.use(pmApiTokenRateLimit);
+  app.use(pmApiTokenScopeGuard);
+
   // WARP-824 — forced-password-change gate. Mounts AFTER authMiddleware (so
   // req.user is populated) and BEFORE every protected router so an
   // admin-created user holding a temporary password can only reach the
@@ -367,6 +404,9 @@ export function createApp(
   // one. Reads the explicit `User.mustChangePassword` flag FRESH from the
   // DB on every request — server enforcement, not a client-trusted redirect.
   app.use(requirePasswordChangeGate(prisma));
+  // WARP-3630 — owners and admins with no second factor can only enrol while
+  // REQUIRE_ADMIN_TWO_STEP is on (pass-through otherwise).
+  app.use(requireAdminMfaEnrollmentGate(prisma));
 
   // Protected routes — auth middleware has populated req.user
   app.use("/api", createProtectedAuthRouter(prisma));
@@ -394,22 +434,11 @@ export function createApp(
   // allowlist-unavailable anomalies here (service-principal only) → signed
   // activity log → /admin/audit.
   //
-  // Mounted BEFORE the module gates, on purpose (WARP-2977 review). Its path,
-  // POST /api/security/egress-anomaly, sits under the `security` module's
-  // prefix, and that module is off by default: behind the gate, every box
-  // without Security switched on would 404 the collector, the collector's
-  // sink suppresses repeats, and the egress audit — one of the threat
-  // mirror's own sources — would go silent. This is host plumbing that must
-  // never depend on a dashboard toggle. Pinned by
-  // src/__tests__/security-prefix-composition.test.ts.
+  // Mounted BEFORE the module gates, on purpose: this is host plumbing that
+  // must never depend on a dashboard toggle, and its path
+  // (POST /api/security/egress-anomaly) is a contract with the host collector.
+  // Pinned by src/__tests__/egress-audit.routes.test.ts.
   app.use("/api", createEgressAuditRouter());
-  // WARP-2981 (ADR-059 P6) — the rack panel's Security count, GET
-  // /api/panel/security: host plumbing like the collector above, for the
-  // panel's own service principal only. Outside every module prefix and
-  // before the gates so it can answer `off` — behind the gate a switched-off
-  // Security and a toggle that could not be read are the same 404. Pinned by
-  // the same test file and security-level-invariant.test.ts.
-  app.use("/api", createPanelSecurityRouter(prisma));
 
   const moduleGate = createModuleGate(prisma, config);
   mountModuleGates(app, moduleGate);
@@ -462,11 +491,10 @@ export function createApp(
   // `/llm/:param` route there can ever shadow it; the `chat` module gate
   // (`/api/llm`) covers it like /api/llm/chat.
   app.use("/api", createLlmWarmRouter(prisma));
-  // WARP-2979 (ADR-059 P4 §6.9.2) — the in-flight counter on the two
-  // interactive LLM routes (typed chat, voice, /llm/complete). Background
-  // model work (Droplet's incident summaries) waits for it to be idle and
-  // aborts when a chat starts. Before the router, after auth: a refused
-  // request still ends, so it counts down again.
+  // WARP-2979 — the in-flight counter on the two interactive LLM routes
+  // (typed chat, voice, /llm/complete). Background model work waits for it to
+  // be idle and aborts when a chat starts. Before the router, after auth: a
+  // refused request still ends, so it counts down again.
   app.use(["/api/llm/chat", "/api/llm/complete"], trackInteractiveInference);
   app.use("/api", createLlmRouter(prisma));
   // WARP-1683 — team chat (member-to-member Messages). Humans only; the
@@ -539,6 +567,14 @@ export function createApp(
   // Every route is scoped to the requester's OWN link — no :userId parameter,
   // because delegated authorization makes a person's mailbox connection theirs.
   app.use("/api", createM365Router(prisma));
+  app.use("/api", createAccountProviderSetupRouter(prisma));
+  app.use("/api", createGoogleRouter(prisma));
+  // WARP-3538 (D13) — ONE search over every cloud a person has connected: their
+  // OneDrive, their SharePoint libraries and, as those connectors land, Google
+  // Drive and Dropbox. Self-scoped like the connection routes above, and also
+  // the assistant's `search_cloud_files` tool (`_service:mcp` acting for the
+  // person in X-Nextcloud-User). Not under /m365: it is not one cloud's route.
+  app.use("/api", createCloudFilesRouter(prisma));
   // WARP-844 — chat voice input (Wyoming STT proxy). 503s gracefully when
   // the whisper sidecar isn't deployed (macOS dev / non-linux profile).
   app.use("/api", createSttRouter());
@@ -566,6 +602,21 @@ export function createApp(
   // factory-reset.sh).
   app.use("/api", createSystemResetRouter(prisma));
   app.use("/api", createMatterRouter(prisma));
+  // WARP-3533 — GET /api/pm/openapi.json, the OpenAPI 3.1 description of the PM
+  // API. First among the PM routers on purpose so a parameterized sibling cannot
+  // shadow this literal route; the /api/pm gates still apply.
+  app.use("/api", createPmOpenApiRouter());
+  // WARP-3522 (ADR-069 §8) — the one filter language: `POST /pm/work-items/query`,
+  // `GET /pm/work-items/by-key/:key` and saved views (`/pm/views`). Mounted BEFORE
+  // the native router because `/pm/work-items/query` is a literal under the
+  // `/pm/work-items/:id` prefix it owns — specific paths first
+  // (droplet-pr-review-patterns P16). No route in either router can be shadowed
+  // by, or shadow, a native one; the order is the cheap guarantee.
+  app.use("/api", createPmQueryRouter(prisma));
+  app.use("/api", createPmViewsRouter(prisma));
+  // WARP-3537 — `POST /pm/work-items/bulk`: the same literal-under-`:id` case as
+  // `/pm/work-items/query` above, so the same rule: before the native router.
+  app.use("/api", createPmBulkRouter(prisma));
   // ADR-026 — native PM (projects, work-items, states, labels, comments).
   // The Droplet-owned project-management surface: state in the orchestrator's
   // own Postgres, dashboard session is the auth, no embedded third-party stack.
@@ -574,6 +625,63 @@ export function createApp(
   // (blocks / relates / duplicates). Its own router on the same prefix; the
   // paths are disjoint from the native router's, so neither shadows the other.
   app.use("/api", createPmRelationsRouter(prisma));
+  // WARP-3519 (ADR-069 WS-2) — comment edit/delete, reactions, watchers and the
+  // merged activity timeline. Its own router on the same prefix; its paths
+  // (`/pm/comments/:id…`, `/pm/work-items/:id/{watchers,timeline}`) are disjoint
+  // from the native router's, so neither shadows the other, and it sits after the
+  // module gates and the MCP acting-user gate like every PM router.
+  app.use("/api", createPmCollaborationRouter(prisma));
+  // WARP-1505 — files on work items and comments. Disjoint paths again
+  // (`/pm/work-items/:id/attachments`, `/pm/attachments/:id`); the `/pm/work-items/:id`
+  // route above takes one segment after `work-items`, so it cannot shadow these.
+  app.use("/api", createPmAttachmentsRouter(prisma));
+  // WARP-3527 (ADR-069 WS-11) — project import (CSV / Trello JSON → background
+  // job) and export (CSV / JSON, streamed). Its own router on the same prefix;
+  // paths are `/pm/projects/:id/{import,export.*}` and `/pm/import-jobs/*`,
+  // disjoint from native.ts, so neither shadows the other.
+  app.use("/api", createPmImportExportRouter(prisma));
+  // WARP-3521 (ADR-069 WS-5) — cycles (sprints) and modules (milestones). Its own
+  // router on the same prefix, for the same reason as relations: the paths are
+  // disjoint from the native router's (`/pm/cycles/*`, `/pm/modules/*`,
+  // `/pm/projects/:id/{cycles,modules,backlog}`, `/pm/work-items/:id/modules`).
+  // Every path starts `/pm/`, so the `projects` module gate and the guest tier
+  // floor already cover it.
+  app.use("/api", createPmPlanningRouter(prisma));
+  // WARP-3536 live presence shares the Projects route gates above.
+  app.use("/api", createPmPresenceRouter(prisma));
+  // WARP-3526 (ADR-069 WS-10) — worklogs, the running timer, the weekly
+  // timesheet and the time report. Its own router, disjoint paths
+  // (`/pm/worklogs`, `/pm/timer`, `/pm/timesheet`, `/pm/time/...`, plus
+  // `/pm/work-items/:id/worklogs`), and the same `/api/pm` module gates as the
+  // routers above — no guest share, no MCP write principal; see its header.
+  app.use("/api", createPmTimeRouter(prisma));
+  // WARP-3520 (ADR-069 WS-4) — custom fields: per-project definitions and the
+  // values items hold. Its own router for the same reason: disjoint paths
+  // (`/pm/properties/...`, `.../properties/:propertyId`), its own error
+  // vocabulary. `/api/pm` is gated by prefix, so the `projects` gate covers it.
+  app.use("/api", createPmFieldsRouter(prisma));
+  // WARP-3532 (ADR-069 §9) — work webhooks and chat-app notifications. Owner
+  // and admin only. `/pm/webhooks` is a literal second segment and no PM router
+  // above owns a `/pm/:param`, so neither shadows the other.
+  app.use("/api", createPmWebhooksRouter(prisma));
+  // WARP-3528 (ADR-069) — the service desk. Its own disjoint prefix
+  // (`/api/support`), so neither PM router shadows it, and its own `support`
+  // module: `mountModuleGates` above already guards the prefix from the registry
+  // (box toggle, the tier floor that refuses an external guest, and the
+  // per-person grant), so nothing here re-implements a gate. Tickets are
+  // PmWorkItem rows in SERVICE_DESK projects that /api/pm answers 404 for.
+  app.use("/api", createSupportRouter(prisma));
+  // WARP-3523 (ADR-069 WS-7) — the Timeline window and the My Work lists. Own
+  // router, disjoint paths (`/pm/projects/:id/timeline`, `/pm/my-work`); the
+  // `projects` module gate covers it through the `/api/pm` prefix.
+  app.use("/api", createPmScheduleRouter(prisma));
+  // WARP-3535 — code-host development links, under the same Projects module
+  // gate as every other /api/pm route. Item reads apply the guest assignment
+  // guard; repository administration is owner/admin only.
+  app.use("/api", createPmDevelopmentRouter(prisma));
+  // WARP-3524 (WS-8) — Insights has its own disjoint `/pm/insights` path.
+  // The `projects` module gate covers it through the `/api/pm` prefix.
+  app.use("/api", createPmInsightsRouter(prisma));
   // WARP-2117 — the CRM, which lives inside the Projects surface. Mounted
   // AFTER the PM router but on a disjoint prefix (`/api/crm`), so neither
   // shadows the other; the `crm` module gate comes from the registry.
@@ -658,44 +766,10 @@ export function createApp(
   // `ambient_data` off-LAN channel, Redis-cached, audited per request;
   // proxies the services/web-fetch allowlisted fetcher.
   app.use("/api", createWebRouter(prisma));
+  app.use("/api", createCameraBusinessHoursRouter(prisma));
+  app.use("/api", createCameraMotionRouter(prisma));
   app.use("/api", createCamerasRouter(prisma));
-  // WARP-2977 (ADR-059 P2) — the Security command center's feed. The
-  // `security` module gate (toggle + per-person view) is mounted above by
-  // mountModuleGates off the registry prefix /api/security.
-  app.use("/api", createSecurityRouter(prisma));
-  // WARP-2977 P2b — areas (routes/security-zones.ts) and the site mode +
-  // opening hours (routes/security-site.ts). Separate routers, not nested,
-  // under the same /api/security module gate; their act/manage write routes
-  // add requireFeatureAccess at the route.
-  app.use("/api", createSecurityZonesRouter(prisma));
-  app.use("/api", createSecuritySiteRouter(prisma));
-  // WARP-2978 (ADR-059 P3) — incidents, acknowledgement and alert routing
-  // (routes 16–22), after the site router, under the same module gate; the
-  // act/manage write routes add requireFeatureAccess at the route. Literal
-  // paths (`/incidents/summary`) are declared before `/incidents/:id`.
-  app.use("/api", createSecurityIncidentsRouter(prisma));
-  // WARP-2980 (ADR-059 P5) — "what normal looks like", read-only (routes
-  // 29–31). Same /api/security module gate.
-  app.use("/api", createSecurityPatternsRouter(prisma));
-  // WARP-2979 (ADR-059 P4 §6.12) — what the read-only `security` chat tools
-  // read (A1–A4): GET only, the `_service:mcp` principal only, for the person
-  // X-Nextcloud-User names. Same /api/security module gate, and the WARP-2988
-  // acting-user gate above (`security` is in MCP_ACTING_USER_GATED_DOMAINS).
-  // The last Security router: every path is under the literal /assistant/.
-  app.use("/api", createSecurityAssistantRouter(prisma));
-  // ADR-055 (P4a) — the doors control-plane spine. Mounted unconditionally: the
-  // `doors` module gate (toggle + per-person view) that mountModuleGates put in
-  // front of /api/doors ABOVE is what makes it absent — DOORS_ENABLED off means
-  // `available: false`, so every route here answers 404 module_disabled.
-  // Registered before any catch-all path param (there is none at this level),
-  // which the boot assertion (services/doors-wiring.ts) checks on every boot.
-  // The two GETs also admit `_service:mcp` (the P4b `doors_*` tools), behind the
-  // WARP-2988 acting-user gate above (`doors` is in MCP_ACTING_USER_GATED_DOMAINS,
-  // so the acting person's tier, tool scope and `doors` grant all apply).
-  app.use("/api", createDoorsRouter(prisma));
   app.use("/api", createSwitchRouter(prisma));
-  // Device control over BACnet/Modbus/SNMP/KNX (services/device-gateway).
-  app.use("/api", createBuildingRouter(prisma));
   app.use("/api", createDisplayRouter(prisma));
   app.use("/api", createCalendarRouter(prisma));
   app.use("/api", createNotesRouter(prisma));
@@ -706,7 +780,13 @@ export function createApp(
   app.use("/api", createApsRouter(prisma));
   // WARP-279: meta-observability dashboard for admin/owner roles. Aggregates
   // session-state.json + GitHub + Jira + compliance-progress.md.
-  app.use("/api", createAdminClaudeActivityRouter());
+  // WARP-3433: Warp Lab's own engineering dashboard, not a customer feature —
+  // ships dark and dark means ABSENT: not mounted, so
+  // /api/admin/claude-activity is a plain 404, unless a developer sets
+  // DROPLET_DEV_ENGINEERING_DASHBOARD=1. setup.sh and compose never do.
+  if (config.DROPLET_DEV_ENGINEERING_DASHBOARD) {
+    app.use("/api", createAdminClaudeActivityRouter());
+  }
   // WARP-230: device-identity admin routes. GET /status + POST /reseal,
   // both gated by admin role; reseal additionally requires recent MFA.
   // The gRPC client is constructed once per orchestrator instance; the
@@ -810,12 +890,18 @@ export function createApp(
   // WARP-1405: backup health for Settings → Device information (last success,
   // last failure, reason, overdue / key-mismatch). Owner + admin, read-only.
   app.use("/api", createBackupStatusRouter());
+  // WARP-3610: the owner takes the backup repository key off the box, once.
+  app.use("/api", createBackupKeyRouter(prisma));
 
   // WARP-540: OTA update operator surface (/api/updates/*) — status,
   // history, check-now, apply-now, skip, and the WARP-538 settings knobs.
   // Owner+admin only (reads included, voice-proxy posture); every mutation
   // writes an activity row via recordActivity.
   app.use("/api", createUpdatesRouter(prisma));
+
+  // WARP-3504 (ADR-068): what this box sends to Warp — GET /api/telemetry/last,
+  // the last payload of each kind. Owner + admin only, read-only.
+  app.use("/api", createTelemetryRouter());
 
   // WARP-472: F4 hardware contract endpoint (admin/owner only).
   app.use("/api", createHardwareRouter(prisma));
@@ -855,6 +941,15 @@ export function createApp(
 
   // WARP-471: F3 models page endpoint (READ-ONLY per one-model rule).
   app.use("/api", createModelsRouter(prisma));
+  // WARP-3452 (ADR-067): coding-tool tokens for the local model API — the
+  // Settings page's routes, plus the two ai-gateway-only routes behind `/llm/`
+  // (introspect on every request, usage after it). No module claims the prefix.
+  app.use("/api", createLlmAccessRouter(prisma));
+  // WARP-3533: Settings -> Developer — personal API tokens, their switch, and
+  // the ICS feed links for "my work" and each project. Deliberately NOT under
+  // /api/pm: an API token is confined to /api/pm + /api/support by the guard
+  // above, so it can never mint a token, a feed link or flip the switch.
+  app.use("/api", createDeveloperRouter(prisma));
 
   // WARP-469: F1 home aggregation. Single round-trip backing
   // FEATURES.md §2.1 (greeting + tiles + timeline + suggestions).

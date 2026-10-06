@@ -37,10 +37,13 @@ import { validatePassword, isValidEmail, PASSWORD_MIN } from "@droplet/auth-poli
  */
 export function AccountStep({
   onComplete,
+  signInOnly = false,
 }: {
   onComplete: (displayName: string) => void;
+  /** Reauthenticate a resumed wizard without showing first-owner creation. */
+  signInOnly?: boolean;
 }) {
-  const [mode, setMode] = useState<"create" | "signin">("create");
+  const [mode, setMode] = useState<"create" | "signin">(signInOnly ? "signin" : "create");
   // Adopt the wizard's auto-login into the auth context. Without this the
   // context `user` stays null for the whole wizard (loginUser only sets the
   // cookie), so AuthGate treats the owner as anonymous at the Done screen and
@@ -57,6 +60,9 @@ export function AccountStep({
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
+  const [mfaRequired, setMfaRequired] = useState(false);
+  const [mfaMode, setMfaMode] = useState<"totp" | "recovery">("totp");
+  const [mfaCode, setMfaCode] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   // WARP-165 — physical-presence claim gate. When the orchestrator reports the
@@ -79,6 +85,7 @@ export function AccountStep({
   const displayNameId = useId();
   const passwordId = useId();
   const confirmPasswordId = useId();
+  const mfaCodeId = useId();
 
   // WARP-867 — proactive owner-exists detection. Tri-state probe: only an
   // EXPLICIT "complete" flips to sign-in; "unknown" (cold boot, 5xx, timeout)
@@ -122,7 +129,8 @@ export function AccountStep({
   const claimOk = !claimGateOn || mode === "signin" || claimCode.trim().length > 0;
   const canSubmit =
     mode === "signin"
-      ? emailOk && password.length > 0 && !isSubmitting
+      ? emailOk && password.length > 0 && !isSubmitting &&
+        (!mfaRequired || (mfaMode === "totp" ? /^\d{6}$/.test(mfaCode.trim()) : mfaCode.trim().length > 0))
       : emailOk && pwOk && matchOk && claimOk && !isSubmitting;
 
   // Spell out the first thing still blocking submission so the disabled CTA is
@@ -203,12 +211,28 @@ export function AccountStep({
     setError(null);
     if (!canSubmit) return;
     setIsSubmitting(true);
+    setShowPassword(false);
     try {
-      const { user } = await loginUser(email, password);
+      const { user } = mfaRequired
+        ? await loginUser(email, password, mfaMode === "recovery"
+            ? { recoveryCode: mfaCode.trim() }
+            : { totp: mfaCode.trim() })
+        : await loginUser(email, password);
       setUserFromPasskey?.(user);
       onComplete(user.displayName ?? "");
     } catch (err: unknown) {
-      setError(translateError(err, "auth"));
+      if ((err as { code?: unknown })?.code === "TOTP_REQUIRED") {
+        if (mfaRequired) {
+          setMfaCode("");
+          setError(mfaMode === "recovery"
+            ? "That recovery code didn't match. Try another saved code."
+            : "That code didn't match. Check your authenticator app and try again.");
+        } else {
+          setMfaRequired(true);
+        }
+      } else {
+        setError(translateError(err, "auth"));
+      }
     } finally {
       setIsSubmitting(false);
     }
@@ -303,7 +327,12 @@ export function AccountStep({
               type="email"
               inputMode="email"
               value={email}
-              onChange={(e) => setEmail(e.target.value)}
+              onChange={(e) => {
+                setEmail(e.target.value);
+                setMfaRequired(false);
+                setMfaCode("");
+                setError(null);
+              }}
               placeholder="you@company.com"
               autoComplete="username"
               className="dp-input pl-10"
@@ -354,7 +383,12 @@ export function AccountStep({
               id={passwordId}
               type={showPassword ? "text" : "password"}
               value={password}
-              onChange={(e) => setPassword(e.target.value)}
+              onChange={(e) => {
+                setPassword(e.target.value);
+                setMfaRequired(false);
+                setMfaCode("");
+                setError(null);
+              }}
               placeholder={
                 mode === "signin" ? "Your password" : "Create a password"
               }
@@ -409,6 +443,43 @@ export function AccountStep({
           <PasswordRulesChecklist password={password} confirm={confirmPassword} />
         )}
 
+        {mode === "signin" && mfaRequired && (
+          <div className="space-y-2">
+            <label htmlFor={mfaCodeId} className="type-subheadline text-label-secondary block">
+              {mfaMode === "recovery" ? "Recovery code" : "Authenticator code"}
+            </label>
+            <p id="account-mfa-hint" className="type-footnote text-label-secondary">
+              {mfaMode === "recovery"
+                ? "Enter one of the recovery codes you saved when you enabled two-factor. Each code works once."
+                : "Enter the 6-digit code from your authenticator app to finish signing in."}
+            </p>
+            <input
+              id={mfaCodeId}
+              type="text"
+              inputMode={mfaMode === "totp" ? "numeric" : "text"}
+              autoComplete="one-time-code"
+              value={mfaCode}
+              onChange={(e) => setMfaCode(e.target.value)}
+              aria-describedby="account-mfa-hint"
+              className="dp-input"
+              autoFocus
+              onKeyDown={(e) => e.key === "Enter" && handleSignIn()}
+            />
+            <button
+              type="button"
+              disabled={isSubmitting}
+              className="type-footnote text-accent"
+              onClick={() => {
+                setMfaMode((previous) => previous === "totp" ? "recovery" : "totp");
+                setMfaCode("");
+                setError(null);
+              }}
+            >
+              {mfaMode === "totp" ? "Use a recovery code" : "Use an authenticator code"}
+            </button>
+          </div>
+        )}
+
         {/* Polite live region: screen-reader users hear *why* the disabled CTA
             is unavailable (a disabled button is otherwise silent). Kept mounted
             — empty when there's nothing to say — so the region is registered
@@ -423,7 +494,7 @@ export function AccountStep({
         </p>
 
         {error && (
-          <p className="type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2">
+          <p role="alert" className="type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2">
             {error}
           </p>
         )}

@@ -1,6 +1,7 @@
 // Static config + small pure helpers for the Projects surface.
 
-import type { Priority, StateGroup, PmWorkItem, Person } from "./types";
+import type { Priority, StateGroup, PmWorkItem, Person, WorkItemType, PropertyType } from "./types";
+import { dateOnly, formatDayMonth, isBeforeToday } from "./date-only";
 
 export interface PriorityMeta {
   label: string;
@@ -18,6 +19,65 @@ export const PRIORITY: Record<Priority, PriorityMeta> = {
 };
 
 export const PRIORITY_ORDER: Priority[] = ["urgent", "high", "medium", "low", "none"];
+
+// ── Work-item kind + estimate (WARP-3520) ───────────────────────────────────
+
+export interface WorkItemTypeMeta {
+  label: string;
+  /** PmIcon name. */
+  icon: string;
+  /** CSS var — bug / incident read at a glance, every other kind stays quiet. */
+  color: string;
+}
+
+export const WORK_ITEM_TYPES: Record<WorkItemType, WorkItemTypeMeta> = {
+  task: { label: "Task", icon: "task", color: "var(--text-3)" },
+  bug: { label: "Bug", icon: "bug", color: "var(--err)" },
+  feature: { label: "Feature", icon: "spark", color: "var(--text-3)" },
+  improvement: { label: "Improvement", icon: "improve", color: "var(--text-3)" },
+  question: { label: "Question", icon: "help", color: "var(--text-3)" },
+  incident: { label: "Incident", icon: "siren", color: "var(--warn)" },
+};
+
+export const WORK_ITEM_TYPE_ORDER: WorkItemType[] = [
+  "task",
+  "bug",
+  "feature",
+  "improvement",
+  "question",
+  "incident",
+];
+
+/** Estimate bounds — mirror the orchestrator's `PmWorkItem_estimate_range` CHECK. */
+export const ESTIMATE_MIN = 0;
+export const ESTIMATE_MAX = 1000;
+
+/** 5 → "5 pts", 1 → "1 pt", 0.5 → "0.5 pts". Null/undefined → null. */
+export function fmtEstimate(n: number | null | undefined): string | null {
+  if (n === null || n === undefined || !Number.isFinite(n)) return null;
+  return `${n} ${n === 1 ? "pt" : "pts"}`;
+}
+
+/** Custom-field type metadata for the settings Fields tab. */
+export const PROPERTY_TYPES: Record<PropertyType, { label: string; icon: string }> = {
+  text: { label: "Text", icon: "text" },
+  number: { label: "Number", icon: "hash" },
+  date: { label: "Date", icon: "cal" },
+  boolean: { label: "Yes / no", icon: "toggle" },
+  select: { label: "Select", icon: "list" },
+  multi_select: { label: "Multi-select", icon: "checks" },
+  member: { label: "Person", icon: "user" },
+};
+
+export const PROPERTY_TYPE_ORDER: PropertyType[] = [
+  "text",
+  "number",
+  "date",
+  "boolean",
+  "select",
+  "multi_select",
+  "member",
+];
 
 /** Left-edge accent on a card: only urgent/high get a colored rail. */
 export function cardAccent(p: Priority): string {
@@ -58,32 +118,30 @@ export function toneOf(id: string): number {
   return (h % 6) + 1;
 }
 
-export function makePerson(id: string, displayName?: string): Person {
+export function makePerson(id: string, displayName?: string, avatarUrl?: string | null): Person {
   const name = displayName && displayName.trim().length > 0 ? displayName : "Unknown";
-  return { id, name, initials: initialsOf(name), tone: toneOf(id) };
+  return { id, name, initials: initialsOf(name), tone: toneOf(id), ...(avatarUrl ? { avatarUrl } : {}) };
 }
 
 // ── Dates ───────────────────────────────────────────────────────────────────
+// WARP-3372 — a due / start date is a calendar date; every read of one goes
+// through ./date-only, which never builds a `Date` from it. These three keep
+// their names so the cards, list rows and detail rail did not change shape.
 
-const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-
-/** ISO datetime/date → "Jun 25". Null-safe. */
-export function fmtDate(iso: string | null | undefined): string | null {
-  if (!iso) return null;
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return null;
-  return `${MONTHS[d.getMonth()]} ${d.getDate()}`;
+/** `2026-06-25` → "Jun 25". Null-safe. */
+export function fmtDate(value: string | null | undefined): string | null {
+  return formatDayMonth(value);
 }
 
-/** ISO → YYYY-MM-DD (for the mono date display in the detail rail). */
-export function fmtISODate(iso: string | null | undefined): string {
-  if (!iso) return "—";
-  return iso.slice(0, 10);
+/** `2026-06-25` → "2026-06-25" (the mono date in the detail rail), "—" when unset. */
+export function fmtISODate(value: string | null | undefined): string {
+  return dateOnly(value) ?? "—";
 }
 
-export function isOverdue(item: Pick<PmWorkItem, "dueDate" | "state">): boolean {
+/** Open and due before the VIEWER's today (their local calendar day). */
+export function isOverdue(item: Pick<PmWorkItem, "dueDate" | "state">, now: Date = new Date()): boolean {
   if (!item.dueDate) return false;
   const g = item.state?.group;
   if (g === "completed" || g === "cancelled") return false;
-  return new Date(item.dueDate).getTime() < Date.now();
+  return isBeforeToday(item.dueDate, now);
 }

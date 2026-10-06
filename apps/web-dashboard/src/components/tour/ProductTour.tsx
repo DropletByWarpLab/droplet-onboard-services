@@ -14,8 +14,6 @@ import {
   Folder,
   FolderOpen,
   Globe,
-  Lock,
-  Smartphone,
   Sparkles,
   Video,
   Wifi,
@@ -113,7 +111,7 @@ function MotifRecap({ health }: { health: SystemHealthStatus | null }) {
   const pills: [typeof User, string][] = [
     [User, "Account"],
     [Wifi, "Wi-Fi"],
-    [Globe, "Internet address"],
+    [Globe, "Internal DNS"],
     [HardDrive, "Drives"],
     [Lightbulb, "Device control"],
     [Camera, "Cameras"],
@@ -321,67 +319,19 @@ function MotifCameras({
   );
 }
 
-// Two remote-access motifs, chosen at render by the live signals from
-// GET /api/vpn/status. WARP-993: the away-from-home story (and the ADR-023
-// one-URL-everywhere upgrade) is gated on `offLanReachable` — the FQDN alone
-// is split-horizon only (no public A record), so until the ADR-025 relay
-// lands the honest baseline talks about the home network and flags the relay
-// as coming soon.
-
-function MotifRemoteVpn({ away }: { away: boolean }) {
+// WireGuard and internal DNS are the remote-access path.
+function MotifRemoteVpn({ hostname, away = false }: { hostname?: string | null; away?: boolean }) {
   return (
     <div className="flex w-full items-center gap-4 rounded-[14px] border border-separator bg-surface-secondary p-4 text-left">
-      <div className="flex h-[88px] w-[88px] flex-none items-center justify-center rounded-[12px] border border-separator bg-surface-primary text-label-primary">
-        {/* Decorative padlock glyph; the box's real address shows once HQ assigns it. */}
-        <Lock size={40} aria-hidden="true" />
-      </div>
+      <ShieldCheck size={40} className="flex-none text-accent" aria-hidden="true" />
       <div className="min-w-0">
-        <div className="mb-1 flex items-center gap-2">
-          <Smartphone size={15} className="text-label-tertiary" aria-hidden="true" />
-          <span className="type-footnote font-semibold text-label-primary">
-            Your phone
-          </span>
-          <span className="inline-flex items-center gap-1 rounded-full bg-system-green/15 px-2 py-0.5 type-caption-2 font-semibold text-system-green">
-            connected
-          </span>
-        </div>
-        <div className="type-caption-1 text-label-secondary">
-          Your box&rsquo;s own secure web address
+        <div className="type-footnote font-semibold text-label-primary">WireGuard + internal DNS</div>
+        <div className="mt-1 type-caption-1 text-label-secondary font-mono break-all">
+          {hostname ? `https://${hostname}` : "Your internal DNS address"}
         </div>
         <div className="mt-1.5 type-caption-1 text-label-tertiary">
-          {away
-            ? "One tap on Connect · same address anywhere"
-            : "Works across your office Wi-Fi · away access coming soon"}
+          {away ? "Direct away endpoint configured · verify from another network" : "Office configuration · set up a direct endpoint for away access"}
         </div>
-      </div>
-    </div>
-  );
-}
-
-function MotifRemoteFqdn({ fqdn }: { fqdn: string }) {
-  return (
-    <div className="flex w-full flex-col gap-3 rounded-[14px] border border-separator bg-surface-secondary p-4 text-left">
-      {/* A browser address bar: the box's real publicly-trusted URL with a green
-          padlock, resolving the same on home Wi-Fi and over the WireGuard tunnel
-          (ADR-023 split-horizon). The opaque per-device name carries no PII. */}
-      <div className="flex items-center gap-2 rounded-full border border-separator bg-surface-primary px-3 py-2">
-        <Lock size={14} className="flex-none text-system-green" aria-hidden="true" />
-        <span className="min-w-0 flex-1 truncate type-caption-1 font-mono text-label-secondary">
-          {fqdn}
-        </span>
-        <span className="inline-flex flex-none items-center gap-1 rounded-full bg-system-green/15 px-2 py-0.5 type-caption-2 font-semibold text-system-green">
-          trusted
-        </span>
-      </div>
-      <div className="flex items-center gap-2">
-        <Smartphone size={15} className="flex-none text-label-tertiary" aria-hidden="true" />
-        <span className="type-caption-1 text-label-secondary">
-          Same secure address on-site and away
-        </span>
-        <span className="ml-auto inline-flex flex-none items-center gap-1 type-caption-1 text-label-tertiary">
-          <ShieldCheck size={13} aria-hidden="true" />
-          WireGuard
-        </span>
       </div>
     </div>
   );
@@ -428,57 +378,11 @@ export const TOUR_STEPS: readonly TourStep[] = [
     key: "remote",
     glyph: (cn) => <Globe size={26} className={cn} />,
     kicker: "Remote access",
-    title: "Remote access is automatic and private",
-    // WARP-993: the honest baseline. Until the box reports offLanReachable
-    // (ADR-025 relay live, or a real public endpoint), the secure address only
-    // resolves on the local network — so the default beat never promises away
-    // access; it flags the relay as coming soon instead.
-    body: "Your box has its own secure web address on your office network. Open it from any of your devices at the office — encrypted, with a green padlock, and nothing extra to install. Away-from-office access arrives with the secure relay — coming soon.",
+    title: "Remote access uses WireGuard",
+    body: "Install WireGuard on your device, import the QR configuration from Remote Access, and open the Droplet's internal DNS address through the tunnel. Office configurations use the LAN endpoint. Away access requires a reachable direct WireGuard endpoint and its UDP port allowed through your router. Your device may need to trust the Droplet's HTTPS certificate.",
     motif: (_live) => <MotifRemoteVpn away={false} />,
   },
 ];
-
-/**
- * The remote-access beat with the away-from-office promise, applied ONLY when
- * the box reports `offLanReachable: true` (WARP-993). Same beat key/shape, so
- * the resume index, beat dots, and tests are unaffected.
- */
-function withAwayRemoteStep(steps: readonly TourStep[]): TourStep[] {
-  return steps.map((s) =>
-    s.key === "remote"
-      ? {
-          ...s,
-          body:
-            "Your box has its own secure web address — the same one in the office and away. When you're out, open the Droplet app and turn on Connect: your phone links straight to the box, encrypted end to end, and you open that same address with a green padlock. No dynamic DNS, no subdomain, nothing to install.",
-          motif: (_live) => <MotifRemoteVpn away />,
-        }
-      : s,
-  );
-}
-
-/**
- * The remote-access beat upgraded for a box that has learned its
- * publicly-trusted per-device FQDN (ADR-023) AND reports it reachable from
- * outside the LAN. Same WireGuard framing, plus the one-URL-everywhere +
- * green-padlock payoff, showing the box's real address. Returned as a fresh
- * array (same length/keys) so the resume index, beat dots, and tests are
- * unaffected.
- */
-function withFqdnRemoteStep(
-  steps: readonly TourStep[],
-  fqdn: string,
-): TourStep[] {
-  return steps.map((s) =>
-    s.key === "remote"
-      ? {
-          ...s,
-          body:
-            "Your box answers at its own secure web address, the same one in the office and away. When you're out, open the Droplet app and turn on Connect — your phone links straight to the box, encrypted end to end, and you open that same address with a real certificate and a green padlock. No “Not secure” warning, no dynamic DNS, and nothing to install on each device.",
-          motif: (_live) => <MotifRemoteFqdn fqdn={fqdn} />,
-        }
-      : s,
-  );
-}
 
 const RESUME_KEY = "droplet-tour-step";
 
@@ -506,13 +410,8 @@ export function ProductTour({ onComplete }: { onComplete?: () => void } = {}) {
   // Guard the finish path so a double-click can't fire completeTour + navigate twice.
   const finishedRef = useRef(false);
 
-  // Ask the box how reachable it really is. WARP-993: the away-from-home
-  // promise keys on `offLanReachable` (honest, deterministic — false while the
-  // FQDN is split-horizon only); the ADR-023 one-URL/green-padlock upgrade
-  // additionally needs the publicly-trusted address itself. Best-effort — a
-  // failed/empty fetch keeps the honest home-network baseline (no over-promise).
-  const [remote, setRemote] = useState<{ fqdn: string | null; away: boolean }>({
-    fqdn: null,
+  const [remote, setRemote] = useState<{ hostname: string | null; away: boolean }>({
+    hostname: null,
     away: false,
   });
   useEffect(() => {
@@ -521,7 +420,7 @@ export function ProductTour({ onComplete }: { onComplete?: () => void } = {}) {
       .then((s) => {
         if (alive) {
           setRemote({
-            fqdn: s?.publicFqdn?.trim() || null,
+            hostname: s?.internalHostname?.trim() || null,
             away: s?.offLanReachable === true,
           });
         }
@@ -604,13 +503,9 @@ export function ProductTour({ onComplete }: { onComplete?: () => void } = {}) {
   // Merge the SWR-sourced health into the batched live data passed to motifs.
   const liveData: TourLiveData = { ...live, health: healthData ?? null };
 
-  // WARP-993: honest baseline unless the box is genuinely reachable off-LAN;
-  // then the away promise, upgraded further with the real FQDN when known.
-  const steps = remote.away
-    ? remote.fqdn
-      ? withFqdnRemoteStep(TOUR_STEPS, remote.fqdn)
-      : withAwayRemoteStep(TOUR_STEPS)
-    : TOUR_STEPS;
+  const steps = TOUR_STEPS.map((step) => step.key === "remote"
+    ? { ...step, motif: (_live: TourLiveData) => <MotifRemoteVpn hostname={remote.hostname} away={remote.away} /> }
+    : step);
   const isFirst = index === 0;
   const isLast = index === steps.length - 1;
   const step = steps[index];

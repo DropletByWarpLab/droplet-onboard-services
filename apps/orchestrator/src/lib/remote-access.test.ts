@@ -5,8 +5,6 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 // trusted-origin.test.ts).
 vi.mock("../config.js", () => ({
   config: {
-    REMOTE_ACCESS_MODE: "fqdn",
-    DROPLET_PUBLIC_FQDN: "",
     WIREGUARD_ENDPOINT_HOST: "",
     agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
@@ -15,7 +13,8 @@ vi.mock("../config.js", () => ({
 import { computeOffLanReachable, isLanOnlyHost } from "./remote-access.js";
 import { config } from "../config.js";
 
-type MutableConfig = {
+// Add legacy values only in the fixture to prove the direct path ignores them.
+type MutableConfig = typeof config & {
   REMOTE_ACCESS_MODE: string;
   DROPLET_PUBLIC_FQDN: string;
   WIREGUARD_ENDPOINT_HOST: string;
@@ -107,7 +106,7 @@ describe("isLanOnlyHost", () => {
   });
 });
 
-// ── computeOffLanReachable: mirrors resolveEndpointHost() priority ──
+// ── computeOffLanReachable: uses only the explicit direct endpoint ──
 describe("computeOffLanReachable", () => {
   it("is false with nothing configured", () => {
     expect(computeOffLanReachable()).toBe(false);
@@ -118,13 +117,10 @@ describe("computeOffLanReachable", () => {
     expect(computeOffLanReachable()).toBe(false);
   });
 
-  it("is false when the FQDN is set even alongside a public endpoint override (FQDN-first minting)", () => {
-    // resolveEndpointHost() is FQDN-first, so the minted conf points at the
-    // FQDN — which is not publicly resolvable. The boolean must reflect the
-    // conf that is actually handed out.
+  it("uses the direct endpoint even when a fleet FQDN is present", () => {
     (config as MutableConfig).DROPLET_PUBLIC_FQDN = "home.droplet-us.com";
     (config as MutableConfig).WIREGUARD_ENDPOINT_HOST = "203.0.113.7";
-    expect(computeOffLanReachable()).toBe(false);
+    expect(computeOffLanReachable()).toBe(true);
   });
 
   it("is true when the operator override is a publicly-routable host and no FQDN is set", () => {
@@ -144,12 +140,10 @@ describe("computeOffLanReachable", () => {
     expect(computeOffLanReachable()).toBe(false);
   });
 
-  it("is true in relay mode once an endpoint is configured (ADR-025)", () => {
-    // The relay makes the named FQDN routable from anywhere. Once the box has
-    // its FQDN (or an operator override), the conf is off-LAN reachable.
+  it("ignores a legacy relay flag and requires a direct endpoint", () => {
     (config as MutableConfig).REMOTE_ACCESS_MODE = "relay";
     (config as MutableConfig).DROPLET_PUBLIC_FQDN = "home.droplet-us.com";
-    expect(computeOffLanReachable()).toBe(true);
+    expect(computeOffLanReachable()).toBe(false);
 
     (config as MutableConfig).DROPLET_PUBLIC_FQDN = "";
     (config as MutableConfig).WIREGUARD_ENDPOINT_HOST = "203.0.113.7";

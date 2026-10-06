@@ -15,6 +15,7 @@
 
 import { Fragment, useState } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { Blocks, ShieldCheck, ChevronRight, AlertTriangle } from "lucide-react";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { Sect } from "@/components/shell/primitives";
@@ -108,6 +109,10 @@ export default function IntegrationsPage() {
       )}
 
       {/* Connected strip */}
+      <div className="card" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, marginBottom: 14 }}>
+        <span className="type-footnote text-label-secondary">Link pull requests, commits, and branches to project work items.</span>
+        <Link className="btn secondary" href="/integrations/development">Configure development links</Link>
+      </div>
       {connected.length > 0 && (
         <>
           <Sect title="Connected" />

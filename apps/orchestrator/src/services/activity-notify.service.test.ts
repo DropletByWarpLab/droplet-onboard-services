@@ -21,6 +21,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { PrismaClient } from "@prisma/client";
+import { grants } from "../__tests__/helpers/support-routes.js";
 
 const { publishMock, recordMock } = vi.hoisted(() => ({
   publishMock: vi.fn(() => ({ channels: ["toast"], errors: [] as string[] })),
@@ -53,17 +54,27 @@ vi.mock("../lib/logger.js", () => {
 
 import { assertRecipientIsUsername } from "./notification-recipient.js";
 
-import { runActivityNotifySweep, SETTLE_MS } from "./activity-notify.service.js";
+import { runActivityNotifySweep, SETTLE_MS, NOTIFIABLE_PM_VERBS } from "./activity-notify.service.js";
 
 interface PmRow {
   id: string;
   workItemId: string;
   actorId: string | null;
   verb: string;
+  /** WARP-3519 — commented/mentioned rows carry comment identity. */
+  field?: string | null;
+  oldValue?: string | null;
   newValue: string | null;
   createdAt: Date;
   notifyStatus: "pending" | "sent" | "not_needed";
   notifiedAt: Date | null;
+  /** WARP-3528 — what the row's work item looks like when it is NOT the default
+   *  project item `INBOX-1 — item <id>` (a ticket in a SERVICE_DESK project). */
+  workItem?: {
+    name: string;
+    sequenceId: number;
+    project: { identifier: string; kind: "PROJECT" | "SERVICE_DESK" };
+  };
 }
 
 const NOW = new Date("2026-08-31T12:00:00.000Z").getTime();
@@ -96,14 +107,24 @@ interface CrmRow {
 function makeStub(seed: {
   pm?: PmRow[];
   assignees?: Array<{ workItemId: string; userId: string }>;
-  users?: Array<{ id: string; username: string; role?: string }>;
+  /** WARP-3519 — PmWorkItemWatcher rows (the explicit watch list). */
+  watchers?: Array<{ workItemId: string; userId: string }>;
+  /** WARP-3519 — PmCommentMention rows (who each comment @mentions). */
+  mentions?: Array<{ commentId: string; userId: string }>;
+  users?: Array<{ id: string; username: string; role?: string; directoryStatus?: string }>;
   crm?: CrmRow[];
   stages?: Array<{ id: string; name: string; kind: "OPEN" | "WON" | "LOST" }>;
+  policies?: Array<{ projectId: string; escalation: unknown }>;
+  /** WARP-3522 — a work item's project identifier + number, where a case needs
+   *  more than the default INBOX-1. */
+  items?: Record<string, { identifier: string; sequenceId: number }>;
 }) {
   const pm = [...(seed.pm ?? [])];
   const crm = [...(seed.crm ?? [])];
   const stages = [...(seed.stages ?? [])];
   const assignees = [...(seed.assignees ?? [])];
+  const watchers = [...(seed.watchers ?? [])];
+  const mentions = [...(seed.mentions ?? [])];
   const users = [...(seed.users ?? [])];
 
   const pmDelegate = {
@@ -115,13 +136,15 @@ function makeStub(seed: {
             r.createdAt.getTime() <= args.where.createdAt.lte.getTime(),
         )
         .slice(0, args.take)
-        .map((r) => ({
+        .map(({ workItem: override, ...r }) => ({
           ...r,
           workItem: {
             id: r.workItemId,
             name: `item ${r.workItemId}`,
-            sequenceId: 1,
-            project: { identifier: "INBOX" },
+            sequenceId: seed.items?.[r.workItemId]?.sequenceId ?? 1,
+            projectId: "p1",
+            project: { identifier: seed.items?.[r.workItemId]?.identifier ?? "INBOX" },
+            ...override,
           },
         })),
     ),
@@ -170,10 +193,28 @@ function makeStub(seed: {
         assignees.filter((a) => args.where.workItemId.in.includes(a.workItemId)),
       ),
     },
+    pmWorkItemWatcher: {
+      findMany: vi.fn(async (args: any) =>
+        watchers.filter((w) => args.where.workItemId.in.includes(w.workItemId)),
+      ),
+    },
+    pmCommentMention: {
+      findMany: vi.fn(async (args: any) =>
+        mentions.filter((m) => args.where.commentId.in.includes(m.commentId)),
+      ),
+    },
     pmState: { findMany: vi.fn(async () => [{ id: "s-done", name: "Done" }]) },
+    pmSlaPolicy: { findMany: vi.fn(async () => seed.policies ?? []) },
     user: {
       findMany: vi.fn(async (args: any) =>
-        users.filter((u) => args.where.id.in.includes(u.id)),
+        users
+          .filter(
+            (u) =>
+              (!args.where.id || args.where.id.in.includes(u.id)) &&
+              (!args.where.role || args.where.role.in.includes(u.role ?? "family")) &&
+              (!args.where.directoryStatus || (u.directoryStatus ?? "ACTIVE") === args.where.directoryStatus),
+          )
+          .map((u) => Object.fromEntries(Object.keys(args.select ?? u).filter((key) => args.select?.[key] !== false).map((key) => [key, (u as Record<string, unknown>)[key]]))),
       ),
     },
     notificationLog: { updateMany: vi.fn(async () => ({ count: 0 })) },
@@ -182,10 +223,13 @@ function makeStub(seed: {
   return stub as unknown as PrismaClient & typeof stub;
 }
 
-const opts = { now: () => NOW };
+const resolveAccess = vi.fn(async (_userId: string) => grants([["support", "view"]]));
+const opts = { now: () => NOW, resolveAccess };
 
 beforeEach(() => {
   vi.clearAllMocks();
+  resolveAccess.mockReset();
+  resolveAccess.mockResolvedValue(grants([["support", "view"]]));
   logged.length = 0;
   publishMock.mockReturnValue({ channels: ["toast"], errors: [] });
   // The REAL recipient check, as recordNotification runs it: a refusal inside
@@ -378,6 +422,91 @@ describe("WARP-2804 — each toast carries the id of the row recorded for it", (
   });
 });
 
+describe("WARP-3522 — a PM notification links to what it is about", () => {
+  const bob = { assignees: [{ workItemId: "w1", userId: "u-bob" }, { workItemId: "w2", userId: "u-bob" }, { workItemId: "w3", userId: "u-bob" }], users: [{ id: "u-bob", username: "bob" }] };
+
+  it("one item: the link opens that item's drawer, and the durable row and the toast carry the same one", async () => {
+    const prisma = makeStub({
+      pm: [pmRow({ id: "a1", workItemId: "w1", verb: "assigned" })],
+      ...bob,
+      items: { w1: { identifier: "INBOX", sequenceId: 42 } },
+    });
+    await runActivityNotifySweep(prisma, opts);
+    expect(recordMock.mock.calls[0][1]).toMatchObject({ url: "/projects?p=INBOX&item=INBOX-42" });
+    // (an untyped vi.fn infers a zero-length args tuple; the toast's arg is the object)
+    expect((publishMock.mock.calls as unknown as Array<[Record<string, unknown>]>)[0][0]).toMatchObject({
+      url: "/projects?p=INBOX&item=INBOX-42",
+    });
+  });
+
+  it("a digest over ONE item still opens that item", async () => {
+    const prisma = makeStub({
+      pm: [
+        pmRow({ id: "a1", workItemId: "w1", verb: "commented" }),
+        pmRow({ id: "a2", workItemId: "w1", verb: "state_changed", newValue: "s-done" }),
+      ],
+      ...bob,
+      items: { w1: { identifier: "INBOX", sequenceId: 7 } },
+    });
+    await runActivityNotifySweep(prisma, opts);
+    expect(recordMock.mock.calls[0][1]).toMatchObject({ title: "2 updates on your work", url: "/projects?p=INBOX&item=INBOX-7" });
+  });
+
+  it("a digest over several items of one project opens the project", async () => {
+    const prisma = makeStub({
+      pm: [pmRow({ id: "a1", workItemId: "w1", verb: "assigned" }), pmRow({ id: "a2", workItemId: "w2", verb: "assigned" })],
+      ...bob,
+      items: { w1: { identifier: "OPS", sequenceId: 1 }, w2: { identifier: "OPS", sequenceId: 2 } },
+    });
+    await runActivityNotifySweep(prisma, opts);
+    expect(recordMock.mock.calls[0][1]).toMatchObject({ url: "/projects?p=OPS" });
+  });
+
+  it("a digest across projects opens Projects", async () => {
+    const prisma = makeStub({
+      pm: [pmRow({ id: "a1", workItemId: "w1", verb: "assigned" }), pmRow({ id: "a2", workItemId: "w2", verb: "assigned" })],
+      ...bob,
+      items: { w1: { identifier: "OPS", sequenceId: 1 }, w2: { identifier: "HR", sequenceId: 2 } },
+    });
+    await runActivityNotifySweep(prisma, opts);
+    expect(recordMock.mock.calls[0][1]).toMatchObject({ url: "/projects" });
+  });
+
+  it("is a same-origin path the notification validators accept (one leading slash, no scheme, no backslash)", async () => {
+    const prisma = makeStub({
+      pm: [pmRow({ id: "a1", workItemId: "w1", verb: "assigned" })],
+      ...bob,
+    });
+    await runActivityNotifySweep(prisma, opts);
+    const url = String((recordMock.mock.calls[0][1] as { url?: string }).url);
+    expect(url).toMatch(/^\/[^/\\]/);
+    expect(url.length).toBeLessThanOrEqual(512);
+    expect(url).not.toMatch(/[\\\r\n\0]/);
+  });
+
+  it("the CRM sweep still sends no link (the CRM has no deep link yet)", async () => {
+    const prisma = makeStub({
+      crm: [
+        {
+          id: "c1",
+          kind: "STAGE_CHANGE",
+          toStageId: "st-won",
+          actorId: "u-actor",
+          createdAt: OLD,
+          notifyStatus: "pending",
+          notifiedAt: null,
+          deal: { id: "d1", title: "Big deal", ownerId: "u-bob" },
+        },
+      ],
+      stages: [{ id: "st-won", name: "Won", kind: "WON" }],
+      users: [{ id: "u-bob", username: "bob" }],
+    });
+    await runActivityNotifySweep(prisma, opts);
+    expect(recordMock).toHaveBeenCalledOnce();
+    expect(recordMock.mock.calls[0][1]).not.toHaveProperty("url");
+  });
+});
+
 describe("containment", () => {
   it("a failed toast does not roll back the claim or the durable log row", async () => {
     publishMock.mockReturnValue({ channels: [], errors: ["toast: mqtt_unavailable"] });
@@ -558,5 +687,964 @@ describe("WARP-3365 — external guests and notifications", () => {
       ["c2", "sent"],
     ]);
     expect(res).toMatchObject({ crmNotified: 1, crmSkipped: 1 });
+  });
+});
+
+// WARP-3528 (ADR-069 section 1) — a ticket is a work item in a SERVICE_DESK
+// project. Its subject is a customer's words and the people who handle it hold
+// the `support` grant, not necessarily `pm`, so the PM rules above do not apply
+// to it: no department watchers, no state / comment / due-date interrupt. ONE
+// thing tells somebody -- being assigned the ticket -- and it tells THAT user.
+describe("WARP-3528 — service-desk tickets", () => {
+  const desk = (sequenceId: number, name = "Printer jams on page two") => ({
+    name,
+    sequenceId,
+    project: { identifier: "SUP", kind: "SERVICE_DESK" as const },
+  });
+  const ticketRow = (over: Partial<PmRow> & Pick<PmRow, "id" | "verb">) =>
+    pmRow({ workItemId: "t1", workItem: desk(12), ...over });
+  const bob = { id: "u-bob", username: "bob", role: "family" };
+  const carol = { id: "u-carol", username: "carol", role: "family" };
+  const LEGACY = { id: "0d9c5c1e-2f4a-4b6d-8e10-3a5c7e9b1d2f", username: "5f0c2a1e-7b3d-4c9e-8a21-0e6d4b9c3f70" };
+
+  it("SLA transitions notify current assignees, admins and explicit escalation recipients once, with no Project watchers", async () => {
+    const admin = { id: "u-admin", username: "administrator", role: "admin" };
+    const narrowed = { id: "u-narrowed", username: "narrowed", role: "owner" };
+    const inactive = { id: "u-inactive", username: "inactive", role: "admin", directoryStatus: "DEACTIVATED" };
+    resolveAccess.mockImplementation(async (id) => grants(id === narrowed.id ? [["projects", "manage"]] : [["support", "view"]]));
+    const prisma = makeStub({ pm: [ticketRow({ id: "sla1", verb: "sla_breached", actorId: null, field: "resolution", newValue: "BREACHED" })],
+      assignees: [{ workItemId: "t1", userId: bob.id }, { workItemId: "t1", userId: narrowed.id }], users: [bob, carol, admin, narrowed, inactive],
+      policies: [{ projectId: "p1", escalation: [{ on: "BREACHED", metric: "resolution", actions: [{ type: "notify", userIds: [carol.id, bob.id] }] }] }],
+    });
+    const watchers = vi.fn(async () => new Map([["t1", ["u-projects-only"]]]));
+    await runActivityNotifySweep(prisma, { ...opts, departmentWatchers: watchers });
+    expect(recordMock.mock.calls.map((c: any) => c[1].username).sort()).toEqual(["administrator", "bob", "carol"]);
+    expect(recordMock.mock.calls.every((c: any) => c[1].title === "Ticket SUP-12 SLA breached" && c[1].body === "A ticket needs your attention." && c[1].url === "/support?t=SUP-12")).toBe(true);
+    expect(watchers).not.toHaveBeenCalled(); expect(resolveAccess).not.toHaveBeenCalledWith(inactive.id);
+    expect(prisma.pm[0]!.notifyStatus).toBe("sent");
+    await runActivityNotifySweep(prisma, opts); expect(recordMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("an unverifiable SLA recipient leaves the whole transition pending before any claim or notification", async () => {
+    const prisma = makeStub({ pm: [ticketRow({ id: "sla1", verb: "sla_at_risk", actorId: null, field: "resolution", newValue: "AT_RISK" })], assignees: [{ workItemId: "t1", userId: bob.id }], users: [bob] });
+    resolveAccess.mockRejectedValue(new Error("access offline"));
+    await expect(runActivityNotifySweep(prisma, opts)).rejects.toThrow("access offline");
+    expect(prisma.pm[0]!.notifyStatus).toBe("pending"); expect(recordMock).not.toHaveBeenCalled(); expect(publishMock).not.toHaveBeenCalled();
+  });
+
+  it("an assignment tells the user it names: the ticket key, its subject and the support link", async () => {
+    const prisma = makeStub({
+      pm: [ticketRow({ id: "a1", verb: "assigned", actorId: "u-dave", newValue: bob.id })],
+      // Carol is also on the ticket. The row names bob, so only bob hears.
+      assignees: [
+        { workItemId: "t1", userId: bob.id },
+        { workItemId: "t1", userId: carol.id },
+      ],
+      users: [bob, carol],
+    });
+    const res = await runActivityNotifySweep(prisma, opts);
+    expect(recordMock).toHaveBeenCalledOnce();
+    expect(recordMock.mock.calls[0][1]).toEqual({
+      username: "bob",
+      kind: "event",
+      title: "Ticket SUP-12 assigned to you",
+      body: "Printer jams on page two",
+      url: "/support?t=SUP-12",
+    });
+    // The toast carries the same link, so a click opens the ticket.
+    expect(publishMock.mock.calls.map((c: any) => c[0])).toEqual([
+      expect.objectContaining({ username: "bob", kind: "event", url: "/support?t=SUP-12" }),
+    ]);
+    expect(prisma.pm[0].notifyStatus).toBe("sent");
+    expect(res).toMatchObject({ pmNotified: 1, pmSkipped: 0, notificationsSent: 1 });
+  });
+
+  it("never tells the actor, and the row whose only recipient IS the actor is terminal", async () => {
+    const prisma = makeStub({
+      pm: [ticketRow({ id: "a1", verb: "assigned", actorId: bob.id, newValue: bob.id })],
+      users: [bob],
+    });
+    const res = await runActivityNotifySweep(prisma, opts);
+    expect(recordMock).not.toHaveBeenCalled();
+    expect(res.pmSkipped).toBe(1);
+    expect(prisma.pm[0].notifyStatus).toBe("not_needed");
+  });
+
+  it("does not disclose a settled ticket assignment after the person's Support grant is revoked or the module is off", async () => {
+    resolveAccess.mockResolvedValue(grants([["projects", "manage"]]));
+    const prisma = makeStub({
+      pm: [ticketRow({ id: "a1", verb: "assigned", newValue: bob.id })],
+      users: [bob],
+    });
+    const res = await runActivityNotifySweep(prisma, opts);
+    expect(resolveAccess).toHaveBeenCalledWith(bob.id);
+    expect(recordMock).not.toHaveBeenCalled();
+    expect(publishMock).not.toHaveBeenCalled();
+    expect(prisma.pm[0].notifyStatus).toBe("not_needed");
+    expect(res.pmSkipped).toBe(1);
+  });
+
+  it("leaves the assignment pending for retry when current access cannot be verified", async () => {
+    resolveAccess.mockRejectedValue(new Error("access snapshot unavailable"));
+    const prisma = makeStub({
+      pm: [ticketRow({ id: "a1", verb: "assigned", newValue: bob.id })],
+      users: [bob],
+    });
+    await expect(runActivityNotifySweep(prisma, opts)).rejects.toThrow("access snapshot unavailable");
+    expect(recordMock).not.toHaveBeenCalled();
+    expect(publishMock).not.toHaveBeenCalled();
+    expect(prisma.pm[0].notifyStatus).toBe("pending");
+  });
+
+  it("does not tell a deactivated agent about a ticket they were assigned before deactivation", async () => {
+    const prisma = makeStub({
+      pm: [ticketRow({ id: "a1", verb: "assigned", newValue: bob.id })],
+      users: [{ ...bob, directoryStatus: "DEACTIVATED" }],
+    });
+    await runActivityNotifySweep(prisma, opts);
+    expect(recordMock).not.toHaveBeenCalled();
+    expect(publishMock).not.toHaveBeenCalled();
+    expect(resolveAccess).not.toHaveBeenCalled();
+    expect(prisma.pm[0].notifyStatus).toBe("not_needed");
+  });
+
+  it("never tells a guest, and the row is terminal rather than pending", async () => {
+    const gina = { id: "u-gina", username: "gina", role: "guest" };
+    const prisma = makeStub({
+      pm: [ticketRow({ id: "a1", verb: "assigned", actorId: "u-dave", newValue: gina.id })],
+      // On a project item an assigned guest IS told (they can open it); a ticket is not theirs to open.
+      assignees: [{ workItemId: "t1", userId: gina.id }],
+      users: [gina],
+    });
+    const res = await runActivityNotifySweep(prisma, opts);
+    expect(recordMock).not.toHaveBeenCalled();
+    expect(res.pmSkipped).toBe(1);
+    expect(prisma.pm[0].notifyStatus).toBe("not_needed");
+  });
+
+  it("drops an account with no deliverable username (deleted, or User.id-shaped) BEFORE the claim, and tells the rest", async () => {
+    const prisma = makeStub({
+      pm: [
+        ticketRow({ id: "a1", workItemId: "t1", verb: "assigned", newValue: LEGACY.id }),
+        ticketRow({ id: "a2", workItemId: "t2", verb: "assigned", newValue: "u-gone", workItem: desk(13) }),
+        ticketRow({ id: "a3", workItemId: "t3", verb: "assigned", newValue: bob.id, workItem: desk(14) }),
+      ],
+      users: [LEGACY, bob],
+    });
+    const res = await runActivityNotifySweep(prisma, opts);
+    expect(recordMock.mock.calls.map((c) => c[1].username)).toEqual(["bob"]);
+    expect(prisma.pm.map((r) => [r.id, r.notifyStatus])).toEqual([
+      ["a1", "not_needed"],
+      ["a2", "not_needed"],
+      ["a3", "sent"],
+    ]);
+    expect(res).toMatchObject({ pmNotified: 1, pmSkipped: 2 });
+    const errors = logged.filter((l) => l.level === "error");
+    expect(errors).toHaveLength(1);
+    expect(errors[0]!.obj).toMatchObject({ userId: LEGACY.id, code: "NOTIFICATION_RECIPIENT_IS_ID" });
+  });
+
+  it("gives every verb but `assigned` the explicit not_needed terminal, whoever is on the ticket", async () => {
+    const verbs = [
+      "commented",
+      "state_changed",
+      "due_date_changed",
+      "unassigned",
+      "created",
+      "updated",
+      "relation_added",
+    ];
+    const prisma = makeStub({
+      pm: verbs.map((verb, i) =>
+        ticketRow({ id: `a${i}`, verb, actorId: "u-dave", newValue: verb === "state_changed" ? "s-done" : bob.id }),
+      ),
+      assignees: [{ workItemId: "t1", userId: bob.id }],
+      users: [bob],
+    });
+    const res = await runActivityNotifySweep(prisma, opts);
+    expect(recordMock).not.toHaveBeenCalled();
+    expect(res.pmSkipped).toBe(verbs.length);
+    expect(prisma.pm.every((r) => r.notifyStatus === "not_needed")).toBe(true);
+    // Nobody is looked up for a ticket that tells nobody.
+    expect(prisma.pmWorkItemAssignee.findMany).not.toHaveBeenCalled();
+    expect(prisma.pmState.findMany).not.toHaveBeenCalled();
+  });
+
+  it("department watchers are not told about a ticket, and the resolver is not even asked about it", async () => {
+    const prisma = makeStub({
+      pm: [
+        pmRow({ id: "a1", workItemId: "w1", verb: "commented", actorId: "u-dave" }),
+        ticketRow({ id: "a2", verb: "assigned", actorId: "u-dave", newValue: "u-erin" }),
+      ],
+      assignees: [{ workItemId: "w1", userId: bob.id }],
+      users: [
+        bob,
+        carol,
+        { id: "u-erin", username: "erin", role: "family" },
+        { id: "u-frank", username: "frank", role: "family" },
+      ],
+    });
+    // A resolver that answers for the ticket anyway: it must change nothing.
+    const departmentWatchers = vi.fn(
+      async (_prisma: unknown, _ids: readonly string[]) =>
+        new Map([
+          ["w1", [carol.id]],
+          ["t1", [carol.id, "u-frank"]],
+        ]),
+    );
+    await runActivityNotifySweep(prisma, { ...opts, departmentWatchers });
+    expect(departmentWatchers.mock.calls[0]![1]).toEqual(["w1"]);
+    expect(recordMock.mock.calls.map((c) => c[1].username).sort()).toEqual(["bob", "carol", "erin"]);
+  });
+
+  it("support is its own coalescing unit: one row per recipient per tick, apart from the PM one", async () => {
+    const prisma = makeStub({
+      pm: [
+        pmRow({ id: "a1", workItemId: "w1", verb: "assigned", actorId: "u-dave" }),
+        ticketRow({ id: "a2", workItemId: "t1", verb: "assigned", actorId: "u-dave", newValue: bob.id, workItem: desk(12) }),
+        ticketRow({ id: "a3", workItemId: "t2", verb: "assigned", actorId: "u-dave", newValue: bob.id, workItem: desk(13) }),
+        ticketRow({ id: "a4", workItemId: "t3", verb: "assigned", actorId: "u-dave", newValue: bob.id, workItem: desk(14) }),
+      ],
+      assignees: [{ workItemId: "w1", userId: bob.id }],
+      users: [bob],
+    });
+    const res = await runActivityNotifySweep(prisma, opts);
+    expect(recordMock.mock.calls.map((c) => c[1])).toEqual([
+      // Projects retain their canonical deep link alongside ticket links.
+      { username: "bob", kind: "event", title: "Assigned to you", body: "INBOX-1 — item w1", url: "/projects?p=INBOX&item=INBOX-1" },
+      {
+        username: "bob",
+        kind: "event",
+        title: "3 tickets assigned to you",
+        body: "SUP-12, SUP-13, SUP-14",
+        url: "/support",
+      },
+    ]);
+    expect(prisma.pm.every((r) => r.notifyStatus === "sent")).toBe(true);
+    expect(res).toMatchObject({ pmNotified: 4, pmSkipped: 0, notificationsSent: 2 });
+  });
+
+  it("one ticket assigned twice in a tick is still ONE ticket, with its own copy", async () => {
+    const prisma = makeStub({
+      pm: [
+        ticketRow({ id: "a1", verb: "assigned", actorId: "u-dave", newValue: bob.id }),
+        ticketRow({ id: "a2", verb: "assigned", actorId: "u-carol", newValue: bob.id }),
+      ],
+      users: [bob],
+    });
+    await runActivityNotifySweep(prisma, opts);
+    expect(recordMock).toHaveBeenCalledOnce();
+    expect(recordMock.mock.calls[0][1]).toMatchObject({
+      title: "Ticket SUP-12 assigned to you",
+      url: "/support?t=SUP-12",
+    });
+    expect(prisma.pm.every((r) => r.notifyStatus === "sent")).toBe(true);
+  });
+
+  it("keeps the claim discipline: guarded pending->sent claim, log row in the same transaction, toast after the commit", async () => {
+    const prisma = makeStub({
+      pm: [ticketRow({ id: "a1", verb: "assigned", actorId: "u-dave", newValue: bob.id })],
+      users: [bob],
+    });
+    await runActivityNotifySweep(prisma, opts);
+    expect(prisma.pmActivity.updateMany).toHaveBeenCalledWith({
+      where: { id: { in: ["a1"] }, notifyStatus: "pending" },
+      data: { notifyStatus: "sent", notifiedAt: expect.any(Date) },
+    });
+    expect(prisma.$transaction).toHaveBeenCalledOnce();
+    const claimAt = prisma.pmActivity.updateMany.mock.invocationCallOrder[0]!;
+    expect(claimAt).toBeLessThan(recordMock.mock.invocationCallOrder[0]!);
+    expect(recordMock.mock.invocationCallOrder[0]!).toBeLessThan(publishMock.mock.invocationCallOrder[0]!);
+  });
+
+  it("a second sweep over the same rows sends nothing", async () => {
+    const prisma = makeStub({
+      pm: [ticketRow({ id: "a1", verb: "assigned", actorId: "u-dave", newValue: bob.id })],
+      users: [bob],
+    });
+    await runActivityNotifySweep(prisma, opts);
+    expect(recordMock).toHaveBeenCalledOnce();
+    recordMock.mockClear();
+    await runActivityNotifySweep(prisma, opts);
+    expect(recordMock).not.toHaveBeenCalled();
+  });
+
+  it("a project item retains its Projects deep link when its row names its kind", async () => {
+    const prisma = makeStub({
+      pm: [
+        pmRow({
+          id: "a1",
+          workItemId: "w1",
+          verb: "assigned",
+          workItem: { name: "item w1", sequenceId: 1, project: { identifier: "INBOX", kind: "PROJECT" } },
+        }),
+      ],
+      assignees: [{ workItemId: "w1", userId: bob.id }],
+      users: [bob],
+    });
+    await runActivityNotifySweep(prisma, opts);
+    expect(recordMock.mock.calls[0][1]).toMatchObject({ url: "/projects?p=INBOX&item=INBOX-1" });
+    expect(publishMock).toHaveBeenCalledWith(expect.objectContaining({ url: "/projects?p=INBOX&item=INBOX-1" }));
+  });
+});
+
+// ── WARP-3519 (ADR-069 WS-2) — watchers, mentions, and who may hear ──────────
+//
+// The sweep stays ONE pipeline: this is its audience and its copy growing, not a
+// second dispatcher. What the cases below are defending:
+//   • WATCHERS    — the watch list joins the assignees and the department
+//                   watchers into ONE set per person, for every item-wide verb.
+//   • MENTIONS    — a `mentioned` row is for ONE person and is never fanned out;
+//                   the `commented` row of the same comment skips the people it
+//                   mentions, so one comment is one notification, not two.
+//   • ELIGIBILITY — somebody who arrives as a watcher or a mention target must be
+//                   able to read the item; an assignee has always been told.
+//   • COPY        — what each title says, and the digest tally.
+//
+// The real-Postgres half (the rows these cases seed, as the write path produces
+// them) is __tests__/pm-collaboration.pg.test.ts.
+
+/** A directory user — an ACTIVE member unless a case says otherwise. The older
+ *  cases above lean on an undefined role/status; these say what they mean. */
+function person(
+  name: string,
+  over: { displayName?: string; role?: string; directoryStatus?: string } = {},
+) {
+  return {
+    id: `u-${name}`,
+    username: name,
+    displayName: name.charAt(0).toUpperCase() + name.slice(1),
+    role: "family",
+    directoryStatus: "ACTIVE",
+    ...over,
+  };
+}
+
+/** A `commented` row as WS-2 writes it: field "comment", newValue = the comment's id.
+ *  (A legacy one has neither — build it with plain `pmRow`.) */
+const commented = (id: string, workItemId: string, commentId: string, over: Partial<PmRow> = {}) =>
+  pmRow({ id, workItemId, verb: "commented", field: "comment", newValue: commentId, ...over });
+
+/** A `mentioned` row: oldValue = the comment's id, newValue = the mentioned User.id. */
+const mentioned = (
+  id: string,
+  workItemId: string,
+  commentId: string,
+  target: string,
+  over: Partial<PmRow> = {},
+) =>
+  pmRow({
+    id,
+    workItemId,
+    verb: "mentioned",
+    field: "comment",
+    oldValue: commentId,
+    newValue: target,
+    ...over,
+  });
+
+/** The named fields of every notification recorded, sorted: the order the sweep
+ *  delivers in is not part of the contract. */
+function sent(...keys: string[]): string[][] {
+  return recordMock.mock.calls
+    .map((c) => keys.map((k) => String(c[1][k])))
+    .sort((a, b) => a.join("\u0000").localeCompare(b.join("\u0000")));
+}
+
+describe("WARP-3519 — the watch list joins the audience", () => {
+  it.each([
+    ["commented", { verb: "commented" }, "New comment", "New comment"],
+    ["state_changed", { verb: "state_changed", newValue: "s-done" }, "Moved to Done", "Moved to Done"],
+    ["assigned", { verb: "assigned" }, "Assigned to you", "Assignment changed"],
+    ["due_date_changed", { verb: "due_date_changed" }, "Due date changed", "Due date changed"],
+  ])("a watcher is told about a %s, once, alongside the assignee", async (_verb, row, assigneeTitle, watcherTitle) => {
+    // Defends: the watch list is the audience of EVERY item-wide verb, not just
+    // comments; and the copy is per recipient (an assignment is "yours" only to
+    // the person it was assigned to).
+    const prisma = makeStub({
+      pm: [pmRow({ id: "a1", workItemId: "w1", ...row })],
+      assignees: [{ workItemId: "w1", userId: "u-bob" }],
+      watchers: [{ workItemId: "w1", userId: "u-wendy" }],
+      users: [person("bob"), person("wendy")],
+    });
+    await runActivityNotifySweep(prisma, opts);
+    expect(sent("username", "title")).toEqual([
+      ["bob", assigneeTitle],
+      ["wendy", watcherTitle],
+    ]);
+    expect(prisma.pm[0].notifyStatus).toBe("sent");
+  });
+
+  it("an item with a watcher and NO assignee still tells the watcher", async () => {
+    // Defends: the watch list is an audience in its own right. Before WS-2 an
+    // unassigned item told nobody.
+    const prisma = makeStub({
+      pm: [pmRow({ id: "a1", workItemId: "w1", verb: "state_changed", newValue: "s-done" })],
+      watchers: [{ workItemId: "w1", userId: "u-wendy" }],
+      users: [person("wendy")],
+    });
+    await runActivityNotifySweep(prisma, opts);
+    expect(sent("username", "title", "body")).toEqual([["wendy", "Moved to Done", "INBOX-1 — item w1"]]);
+  });
+
+  it("assignee + watcher + department watcher is ONE set: exactly one notification per person", async () => {
+    // Defends: de-duplication across the three sources. A union built by
+    // concatenation would tell bob three times about one comment.
+    const prisma = makeStub({
+      pm: [pmRow({ id: "a1", workItemId: "w1", verb: "commented" })],
+      assignees: [{ workItemId: "w1", userId: "u-bob" }],
+      watchers: [
+        { workItemId: "w1", userId: "u-bob" },
+        { workItemId: "w1", userId: "u-carol" },
+        { workItemId: "w1", userId: "u-dave" },
+      ],
+      users: [person("bob"), person("carol"), person("dave"), person("erin")],
+    });
+    await runActivityNotifySweep(prisma, {
+      ...opts,
+      departmentWatchers: async () => new Map([["w1", ["u-carol", "u-erin", "u-bob"]]]),
+    });
+    expect(recordMock).toHaveBeenCalledTimes(4);
+    expect(sent("username")).toEqual([["bob"], ["carol"], ["dave"], ["erin"]]);
+  });
+
+  it("a watcher hears about the item they watch and no other", async () => {
+    // Defends: the watch list is keyed by ITEM. A flat union of every watcher of
+    // every item in the tick would tell wendy about wally's item.
+    const prisma = makeStub({
+      pm: [
+        pmRow({ id: "a1", workItemId: "w1", verb: "due_date_changed" }),
+        pmRow({ id: "a2", workItemId: "w2", verb: "due_date_changed" }),
+      ],
+      watchers: [
+        { workItemId: "w1", userId: "u-wally" },
+        { workItemId: "w2", userId: "u-wendy" },
+      ],
+      users: [person("wally"), person("wendy")],
+    });
+    await runActivityNotifySweep(prisma, opts);
+    expect(sent("username", "body")).toEqual([
+      ["wally", "INBOX-1 — item w1"],
+      ["wendy", "INBOX-1 — item w2"],
+    ]);
+  });
+
+  it("never notifies the actor, even when they are a watcher (a commenter is auto-watched)", async () => {
+    // Defends: the actor clause survives the new source. WS-2 makes every
+    // commenter a watcher of their own comment's item.
+    const prisma = makeStub({
+      pm: [pmRow({ id: "a1", workItemId: "w1", verb: "commented", actorId: "u-wendy" })],
+      watchers: [
+        { workItemId: "w1", userId: "u-wendy" },
+        { workItemId: "w1", userId: "u-carol" },
+      ],
+      users: [person("wendy"), person("carol")],
+    });
+    await runActivityNotifySweep(prisma, opts);
+    expect(sent("username")).toEqual([["carol"]]);
+  });
+
+  it("a row whose only watcher IS the actor is terminal (not_needed), not stuck pending", async () => {
+    const prisma = makeStub({
+      pm: [pmRow({ id: "a1", workItemId: "w1", verb: "commented", actorId: "u-wendy" })],
+      watchers: [{ workItemId: "w1", userId: "u-wendy" }],
+      users: [person("wendy")],
+    });
+    const res = await runActivityNotifySweep(prisma, opts);
+    expect(recordMock).not.toHaveBeenCalled();
+    expect(prisma.pm[0].notifyStatus).toBe("not_needed");
+    expect(res.pmSkipped).toBe(1);
+  });
+
+  it("a department watcher who is not assigned is told 'Assignment changed' too", async () => {
+    // Defends: the copy rule is "is this recipient a current ASSIGNEE", whatever
+    // route brought them — not "is this person on the watch list table".
+    const prisma = makeStub({
+      pm: [pmRow({ id: "a1", workItemId: "w1", verb: "assigned" })],
+      assignees: [{ workItemId: "w1", userId: "u-bob" }],
+      users: [person("bob"), person("carol")],
+    });
+    await runActivityNotifySweep(prisma, {
+      ...opts,
+      departmentWatchers: async () => new Map([["w1", ["u-carol"]]]),
+    });
+    expect(sent("username", "title")).toEqual([
+      ["bob", "Assigned to you"],
+      ["carol", "Assignment changed"],
+    ]);
+  });
+
+  it("somebody who WAS assigned and still watches (the row outlives an unassignment) is told 'Assignment changed'", async () => {
+    // Defends: "assignee" is read from the CURRENT assignee rows. Being taken off
+    // an item leaves the watcher row (reason ASSIGNEE) behind on purpose.
+    const prisma = makeStub({
+      pm: [pmRow({ id: "a1", workItemId: "w1", verb: "assigned" })],
+      assignees: [{ workItemId: "w1", userId: "u-bob" }],
+      watchers: [{ workItemId: "w1", userId: "u-wendy" }], // ex-assignee: no assignee row any more
+      users: [person("bob"), person("wendy")],
+    });
+    await runActivityNotifySweep(prisma, opts);
+    expect(sent("username", "title")).toEqual([
+      ["bob", "Assigned to you"],
+      ["wendy", "Assignment changed"],
+    ]);
+  });
+});
+
+describe("WARP-3519 — a mention is for ONE person", () => {
+  it("a `mentioned` row notifies ONLY its target — never the item's assignees, watchers or department — as '<Name> mentioned you'", async () => {
+    // Defends: "Alice mentioned you" going to the whole item would be wrong (it
+    // is a lie to everyone but mia) and noisy. The target is row.newValue and
+    // nobody else; the body names the item like every other notification.
+    const prisma = makeStub({
+      pm: [mentioned("a1", "w1", "c1", "u-mia", { actorId: "u-alice" })],
+      assignees: [{ workItemId: "w1", userId: "u-bob" }],
+      watchers: [{ workItemId: "w1", userId: "u-wendy" }],
+      users: [
+        person("alice", { displayName: "Alice Actor" }),
+        person("mia"),
+        person("bob"),
+        person("wendy"),
+        person("carol"),
+      ],
+    });
+    await runActivityNotifySweep(prisma, {
+      ...opts,
+      departmentWatchers: async () => new Map([["w1", ["u-carol"]]]),
+    });
+    expect(recordMock).toHaveBeenCalledOnce();
+    expect(recordMock.mock.calls[0][1]).toMatchObject({
+      username: "mia",
+      kind: "event",
+      title: "Alice Actor mentioned you",
+      body: "INBOX-1 — item w1",
+    });
+    expect(prisma.pm[0].notifyStatus).toBe("sent");
+  });
+
+  it.each([
+    ["no actor (an AI-written comment)", null],
+    ["an actor with no directory row (deleted since)", "u-ghost"],
+  ])("titles a mention by %s 'You were mentioned'", async (_who, actorId) => {
+    // Defends: the copy degrades to a sentence that is still true, instead of
+    // "undefined mentioned you" or a thrown sweep.
+    const prisma = makeStub({
+      pm: [mentioned("a1", "w1", "c1", "u-mia", { actorId })],
+      users: [person("mia")],
+    });
+    await runActivityNotifySweep(prisma, opts);
+    expect(sent("username", "title", "body")).toEqual([["mia", "You were mentioned", "INBOX-1 — item w1"]]);
+  });
+
+  it("caps the title when the actor's display name is long (NotificationLog.title is 120 characters)", async () => {
+    // Defends: a display name is user-typed. The title cap exists so a row the
+    // sweep writes can never be one the manual-send path would refuse.
+    const prisma = makeStub({
+      pm: [mentioned("a1", "w1", "c1", "u-mia", { actorId: "u-alice" })],
+      users: [person("alice", { displayName: "A".repeat(300) }), person("mia")],
+    });
+    await runActivityNotifySweep(prisma, opts);
+    expect(recordMock).toHaveBeenCalledOnce();
+    const title = String(recordMock.mock.calls[0][1].title);
+    expect(title.length).toBeLessThanOrEqual(120);
+    expect(title.startsWith("AAAA")).toBe(true);
+  });
+
+  it("a mention of the actor themself is terminal (not_needed), not stuck pending", async () => {
+    // The write path never records one; the sweep still refuses to tell a
+    // person what they just did.
+    const prisma = makeStub({
+      pm: [mentioned("a1", "w1", "c1", "u-alice", { actorId: "u-alice" })],
+      users: [person("alice")],
+    });
+    const res = await runActivityNotifySweep(prisma, opts);
+    expect(recordMock).not.toHaveBeenCalled();
+    expect(prisma.pm[0].notifyStatus).toBe("not_needed");
+    expect(res.pmSkipped).toBe(1);
+  });
+
+  it("a mention of somebody with no directory row is terminal — not retried every tick", async () => {
+    const prisma = makeStub({
+      pm: [mentioned("a1", "w1", "c1", "u-gone", { actorId: "u-alice" })],
+      users: [person("alice")],
+    });
+    await runActivityNotifySweep(prisma, opts);
+    expect(recordMock).not.toHaveBeenCalled();
+    expect(prisma.pm[0].notifyStatus).toBe("not_needed");
+  });
+});
+
+describe("WARP-3519 — one comment is one notification", () => {
+  it("the commented row skips the people the comment mentions (they hear through the mention); everyone else still gets 'New comment'", async () => {
+    // Defends: mia is on the item as an assignee-less watcher (auto-watched when
+    // mentioned) AND is the target of a `mentioned` row. If the `commented` row
+    // fanned out to her too she would get a digest — "2 updates" for one comment.
+    const prisma = makeStub({
+      pm: [
+        commented("a1", "w1", "c1", { actorId: "u-alice" }),
+        mentioned("a2", "w1", "c1", "u-mia", { actorId: "u-alice" }),
+      ],
+      assignees: [{ workItemId: "w1", userId: "u-bob" }],
+      watchers: [
+        { workItemId: "w1", userId: "u-mia" },
+        { workItemId: "w1", userId: "u-wendy" },
+      ],
+      mentions: [{ commentId: "c1", userId: "u-mia" }],
+      users: [person("alice", { displayName: "Alice Actor" }), person("bob"), person("mia"), person("wendy")],
+    });
+    const res = await runActivityNotifySweep(prisma, opts);
+    expect(sent("username", "title")).toEqual([
+      ["bob", "New comment"],
+      ["mia", "Alice Actor mentioned you"],
+      ["wendy", "New comment"],
+    ]);
+    // 2 activity rows claimed, 3 notifications written
+    expect(res).toMatchObject({ pmNotified: 2, pmSkipped: 0, notificationsSent: 3 });
+    expect(prisma.pm.every((r) => r.notifyStatus === "sent")).toBe(true);
+  });
+
+  it("the exclusion is per COMMENT: mentioned in one, still told about the other", async () => {
+    // Defends: the mention table is read per comment id. Excluding "everyone
+    // mentioned anywhere on the item" would silence mia for comment c2.
+    const prisma = makeStub({
+      pm: [
+        commented("a1", "w1", "c1", { actorId: "u-alice" }),
+        commented("a2", "w1", "c2", { actorId: "u-alice" }),
+      ],
+      watchers: [
+        { workItemId: "w1", userId: "u-mia" },
+        { workItemId: "w1", userId: "u-wendy" },
+      ],
+      mentions: [{ commentId: "c1", userId: "u-mia" }],
+      users: [person("alice"), person("mia"), person("wendy")],
+    });
+    await runActivityNotifySweep(prisma, opts);
+    expect(sent("username", "title", "body")).toEqual([
+      ["mia", "New comment", "INBOX-1 — item w1"], // c2 only
+      ["wendy", "2 updates on your work", "2 commented"], // both
+    ]);
+  });
+
+  it("a commented row whose whole audience is its own mentioned people is terminal, not pending", async () => {
+    const prisma = makeStub({
+      pm: [commented("a1", "w1", "c1", { actorId: "u-alice" })],
+      watchers: [{ workItemId: "w1", userId: "u-mia" }],
+      mentions: [{ commentId: "c1", userId: "u-mia" }],
+      users: [person("alice"), person("mia")],
+    });
+    const res = await runActivityNotifySweep(prisma, opts);
+    expect(recordMock).not.toHaveBeenCalled();
+    expect(prisma.pm[0].notifyStatus).toBe("not_needed");
+    expect(res.pmSkipped).toBe(1);
+  });
+
+  it("a commented row with no comment id (a legacy row) fans out as it always did", async () => {
+    // Defends: rows written before WS-2 carry no comment id. They have nothing to
+    // exclude by and must keep reaching their whole audience.
+    const prisma = makeStub({
+      pm: [pmRow({ id: "a1", workItemId: "w1", verb: "commented", actorId: "u-alice" })],
+      assignees: [{ workItemId: "w1", userId: "u-bob" }],
+      watchers: [{ workItemId: "w1", userId: "u-mia" }],
+      mentions: [{ commentId: "c1", userId: "u-mia" }], // unrelated to this row
+      users: [person("alice"), person("bob"), person("mia")],
+    });
+    await runActivityNotifySweep(prisma, opts);
+    expect(sent("username", "title")).toEqual([
+      ["bob", "New comment"],
+      ["mia", "New comment"],
+    ]);
+  });
+
+  it.each([
+    ["no commented row at all", () => [pmRow({ id: "a1", workItemId: "w1", verb: "assigned" })]],
+    ["only a legacy commented row (no comment id)", () => [pmRow({ id: "a1", workItemId: "w1", verb: "commented" })]],
+    ["only a non-notifiable row", () => [pmRow({ id: "a1", workItemId: "w1", verb: "comment_edited", field: "comment" })]],
+    ["only a mentioned row (its comment id is not a commented row's)", () => [mentioned("a1", "w1", "c1", "u-mia")]],
+  ])("does not read PmCommentMention when there is %s", async (_label, rows) => {
+    // Defends: the extra query runs only when a commented row carries a comment id.
+    const prisma = makeStub({
+      pm: rows(),
+      assignees: [{ workItemId: "w1", userId: "u-bob" }],
+      users: [person("bob"), person("mia")],
+    });
+    await runActivityNotifySweep(prisma, opts);
+    expect(prisma.pmCommentMention.findMany).not.toHaveBeenCalled();
+  });
+
+  it("reads the mentions of exactly the comments the commented rows are about", async () => {
+    // Defends: `in` holds comment ids and only comment ids — not a state id from
+    // a state_changed row, not the comment id a mentioned row also carries.
+    const prisma = makeStub({
+      pm: [
+        commented("a1", "w1", "c1", { actorId: "u-alice" }),
+        commented("a2", "w1", "c2", { actorId: "u-alice" }),
+        pmRow({ id: "a3", workItemId: "w1", verb: "state_changed", newValue: "s-done" }),
+        mentioned("a4", "w1", "c3", "u-mia", { actorId: "u-alice" }),
+      ],
+      assignees: [{ workItemId: "w1", userId: "u-bob" }],
+      users: [person("alice"), person("bob"), person("mia")],
+    });
+    await runActivityNotifySweep(prisma, opts);
+    expect(prisma.pmCommentMention.findMany).toHaveBeenCalledTimes(1);
+    const args = prisma.pmCommentMention.findMany.mock.calls[0][0];
+    expect([...args.where.commentId.in].sort()).toEqual(["c1", "c2"]);
+    expect(args.select).toMatchObject({ commentId: true, userId: true });
+  });
+});
+
+describe("WARP-3519 — who may hear", () => {
+  const INELIGIBLE = [
+    ["a guest who is not assigned to the item", person("gina", { role: "guest" })],
+    ["a deactivated account", person("dora", { directoryStatus: "DEACTIVATED" })],
+    ["a service principal", person("svc", { role: "service" })],
+  ] as const;
+
+  it.each(INELIGIBLE)("an item watcher who is %s is not notified — the row ends not_needed, never pending", async (_who, u) => {
+    const prisma = makeStub({
+      pm: [pmRow({ id: "a1", workItemId: "w1", verb: "state_changed", newValue: "s-done" })],
+      watchers: [{ workItemId: "w1", userId: u.id }],
+      users: [u],
+    });
+    const res = await runActivityNotifySweep(prisma, opts);
+    expect(recordMock).not.toHaveBeenCalled();
+    expect(prisma.pm[0].notifyStatus).toBe("not_needed");
+    expect(res.pmSkipped).toBe(1);
+  });
+
+  it.each(INELIGIBLE)("a department watcher who is %s is not notified — the row ends not_needed", async (_who, u) => {
+    const prisma = makeStub({
+      pm: [pmRow({ id: "a1", workItemId: "w1", verb: "commented" })],
+      users: [u],
+    });
+    await runActivityNotifySweep(prisma, {
+      ...opts,
+      departmentWatchers: async () => new Map([["w1", [u.id]]]),
+    });
+    expect(recordMock).not.toHaveBeenCalled();
+    expect(prisma.pm[0].notifyStatus).toBe("not_needed");
+  });
+
+  it.each(INELIGIBLE)("a mention target who is %s is not notified — the row ends not_needed", async (_who, u) => {
+    const prisma = makeStub({
+      pm: [mentioned("a1", "w1", "c1", u.id, { actorId: "u-alice" })],
+      users: [person("alice"), u],
+    });
+    const res = await runActivityNotifySweep(prisma, opts);
+    expect(recordMock).not.toHaveBeenCalled();
+    expect(prisma.pm[0].notifyStatus).toBe("not_needed");
+    expect(res.pmSkipped).toBe(1);
+  });
+
+  it("of several watchers, only those who may read the item are told", async () => {
+    // Defends: the filter is per person. One ineligible watcher must not take the
+    // eligible ones down with it, and an eligible one must not carry the others in.
+    const prisma = makeStub({
+      pm: [pmRow({ id: "a1", workItemId: "w1", verb: "commented" })],
+      watchers: INELIGIBLE.map(([, u]) => ({ workItemId: "w1", userId: u.id })).concat([
+        { workItemId: "w1", userId: "u-wendy" },
+      ]),
+      users: [...INELIGIBLE.map(([, u]) => u), person("wendy")],
+    });
+    await runActivityNotifySweep(prisma, opts);
+    expect(sent("username")).toEqual([["wendy"]]);
+    expect(prisma.pm[0].notifyStatus).toBe("sent");
+  });
+
+  it("an ASSIGNED guest is still told (and once, though they also watch); a guest who is only a watcher is not", async () => {
+    // Defends: WARP-3365's rule survives the new source — assigning a guest
+    // shares THAT item with them, so they can open what they are told about.
+    const prisma = makeStub({
+      pm: [pmRow({ id: "a1", workItemId: "w1", verb: "commented", actorId: "u-alice" })],
+      assignees: [{ workItemId: "w1", userId: "u-gina" }],
+      watchers: [
+        { workItemId: "w1", userId: "u-gina" },
+        { workItemId: "w1", userId: "u-greg" },
+      ],
+      users: [person("alice"), person("gina", { role: "guest" }), person("greg", { role: "guest" })],
+    });
+    await runActivityNotifySweep(prisma, opts);
+    expect(sent("username", "title")).toEqual([["gina", "New comment"]]);
+  });
+
+  it("a mention reaches an ASSIGNED guest — they can open the item", async () => {
+    // The contract's eligibility test is "a guest NOT assigned to the item"; the
+    // assignee exception applies to a mention's target the same way.
+    const prisma = makeStub({
+      pm: [mentioned("a1", "w1", "c1", "u-gina", { actorId: "u-alice" })],
+      assignees: [{ workItemId: "w1", userId: "u-gina" }],
+      users: [person("alice", { displayName: "Alice Actor" }), person("gina", { role: "guest" })],
+    });
+    await runActivityNotifySweep(prisma, opts);
+    expect(sent("username", "title")).toEqual([["gina", "Alice Actor mentioned you"]]);
+  });
+
+  it("assignees stay unconditional: a deactivated assignee is still told (unchanged behaviour)", async () => {
+    // Pins the contract's "assignees are unconditional (unchanged behaviour)".
+    // Eligibility is for the people who arrive by ANOTHER route.
+    const prisma = makeStub({
+      pm: [pmRow({ id: "a1", workItemId: "w1", verb: "state_changed", newValue: "s-done" })],
+      assignees: [{ workItemId: "w1", userId: "u-dora" }],
+      users: [person("dora", { directoryStatus: "DEACTIVATED" })],
+    });
+    await runActivityNotifySweep(prisma, opts);
+    expect(sent("username", "title")).toEqual([["dora", "Moved to Done"]]);
+  });
+});
+
+describe("WARP-3519 — the verbs and the digest", () => {
+  it("`mentioned` is notifiable, and the notifiable set is exactly the five", () => {
+    expect(NOTIFIABLE_PM_VERBS.has("mentioned")).toBe(true);
+    expect([...NOTIFIABLE_PM_VERBS].sort()).toEqual([
+      "assigned",
+      "commented",
+      "due_date_changed",
+      "mentioned",
+      "state_changed",
+    ]);
+  });
+
+  it("the other new verbs are history: the explicit not_needed terminal, never a notification", async () => {
+    // Defends: the cut. An edited or deleted comment and a watch-list change are
+    // in the item's timeline; the one news-worthy thing an edit can cause — a
+    // new @mention — is its own `mentioned` row.
+    const prisma = makeStub({
+      pm: [
+        pmRow({ id: "a1", workItemId: "w1", verb: "comment_edited", field: "comment" }),
+        pmRow({ id: "a2", workItemId: "w1", verb: "comment_deleted", field: "comment" }),
+        pmRow({ id: "a3", workItemId: "w1", verb: "watcher_added", field: "watchers" }),
+        pmRow({ id: "a4", workItemId: "w1", verb: "watcher_removed", field: "watchers" }),
+      ],
+      assignees: [{ workItemId: "w1", userId: "u-bob" }],
+      watchers: [{ workItemId: "w1", userId: "u-wendy" }],
+      users: [person("bob"), person("wendy")],
+    });
+    const res = await runActivityNotifySweep(prisma, opts);
+    expect(recordMock).not.toHaveBeenCalled();
+    expect(res.pmSkipped).toBe(4);
+    expect(prisma.pm.every((r) => r.notifyStatus === "not_needed")).toBe(true);
+  });
+
+  it("a watcher with two rows in one tick gets ONE digest, with the usual tally", async () => {
+    // Defends: coalescing is per recipient whatever route they arrived by.
+    const prisma = makeStub({
+      pm: [
+        pmRow({ id: "a1", workItemId: "w1", verb: "state_changed", newValue: "s-done" }),
+        pmRow({ id: "a2", workItemId: "w1", verb: "commented" }),
+      ],
+      watchers: [{ workItemId: "w1", userId: "u-wendy" }],
+      users: [person("wendy")],
+    });
+    await runActivityNotifySweep(prisma, opts);
+    expect(recordMock).toHaveBeenCalledOnce();
+    expect(recordMock.mock.calls[0][1]).toMatchObject({
+      username: "wendy",
+      title: "2 updates on your work",
+      body: "1 moved · 1 commented",
+    });
+  });
+
+  it("`mentioned` contributes the word 'mentioned' to a digest", async () => {
+    // wendy hears about the first row as a watcher and the second as the target.
+    const prisma = makeStub({
+      pm: [
+        pmRow({ id: "a1", workItemId: "w1", verb: "commented", actorId: "u-alice" }),
+        mentioned("a2", "w1", "c9", "u-wendy", { actorId: "u-alice" }),
+      ],
+      watchers: [{ workItemId: "w1", userId: "u-wendy" }],
+      users: [person("alice"), person("wendy")],
+    });
+    await runActivityNotifySweep(prisma, opts);
+    expect(sent("username", "title", "body")).toEqual([
+      ["wendy", "2 updates on your work", "1 commented · 1 mentioned"],
+    ]);
+  });
+
+  it("two mentions of one person are one digest: '2 mentioned'", async () => {
+    const prisma = makeStub({
+      pm: [
+        mentioned("a1", "w1", "c1", "u-mia", { actorId: "u-alice" }),
+        mentioned("a2", "w2", "c2", "u-mia", { actorId: "u-bob" }),
+      ],
+      users: [person("alice"), person("bob"), person("mia")],
+    });
+    await runActivityNotifySweep(prisma, opts);
+    expect(sent("username", "title", "body")).toEqual([["mia", "2 updates on your work", "2 mentioned"]]);
+  });
+});
+
+describe("WARP-3519 — a recipient whose username is User.id-shaped (the WARP-2911 rule, new sources)", () => {
+  const LEGACY = { id: "0d9c5c1e-2f4a-4b6d-8e10-3a5c7e9b1d2f", username: "5f0c2a1e-7b3d-4c9e-8a21-0e6d4b9c3f70" };
+
+  it("🔴 a mention of one is dropped BEFORE the claim: the rest are notified and the CRM sweep still runs", async () => {
+    // Defends: the refusal inside the claim transaction rolled the WHOLE batch
+    // back, every tick, forever. A new way to reach a recipient must not reopen it.
+    const prisma = makeStub({
+      pm: [
+        mentioned("a1", "w1", "c1", LEGACY.id, { actorId: "u-alice" }),
+        pmRow({ id: "a2", workItemId: "w2", verb: "assigned" }),
+      ],
+      assignees: [{ workItemId: "w2", userId: "u-bob" }],
+      users: [person("alice"), LEGACY, person("bob")],
+    });
+    const res = await runActivityNotifySweep(prisma, opts);
+    expect(sent("username")).toEqual([["bob"]]);
+    expect(prisma.pm.map((r) => [r.id, r.notifyStatus])).toEqual([
+      ["a1", "not_needed"],
+      ["a2", "sent"],
+    ]);
+    expect(res.notificationsSent).toBe(1);
+    expect(prisma.crmActivity.findMany).toHaveBeenCalled();
+  });
+
+  it("🔴 an item WATCHER with one is dropped the same way, and the other watcher is still told", async () => {
+    const prisma = makeStub({
+      pm: [pmRow({ id: "a1", workItemId: "w1", verb: "commented" })],
+      watchers: [
+        { workItemId: "w1", userId: LEGACY.id },
+        { workItemId: "w1", userId: "u-wendy" },
+      ],
+      users: [LEGACY, person("wendy")],
+    });
+    await runActivityNotifySweep(prisma, opts);
+    expect(sent("username")).toEqual([["wendy"]]);
+    expect(prisma.pm[0].notifyStatus).toBe("sent");
+  });
+
+  it("the drop is logged at ERROR, naming the account and the refusal code", async () => {
+    const prisma = makeStub({
+      pm: [mentioned("a1", "w1", "c1", LEGACY.id, { actorId: "u-alice" })],
+      users: [person("alice"), LEGACY],
+    });
+    await runActivityNotifySweep(prisma, opts);
+    const errors = logged.filter((l) => l.level === "error");
+    expect(errors).toHaveLength(1);
+    expect(errors[0]!.obj).toMatchObject({ userId: LEGACY.id, username: LEGACY.username, code: "NOTIFICATION_RECIPIENT_IS_ID" });
+    expect(prisma.pm[0].notifyStatus).toBe("not_needed");
+  });
+});
+
+describe("WARP-3519 — exactly-once still holds with watchers and mentions", () => {
+  it("a second sweep over the same rows sends nothing, and no row is left pending", async () => {
+    const prisma = makeStub({
+      pm: [
+        commented("a1", "w1", "c1", { actorId: "u-alice" }),
+        mentioned("a2", "w1", "c1", "u-mia", { actorId: "u-alice" }),
+        pmRow({ id: "a3", workItemId: "w1", verb: "comment_edited", field: "comment" }),
+      ],
+      assignees: [{ workItemId: "w1", userId: "u-bob" }],
+      watchers: [
+        { workItemId: "w1", userId: "u-mia" },
+        { workItemId: "w1", userId: "u-wendy" },
+      ],
+      mentions: [{ commentId: "c1", userId: "u-mia" }],
+      users: [person("alice"), person("bob"), person("mia"), person("wendy")],
+    });
+    await runActivityNotifySweep(prisma, opts);
+    expect(recordMock).toHaveBeenCalledTimes(3);
+    expect(prisma.pm.map((r) => r.notifyStatus)).toEqual(["sent", "sent", "not_needed"]);
+
+    recordMock.mockClear();
+    await runActivityNotifySweep(prisma, opts);
+    expect(recordMock).not.toHaveBeenCalled();
   });
 });

@@ -651,6 +651,176 @@ describe("the three-way rule, client half", () => {
 });
 
 /**
+ * WARP-3434 — a number field goes to the box as a number.
+ *
+ * Every draft is a string, and the box accepts a `positiveInteger` only as a
+ * JSON number, so "5000" was refused with "… is not in the expected format."
+ * Once such a field held a value (QuickBooks Online's `callCeiling`) every
+ * later Save of that connector's form failed with it, a key rotation included.
+ *
+ * Mutation: send `typed` as-is again in `submit` → red on `toBe(7500)`.
+ */
+describe("a positiveInteger field is sent as a number", () => {
+  const QBO: SaasCredentialView = {
+    provider: "fixture-metered",
+    displayName: "Fixture Metered",
+    category: "Accounting",
+    state: "CONNECTED",
+    hasCredentials: true,
+    configured: true,
+    fields: [
+      {
+        name: "callCeiling",
+        label: "Metered calls per 30 days",
+        type: "positiveInteger",
+        required: false,
+        secret: false,
+        storage: "providerConfig",
+        help: null,
+        pattern: null,
+        hasValue: null,
+      },
+      {
+        name: "apiKey",
+        label: "Key",
+        type: "string",
+        required: true,
+        secret: true,
+        storage: "encrypted",
+        help: null,
+        pattern: null,
+        hasValue: true,
+      },
+    ],
+    values: { callCeiling: 5000 },
+    updatedAt: null,
+  };
+
+  async function saveWith(edit: (ceiling: HTMLElement) => void) {
+    fetchSaasCredentialsMock.mockResolvedValue([QBO]);
+    saveSaasCredentialMock.mockResolvedValue(QBO);
+    setRole("owner");
+    render(<SaasCredentialsSection />);
+    edit(await screen.findByLabelText(/Metered calls per 30 days/));
+    fireEvent.click(screen.getAllByRole("button", { name: /Save/ })[0]);
+    await waitFor(() => expect(saveSaasCredentialMock).toHaveBeenCalled());
+    return saveSaasCredentialMock.mock.calls[0][1];
+  }
+
+  it("sends a typed number as a number", async () => {
+    const fields = await saveWith((el) => fireEvent.change(el, { target: { value: "7500" } }));
+    expect(fields.callCeiling).toBe(7500);
+  });
+
+  it("sends the pre-filled number as a number when only something else changed", async () => {
+    // The rotation case: the stored 5000 comes back as the draft "5000" and
+    // must not turn the next Save into a 400.
+    const fields = await saveWith(() => {});
+    expect(fields.callCeiling).toBe(5000);
+  });
+
+  it("sends a cleared field as an empty string, which the box reads as clear", async () => {
+    const fields = await saveWith((el) => fireEvent.change(el, { target: { value: "  " } }));
+    expect(fields.callCeiling).toBe("");
+  });
+
+  it("sends text that is not a number as typed, so the box names the field", async () => {
+    const fields = await saveWith((el) => fireEvent.change(el, { target: { value: "lots" } }));
+    expect(fields.callCeiling).toBe("lots");
+  });
+});
+
+/**
+ * WARP-3434 — a first Xero key can be saved from this page.
+ *
+ * A provider declaring `credentialVariants` records which path a connection is
+ * on, and the box refuses a first save that does not name one ("Choose which
+ * credential type this is."). The view now says which path its fields belong
+ * to, and the form sends it back.
+ *
+ * Mutation: drop the `credentialVariant` line from `submit` → red on the first
+ * test, and the page is back to refusing the first Xero key.
+ */
+describe("a provider with credential variants names its path on save", () => {
+  const XERO: SaasCredentialView = {
+    provider: "xero",
+    displayName: "Xero",
+    category: "Accounting",
+    state: "NOT_CONFIGURED",
+    hasCredentials: false,
+    configured: false,
+    variant: "custom-connection",
+    fields: [
+      {
+        name: "clientId",
+        label: "Xero client id",
+        type: "string",
+        required: true,
+        secret: false,
+        storage: "providerConfig",
+        help: null,
+        pattern: null,
+        hasValue: null,
+      },
+      {
+        name: "clientSecret",
+        label: "Xero client secret",
+        type: "string",
+        required: true,
+        secret: true,
+        storage: "encrypted",
+        help: null,
+        pattern: null,
+        hasValue: false,
+      },
+    ],
+    values: {},
+    updatedAt: null,
+  };
+
+  async function renderXero(view: SaasCredentialView) {
+    fetchSaasCredentialsMock.mockResolvedValue([view]);
+    saveSaasCredentialMock.mockResolvedValue({ ...view, state: "NOT_CONFIGURED" });
+    setRole("owner");
+    render(<SaasCredentialsSection />);
+    await screen.findByLabelText(/Xero client id/);
+  }
+
+  it("sends the path the form is showing, with the first key", async () => {
+    await renderXero(XERO);
+    fireEvent.change(screen.getByLabelText(/Xero client id/), { target: { value: "ID-1" } });
+    fireEvent.change(screen.getByLabelText(/Xero client secret/), {
+      target: { value: "SECRET-1" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Save/ }));
+
+    await waitFor(() => expect(saveSaasCredentialMock).toHaveBeenCalled());
+    expect(saveSaasCredentialMock.mock.calls[0][1]).toEqual({
+      credentialVariant: "custom-connection",
+      clientId: "ID-1",
+      clientSecret: "SECRET-1",
+    });
+  });
+
+  it("says which credential type it is asking for, in the descriptor's words", async () => {
+    await renderXero(XERO);
+    expect(screen.getByTestId("variant-xero")).toHaveTextContent(/Xero app you create/);
+  });
+
+  it("sends no path for a provider that declares none", async () => {
+    setRole("owner");
+    fetchSaasCredentialsMock.mockResolvedValue([BILLING]);
+    render(<SaasCredentialsSection />);
+    await screen.findByLabelText(/Account id/);
+    fireEvent.click(screen.getAllByRole("button", { name: /Save/ })[0]);
+
+    await waitFor(() => expect(saveSaasCredentialMock).toHaveBeenCalled());
+    expect(saveSaasCredentialMock.mock.calls[0][1]).not.toHaveProperty("credentialVariant");
+    expect(screen.queryByTestId("variant-fixture-billing")).not.toBeInTheDocument();
+  });
+});
+
+/**
  * WARP-2842 — a saved credential is CHECKED, and the line shows the verdict.
  *
  * `handleSave` used to stop at `saveSaasCredential` and show "Saved" — true,

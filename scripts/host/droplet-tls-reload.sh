@@ -3,11 +3,9 @@
 # ADR-023 (C2) — Droplet gateway-nginx reload host executor
 # =============================================================================
 #
-# The host-side entry point the orchestrator's tls-issuance cron reaches (via
-# the device-bridge's auth-gated POST /tls/reload) after it has atomically
-# written a freshly-issued Let's Encrypt fullchain into docker/certs/droplet.crt
-# + the matching key into droplet.key. It asks the running gateway container to
-# `nginx -s reload` so the new publicly-trusted cert is served immediately.
+# After a local certificate change, the device-bridge's auth-gated POST
+# /tls/reload reaches this host entry point. It asks the running gateway
+# container to reload nginx so the installed certificate is served immediately.
 #
 # The orchestrator deliberately does NOT mount the docker socket (ADR-023), so
 # the docker compose call has to run on the host — hence this thin wrapper.

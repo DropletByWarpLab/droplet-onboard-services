@@ -4,7 +4,7 @@
  * Owner/admin/family only, and only while the owner has turned personal
  * drives on (`Workspace.personalDriveEnabled`, default off).
  *
- * Real config (default trusted origin https://droplet-ai.local); Nextcloud,
+ * Real config (default trusted origin https://droplet-ai.lan); Nextcloud,
  * cache, crypto, MQTT and push are stubbed like device-clients.routes.test.ts.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -101,10 +101,10 @@ describe("POST /api/storage/network-drive/personal", () => {
       deviceId: "dc-1",
       username: "alice",
       appPassword: "app-pw-123",
-      webdavUrl: "https://droplet-ai.local/nextcloud/remote.php/dav/files/alice/",
-      macosUrl: "https://droplet-ai.local/nextcloud/remote.php/dav/files/alice/",
+      webdavUrl: "https://droplet-ai.lan/nextcloud/remote.php/dav/files/alice/",
+      macosUrl: "https://droplet-ai.lan/nextcloud/remote.php/dav/files/alice/",
       windowsPath:
-        "\\\\droplet-ai.local@SSL\\nextcloud\\remote.php\\dav\\files\\alice",
+        "\\\\droplet-ai.lan@SSL\\nextcloud\\remote.php\\dav\\files\\alice",
     });
     expect(mockPrisma.deviceClient.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
@@ -129,10 +129,10 @@ describe("POST /api/storage/network-drive/personal", () => {
       .send({ platform: "windows" });
     expect(res.status).toBe(200);
     expect(res.body.webdavUrl).toBe(
-      "https://droplet-ai.local/nextcloud/remote.php/dav/files/anne%20marie/",
+      "https://droplet-ai.lan/nextcloud/remote.php/dav/files/anne%20marie/",
     );
     expect(res.body.windowsPath).toBe(
-      "\\\\droplet-ai.local@SSL\\nextcloud\\remote.php\\dav\\files\\anne marie",
+      "\\\\droplet-ai.lan@SSL\\nextcloud\\remote.php\\dav\\files\\anne marie",
     );
   });
 

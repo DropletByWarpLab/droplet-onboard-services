@@ -2,9 +2,10 @@
  * GET /api/admin/capabilities (#14, #15) — drives dashboard nav-gating for the
  * optional admin surfaces (Activity, RAG eval).
  *
- * Covers: admin-only (403 for non-admins); claudeActivity true when a GitHub
- * token OR a fully-configured Jira is present; ragEval true when RAG_EVAL_URL is
- * set; all false when nothing is configured.
+ * Covers: admin-only (403 for non-admins); claudeActivity true when the
+ * developer flag is on (WARP-3433, default off) AND a GitHub token OR a
+ * fully-configured Jira is present; ragEval true when RAG_EVAL_URL is set; all
+ * false when nothing is configured.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import request from "supertest";
@@ -12,7 +13,7 @@ import express from "express";
 
 // The Jira check reads `config`; mock it as a mutable object the tests tweak.
 vi.mock("../config.js", () => ({
-  config: { JIRA_HOST: "", JIRA_EMAIL: "", JIRA_API_TOKEN: "", agentMaxIter: { defaultIter: 5, capIter: 10 } },
+  config: { DROPLET_DEV_ENGINEERING_DASHBOARD: false, JIRA_HOST: "", JIRA_EMAIL: "", JIRA_API_TOKEN: "", agentMaxIter: { defaultIter: 5, capIter: 10 } },
 }));
 
 import { config } from "../config.js";
@@ -31,7 +32,8 @@ function appWithRole(role: string | undefined) {
 }
 
 beforeEach(() => {
-  const c = config as unknown as Record<string, string>;
+  const c = config as unknown as Record<string, string | boolean>;
+  c.DROPLET_DEV_ENGINEERING_DASHBOARD = true;
   c.JIRA_HOST = "";
   c.JIRA_EMAIL = "";
   c.JIRA_API_TOKEN = "";
@@ -52,6 +54,7 @@ describe("GET /api/admin/capabilities", () => {
   });
 
   it("returns all-false when nothing is configured", async () => {
+    // (the flag is ON here: nothing to back it is still false)
     const res = await request(appWithRole("owner")).get(
       "/api/admin/capabilities",
     );
@@ -65,6 +68,19 @@ describe("GET /api/admin/capabilities", () => {
       "/api/admin/capabilities",
     );
     expect(res.body.claudeActivity).toBe(true);
+  });
+
+  it("claudeActivity false without the developer flag, even with a token and Jira (WARP-3433)", async () => {
+    const c = config as unknown as Record<string, string | boolean>;
+    c.DROPLET_DEV_ENGINEERING_DASHBOARD = false;
+    c.JIRA_HOST = "acme.atlassian.net";
+    c.JIRA_EMAIL = "ops@acme.co";
+    c.JIRA_API_TOKEN = "tok";
+    process.env.GITHUB_TOKEN = "ghp_example";
+    const res = await request(appWithRole("owner")).get(
+      "/api/admin/capabilities",
+    );
+    expect(res.body.claudeActivity).toBe(false);
   });
 
   it("claudeActivity true when Jira is fully configured", async () => {

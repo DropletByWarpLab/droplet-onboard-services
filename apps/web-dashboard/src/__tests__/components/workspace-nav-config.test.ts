@@ -11,7 +11,6 @@ import { describe, expect, it } from "vitest";
 
 import {
   NAV_GROUPS,
-  moduleForPath,
   type AuthRole,
   type NavCapabilities,
 } from "@/components/nav-config";
@@ -96,6 +95,15 @@ describe("workspace-nav-config — the map is complete and single-homed", () => 
       expect(set.has(href), `${href} has no home`).toBe(true);
   });
 
+  // WARP-3528 — Support is a child of Customers in the sidebar and a chip of its
+  // own here (rule 2: only the surface differs), beside the destination it is
+  // filed under.
+  it("homes /support in Business, right after Customers (WARP-3528)", () => {
+    const business = SPACES.find((s) => s.id === "business")!.hrefs;
+    expect(business.indexOf("/support")).toBe(business.indexOf("/customers") + 1);
+    expect(spaceHrefs.filter((href) => href === "/support")).toHaveLength(1);
+  });
+
   it("has six spaces, Business between Work and Operations (ADR-044)", () => {
     expect(SPACES.map((s) => s.id)).toEqual([
       "home",
@@ -150,6 +158,28 @@ describe("workspace-nav-config — gates are the sidebar's", () => {
     expect(chips("projects")).not.toContain("/projects");
     expect(chips("network")).toContain("/voice");
     expect(chips("network")).not.toContain("/remote-access");
+  });
+
+  it("keeps Support with CRM off and drops it with Support off (WARP-3528)", () => {
+    // The sidebar's promotion, mirrored: Customers failing only its `crm` gate
+    // does not take a child with a module of its own, and Support off drops
+    // only Support.
+    const chips = (off: string) =>
+      resolveSpaces("owner", ALL_CAPS, (id) => id !== off).flatMap((s) =>
+        s.destinations.map((d) => d.item.href),
+      );
+    expect(chips("crm")).toContain("/support");
+    expect(chips("crm")).not.toContain("/customers");
+    expect(chips("support")).toContain("/customers");
+    expect(chips("support")).not.toContain("/support");
+  });
+
+  it("hides Customers and Support from a guest, whatever is on (WARP-3528)", () => {
+    const hrefs = resolveSpaces("guest", ALL_CAPS, allOn).flatMap((s) =>
+      s.destinations.map((d) => d.item.href),
+    );
+    expect(hrefs).not.toContain("/customers");
+    expect(hrefs).not.toContain("/support");
   });
 
   it("a role gate hides the chip, and an emptied space loses its tab", () => {
@@ -220,41 +250,12 @@ describe("workspace-nav-config — Level 3 views", () => {
     expect(dest("/cameras")?.views).toEqual([]);
   });
 
-  it("Security's Areas, Patterns and Settings are its views, the section itself first (WARP-2977 P2b, WARP-2980, WARP-2978)", () => {
-    const views = dest("/security")?.views ?? [];
-    // WARP-2978 — /security/settings holds the opening hours AND who is told about alerts.
-    expect(views.map((v) => v.label)).toEqual(["Security", "Areas", "Patterns", "Settings"]);
-    // Out of context "Settings" would collide with the app's own Settings link:
-    // its accessible name says whose settings they are (and contains the visible label).
-    expect(views.find((v) => v.href === "/security/settings")?.ariaLabel).toBe("Security settings");
-    expect(views.map((v) => v.href)).toEqual(["/security", "/security/zones", "/security/patterns", "/security/settings"]);
-    // The section pill is exact, so it does not stay lit on its sub-pages.
-    expect(views[0]?.exact).toBe(true);
-    // Views, never chips of their own.
-    expect(spaceHrefs).not.toContain("/security/zones");
-    expect(spaceHrefs).not.toContain("/security/settings");
-    expect(spaceHrefs).not.toContain("/security/patterns");
-  });
-
-  it("Security's views follow the security module, not a role (both pages read at view)", () => {
-    const family = resolveSpaces("family", NO_CAPS, allOn);
-    const sec = family.flatMap((s) => s.destinations).find((d) => d.item.href === "/security");
-    expect(sec?.views.map((v) => v.label)).toEqual(["Security", "Areas", "Patterns", "Settings"]);
-    const off = resolveSpaces("owner", ALL_CAPS, (m) => m !== "security");
-    expect(off.flatMap((s) => s.destinations).find((d) => d.item.href === "/security")).toBeUndefined();
+  it("Customers has no views — its only child (Support) is a chip (WARP-3528)", () => {
+    expect(dest("/customers")?.views).toEqual([]);
   });
 
   it("a destination without children has no views", () => {
     expect(dest("/network")?.views).toEqual([]);
-  });
-
-  // WARP-2981 (ADR-059 P6) — the wall is reached from /security's header, never
-  // the nav, and is still gated by the security module (the prefix rule).
-  it("the Security wall is no chip and no view, but the security module still gates it", () => {
-    expect(spaceHrefs).not.toContain("/security/wall");
-    expect((dest("/security")?.views ?? []).map((v) => v.href)).not.toContain("/security/wall");
-    expect(NAV_GROUPS.flatMap((g) => g.items.flatMap((i) => [i.href, ...(i.children ?? []).map((c) => c.href)]))).not.toContain("/security/wall");
-    expect(moduleForPath("/security/wall")?.moduleId).toBe("security");
   });
 });
 
@@ -275,10 +276,8 @@ describe("workspace-nav-config — locate() derives space + destination from the
     ["/admin/prompt", "ai", "/admin/prompt", null],
     ["/knowledge", "ai", "/knowledge", null],
     ["/network", "ops", "/network", null],
-    // WARP-2977 P2b — Security's sub-pages are views of the Security chip.
-    ["/security", "ops", "/security", "/security"],
-    ["/security/zones", "ops", "/security", "/security/zones"],
-    ["/security/settings", "ops", "/security", "/security/settings"],
+    ["/customers", "business", "/customers", null],
+    ["/support", "business", "/support", null],
   ])("%s → %s / %s (view %s)", (path, space, destHref, viewHref) => {
     const loc = locate(spaces, path);
     expect(loc?.space.def.id).toBe(space);

@@ -199,7 +199,6 @@ function availabilityConfig(overrides: Partial<AvailabilityConfig> = {}): Availa
     DROPLET_MATTER_SERVICE_URL: "http://matter.test",
     ROUTING_SERVICE_URL: "http://routing.test",
     SWITCH_SERVICE_URL: "http://switch.test",
-    DOORS_ENABLED: "1",
     ...overrides,
   };
 }

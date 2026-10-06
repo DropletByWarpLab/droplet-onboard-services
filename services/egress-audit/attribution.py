@@ -4,15 +4,14 @@ Sources of truth (fetched via injectable callables so tests never touch
 docker): `docker network inspect droplet_default` for container IPs and the
 bridge subnet, `ip -j addr` for host-owned IPs. Container names reduce to
 service names via the pinned compose project prefix (`droplet-<service>-<n>`,
-docker-compose.yml:10) and the explicit container_names (droplet-openwrt,
-droplet-cloudflared).
+docker-compose.yml:10) and the explicit container_names (droplet-openwrt).
 
 Attribution classes returned by Attributor.resolve():
   "<service>"          bridge container (per-service — the normal case)
   "host"               host-owned source IP: host daemons, dockerd's DNS
                        forwarder, and the network_mode:host services
                        (routing, matter-controller, switch, camera-discovery,
-                       oled-display, cloudflared) — aggregate in v1
+                       oled-display) — aggregate in v1
   "unknown-container"  inside the bridge subnet but not in the (just
                        refreshed) map — race with container churn
   None                 out of audit scope (LAN clients, inbound remotes)

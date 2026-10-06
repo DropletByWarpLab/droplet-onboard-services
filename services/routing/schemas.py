@@ -545,37 +545,15 @@ class VpnPeerCreateRequest(BaseModel):
         return v
 
 
-class VpnOverlayPeerRequest(BaseModel):
-    """WARP-1385 — install/refresh a DIRECT-PUNCH overlay peer (ADR-030).
+class VpnPeerInstallRequest(BaseModel):
+    """Restore a saved client public-key peer without a configured endpoint."""
 
-    Unlike VpnPeerCreateRequest (which generates the keypair server-side and
-    returns the private key), an overlay peer brings its OWN key: the phone was
-    enrolled with HQ, so the box installs the phone's public key with the
-    phone's observed `endpoint` + a keepalive so WireGuard's own initiations
-    punch outbound. Idempotent: re-installing the same public_key replaces the
-    prior section (refresh), so a re-connect just updates the endpoint."""
+    model_config = ConfigDict(extra="forbid")
 
     interface: str = Field(default="wg0", pattern=_WG_IFACE_PATTERN)
     public_key: str = Field(
         ..., pattern=_WG_KEY_PATTERN,
-        description="Phone's WireGuard public key, base64-encoded (43 chars + '=').",
-    )
-    # The phone's observed public mapping (STUN reflexive) as IPv4:port. IPv6 is
-    # tracked as a follow-up caveat in ADR-030's client stories.
-    # WARP-1757: OPTIONAL. WireGuard learns a peer's endpoint from its first
-    # authenticated handshake, so the box needs one configured only when the BOX
-    # must initiate — i.e. the NAT hole-punch. A peer installed at approval time
-    # (before any punch, and for a box that is its own edge router, behind a
-    # successful port map, or reached over the LAN) is client-initiated and must
-    # be installable WITHOUT one. The SDK's add_peer has always treated it as
-    # optional (`if endpoint:`); only this schema forced it.
-    endpoint: str | None = Field(
-        default=None,
-        pattern=r"^(?:(?:25[0-5]|2[0-4]\d|[01]?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d?\d):(?:[1-9]\d{0,4})$",
-        description=(
-            "Peer's observed endpoint host:port, e.g. '203.0.113.7:51820'. "
-            "Omit for a client-initiated peer — WireGuard learns it from the handshake."
-        ),
+        description="Client WireGuard public key, base64-encoded (43 chars + '=').",
     )
     allowed_ips: list[str] = Field(
         ..., min_length=1, max_length=8,
@@ -583,7 +561,7 @@ class VpnOverlayPeerRequest(BaseModel):
     )
     persistent_keepalive: int = Field(
         default=25, ge=1, le=600,
-        description="Seconds between keepalives — the box side of the punch.",
+        description="Seconds between WireGuard keepalives.",
     )
     description: str = Field(default="", max_length=128)
 

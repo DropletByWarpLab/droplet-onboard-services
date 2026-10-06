@@ -11,7 +11,7 @@
  * machine, the single-display of recovery codes, and the skip path.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { TwoFactorStep } from "./TwoFactorStep";
 import { SetupNavProvider } from "@/components/setup/setup-nav";
 
@@ -397,5 +397,55 @@ describe("TwoFactorStep", () => {
 
     expect(screen.queryByRole("button", { name: /^back$/i })).toBeNull();
     expect(screen.queryByRole("button", { name: /^Go to / })).toBeNull();
+  });
+
+  it("freezes skip, Back and rail jumps while verification is pending so recovery codes stay visible", async () => {
+    let finishVerify!: (response: unknown) => void;
+    verifyTotp.mockImplementationOnce(() => new Promise((resolve) => { finishVerify = resolve; }));
+    const onSkip = vi.fn();
+    const onComplete = vi.fn();
+    render(
+      <SetupNavProvider value={{ navigate: vi.fn(), maxReachedIdx: 13, back: vi.fn(), firstNavigableIdx: 3 }}>
+        <TwoFactorStep onComplete={onComplete} onSkip={onSkip} />
+      </SetupNavProvider>,
+    );
+    await screen.findByAltText(/qr code/i);
+    expect(screen.getByRole("button", { name: /^back$/i })).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: /^Go to / }).length).toBeGreaterThan(0);
+    fireEvent.change(screen.getByLabelText(/6-digit code/i), { target: { value: "123456" } });
+    fireEvent.click(screen.getByRole("button", { name: /verify & enable/i }));
+
+    expect(screen.getByRole("button", { name: "Verifying…" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: /skip for now/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^back$/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Go to / })).not.toBeInTheDocument();
+    await act(async () => { finishVerify({ enabled: true, recoveryCodes: ["saved-1234"] }); });
+    expect(screen.getByText("saved-1234")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /I've saved them/i })).toBeDisabled();
+    expect(onSkip).not.toHaveBeenCalled();
+    expect(onComplete).not.toHaveBeenCalled();
+  });
+
+  it("restores retry, skip and wizard navigation after a verification failure", async () => {
+    let failVerify!: (error: Error) => void;
+    verifyTotp.mockImplementationOnce(() => new Promise((_resolve, reject) => { failVerify = reject; }));
+    const onSkip = vi.fn();
+    const back = vi.fn();
+    render(
+      <SetupNavProvider value={{ navigate: vi.fn(), maxReachedIdx: 13, back, firstNavigableIdx: 3 }}>
+        <TwoFactorStep onComplete={vi.fn()} onSkip={onSkip} />
+      </SetupNavProvider>,
+    );
+    await screen.findByAltText(/qr code/i);
+    fireEvent.change(screen.getByLabelText(/6-digit code/i), { target: { value: "123456" } });
+    fireEvent.click(screen.getByRole("button", { name: /verify & enable/i }));
+    await act(async () => { failVerify(new Error("Invalid authenticator code")); });
+    expect(screen.getByText(/didn't match/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /verify & enable/i })).toBeEnabled();
+    expect(screen.getAllByRole("button", { name: /^Go to / }).length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^back$/i }));
+    expect(onSkip).toHaveBeenCalledOnce();
+    expect(back).toHaveBeenCalledOnce();
   });
 });

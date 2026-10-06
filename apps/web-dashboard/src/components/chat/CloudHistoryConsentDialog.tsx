@@ -9,13 +9,13 @@ import type { CloudHistorySummary } from "@/lib/api";
  * switched to a cloud model. Closing it records nothing, and the server then
  * sends only the user's own messages (it never relies on this dialog).
  *
- * WARP-2979 (ADR-059 P4 §6.13) — an answer that used Security is never sent
- * to a cloud model, whatever is chosen here: the server replays only the
- * user's own messages. So when the summary says so (`neverSent`), the dialog
- * says it too and offers only that — a "send everything" button would promise
- * what the server will not do. That lone button is an ACKNOWLEDGEMENT, not a
- * choice (#2420 review 7): it records nothing, so an earlier "send the whole
- * conversation" is never overwritten by a decline the person did not make.
+ * An answer that used a private source never goes to a cloud model, whatever
+ * is chosen here: the server replays only the user's own messages. So when the
+ * summary says so (`neverSent`), the dialog says it too and offers only that —
+ * a "send everything" button would promise what the server will not do. That
+ * lone button is an ACKNOWLEDGEMENT, not a choice (#2420 review 7): it records
+ * nothing, so an earlier "send the whole conversation" is never overwritten by
+ * a decline the person did not make.
  */
 export function CloudHistoryConsentDialog({
   open,

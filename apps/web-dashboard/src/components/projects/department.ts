@@ -1,8 +1,8 @@
 // ADR-045 §5.3 (slice 8) — the department dimension, dashboard side.
 //
-// Pure helpers for the board's department filter. They live in their own file
-// rather than config.ts because they encode two decisions worth reading, not
-// two bits of formatting.
+// Pure helper for the board's department filter picker. It lives in its own file
+// rather than config.ts because it encodes a decision worth reading, not a bit
+// of formatting.
 //
 // ── 1. WHICH OPTIONS THE PICKER OFFERS ──────────────────────────────────────
 //
@@ -32,31 +32,23 @@
 //
 // ── 2. WHAT SELECTING A DEPARTMENT MATCHES ──────────────────────────────────
 //
-// Picking a DEPARTMENT matches it AND its TEAMs — a department's board that
-// hides the work its own teams own is not a department's board. Picking a TEAM
-// matches only that team. There is no second "include teams" toggle: one
-// control, one rule. The server's `?department=` filter applies exactly the
-// same rule (`pm-department.ts` `expandDepartmentScope`), so this board and the
-// assistant never disagree about what a department contains. (The tool is
-// `business_find` with a `department` argument — WARP-2719. It used to be
-// `pm_list_work_items`, which ADR-045 slice C deleted.)
+// Not decided here. A department chip is the filter language's `department`
+// condition, and the SERVER evaluates it (WS-6, WARP-3522): picking a DEPARTMENT
+// matches it AND its TEAMs, picking a TEAM matches only that team, and an item's
+// own department overrides its project's — `expandDepartmentScope` and
+// `departmentWorkItemWhere` in the orchestrator's pm-department.ts, the same
+// functions `?department=` and the assistant use, so this board and the
+// assistant never disagree about what a department contains. This file used to
+// repeat that rule client-side (`matchesDepartment`); the page no longer
+// filters what it holds, so the copy is gone rather than left to drift.
 //
 // HOUSEHOLD is never offered. It is the seeded system unit everyone is already
 // in, so "route it to Household" is indistinguishable from routing nothing. The
 // orchestrator refuses the assignment (`department_not_assignable`); filtering
 // it out here means the refusal is never reachable from this surface.
-//
-// The filtering is client-side, like `savedView` and `q` on this page: the
-// board already holds every item for the project in one fetch, so a server
-// round-trip would buy nothing and would cost the instant saved-view counts.
 
 import type { Department } from "@/lib/types";
 import type { PmDepartmentRef, PmWorkItem } from "./types";
-
-/** No department filter applied. */
-export const DEPARTMENT_ANY = "all";
-/** Only work no department owns — at the item level AND the project level. */
-export const DEPARTMENT_NONE = "none";
 
 /** One row of the picker. Deliberately the PM projection's shape, not the
  *  storage API's `Department` — the two sources are merged INTO this. */
@@ -115,32 +107,4 @@ export function departmentOptions(
     if (a.kind !== b.kind) return a.kind === "TEAM" ? 1 : -1;
     return a.name.localeCompare(b.name);
   });
-}
-
-/**
- * Does this work item belong to the selected department?
- *
- * `item.department` is already RESOLVED by the orchestrator (the item's own
- * overriding its project's), so this never re-implements the override rule —
- * it only adds the DEPARTMENT→TEAM rollup, which needs no lookup because the
- * item's own ref carries `parentId`.
- *
- * `options` is consulted for one thing only: confirming the SELECTED unit is a
- * DEPARTMENT, since a TEAM must not roll up to anything. When the option list
- * has not loaded, the `parentId` comparison alone is still correct — it can
- * only match a genuine parent.
- */
-export function matchesDepartment(
-  item: PmWorkItem,
-  selection: string,
-  options: readonly DepartmentOption[],
-): boolean {
-  if (selection === DEPARTMENT_ANY) return true;
-  const dept = item.department;
-  if (selection === DEPARTMENT_NONE) return dept === null;
-  if (!dept) return false;
-  if (dept.id === selection) return true;
-  const selected = options.find((o) => o.id === selection);
-  if (selected && selected.kind !== "DEPARTMENT") return false;
-  return dept.parentId === selection;
 }

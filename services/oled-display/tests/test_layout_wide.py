@@ -34,10 +34,12 @@ def wide(monkeypatch, sim_display):
 def populated(wide):
     wide._v3.update({
         "cpu": 34, "mem": 61, "disk": 44, "temp": 52, "gpu": 12,
+        "gpu_temp": 58,
         "ip": "192.168.1.250", "hostname": "droplet-sys",
         "public_host": "warp-lab.droplet-us.com",
         "uptime": "6d 4h", "version": "v2.6.1",
         "sparks_cpu": [20 + (i % 17) for i in range(48)],
+        "sparks_gpu": [10 + (i % 9) for i in range(48)],
         "wan_online": True, "wan_latency_ms": 14, "tls_days": 61,
         "wifi": {"ssid": "Droplet-AI", "band": "5 GHz", "channel": 36,
                  "clients": 4},
@@ -168,6 +170,93 @@ def test_missing_metrics_render_as_dash_never_zero(wide):
     assert lw._num(None) == "—"
     assert lw._num(None, "%") == "—"
     assert lw._num(0, "%") == "0%"
+
+
+def _health_runs(populated, monkeypatch):
+    runs = []
+    real = display_module._v3_text
+
+    def spy(draw, text, x, y, **kwargs):
+        runs.append((text, x, y, kwargs))
+        return real(draw, text, x, y, **kwargs)
+
+    monkeypatch.setattr(display_module, "_v3_text", spy)
+    draw = ImageDraw.Draw(Image.new("RGB", (PANEL_W, PANEL_H)))
+    lw._cell_health(populated, draw, populated._v3)
+    return runs
+
+
+def test_gpu_is_the_largest_load_reading_and_owns_the_primary_trend(populated, monkeypatch):
+    sparks = []
+    real = lw._spark
+
+    def spy(draw, x, y, w, h, series, ink, fill):
+        sparks.append(series)
+        return real(draw, x, y, w, h, series, ink, fill)
+
+    monkeypatch.setattr(lw, "_spark", spy)
+    runs = _health_runs(populated, monkeypatch)
+    by_text = {text: kw for text, _x, _y, kw in runs}
+    assert "GPU LOAD" in by_text
+    assert {"CPU", "RAM", "GPU T", "CPU T", "34%", "61%", "58°C", "52°C"} <= by_text.keys()
+    assert by_text["12%"]["font"].size > by_text["34%"]["font"].size
+    assert sparks == [populated._v3["sparks_gpu"]]
+
+
+def test_a_missing_gpu_stays_unknown_even_with_cpu_history(populated, monkeypatch):
+    populated._v3.update(gpu=None, gpu_temp=None, sparks_gpu=[])
+    runs = _health_runs(populated, monkeypatch)
+    texts = [text for text, _x, _y, _kw in runs]
+    assert texts.count("—") == 2
+    assert "no GPU history" in texts
+    assert "0%" not in texts and "0°C" not in texts
+
+
+@pytest.mark.parametrize("temperature,expected", [
+    (69, display_module.V3_TEXT),
+    (70, display_module.V3_ORANGE),
+    (84, display_module.V3_ORANGE),
+    (85, display_module.V3_RED),
+])
+def test_both_temperature_readings_warn_at_the_thermal_thresholds(populated, monkeypatch,
+                                                                  temperature, expected):
+    populated._v3.update(gpu_temp=temperature, temp=temperature)
+    runs = _health_runs(populated, monkeypatch)
+    inks = [kw["fill"] for text, _x, _y, kw in runs if text == f"{temperature}°C"]
+    assert inks == [expected, expected]
+
+
+@pytest.mark.parametrize("overall,label,state", [
+    ("ok", "OK", "live"),
+    ("healed", "HEALED", "live"),
+    ("heal_failed", "HEAL FAILED", "degraded"),
+    ("escalated", "ESCALATED", "alert"),
+    ("stale", "STALE", "degraded"),
+    ("unavailable", "NO DATA", "live"),
+])
+def test_watchdog_status_is_visible_and_affects_the_box_state(populated, monkeypatch,
+                                                             overall, label, state):
+    populated._v3["watchdog"] = {"available": overall != "unavailable", "overall": overall}
+    assert label in _texts(populated)
+    assert _chrome_state(monkeypatch, populated) == state
+
+
+def test_an_unavailable_watchdog_does_not_claim_ok(populated):
+    populated._v3["watchdog"] = {"available": False, "overall": "ok"}
+    texts = _texts(populated)
+    assert "NO DATA" in texts and "OK" not in texts
+
+
+def test_stale_watchdog_is_degraded_even_if_the_feed_is_unavailable(populated, monkeypatch):
+    populated._v3["watchdog"] = {"available": False, "overall": "stale"}
+    assert "STALE" in _texts(populated)
+    assert _chrome_state(monkeypatch, populated) == "degraded"
+
+
+def test_watchdog_failure_cannot_hide_a_service_alert(populated, monkeypatch):
+    populated._v3["watchdog"] = {"available": True, "overall": "heal_failed"}
+    populated._v3["services"]["status"] = "down"
+    assert _chrome_state(monkeypatch, populated) == "alert"
 
 
 def test_touch_regions_cover_every_cell(populated):
@@ -1191,26 +1280,32 @@ def test_the_vitals_ssid_default_is_empty_not_a_plausible_name(sim_display):
 
 # --- WARP-2944: the certificate lifecycle on the screen -------------------
 
-def test_tls_warning_line_speaks_only_when_renewal_is_failing_and_time_is_short():
-    """The rule, branch by branch: failing + under 14 days → the line with the
-    count and the action; failing with weeks to go, healthy, renewing, the
-    bootstrap self-signed cert, an unpolled box, and junk all say nothing."""
-    assert lw.tls_warning_line({"state": "LE_RENEW_FAILED", "daysLeft": 5}) == (
-        "CERTIFICATE · renewal failing · 5 days left · needs internet")
-    assert lw.tls_warning_line({"state": "LE_RENEW_FAILED", "daysLeft": 1}) == (
-        "CERTIFICATE · renewal failing · 1 day left · needs internet")
-    assert lw.tls_warning_line({"state": "LE_RENEW_FAILED", "daysLeft": -2}) == (
-        "CERTIFICATE EXPIRED · renewal failing · needs internet")
-    assert lw.tls_warning_line({"state": "LE_RENEW_FAILED", "daysLeft": 13}) != ""
-    assert lw.tls_warning_line({"state": "LE_RENEW_FAILED", "daysLeft": 14}) == ""
-    assert lw.tls_warning_line({"state": "LE_RENEW_FAILED", "daysLeft": 25}) == ""
+def test_tls_warning_line_reports_current_local_certificate_expiry():
+    """The footer warns about the current leaf without promising HQ renewal.
+    Historical fleet state, unknown metadata, and a healthy leaf say nothing."""
+    assert lw.tls_warning_line({"state": "LOCAL_CERTIFICATE", "daysLeft": 5}) == (
+        "CERTIFICATE · 5 days left · needs replacement")
+    assert lw.tls_warning_line({"state": "LOCAL_CERTIFICATE", "daysLeft": 1}) == (
+        "CERTIFICATE · 1 day left · needs replacement")
+    assert lw.tls_warning_line({"state": "LOCAL_CERTIFICATE", "daysLeft": -2}) == (
+        "CERTIFICATE EXPIRED · needs replacement")
+    assert lw.tls_warning_line({"state": "LOCAL_CERTIFICATE", "daysLeft": 13}) != ""
+    assert lw.tls_warning_line({"state": "LOCAL_CERTIFICATE", "daysLeft": 14}) == ""
+    assert lw.tls_warning_line({"state": "LOCAL_CERTIFICATE", "daysLeft": 25}) == ""
     assert lw.tls_warning_line({"state": "LE_ISSUED", "daysLeft": 3}) == ""
+    assert lw.tls_warning_line({"state": "LE_RENEW_FAILED", "daysLeft": 3}) == ""
     assert lw.tls_warning_line({"state": "LE_RENEWING", "daysLeft": 3}) == ""
     assert lw.tls_warning_line({"state": "BOOTSTRAP_SELF_SIGNED", "daysLeft": None}) == ""
-    assert lw.tls_warning_line({"state": "LE_RENEW_FAILED", "daysLeft": None}) == ""
-    assert lw.tls_warning_line({"state": "LE_RENEW_FAILED", "daysLeft": "5"}) == ""
+    assert lw.tls_warning_line({"state": "LOCAL_CERTIFICATE", "daysLeft": None}) == ""
+    assert lw.tls_warning_line({"state": "LOCAL_CERTIFICATE", "daysLeft": "5"}) == ""
     assert lw.tls_warning_line({}) == ""
     assert lw.tls_warning_line(None) == ""
+
+
+def test_tls_warning_line_reports_local_dns_name_mismatch():
+    assert lw.tls_warning_line({"state": "LOCAL_CERTIFICATE", "daysLeft": 61,
+                                "coversInternalHostname": False}) == (
+        "CERTIFICATE · internal DNS name mismatch · needs replacement")
 
 
 def _chrome_state(monkeypatch, populated):
@@ -1226,10 +1321,10 @@ def _chrome_state(monkeypatch, populated):
 
 
 def test_a_failing_certificate_takes_the_footer_and_the_pill_goes_degraded(populated, monkeypatch):
-    populated._mirror_to_v3("tls", {"state": "LE_RENEW_FAILED", "daysLeft": 6,
-                                    "fqdn": "warp-lab.droplet-us.com"})
+    populated._mirror_to_v3("tls", {"state": "LOCAL_CERTIFICATE", "daysLeft": 6,
+                                    "fqdn": "droplet-ai.lan"})
     t = _texts(populated)
-    assert "CERTIFICATE · renewal failing · 6 days left · needs internet" in t
+    assert "CERTIFICATE · 6 days left · needs replacement" in t
     # It outranks the last event on the footer's right, rather than sharing it.
     assert "12:04 · Backup completed" not in t
     # DEGRADED, never ALERT: the box is doing its job; its padlock is not.
@@ -1237,8 +1332,8 @@ def test_a_failing_certificate_takes_the_footer_and_the_pill_goes_degraded(popul
 
 
 def test_a_healthy_certificate_leaves_the_footer_and_the_pill_alone(populated, monkeypatch):
-    populated._mirror_to_v3("tls", {"state": "LE_ISSUED", "daysLeft": 61,
-                                    "fqdn": "warp-lab.droplet-us.com"})
+    populated._mirror_to_v3("tls", {"state": "LOCAL_CERTIFICATE", "daysLeft": 61,
+                                    "fqdn": "droplet-ai.lan"})
     t = _texts(populated)
     assert "12:04 · Backup completed" in t
     assert not any(s.startswith("CERTIFICATE") for s in t)
@@ -1246,10 +1341,10 @@ def test_a_healthy_certificate_leaves_the_footer_and_the_pill_alone(populated, m
 
 
 def test_a_later_answer_takes_the_warning_back_down(populated):
-    """update_tls replaces wholesale: renewal succeeded → no stale warning."""
-    populated._mirror_to_v3("tls", {"state": "LE_RENEW_FAILED", "daysLeft": 3})
+    """update_tls replaces wholesale: a fresh local leaf clears the warning."""
+    populated._mirror_to_v3("tls", {"state": "LOCAL_CERTIFICATE", "daysLeft": 3})
     assert any(s.startswith("CERTIFICATE") for s in _texts(populated))
-    populated._mirror_to_v3("tls", {"state": "LE_ISSUED", "daysLeft": 89})
+    populated._mirror_to_v3("tls", {"state": "LOCAL_CERTIFICATE", "daysLeft": 89})
     assert not any(s.startswith("CERTIFICATE") for s in _texts(populated))
     assert populated._v3["tls"].get("daysLeft") == 89
 
@@ -1271,6 +1366,11 @@ BRIDGE_PAIR_OK = {
     # The compact pin-only form (base64url, no padding) — 63 bytes, the only
     # shape that encodes as a version-4 code on the rail card.
     "payload": "droplet://pair?spki=8BevqGrXi-1KveZGkPBbe42742sm6cj0EOU2ph498lw",
+    # WARP-3414: the reading form of the same key, as the bridge now sends it
+    # (device-bridge.py format_key_fingerprint; pinned against the known
+    # certificate in test_device_bridge_pair_qr.py).
+    "fingerprint": ("F017 AFA8 6AD7 8BED 4ABD E646 90F0 5B7B "
+                    "8DBB E36B 26E9 C8F4 10E5 36A6 1E3D F25C"),
 }
 
 
@@ -1342,3 +1442,166 @@ def test_only_a_well_shaped_pairing_link_reaches_the_glass(populated):
                     "droplet://pair?spki=" + "!" * 43, ""):
         populated._mirror_to_v3("pair", {"ok": True, "payload": payload})
         assert populated.pair_qr_payload() == "", payload
+
+
+# --- WARP-3414: the rail's certificate-fingerprint face ----------------------
+# A Droplet app asks an admin to confirm the box's certificate key on a manual
+# connect. The dashboard shows the same value over the connection being
+# checked, so it cannot be the reference; this panel can (a LAN attacker cannot
+# rewrite the glass). Pinned: the app's format, the full 16 groups (never a
+# prefix), the tap path, the self-revert, and that nothing malformed is drawn.
+
+KNOWN_FINGERPRINT = BRIDGE_PAIR_OK["fingerprint"]
+
+
+def test_a_bridge_with_no_fingerprint_offers_no_fingerprint_face(populated):
+    """A frame without the field (an older bridge) leaves the rail exactly as
+    it was: no extra face, no pager."""
+    pair = {k: v for k, v in BRIDGE_PAIR_OK.items() if k != "fingerprint"}
+    populated._mirror_to_v3("pair", pair)
+    assert populated.cert_fingerprint_groups() == []
+    assert lw._rail_content(populated, populated._v3)["faces"] == 1
+    assert _rail_dots(populated) == []
+    lw.render_status(populated)
+    _tap_rail(populated)
+    assert populated.rail_face() == "dashboard"
+
+
+def test_the_bridge_frame_makes_the_fingerprint_a_second_face(with_pair):
+    assert with_pair.cert_fingerprint_groups() == KNOWN_FINGERPRINT.split(" ")
+    assert len(with_pair.cert_fingerprint_groups()) == 16
+    c = lw._rail_content(with_pair, with_pair._v3)
+    assert c["faces"] == 2 and c["face_index"] == 0
+    assert len(_rail_dots(with_pair)) == 2
+
+
+def test_tapping_the_rail_shows_the_full_fingerprint_in_the_apps_format(with_pair):
+    lw.render_status(with_pair)
+    _tap_rail(with_pair)
+    assert with_pair.rail_face() == "fingerprint"
+    c = lw._rail_content(with_pair, with_pair._v3)
+    assert c["headline"] == "Droplet fingerprint"
+    assert c["fingerprint"] == KNOWN_FINGERPRINT.split(" ")
+    assert c["faces"] == 2 and c["face_index"] == 1
+    # All 16 groups are drawn, four to a line, none shortened.
+    drawn = _texts(with_pair)
+    for i in range(0, 16, 4):
+        line = " ".join(KNOWN_FINGERPRINT.split(" ")[i:i + 4])
+        assert line in drawn, f"{line!r} missing from the glass: {drawn!r}"
+
+
+def test_the_fingerprint_face_stays_inside_the_safe_area(with_pair):
+    lw.render_status(with_pair)
+    _tap_rail(with_pair)
+    g = lw.geom()
+    boxes = _rail_boxes(with_pair)
+    assert boxes
+    for box, text in boxes:
+        assert box[1] >= g.top, f"{text!r} above the safe area: {box}"
+        assert box[3] <= g.bottom, f"{text!r} below the safe area: {box}"
+        assert box[2] <= g.rail_x + g.rail_w, f"{text!r} overflows: {box}"
+
+
+def test_the_fingerprint_face_reverts_by_itself_and_on_a_second_tap(with_pair):
+    """A deadline, like the Wi-Fi face: the rail goes back to the scannable QR
+    with nothing running, and a tap leaves it at once."""
+    lw.render_status(with_pair)
+    before = time.time()
+    _tap_rail(with_pair)
+    assert (with_pair._rail_fp_until - before) == pytest.approx(
+        display_module.RAIL_FINGERPRINT_SECONDS, abs=1.0)
+    with_pair._rail_fp_until = time.time() - 0.001
+    assert with_pair.rail_face() == "dashboard"
+    assert lw._rail_content(with_pair, with_pair._v3)["payload"] == BRIDGE_PAIR_OK["payload"]
+    lw.render_status(with_pair)
+    _tap_rail(with_pair)
+    assert with_pair.rail_face() == "fingerprint"
+    lw.render_status(with_pair)
+    _tap_rail(with_pair)
+    assert with_pair.rail_face() == "dashboard"
+    assert with_pair._rail_fp_until == 0.0
+
+
+def test_the_tap_steps_pair_then_wifi_then_fingerprint_then_pair(with_pair):
+    with_pair._pyportal_send("qr", dict(BRIDGE_QR_OK))
+    lw.render_status(with_pair)
+    assert lw._rail_content(with_pair, with_pair._v3)["faces"] == 3
+    seen = []
+    for _ in range(4):
+        seen.append(with_pair.rail_face())
+        lw.render_status(with_pair)
+        _tap_rail(with_pair)
+    seen.append(with_pair.rail_face())
+    assert seen == ["dashboard", "wifi", "fingerprint", "dashboard", "wifi"]
+    # Leaving the Wi-Fi face clears its window whatever comes next.
+    lw.render_status(with_pair)
+    _tap_rail(with_pair)
+    assert with_pair._rail_wifi_until == 0.0
+
+
+def test_the_wifi_face_names_the_face_the_next_tap_opens(with_pair, monkeypatch):
+    """The Wi-Fi face's typed line is the on-glass instruction. With a
+    fingerprint on offer the next tap goes THERE, not to the dashboard; with
+    none (older bridge, or the face switched off) it still goes to the
+    dashboard."""
+    with_pair._pyportal_send("qr", dict(BRIDGE_QR_OK))
+    lw.render_status(with_pair)
+    _tap_rail(with_pair)
+    assert with_pair.rail_face() == "wifi"
+    c = lw._rail_content(with_pair, with_pair._v3)
+    assert c["fallback"] == "TAP FOR FINGERPRINT"
+    # The line is true: that tap really does land on the fingerprint.
+    lw.render_status(with_pair)
+    _tap_rail(with_pair)
+    assert with_pair.rail_face() == "fingerprint"
+    # No fingerprint to go to: the old instruction, and it is still true.
+    pair = {k: v for k, v in BRIDGE_PAIR_OK.items() if k != "fingerprint"}
+    with_pair._mirror_to_v3("pair", pair)
+    with_pair._rail_wifi_until = time.time() + 60
+    assert with_pair.rail_face() == "wifi"
+    assert lw._rail_content(with_pair, with_pair._v3)["fallback"] == "TAP FOR DASHBOARD"
+    # Face switched off: same.
+    with_pair._mirror_to_v3("pair", dict(BRIDGE_PAIR_OK))
+    monkeypatch.setattr(display_module, "RAIL_FINGERPRINT", False)
+    assert lw._rail_content(with_pair, with_pair._v3)["fallback"] == "TAP FOR DASHBOARD"
+
+
+def test_the_bridge_taking_the_fingerprint_back_takes_the_face_down(with_pair):
+    """`ok: False` (no LAN address, unreadable certificate) beats a previously
+    good frame — a merge would leave a stale key on the front of the rack."""
+    lw.render_status(with_pair)
+    _tap_rail(with_pair)
+    assert with_pair.rail_face() == "fingerprint"
+    with_pair._mirror_to_v3("pair", {"ok": False, "error": "served certificate not readable",
+                                     "fingerprint": KNOWN_FINGERPRINT})
+    assert with_pair.cert_fingerprint_groups() == []
+    assert with_pair.rail_face() == "dashboard"
+
+
+@pytest.mark.parametrize("bad", [
+    "",
+    KNOWN_FINGERPRINT.lower(),                       # not uppercase
+    " ".join(KNOWN_FINGERPRINT.split(" ")[:8]),      # a prefix: forgeable
+    KNOWN_FINGERPRINT.replace(" ", ""),              # not grouped
+    KNOWN_FINGERPRINT + " 0000",                     # 17 groups
+    KNOWN_FINGERPRINT.replace("F017", "G017"),       # not hex
+    KNOWN_FINGERPRINT.replace(" ", "  ", 1),         # odd spacing
+])
+def test_only_a_well_shaped_fingerprint_reaches_the_glass(populated, bad):
+    """The panel never composes the value and never trusts an odd one; a short
+    prefix is exactly what an impostor can grind out."""
+    populated._mirror_to_v3("pair", {**BRIDGE_PAIR_OK, "fingerprint": bad})
+    assert populated.cert_fingerprint_groups() == []
+    lw.render_status(populated)
+    _tap_rail(populated)
+    assert populated.rail_face() == "dashboard"
+
+
+def test_the_fingerprint_kill_switch_leaves_the_rail_as_it_was(with_pair, monkeypatch):
+    monkeypatch.setattr(display_module, "RAIL_FINGERPRINT", False)
+    lw.render_status(with_pair)
+    _tap_rail(with_pair)
+    assert with_pair.rail_face() == "dashboard"
+    c = lw._rail_content(with_pair, with_pair._v3)
+    assert c["faces"] == 1 and c["payload"] == BRIDGE_PAIR_OK["payload"]
+    assert _rail_dots(with_pair) == []

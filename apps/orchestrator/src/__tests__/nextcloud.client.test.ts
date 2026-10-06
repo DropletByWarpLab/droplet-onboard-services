@@ -40,6 +40,7 @@ import {
   ncFetchThumbnail,
   ncCreateShareV2,
   ncUpdateShare,
+  ncIsDirectory,
   ncDeleteShare,
   ncListSharedWithMe,
   ncListOutboundShares,
@@ -804,6 +805,71 @@ describe("nextcloud.client — thumbnails", () => {
         } as unknown as Response) as unknown as typeof fetch;
       expect(await ncFetchThumbnail("t", 1)).toBeNull();
     });
+
+    it("streams within an optional byte cap and applies its timeout signal", async () => {
+      const body = new Uint8Array([1, 2, 3, 4]);
+      const fetchMock = vi.fn().mockResolvedValue(
+        new Response(body, { headers: { "content-type": "image/jpeg" } }),
+      );
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      const result = await ncFetchThumbnail("token", 42, 512, 512, {
+        maxBytes: 4,
+        timeoutMs: 1000,
+      });
+
+      expect(result?.contentType).toBe("image/jpeg");
+      expect([...new Uint8Array(result!.body)]).toEqual([1, 2, 3, 4]);
+      expect(fetchMock.mock.calls[0]![1]?.signal).toBeInstanceOf(AbortSignal);
+    });
+
+    it("cancels before buffering when Content-Length declares an oversized thumbnail", async () => {
+      const cancel = vi.fn(async () => undefined);
+      const arrayBuffer = vi.fn(async () => new ArrayBuffer(0));
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        headers: new Headers({ "content-length": "5", "content-type": "image/jpeg" }),
+        body: { cancel },
+        arrayBuffer,
+      } as unknown as Response) as unknown as typeof fetch;
+
+      expect(await ncFetchThumbnail("token", 42, 512, 512, { maxBytes: 4 })).toBeNull();
+      expect(cancel).toHaveBeenCalledTimes(1);
+      expect(arrayBuffer).not.toHaveBeenCalled();
+    });
+
+    it("cancels a streamed thumbnail as soon as it crosses the byte cap", async () => {
+      let cancelled = false;
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array([1, 2, 3]));
+          controller.enqueue(new Uint8Array([4, 5, 6]));
+        },
+        cancel() {
+          cancelled = true;
+        },
+      });
+      global.fetch = vi.fn().mockResolvedValue(
+        new Response(body, { headers: { "content-type": "image/jpeg" } }),
+      ) as unknown as typeof fetch;
+
+      expect(await ncFetchThumbnail("token", 42, 512, 512, { maxBytes: 4 })).toBeNull();
+      expect(cancelled).toBe(true);
+    });
+
+    it("returns null on bounded 404 responses", async () => {
+      const cancel = vi.fn(async () => undefined);
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 404,
+        headers: new Headers(),
+        body: { cancel },
+      } as unknown as Response) as unknown as typeof fetch;
+
+      expect(await ncFetchThumbnail("t", 1, 256, 256, { maxBytes: 4 })).toBeNull();
+      expect(cancel).toHaveBeenCalledTimes(1);
+    });
   });
 });
 
@@ -902,6 +968,24 @@ describe("nextcloud.client — shares v2", () => {
       await expect(
         ncCreateShareV2("t", "/report.pdf", { shareType: 3, password: "pwned" })
       ).rejects.toThrow(/compromised password list/);
+    });
+  });
+
+  describe("ncIsDirectory (WARP-3586)", () => {
+    const propfind = (status: number, text = "") =>
+      mockResponse({ ok: status >= 200 && status < 300, status, text });
+
+    it("true for a collection, false for a file, false for 404, throws otherwise", async () => {
+      const collection = '<d:multistatus xmlns:d="DAV:"><d:response><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat></d:response></d:multistatus>';
+      const file = '<d:multistatus xmlns:d="DAV:"><d:response><d:propstat><d:prop><d:resourcetype/></d:prop></d:propstat></d:response></d:multistatus>';
+      global.fetch = vi.fn().mockResolvedValueOnce(propfind(207, collection)) as unknown as typeof fetch;
+      await expect(ncIsDirectory("t", "mia", "/Docs")).resolves.toBe(true);
+      global.fetch = vi.fn().mockResolvedValueOnce(propfind(207, file)) as unknown as typeof fetch;
+      await expect(ncIsDirectory("t", "mia", "/Docs/a.pdf")).resolves.toBe(false);
+      global.fetch = vi.fn().mockResolvedValueOnce(propfind(404)) as unknown as typeof fetch;
+      await expect(ncIsDirectory("t", "mia", "/nope")).resolves.toBe(false);
+      global.fetch = vi.fn().mockResolvedValueOnce(propfind(500)) as unknown as typeof fetch;
+      await expect(ncIsDirectory("t", "mia", "/x")).rejects.toThrow(/PROPFIND failed/);
     });
   });
 

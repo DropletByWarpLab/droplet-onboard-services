@@ -292,7 +292,7 @@ describe("setup AI step (WARP-174)", () => {
     ).toBeInTheDocument();
   });
 
-  it("the post-response Continue CTA advances to the voice step, then team (WARP-1036)", async () => {
+  it("the post-response Continue CTA advances to voice, accounts, then team", async () => {
     fetchModelsMock.mockResolvedValue({ models: [LOCAL_MODEL] });
     sendChatMock.mockResolvedValue({
       ok: true,
@@ -322,7 +322,8 @@ describe("setup AI step (WARP-174)", () => {
       await Promise.resolve();
       fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
     });
-    // PR #381 — team still follows (voice → team → done).
+    expect(screen.getByText(/connect your accounts/i)).toBeInTheDocument();
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: /skip for now/i })));
     expect(screen.getByText(/bring in your team/i)).toBeInTheDocument();
   });
 
@@ -338,12 +339,14 @@ describe("setup AI step (WARP-174)", () => {
     });
 
     expect(sendChatMock).not.toHaveBeenCalled();
-    // WARP-1036 — the step after ai is now voice; team follows on skip.
+    // Voice follows AI, then the optional account connections.
     expect(screen.getByText(/hey droplet/i)).toBeInTheDocument();
     await act(async () => {
       await Promise.resolve();
       fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
     });
+    expect(screen.getByText(/connect your accounts/i)).toBeInTheDocument();
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: /skip for now/i })));
     expect(screen.getByText(/bring in your team/i)).toBeInTheDocument();
   });
 

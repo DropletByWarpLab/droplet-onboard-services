@@ -290,9 +290,9 @@ export type ActivityAppendTx = Pick<Prisma.TransactionClient, "$queryRawUnsafe" 
  * The caller broke an append precondition (a bare client, a handle without
  * Prisma's transaction id, statements that ran outside one transaction, or a
  * transaction that is not READ COMMITTED). A
- * PROGRAMMING error, never an outage: the Security audit helper lets it
- * through unwrapped (a 500), instead of mapping it to 503 AUDIT_UNAVAILABLE.
- * Thrown before any row is written; the caller's transaction rolls back.
+ * PROGRAMMING error, never an outage: a caller must let it through unwrapped
+ * (a 500), not map it to a 503. Thrown before any row is written; the
+ * caller's transaction rolls back.
  */
 export class ActivityChainPreconditionError extends Error {
   constructor(message: string) {
@@ -317,7 +317,7 @@ const PRISMA_TX_ID = Symbol.for("prisma.client.transaction.id");
  * `activityRow.create` is not a function: a spread / `Object.assign` copy of
  * the real tx carries the id (own enumerable symbol) but not Prisma's
  * methods, and would otherwise fail on its first statement with a TypeError
- * that the Security routes report as an outage (503 AUDIT_UNAVAILABLE)
+ * that a caller wrapping append failures would report as an outage (503)
  * instead of the programming error it is (500). (`activityRow.create` is
  * checked as part of that shape only; the append writes through
  * `$queryRawUnsafe` — see `ActivityAppendTx`.)
@@ -344,7 +344,7 @@ function transactionIdOf(tx: ActivityAppendTx): string {
  * `pg_advisory_xact_lock` is re-entrant within one backend, so it serialises
  * nothing between two appends running concurrently on the SAME transaction:
  * both hold the lock at once, read the same tail and fork the chain (measured
- * on pg16: `Promise.all` of three Security audits on one tx committed with two
+ * on pg16: `Promise.all` of three audits on one tx committed with two
  * rows sharing a predecessor, and audit-verify broke for good). Before `record()`
  * had an in-tx sibling this could not happen, because every append opened its
  * own transaction on its own connection.
@@ -384,9 +384,9 @@ const appendQueues = new Map<string, Promise<unknown>>();
  * ONE code path that signs and inserts. activity.service.test.ts pins its
  * output to literals computed from the pre-split recorder (61fa4aebe).
  *
- * Why a caller would want it: a security change and its audit row must
- * commit together — if the audit cannot be written, the change must not
- * happen either.
+ * Why a caller would want it: a change and its audit row must commit
+ * together — if the audit cannot be written, the change must not happen
+ * either.
  *
  * PRECONDITIONS — enforced, not advisory:
  *   · `tx` is the interactive-transaction client Prisma handed the callback
@@ -419,7 +419,7 @@ const appendQueues = new Map<string, Promise<unknown>>();
  *     pg16 a `Promise.all` over per-item `[CAS; audit]` pairs did exactly
  *     that). After the audits NOTHING else may run in the callback — in
  *     particular no global-client audit (`recordActivity`,
- *     `getActivityRecorder().record`, `auditSecuritySystem`): it would wait
+ *     `getActivityRecorder().record`): it would wait
  *     for this very lock, on another connection, until the interactive
  *     transaction times out (P2028), and Postgres cannot see that deadlock.
  *     The change would be lost.

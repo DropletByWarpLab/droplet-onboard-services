@@ -46,6 +46,34 @@ beforeEach(() => {
 });
 
 describe("POST /api/stt — ?rate= parsing", () => {
+  it("rejects speech longer than the 30-second sidecar limit before inference", async () => {
+    const res = await request(makeApp())
+      .post("/api/stt?rate=16000")
+      .set("Content-Type", "application/octet-stream")
+      .send(Buffer.alloc(16000 * 2 * 30 + 2));
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: "audio_too_long", maxSeconds: 30 });
+    expect(mockTranscribe).not.toHaveBeenCalled();
+  });
+
+  it("accepts exactly 30 seconds at a lower microphone sample rate", async () => {
+    const res = await request(makeApp())
+      .post("/api/stt?rate=8000")
+      .set("Content-Type", "application/octet-stream")
+      .send(Buffer.alloc(8000 * 2 * 30));
+    expect(res.status).toBe(200);
+    expect(mockTranscribe).toHaveBeenCalledWith(expect.objectContaining({ rate: 8000 }));
+  });
+
+  it("rejects a partial int16 sample", async () => {
+    const res = await request(makeApp())
+      .post("/api/stt")
+      .set("Content-Type", "application/octet-stream")
+      .send(Buffer.alloc(3));
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: "invalid_audio" });
+    expect(mockTranscribe).not.toHaveBeenCalled();
+  });
   it("passes a single numeric rate through to the transcriber", async () => {
     const res = await post("/api/stt?rate=48000");
     expect(res.status).toBe(200);

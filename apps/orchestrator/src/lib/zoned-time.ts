@@ -3,13 +3,12 @@
  *
  * WARP-2977 P2b: `zoneFormatter`, `timeZoneOffsetMs` and `zonedWallClockToUtc`
  * were MOVED here verbatim from services/ics.ts (WARP-2764), which imports
- * them back. There is ONE RFC 5545 converter on this box: the calendar feed
- * parser and the Security opening hours (lib/security-hours.ts) both resolve
- * wall clocks through it, so a DST fix lands in both at once. It stays pinned
- * by src/__tests__/ics.test.ts (Santiago, New York, the repeated hour) — do
- * not "simplify" it; read its own comment first.
+ * them back. There is ONE RFC 5545 converter on this box: every caller
+ * resolves wall clocks through it, so a DST fix lands everywhere at once. It
+ * stays pinned by src/__tests__/ics.test.ts (Santiago, New York, the
+ * repeated hour) — do not "simplify" it; read its own comment first.
  *
- * Added beside it for the opening hours: zone validation and
+ * Added beside it: zone validation and
  * canonicalisation, the site-local parts of an instant, and calendar-date
  * arithmetic on 'YYYY-MM-DD' strings. Nothing here ever reads the PROCESS
  * zone (`getDay`, `getHours`, `new Date(y, m, d)`): the orchestrator
@@ -134,8 +133,7 @@ export function zonedWallClockToUtc(
  * A zone the runtime resolves AND that is an IANA name — not a raw UTC
  * offset. Modern ICU accepts `+05:00` as a `timeZone`, but an offset has no
  * DST rules: a site "on +01:00" would silently stop following its summer
- * time. Refused, like anything longer than the 64 characters
- * SecuritySiteHours.timezone stores.
+ * time. Refused, like anything longer than 64 characters.
  *
  * Builds a throwaway formatter rather than `zoneFormatter`'s cached one: the
  * input is user text, and caching every case spelling of every zone a client
@@ -154,8 +152,8 @@ export function isValidIanaZone(tz: unknown): tz is string {
 
 /**
  * The runtime's canonical spelling of a valid zone (`us/eastern` →
- * `America/New_York`, `utc` → `UTC`). What SecuritySiteHours.timezone stores,
- * so one zone is always one string. Throws RangeError for an invalid zone —
+ * `America/New_York`, `utc` → `UTC`). What a stored zone should be, so one
+ * zone is always one string. Throws RangeError for an invalid zone —
  * check `isValidIanaZone` first.
  */
 export function canonicalZone(tz: string): string {

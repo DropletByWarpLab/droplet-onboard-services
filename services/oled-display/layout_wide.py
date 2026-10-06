@@ -25,7 +25,6 @@ import contextlib
 import logging
 import os
 import threading
-import time
 from typing import Any, List, Optional, Tuple
 
 from PIL import Image, ImageDraw
@@ -250,14 +249,14 @@ COLUMNS = 12
 #     more. So surplus height becomes band D: a second row carrying data the
 #     compact tier has to drop on the floor — the alerts you can otherwise
 #     only reach by tapping the chrome badge, the degraded services past the
-#     third, the MEM/SYSTEM trend hiding behind two bare percentages, and the
+#     third, the CPU/RAM trend hiding behind two bare percentages, and the
 #     LAN client count, which the bridge already streams and which until now
 #     was rendered nowhere at all.
 #
 # Nothing in band D is invented to fill space. A block with no data says so.
 REF_BAND_B_TOP = 67    # band_b_top on the 1424x280 reference panel
 REF_ROW_H = 166        # authored primary row: eyebrow at 67 down to the
-                       # deepest glyph, health's 24px MEM/SYSTEM/TEMP/GPU
+                       # deepest glyph, health's 24px CPU/RAM/GPU T/CPU T
                        # numerals drawn at y=202
 EXTRA_GAP = 20         # rule + breathing room between the primary row and D
 EXTRA_ROW_H = 24       # one band-D list row
@@ -573,14 +572,40 @@ def _render_rail_pager(draw, cx: int, y: int, faces: int, active: int) -> None:
                      fill=d.V3_ACCENT if i == active else d.V3_LABEL4)
 
 
+def _render_fingerprint_card(draw, x: int, y: int, card: int,
+                             groups: List[str]) -> None:
+    """The certificate key fingerprint inside the rail card (WARP-3414): the
+    16 four-character groups, four to a line, in full.
+
+    Never truncated and never re-cased: the string is the Droplet Mac app's
+    confirmation-screen format, and a person compares it group by group, so a
+    short prefix (which an impostor could grind out) is not an option. The
+    face steps DOWN until the widest line fits the card rather than shortening
+    anything. Dark ink on the white card, like the QR it replaces."""
+    d = _d()
+    lines = [" ".join(groups[i:i + 4]) for i in range(0, len(groups), 4)]
+    font = _fit_font(draw, max(lines, key=len), card - 20, 17, floor=11,
+                     weight="bold")
+    pitch = card // (len(lines) + 1)
+    top = y + (card - pitch * len(lines)) // 2
+    cx = x + card // 2
+    for i, line in enumerate(lines):
+        d._v3_text(draw, line, cx, top + i * pitch, font=font,
+                   fill=(0x20, 0x20, 0x28), anchor="ma")
+
+
 def render_rail(disp, draw: ImageDraw.ImageDraw, img: Image.Image, *,
                 payload: str, caption: str, headline: str,
                 fallback: str, ecc: str = "M",
-                faces: int = 0, face_index: int = 0) -> None:
+                faces: int = 0, face_index: int = 0,
+                fingerprint: Optional[List[str]] = None) -> None:
     """The fixed right-hand action rail: QR card + caption + typed fallback.
 
     `faces` > 1 draws the pager dots; 0 or 1 leaves the top strip empty, which
     is what the screens with a single, non-tappable rail want.
+
+    `fingerprint` (WARP-3414), when given, puts the certificate key
+    fingerprint in the card instead of a QR; `payload` is then unused.
     """
     d = _d()
     g = geom()
@@ -635,22 +660,25 @@ def render_rail(disp, draw: ImageDraw.ImageDraw, img: Image.Image, *,
         card_x = g.rail_x + (g.rail_w - card) // 2
         d._rrect(draw, card_x, card_y, card, card, 14, fill=d.V3_WHITE)
 
-        qr_img, module_px = render_qr(payload, card=card, ecc=ecc)
-        if qr_img is not None:
-            px = card_x + (card - qr_img.width) // 2
-            py = card_y + (card - qr_img.height) // 2
-            img.paste(qr_img, (px, py))
-            # A 22px mark over a ~164px code occludes <2% of the area; ECC M
-            # tolerates ~15%. ECC L has no headroom to spare, so skip it there.
-            if ecc != "L":
-                d.draw_droplet_mark(draw, card_x + card // 2 - 11,
-                                    card_y + card // 2 - 11, 22,
-                                    primary=d.V3_ACCENT,
-                                    highlight=d.V3_ACCENT_INK)
+        if fingerprint:
+            _render_fingerprint_card(draw, card_x, card_y, card, fingerprint)
         else:
-            d._v3_text(draw, "SEE ADDRESS BELOW", card_x + card // 2,
-                       card_y + card // 2, font=d._get_font(11, weight="bold"),
-                       fill=(0x40, 0x40, 0x48), anchor="mm")
+            qr_img, module_px = render_qr(payload, card=card, ecc=ecc)
+            if qr_img is not None:
+                px = card_x + (card - qr_img.width) // 2
+                py = card_y + (card - qr_img.height) // 2
+                img.paste(qr_img, (px, py))
+                # A 22px mark over a ~164px code occludes <2% of the area; ECC M
+                # tolerates ~15%. ECC L has no headroom to spare, so skip it there.
+                if ecc != "L":
+                    d.draw_droplet_mark(draw, card_x + card // 2 - 11,
+                                        card_y + card // 2 - 11, 22,
+                                        primary=d.V3_ACCENT,
+                                        highlight=d.V3_ACCENT_INK)
+            else:
+                d._v3_text(draw, "SEE ADDRESS BELOW", card_x + card // 2,
+                           card_y + card // 2, font=d._get_font(11, weight="bold"),
+                           fill=(0x40, 0x40, 0x48), anchor="mm")
 
     d._v3_text(draw, caption, cx, cap_y, font=d._get_font(11, weight="bold"),
                fill=d.V3_ACCENT, anchor="ma", tracking=1.6)
@@ -705,11 +733,7 @@ def _lockup_region(disp, name: str, action) -> None:
             d.TouchRegion(name, g.left, g.top, LOCKUP_W, LOCKUP_H, action))
 
 
-def _render_chrome(disp, draw, now, state: str) -> Tuple[int, int]:
-    """Band A. Returns `(pill_right, right_limit)`: the free span between the
-    state pill and whatever sits left of the clock (the alert badge, else the
-    date), less 12 px of air — the only room band A has for the Security chip
-    (WARP-2981)."""
+def _render_chrome(disp, draw, now, state: str) -> None:
     d = _d()
     g = geom()
     d.draw_droplet_mark(draw, g.left, g.top + 12, 22,
@@ -743,7 +767,6 @@ def _render_chrome(disp, draw, now, state: str) -> Tuple[int, int]:
     d._rrect(draw, g.left + 312, g.top + 12, pw, 22, 11, fill=fill)
     d._v3_text(draw, label, g.left + 312 + pw // 2, g.top + 17, font=pf, fill=ink,
                anchor="ma", tracking=1.2)
-    pill_right = g.left + 312 + pw
 
     clk = disp._fmt_clock_parts(now)["str"]
     cf = d._get_font(20, weight="heavy")
@@ -755,13 +778,11 @@ def _render_chrome(disp, draw, now, state: str) -> Tuple[int, int]:
     date_x = int(g.content_r - clk_w - 16)
     d._v3_text(draw, date, date_x, g.top + 18, font=d._get_font(9, weight="bold"),
                fill=d.V3_LABEL4, anchor="ra", tracking=1.4)
-    date_w = d._v3_text_width(draw, date, d._get_font(9, weight="bold"), 1.4)
-    right_limit = int(date_x - date_w) - 12
 
     open_count = disp._open_alerts_count()
     if open_count:
+        date_w = d._v3_text_width(draw, date, d._get_font(9, weight="bold"), 1.4)
         bx, by, br = int(date_x - date_w - 24), g.top + 23, 11
-        right_limit = bx - br - 12
         draw.ellipse([bx - br, by - br, bx + br, by + br], fill=d.V3_RED)
         d._v3_text(draw, "!", bx, by, font=d._get_font(15, weight="heavy"),
                    fill=d.V3_WHITE, anchor="mm")
@@ -771,13 +792,10 @@ def _render_chrome(disp, draw, now, state: str) -> Tuple[int, int]:
                 br * 2 + 12, disp._open_drawer))
 
     draw.rectangle([g.left, g.band_a_rule, g.content_r, g.band_a_rule], fill=d.V3_SEP)
-    return pill_right, right_limit
 
 
-# WARP-2944 — the screen's one-line certificate status. The ticket's rule:
-# speak when fewer than this many days remain AND renewal is failing; a
-# healthy box, a box mid-renewal with weeks to go, and a self-signed box all
-# say nothing here (the self-signed box's story is the rail's SCAN TO PAIR).
+# Warn about the installed local certificate, independent of retired HQ
+# renewal state. Unknown metadata must not create an expiry countdown.
 TLS_SCREEN_WARNING_DAYS = 14
 
 
@@ -789,91 +807,19 @@ def tls_warning_line(tls: dict) -> str:
         return ""
     state = tls.get("state")
     days = tls.get("daysLeft")
-    if state != "LE_RENEW_FAILED" or not isinstance(days, (int, float)):
+    if state != "LOCAL_CERTIFICATE":
+        return ""
+    if tls.get("coversInternalHostname") is False:
+        return "CERTIFICATE · internal DNS name mismatch · needs replacement"
+    if not isinstance(days, (int, float)):
         return ""
     if days < 0:
-        return "CERTIFICATE EXPIRED · renewal failing · needs internet"
+        return "CERTIFICATE EXPIRED · needs replacement"
     if days < TLS_SCREEN_WARNING_DAYS:
         n = int(days)
-        return "CERTIFICATE · renewal failing · {} day{} left · needs internet".format(
+        return "CERTIFICATE · {} day{} left · needs replacement".format(
             n, "" if n == 1 else "s")
     return ""
-
-
-# WARP-2981 (ADR-059 P6, §3.8) — band A's Security chip: "a single count cell
-# at most … never images, never names". A chip beside the state pill, in the
-# pill's own type, because band B's four cells already use all 12 columns (the
-# rack brief's §2.4) and band A is the across-the-room band. The pill stays box
-# health only: open incidents never make it ALERT or DEGRADED.
-#
-# Stale after this many missed reads. The chip is fed on the storage cadence
-# (display.py's pump, STORAGE_REFRESH_SECONDS), so an answer older than three
-# of them means the orchestrator stopped answering, and the chip says it
-# doesn't know rather than keep a number nobody is refreshing.
-SECURITY_CHIP_STALE_READS = 3
-SECURITY_CHIP_UNKNOWN = "SECURITY: —"
-SECURITY_CHIP_BEHIND = " · MAY BE BEHIND"
-
-
-def security_chip(sec, now_ts: float, stale_after_s: float) -> Optional[Tuple[str, str]]:
-    """The chip for `_v3["security"]` (display.update_security's shapes), as
-    `(text, tone)` with tone "warn" or "muted", or None for no chip. Pure, so
-    every branch is a test without a render. One explicit case per state:
-
-      * `unasked` — the panel has not heard yet: no chip;
-      * `off` — the box does not use Security (it is off by default): no chip,
-        at any age. "SECURITY OFF" on a rack reads as "unprotected", and a
-        `—` whenever such a box's orchestrator blinks would be noise;
-      * `on` — `SECURITY: n OPEN` (`99+` above 99). Orange when an alert is
-        open or the number may be behind (`· MAY BE BEHIND`); muted for
-        notices alone and for 0, so a backlog of notices never keeps the
-        glance tier lit. Older than `stale_after_s`, or learned "in the
-        future" (a clock step), it is `—`: never a number nobody refreshes;
-      * `unknown`, and any state this was not written for — `SECURITY: —`.
-    """
-    state = sec.get("state") if isinstance(sec, dict) else None
-    if state == "unasked":
-        return None
-    if state == "off":
-        return None
-    if state == "on":
-        at, n, alerts, up = sec.get("at"), sec.get("open"), sec.get("alerts"), sec.get("upToDate")
-        fresh = isinstance(at, (int, float)) and 0 <= now_ts - at <= stale_after_s
-        if not (fresh and isinstance(n, int) and isinstance(alerts, int) and isinstance(up, bool)):
-            return SECURITY_CHIP_UNKNOWN, "muted"
-        text = "SECURITY: {} OPEN".format("99+" if n > 99 else n)
-        if not up:
-            return text + SECURITY_CHIP_BEHIND, "warn"
-        return text, ("warn" if alerts > 0 else "muted")
-    return SECURITY_CHIP_UNKNOWN, "muted"
-
-
-# Geometries already told there is no room, so a 1 s re-render logs once.
-_SECURITY_CHIP_WARNED: set = set()
-
-
-def _render_security_chip(disp, draw, span: Tuple[int, int], now_ts: float) -> None:
-    """Draw the chip 12 px right of the pill, only if it ends 12 px clear of
-    the badge (or the date). Below ~1280 px wide there is no such room: then
-    it is not drawn, and one warning says so per panel geometry."""
-    d = _d()
-    g = geom()
-    chip = security_chip(disp._v3.get("security"), now_ts,
-                         SECURITY_CHIP_STALE_READS * d.STORAGE_REFRESH_SECONDS)
-    if chip is None:
-        return
-    text, tone = chip
-    pill_right, right_limit = span
-    x = pill_right + 12
-    if x + _chip_width(draw, text) > right_limit:
-        key = (d.WIDTH, d.HEIGHT)
-        if key not in _SECURITY_CHIP_WARNED:
-            _SECURITY_CHIP_WARNED.add(key)
-            logger.warning("band A has no room for the Security chip at %dx%d; not drawn", *key)
-        return
-    # The pill's tokens: DEGRADED's orange, or an inactive chip. No new colours (brief §4).
-    ink, fill = (d.V3_ORANGE, d.V3_ORANGE_SUBTLE) if tone == "warn" else (d.V3_LABEL3, d.V3_SURFACE)
-    _chip(draw, x, g.top + 12, text, ink, fill)
 
 
 def _render_foot(disp, draw, v: dict) -> None:
@@ -951,15 +897,10 @@ def _cell_reach(disp, draw, v: dict) -> None:
                fill=d.V3_LABEL3)
 
 
-def _chip_width(draw, text: str) -> int:
-    d = _d()
-    return int(d._v3_text_width(draw, text, d._get_font(10, weight="bold"), 1.2)) + 22
-
-
 def _chip(draw, x: int, y: int, text: str, ink, fill) -> int:
     d = _d()
     f = d._get_font(10, weight="bold")
-    w = _chip_width(draw, text)
+    w = int(d._v3_text_width(draw, text, f, 1.2)) + 22
     d._rrect(draw, x, y, w, 22, 11, fill=fill)
     d._v3_text(draw, text, x + 11, y + 5, font=f, fill=ink, tracking=1.2)
     return w
@@ -969,40 +910,59 @@ def _cell_health(disp, draw, v: dict) -> None:
     d = _d()
     g = geom()
     x, w = g.cells["health"]
-    _eyebrow(draw, "LOAD", x)
-    d._v3_text(draw, _num(v.get("cpu"), "%"), x, g.by(74),
-               font=d._get_font(60, weight="heavy"), fill=d.V3_TEXT,
+    _eyebrow(draw, "GPU LOAD", x)
+    gpu = v.get("gpu")
+    hero = _num(gpu, "%")
+    hero_font = d._get_font(60, weight="heavy")
+    d._v3_text(draw, hero, x, g.by(74),
+               font=hero_font, fill=d.V3_TEXT if gpu is not None else d.V3_LABEL4,
                tracking=-2)
 
-    sp = v.get("sparks_cpu") or []
-    sx, sy, sh = x, g.by(146), 36
-    draw.rectangle([sx, sy + sh, sx + w, sy + sh], fill=d.V3_SEP)
-    if len(sp) >= 2:
-        lo, hi = min(sp), max(sp)
-        rng = max(1.0, hi - lo)
-        pts = [(sx + (i / (len(sp) - 1)) * w,
-                sy + sh - ((val - lo) / rng) * sh)
-               for i, val in enumerate(sp)]
-        draw.polygon(pts + [(sx + w, sy + sh), (sx, sy + sh)],
-                     fill=d.V3_SPARK_FILL)
-        draw.line(pts, fill=d.V3_ACCENT, width=2, joint="curve")
+    # Watchdog status shares the hero row, leaving the GPU trend unbroken.
+    wd = _watchdog_overall(v)
+    label, ink = {
+        "ok": ("OK", d.V3_GREEN),
+        "healed": ("HEALED", d.V3_GREEN),
+        "heal_failed": ("HEAL FAILED", d.V3_ORANGE),
+        "escalated": ("ESCALATED", d.V3_RED),
+        "stale": ("STALE", d.V3_ORANGE),
+    }.get(wd, ("NO DATA", d.V3_LABEL4))
+    wd_w = int(w - d._v3_text_width(draw, hero, hero_font, -2) - 16)
+    wf, wt = _fit_text(draw, label, max(24, wd_w), 14, floor=9, weight="bold")
+    d._v3_text(draw, "WATCHDOG", x + w, g.by(86),
+               font=d._get_font(9, weight="bold"), fill=d.V3_LABEL3, anchor="ra")
+    d._v3_text(draw, wt, x + w, g.by(102), font=wf, fill=ink, anchor="ra")
 
-    # WARP-2668: the third gauge is `psutil.disk_usage("/")` — the filesystem
-    # the box is INSTALLED on, which is not the storage the owner bought. Under
-    # its old "DISK" eyebrow it sat two cells away from a STORAGE meter that
-    # had never received data, so the only storage-shaped number on the glass
-    # was the wrong disk. "SYSTEM" names what it measures; C4's STORAGE cell
-    # carries the data drives. Do not merge or cross-fill the two.
-    cols = (("MEM", _num(v.get("mem"), "%")),
-            ("SYSTEM", _num(v.get("disk"), "%")),
-            ("TEMP", _num(v.get("temp"), "°")),
-            ("GPU", _num(v.get("gpu"), "%")))
+    if not _spark(draw, x, g.by(146), w, 36, v.get("sparks_gpu"),
+                  d.V3_ACCENT, d.V3_SPARK_FILL):
+        d._v3_text(draw, "no GPU history", x, g.by(154),
+                   font=d._get_font(10), fill=d.V3_LABEL4)
+
+    cols = (("CPU", v.get("cpu"), "%"),
+            ("RAM", v.get("mem"), "%"),
+            ("GPU T", v.get("gpu_temp"), "°C"),
+            ("CPU T", v.get("temp"), "°C"))
     cw = w / 4
-    for i, (label, val) in enumerate(cols):
+    for i, (label, val, suffix) in enumerate(cols):
         cx = int(x + i * cw)
         _eyebrow(draw, label, cx, g.by(190))
-        d._v3_text(draw, val, cx, g.by(202), font=d._get_font(24, weight="heavy"),
-                   fill=d.V3_TEXT)
+        ink = d.V3_LABEL4 if val is None else d.V3_TEXT
+        if suffix == "°C" and val is not None:
+            ink = d.V3_RED if val >= 85 else d.V3_ORANGE if val >= 70 else d.V3_TEXT
+        font, text = _fit_text(draw, _num(val, suffix), max(24, int(cw) - 6),
+                               24, floor=16)
+        d._v3_text(draw, text, cx, g.by(202), font=font, fill=ink)
+
+
+def _watchdog_overall(v: dict) -> str:
+    """An absent watchdog feed never implies a healthy watchdog."""
+    wd = v.get("watchdog") or {}
+    overall = wd.get("overall")
+    if overall == "stale":
+        return "stale"
+    if wd.get("available") and overall in ("ok", "healed", "heal_failed", "escalated"):
+        return overall
+    return "unavailable"
 
 
 def _cell_services(disp, draw, v: dict, *, carry: int = 0) -> List[dict]:
@@ -1146,7 +1106,7 @@ def _cell_netstore(disp, draw, v: dict) -> None:
 # under the primary row for a whole second one. Every block here shows data
 # the box ALREADY streams and the compact panel has to drop: the alert list
 # you can otherwise only reach by tapping the chrome badge, the degraded
-# services past the third, the MEM/SYSTEM trend hiding behind two bare
+# services past the third, the CPU/RAM trend hiding behind two bare
 # percentages, and lan_clients - fed by the bridge and, until now, rendered on
 # no screen at all.
 #
@@ -1231,15 +1191,11 @@ def _extra_activity(disp, draw, v: dict) -> None:
 
 
 def _extra_trends(disp, draw, v: dict) -> None:
-    """MEM and SYSTEM over the same window as the CPU spark above them.
+    """CPU and RAM over the same window as the GPU spark above them.
 
     The primary row prints both as bare percentages, which cannot answer the
     question you walked to the rack holding: is this climbing, or has it been
-    sitting there all week?
-
-    SYSTEM is the install filesystem, same series as the primary row's third
-    gauge (WARP-2668) — the buffer keeps its `sparks_disk` name because that is
-    what `update_stats` feeds; only the eyebrow changed."""
+    sitting there all week?"""
     d = _d()
     g = geom()
     x, w = g.cells["health"]
@@ -1249,8 +1205,8 @@ def _extra_trends(disp, draw, v: dict) -> None:
     head = g.extra_top + EXTRA_HEAD_H
     h = max(12, min(30, g.extra_bot - head - 18))
     for i, (label, buf, cur) in enumerate((
-            ("MEM", v.get("sparks_mem"), v.get("mem")),
-            ("SYSTEM", v.get("sparks_disk"), v.get("disk")))):
+            ("CPU", v.get("sparks_cpu"), v.get("cpu")),
+            ("RAM", v.get("sparks_mem"), v.get("mem")))):
         sx = x + i * (half + 24)
         _eyebrow(draw, label, sx, head)
         d._v3_text(draw, _num(cur, "%"), sx + half, head - 4,
@@ -1355,17 +1311,18 @@ def render_status(disp, now=None, state: str = "live") -> Image.Image:
     # it earns ALERT; anything else failing is DEGRADED.
     # TODO: ALERT should also replace C2+C3 with an incident block (brief §6).
     svc_status = svc.get("status")
-    if disp._open_alerts_count() or svc_status == "down":
+    watchdog_status = _watchdog_overall(v)
+    if disp._open_alerts_count() or svc_status == "down" or watchdog_status == "escalated":
         state = "alert"
-    elif svc_status == "degraded" or (svc.get("degraded") or []):
+    elif (svc_status == "degraded" or (svc.get("degraded") or [])
+          or watchdog_status in ("heal_failed", "stale")):
         state = "degraded"
     elif tls_warning_line(v.get("tls") or {}):
         # WARP-2944 — the box is doing its job, but its padlock is running
         # out and it cannot fix that alone: DEGRADED, never ALERT.
         state = "degraded"
 
-    span = _render_chrome(disp, draw, now, state)
-    _render_security_chip(disp, draw, span, time.time())
+    _render_chrome(disp, draw, now, state)
 
     for dx in g.dividers:
         draw.rectangle([dx, g.band_b_top, dx, g.band_b_bot], fill=d.V3_SEP)
@@ -1402,9 +1359,25 @@ def _rail_content(disp, v: dict) -> dict:
     d = _d()
     host = str(v.get("public_host") or v.get("hostname") or "droplet")
     wifi_payload = disp.wifi_qr_payload()
-    faces = 2 if (d.RAIL_WIFI_QR and wifi_payload) else 1
+    # WARP-3414: the certificate fingerprint is a third face when the bridge
+    # has vouched for one; the pager counts every face the tap can reach.
+    fingerprint = disp.cert_fingerprint_groups() if d.RAIL_FINGERPRINT else []
+    faces = (1 + (1 if (d.RAIL_WIFI_QR and wifi_payload) else 0)
+             + (1 if fingerprint else 0))
+    face = disp.rail_face()
 
-    if faces == 1 or disp.rail_face() != "wifi":
+    if face == "fingerprint":
+        # The box's own key, as text, in the form the Droplet apps show: what an
+        # admin compares against an app's "confirm this Droplet" screen. This
+        # local panel is the channel that makes that comparison mean something
+        # — a LAN attacker can rewrite the dashboard, not the glass. The
+        # headline names it; the typed line says how to leave.
+        return dict(payload="", fingerprint=fingerprint,
+                    caption="COMPARE IN THE APP", headline="Droplet fingerprint",
+                    fallback="SHA-256 · tap to go back", faces=faces,
+                    face_index=faces - 1)
+
+    if face != "wifi":
         # WARP-2954 / ADR-058: once the bridge has vouched for the box's
         # certificate key, the default face is the APP-PAIRING link — the
         # box's own key, from the one channel no network attacker can reach.
@@ -1427,8 +1400,13 @@ def _rail_content(disp, v: dict) -> dict:
                     fallback=host, faces=faces, face_index=0)
 
     ssid = str((v.get("wifi") or {}).get("ssid") or "Wi-Fi")
+    # The next tap leaves this face for the fingerprint whenever one is on
+    # offer (display._tap_rail_qr), so the line names where the tap goes: it
+    # is the on-glass instruction and must not point at the wrong face.
     return dict(payload=wifi_payload, caption="JOIN WI-FI", headline=ssid,
-                fallback="TAP FOR DASHBOARD", faces=faces, face_index=1)
+                fallback=("TAP FOR FINGERPRINT" if fingerprint
+                          else "TAP FOR DASHBOARD"),
+                faces=faces, face_index=1)
 
 
 def _bind_cell_regions(disp) -> None:
@@ -1550,9 +1528,9 @@ def render_claim(disp, code: str, setup_url: str,
     Wi-Fi join creds, C4 is hidden, the rail holds the claim QR.
 
     TODO(PR-4): full implementation. The default deep link
-    (`https://d-<hmac>.droplet-us.com/setup?c=DRPL-XXXX-XXXX`, ~56 bytes) fits
-    at version 4 with room to spare. The failure case is a long *named
-    address* host, which pushes past the ~62-byte budget — assert before
+    (`https://droplet-ai.lan/setup?c=DRPL-XXXX-XXXX`) fits
+    at version 4 with room to spare. A long configured internal hostname
+    can push past the ~62-byte budget — assert before
     painting and fall back to the typed path rather than shipping a code
     nobody can scan.
 

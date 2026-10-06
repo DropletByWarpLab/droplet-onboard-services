@@ -24,6 +24,7 @@ import { useSearchParams } from "next/navigation";
 import { Mic, RefreshCw } from "lucide-react";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { VoiceSurface } from "@/components/voice/VoiceSurface";
+import { SpeakingVoiceSection } from "@/components/voice/SpeakingVoiceSection";
 import { useVoiceSurfaceData } from "@/lib/hooks/useVoice";
 import { useVoiceProfiles } from "@/lib/hooks/useVoiceProfiles";
 import { useVoiceActivity } from "@/lib/hooks/useVoiceActivity";
@@ -91,6 +92,7 @@ function VoicePageInner() {
         onRefresh={data.refresh}
         onCalibrationApplied={data.onCalibrationApplied}
       />
+      <SpeakingVoiceSection previewAllowed={data.enabled && !data.unavailable && Boolean(data.status?.tts_loaded)} />
     </ShellPage>
   );
 }

@@ -14,7 +14,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 vi.mock("../config.js", () => ({
   config: {
-    WIREGUARD_ENDPOINT_HOST: "",
+    DROPLET_LAN_HOSTNAME: "",
     corsAllowedOrigins: ["https://droplet-ai.local"],
     agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
@@ -45,7 +45,7 @@ function fakeReq(opts: {
 beforeEach(() => {
   vi.clearAllMocks();
   _resetTrustedOriginCacheForTests();
-  (config as { WIREGUARD_ENDPOINT_HOST: string }).WIREGUARD_ENDPOINT_HOST = "";
+  (config as { DROPLET_LAN_HOSTNAME: string }).DROPLET_LAN_HOSTNAME = "";
   (config as { corsAllowedOrigins: string[] }).corsAllowedOrigins = [
     "https://droplet-ai.local",
   ];
@@ -65,7 +65,7 @@ describe("webdavBaseUrl (device-client WebDAV/server URL)", () => {
   });
 
   it("builds the WebDAV URL from the configured canonical origin", async () => {
-    (config as { WIREGUARD_ENDPOINT_HOST: string }).WIREGUARD_ENDPOINT_HOST =
+    (config as { DROPLET_LAN_HOSTNAME: string }).DROPLET_LAN_HOSTNAME =
       "studio.example.com";
     const url = await webdavBaseUrl(
       fakeReq({ host: "droplet-ai.local", xForwardedProto: "https" }),

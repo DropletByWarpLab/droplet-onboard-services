@@ -61,6 +61,7 @@ vi.mock("../services/nextcloud.client.js", () => {
     ncGetCurrentUser: vi.fn(),
     ncCreateUser: vi.fn().mockResolvedValue(undefined),
     ncDeleteUser: vi.fn().mockResolvedValue(undefined),
+    ncDeleteShare: vi.fn().mockResolvedValue(undefined),
     ncListUsers: vi.fn(),
     ncUpdateUser: vi.fn().mockResolvedValue(undefined),
     ncSetUserEnabled: vi.fn(),
@@ -108,6 +109,14 @@ vi.mock("../services/brain-memory.service.js", () => ({
   purgeUserData: purgeUserDataMock,
 }));
 
+// WARP-3600 — a removed mailbox nudges the email-indexer; the hop is the seam.
+const { requestIndexerRefreshMock } = vi.hoisted(() => ({
+  requestIndexerRefreshMock: vi.fn().mockResolvedValue(true),
+}));
+vi.mock("../services/email/provision.service.js", () => ({
+  requestIndexerRefresh: requestIndexerRefreshMock,
+}));
+
 // WARP-1526 rail 6: removal hard-revokes credentials (revoke + denylist).
 const { revokeAllSessionsMock, denylistUserMock } = vi.hoisted(() => ({
   revokeAllSessionsMock: vi.fn(async (_userId: string) => 2),
@@ -135,6 +144,15 @@ const { revokeOverlayDevicesMock } = vi.hoisted(() => ({
 vi.mock("../services/vpn-peer-revoke.service.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../services/vpn-peer-revoke.service.js")>()),
   revokeOverlayDevicesForUser: revokeOverlayDevicesMock,
+}));
+
+// WARP-3384 — Delete revokes the person's paired file-sync devices.
+const { revokeDeviceClientsMock } = vi.hoisted(() => ({
+  revokeDeviceClientsMock: vi.fn(async () => ({ revoked: 2, appPasswordsNotDeleted: 0, failed: 0 })),
+}));
+vi.mock("../services/device-client-revoke.service.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../services/device-client-revoke.service.js")>()),
+  revokeDeviceClientsForUser: revokeDeviceClientsMock,
 }));
 
 // WARP-3169 — the hand-over transfer runs through the host helper; the exec
@@ -169,7 +187,12 @@ function createPrismaMock(seed: any[] = []) {
   const users: any[] = seed.map((u) => ({ deletionStatus: "NONE", deletionDueAt: null, ...u }));
   // Every seeded user is given a Microsoft 365 link, so the delete tests can
   // assert the credential actually goes with them (WARP-2115).
-  const m365Rows: any[] = seed.map((u: any) => ({ userId: u.id }));
+  const m365Rows: any[] = seed.map((u: any) => ({
+    userId: u.id,
+    calendarSourceId: `m365-calendar-${u.id}`,
+    calendarEnabled: true,
+    calendarSyncState: "CONNECTED",
+  }));
   const self: any = {};
   // WARP-1570: shared seam — records the options argument (auth.ts opens
   // the removal rails with SERIALIZABLE_TX) and rolls `users` back when the
@@ -191,6 +214,7 @@ function createPrismaMock(seed: any[] = []) {
         ) ?? null
       );
     }),
+    findFirst: vi.fn(async ({ where }: any) => users.find((u) => u.id === where.id) ?? null),
     update: vi.fn(async ({ where, data }: any) => {
       const idx = users.findIndex(
         (u) =>
@@ -301,6 +325,16 @@ function createPrismaMock(seed: any[] = []) {
   // connection. Without this delegate the route's try/catch would swallow a
   // TypeError and the cascade would look like it worked while doing nothing.
   self.m365Connection = {
+    findUnique: vi.fn(async ({ where }: any) => m365Rows.find((r) => r.userId === where.userId) ?? null),
+    updateMany: vi.fn(async ({ where, data }: any) => {
+      let count = 0;
+      for (const row of m365Rows) {
+        if (row.userId !== where.userId) continue;
+        Object.assign(row, data);
+        count += 1;
+      }
+      return { count };
+    }),
     deleteMany: vi.fn(async ({ where }: any = {}) => {
       const before = m365Rows.length;
       for (let i = m365Rows.length - 1; i >= 0; i -= 1) {
@@ -317,6 +351,10 @@ function createPrismaMock(seed: any[] = []) {
   self.m365DeltaCursor = {
     deleteMany: vi.fn(async () => ({ count: 0 })),
   };
+  // WARP-3538 — and the file names landed from their Microsoft 365 (OneDrive and
+  // SharePoint metadata, ADR-041 §4). Same reason for real delegates.
+  self.cloudFileItem = { deleteMany: vi.fn(async () => ({ count: 0 })) };
+  self.cloudFileSource = { deleteMany: vi.fn(async () => ({ count: 0 })) };
   self._m365Rows = m365Rows;
   self._users = users;
   // WARP-3193 SEC-AUTH-6 — the username-keyed private tables. Seeded with one
@@ -344,6 +382,57 @@ function createPrismaMock(seed: any[] = []) {
       }),
     };
   }
+  // WARP-3600 — the rows keyed by User.id (mailboxes) and by the Nextcloud
+  // login (file index), with the lookalikes a wrong scope would take: a
+  // bystander, a login that merely starts with the leaver's, and the shared
+  // library sentinel. Brain chunks (keyed by User.id) are not this code's.
+  const ids = seed.map((u: any) => u.id);
+  const logins = seed.map((u: any) => u.nextcloudUsername).filter((l: any) => l);
+  const ownedTables: Record<string, any[]> = {
+    emailAccount: [...ids, "bystander-id"].map((userId) => ({ userId })),
+    fileContentChunk: [
+      ...logins.map((userId: string) => ({ userId, source: "nextcloud" })),
+      ...logins.map((l: string) => ({ userId: `${l}2`, source: "nextcloud" })),
+      ...ids.map((userId: string) => ({ userId, source: "brain" })),
+      { userId: "__household__", source: "nextcloud" },
+      { userId: "bystander", source: "nextcloud" },
+    ],
+    fileIndexStatus: [
+      ...logins.map((userId: string) => ({ userId })),
+      ...logins.map((l: string) => ({ userId: `${l}2` })),
+      { userId: "__household__" },
+      { userId: "bystander" },
+    ],
+  };
+  for (const [model, rows] of Object.entries(ownedTables)) {
+    self[model] = {
+      deleteMany: vi.fn(async ({ where }: any = {}) => {
+        const before = rows.length;
+        for (let i = rows.length - 1; i >= 0; i -= 1) {
+          if (Object.entries(where).every(([k, v]) => rows[i][k] === v)) rows.splice(i, 1);
+        }
+        return { count: before - rows.length };
+      }),
+    };
+  }
+  self._ownedRows = (model: string, key: string, source?: string) =>
+    ownedTables[model]!.filter((r) => r.userId === key && (source === undefined || r.source === source)).length;
+  const shareRows: any[] = [
+    ...ids.flatMap((createdById: string, i: number) => [
+      { id: `s-${createdById}-a`, ncShareId: 100 + i * 10, createdById, revokedAt: null },
+      { id: `s-${createdById}-b`, ncShareId: 101 + i * 10, createdById, revokedAt: null },
+    ]),
+    { id: "s-bystander", ncShareId: 900, createdById: "bystander-id", revokedAt: null },
+  ];
+  self.departmentShare = {
+    findMany: vi.fn(async ({ where }: any) =>
+      shareRows.filter((r) => r.createdById === where.createdById && r.revokedAt === where.revokedAt),
+    ),
+    update: vi.fn(async ({ where, data }: any) => {
+      Object.assign(shareRows.find((r) => r.id === where.id), data);
+    }),
+  };
+  self._shareRows = shareRows;
   self._usernameRows = (model: string, owner: string) =>
     usernameTables[model]!.rows.filter((r) => r[usernameTables[model]!.key] === owner).length;
   self._usernameModels = Object.keys(usernameTables);
@@ -398,6 +487,8 @@ beforeEach(() => {
   revokeAllSessionsMock.mockResolvedValue(2);
   (nc.ncDeleteUser as any).mockResolvedValue(undefined);
   (nc.ncSetUserEnabled as any).mockResolvedValue(undefined);
+  (nc.ncDeleteShare as any).mockReset().mockResolvedValue(undefined);
+  requestIndexerRefreshMock.mockResolvedValue(true);
   purgeUserDataMock.mockResolvedValue({ items: 0, chunks: 0 });
 });
 
@@ -423,6 +514,28 @@ describe("DELETE /api/auth/users/:username — WARP-3113 schedules, never purges
         }),
       }),
     );
+  });
+
+  // WARP-3384: scheduling the deletion revokes the person's paired devices
+  // (file-sync app passwords, drive logins) now, as the removal it is, and
+  // BEFORE the Nextcloud account is disabled: a disabled account cannot
+  // authenticate its own app-password delete.
+  it("WARP-3384: revokes the person's paired devices (removal, by the admin) BEFORE disabling Nextcloud, once", async () => {
+    const prisma = createPrismaMock([seededAlice(), OWNER_ROW]);
+    const res = await del(buildApp(prisma), "alice");
+
+    expect(res.status).toBe(200);
+    expect(revokeDeviceClientsMock).toHaveBeenCalledTimes(1);
+    expect(revokeDeviceClientsMock).toHaveBeenCalledWith("alice", { type: "user", id: "owner-id" }, "removal");
+    expect(revokeDeviceClientsMock.mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(nc.ncSetUserEnabled).mock.invocationCallOrder[0],
+    );
+  });
+
+  it("WARP-3384: a refused delete (the owner) revokes no devices", async () => {
+    const owner = createPrismaMock([{ ...OWNER_ROW, id: "u-boss", nextcloudUsername: "boss" }]);
+    expect((await del(buildApp(owner, "admin"), "boss")).body.code).toBe("OWNER_IMMUTABLE");
+    expect(revokeDeviceClientsMock).not.toHaveBeenCalled();
   });
 
   it("an explicit disposition is recorded as chosen, not defaulted; an unknown one is a 400", async () => {
@@ -605,7 +718,26 @@ describe("purgeDueDeletions — the nightly job (WARP-3113)", () => {
     expect(await purgeDueDeletions(prisma)).toEqual({ completed: 1, failed: 0 });
     expect(nc.ncDeleteUser).toHaveBeenCalledWith(SERVICE_NC_TOKEN, "alice");
     expect(purgeUserDataMock).toHaveBeenCalledWith(prisma, "u-alice");
+    expect(prisma.m365Connection.updateMany).toHaveBeenCalledWith({
+      where: { userId: "u-alice" },
+      data: { calendarEnabled: false, calendarSyncState: "DISCONNECTED" },
+    });
+    expect(prisma.m365Connection.updateMany).toHaveBeenCalledWith({
+      where: { userId: "u-alice" }, data: { calendarSourceId: null },
+    });
+    expect(prisma.m365DeltaCursor.deleteMany).toHaveBeenCalledWith({
+      where: { userId: "u-alice", workload: "calendar" },
+    });
     expect(prisma.m365Connection.deleteMany).toHaveBeenCalledWith({ where: { userId: "u-alice" } });
+    expect(prisma._m365Rows).toHaveLength(0);
+    for (const model of ["calendarEvent", "calendarSource"]) {
+      expect(prisma._usernameRows(model, "alice"), model).toBe(0);
+      expect(prisma._usernameRows(model, "bystander"), model).toBe(1);
+    }
+    // WARP-3538 — the leaver's landed file names go with them, scoped to the one
+    // person and to Microsoft 365 (another cloud's files are that cloud's to remove).
+    expect(prisma.cloudFileItem.deleteMany).toHaveBeenCalledWith({ where: { userId: "u-alice", provider: "M365" } });
+    expect(prisma.cloudFileSource.deleteMany).toHaveBeenCalledWith({ where: { userId: "u-alice", provider: "M365" } });
     expect(prisma._users).toHaveLength(0);
     expect(revokeAllSessionsMock).toHaveBeenCalledWith("u-alice");
     expect(denylistUserMock).toHaveBeenCalledWith("u-alice", expect.any(Number));
@@ -616,6 +748,15 @@ describe("purgeDueDeletions — the nightly job (WARP-3113)", () => {
         refs: expect.objectContaining({ actor: "user-owner", targetUserId: "u-alice" }),
         actor: { type: "system" },
       }),
+    );
+  });
+
+  it("WARP-3384: sweeps the person's device clients BEFORE the Nextcloud account is deleted", async () => {
+    const prisma = createPrismaMock([due()]);
+    expect(await purgeDueDeletions(prisma)).toEqual({ completed: 1, failed: 0 });
+    expect(revokeDeviceClientsMock).toHaveBeenCalledWith("alice", { type: "system" }, "removal");
+    expect(revokeDeviceClientsMock.mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(nc.ncDeleteUser).mock.invocationCallOrder[0],
     );
   });
 
@@ -680,6 +821,149 @@ describe("purgeDueDeletions — the nightly job (WARP-3113)", () => {
     for (const model of prisma._usernameModels) {
       expect(prisma._usernameRows(model, "alice"), model).toBe(1);
     }
+  });
+
+  // WARP-3600 — the mailbox, the file index and the department links go with
+  // the person, each scoped by THEIR identifier (User.id / their own Nextcloud
+  // login), by equality only.
+  describe("WARP-3600: the final purge is complete", () => {
+    it("removes the leaver's mailbox and file-index rows in the row's own transaction, and nothing of anyone else's", async () => {
+      const prisma = createPrismaMock([due(), OWNER_ROW]);
+      expect(await purgeDueDeletions(prisma)).toEqual({ completed: 1, failed: 0 });
+      expect(prisma.emailAccount.deleteMany).toHaveBeenCalledWith({ where: { userId: "u-alice" } });
+      expect(prisma._ownedRows("emailAccount", "u-alice")).toBe(0);
+      expect(prisma._ownedRows("fileContentChunk", "alice", "nextcloud")).toBe(0);
+      expect(prisma._ownedRows("fileIndexStatus", "alice")).toBe(0);
+      // A login that only STARTS with the leaver's, the shared library, a
+      // bystander, the owner, and the leaver's brain chunks (purgeUserData's,
+      // by id) are all untouched.
+      expect(prisma._ownedRows("fileContentChunk", "alice2", "nextcloud")).toBe(1);
+      expect(prisma._ownedRows("fileIndexStatus", "alice2")).toBe(1);
+      expect(prisma._ownedRows("fileContentChunk", "__household__")).toBe(1);
+      expect(prisma._ownedRows("fileIndexStatus", "__household__")).toBe(1);
+      expect(prisma._ownedRows("fileContentChunk", "bystander")).toBe(1);
+      expect(prisma._ownedRows("emailAccount", "bystander-id")).toBe(1);
+      expect(prisma._ownedRows("emailAccount", "own")).toBe(1);
+      expect(prisma._ownedRows("fileContentChunk", "o", "nextcloud")).toBe(1);
+      expect(prisma._ownedRows("fileIndexStatus", "o")).toBe(1);
+      expect(prisma._ownedRows("fileContentChunk", "u-alice", "brain")).toBe(1);
+    });
+
+    it("a second person later given the same login finds no chunk, index row or mailbox from the first", async () => {
+      const prisma = createPrismaMock([due()]);
+      await purgeDueDeletions(prisma);
+      expect(prisma._ownedRows("fileContentChunk", "alice")).toBe(0);
+      expect(prisma._ownedRows("fileIndexStatus", "alice")).toBe(0);
+      expect(prisma._ownedRows("emailAccount", "u-alice")).toBe(0);
+    });
+
+    it("nudges the email-indexer after a mailbox is removed, and not when there was none", async () => {
+      await purgeDueDeletions(createPrismaMock([due()]));
+      expect(requestIndexerRefreshMock).toHaveBeenCalledTimes(1);
+
+      requestIndexerRefreshMock.mockClear();
+      const noMailbox = createPrismaMock([due()]);
+      noMailbox.emailAccount.deleteMany.mockResolvedValue({ count: 0 });
+      await purgeDueDeletions(noMailbox);
+      expect(requestIndexerRefreshMock).not.toHaveBeenCalled();
+    });
+
+    it("a failing indexer nudge does not fail the removal", async () => {
+      requestIndexerRefreshMock.mockRejectedValueOnce(new Error("indexer down"));
+      expect(await purgeDueDeletions(createPrismaMock([due()]))).toEqual({ completed: 1, failed: 0 });
+    });
+
+    it("an SSO/SCIM person (no Nextcloud login) loses the mailbox by id and no file-index row is matched", async () => {
+      const prisma = createPrismaMock([{ ...due(), nextcloudUsername: null }]);
+      await purgeDueDeletions(prisma);
+      expect(prisma._ownedRows("emailAccount", "u-alice")).toBe(0);
+      expect(prisma.fileContentChunk.deleteMany).not.toHaveBeenCalled();
+      expect(prisma.fileIndexStatus.deleteMany).not.toHaveBeenCalled();
+    });
+
+    it("never matches the file index with a shared-library sentinel", async () => {
+      const prisma = createPrismaMock([{ ...due(), nextcloudUsername: "__household__" }]);
+      await purgeDueDeletions(prisma);
+      expect(prisma.fileContentChunk.deleteMany).not.toHaveBeenCalled();
+      // Both the seeded row for this "login" and the sentinel's own row survive.
+      expect(prisma._ownedRows("fileContentChunk", "__household__")).toBe(2);
+      expect(prisma._ownedRows("fileIndexStatus", "__household__")).toBe(2);
+    });
+
+    it("removes nothing when the Nextcloud delete fails or the row changed state", async () => {
+      (nc.ncDeleteUser as any).mockRejectedValueOnce(new Error("nc down"));
+      const failed = createPrismaMock([due()]);
+      await purgeDueDeletions(failed);
+      expect(failed.emailAccount.deleteMany).not.toHaveBeenCalled();
+      expect(failed._ownedRows("fileContentChunk", "alice", "nextcloud")).toBe(1);
+      expect(failed.departmentShare.findMany).not.toHaveBeenCalled();
+
+      const raced = createPrismaMock([due()]);
+      (nc.ncDeleteUser as any).mockImplementationOnce(async () => {
+        raced._users.find((u: any) => u.id === "u-alice").directoryStatus = "ACTIVE";
+      });
+      await purgeDueDeletions(raced);
+      expect(raced._ownedRows("emailAccount", "u-alice")).toBe(1);
+      expect(raced._ownedRows("fileIndexStatus", "alice")).toBe(1);
+      expect(raced.departmentShare.findMany).not.toHaveBeenCalled();
+      expect(nc.ncDeleteShare).not.toHaveBeenCalled();
+    });
+
+    it("revokes the shares the leaver minted (and only those) with the box's admin credential, keeping the rows", async () => {
+      const prisma = createPrismaMock([due(), OWNER_ROW]);
+      await purgeDueDeletions(prisma);
+      expect(prisma.departmentShare.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { createdById: "u-alice", revokedAt: null } }),
+      );
+      const revoked = vi.mocked(nc.ncDeleteShare).mock.calls.map((c) => c[1]);
+      expect(revoked.sort()).toEqual([100, 101]);
+      expect(vi.mocked(nc.ncDeleteShare).mock.calls.every((c) => c[0] === SERVICE_NC_TOKEN)).toBe(true);
+      const byId = (id: string) => prisma._shareRows.find((r: any) => r.id === id);
+      expect(byId("s-u-alice-a").revokedAt).toBeInstanceOf(Date);
+      expect(byId("s-u-alice-b").revokedAt).toBeInstanceOf(Date);
+      expect(byId("s-own-a").revokedAt).toBeNull();
+      expect(byId("s-bystander").revokedAt).toBeNull();
+    });
+
+    it("a share that is already gone upstream counts as revoked; one that fails is listed for an admin", async () => {
+      (nc.ncDeleteShare as any).mockImplementation(async (_t: string, id: number) => {
+        if (id === 100) throw new Error("OCS share delete failed: 404");
+        if (id === 101) throw new Error("OCS share delete failed: 500");
+      });
+      const prisma = createPrismaMock([due()]);
+      expect(await purgeDueDeletions(prisma)).toEqual({ completed: 1, failed: 0 });
+      const byId = (id: string) => prisma._shareRows.find((r: any) => r.id === id);
+      expect(byId("s-u-alice-a").revokedAt).toBeInstanceOf(Date);
+      expect(byId("s-u-alice-b").revokedAt).toBeNull();
+      const removedRow = vi
+        .mocked(recordActivity)
+        .mock.calls.map((c) => c[0] as any)
+        .find((r) => r.what === "User removed");
+      expect(removedRow.refs.purged).toMatchObject({
+        departmentSharesRevoked: 1,
+        departmentSharesNeedingReview: [101],
+      });
+    });
+
+    it("records the counts, and only counts, on the 'User removed' row", async () => {
+      await purgeDueDeletions(createPrismaMock([due()]));
+      const removedRow = vi
+        .mocked(recordActivity)
+        .mock.calls.map((c) => c[0] as any)
+        .find((r) => r.what === "User removed");
+      expect(removedRow.refs.purged).toEqual({
+        emailAccounts: 1,
+        fileChunks: 1,
+        fileIndexRows: 1,
+        departmentSharesRevoked: 2,
+      });
+    });
+
+    it("brain memory is purged by the local User.id, never the username", async () => {
+      await purgeDueDeletions(createPrismaMock([{ ...due(), id: "11111111-aaaa-4aaa-8aaa-111111111111" }]));
+      expect(purgeUserDataMock).toHaveBeenCalledTimes(1);
+      expect(purgeUserDataMock.mock.calls[0][1]).toBe("11111111-aaaa-4aaa-8aaa-111111111111");
+    });
   });
 
   it("a person with no Nextcloud account (SSO/SCIM) is removed without a Nextcloud call", async () => {

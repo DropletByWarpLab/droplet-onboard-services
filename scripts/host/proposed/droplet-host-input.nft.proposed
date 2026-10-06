@@ -1,0 +1,91 @@
+# =============================================================================
+# PROPOSAL (WARP-3574) - host input firewall for the single-box appliance.
+# NOT INSTALLED, NOT LOADED, NOT WIRED INTO setup.sh. The `.proposed` suffix is
+# deliberate: nothing in this repo globs it, and
+# tests/droplet-host-net-unit.test.sh fails if an installer starts referencing
+# it before this proposal is reviewed and renamed. Rollout and rollback:
+# docs/security/host-input-firewall.md. A WRONG input policy locks the owner
+# out of their own box, so this is enabled only by a human, on a box with a
+# console, after the validation checklist in that doc.
+#
+# WHY: five control-plane services run with `network_mode: host` and the device
+# bridge binds 0.0.0.0:9090, so they listen on every interface including the
+# uplink and the LAN, behind a bearer token over plain HTTP. They cannot simply
+# be re-bound: host-side callers use 127.0.0.1 (camera-discovery and switch ->
+# routing, the panel dead-man, automount, wifi-rotate -> bridge) while the
+# orchestrator container reaches them through the droplet_default gateway IP.
+# One listener cannot serve both unless it binds 0.0.0.0, so the control is
+# this input chain, not a bind address.
+#
+# DESIGN
+#   * Own table (inet droplet_host_input); Docker's iptables rules and the
+#     OpenWrt/WireGuard NAT are untouched. Published container ports
+#     (80/443 gateway, udp/51820 WireGuard) are DNAT'd and take the FORWARD
+#     path, not this chain; the 80/443 rule below is only for a host listener.
+#   * Loopback and Docker bridges are trusted (containers are inside the
+#     boundary and already reach host services at the gateway IP). The compose
+#     bridge is `br-<12 hex>` from 172.16.0.0/12, so `br-*` is accepted only
+#     with a Docker-pool source; the AP bridge `br-lan` (192.168.20.0/24)
+#     therefore does NOT match.
+#   * Everything else: only the lines marked `lan` below. Control-plane ports
+#     are marked `internal` and are deliberately absent from the accept rules.
+#   * Interface names are not baked in (they differ per box and per shape).
+#
+# INVENTORY. One line per host listener; tests/droplet-host-net-unit.test.sh
+# derives the repo's host-network listeners and FAILS when one has no line
+# here, so a new 0.0.0.0 listener forces a decision (lan = needs an accept
+# rule below, internal = must have none). Format:
+#   host-listener: <proto> <ports> <service> <lan|internal|none>
+# host-listener: tcp 8080 routing internal
+# host-listener: tcp 8081 switch internal
+# host-listener: tcp 8082 oled-display internal
+# host-listener: tcp 8083 matter-controller internal
+# host-listener: tcp 8085 camera-discovery internal
+# host-listener: tcp 9090 device-bridge internal
+# host-listener: tcp 80,443 gateway lan
+# host-listener: tcp 22 sshd lan
+# host-listener: udp 67 dnsmasq lan
+# host-listener: udp 5353 avahi lan
+# host-listener: tcp 445,139 samba lan
+# host-listener: udp 137,138,3702 samba lan
+# host-listener: tcp 5357 samba lan
+#
+# NOT YET VERIFIED ON A BOX (validate with the checklist before enabling):
+# DNS (53) served by dnsmasq/OpenWrt to LAN clients, Matter commissioning
+# (UDP 5540), Frigate/RTSP, and whether nmbd (137/138) runs in the samba image.
+# Add a `lan` line AND an accept rule for anything `ss -lntupH` shows that is
+# not covered here.
+# =============================================================================
+table inet droplet_host_input {
+  chain input {
+    type filter hook input priority filter; policy drop;
+
+    ct state established,related accept
+    ct state invalid drop
+    iifname "lo" accept
+
+    # Trusted container side.
+    iifname "docker0" accept
+    iifname "br-*" ip saddr 172.16.0.0/12 accept
+
+    # Neighbour discovery / path MTU / ping must keep working.
+    ip protocol icmp accept
+    ip6 nexthdr icmpv6 accept
+
+    # --- lan: reachable from the LAN and the uplink side ---------------------
+    tcp dport { 80, 443 } accept
+    # sshd only listens while the owner's SSH toggle is on (the applier starts
+    # and stops the service), so this rule opens nothing while it is off.
+    tcp dport 22 accept
+    udp dport 67 accept
+    udp dport 5353 accept
+    tcp dport { 445, 139 } accept
+    udp dport { 137, 138, 3702 } accept
+    tcp dport 5357 accept
+
+    # Anything else is dropped. In observe mode (policy accept, see the doc)
+    # this rule still counts and logs what WOULD have been dropped.
+    limit rate 10/minute log prefix "droplet-input-drop: " counter
+    counter
+  }
+}

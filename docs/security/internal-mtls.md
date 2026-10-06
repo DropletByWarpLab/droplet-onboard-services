@@ -1,8 +1,24 @@
 # Internal service-to-service mTLS (WARP-236) + MQTT mTLS (WARP-235)
 
-Every first-party internal HTTP/gRPC hop and the MQTT broker authenticate peers
-with X.509 client certificates issued by a compose-network-scoped internal CA.
-The single shared MQTT password is retired; MQTT identity is the client-cert CN.
+> **Default posture (read this first).** Internal mutual TLS for HTTP and gRPC is
+> **dormant by default**: `DROPLET_INTERNAL_TLS` ships as `0` (written by
+> `scripts/lib/secrets.sh`, defaulted `:-0` in `docker/docker-compose.yml`) and
+> nothing turns it on. On a box as shipped, only Mosquitto (client-cert CN
+> identity), Postgres (TLS 1.3 + SCRAM) and Redis (TLS-only + per-service ACLs)
+> are encrypted and authenticated by default. Every HTTP and gRPC hop between
+> the first-party services is plaintext on the compose bridge and relies on a
+> static per-service bearer token; `voice-io`, `rag-eval` and `file-indexer`
+> gained such a fail-closed bearer in WARP-3625 (before that they relied on
+> network position alone). The rest of this document describes the design and
+> the behaviour **when the flag is on**. Flipping the default is tracked in
+> WARP-2565 and needs live-box validation first.
+
+## Target design
+
+With `DROPLET_INTERNAL_TLS=1`, every first-party internal HTTP/gRPC hop and the
+MQTT broker authenticate peers with X.509 client certificates issued by a
+compose-network-scoped internal CA. The single shared MQTT password is retired;
+MQTT identity is the client-cert CN.
 
 ## Design summary
 
@@ -66,11 +82,13 @@ device-identity-svc issuance. Rationale:
 5. WARP-235 removes the password listener entirely (single mTLS listener :8883).
    The dev compose stack keeps its own anonymous 1883 broker — untouched.
 
-## Enforcement matrix (implemented — WARP-1061)
+## Enforcement matrix (implemented but off by default — WARP-1061)
 
 Every row below is wired end-to-end (client presents its bundle AND the
 server requires a CA-signed client cert) and gated on `DROPLET_INTERNAL_TLS`
-(default `0` = plaintext, byte-identical to the pre-mTLS posture). "impl."
+(default `0` = plaintext, byte-identical to the pre-mTLS posture). The "Flag
+on" column describes the Target posture; the shipped default is the "Flag
+off" column. "impl."
 notes which ticket landed the last missing half.
 
 | # | Client → Server | Transport | Flag off | Flag on | impl. |
@@ -112,7 +130,7 @@ flag is off.
 | ops-console inbound :8087 | loopback-published for the operator's tunneled BROWSER, which cannot present internal client certs; bearer token + 127.0.0.1 bind + reverse tunnel are the gate. It IS an mTLS *client* for its mesh probes (row 15) — the probe rewrite is scoped to the mesh registry names so exempt targets are never probed over TLS. |
 | mcp-server inbound :9090 | JWT-gated surface for OFF-stack consumers (droplet-local-LLM, Claude Desktop) that hold no internal identity. It is an mTLS *client* toward the orchestrator/routing/switch (rows 5, 12). |
 | nginx → web-dashboard :3001 / nextcloud / docserver | user plane; holds no service secrets — the browser is the real client and the gateway terminates the public TLS. |
-| device-bridge inbound :9090 (host) | loopback-bound host listener (BRIDGE_BIND=127.0.0.1) with its own bearer; a host python stdlib server with no TLS listener support worth adding. Orchestrator → bridge calls stay plain http on the host-gateway leg. Loopback-only ⇒ acceptable per the WARP-1061 host-caller policy. |
+| device-bridge inbound :9090 (host) | host listener bound `BRIDGE_BIND=0.0.0.0` by `droplet-device-bridge.service` (the in-code default is 127.0.0.1, the unit overrides it): the orchestrator container reaches it at the `droplet_default` gateway IP while host callers use 127.0.0.1, which one bind address cannot serve. Protected by its own bearer on every route except `/health`; a host python stdlib server with no TLS listener support worth adding, so orchestrator → bridge calls stay plain http on the host-gateway leg. **Not loopback-only**: it is reachable from the LAN and uplink until the host input firewall (WARP-3574, `docs/security/host-input-firewall.md`) is enabled, which is why plaintext on this leg is an accepted risk, not a closed one. |
 | orchestrator → frigate :5000, device-bridge :9090, nextcloud WebDAV, HQ issuance | third-party / host / WAN surfaces outside the compose mesh (frigate is loopback-published; HQ is public TLS). |
 | ai-gateway → the inference runtime (dmr :12434 default / ollama :11434 opt-in), ollama-manager; voice-io → wyoming STT/TTS | third-party engines: bridge-internal or raw-TCP protocols with no/immaterial TLS support. |
 | orchestrator → device-identity-svc | Unix socket, filesystem-scoped — no network hop to encrypt. |
@@ -137,7 +155,9 @@ the mesh. Three host identities are issued by `internal_ca_issue_all` into
 
 - **Live everywhere:** the internal CA + per-service bundle
   issuance/rotation, Postgres TLS (WARP-233), Redis TLS (WARP-234), MQTT
-  mTLS :8883 (WARP-235, scheme-gated, always on).
+  mTLS :8883 (WARP-235, scheme-gated, always on). Postgres and Redis use TLS
+  with password or ACL authentication; they do not require client certificates
+  (`--tls-auth-clients no` on Redis).
 - **Wired and flag-gated (everything in the matrix):** flipping
   `DROPLET_INTERNAL_TLS=1` + recreating the stack turns every row on
   together. `scripts/setup.sh` writes the knob (default `0`) into fresh

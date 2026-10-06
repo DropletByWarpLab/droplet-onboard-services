@@ -61,7 +61,12 @@ export type UpdateFailureReason =
   | "key_usage_mismatch"
   | "extension_key_changed"
   | "extension_schema_invalid"
-  | "extension_digest_mismatch";
+  | "extension_digest_mismatch"
+  // WARP-3430: the signed channel pointer (channel-pointer.ts). A pointer that
+  // fails its own schema, or disagrees with the signed manifest it names, is
+  // refused as its own reason — never as a manifest or signature failure.
+  | "pointer_invalid"
+  | "pointer_mismatch";
 
 export type ManifestFailureReason = Extract<
   UpdateFailureReason,

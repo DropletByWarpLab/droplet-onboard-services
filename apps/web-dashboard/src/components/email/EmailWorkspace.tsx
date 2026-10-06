@@ -66,7 +66,7 @@ export function EmailWorkspace({
 }: EmailWorkspaceProps) {
   const router = useRouter();
   const { user } = useAuth();
-  const canSend = user?.role === "owner" || user?.role === "admin";
+  const canDraft = user?.role === "owner" || user?.role === "admin";
 
   // Layout breakpoints, mirrored from the Tailwind grid below so the rendered
   // panes and the CSS column template stay in lock-step:
@@ -122,6 +122,8 @@ export function EmailWorkspace({
   }, [activeThreadId, activeAccountId]);
 
   const activeAccount = accounts.find((a) => a.id === activeAccountId) ?? null;
+  const outlookImport = activeAccount?.authMode === "M365_GRAPH";
+  const canSend = canDraft && !outlookImport && activeAccount?.canSend !== false;
   const lastSyncLabel = relativeSync(activeAccount?.lastIdleAt ?? null);
   // WARP-2957 — an empty list has three different meanings now, and the
   // account row can tell them apart: never synced yet, last sync failed, or
@@ -236,6 +238,7 @@ export function EmailWorkspace({
               isLoading={Boolean(activeThreadId) && threadLoading}
               error={threadError}
               canSend={canSend}
+              importedFromOutlook={outlookImport}
               onSent={() => {
                 setDraft(null);
                 refreshThread();
@@ -243,12 +246,13 @@ export function EmailWorkspace({
               }}
             />
             {/* Reply composer — the only place a sendable draft is created. */}
-            {canSend && activeThreadId && thread && !draft && (
+            {canDraft && activeThreadId && thread && !draft && (
               <ReplyComposer
                 accountId={activeAccountId as string}
                 threadId={activeThreadId}
                 to={replyRecipients(thread.messages, activeAccount?.address)}
                 subject={replySubject(thread.subject)}
+                canSend={canSend}
                 onDraftCreated={setDraft}
               />
             )}
@@ -390,12 +394,14 @@ function ReplyComposer({
   threadId,
   to,
   subject,
+  canSend,
   onDraftCreated,
 }: {
   accountId: string;
   threadId: string;
   to: string[];
   subject: string;
+  canSend: boolean;
   onDraftCreated: (draft: DraftRow) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -490,7 +496,7 @@ function ReplyComposer({
           {busy ? "Saving…" : "Save draft"}
         </button>
         <span className="type-caption-2" style={{ color: "var(--text-muted)" }}>
-          You&rsquo;ll confirm before it sends.
+          {canSend ? <>You&rsquo;ll confirm before it sends.</> : "Saved locally. Sending from this mailbox in Droplet is not available."}
         </span>
       </div>
     </div>

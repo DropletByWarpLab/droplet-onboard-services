@@ -291,12 +291,20 @@ status pill in the chrome.
 | POST | `/devices/pair` | Bearer (dashboard) | `{ deviceName, deviceType: "desktop"\|"mobile", platform }` | `{ code, expiresAt, pairUrl }` |
 | GET | `/devices/pair/:code/status` | Bearer | — | `{ code, used, expired, expiresAt, claimedBy? }` |
 | POST | `/devices/pair/claim` | **Bearer** | `{ code, deviceName?, appVersion? }` | `{ deviceId, ncUsername, webdavUrl, appPassword }` |
-| GET | `/devices/clients` | Bearer | — | `{ clients: [{ id, deviceName, deviceType, platform, appVersion, lastSeen, status, createdAt }] }` |
-| DELETE | `/devices/clients/:id` | Bearer | — | `{ revoked: "<deviceId>" }` |
+| GET | `/devices/clients` | Bearer | — | `{ clients: [{ id, deviceName, deviceType, platform, appVersion, kind: "app_pairing"\|"personal_drive", lastSeen, status, createdAt }] }` (the caller's own) |
+| DELETE | `/devices/clients/:id` | Bearer | — | `{ revoked: "<deviceId>" }` (the caller's own) |
+| GET | `/admin/devices/clients?userId=` | Bearer, owner/admin only | — | `{ clients: [{ …the row above, userId, displayName, personStatus: "active"\|"deactivated"\|"removed" }] }`; `userId` omitted lists everyone. Members, guests: 403 |
+| DELETE | `/admin/devices/clients/:id` | Bearer, owner/admin only | — | `{ revoked, appPasswordDeleted: true\|false\|null, warning? }`; `false` = marked revoked but Nextcloud did not confirm deleting the app password, `null` = already revoked. Audited with actor and person |
 | GET | `/devices/push/vapid-public-key` | Bearer | — | `{ publicKey }` |
 | POST | `/devices/push/subscribe` | Bearer | `{ endpoint, keys: { p256dh, auth }, deviceClientId? }` | `{ id }` |
 | DELETE | `/devices/push/subscribe` | Bearer | `{ endpoint }` | 204 |
 | POST | `/devices/push/test` | Bearer | — | dispatch result |
+
+`lastSeen` is the pairing time until the client's tool-host connects the WS bridge
+(it then moves with each hello and heartbeat). A client that never does, such as a
+Finder / File Explorer drive login, keeps the pairing time. Deactivating or deleting
+a person revokes all their clients (both kinds) and writes one audit row with the
+actor, the person and the counts.
 
 **Push status:** only **WebPush (VAPID)** subscribe exists today. A native
 **APNs/FCM token-registration endpoint is NOT yet implemented** — native
@@ -332,6 +340,17 @@ Sign-in + optional enrollment sequence:
    leaf; unknown parameters are ignored by older clients. Reference
    implementation: the native Windows client's C# trust code in `droplet-windows`
    (a port of the retired Rust `trust.rs`, WARP-2953; WARP-3236).
+   **Manual connect (WARP-3414).** A client that is given only an address (no
+   scanned `spki`) and finds a box with its own certificate MAY show the key's
+   fingerprint and ask the admin to compare it. Format, shared by every channel:
+   the same SHA-256 as uppercase hex in 4-character groups separated by single
+   spaces, 16 groups (`F017 AFA8 6AD7 8BED …`). The reference must come from a
+   channel a LAN attacker cannot rewrite, so the box shows it on its own front
+   screen (the rail's `Droplet fingerprint` face), in the `setup.sh` output and
+   from `droplet-fingerprint` on the box. Settings → Device information and
+   Devices → Pair show it too (`fingerprint` on the owner/admin-only
+   `GET /api/tls/certificate`), but that is the same connection under
+   question, so the dashboard copy says it proves nothing on its own.
 2. App POSTs `/auth/login?return=body` → stores JWT pair + user. On
    `401 TOTP_REQUIRED`, prompt for `totp` and resubmit.
 3. (Optional) If a pair `code` is present, app POSTs `/devices/pair/claim`
@@ -347,18 +366,24 @@ To GENERATE a code, the dashboard (already authenticated) POSTs
 
 | Method | Path | Auth | Returns / body |
 |---|---|---|---|
-| GET | `/cameras` | Bearer | `{ cameras }`, the cameras this person may see; `{ cameras: [], _status: "disconnected" }` when the camera service is down (that is not "no cameras") |
-| GET | `/cameras/:name` | Bearer | full `CameraInfo` |
+| GET | `/cameras` | Bearer | `{ cameras }`, the cameras this person may see; `{ cameras: [], _status: "disconnected" }` when the camera service is down (that is not "no cameras"). When the camera service could not be read the list carries `degraded: true` and the `X-Droplet-Degraded: frigate-unavailable` header, and every `status` is unknown rather than "offline" (see "Recording state" below) |
+| GET | `/cameras/:name` | Bearer | full `CameraInfo` plus `recentEvents`; `X-Droplet-Degraded` as above |
 | GET | `/cameras/:name/snapshot` | Bearer | current JPEG frame |
 | GET | `/cameras/:name/live` | Bearer | MJPEG stream (`multipart/x-mixed-replace`, `Cache-Control: no-store`) |
 | GET | `/cameras/:name/events` | Bearer | events for one camera |
-| GET | `/cameras/events?limit=` | Bearer | recent events, newest first |
+| GET | `/cameras/events?limit=&businessHours=outside` | Bearer | `{ events, nextCursor, scanLimitReached }`, newest first; items include `outsideBusinessHours: boolean \| null` |
+| GET | `/cameras/reviews?severity=alert&businessHours=outside` | Bearer | `{ reviews, nextCursor, scanLimitReached }`; items include `outsideBusinessHours: boolean \| null` |
+| GET | `/cameras/motion?cameras=&after=&before=&businessHours=&limit=&cursor=` | Bearer (owner, admin, family) | `{ activity, nextCursor, scanLimitReached: false, coverage }`; motion in retained recordings, with per-camera scope |
+| GET | `/cameras/business-hours` | Bearer (owner, admin, family) | `{ configured, timezone, days }`; unset defaults below |
+| PUT | `/cameras/business-hours` | Bearer (owner, admin; cameras manage access) | same complete schedule body and response; invalid schedule → 400 |
 | GET | `/cameras/events/:eventId/thumbnail` | Bearer (owner, admin, family) | image bytes: Frigate's own `Content-Type` (`image/jpeg` when it sends none), `Cache-Control: private, no-store`. `:eventId` is a Frigate event id, `^[a-zA-Z0-9._-]{1,128}$`; errors below the table |
 | GET | `/cameras/events/:eventId/snapshot` | Bearer | event JPEG |
-| GET | `/cameras/reviews/:reviewId/thumbnail` | Bearer | review item image bytes |
+| GET | `/cameras/reviews/:reviewId/thumbnail` | Bearer | review item image bytes: `Content-Type: image/webp` (`image/jpeg` on an older Frigate), `Cache-Control: private, no-store`. 404 `{ "error": "review_not_found" }` or `{ "error": "thumbnail_not_found" }` when Frigate has no such review or no file for it (an in-progress review may not have one yet; key on the status). 503 `{ "error": "frigate_unavailable" }` with `X-Droplet-Degraded: frigate-unavailable` when Frigate is unreachable or answers with an error |
+| GET | `/cameras/reviews/:reviewId/preview` | Bearer | MP4 preview; preserves `Range`, 206, 416, `Content-Range`, `Accept-Ranges`, `Content-Length`. Missing preview → 404 `preview_not_found`; unavailable service → 503 `frigate_unavailable` |
 | GET | `/cameras/events/sse` | Bearer | SSE stream of camera events (`data: {json}`; `: heartbeat` every 30 s; first frame `{ "type": "connected" }`) |
 | GET | `/cameras/clips?camera=&limit=` | Bearer | `{ clips: [{ id, camera, label, score, start_time, end_time, thumbnail_url, clip_url }] }` (`limit` default 50, max 200; only events that have a clip) |
-| GET | `/cameras/clips/event/:eventId` | Bearer | mp4 bytes |
+| GET | `/cameras/clips/event/:eventId` | Bearer | mp4 bytes: Frigate's `clip.mp4`, a **fragmented** mp4 streamed as it is made (no duration in its header, its index at the end, no `Content-Length`, `Range` ignored). Fine to save as a file (`?download=1`, owner and admin); a player cannot read its length or seek in it, so play an event with the route below |
+| GET | `/cameras/events/:eventId/playback.m3u8` | Bearer (owner, admin, family) | HLS playlist of the same footage, the way `/cameras/:name/playback.m3u8` serves a recording: segments and the fMP4 init map point at `/cameras/:name/playback.segment` and carry the same short-lived signature (WARP-3122). The box picks the window: the event's start and end plus the pre/post-capture padding (20 s each by default), up to now for an event still in progress, at most an hour. Request it again for an event in progress to reach further. 404 `{ "error": "event_not_found" }` or `{ "error": "no_recordings_in_range" }`; 503 `{ "error": "frigate_unavailable" }` with `X-Droplet-Degraded: frigate-unavailable` when Frigate cannot be asked |
 | POST | `/cameras/clips/share` | Bearer (custody roles) | share a clip |
 | GET | `/cameras/groups` | Bearer | `[{ id, name, members }]` |
 | GET | `/cameras/pins` | Bearer | `[{ cameraName, sortOrder }]` |
@@ -372,11 +397,79 @@ header; the stream is per-connection and never cached) and stills come from
 it is granted. A save or download asked by a role that is not owner or admin
 answers `403 { code: "CAMERA_CUSTODY_REQUIRED" }`.
 
+**Business hours.** The complete schedule has `configured: boolean`, an IANA
+`timezone` string and `days` with exactly `monday` through `sunday`. Each day is
+`null` for closed, or `{ open: "09:00", close: "17:00" }`. Opening accepts
+`00:00`–`23:59`; closing also accepts `24:00`. Equal times are invalid. A close
+earlier than its open ends on the following day. `00:00`–`24:00` is all day.
+The unset response is `configured: false`, `timezone: "UTC"`, all days `null`;
+clients should ask for the user's timezone when first configuring the schedule.
+
+`outsideBusinessHours: null` means the schedule is unset, not that activity was
+within business hours. Otherwise the server classifies the whole `[startTime,
+endTime)` activity span against the saved timezone, including overnight windows
+and daylight saving changes; active items extend to now. The business-hours
+filter accepts exactly `outside` or `inside` on events, reviews and semantic
+event search. Event/review filtering scans upstream before paging. On
+`scanLimitReached: true`, follow `nextCursor` even if the current page is empty;
+do not present an empty bounded scan as an exhaustive absence of activity.
+Semantic search reports `searchLimitReached` for its bounded candidate set and
+returns `nextCursor: null`; narrow the query or filters for more precise coverage.
+
+**Retained motion.** Motion activity is independent of object reviews; Frigate
+0.17.1 only has `alert` and `detection` review severities. `/cameras/motion` reads
+raw per-recording positive motion counts and merges contiguous segments.
+`activity` items contain `{ id, camera, startTime, endTime, motion,
+outsideBusinessHours, playbackUrl }`; `motion` is a count, not a percentage.
+The default range is the last 24 hours and the maximum is 26 hours, allowing a
+day with a daylight saving transition. `limit` defaults to 50 and allows 1–200.
+Keep both original time bounds fixed between pages and pass `nextCursor` as the
+separate `cursor` query parameter. Equal-time windows stay together, so a page
+can contain more than `limit` items. Invalid ranges or parameters return 400.
+
+`coverage` is `{ after, before, partial, cameras: [{ camera, recordedSeconds,
+hasGaps, available }] }`, containing only cameras the person can see. A failed
+camera read has `available: false`, `recordedSeconds: null`, `hasGaps: true` and
+sets `partial: true`; an empty successful read has zero retained seconds and
+gaps. A successful, completely covered quiet window has no gaps. Do not label
+an empty page as proof of no movement outside the retained footage and selected
+range. These bounded motion queries classify and filter the full activity
+spans before pagination.
+
+**Review media.** The thumbnail proxy validates the review's own
+`/media/frigate/clips/review/thumb-<camera>-<reviewId>.webp` path. The preview
+proxy uses Frigate's `/api/review/:reviewId/preview?format=mp4` endpoint. Clips,
+previews and recording playback keep authenticated per-camera access checks.
+Clients can fall back from unavailable MP4 media to
+`/cameras/:name/playback.m3u8?after=<startTime>&before=<endTime>` for the same
+activity window, then display an unavailable message if recordings have expired.
+
+**Recording state (`CameraInfo.recording`, WARP-3511).** Every camera carries what
+it is keeping, from the same camera-service reading as `status`, so the two cannot
+disagree about whether anything is being saved. `null` always means "not known",
+never zero.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `mode` | `continuous`, `motion`, `events`, `off`, or `null` | Named for the broadest open retention window: `continuous` keeps everything, `motion` keeps segments with motion, `events` keeps only footage that overlaps an alert or detection, `off` keeps nothing. `null` only when `degraded` |
+| `retentionDays` | `{ continuous, motion, alerts, detections }` or `null` | Days each window keeps footage, as configured (0 closes a window). Present even when `mode` is `off`. `null` only when `degraded` |
+| `lastSegmentAt` | ISO string or `null` | When the newest saved segment ended, from a short recent window. `null` means unread or none was found there; check `lastSegmentReadFailed` before claiming no recent footage |
+| `lastSegmentReadFailed` | optional boolean | `true` when the recent-segment read failed. Show "Last save unavailable", never "Nothing saved recently"; this does not invalidate the mode and retention readings |
+| `usedBytes` | number or `null` | Bytes of footage on disk. `null` means none yet, or not known, and is never 0 |
+| `bytesPerDay` | number or `null` | The measured write rate scaled to a day. `null` means not measured yet |
+| `degraded` | boolean | The camera service could not be read. Every other field, and `status`, is unknown: show "service unavailable", never a recording or "not saving" claim |
+
+A degraded list is not cached, so it heals on the next poll. `GET` and `PATCH
+/cameras/:name/settings` answer `503 { error: "frigate_unavailable", degraded: true }`
+with the same header (an empty settings form served as 200 would be saved back over
+the real configuration), and `GET /cameras/:name/ptz` answers
+`{ supported: false, ... }`, adding `degraded: true` only when the camera service is
+unreachable. A camera with no PTZ is a normal answer, not an error. Retention
+windows and detection FPS have one set of limits for the service and the clients
+(`@droplet/shared-types`: detection FPS 1 to 30, every retention window 0 to 90 days).
+
 **Event still (`GET /cameras/events/:eventId/thumbnail`).** `:eventId` is a
-Frigate event id, and `thumbnail_url` on `/cameras/clips` points here. For the
-still of a Security incident's event, send the feed row's `frigateEventId`
-(`IncidentDetail.events`, under Security), never its `id`; it is `null` on a row
-with no Frigate event, so there is nothing to ask for. Its errors
+Frigate event id, and `thumbnail_url` on `/cameras/clips` points here. Its errors
 (`routes/cameras.ts`, `services/camera-access.service.ts`,
 `middleware/error-handler.ts`):
 
@@ -394,12 +487,20 @@ with no Frigate event, so there is nothing to ask for. Its errors
 
 | Method | Path | Auth | Returns / body |
 |---|---|---|---|
-| GET | `/llm/models` | Bearer | `[{ id, name, provider, ... }]` |
+| GET | `/llm/models` | Bearer | `{ models: [{ id, name, provider, ... }], defaultModel?: string \| null, degraded?: boolean, degraded_providers?: string[] }` |
 | GET | `/llm/conversations` | Bearer | `[{ id, title, updatedAt, model }]` |
 | GET | `/llm/conversations/:id` | Bearer | `{ id, title, messages: [...] }` |
 | POST | `/llm/conversations` | Bearer | `{ title?, model? }` → `{ id }` |
 | POST | `/llm/chat` | Bearer | `{ model, messages: [{ role, content }], stream?: true, conversationId? }` → SSE stream OR JSON |
 | DELETE | `/llm/conversations/:id` | Bearer | `{ ok }` |
+
+`GET /llm/models` returns an object, including when its `models` array is
+empty. Decode `models` from that object; the response is never a bare array.
+`defaultModel` is the installed local model selected for chat, or `null` when
+none is selected. `degraded: true` means the local model list may be incomplete
+because the AI service is unreachable or reported a provider failure; an empty
+list in that state does not prove that no model is installed. The optional
+`degraded_providers` names the providers whose model listing failed.
 
 Each message carries `kind` (`message`, or `agent_run_result` for a background run reporting back, WARP-3300) and `meta` (`null`, or `{runId, status, title, summary, artifacts}` on an `agent_run_result`). Its `content` is plain assistant text either way, so a client that ignores `kind` still shows it.
 
@@ -587,6 +688,26 @@ Body is raw audio bytes (not multipart/JSON); `rate` 8000..48000 (default 16000)
 `429 stt_busy` (+ `Retry-After`) when the 2-slot concurrency limit is hit — just
 retry; `400 empty_audio` / `400 invalid_rate`; `503 stt_unavailable` when the STT
 sidecar is down.
+
+#### Coding-tool tokens (`/api/llm-access`)
+
+WARP-3452 / ADR-067. Tokens (`dlk_…`) that let a coding tool use the box's model at
+`https://<box>/llm/`. Owner, admin and members only: a guest gets
+`403 role_not_allowed` on every route.
+
+| Method | Path | Auth | Body | Returns |
+|---|---|---|---|---|
+| GET | `/llm-access` | owner/admin/family | — | `{ enabled, canCreate, isAdmin, activeModel, contextWindow, tokens: TokenRow[] }` (the caller's own tokens, newest first) |
+| PUT | `/llm-access/settings` | owner/admin | `{ enabled }` | same as GET |
+| POST | `/llm-access/tokens` | owner/admin/family | `{ label }` (1–64 chars, trimmed) | 201 `{ token, row: TokenRow }`; `token` is shown this once. `409 disabled` while the switch is off |
+| POST | `/llm-access/tokens/:id/renew` | own token, or owner/admin | — | `TokenRow` (expires 364 days on); `409 revoked` |
+| DELETE | `/llm-access/tokens/:id` | own token, or owner/admin | — | `204` (revoked, row kept) |
+| GET | `/llm-access/tokens/all` | owner/admin | — | `{ tokens: Array<TokenRow & { user: { id, displayName } }> }` |
+
+`TokenRow` = `{ id, label, prefix, status: "active"|"revoked"|"expired", createdAt,
+expiresAt, lastUsedAt, revokedAt, usage30d: { requests, promptTokens,
+completionTokens, errors } }`. Someone else's token id → `404 not_found`. The
+`_introspect` and `_usage` routes under the same prefix are for ai-gateway only.
 
 ### Files (`/api/files/*`)
 
@@ -952,512 +1073,56 @@ Differences that are not contract issues: iOS handles the 404 in both shapes (th
 and Android's `parkedCallMayHaveRun` (the `unknownOutcome` re-park case) is Android
 copy that the iOS card may not carry.
 
-### Security incidents and alert routing (`/api/security/*` — WARP-2981)
+### Recording storage — dashboard consumption (WARP-3515)
 
-> **Added for WARP-2981 (ADR-059 P6, §8).** Android and Windows build the
-> incident inbox, acknowledge-from-the-phone and "who is told" screens on these
-> routes (iOS is out of P6, DS-038). The numbers 16–22 are ADR-059's; the route
-> file's own header carries the same ones. Where the ADR and the code differ,
-> this section follows the code. Paths `routes/…`, `services/…`, `middleware/…`,
-> `modules/…` and `lib/…` are under `apps/orchestrator/src/`. None of these
-> shapes is defined in `packages/shared-types`; the web dashboard mirrors them in
-> `apps/web-dashboard/src/lib/types.ts`.
+> **Dashboard only.** The native clients do not consume these routes. The endpoint
+> specification is ADR-070 (`docs/ADR-070-camera-recording-storage.md`) and the
+> WARP-3514 / WARP-3513 PRs; this note records only what the web dashboard
+> *relies on*, so a change to any of it is visible to whoever reads this file.
 
-An **incident** groups the events that belong together (one area or camera, one
-visit) and carries **reason codes**. Only an `alert` incident notifies anyone. A
-person reads incidents; at `act` level they acknowledge or resolve them; an owner
-or admin at `manage` level chooses who is told (`routes/security-incidents.ts`).
+What the dashboard calls: `GET`/`PUT /api/storage/recordings`,
+`POST /api/storage/recordings/old-footage/delete`,
+`POST /api/storage/drives/:id/recovery-key/reveal`,
+`POST /api/storage/drives/:id/recovery-key/regenerate`, and the extended drive object
+(`encryption`, `preparation`, `usage`, `isSystemDisk`) on `GET /api/storage/drives`.
+`:id` is the drive's filesystem UUID, as on every other `/storage/drives/:uuid/*` route.
 
-| # | Method | Path | Auth | Body / query | 200 response |
-|---|---|---|---|---|---|
-| 16 | GET | `/security/incidents` | Security `view` | query: `limit` 1–100 (default 30), `cursor`, `state` = `attention` \| `open` \| `acknowledged` \| `resolved` \| `activity` \| `all` (default `all`), `severity` = `alert` \| `notice`, `zone` = an area uuid | `{ incidents: IncidentSummary[], nextCursor }` |
-| 17 | GET | `/security/incidents/summary` | `view` | — | `{ openAlerts, openNotices, latest: IncidentSummary[], alertsReady }` |
-| 18 | GET | `/security/incidents/:id` | `view` | — | `IncidentDetail` |
-| 19 | POST | `/security/incidents/:id/acknowledge` | `act` | `{ notificationId? }` | `{ incident: IncidentDetail, changed }` |
-| 20 | POST | `/security/incidents/:id/resolve` | `act` | `{ note? }`, at most 280 UTF-16 code units (below) | `{ incident: IncidentDetail, changed }` |
-| 21 | GET | `/security/alert-routing` | `view` | — | `AlertRouting` |
-| 22 | PUT | `/security/alert-routing/:userId` | `manage`, owner/admin | `{ state: "receiving" \| "not_receiving", expectedVersion: <int> \| null }` | `{ person: RoutingPerson }` |
-| 28 | POST | `/security/incidents/:id/narrative` | `act`, then a person who sees every camera and may read threats (owner/admin) | `{}` or no body (below) | **`202`**, not 200: `{ narrative: NarrativeView }` |
-| 35 | POST | `/security/incidents/:id/verdict` | `act`, owner/admin | `{ verdict: "expected" \| "not_expected" }` | `{ incident: IncidentDetail, changed }` |
+- **Tier handshake.** Every write answers `202` with a single-use token
+  (`status: "confirmation_required"`, `confirmationToken`, `service`, `resourceId`). The
+  dashboard has already collected the owner's consent in a dialog (a click for tier 2, a
+  typed phrase for tier 3) and completes the handshake itself with
+  `POST /api/storage/command/confirm {confirmationToken, service, resourceId}`. The
+  one-time recovery key arrives on that confirm (`{ recoveryKey }`); a reveal that answers
+  `200 { recoveryKey }` directly is accepted too. The reveal is never retried and never
+  cached.
+- **Absence is not an error.** `404` on `GET /api/storage/recordings` → "not available on
+  this Droplet yet"; `403` (a family account: the route and its writes are owner + admin
+  only) → the card is hidden, and the dashboard does not issue the request for that role.
+  A drive object without the new fields makes no claim about encryption; the Prepare drive
+  and Recovery key actions are not offered for it.
+- **Status the card renders.** The `status` string is folded with `warnings` and
+  `migration.state` by the orchestrator's own precedence: `missing` > `migrating` >
+  `degraded` > `on_system_disk` > `pending` > `active` > `no_eligible_drive`. An unknown
+  status renders neutrally; unknown warning codes render their `message`.
+- **Retention estimate.** The additive `retentionKnown` boolean is omitted by older
+  servers. When it is `false`, `needBytes`, `retentionDays`, and each camera's `needBytes`
+  are numeric `0` unknown sentinels, not zero required storage or zero-day retention.
+  The dashboard says the recording-space estimate is unavailable while waiting for
+  Frigate retention. Measured usage, reserved/free capacity, and `daysStored` remain
+  unchanged. When omitted, older-server behavior is preserved.
+- **Refusals the dashboard recognises.** `409 tpm_required` on Prepare / pool format / pool
+  create (matched on `code`, or the text) → "This Droplet has no security chip (TPM);
+  drives can't be encrypted." `409` on `{ mode: "full" }` with a files-present reason
+  (`files_not_empty`, or prose about files) → Whole drive is locked for that drive with the
+  reason shown. `410` on reveal → "already shown or expired" with a Tier-3 "Generate a new
+  recovery key".
 
-Routes 28 and 35 are not among §8's 16–22: 28 is P4's (WARP-2979), 35 is P5's. They
-are in the same router and route 18 reports them (`narrative`, `verdict`,
-`viewer.canGiveVerdict`), so they are listed. `:id` is an incident uuid, `:userId` a
-user uuid; a value that is not a uuid is a `400`.
-
-**Who may call.**
-
-- **Two gates first, mounted off `/api/security`** (`modules/module-mounts.ts`):
-  the box's Security toggle, then the person's Security level (`view` < `act` <
-  `manage`). Security is **off by default** (`defaultEnabled: false`,
-  `modules/module-registry.ts`; the retail, clinic and hospitality presets turn it
-  on), and `manage` is floored at the admin tier (`services/access-catalog.ts`).
-  A closed gate answers the **flat** `404 { "error": "module_disabled", "module":
-  "security" }`: the toggle is off, the person holds no Security grant, or the route
-  needs a level the person lacks (19, 20, 28 and 35 need `act`, 22 needs `manage`). It
-  is not the nested envelope below and not `INCIDENT_NOT_FOUND`.
-- **Role, on each route** (`routes/security-incidents.ts`): 16–21 owner, admin or
-  family (`family` is "Staff" in the UI); 22 and 35 owner or admin only; 28 owner,
-  admin or family at the role gate, then the viewer rule under Route 28 below (in
-  practice owner or admin). A role outside the list, a guest or a service token,
-  gets the flat `403 { "error": "Forbidden: role not permitted" }` (a guest whose
-  access role holds no Security grant is turned away earlier, by the `404` above).
-  No route takes a service principal, so Droplet's AI can never acknowledge,
-  resolve or change routing.
-- **Rate limit on the writes** (19, 20, 22, 28, 35): 60 a minute per IP
-  (`sensitiveRateLimit`, `middleware/rate-limit.ts`), then a `429` whose body is
-  exactly `{ "error": "Too many requests, slow down" }`. It is **flat**: `error` is
-  a string, and there is no `code`, no `message` and no `retryAfterSeconds`. The
-  wait is only in the `Retry-After` response header, in whole seconds. It is not
-  the nested envelope below. **The limiter is shared:** `sensitiveRateLimit` is one
-  counter (`identifier: "droplet-sensitive"`, `rate-limit.ts`) used by 13 route
-  files, so any other route that uses it (auth, files, VPN, cameras, and more)
-  spends the same 60 a minute per IP.
-- **Do not probe.** Ask `GET /api/modules` whether to draw Security at all:
-  `effectiveForUser: [{ moduleId, level }]` lists what the person holds (no
-  `security` entry: no Security screens and no Security calls; the field is
-  omitted when the box cannot resolve it, and then `modules[].effective` decides)
-  (`routes/modules.routes.ts`). The role `403` (route 28's viewer-rule `403` too)
-  and the per-person `404` are each written to the audit log as an `auth` warn
-  "Access denied" row, which Security copies into its own feed as a threat for
-  owners and admins (`recordAccessDenied`, `middleware/auth.ts`; `mirrorThreatRows`,
-  `services/security-events.service.ts`).
-  Once a screen is open, route 18's `viewer.level` and route 21's `level` say
-  which controls to draw.
-
-**A hidden camera changes nothing (DS-005).** One place decides it
-(`services/security-incident-view.ts`, fed by `securityViewerScope` in
-`services/security-access.ts`). Owner and admin see every camera; anyone else
-sees the cameras they were granted.
-
-- An incident none of whose cameras the person can see does not exist for them:
-  absent from 16, from 17's counts and `latest`, and `404 INCIDENT_NOT_FOUND`, the
-  same body as a missing id, from 18–20, 28 and 35. `site_threat` incidents (network
-  and sign-in warnings) are owner/admin only; `site_camera_system` incidents
-  (Frigate as a whole) are visible to every Security viewer.
-- A visible incident is **projected** onto the visible cameras: `state`,
-  `severity`, `reasonCodes`, `eventCount`, `labels`, `firstActivityAt`,
-  `lastActivityAt` and `grouping`, and route 16's order and `nextCursor`, come from
-  them alone, so activity on a hidden camera never moves an incident, reorders the
-  list or changes a count. Route 16's `state` and `severity` filters and route 17's
-  counts read visible codes only. In route 18, `reasons`, `events` and
-  `patternFlags` hold only what the person can see.
-- **No visible code** is plain activity: `state: "no_action"`, `severity: "info"`,
-  no acks, no notices, and `409 NOT_ACTIONABLE` on 19–20.
-- **Partial view**: the person sees a code, but a reason at the incident's top
-  severity rests on a camera they cannot see. `state` reads `open` (`resolved`
-  once resolved), never `acknowledged`; `lastAck` is `null`; `acks` holds only
-  their own; `notices` is empty; and 19–20 answer `409 NOT_ACTIONABLE`, the same
-  body as plain activity, because both actions settle the whole incident. A view
-  with a visible code that is not partial is a **full view**.
-- `?zone=` naming an area the person cannot see (or one that is missing, archived
-  or unlinked) is the empty page `{ "incidents": [], "nextCursor": null }`, the
-  same as a quiet area.
-- Alerts follow the rule too: a person is told only if they can see a camera an
-  alert rests on, and the text is built from what they can see (below).
-- **DS-019 applies to none of these routes on `stage`.** There is no lock source,
-  event kind or link yet: `SecurityEventSource` and `SecurityEventKind`
-  (`apps/orchestrator/prisma/schema.prisma`) carry none, and
-  `services/security-access.ts` has no lock scope.
-
-**Errors on 16–22, 28 and 35 are nested**, as on the Notifications routes:
-`{ "error": { "code": "…", "message": "…", "issues"? } }`. Key on `code`; `message`
-is calm copy for the person. `issues` is present only when the query or body
-failed its schema: a non-uuid id, a `cursor` of 60 characters or fewer that the box
-did not mint, and a `note` with characters that cannot be stored are a `400`
-without it. Its shape is under [Nested envelope](#nested-envelope-on-some-routes).
-The two gate answers above and the `429` are flat.
-
-| HTTP | `error.code` | Routes | When |
-|---|---|---|---|
-| 400 | `VALIDATION_ERROR` | 16, 18–20, 22, 28, 35 | Unknown key, value out of range, a non-uuid id, a `cursor` the box did not mint (or over 60 characters), a `note` with characters that cannot be stored |
-| 404 | `INCIDENT_NOT_FOUND` | 18–20, 28, 35 | Missing **or hidden**, byte for byte the same |
-| 404 | `USER_NOT_FOUND` | 22 | No such person |
-| 409 | `NOT_ACTIONABLE` | 19, 20, 28 | Plain activity, or a partial view (28: also any view the summary rules refuse, one body) |
-| 409 | `SUMMARIES_OFF` | 28 | Summaries are switched off in Security settings |
-| 409 | `NARRATIVE_TOO_OLD` | 28 | The incident's last activity is over 7 days ago |
-| 409 | `NARRATIVE_COOLDOWN` | 28 | Under 10 minutes since the last attempt or the last written text |
-| 409 | `NOT_JUDGEABLE` | 35 | Nothing this person can judge, or a partial view |
-| 409 | `INCIDENT_CONFLICT` | 19, 20, 28, 35 | Someone changed the incident at the same moment, twice in a row; re-read (route 18) and try again if still wanted |
-| 409 | `VERSION_CONFLICT` | 22 | `expectedVersion` is not the row's current `version` |
-| 409 | `NO_RECIPIENT` | 22 | The change would leave nobody eligible to be told |
-| 422 | `NOT_ELIGIBLE` | 22 | `receiving` for a person who cannot open Security at `act` |
-| 500 | `INTERNAL_ERROR` | 19, 20, 22, 35 | A bug on the box |
-| 503 | `INCIDENTS_UNAVAILABLE` | 16–20, 28, 35 | The read or write could not be answered: **never an empty 200** |
-| 503 | `ROUTING_UNAVAILABLE` | 21, 22 | Same, for routing |
-| 503 | `AUDIT_UNAVAILABLE` | 19, 20, 22, 35 | The audit row is written in the same transaction, and it could not be: nothing changed, safe to retry |
-
-**`IncidentSummary`** (routes 16 and 17's `latest`; `IncidentSummary`, `summaryOf`
-in `services/security-incident-view.ts`). Times are UTC ISO-8601.
-
-```json
-{
-  "id": "<uuid>",
-  "scope": "area" | "camera" | "site_threat" | "site_camera_system",
-  "zone": { "id": "<uuid>", "name": "…", "kind": "entry" | "interior" | "perimeter" | "parking" | "restricted" } | null,
-  "camera": "<Frigate camera name>" | null,
-  "state": "no_action" | "open" | "acknowledged" | "resolved",
-  "severity": "info" | "notice" | "alert",
-  "reasonCodes": ["after_hours_presence" | "camera_offline" | "threat_signal"],
-  "grouping": "collecting" | "closed",
-  "openedInMode": "open" | "closed" | "away",
-  "firstActivityAt": "ISO-8601", "lastActivityAt": "ISO-8601",
-  "eventCount": 3,
-  "labels": { "person": 2, "_status": 1 },
-  "lastAck": { "action": "acknowledge" | "resolve", "byName": "…", "at": "ISO-8601" } | null
-}
-```
-
-- **`zone` and `camera`** are the incident's place as it was when it opened: `zone`
-  only for `scope: "area"`, `camera` only for `scope: "camera"`, both `null` on a
-  site scope (the `SecurityIncident_scope_shape` CHECK). A later change to the
-  area's links does not move history.
-- **`reasonCodes`** hold only `after_hours_presence` (alert), `camera_offline` and
-  `threat_signal` (notices) today. The enum also names `out_of_place`,
-  `unusual_volume` and `long_dwell`, but they are in trial: the database refuses
-  them on a reason (`SecurityIncidentReason_code_severity`), so they never move
-  `state`, `severity` or a notification. Ignore a code you do not know.
-- **`labels`** counts the visible events: Frigate labels (the box tracks `person`,
-  `car`, `dog` and `cat`, `docker/frigate/config.yml`), plus `_status` (camera or system status rows), `_threat` (warning rows)
-  and `_ongoing` (a person still in view). `eventCount` is their sum.
-- **`grouping`**: `collecting` means the incident can still gain events (the web's
-  "still happening"), `closed` that it is sealed. Projected per viewer.
-- **`lastAck`** is the latest acknowledgement by anyone, only in a full view.
-
-**`IncidentDetail`** (route 18, and `incident` in 19, 20 and 35; `IncidentDetail`,
-`loadIncidentDetail` in `services/security-incident-view.ts`) is an
-`IncidentSummary` plus:
-
-```json
-{
-  "actionable": true,
-  "reasons": [{
-    "code": "after_hours_presence" | "camera_offline" | "threat_signal", "severity": "alert" | "notice",
-    "evidence": { "eventId": "<id>", "camera": "<Frigate camera name>" | null, "source": "<event source>", "kind": "<event kind>", "label": "<label>" | null, "at": "ISO-8601", "summary": "…" },
-    "detail": { … }
-  }],
-  "events": [ /* the feed row below, without `incident` */ ],
-  "moreEvents": false,
-  "acks": [{
-    "action": "acknowledge" | "resolve", "byName": "…", "at": "ISO-8601",
-    "client": "<product>/<version> (…)" | null, "viaNotification": false, "note": "…",
-    "signIn": { "recorded": true, "confirmedLive": true } | null
-  }],
-  "notices": [{
-    "userId": "<uuid>", "name": "…",
-    "outcome": "queued" | "sent" | "not_sent" | "outcome_unknown" | "skipped_no_access" | "skipped_not_visible" | "skipped_capped" | "skipped_no_address",
-    "reason": "routed" | "fallback_owner", "channels": "toast,push",
-    "pushOutcome": "sent" | "no_subscribers" | "refused_gate" | "failed" | null,
-    "createdAt": "ISO-8601", "settledAt": "ISO-8601" | null
-  }],
-  "eventsKept": "kept" | "partly_removed" | "removed",
-  "verdict": { "state": "unreviewed" | "expected" | "not_expected", "byName": "…" | null, "at": "ISO-8601" | null, "codes": ["…"] } | null,
-  "patternFlags": [{
-    "code": "out_of_place" | "unusual_volume" | "long_dwell", "effect": "trial" | "suppressed", "severity": "info" | "notice" | "alert",
-    "key": { "kind": "area" | "camera", "zoneId": "<uuid>" | null, "camera": "…" | null },
-    "evidence": { "eventId": "<id>", "camera": "…", "label": "…", "at": "ISO-8601", "summary": "…" },
-    "detail": { … }, "suppression": { "id": "<uuid>", "reason": "…", "state": "active" | "removed" | "expired" } | null
-  }],
-  "narrative": NarrativeView | null,
-  "viewer": { "level": "view" | "act" | "manage", "acknowledged": false, "canGiveVerdict": false }
-}
-```
-
-- **`actionable`** is true exactly when a **resolve** from this person would change
-  the incident: their level is `act` or above, the view has a visible code and is
-  not partial, and the incident is `open` or `acknowledged`. **Acknowledge** follows
-  it, except that once `viewer.acknowledged` is true it is a `changed: false` no-op.
-  Draw the buttons from these, never from the role.
-- **`reasons[].detail`** is the rule's numbers, optional context: ignore keys you do
-  not know. Today `after_hours_presence` `{ mode, modeSource, nonOpenAt, zoneKind }`,
-  `camera_offline` `{ offlineForSec, backAt }`, `threat_signal` `{ activityId, kind }`
-  (`lib/security-rules.ts`). Each reason keeps its own evidence snapshot (at most 5
-  per code and camera) that outlives the event trim.
-- **`events`**: the visible members, newest first, at most 200 (`moreEvents` says
-  there are more; there is no second page), empty once `eventsKept` is `removed`.
-  Each is route 1's feed row (`listSecurityEvents`,
-  `services/security-events.service.ts`) without its `incident` field:
-
-  ```json
-  { "id": "<id>", "source": "frigate" | "frigate_status" | "activity_mirror" | "site_mode",
-    "kind": "detection" | "detection_ongoing" | "detection_low" | "camera_offline" | "camera_online" | "source_offline" | "source_online" | "threat" | "mode_changed",
-    "severity": "info" | "notice" | "alert", "camera": "…" | null, "labels": ["person"], "cameraZones": ["…"], "score": <number> | null,
-    "startedAt": "ISO-8601", "endedAt": "ISO-8601" | null, "summary": "…", "frigateEventId": "…" | null,
-    "zones": [{ "id": "<uuid>", "name": "…" }], "alsoIn": [{ "id": "<uuid>", "name": "…" }] }
-  ```
-
-  `zones` are the person's visible areas for that event; `alsoIn` the other visible
-  areas it matched when it was sorted.
-- **`acks`**: every acknowledgement in a full view; only their own in a partial
-  view; none for plain activity. `client` is what the device *said*
-  it was (`X-Droplet-Client`, below), never proof, and may be `null`. `signIn` is
-  owner/admin only (`null` for anyone else): whether the request carried a sign-in
-  id and whether the box confirmed that sign-in live; the id itself is never
-  returned. `viaNotification` is true when the ack came from the person's own alert
-  notification for this incident (verified).
-- **`notices`**: who was told, in a full view. Owner/admin see every notice;
-  anyone else sees only their own, and never a `skipped_not_visible` one (it says
-  an alert was raised on a camera they cannot see).
-- **`eventsKept`**: events are kept 30 days, so an older incident reads
-  `partly_removed` or `removed` and `events` shrinks or empties. Counts, the
-  reasons' evidence, acks and notices stay.
-- **`verdict`** is `null` unless the person sees every camera and may read threats;
-  **`patternFlags`** is empty for everyone but owners and admins. A flag is a trial:
-  it never counts towards `state`, `severity` or a notification.
-- **`narrative`** is Droplet's "Summary by Droplet" for this person (`NarrativeView`,
-  under Route 28), or `null`: for anyone who may not read summaries (no state and no
-  hint that one exists), with summaries off, for plain activity, and when there is
-  nothing to say (`none` once the incident has closed, `expired` with no text)
-  (`narrativeView`, `services/security-narrative-view.ts`).
-
-**Route 16 (list).** Newest first by the person's own last activity, then id
-descending. `nextCursor` is opaque (`<ms>.<uuid>`): pass it back as `cursor` for
-the next page; `null` is the last page. Trust `nextCursor`, not the page length,
-and re-read page 1 to catch an incident that gained events (the key is its last
-activity, which moves). `state` selects the incidents whose **projected** `state`
-is the one asked for, over visible codes only: `attention` and `open` are the same
-(nobody is on it yet), `activity` is plain activity, `all` everything visible.
-`severity=alert` needs a visible alert code; `severity=notice` a visible notice
-and no visible alert. The query is strict: an unknown key is a `400`. `zone` is
-the area an incident opened in (`IncidentSummary.zone.id`).
-
-**Route 17 (summary).** Reads no query. `openAlerts` and `openNotices` count the
-incidents that need attention (`state` `open`: nobody has acknowledged) whose
-visible codes include an alert, or only notices; acknowledged, resolved and plain
-activity never count. Their sum is the wall's "Needs attention". `latest` is up to
-three of them, in route 16's order. `alertsReady` is true when opening hours are
-set and at least one area marked Inside or Staff only (`interior` or `restricted`)
-has an active link (`alertsReady`, `services/security-alerts.service.ts`): false
-means after-hours alerts cannot fire yet.
-
-**Routes 19 and 20 (act).** Both bodies are strict; an empty body is fine.
-`notificationId` is the id of the notification the person opened the incident
-from (`^[A-Za-z0-9_-]{1,64}$`): the box stores it only when it is that person's
-own alert for this incident, and otherwise ignores it without an error. Each write
-is one transaction on the incident's `version` (a lost race is re-read once, then
-`INCIDENT_CONFLICT`), and the response is the whole incident as this person may
-now see it. What each does (`services/security-incident-actions.ts`):
-
-| Incident, as this person sees it | Acknowledge | Resolve |
-|---|---|---|
-| plain activity, or a partial view | `409 NOT_ACTIONABLE` | `409 NOT_ACTIONABLE` |
-| `open` | → `acknowledged`, `changed: true` | → `resolved` and sealed, `changed: true` |
-| `acknowledged` | `changed: true` and the state stays, if this person has no ack yet; else `changed: false` | → `resolved` and sealed, `changed: true` |
-| `resolved` | `changed: false` | `changed: false` |
-
-- **Every person's first acknowledgement is recorded**, so several people can
-  acknowledge one incident. A resolve takes an optional `note`. Nothing resolves an
-  incident automatically, and later events never re-notify.
-- **`note` is at most 280 UTF-16 code units**, not characters and not code points.
-  The schema is `z.string().max(280)` (`resolveBodySchema`,
-  `routes/security-incidents.ts`), and Zod 3 compares the JavaScript string's
-  `length`. That is the count of Kotlin's `String.length` and C#'s
-  `string.Length`. A character outside the Basic Multilingual Plane (most emoji) is
-  2 units, so 140 of them fit and 141 do not. The limit is checked on the note as
-  sent, before the box trims it, so leading and trailing whitespace count. Over
-  it is `400 VALIDATION_ERROR` with an `issues` entry `{ code: "too_big", maximum:
-  280, path: ["note"], … }`.
-- **Send `X-Droplet-Client: <product>/<version>`** on 19 and 20, with the grammar
-  given under Notifications: the box stores it as `acks[].client`, labelled as
-  reported. A header that does not match falls back to a coarse User-Agent label,
-  else `null` (`lib/client-descriptor.ts`).
-- **Side effect on notifications.** An acknowledge or resolve marks the actor's
-  **own** notification rows for this incident `acked` with `ackMethod: "incident"`
-  (N1's `unread` follows), never anyone else's. The reverse does not hold: N3 and
-  N4 mean "I saw this" and never acknowledge an incident.
-- A resolve before the notifier has reached a pending alert settles the alert:
-  nobody is woken for it. An acknowledge leaves it pending, so the others are still
-  told.
-
-**Routes 21 and 22 (who is told).** `AlertRouting` is by level (`readAlertRouting`,
-`services/security-alerts.service.ts`); `level` is the person's own Security level.
-
-```json
-// level "manage" (an owner or admin at manage): everyone
-{ "level": "manage", "people": [RoutingPerson], "fallbackActive": false }
-// anyone else: only their own line
-{ "level": "view" | "act", "self": { "state": "receiving" | "not_receiving", "eligible": true } }
-
-// RoutingPerson
-{ "userId": "<uuid>", "name": "…", "role": "owner" | "admin" | "family" | "guest" | "service",
-  "state": "receiving" | "not_receiving", "origin": "owner_default" | "chosen" | null, "version": <int> | null,
-  "eligible": true, "ineligibleReason": "inactive" | "role" | "no_address" | "no_access" | null,
-  "managesSecurityDepartment": false, "delivery": "push" | "in_app_only" }
-```
-
-- An owner is told by default (`origin: "owner_default"`, its row created on the
-  first read); anyone else only after a person chose them (`state:
-  "not_receiving"`, `origin: null`, `version: null` until then). Membership of a
-  Security department routes nobody: `managesSecurityDepartment` is a suggestion.
-- **Eligible** means active, an owner/admin/family role, a usable address, and
-  Security at `act` or above; `ineligibleReason` says which is missing.
-  `fallbackActive` is true when nobody set to be told is eligible: the eligible
-  owners are told instead. `delivery` is `push` when the person has a phone
-  subscribed and the box's web push is on, else they hear only while Droplet is open.
-- **Route 22** is compare-and-set on `version`. `expectedVersion: null` inserts (the
-  person has no row; if one exists, `VERSION_CONFLICT`); an integer (0 to
-  2147483647) must equal the current `version`. `receiving` for an ineligible person is `422 NOT_ELIGIBLE`;
-  `not_receiving` is always allowed. A change that would leave no eligible person
-  receiving is `409 NO_RECIPIENT`. On success `person` carries the new `version`.
-
-**Route 35 (verdict).** Marks an incident Expected or Not expected, for precision
-only: it never changes `state`, `severity`, codes or notifications. The `state` in
-`verdict` can change between the two, never back to `unreviewed`. Send it only when
-route 18 says `viewer.canGiveVerdict`. The `409 NOT_JUDGEABLE` body is the same
-whether there is nothing to judge or the view is partial.
-
-**Route 28 (summarise now, regenerate).** Asks the box to write, or rewrite, the
-incident's "Summary by Droplet" (`requestIncidentNarrative`,
-`services/security-incident-actions.ts`). The box writes the text afterwards, so the
-answer is **`202`**, not `200`, and `narrative.state` is always `pending`. There is
-nothing to send: the body is strict (`narrativeBodySchema`,
-`routes/security-incidents.ts`), so `{}` or no body is fine and any key is
-`400 VALIDATION_ERROR` with `issues`. It writes no audit row and leaves the
-incident's `version` alone.
-
-```json
-{ "narrative": NarrativeView }
-
-// NarrativeView (services/security-narrative-view.ts), also route 18's `narrative`
-{ "state": "none" | "pending" | "written" | "failed" | "expired",
-  "text": "…" | null, "writtenAt": "ISO-8601" | null, "model": "…" | null, "promptVersion": <int> | null }
-```
-
-- `text` is plain text. While `pending` it is the **previous** summary when there is
-  one (else `null`), kept until the new one is written; `writtenAt`, `model` and
-  `promptVersion` describe that text and are `null` with it. Re-read route 18 until
-  `state` leaves `pending`: the dashboard does so every 5 s for at most 2 minutes
-  (`NarrativeSection.tsx`, `NARRATIVE_POLL_MS`, `NARRATIVE_POLL_FOR_MS`).
-- **The viewer rule runs first, before any incident is read.** A person who does not
-  both see every camera and may read threats (`mayReadSummaries`,
-  `services/security-narrative-view.ts`) gets the flat `403 { "error": "Forbidden:
-  role not permitted" }`: the role gate's own body, the same for every id, so it says
-  nothing about any summary. Only owner and admin qualify (`roleMayReadThreats`,
-  `services/security-access.ts`; `UNRESTRICTED_ROLES`,
-  `services/camera-access.service.ts`), so a `family` (Staff) person at `act` gets it,
-  and an audit row (`recordAccessDenied`, reason `summary-audience`).
-- **Then the first of these that applies wins**, in this order: `404
-  INCIDENT_NOT_FOUND`; `409 NOT_ACTIONABLE`; `409 SUMMARIES_OFF`; `409
-  NARRATIVE_TOO_OLD` (`lastActivityAt` over 7 days ago, `NARRATIVE_EXPIRE_MS`: a
-  request then would only expire); `409 NARRATIVE_COOLDOWN` (under 10 minutes since
-  the last attempt or the last text, `NARRATIVE_COOLDOWN_MS`); `409
-  INCIDENT_CONFLICT`. Any read or write that fails is `503 INCIDENTS_UNAVAILABLE`:
-  this route has no `500` and no `AUDIT_UNAVAILABLE`.
-- **When to send it.** Read route 18 first. Offer it only at `viewer.level` `act` or
-  above, within 7 days of `lastActivityAt`, and for a `narrative` in state `written`
-  or `failed` (Regenerate) or `none` while `grouping` is `collecting` (Summarise
-  now); never for `pending`, `expired` or a `null` `narrative`. This is the
-  dashboard's rule (`narrativeAskable` and the button choice in
-  `NarrativeSection.tsx`).
-
-**Freshness and empty states.**
-
-- The engine that makes incidents ticks every 10 s (`SECURITY_INCIDENT_INTERVAL_MS`,
-  `services/security-incidents.service.ts`), so new events are sorted into incidents
-  on that tick, and a `camera_offline` reason waits until the camera has been down 60 s
-  (`OFFLINE_MIN_MS`). An incident stays `collecting` until 5 minutes of
-  quiet plus a 90 s settle (`QUIET_MS`, `SETTLE_MS`), and never spans more than an
-  hour. Frigate reports a detection when it ends, so a person still in view is
-  counted about 30 s in (`SECURITY_ONGOING_AFTER_MS`, an `_ongoing` label) and
-  their `end` joins the same incident. The web polls the list and one incident every
-  15 s and the summary every 30 s (`apps/web-dashboard/src/lib/hooks/useSecurity.ts`);
-  these routes are request and response only.
-- **`incidents: []` is a real answer, not an outage**: nothing visible matched. An
-  outage is a `503`. It is also not "all clear". Read `GET /security/health`'s
-  `incidents` row (`down`: the engine is not sorting) and route 17's `alertsReady`
-  (`false`: after-hours alerts cannot fire) before showing a calm screen. The
-  engine starts from the newest event the first time it runs, so events from before
-  it existed never become incidents.
-- **Retention**: events 30 days, incidents that carry a code 365 days; plain
-  activity (severity `info`, no verdict) goes with its events at 30 days
-  (`trimSecurityIncidents`, `services/security-incidents.service.ts`).
-
-**Alert notifications.** An alert reaches a person as an ordinary notification (N1)
-with `kind: "event"`, `url: "/security/incidents/<uuid>"` and `data: { incidentId }`
-(`notifyIncident`, `services/security-alerts.service.ts`). A connected app also
-gets it as a frame on `/api/ws/events`, with `priority: "alert"` (see "Real-time
-events"). Open route 18 with `data.incidentId`, and send that notification's `id`
-as `notificationId` on route 19.
-One notification per incident per person, at most 6 per person per rolling hour (the
-rest show only in Security). The owner is told by default and everyone else by
-choice (route 22), each re-checked when sent; when nobody routed can be told, the
-eligible owners are. With Security off box-wide, incidents still group and nothing
-is sent. Web push adds `priority: "alert"` (kept an hour, `Urgency: high`) and tag
-`security-incident-<uuid>` (`incidentTag`, `PUSH_ALERT_TTL_S`); native push is
-still pending (see "Push status").
-
-**The wall (`/security/wall`) is a web page, and nothing on the box is specific to
-it.** It has no route, no kiosk token and no device principal; "the wall runs on a
-Staff (`family`) account, never an owner or admin" is a client-side rule
-(`wallRunsFor` in `apps/web-dashboard/src/components/security/wall-status.ts`,
-applied in `apps/web-dashboard/src/components/AuthGate.tsx`) and the server does not
-check it. Every read it makes is an ordinary route a native client can call the same
-way, so a native wall needs no server work; there is none yet (ADR-059 §8, #2368 F5).
-
-| Read | Route | Used for | Web cadence |
-|---|---|---|---|
-| Features | `GET /api/modules` | Security and Cameras must both be open to the person before anything else is asked | 120 s |
-| Attention | route 17 (`openAlerts`, `openNotices` only) | "Needs attention" = their sum; an alert badge when `openAlerts` > 0 | 15 s |
-| Sources | `GET /api/security/health` (route 2) | which event sources are reporting, and whether the count may be behind | 15 s |
-| Mode | `GET /api/security/mode` (route 5) | the site mode | 15 s |
-| Cameras | `GET /api/cameras` | one tile per camera | 15 s |
-| Pictures | `GET /api/cameras/:name/snapshot?h=720` | each tile | 3 s |
-| Sign-in end | `GET /api/auth/me` `session.endsAt` | "signed out by … at the latest", in the last 30 minutes | 300 s |
-
-- **Route 2** (`routes/security.ts`, floored at owner/admin/family like 16–21):
-  `{ sources: [{ id, state, detail, lastSeenAt }] }`, `id` ∈ `camera_ingest`,
-  `camera_system`, `threat_mirror`, `site_mode`, `incidents`, `alerts`, `patterns`,
-  `retention`; `state` ∈ `ok` \| `quiet` \| `down` \| `not_configured`. `camera_system`
-  is absent when no camera system is set up (`camera_ingest` then reads
-  `not_configured`); `threat_mirror` and `alerts` are sent to owners and admins only
-  (`buildSecurityHealth`, `services/security-events.service.ts`). An outage is a flat
-  `503 { "error": "SECURITY_HEALTH_UNAVAILABLE" }`. The wall counts `camera_ingest`, `camera_system`
-  and `threat_mirror` as sources, and says the attention count may be behind when
-  `incidents`, `camera_ingest` or `threat_mirror` is `down` (`WALL_ROW_ROLE`,
-  `countBehind`).
-- **Route 5** (`ModeView`, `services/security-mode.service.ts`; floored like route 2):
-
-  ```json
-  { "mode": "open" | "closed" | "away", "source": "schedule" | "manual",
-    "manualEnd": "none" | "next_opening" | "at_time" | "until_changed",
-    "until": "ISO-8601" | null, "setBy": { "id": "<uuid>", "name": "…" } | null, "setAt": "ISO-8601",
-    "hours": { "state": "not_set" } | { "state": "set", "timezone": "<IANA zone>", "scheduledMode": "open" | "closed",
-                                         "upcoming": { "at": "ISO-8601", "mode": "open" | "closed" } | null },
-    "displayTimezone": "<IANA zone>" | null, "stale": false, "version": <int> }
-  ```
-
-  `mode` is the effective mode, resolved on every read. `stale` true means the box's
-  own record of it may be out of date. `displayTimezone` is the zone to format its
-  times in (`null`: the device's). The wall never shows `setBy`. An outage is a
-  nested `503 MODE_UNAVAILABLE`.
-- **`GET /api/cameras`** is already narrowed to the person's grants (owner and
-  admin see all). `{ cameras: [], _status: "disconnected" }` means the camera system
-  is unreachable, **not** "no cameras". A tile is not asked for, and shows no
-  picture, when `enabled` is `false` or `status` is `offline` or `idle`.
-  **`/cameras/:name/snapshot`** takes `h` clamped to 100–1080 (default 480), sends
-  `Cache-Control: private, no-store`, and re-checks the grant on every request: a
-  camera the person cannot see is `404 { "error": "Camera not found" }`, a grant
-  check that could not run `503 { "error": "access_check_unavailable" }`. The
-  Frigate birdseye composite is not used: it is all-or-nothing (WARP-2982), so it
-  needs the owner or admin session the wall refuses.
-- **Rules to keep** (`wall-status.ts` and `WallCameras.tsx` under
-  `apps/web-dashboard/src/components/security/`, and
-  `apps/web-dashboard/src/lib/hooks/useSecurity.ts`). Draw no value before its read
-  has answered (a dash, never `0`). When a read fails, keep the
-  last answer, dimmed, under a banner with its time; the strip is stale after 45 s
-  without an answer. A tile whose picture is older than 15 s stays, dimmed, under
-  "Picture from {time}"; a frozen frame is never shown as current. Retry every
-  failure on a backoff (15 s doubling to 2 min; tiles 3 s doubling to 2 min), a `404`
-  included, because the module gate answers `404` when it cannot read the toggle.
-  Show no toast on the wall: it faces a room, and a toast's Open is not the room's to
-  press (`apps/web-dashboard/src/components/NotificationToaster.tsx`).
-- **Not for clients**: `GET /api/panel/security` is the rack panel's count. Only the
-  display service principal may call it; every person, an owner included, gets a
-  `403` (`routes/panel-security.ts`).
-
-**Pending.** Lock rows and the Doors view arrive with #2350 and are gated on Devices
-view (DS-019) as well as Security view; they are not on `stage` and not part of
-this contract.
+**To confirm with WARP-3513 / WARP-3514** (assumed by the dashboard, not spelled out in the
+contract): the path `…/recovery-key/regenerate`; that `PUT /api/storage/recordings` and the
+old-footage delete confirm through `/api/storage/command/confirm`; the code name for the
+files-present refusal; and the values `oldFootage.location` takes besides `system_disk`
+(anything else is shown as "the previous recording drive"). Each lives in one function in
+`apps/web-dashboard/src/lib/api.ts` or `lib/recording-storage.ts`.
 
 ## Error shape
 
@@ -1465,11 +1130,9 @@ this contract.
 > of this section described a **nested** envelope `{ error: { code, message } }` for
 > the whole API. On 2026-06-28 **no** orchestrator route emitted that shape: a sweep
 > of `src/routes/*` found ~621 flat `error` responses and **zero** nested ones. A few
-> route families have emitted it since (the first, WARP-2977, on 2026-09-23); they are
-> listed under [Nested envelope](#nested-envelope-on-some-routes) below, and every
-> other client-facing route is still flat (`routes/panel-security.ts` and
-> `routes/security-assistant.ts` also nest their errors, but only a service principal
-> may call them). The fictional codes the old table listed
+> route families have emitted it since; they are listed under
+> [Nested envelope](#nested-envelope-on-some-routes) below, and every other
+> client-facing route is still flat. The fictional codes the old table listed
 > (`PAIR_CODE_EXPIRED`, `PAIR_CODE_INVALID`, `RATE_LIMITED`, `INTERNAL`) do not
 > exist in any handler.
 
@@ -1530,53 +1193,16 @@ per-domain tables): `auth` → `INVALID_CREDENTIALS`, `WEAK_PASSWORD`,
 
 ### Nested envelope on some routes
 
-These routes answer `{ "error": { "code": "…", "message": "…", "issues"? } }`:
+These routes answer `{ "error": { "code": "…", "message": "…" } }`:
 `error` is an **object**, and there is no top-level `code`.
 
 - `/notifications` N1–N4 (`routes/notifications.ts`; `POST /notifications/send`
   keeps the flat shape).
 - `/me/active-department` (`routes/me-department.ts`).
-- The Security routes of `routes/security-incidents.ts` (16–22, 28, 35),
-  `routes/security-site.ts`, `routes/security-zones.ts` and
-  `routes/security-patterns.ts`. Routes 1 and 2 (`routes/security.ts`) are flat,
-  and so are the gate, role and rate-limit answers in front of all of them (see
-  Security).
 
 Both shapes reach the same client, so check whether `error` is an object or a
 string before reading `code`. `code` is an UPPER_SNAKE slug to key on; do not parse
 `message`.
-
-On the Security routes, `issues` is present only on a `400` whose `code` is
-`VALIDATION_ERROR` or, for opening hours, `SAME_OPEN_CLOSE`, when a query or body
-check failed: a schema (`routes/security-incidents.ts`, `fail`) or one of the
-box's own checks listed below (`routes/security-site.ts:333` for
-`SAME_OPEN_CLOSE`); the
-Notifications and active-department routes never send it. It is Zod's
-`error.issues` array as it comes, one entry per failed check, plus a few entries the
-box adds itself (below). That is not the `{ formErrors, fieldErrors }` object that
-`details` carries in the flat shape.
-
-```json
-{ "error": { "code": "VALIDATION_ERROR", "message": "That request isn't in a shape Droplet understands.",
-    "issues": [{ "code": "too_big", "maximum": 280, "type": "string", "inclusive": true, "exact": false,
-                 "message": "String must contain at most 280 character(s)", "path": ["note"] }] } }
-```
-
-- Every entry has `path` and `message`. Entries Zod produces also have `code` (Zod's
-  issue code, for example `invalid_type`, `too_big`, `invalid_enum_value`,
-  `invalid_string`, `unrecognized_keys`), and other keys depend on it: `maximum` on
-  `too_big`, `keys` on `unrecognized_keys`, `options` and `received` on
-  `invalid_enum_value`. **Entries the box adds itself carry only `path` and
-  `message`, no `code`**: a zone link that is not a camera or part-of-view reference,
-  or more than 32 links (`PUT /security/zones/:id/links`), and an area name that
-  breaks the naming rule (`routes/security-zones.ts`); opening hours
-  (`routes/security-site.ts`); and the pattern and suppression checks
-  (`routes/security-patterns.ts`). Decode `code` as optional.
-- `path` is the list of keys (strings) and array indexes (numbers) from the top of
-  the query or body to the value: `["note"]`. It is `[]` when the whole object is
-  at fault, as for an unknown key (`code: "unrecognized_keys"`, `keys: ["…"]`).
-- `issues[].message` is Zod's own English text, or the box's own on an entry it adds.
-  Do not show it; key on `path`, and on `code` when it is present.
 
 ## SSE / streaming reads
 
@@ -1668,8 +1294,9 @@ Source: `apps/orchestrator/src/services/ws-bridge.service.ts`.
 - **Topics:** there is no subscribe message. The server subscribes each
   connection to the person's own topics only: `droplet/files/<username>/#`
   (and `droplet/files/<userId>/#`), `droplet/devices/<username>/#`,
-  `droplet/index/<username>/#`, `droplet/notifications/<username>` and
-  `droplet/chat/<username>/#`. Other people's topics are never forwarded.
+  `droplet/index/<username>/#`, `droplet/notifications/<username>`,
+  `droplet/chat/<username>/#`, `droplet/agent-runs/<username>` and
+  `droplet/team-chat/<username>`. Other people's topics are never forwarded.
 - **Frames:** server to client JSON text frames
   `{ "topic": "<mqtt topic>", "payload": <json> }`. Client-sent frames are
   ignored. The server sends a WebSocket ping every 25 s (the client library
@@ -1682,19 +1309,21 @@ Source: `apps/orchestrator/src/services/ws-bridge.service.ts`.
   `null`, and `at` is UTC ISO-8601. `url` and `data` are N1's; they are **absent**,
   not `null`, when the notification has none or the box refused them.
   `priority` is present, as `"alert"`, only on an alert. There is no `tag`: that
-  is a web push field. A **Security alert** therefore arrives as:
-
-  ```json
-  { "topic": "droplet/notifications/<username>",
-    "payload": { "id": "clx…", "kind": "event", "title": "…", "body": "…", "at": "ISO-8601",
-                 "url": "/security/incidents/<uuid>", "data": { "incidentId": "<uuid>" },
-                 "priority": "alert" } }
-  ```
-
-  So `payload.url` and `payload.data.incidentId` are there, the same as in the
-  push and in N1's row: open route 18 with `data.incidentId`, and send
-  `payload.id` as `notificationId` on route 19 (see "Alert notifications" under
-  Security).
+  is a web push field.
+- **Team chat frames (Messages).** A frame on `droplet/team-chat/<username>`
+  says something changed in a conversation the person belongs to, and carries
+  **IDs and a kind only, never message text, titles or names**:
+  `{ kind: "message" | "read" | "conversation", conversationId, messageId? }`.
+  `message`: a message was posted (or its meeting card changed, for example an
+  RSVP); `messageId` names it. `read`: the person's own read cursor moved (sent
+  to that person's own sockets only, so a colleague's reading is never
+  announced). `conversation`: a conversation was created. Re-read through the
+  usual routes, which keep their gates: `GET /team-chat/threads/:id/messages`
+  for that conversation, `GET /team-chat/threads` for the list and
+  `GET /team-chat/unread-count` for the badge. Only members receive a frame for
+  a conversation, and an external guest only for conversations they were added
+  to. Frames are best-effort and not replayed, so keep a slow poll as a
+  fallback, and re-read after a reconnect. The polls stay valid for older clients.
 - **Reconnect:** on close, reconnect with exponential backoff and jitter, and
   stop once sign-in has ended. Events are not replayed, so after a reconnect
   re-fetch state (`GET /notifications`, files, devices).
@@ -1717,7 +1346,8 @@ Source: `apps/orchestrator/src/services/ws-bridge.service.ts`.
 > Backed by the native PM module owned by the orchestrator
 > ([ADR-026](ADR-026-native-pm-supersedes-plane.md), superseding the embedded
 > Plane stack). The mobile read contract below is unchanged — only the backend
-> behind it changed.
+> behind it changed. WARP-3371 only ever *adds* fields (`next_cursor`, `total`)
+> and an optional `cursor`/`limit` pair to the work-items list.
 
 V1 = read-only on mobile. The orchestrator serves PM from its own Postgres
 (`Pm*` Prisma models) via the native `/api/pm/*` routes and transforms the
@@ -1736,6 +1366,13 @@ the same with `"module": "crm"` / `"money"`, WARP-3365). The one exception
 `POST /work-items/:id/transition` and `GET /projects/:id/states` for an item
 assigned to them (the same 404 for any other item, existing or not). Clients hide
 the entry rather than show the error.
+
+**Service desk (WARP-3528, ADR-069).** A service desk is a project of kind
+`SERVICE_DESK` and a ticket is a work item in one, served by `/api/support/*` and
+never by these routes. Every `/api/mobile/pm/*` and `/api/pm/*` route treats a
+desk, its states and labels, its tickets, their comments, history and links as
+not existing (the same 404 as an unknown id), and no list or summary counts them.
+The contract below is unchanged.
 
 ### `GET /api/mobile/pm/workspaces`
 
@@ -1772,15 +1409,27 @@ Paginated list of projects under a workspace.
 }
 ```
 
-### `GET /api/mobile/pm/work-items?workspace=<slug>&project_id=<id>&state=<id>&assignee=<id>&per_page=<n>`
+### `GET /api/mobile/pm/work-items?workspace=<slug>&project_id=<id>&state=<id>&assignee=<id>&limit=<n>&cursor=<c>`
 
-Paginated list of work items (issues/tickets).
+Paginated list of work items (issues/tickets). Ordered by the board order
+(`sortOrder`, then `id`), which is stable across pages.
 
 **Query params:**
 - `workspace` (required), `project_id` (required).
 - `state` (optional) — filter by state. Accepts either the native `PmState` id (UUID) **or**, for backwards compatibility, the legacy Plane state name/slug (e.g. `in_progress` / `In Progress`), which is resolved to the matching state server-side (WARP-888). An unrecognised value yields an empty list rather than an error.
 - `assignee` (optional) — filter by assignee id.
-- `per_page` (optional) — 1..100, default 50.
+- `limit` (optional) — 1..100, **default 50**. `per_page` is the older name for
+  the same parameter and is still accepted; `limit` wins if both are sent.
+  A non-numeric or out-of-range value is clamped into `1..100` (it is not an
+  error), exactly as before.
+- `cursor` (optional, WARP-3371) — the `next_cursor` of the previous response.
+  Opaque: never parse or build one. A cursor the list did not issue answers
+  `400 { "code": "PM_INVALID_CURSOR" }`.
+
+A client that sends neither `limit`/`per_page` nor `cursor` gets the first 50
+items — the pre-cursor behaviour, byte for byte in `work_items` — plus the two
+additive fields below, which it may ignore. To read **every** item, repeat the
+request with `cursor=<next_cursor>` until `next_cursor` is `null`.
 
 **Response:**
 ```json
@@ -1795,9 +1444,15 @@ Paginated list of work items (issues/tickets).
       "created_at": "<iso8601>",
       "updated_at": "<iso8601>"
     }
-  ]
+  ],
+  "next_cursor": "<opaque>" | null,
+  "total": 0
 }
 ```
+
+`next_cursor` is `null` on the last page. `total` is the exact number of work
+items matching the filters — the size of the whole set, never of this page — so a
+client can say "50 of 250" instead of silently stopping at the first page.
 
 ### `GET /api/mobile/pm/work-items/{id}?workspace=<slug>&project_id=<id>`
 

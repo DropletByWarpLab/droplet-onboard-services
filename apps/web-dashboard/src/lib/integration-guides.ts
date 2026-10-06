@@ -49,11 +49,14 @@ import addAProvider from "../../../../docs/integrations/ADD-A-PROVIDER.md?raw";
 import atlassian from "../../../../docs/integrations/atlassian.md?raw";
 import brevo from "../../../../docs/integrations/brevo.md?raw";
 import calcom from "../../../../docs/integrations/calcom.md?raw";
+import capsule from "../../../../docs/integrations/capsule.md?raw";
 import credentialHandling from "../../../../docs/integrations/credential-handling.md?raw";
 import eaglesoft from "../../../../docs/integrations/eaglesoft.md?raw";
 import exportDrop from "../../../../docs/integrations/export-drop.md?raw";
 import github from "../../../../docs/integrations/github.md?raw";
 import gitlab from "../../../../docs/integrations/gitlab.md?raw";
+import gocardless from "../../../../docs/integrations/gocardless.md?raw";
+import googleMail from "../../../../docs/integrations/google-mail.md?raw";
 import hubspot from "../../../../docs/integrations/hubspot.md?raw";
 import klaviyo from "../../../../docs/integrations/klaviyo.md?raw";
 import loyverse from "../../../../docs/integrations/loyverse.md?raw";
@@ -86,11 +89,14 @@ export const INTEGRATION_GUIDES: Readonly<Record<string, string>> = {
   atlassian,
   brevo,
   calcom,
+  capsule,
   "credential-handling": credentialHandling,
   eaglesoft,
   "export-drop": exportDrop,
   github,
   gitlab,
+  gocardless,
+  "google-mail": googleMail,
   hubspot,
   klaviyo,
   loyverse,

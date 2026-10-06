@@ -1233,7 +1233,7 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
         help:
           "In GitHub: your profile photo → Settings → Developer settings → Personal access tokens → " +
           "Fine-grained tokens → Generate new token. Pick the repositories to include and grant " +
-          "Issues: Read-only (Pull requests: Read-only too if pull requests should appear). " +
+          "Issues: Read-only, Pull requests: Read-only, and Contents: Read-only for development links. " +
           "Any plan works, including Free.",
       },
     ],
@@ -1254,7 +1254,7 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
       name: "GitHub",
       category: "Project management",
       description:
-        "Issues and pull requests across every repository your token can see — read from GitHub.",
+        "Issues and pull requests, plus linked development activity from repositories you choose — read from GitHub.",
       availability: "available",
       setupGuideHref: "/help/integrations/github",
       order: 14,
@@ -1308,7 +1308,7 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
       id: "gitlab",
       name: "GitLab",
       category: "Project management",
-      description: "Issues across every project you can see — their state, assignee and timing — read from gitlab.com.",
+      description: "Issues and linked development activity from projects you choose — read from gitlab.com.",
       availability: "available",
       setupGuideHref: "/help/integrations/gitlab",
       order: 15,
@@ -1419,6 +1419,125 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
       availability: "available",
       setupGuideHref: "/help/integrations/loyverse",
       order: 17,
+    },
+  },
+  // ── WARP-3697..3702 — free-integrations wave 3 ────────────────────────────
+  //
+  // Six vendors that fit the declarative REST track with ZERO widening. `order`
+  // follows the research spec's RANK (segment value first, readiness second),
+  // not the build order below — Keap is 18 and is declared fourth — and
+  // `catalogDescriptors()` sorts by it, so the hub reads in rank order.
+  //
+  // 🔴 EVERY dataset a wave-3 vendor declares is ALREADY served by an earlier
+  // provider, and `cloud_query_dataset` resolves a dataset to ONE connected
+  // provider — the lowest `catalog.order` (`erp.service.ts`
+  // `cloudRowForDataset`, WARP-2833). Orders 18..23 sort AFTER every provider
+  // that shipped before, so on a box that also has an earlier provider
+  // connected, the new vendor answers NOTHING through that tool for the shared
+  // dataset. Recorded in ADR-046's wave-3 implementation record; deliberately
+  // not changed here.
+
+  // WARP-3697 — the seventh REST profile, and the first DIRECT-DEBIT vendor.
+  {
+    id: "gocardless",
+    displayName: "GoCardless",
+    category: "Payments",
+    track: "rest",
+    credentialFields: [
+      {
+        name: "accessToken",
+        label: "GoCardless access token",
+        type: "string",
+        required: true,
+        secret: true,
+        storage: "encrypted",
+        // NO `pattern`, for the Brevo / Square / Cal.com reason. The `live_` and
+        // `sandbox_` prefixes are community-reported only — no official page
+        // states a token shape — so a regex would be a guess that refuses valid
+        // tokens. What narrows this token is its SCOPE, chosen at creation, and
+        // the help asks for the read-only one. Pinned absent by
+        // `gocardless-profile.test.ts`.
+        //
+        // No host in the help: the egress scanner reads descriptor strings, and a
+        // dashboard address here would be a destination nobody registered.
+        help:
+          "In GoCardless (your live dashboard, not the sandbox): Developers → API settings → Create → " +
+          "Access token. Name it, choose the read-only scope and click Create access token, then copy it " +
+          "now — GoCardless shows it once. Only a GoCardless admin can create one.",
+      },
+    ],
+    // ONE FIXED HOST for live accounts. The sandbox host is never dialled and
+    // never registered.
+    egressHosts: ["api.gocardless.com"],
+    // `charge`, `refund` and `payout`, as a read-through trio (the Square
+    // pattern): none has an `ERP_SYNC_ENTITIES` row, and all three watermarks
+    // are `complete: false` — a creation-time filter. Payers, mandates and
+    // subscriptions are not served; the reasons are in `rest/vendors/gocardless.ts`.
+    datasets: ["charge", "refund", "payout"],
+    // The LOWER of GoCardless's two published figures: its limits table says
+    // 1,600 requests a minute, its own header example and a performance note say
+    // 1,000. Paced at ceil(60,000 / 1,000) = 60 ms.
+    rateLimit: { callCeiling: 1_000, periodMs: 60_000 },
+    catalog: {
+      id: "gocardless",
+      name: "GoCardless",
+      category: "Payments",
+      description:
+        "Direct Debit payments, refunds and payouts — read from GoCardless. Payers, mandates and subscriptions are not read.",
+      availability: "available",
+      setupGuideHref: "/help/integrations/gocardless",
+      order: 19,
+    },
+  },
+  // WARP-3698 — the eighth REST profile, and a pipeline CRM whose `deal` LANDS
+  // in the box CRM beside a read-through `task` list.
+  {
+    id: "capsule",
+    displayName: "Capsule CRM",
+    category: "CRM",
+    track: "rest",
+    credentialFields: [
+      {
+        name: "token",
+        label: "Capsule personal access token",
+        type: "string",
+        required: true,
+        secret: true,
+        storage: "encrypted",
+        // NO `pattern`, for the Brevo / Square / Cal.com reason: Capsule documents
+        // no token format, so a regex would be a guess that refuses valid tokens.
+        // Pinned absent by `capsule-profile.test.ts`.
+        //
+        // The scope picker is UNVERIFIED (the support article says to restrict the
+        // token to what is required but does not show the choice), so the help
+        // says "if Capsule offers the choice". No host in the help: the egress
+        // scanner reads descriptor strings.
+        help:
+          "In Capsule: click your name (top menu bar) → My Preferences → API Authentication → " +
+          "Generate new API token. Restrict it to read access if Capsule offers the choice, then copy it.",
+      },
+    ],
+    // ONE FIXED HOST. The owner's browser host, the developer-docs host and the
+    // OAuth / MCP hosts are never dialled and never registered.
+    egressHosts: ["api.capsulecrm.com"],
+    // `deal` from `GET /opportunities` (a complete `since` watermark; LANDS in
+    // the box CRM) and `task` from `GET /tasks` (a declared full scan; read-through).
+    // `contact` and `company` are NOT served: both live behind one `/parties`
+    // list with no type filter, which the track cannot route by row value. The
+    // reasons are in `rest/vendors/capsule.ts`.
+    datasets: ["deal", "task"],
+    // "4,000 requests per hour when using Bearer Token Authentication" — per
+    // USER, shared with every other tool using that user's tokens.
+    rateLimit: { callCeiling: 4_000, periodMs: 3_600_000 },
+    catalog: {
+      id: "capsule",
+      name: "Capsule CRM",
+      category: "CRM",
+      description:
+        "Opportunities with their milestone and value, and tasks with their owner and dates — read from Capsule CRM. People and organisations are not read.",
+      availability: "available",
+      setupGuideHref: "/help/integrations/capsule",
+      order: 20,
     },
   },
 ] as const satisfies readonly ProviderDescriptor[];

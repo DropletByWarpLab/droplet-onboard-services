@@ -86,7 +86,7 @@ const LOCK_KEY = (ip: string) => `ratelimit:setup-claim:lock:${ip}`;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-function createPrismaMock() {
+function createPrismaMock(ownerCount = 0) {
   type ClaimRow = {
     id: string;
     codeHash: string;
@@ -99,6 +99,8 @@ function createPrismaMock() {
   let appliance: Record<string, unknown> | null = null;
 
   const claimCode = {
+    count: async ({ where }: { where?: { state?: string } } = {}) =>
+      claimRows.filter((row) => where?.state === undefined || row.state === where.state).length,
     _seed: (row: Partial<ClaimRow> & { codeHash: string }) => {
       claimRows.push({
         id: row.id ?? `cc-${claimRows.length + 1}`,
@@ -135,7 +137,7 @@ function createPrismaMock() {
 
   const prisma = {
     _appliance: () => appliance,
-    user: { count: async () => 0 },
+    user: { count: async () => ownerCount },
     claimCode,
     applianceSetup: {
       findUnique: async ({ where }: { where: { id: string } }) =>
@@ -470,7 +472,7 @@ describe("POST /api/setup/claim — resume-pointer floor on re-claim (WARP-867)"
   });
 
   it("does NOT regress a further-along pointer on an already-claimed re-run", async () => {
-    const prisma = createPrismaMock();
+    const prisma = createPrismaMock(1);
     prisma.claimCode._seed({
       codeHash: hashClaimCode("DRPL-7K2Q-9F4M"),
       state: "consumed",

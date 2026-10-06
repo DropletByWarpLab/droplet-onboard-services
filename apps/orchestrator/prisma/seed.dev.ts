@@ -119,6 +119,7 @@ async function seedCameras() {
         ipAddress: cam.ipAddress,
         macAddress: cam.macAddress,
         enabled: cam.enabled ?? true,
+        adoption: "ADOPTED",
         lastSeen: new Date(),
       },
       create: {
@@ -130,6 +131,9 @@ async function seedCameras() {
         macAddress: cam.macAddress,
         enabled: cam.enabled ?? true,
         autoDiscovered: false,
+        // Seeded cameras are real (adopted) ones — `enabled: false` below is an
+        // operator toggle, not a discovery candidate (WARP-3510).
+        adoption: "ADOPTED",
       },
     });
   }

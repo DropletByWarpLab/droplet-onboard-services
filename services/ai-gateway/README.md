@@ -121,6 +121,36 @@ services/ai-gateway/
 | `DEVICE_SECRET` | (required) | Device auth secret |
 | `ORCHESTRATOR_URL` | `http://orchestrator:3000` | Orchestrator API for tool execution |
 | `GRPC_PORT` | `50051` | gRPC listen port |
+| `LLM_ACCESS_RPM` | `60` | Requests per minute one coding-tools token may send to `/llm/*`; the next one gets `429` + `Retry-After`. Read from the repo-root `.env` at start (recreate the container to change it). |
+
+## Coding tools: `/llm/*` (WARP-3452)
+
+`llm_access.py` serves the box's model runtime (Docker Model Runner or Ollama,
+per `INFERENCE_RUNTIME`) to employees' coding tools through nginx's
+`location /llm/`: OpenAI (`/llm/v1/chat/completions`, `/llm/v1/completions`,
+`/llm/v1/models`, `/llm/v1/responses` on Ollama only), Ollama native
+(`/llm/api/{version,tags,show,chat,generate}`) and Anthropic Messages
+(`/llm/v1/messages`). Every other path is a 404 that never reaches the runtime.
+
+- Auth is a member's `dlk_` bearer, introspected on every request at
+  `POST {ORCHESTRATOR_URL}/api/llm-access/_introspect` with
+  `AI_GATEWAY_SAMPLER_TOKEN`; any failure to check it is a 503. The
+  `SERVICE_TOKEN_AI_GATEWAY` gate does not apply to `/llm/*`.
+- Only the active chat model is listed or served; another model is a 404
+  `model_not_found` in the client's dialect.
+- Generation runs at AUTOMATION priority and gives its slot up to the box's
+  own chat (`503 preempted_for_chat` before the answer starts, an error frame
+  after). One request in flight per token, plus `LLM_ACCESS_RPM`.
+- Token counts are posted to `/api/llm-access/_usage` after each generation;
+  bodies are never logged or stored. Known limit: a streamed OpenAI-dialect
+  answer (`/llm/v1/chat/completions`, `/llm/v1/completions` with
+  `"stream": true`) carries a `usage` chunk only when the client sends
+  `stream_options.include_usage`, so without it the request is counted with
+  0 prompt and 0 completion tokens. Ollama and Anthropic streams always carry
+  their counts.
+- nginx refuses `/llm/` to untrusted ingress and guest Wi-Fi by peer
+  address (`docker/nginx/render-llm-access.sh`, rendered at gateway start and
+  by `scripts/lib/local-dns.sh` when it rewrites the host-record).
 
 ## Adding a New Tool
 

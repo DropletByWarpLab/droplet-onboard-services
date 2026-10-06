@@ -334,16 +334,16 @@ describe("§4.2 role detail", () => {
     expect(within(detail).getByText("Files · share & manage")).toBeInTheDocument();
     expect(within(detail).getByText("No limit storage")).toBeInTheDocument();
     expect(within(detail).getByText(ACCESS_COPY.builtinFixed)).toBeInTheDocument();
-    // The admin tier holds Security, CRM, Projects and Money…
-    for (const label of [/^Security/, /^CRM/, /^Projects/, /^Money/]) {
+    // The admin tier holds CRM, Projects, Money and Support (WARP-3528)…
+    for (const label of [/^CRM/, /^Projects/, /^Money/, /^Support/]) {
       expect(within(detail).queryAllByText(label).length, String(label)).toBeGreaterThan(0);
     }
     // External guest ceilings clamp to view.
     const guestDetail = await selectRole(/External guest/);
     expect(within(guestDetail).getByText("Network · view")).toBeInTheDocument();
     // …and a module the box refuses the guest tier outright is not listed as held
-    // (Security, CRM, Projects and Money: WARP-3365, WARP-3369).
-    for (const label of [/^Security/, /^CRM/, /^Projects/, /^Money/]) {
+    // (CRM, Projects and Money: WARP-3365, WARP-3369; Support: WARP-3528).
+    for (const label of [/^CRM/, /^Projects/, /^Money/, /^Support/]) {
       expect(within(guestDetail).queryAllByText(label), String(label)).toHaveLength(0);
     }
     // Service is a system principal — notes only, no feature chips.

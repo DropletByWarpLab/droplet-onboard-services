@@ -1,7 +1,7 @@
 /**
  * WARP-1397 — the sidebar module-gate decision (fail-open).
  * WARP-1528 — …now preferring the per-user view when the orchestrator sends it.
- * WARP-2977 P2b — …and the caller's LEVEL, which fails CLOSED for actions.
+ * …and the caller's LEVEL, which fails CLOSED for actions.
  */
 import { createElement, type ReactNode } from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -17,7 +17,12 @@ vi.mock("../../auth", () => ({
   useAuth: () => ({ user: h.user }),
 }));
 
-import { ABSENT_UNLESS_LISTED } from "../../dark-modules";
+// The registry of modules that ship dark (`dark-modules.ts`) is empty in this
+// build, so the ship-dark decisions below run against a synthetic one. The
+// real registry is pinned in `dark-modules.test.ts`.
+const dark = vi.hoisted(() => ({ ids: new Set<string>(["dark_example"]) }));
+vi.mock("../../dark-modules", () => ({ ABSENT_UNLESS_LISTED: dark.ids }));
+
 import { isModuleEffective, levelAtLeast, moduleLevelFor, useModuleGateState, useModuleLevel } from "../useModuleGate";
 
 const view = {
@@ -96,40 +101,36 @@ describe("isModuleEffective — effectiveForUser", () => {
   });
 });
 
-// ── ADR-055: a module that ships dark is ABSENT, not merely off ───────
+// ── a module that ships dark is ABSENT, not merely off ────────────────
 //
-// `doors` is not listed while DOORS_ENABLED is off (`listedWhenUnavailable:
+// Such a module is not listed while unavailable (`listedWhenUnavailable:
 // false`), so a switched-off box's payload has no row for it. Every other
 // unlisted id reads as "a module I can't classify: show it"; for these it is
-// the definition of off. The list is explicit and pinned here.
+// the definition of off. The list is explicit (`dark-modules.ts`).
 
-describe("isModuleEffective — modules that ship dark (ADR-055)", () => {
+describe("isModuleEffective — modules that ship dark", () => {
   const darkOff = { modules: [{ id: "cameras", effective: true }] };
 
-  it("names exactly `doors`", () => {
-    expect([...ABSENT_UNLESS_LISTED]).toEqual(["doors"]);
-  });
-
-  it("reads doors as OFF when a resolved payload does not list it", () => {
-    expect(isModuleEffective(darkOff, "doors")).toBe(false);
+  it("reads a dark module as OFF when a resolved payload does not list it", () => {
+    expect(isModuleEffective(darkOff, "dark_example")).toBe(false);
   });
 
   it("and as OFF when the per-user set does not carry it", () => {
     const perUser = { ...darkOff, effectiveForUser: [{ moduleId: "cameras", level: "view" as const }] };
-    expect(isModuleEffective(perUser, "doors")).toBe(false);
+    expect(isModuleEffective(perUser, "dark_example")).toBe(false);
   });
 
-  it("reads doors as ON when it is listed effective, and OFF when listed and not", () => {
-    expect(isModuleEffective({ modules: [{ id: "doors", effective: true }] }, "doors")).toBe(true);
-    expect(isModuleEffective({ modules: [{ id: "doors", effective: false }] }, "doors")).toBe(false);
+  it("reads it as ON when it is listed effective, and OFF when listed and not", () => {
+    expect(isModuleEffective({ modules: [{ id: "dark_example", effective: true }] }, "dark_example")).toBe(true);
+    expect(isModuleEffective({ modules: [{ id: "dark_example", effective: false }] }, "dark_example")).toBe(false);
   });
 
-  it("fails CLOSED while the probe has not answered: nothing about doors shows until the list lists it", () => {
-    expect(isModuleEffective(undefined, "doors")).toBe(false);
+  it("fails CLOSED while the probe has not answered: nothing about it shows until the list lists it", () => {
+    expect(isModuleEffective(undefined, "dark_example")).toBe(false);
   });
 
   it("every other module still fails OPEN while the probe has not answered", () => {
-    for (const id of ["cameras", "security", "files", "chat", "mystery_module"]) {
+    for (const id of ["cameras", "network", "files", "chat", "mystery_module"]) {
       expect(isModuleEffective(undefined, id), id).toBe(true);
     }
   });
@@ -139,29 +140,28 @@ describe("isModuleEffective — modules that ship dark (ADR-055)", () => {
   });
 });
 
-// ── WARP-2977 P2b: the caller's level ─────────────────────────────────
+// ── the caller's level ────────────────────────────────────────────────
 //
 // Fail-CLOSED for actions: a control shown to someone the server refuses
-// turns every click into a feature-access denial — an auth/warn ActivityRow
-// that the Security threat mirror then shows as a threat.
+// turns every click into a feature-access denial — an auth/warn ActivityRow.
 
 const withLevels = {
-  modules: [{ id: "security", effective: true }],
+  modules: [{ id: "cameras", effective: true }],
   effectiveForUser: [
     { moduleId: "chat", level: "act" as const },
-    { moduleId: "security", level: "act" as const },
+    { moduleId: "cameras", level: "act" as const },
   ],
 };
 
 describe("moduleLevelFor", () => {
   it("reads the level from the per-user set", () => {
-    expect(moduleLevelFor(withLevels, "security", "family")).toBe("act");
+    expect(moduleLevelFor(withLevels, "cameras", "family")).toBe("act");
     expect(moduleLevelFor(withLevels, "chat", "family")).toBe("act");
   });
 
   it("the per-user set wins even for an owner or admin (admins can be narrowed)", () => {
-    expect(moduleLevelFor(withLevels, "security", "admin")).toBe("act");
-    expect(moduleLevelFor(withLevels, "security", "owner")).toBe("act");
+    expect(moduleLevelFor(withLevels, "cameras", "admin")).toBe("act");
+    expect(moduleLevelFor(withLevels, "cameras", "owner")).toBe("act");
   });
 
   it("is `none` when the module is absent from a non-empty per-user set", () => {
@@ -170,22 +170,22 @@ describe("moduleLevelFor", () => {
   });
 
   it("field absent (no local row / resolver error): owner → manage, everyone else → view", () => {
-    const absent = { modules: [{ id: "security", effective: true }] };
-    expect(moduleLevelFor(absent, "security", "owner")).toBe("manage");
-    expect(moduleLevelFor(absent, "security", "admin")).toBe("view");
-    expect(moduleLevelFor(absent, "security", "family")).toBe("view");
-    expect(moduleLevelFor(absent, "security", undefined)).toBe("view");
+    const absent = { modules: [{ id: "cameras", effective: true }] };
+    expect(moduleLevelFor(absent, "cameras", "owner")).toBe("manage");
+    expect(moduleLevelFor(absent, "cameras", "admin")).toBe("view");
+    expect(moduleLevelFor(absent, "cameras", "family")).toBe("view");
+    expect(moduleLevelFor(absent, "cameras", undefined)).toBe("view");
   });
 
   it("an EMPTY per-user set is treated as absent", () => {
     const empty = { modules: [], effectiveForUser: [] };
-    expect(moduleLevelFor(empty, "security", "owner")).toBe("manage");
-    expect(moduleLevelFor(empty, "security", "admin")).toBe("view");
+    expect(moduleLevelFor(empty, "cameras", "owner")).toBe("manage");
+    expect(moduleLevelFor(empty, "cameras", "admin")).toBe("view");
   });
 
   it("loading (or a failed probe) → view, even for an owner", () => {
-    expect(moduleLevelFor(undefined, "security", "owner")).toBe("view");
-    expect(moduleLevelFor(undefined, "security", "family")).toBe("view");
+    expect(moduleLevelFor(undefined, "cameras", "owner")).toBe("view");
+    expect(moduleLevelFor(undefined, "cameras", "family")).toBe("view");
   });
 });
 
@@ -214,7 +214,7 @@ describe("useModuleLevel", () => {
   it("reads /api/modules (the nav gate's key) and returns the per-user level", async () => {
     h.user = { role: "family" };
     respond(withLevels);
-    const { result } = renderHook(() => useModuleLevel("security"), { wrapper });
+    const { result } = renderHook(() => useModuleLevel("cameras"), { wrapper });
     await waitFor(() => expect(result.current).toBe("act"));
     expect(h.authFetch).toHaveBeenCalledWith("/api/modules");
   });
@@ -223,7 +223,7 @@ describe("useModuleLevel", () => {
     h.user = { role: "owner" };
     let release: (v: unknown) => void = () => undefined;
     h.authFetch.mockReturnValue(new Promise((r) => (release = r)));
-    const { result } = renderHook(() => useModuleLevel("security"), { wrapper });
+    const { result } = renderHook(() => useModuleLevel("cameras"), { wrapper });
     expect(result.current).toBe("view");
     release({ ok: true, status: 200, json: async () => ({ modules: [] }) });
     await waitFor(() => expect(result.current).toBe("manage"));
@@ -232,7 +232,7 @@ describe("useModuleLevel", () => {
   it("a failed probe leaves even an owner at view", async () => {
     h.user = { role: "owner" };
     respond({}, false);
-    const { result } = renderHook(() => useModuleLevel("security"), { wrapper });
+    const { result } = renderHook(() => useModuleLevel("cameras"), { wrapper });
     await waitFor(() => expect(h.authFetch).toHaveBeenCalled());
     // Give SWR a beat to settle the error; the level must not move off view.
     await new Promise((r) => setTimeout(r, 20));
@@ -240,7 +240,7 @@ describe("useModuleLevel", () => {
   });
 });
 
-// ── ADR-055: the three states a page that ships dark needs to tell apart ──
+// ── the three states a page that ships dark needs to tell apart ──
 //
 // `useModuleGate`'s predicate answers false for BOTH "not yet answered" and
 // "off" on a dark module, which is right for a nav entry and wrong for a page:
@@ -258,41 +258,41 @@ describe("useModuleGateState", () => {
     h.user = null;
   });
 
-  it("is unresolved until /api/modules answers, then on when doors is listed for the person", async () => {
+  it("is unresolved until /api/modules answers, then on when the module is listed for the person", async () => {
     let release: (v: unknown) => void = () => undefined;
     h.authFetch.mockReturnValue(new Promise((r) => (release = r)));
-    const { result } = renderHook(() => useModuleGateState("doors"), { wrapper });
+    const { result } = renderHook(() => useModuleGateState("dark_example"), { wrapper });
     expect(result.current).toBe("unresolved");
     release({
       ok: true,
       status: 200,
       json: async () => ({
-        modules: [{ id: "doors", effective: true }],
-        effectiveForUser: [{ moduleId: "doors", level: "view" }],
+        modules: [{ id: "dark_example", effective: true }],
+        effectiveForUser: [{ moduleId: "dark_example", level: "view" }],
       }),
     });
     await waitFor(() => expect(result.current).toBe("on"));
     expect(h.authFetch).toHaveBeenCalledWith("/api/modules");
   });
 
-  it("is off when the list answered and does not list doors (absent)", async () => {
+  it("is off when the list answered and does not list the module (absent)", async () => {
     respond({ modules: [{ id: "cameras", effective: true }], effectiveForUser: [{ moduleId: "cameras", level: "view" }] });
-    const { result } = renderHook(() => useModuleGateState("doors"), { wrapper });
+    const { result } = renderHook(() => useModuleGateState("dark_example"), { wrapper });
     await waitFor(() => expect(result.current).toBe("off"));
   });
 
-  it("is off when doors is listed but switched off, and when the payload has no per-user set", async () => {
-    respond({ modules: [{ id: "doors", effective: false }] });
-    const listedOff = renderHook(() => useModuleGateState("doors"), { wrapper });
+  it("is off when the module is listed but switched off, and when the payload has no per-user set", async () => {
+    respond({ modules: [{ id: "dark_example", effective: false }] });
+    const listedOff = renderHook(() => useModuleGateState("dark_example"), { wrapper });
     await waitFor(() => expect(listedOff.result.current).toBe("off"));
     respond({ modules: [{ id: "cameras", effective: true }] });
-    const noSet = renderHook(() => useModuleGateState("doors"), { wrapper });
+    const noSet = renderHook(() => useModuleGateState("dark_example"), { wrapper });
     await waitFor(() => expect(noSet.result.current).toBe("off"));
   });
 
   it("a failed probe stays unresolved, the closed direction", async () => {
     respond({}, false);
-    const { result } = renderHook(() => useModuleGateState("doors"), { wrapper });
+    const { result } = renderHook(() => useModuleGateState("dark_example"), { wrapper });
     await waitFor(() => expect(h.authFetch).toHaveBeenCalled());
     await new Promise((r) => setTimeout(r, 20));
     expect(result.current).toBe("unresolved");

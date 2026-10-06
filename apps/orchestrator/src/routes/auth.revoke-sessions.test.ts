@@ -95,6 +95,15 @@ vi.mock("../services/brain-memory.service.js", () => ({
   purgeUserData: vi.fn().mockResolvedValue({ items: 0, chunks: 0 }),
 }));
 
+// WARP-3384 — Deactivate revokes the person's paired file-sync devices.
+const { revokeDeviceClientsMock } = vi.hoisted(() => ({
+  revokeDeviceClientsMock: vi.fn(async () => ({ revoked: 1, appPasswordsNotDeleted: 0, failed: 0 })),
+}));
+vi.mock("../services/device-client-revoke.service.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../services/device-client-revoke.service.js")>()),
+  revokeDeviceClientsForUser: revokeDeviceClientsMock,
+}));
+
 import { createProtectedAuthRouter } from "./auth.js";
 import * as nc from "../services/nextcloud.client.js";
 import { recordActivity } from "../services/activity.singleton.js";
@@ -416,6 +425,38 @@ describe("POST /api/auth/users/:username/disable — revokes sessions", () => {
     expect(revokeAllSessions).toHaveBeenCalledWith("u-alice");
   });
 
+  // WARP-3384: a disabled Nextcloud account cannot authenticate its own
+  // app-password delete, so the person's paired devices must go FIRST.
+  it("revokes the person's paired devices (deactivation, by the admin) BEFORE it disables Nextcloud", async () => {
+    const prisma = createPrismaMock([seededAlice()]);
+    const app = buildApp(prisma, "owner");
+
+    const res = await request(app).post("/api/auth/users/alice/disable");
+
+    expect(res.status).toBe(200);
+    expect(revokeDeviceClientsMock).toHaveBeenCalledWith(
+      "alice",
+      { type: "user", id: "owner-id" },
+      "deactivation",
+    );
+    expect(revokeDeviceClientsMock.mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(nc.ncSetUserEnabled).mock.invocationCallOrder[0],
+    );
+  });
+
+  it("a legacy NC-only account (no local row) is still swept, as a backstop, by username", async () => {
+    const app = buildApp(createPrismaMock([]), "owner");
+
+    const res = await request(app).post("/api/auth/users/legacy/disable");
+
+    expect(res.status).toBe(200);
+    expect(revokeDeviceClientsMock).toHaveBeenCalledWith(
+      "legacy",
+      { type: "user", id: "owner-id" },
+      "deactivation",
+    );
+  });
+
   it("still disables a legacy NC-only account with no local row (no revoke)", async () => {
     const prisma = createPrismaMock([]); // no local mirror
     const app = buildApp(prisma, "owner");
@@ -679,7 +720,7 @@ describe("POST /api/auth/users/:username/disable — N1 degraded-mirror honesty"
       username: "alice",
       ncMirror: "failed",
     });
-    expect(res.body.warning).toMatch(/Nextcloud/i);
+    expect(res.body.warning).toMatch(/File Store/i);
     expect(prisma._users[0].directoryStatus).toBe("DEACTIVATED");
   });
 

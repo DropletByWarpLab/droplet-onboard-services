@@ -210,10 +210,9 @@ describe("dp-btn-primary clears WCAG AA 1.4.3 in both themes", () => {
 
   it("the dark fills follow the ink into nested .dark subtrees", () => {
     // --color-on-accent flips under ANY `.dark` ancestor (the `.dark`
-    // contract block), and forced-dark subtrees render inside a light page
-    // (SecurityWall, WallNotice). Declared on `html.dark` alone, a primary
-    // button there would pair #1d1d1f ink with the light #4f46e5 fill:
-    // 2.68:1.
+    // contract block), and a forced-dark subtree can render inside a light
+    // page. Declared on `html.dark` alone, a primary button there would pair
+    // #1d1d1f ink with the light #4f46e5 fill: 2.68:1.
     const ink = parseHex(must(".dark", "--color-on-accent"));
     const lightFill = parseHex(must(FILL_LIGHT, "--color-accent-fill"));
     expect(contrastRatio(ink, lightFill)).toBeLessThan(AA_NORMAL_TEXT);

@@ -1,14 +1,19 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
+import Link from "next/link";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import {
   ArrowLeft,
   ChevronLeft,
   ChevronRight,
   Download,
   Loader2,
+  Pause,
+  Play,
   RefreshCw,
+  SkipBack,
+  SkipForward,
   Video,
 } from "lucide-react";
 import { useCameras } from "@/lib/hooks/useCameras";
@@ -19,14 +24,16 @@ import {
 import { authFetch, useAuth } from "@/lib/auth";
 import { getRecordingHlsUrl } from "@/lib/api";
 import { HlsPlayer, type HlsPlayerHandle } from "@/components/recordings/HlsPlayer";
+import { archiveToMediaTime, mediaToArchiveTime } from "@/components/recordings/archive-time";
 import {
   RecordingsTimeline,
-  fmtSecOfDay,
   type TimelineSelection,
 } from "@/components/recordings/RecordingsTimeline";
 import type { CameraInfo } from "@/lib/types";
 import { X } from "lucide-react";
 import { ShellPage } from "@/components/shell/ShellPage";
+import { CameraRelatedLinks } from "@/components/cameras/CameraRelatedLinks";
+import { formatDays, maxRetentionDays } from "@/lib/camera-recording";
 
 /** Playback window — one full hour. With HLS the orchestrator no
  *  longer caps the range, but the per-hour granularity matches the
@@ -39,6 +46,9 @@ function localDayString(date: Date): string {
   const m = String(date.getMonth() + 1).padStart(2, "0");
   const d = String(date.getDate()).padStart(2, "0");
   return `${y}-${m}-${d}`;
+}
+function archiveTimeLabel(timestamp: number): string {
+  return new Date(timestamp * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false, timeZoneName: "short" });
 }
 
 function dayPlusOffset(day: string, offsetDays: number): string {
@@ -67,6 +77,7 @@ function dayPlusOffset(day: string, offsetDays: number): string {
 export default function RecordingsPage() {
   const params = useParams<{ name: string }>();
   const router = useRouter();
+  const searchParams = useSearchParams();
   const name = useMemo(
     () => (typeof params?.name === "string" ? decodeURIComponent(params.name) : ""),
     [params],
@@ -78,8 +89,15 @@ export default function RecordingsPage() {
   const canExport = user?.role === "owner" || user?.role === "admin";
   const camera: CameraInfo | undefined = cameras.find((c) => c.name === name);
 
-  const [day, setDay] = useState<string>(() => localDayString(new Date()));
+  const [day, setDay] = useState<string>(() => {
+    const requested = searchParams?.get("date");
+    const today = localDayString(new Date());
+    if (!requested || !/^\d{4}-\d{2}-\d{2}$/.test(requested) || requested > today) return today;
+    const [y, m, d] = requested.split("-").map(Number);
+    return localDayString(new Date(y, m - 1, d)) === requested ? requested : today;
+  });
   const [hour, setHour] = useState<number | null>(null);
+  const [playbackAnchor, setPlaybackAnchor] = useState<number | null>(null);
   // Operator-drawn range over the timeline — minute precision in
   // seconds-since-midnight on the visible day. Drives the export
   // button when set; null falls back to the current hour.
@@ -89,6 +107,7 @@ export default function RecordingsPage() {
   // doesn't accidentally export Tuesday's range from Wednesday.
   useEffect(() => {
     setSelection(null);
+    setPlaybackAnchor(null);
   }, [day]);
 
   const summaryHook = useRecordingsSummary(name || null);
@@ -123,13 +142,23 @@ export default function RecordingsPage() {
     const empty = { after: null as number | null, before: null as number | null };
     if (hour === null) return empty;
     const [y, m, d] = day.split("-").map(Number);
-    const start = Math.floor(new Date(y, m - 1, d, hour, 0, 0).getTime() / 1000);
+    const anchor = playbackAnchor === null ? null : new Date(playbackAnchor * 1000);
+    const start = anchor && localDayString(anchor) === day && anchor.getHours() === hour
+      ? playbackAnchor! - anchor.getMinutes() * 60 - anchor.getSeconds()
+      : Math.floor(new Date(y, m - 1, d, hour, 0, 0).getTime() / 1000);
     const nowSec = Math.floor(Date.now() / 1000);
     if (start >= nowSec) return empty;
     return { after: start, before: Math.min(start + PLAYBACK_WINDOW_SEC, nowSec) };
-  }, [day, hour]);
+  }, [day, hour, playbackAnchor]);
 
   const rangeHook = useRecordingsRange(name || null, range.after, range.before);
+  const dayRange = useMemo(() => {
+    const [y, m, d] = day.split("-").map(Number);
+    const after = Math.floor(new Date(y, m - 1, d).getTime() / 1000);
+    const before = Math.min(Math.floor(new Date(y, m - 1, d + 1).getTime() / 1000), Math.floor(Date.now() / 1000));
+    return { after, before };
+  }, [day, summaryHook.days]);
+  const dayHook = useRecordingsRange(name || null, dayRange.after, dayRange.before);
 
   // An hour with no segments is EMPTY, not broken. Loading the player
   // into such a range makes Frigate 404 the manifest and hls.js raise a
@@ -147,17 +176,18 @@ export default function RecordingsPage() {
   const playerRef = useRef<HlsPlayerHandle | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
   const [playerError, setPlayerError] = useState<string | null>(null);
+  const [playing, setPlaying] = useState(false);
+  const [playbackRate, setPlaybackRate] = useState(1);
   useEffect(() => {
     setCurrentTime(0);
     setPlayerError(null);
   }, [playbackUrl]);
 
-  const playheadFraction = useMemo(() => {
-    if (hour === null || range.after === null) return undefined;
-    // Within the selected hour cell, where are we (0..1)?
-    const offset = currentTime / PLAYBACK_WINDOW_SEC;
-    return Math.min(1, Math.max(0, offset));
-  }, [hour, currentTime, range.after]);
+  const archiveTimestamp = range.after !== null && range.before !== null
+    ? mediaToArchiveTime(rangeHook.segments, range.after, range.before, currentTime)
+    : null;
+  const archiveDate = archiveTimestamp === null ? null : new Date(archiveTimestamp * 1000);
+  const playheadSec = archiveTimestamp === null ? undefined : archiveTimestamp - dayRange.after;
 
   /**
    * Seconds-since-midnight of "now" — but only when the visible day IS
@@ -167,8 +197,8 @@ export default function RecordingsPage() {
   const nowSecOfDay = useMemo(() => {
     const now = new Date();
     if (localDayString(now) !== day) return null;
-    return now.getHours() * 3600 + now.getMinutes() * 60 + now.getSeconds();
-  }, [day]);
+    return Math.floor(now.getTime() / 1000) - dayRange.after;
+  }, [day, dayRange.after, summaryHook.days]);
 
   /**
    * Oldest day the summary still knows about — a good proxy for "how far
@@ -189,26 +219,36 @@ export default function RecordingsPage() {
    * stash the offset and apply it when the player reports it is ready.
    */
   const pendingSeekRef = useRef<number | null>(null);
+  useEffect(() => { pendingSeekRef.current = null; }, [day]);
   const handleScrubTo = (secOfDay: number) => {
-    const targetHour = Math.floor(secOfDay / 3600);
-    const offsetInHour = secOfDay - targetHour * 3600;
-    if (hour === targetHour) {
-      playerRef.current?.seek(offsetInHour);
+    const target = Math.min(Math.floor(Date.now() / 1000), dayRange.after + secOfDay);
+    const targetHour = new Date(target * 1000).getHours();
+    if (hour === targetHour && playbackUrl && range.after !== null && range.before !== null && target >= range.after && target < range.before) {
+      playerRef.current?.seek(archiveToMediaTime(rangeHook.segments, range.after, range.before, target));
     } else {
-      pendingSeekRef.current = offsetInHour;
+      pendingSeekRef.current = target;
+      setPlaybackAnchor(target);
       setHour(targetHour);
     }
   };
-
-  // Apply a queued seek once the new hour's playlist is mounted.
-  useEffect(() => {
-    if (pendingSeekRef.current === null) return;
-    if (!playbackUrl) return;
-    const offset = pendingSeekRef.current;
+  const handlePlayerReady = () => {
+    if (pendingSeekRef.current === null || range.after === null || range.before === null) return;
+    playerRef.current?.seek(archiveToMediaTime(rangeHook.segments, range.after, range.before, pendingSeekRef.current));
     pendingSeekRef.current = null;
-    const id = window.setTimeout(() => playerRef.current?.seek(offset), 0);
-    return () => window.clearTimeout(id);
-  }, [playbackUrl]);
+  };
+  const jumpEvent = (direction: number) => {
+    const timestamps = [...new Set(dayHook.timeline.map((e) => e.timestamp))].sort((a, b) => a - b);
+    const current = archiveTimestamp ?? range.after ?? dayRange.after;
+    const target = direction < 0 ? [...timestamps].reverse().find((t) => t < current - 1) : timestamps.find((t) => t > current + 1);
+    if (target === undefined) return;
+    handleScrubTo(target - dayRange.after);
+  };
+  const handlePlaybackEnded = () => {
+    if (range.before === null) return;
+    const next = [...dayHook.segments].sort((a, b) => a.startTime - b.startTime).find((s) => s.endTime > range.before!);
+    if (!next) return;
+    handleScrubTo(Math.max(next.startTime, range.before) - dayRange.after);
+  };
 
   // ---------- Export ----------
   //
@@ -218,23 +258,23 @@ export default function RecordingsPage() {
   // the day's epoch start to convert to absolute Unix seconds.
   const exportRange = useMemo(() => {
     if (selection) {
-      const [y, m, d] = day.split("-").map(Number);
-      const dayStart = Math.floor(new Date(y, m - 1, d, 0, 0, 0).getTime() / 1000);
       return {
-        after: dayStart + selection.startSec,
-        before: dayStart + selection.endSec,
+        after: dayRange.after + selection.startSec,
+        before: dayRange.after + selection.endSec,
       };
     }
     return range;
-  }, [selection, day, range]);
+  }, [selection, dayRange.after, range]);
 
   const exportSpanLabel = useMemo(() => {
     if (selection) {
-      return `${fmtSecOfDay(selection.startSec)} – ${fmtSecOfDay(selection.endSec)}`;
+      const format = (sec: number) => archiveTimeLabel(dayRange.after + sec);
+      return `${format(selection.startSec)} – ${format(selection.endSec)}`;
     }
     if (hour === null) return null;
+    if (range.after !== null && range.before !== null) return `${archiveTimeLabel(range.after)} – ${archiveTimeLabel(range.before)}`;
     return `${String(hour).padStart(2, "0")}:00 – ${String((hour + 1) % 24).padStart(2, "0")}:00`;
-  }, [selection, hour]);
+  }, [selection, hour, dayRange.after, range]);
 
   const [exporting, setExporting] = useState(false);
   const [exportMsg, setExportMsg] = useState<string | null>(null);
@@ -256,7 +296,7 @@ export default function RecordingsPage() {
         throw new Error((body as { error?: string }).error || `Failed: ${res.status}`);
       }
       const body = (await res.json()) as { ncPath?: string };
-      setExportMsg(body.ncPath ? `Saved to ${body.ncPath}` : "Saved to Nextcloud");
+      setExportMsg(body.ncPath ? `Saved to ${body.ncPath}` : "Saved to File Store");
     } catch (e) {
       setExportMsg(e instanceof Error ? e.message : "Export failed");
     } finally {
@@ -265,6 +305,18 @@ export default function RecordingsPage() {
   };
 
   if (!name) return null;
+
+  // WARP-3511: how far back this camera keeps footage comes from its own
+  // retention, not a fixed number. This said "the past 7 days" for every
+  // camera, whatever it kept — and that figure is changing by release.
+  const rec = camera?.recording;
+  const longest = maxRetentionDays(rec);
+  const browseSub =
+    !rec || rec.degraded || !rec.mode
+      ? "Browse your recordings."
+      : rec.mode === "off"
+        ? "This camera isn't saving footage, so only what was kept before is here."
+        : `Footage is kept for up to ${formatDays(longest)}.`;
 
   const actions = (
     <>
@@ -277,9 +329,10 @@ export default function RecordingsPage() {
         Camera
       </button>
       <button
-        onClick={() => {
-          summaryHook.refresh();
-          rangeHook.refresh();
+          onClick={() => {
+            summaryHook.refresh();
+            rangeHook.refresh();
+            dayHook.refresh();
         }}
         className="icon-btn"
         aria-label="Refresh"
@@ -296,9 +349,13 @@ export default function RecordingsPage() {
       icon={<Video size={15} />}
       label="Recordings"
       title={`${camera?.displayName ?? name} · Recordings`}
-      sub="Browse the past 7 days. Click an hour on the timeline to jump in."
+      sub={`${browseSub} Click an hour on the timeline to jump in.`}
       actions={actions}
     >
+      {/* WARP-3511 — the way to this camera's settings, notifications and
+          storage. Settings only for those who can open it. */}
+      <CameraRelatedLinks camera={name} current="recordings" canManage={canExport} className="mb-3" />
+
       {/* Date picker */}
       <div className="card mb-4 flex items-center gap-2" style={{ padding: 12 }}>
         <button
@@ -314,6 +371,7 @@ export default function RecordingsPage() {
         </button>
         <input
           type="date"
+          aria-label="Recording date"
           value={day}
           onChange={(e) => {
             setDay(e.target.value);
@@ -351,6 +409,10 @@ export default function RecordingsPage() {
                 src={playbackUrl}
                 onTimeUpdate={setCurrentTime}
                 onError={setPlayerError}
+                onReady={handlePlayerReady}
+                onPlayingChange={setPlaying}
+                onEnded={handlePlaybackEnded}
+                playbackRate={playbackRate}
                 ref={playerRef}
                 className="w-full h-full object-contain"
               />
@@ -384,7 +446,21 @@ export default function RecordingsPage() {
                     <p className="type-subheadline">No footage kept for this hour</p>
                     <p className="type-caption-1 text-white/50">
                       Nothing was recorded, or it has passed this camera&apos;s
-                      retention window. Check Settings to keep footage for longer.
+                      retention window.{" "}
+                      {canExport ? (
+                        <>
+                          Check{" "}
+                          <Link
+                            href={`/cameras/${encodeURIComponent(name)}/settings`}
+                            className="underline underline-offset-2 text-white/80"
+                          >
+                            Settings
+                          </Link>{" "}
+                          to keep footage for longer.
+                        </>
+                      ) : (
+                        "Ask an owner or admin to keep footage for longer."
+                      )}
                     </p>
                   </>
                 )}
@@ -397,11 +473,34 @@ export default function RecordingsPage() {
             )}
           </div>
 
-          {/* Hour navigation under the player. */}
+          <div className="card flex items-center justify-between gap-3 flex-wrap" style={{ padding: "8px 12px" }}>
+            <div className="flex items-center gap-1">
+              <button type="button" className="icon-btn" aria-label="Previous event" disabled={dayHook.timeline.length === 0} onClick={() => jumpEvent(-1)}><SkipBack size={16} /></button>
+              <button type="button" className="icon-btn" aria-label={playing ? "Pause recording" : "Play recording"} disabled={!playbackUrl} onClick={() => {
+                if (playing) playerRef.current?.pause();
+                else void playerRef.current?.play().catch(() => setPlayerError("Playback could not start. Try the player's play button."));
+              }}>{playing ? <Pause size={18} /> : <Play size={18} />}</button>
+              <button type="button" className="icon-btn" aria-label="Next event" disabled={dayHook.timeline.length === 0} onClick={() => jumpEvent(1)}><SkipForward size={16} /></button>
+              <select aria-label="Playback speed" value={playbackRate} onChange={(e) => setPlaybackRate(Number(e.target.value))} className="h-8 rounded-md px-2 type-caption-1" style={{ background: "var(--inset)", color: "var(--text)" }}>
+                {[0.25, 0.5, 1, 2, 4, 8, 16].map((rate) => <option key={rate} value={rate}>{rate}×</option>)}
+              </select>
+            </div>
+            <label className="flex items-center gap-2 type-caption-1 text-label-tertiary">Go to time
+              <input type="time" step="1" aria-label="Go to recording time" value={archiveDate === null ? "" : `${String(archiveDate.getHours()).padStart(2, "0")}:${String(archiveDate.getMinutes()).padStart(2, "0")}:${String(archiveDate.getSeconds()).padStart(2, "0")}`} onChange={(e) => {
+                const [h, m, s = 0] = e.target.value.split(":").map(Number);
+                const [y, month, d] = day.split("-").map(Number);
+                if (Number.isFinite(h) && Number.isFinite(m)) handleScrubTo(Math.min(nowSecOfDay ?? dayRange.before - dayRange.after - 1, new Date(y, month - 1, d, h, m, s).getTime() / 1000 - dayRange.after));
+              }} className="h-8 rounded-md px-2 font-mono text-label-primary" style={{ background: "var(--inset)", border: "1px solid var(--border)" }} />
+            </label>
+          </div>
+
+          {/* Quick hour steps sit beside the continuous timeline controls. */}
           {hour !== null && (
-            <div className="card flex items-center justify-between" style={{ padding: "8px 12px" }}>
+            <div className="card flex items-center justify-between gap-2 flex-wrap" style={{ padding: "8px 12px" }}>
               <button
                 onClick={() => {
+                  pendingSeekRef.current = null;
+                  setPlaybackAnchor(null);
                   if (hour > 0) setHour(hour - 1);
                 }}
                 disabled={hour === 0}
@@ -411,12 +510,15 @@ export default function RecordingsPage() {
                 <ChevronLeft size={14} />
                 <span className="type-caption-1">Earlier hour</span>
               </button>
-              <span className="type-subheadline text-label-primary font-mono">
-                {String(hour).padStart(2, "0")}:00 —{" "}
-                {String((hour + 1) % 24).padStart(2, "0")}:00
+              <span className="type-subheadline text-label-primary font-mono order-last w-full text-center sm:order-none sm:w-auto">
+                {range.after !== null && range.before !== null
+                  ? `${archiveTimeLabel(range.after)} — ${archiveTimeLabel(range.before)}`
+                  : `${String(hour).padStart(2, "0")}:00`}
               </span>
               <button
                 onClick={() => {
+                  pendingSeekRef.current = null;
+                  setPlaybackAnchor(null);
                   if (hour < 23) setHour(hour + 1);
                 }}
                 disabled={hour === 23}
@@ -432,9 +534,10 @@ export default function RecordingsPage() {
           <RecordingsTimeline
             day={day}
             summary={summaryHook.days}
-            timeline={rangeHook.timeline}
+            timeline={dayHook.timeline}
+            recordings={dayHook.isLoading || dayHook.error ? undefined : dayHook.segments}
             selectedHour={hour}
-            playheadFraction={playheadFraction}
+            playheadSec={playheadSec}
             onSelectHour={setHour}
             selection={selection}
             onSelectionChange={setSelection}
@@ -469,7 +572,7 @@ export default function RecordingsPage() {
               {exportSpanLabel ? (
                 <>
                   Saves <span className="font-mono">{exportSpanLabel}</span> to
-                  your Nextcloud under <span className="font-mono">/Clips</span>.
+                  your File Store under <span className="font-mono">/Clips</span>.
                 </>
               ) : (
                 <>Pick an hour or drag a range on the timeline first.</>
@@ -488,7 +591,7 @@ export default function RecordingsPage() {
                 <Download size={14} />
               )}
               <span className="type-subheadline">
-                {exporting ? "Exporting…" : "Save to Nextcloud"}
+                {exporting ? "Exporting…" : "Save to File Store"}
               </span>
             </button>
             {exportMsg && (
@@ -526,10 +629,8 @@ export default function RecordingsPage() {
                       className="flex items-center justify-between gap-2 px-2 py-1.5 rounded-lg hover:bg-[var(--hover)] cursor-pointer"
                       onClick={() => {
                         if (range.after === null) return;
-                        const offset = s.startTime - range.after;
-                        if (offset >= 0 && offset <= PLAYBACK_WINDOW_SEC) {
-                          playerRef.current?.seek(offset);
-                        }
+                        if (range.before === null) return;
+                        playerRef.current?.seek(archiveToMediaTime(rangeHook.segments, range.after, range.before, s.startTime));
                       }}
                     >
                       <span className="type-caption-1 font-mono" style={{ color: "var(--text)" }}>

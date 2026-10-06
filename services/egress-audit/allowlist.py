@@ -71,12 +71,11 @@ _MATCHABLE_KINDS = ("egress",)
 
 # WARP-268/269 — service-name reconciliation. The registry (owned by WARP-269)
 # labels egress rows with human-readable owners, but the runtime Attributor
-# (attribution.py) emits a different vocabulary for two of them:
-#   * network_mode:host services aggregate to "host" in v1  → "cloudflared"
+# (attribution.py) emits a different vocabulary for the router:
 #   * a bridge container reduces to its droplet-stripped name → the container
 #     "droplet-openwrt" resolves to "openwrt", not "openwrt-router".
 # match() filters candidate rules by the attributor's string, so without this
-# a box's own tunnel + router DNS/NTP egress never matches its rule and surfaces
+# a box's router DNS/NTP egress never matches its rule and surfaces
 # as a steady false anomaly. Canonicalize the registry label to the attributor
 # vocabulary at parse time; the human label is preserved on AllowRule.service
 # for operator-facing `policy` / `key` output. The set is kept explicit (not
@@ -84,7 +83,6 @@ _MATCHABLE_KINDS = ("egress",)
 # edit here — the TestRealAllowlist cross-check guards against silent drift.
 _SERVICE_ALIASES: dict[str, str] = {
     "openwrt-router": "openwrt",   # bridge container droplet-openwrt
-    "cloudflared": "host",         # network_mode:host → attributes to "host"
 }
 
 

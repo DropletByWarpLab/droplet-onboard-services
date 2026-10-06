@@ -44,8 +44,8 @@
  *
  * ── WHICH EVENTS, AND WHY THE CUT IS THIS SMALL ────────────────────────────
  *
- * PM: `assigned`, `state_changed`, `due_date_changed`, `commented`. Nothing
- * else. The excluded ones are excluded on purpose:
+ * PM: `assigned`, `state_changed`, `due_date_changed`, `commented` and (WARP-3519)
+ * `mentioned`. Nothing else. The excluded ones are excluded on purpose:
  *   • `updated` is the catch-all bucket pm.service.ts writes for a name,
  *     description, startDate or label change. It fires on a typo fix. A
  *     notifier that pings the whole team when somebody corrects a spelling is
@@ -60,6 +60,9 @@
  *     case is covered by the verb that actually names it.
  *   • `unassigned` is recorded but not notified: "you are no longer on this"
  *     is rarely actionable and doubles the traffic of every re-assignment.
+ *   • `comment_edited`, `comment_deleted`, `watcher_added`, `watcher_removed`
+ *     (WARP-3519) are history, not news. The one thing an EDIT can cause that is
+ *     news — somebody newly @mentioned — is its own `mentioned` row.
  *
  * CRM: a STAGE_CHANGE whose destination stage has `kind` WON or LOST. Not
  * every stage move — a deal walking through four OPEN stages is the pipeline
@@ -69,17 +72,42 @@
  *
  * ── WHO ────────────────────────────────────────────────────────────────────
  *
- * PM: the work item's assignees (PmWorkItemAssignee), plus whatever
- * `departmentWatchers` resolves — see the seam below — and NEVER the actor.
- * A person does not need to be told what they just did; team-chat-reminders
- * gets that clause right for the organizer and this copies it.
+ * PM: the work item's assignees (PmWorkItemAssignee) UNION its watchers
+ * (PmWorkItemWatcher, WARP-3519 — people subscribed by creating, being assigned,
+ * commenting or being mentioned, or by hand) UNION whatever `departmentWatchers`
+ * resolves — see the seam below — and NEVER the actor. A person does not need
+ * to be told what they just did; team-chat-reminders gets that clause right for
+ * the organizer and this copies it. One set per person, so somebody who is an
+ * assignee AND a watcher AND in the department hears once.
+ *
+ * Assignees are unconditional (they have always been told about their own
+ * work). Everyone who arrives by ANOTHER route — a watcher, a department
+ * watcher, the target of a mention — must be able to read the item: an external
+ * guest only counts when assigned to it (WARP-3365), a `service` principal is
+ * not a person, a deactivated account is gone.
+ *
+ * A `mentioned` row is addressed to ONE person (its `newValue`) and is never
+ * fanned out to the item's other people. The `commented` row of the same
+ * comment is NOT also sent to the people that comment mentions: they hear
+ * through the mention, once, instead of twice for one comment.
+ *
  * CRM: the deal's `ownerId`, minus the actor.
+ *
+ * TICKETS (WARP-3528, ADR-069 section 1): a work item in a SERVICE_DESK project
+ * is not told like the above. Its subject is a customer's words and the people
+ * who handle it hold the `support` grant, not necessarily `pm`, so a department
+ * WATCHER is never a recipient and `state_changed` / `commented` /
+ * `due_date_changed` interrupt nobody. `assigned` tells the named user;
+ * `sla_at_risk` / `sla_breached` tell current assignees, administrators and
+ * configured escalation recipients. Every recipient must still be active
+ * staff with current Support access. Other ticket verbs are `not_needed`.
  *
  * ── COALESCING, AND ITS WINDOW ─────────────────────────────────────────────
  *
  * A bulk import that assigns 200 tickets must not send 200 notifications, so
  * the unit of delivery is (recipient, tick, source) — at most ONE
- * NotificationLog row per recipient per 60s tick from PM and one from the CRM.
+ * NotificationLog row per recipient per 60s tick from PM, one from the CRM and
+ * one from the service desk.
  * One activity gets a specific message; two or more get a counted digest.
  *
  * Two constants make that work:
@@ -102,6 +130,10 @@ import {
 } from "./notifications.service.js";
 import { createLogger } from "../lib/logger.js";
 import { isUserIdShaped } from "@droplet/auth-policy";
+import { buildPmPath, pmWorkItemPath } from "@droplet/shared-types";
+import { isServiceDesk } from "./pm/pm.service.js";
+import { resolveEffectiveAccess } from "./effective-access.service.js";
+import { escalationSchema } from "./support/sla-schemas.js";
 
 const logger = createLogger("activity-notify");
 
@@ -119,7 +151,7 @@ export const BATCH = 500;
 const TITLE_MAX = 120;
 const BODY_MAX = 500;
 
-/** The four PM verbs worth interrupting somebody for. See the header for the
+/** The PM verbs worth interrupting somebody for. See the header for the
  *  justification of every verb NOT in this set — the cut is the design. */
 export const NOTIFIABLE_PM_VERBS: ReadonlySet<$Enums.PmActivityVerb> =
   new Set<$Enums.PmActivityVerb>([
@@ -127,6 +159,7 @@ export const NOTIFIABLE_PM_VERBS: ReadonlySet<$Enums.PmActivityVerb> =
     "state_changed",
     "due_date_changed",
     "commented",
+    "mentioned",
   ]);
 
 /** Digest vocabulary — one short past-tense word per verb, so a tally reads
@@ -136,6 +169,7 @@ const PM_VERB_WORD: Record<string, string> = {
   state_changed: "moved",
   due_date_changed: "re-dated",
   commented: "commented",
+  mentioned: "mentioned",
 };
 
 /**
@@ -174,7 +208,7 @@ export const noDepartmentWatchers: DepartmentWatchersResolver = async () =>
   new Map<string, string[]>();
 
 export interface ActivityNotifySweepResult {
-  /** PmActivity rows claimed `sent`. */
+  /** PmActivity rows claimed `sent` (project items and tickets alike). */
   pmNotified: number;
   /** PmActivity rows given the explicit `not_needed` terminal. */
   pmSkipped: number;
@@ -186,6 +220,8 @@ export interface ActivityNotifySweepResult {
 
 export interface ActivityNotifyOpts {
   departmentWatchers?: DepartmentWatchersResolver;
+  /** Fresh recipient access, including the box module toggle and person grant. */
+  resolveAccess?: typeof resolveEffectiveAccess;
   /** Injectable clock — the settle window is the one thing worth pinning
    *  deterministically in tests. */
   now?: () => number;
@@ -208,6 +244,28 @@ function workItemLabel(item: {
   return key ? `${key} — ${item.name}` : item.name;
 }
 
+/**
+ * WARP-3522 — where a tap on a PM notification should land, in the `/projects`
+ * deep-link contract (`?p=<IDENTIFIER>&item=<KEY>`, packages/shared-types
+ * `pm-links.ts`). One item opens that item's drawer; several items in one
+ * project open the project; a mix opens Projects. A notification used to carry
+ * no link at all, so a tap went nowhere.
+ */
+function pmLink(
+  rows: ReadonlyArray<{
+    workItemId: string;
+    workItem: { sequenceId: number; project: { identifier: string } | null };
+  }>,
+): string {
+  const identifier = rows[0]?.workItem.project?.identifier;
+  if (!identifier) return buildPmPath({});
+  if (new Set(rows.map((r) => r.workItemId)).size === 1) {
+    return pmWorkItemPath(identifier, `${identifier}-${rows[0].workItem.sequenceId}`);
+  }
+  const sameProject = rows.every((r) => r.workItem.project?.identifier === identifier);
+  return sameProject ? buildPmPath({ p: identifier }) : buildPmPath({});
+}
+
 /** "2 assigned · 1 moved" — insertion-ordered so the tally reads in the order
  *  things happened rather than alphabetically. */
 function tally(words: string[]): string {
@@ -224,6 +282,8 @@ interface Outgoing {
   username: string;
   title: string;
   body: string;
+  /** Same-origin dashboard destination: PM work-item or view links and Support ticket links. */
+  url?: string;
 }
 
 /**
@@ -320,6 +380,7 @@ async function claimAndNotify(
         kind: "event",
         title: o.title,
         body: o.body,
+        ...(o.url !== undefined ? { url: o.url } : {}),
       });
       ids.push(log.id);
     }
@@ -342,6 +403,7 @@ async function claimAndNotify(
       kind: "event",
       title: o.title,
       body: o.body,
+      ...(o.url !== undefined ? { url: o.url } : {}),
     });
     (channels.length > 0 ? delivered : failed).push(logIds[i]);
   });
@@ -387,12 +449,34 @@ async function markNotNeeded(
   return res.count;
 }
 
+/** What the PM sweep reads with every activity row. `project.kind` is how a
+ *  ticket is told from a project item (WARP-3528). */
+const SWEEP_INCLUDE = {
+  workItem: {
+    select: {
+      id: true,
+      name: true,
+      sequenceId: true,
+      projectId: true,
+      project: { select: { identifier: true, kind: true } },
+    },
+  },
+} satisfies Prisma.PmActivityInclude;
+
+type SweepRow = Prisma.PmActivityGetPayload<{ include: typeof SWEEP_INCLUDE }>;
+type SweepWorkItemRow = SweepRow & {
+  workItemId: string;
+  workItem: NonNullable<SweepRow["workItem"]>;
+};
+type SweepCounts = { notified: number; skipped: number; logs: number };
+
 async function sweepPm(
   prisma: PrismaClient,
   cutoff: Date,
   now: Date,
   resolveWatchers: DepartmentWatchersResolver,
-): Promise<{ notified: number; skipped: number; logs: number }> {
+  resolveAccess: typeof resolveEffectiveAccess,
+): Promise<SweepCounts> {
   // Ordered by createdAt so a backlog drains FIFO. The
   // [notifyStatus, createdAt] index makes the `pending` prefix selective even
   // though the table is append-only and almost every row is terminal.
@@ -400,28 +484,71 @@ async function sweepPm(
     where: { notifyStatus: "pending", createdAt: { lte: cutoff } },
     orderBy: { createdAt: "asc" },
     take: BATCH,
-    include: {
-      workItem: {
-        select: {
-          id: true,
-          name: true,
-          sequenceId: true,
-          project: { select: { identifier: true } },
-        },
-      },
-    },
+    include: SWEEP_INCLUDE,
   });
+  // Deletion tombstones deliberately have no related work item. The live
+  // event path delivers those after commit; this assignment sweep cannot
+  // derive a project or ticket audience from them, so give them the explicit
+  // terminal instead of leaving them pending forever.
+  const tombstoneIds = rows.filter((row) => row.workItem === null).map((row) => row.id);
+  const tombstonesSkipped = await markNotNeeded(prisma, "pmActivity", tombstoneIds);
+  const workItemRows = rows.filter(
+    (row): row is SweepWorkItemRow => row.workItemId !== null && row.workItem !== null,
+  );
+  // WARP-3528 — one read, two audiences: a ticket is told by `sweepTickets`
+  // under its own rules, a project item by the rules below, unchanged.
+  const isTicket = (r: SweepWorkItemRow): boolean => isServiceDesk(r.workItem.project);
+  const items = await sweepProjectItems(
+    prisma,
+    workItemRows.filter((r) => !isTicket(r)),
+    now,
+    resolveWatchers,
+  );
+  const tickets = await sweepTickets(prisma, workItemRows.filter(isTicket), now, resolveAccess);
+  return {
+    notified: items.notified + tickets.notified,
+    skipped: tombstonesSkipped + items.skipped + tickets.skipped,
+    logs: items.logs + tickets.logs,
+  };
+}
+
+async function sweepProjectItems(
+  prisma: PrismaClient,
+  rows: SweepWorkItemRow[],
+  now: Date,
+  resolveWatchers: DepartmentWatchersResolver,
+): Promise<SweepCounts> {
   if (rows.length === 0) return { notified: 0, skipped: 0, logs: 0 };
 
-  const candidates = rows.filter((r) => NOTIFIABLE_PM_VERBS.has(r.verb));
-  const skipIds = rows.filter((r) => !NOTIFIABLE_PM_VERBS.has(r.verb)).map((r) => r.id);
+  const candidates = rows.filter(
+    (r): r is (typeof r & { workItemId: string; workItem: NonNullable<typeof r.workItem> }) =>
+      r.workItemId !== null && r.workItem !== null && NOTIFIABLE_PM_VERBS.has(r.verb),
+  );
+  const skipIds = rows
+    .filter((r) => r.workItemId === null || r.workItem === null || !NOTIFIABLE_PM_VERBS.has(r.verb))
+    .map((r) => r.id);
   if (candidates.length === 0) {
     return { notified: 0, skipped: await markNotNeeded(prisma, "pmActivity", skipIds), logs: 0 };
   }
 
   const workItemIds = [...new Set(candidates.map((r) => r.workItemId))];
-  const [assignees, watchers] = await Promise.all([
+  // The comments the `commented` rows are ABOUT (WARP-3519 stamps the comment
+  // id on them), so the people each one mentions can be told apart from the
+  // ones it merely reaches. A legacy `commented` row has no id and fans out as
+  // it always did.
+  const commentIds = [
+    ...new Set(
+      candidates
+        .filter((r) => r.verb === "commented" && r.field === "comment" && r.newValue)
+        .map((r) => r.newValue as string),
+    ),
+  ];
+  const [assignees, itemWatchers, watchers, commentMentions] = await Promise.all([
     prisma.pmWorkItemAssignee.findMany({
+      where: { workItemId: { in: workItemIds } },
+      select: { workItemId: true, userId: true },
+    }),
+    prisma.pmWorkItemWatcher.findMany({
       where: { workItemId: { in: workItemIds } },
       select: { workItemId: true, userId: true },
     }),
@@ -431,32 +558,74 @@ async function sweepPm(
       logger.warn({ err }, "department watcher resolution failed — assignees only");
       return new Map<string, string[]>();
     }),
+    commentIds.length === 0
+      ? Promise.resolve([] as Array<{ commentId: string; userId: string }>)
+      : prisma.pmCommentMention.findMany({
+          where: { commentId: { in: commentIds } },
+          select: { commentId: true, userId: true },
+        }),
   ]);
+
+  const assigneesByItem = new Map<string, Set<string>>();
+  for (const a of assignees) {
+    const set = assigneesByItem.get(a.workItemId) ?? new Set<string>();
+    set.add(a.userId);
+    assigneesByItem.set(a.workItemId, set);
+  }
+  const mentionsByComment = new Map<string, Set<string>>();
+  for (const m of commentMentions) {
+    const set = mentionsByComment.get(m.commentId) ?? new Set<string>();
+    set.add(m.userId);
+    mentionsByComment.set(m.commentId, set);
+  }
 
   // WARP-3365 (Romain, 2026-09-30) — assigning a work item to an external guest
   // SHARES that one item with them, so an ASSIGNEE is told about it: they can
   // open it. A department WATCHER is not: a watcher hears about every item in
   // the department, and a guest is admitted to no item they are not assigned to.
-  const watcherIds = [...new Set([...watchers.values()].flat())];
-  const guestWatchers = new Set<string>();
-  if (watcherIds.length > 0) {
-    const roles = await prisma.user.findMany({
-      where: { id: { in: watcherIds } },
-      select: { id: true, role: true },
+  // WARP-3519 extends the same rule to everyone who reaches an item some way
+  // other than being assigned to it — an item watcher, a mention's target — and
+  // adds the two accounts that are not people to tell: a `service` principal and
+  // a deactivated one. Looked up once for all of them.
+  const arrivedByOtherRoute = [
+    ...new Set([
+      ...itemWatchers.map((w) => w.userId),
+      ...[...watchers.values()].flat(),
+      ...candidates
+        .filter((r) => r.verb === "mentioned" && r.newValue)
+        .map((r) => r.newValue as string),
+    ]),
+  ];
+  const cannotRead = new Set<string>();
+  if (arrivedByOtherRoute.length > 0) {
+    const people = await prisma.user.findMany({
+      where: { id: { in: arrivedByOtherRoute } },
+      select: { id: true, role: true, directoryStatus: true },
     });
-    for (const u of roles) if (u.role === "guest") guestWatchers.add(u.id);
+    for (const u of people) {
+      if (u.role === "guest" || u.role === "service" || u.directoryStatus === "DEACTIVATED") {
+        cannotRead.add(u.id);
+      }
+    }
   }
+  /** May `userId` be told about `workItemId` when they did NOT arrive as its
+   *  assignee? An assigned guest still may: assignees are unconditional. */
+  const mayHear = (workItemId: string, userId: string): boolean =>
+    (assigneesByItem.get(workItemId)?.has(userId) ?? false) || !cannotRead.has(userId);
 
+  // The item-wide audience: assignees, plus watchers and department watchers who
+  // may read the item.
   const byItem = new Map<string, Set<string>>();
-  for (const a of assignees) {
-    const set = byItem.get(a.workItemId) ?? new Set<string>();
-    set.add(a.userId);
-    byItem.set(a.workItemId, set);
+  for (const itemId of workItemIds) {
+    byItem.set(itemId, new Set(assigneesByItem.get(itemId) ?? []));
+  }
+  for (const w of itemWatchers) {
+    if (mayHear(w.workItemId, w.userId)) byItem.get(w.workItemId)?.add(w.userId);
   }
   for (const [itemId, userIds] of watchers) {
-    const set = byItem.get(itemId) ?? new Set<string>();
-    for (const u of userIds) if (!guestWatchers.has(u)) set.add(u);
-    byItem.set(itemId, set);
+    const set = byItem.get(itemId);
+    if (!set) continue;
+    for (const u of userIds) if (mayHear(itemId, u)) set.add(u);
   }
 
   // A `state_changed` row carries stateIds, not names. "moved" without a
@@ -479,14 +648,29 @@ async function sweepPm(
         ).map((s) => [s.id, s.name] as const),
   );
 
+  /** Who a row is for. A mention is addressed to one person and nobody else; the
+   *  rest go to the item's audience, minus the actor, minus (for a comment) the
+   *  people that comment mentions — they hear through their mention. */
+  const recipientsOf = (row: (typeof candidates)[number]): string[] => {
+    if (row.verb === "mentioned") {
+      const target = row.newValue;
+      return target && target !== row.actorId && mayHear(row.workItemId, target) ? [target] : [];
+    }
+    const mentioned =
+      row.verb === "commented" && row.field === "comment" && row.newValue
+        ? mentionsByComment.get(row.newValue)
+        : undefined;
+    return [...(byItem.get(row.workItemId) ?? new Set<string>())].filter(
+      // NEVER the actor.
+      (userId) => userId !== row.actorId && !mentioned?.has(userId),
+    );
+  };
+
   // recipient User.id -> the rows they should hear about.
   const perUser = new Map<string, typeof candidates>();
   const sendIds = new Set<string>();
   for (const row of candidates) {
-    const recipients = [...(byItem.get(row.workItemId) ?? new Set<string>())].filter(
-      // NEVER the actor.
-      (userId) => userId !== row.actorId,
-    );
+    const recipients = recipientsOf(row);
     if (recipients.length === 0) {
       skipIds.push(row.id);
       continue;
@@ -499,14 +683,50 @@ async function sweepPm(
     }
   }
 
+  // The recipients' usernames, and the display names of whoever MENTIONED
+  // somebody (a mention is the one notification that is better with a name in
+  // it: "Ana mentioned you").
+  const mentionActorIds = [
+    ...new Set(
+      candidates
+        .filter((r) => r.verb === "mentioned" && r.actorId)
+        .map((r) => r.actorId as string),
+    ),
+  ];
+  const lookupIds = [...new Set([...perUser.keys(), ...mentionActorIds])];
   const users =
-    perUser.size === 0
+    lookupIds.length === 0
       ? []
       : await prisma.user.findMany({
-          where: { id: { in: [...perUser.keys()] } },
-          select: { id: true, username: true },
+          where: { id: { in: lookupIds } },
+          select: { id: true, username: true, displayName: true },
         });
   const usernames = new Map(users.map((u) => [u.id, u.username] as const));
+  const displayNames = new Map(
+    users.flatMap((u) => (u.displayName ? [[u.id, u.displayName] as const] : [])),
+  );
+
+  /** The one-line title for ONE row, for ONE recipient. */
+  const titleFor = (row: (typeof candidates)[number], userId: string): string => {
+    switch (row.verb) {
+      case "assigned":
+        // "Assigned to you" is for the people who ARE assigned; a watcher who
+        // is not is told the assignment changed, not that it is theirs.
+        return assigneesByItem.get(row.workItemId)?.has(userId)
+          ? "Assigned to you"
+          : "Assignment changed";
+      case "commented":
+        return "New comment";
+      case "due_date_changed":
+        return "Due date changed";
+      case "mentioned": {
+        const who = row.actorId ? displayNames.get(row.actorId) : undefined;
+        return who ? `${who} mentioned you` : "You were mentioned";
+      }
+      default:
+        return `Moved to ${stateNames.get(row.newValue ?? "") ?? "a new state"}`;
+    }
+  };
 
   const outgoing: Outgoing[] = [];
   const reached = new Set<string>();
@@ -520,19 +740,11 @@ async function sweepPm(
     for (const r of list) reached.add(r.id);
     if (list.length === 1) {
       const row = list[0];
-      const label = workItemLabel(row.workItem);
-      const title =
-        row.verb === "assigned"
-          ? "Assigned to you"
-          : row.verb === "commented"
-            ? "New comment"
-            : row.verb === "due_date_changed"
-              ? "Due date changed"
-              : `Moved to ${stateNames.get(row.newValue ?? "") ?? "a new state"}`;
       outgoing.push({
         username,
-        title: truncate(title, TITLE_MAX),
-        body: truncate(label, BODY_MAX),
+        title: truncate(titleFor(row, userId), TITLE_MAX),
+        body: truncate(workItemLabel(row.workItem), BODY_MAX),
+        url: pmLink([row]),
       });
       continue;
     }
@@ -540,6 +752,7 @@ async function sweepPm(
       username,
       title: truncate(`${list.length} updates on your work`, TITLE_MAX),
       body: truncate(tally(list.map((r) => PM_VERB_WORD[r.verb] ?? "updated")), BODY_MAX),
+      url: pmLink(list),
     });
   }
 
@@ -551,6 +764,131 @@ async function sweepPm(
   const logs = await claimAndNotify(prisma, "pmActivity", finalSendIds, outgoing, now);
   const skipped = await markNotNeeded(prisma, "pmActivity", skipIds);
   return { notified: logs > 0 ? finalSendIds.length : 0, skipped, logs };
+}
+
+/**
+ * WARP-3528 (ADR-069 section 1) — the ticket half of the sweep: the activity
+ * rows of work items that live in a SERVICE_DESK project. See the header's
+ * TICKETS paragraph for why none of the project-item rules above apply.
+ *
+ * Only `assigned` tells anyone, and only the user the row names (`newValue` is
+ * that assignee's User.id) -- not the item's current assignees, not a department
+ * watcher. A ticket's recipients are therefore never looked up; the one user
+ * lookup is for the named assignees. Their current staff role and effective
+ * Support grant are checked at delivery: an assignment may settle after an
+ * owner revoked the grant or disabled the module. Everything undeliverable, and
+ * every other verb, takes the explicit `not_needed` terminal.
+ *
+ * Its own coalescing unit and its own claim: one NotificationLog row per
+ * recipient per tick, apart from the PM one. The claim keeps the same
+ * exactly-once discipline as every other phase (`claimAndNotify`). SLA
+ * transition rows use that same claim, with the current Support audience.
+ */
+async function sweepTickets(
+  prisma: PrismaClient,
+  rows: SweepWorkItemRow[],
+  now: Date,
+  resolveAccess: typeof resolveEffectiveAccess,
+): Promise<SweepCounts> {
+  if (rows.length === 0) return { notified: 0, skipped: 0, logs: 0 };
+
+  const skipIds: string[] = [];
+  // assignee User.id -> the assignment rows that name them.
+  const perUser = new Map<string, SweepWorkItemRow[]>();
+  const slaRows = rows.filter((r) => r.verb === "sla_at_risk" || r.verb === "sla_breached");
+  const slaRecipients = new Map<string, Set<string>>();
+  if (slaRows.length) {
+    const [assignees, admins, policies] = await Promise.all([
+      prisma.pmWorkItemAssignee.findMany({ where: { workItemId: { in: slaRows.map((r) => r.workItemId) } }, select: { workItemId: true, userId: true } }),
+      prisma.user.findMany({ where: { directoryStatus: "ACTIVE", role: { in: ["owner", "admin"] } }, select: { id: true } }),
+      prisma.pmSlaPolicy.findMany({ where: { projectId: { in: [...new Set(slaRows.map((r) => r.workItem.projectId))] } }, select: { projectId: true, escalation: true } }),
+    ]);
+    const byDesk = new Map(policies.map((p) => [p.projectId, escalationSchema.parse(p.escalation)]));
+    for (const r of slaRows) {
+      const ids = new Set([...admins.map((u) => u.id), ...assignees.filter((a) => a.workItemId === r.workItemId).map((a) => a.userId)]);
+      for (const e of byDesk.get(r.workItem.projectId) ?? []) {
+        if (e.on === r.newValue && (e.metric === "any" || e.metric === r.field)) {
+          for (const a of e.actions) if (a.type === "notify") for (const id of a.userIds) ids.add(id);
+        }
+      }
+      slaRecipients.set(r.id, ids);
+    }
+  }
+  for (const row of rows) {
+    const recipients = slaRecipients.get(row.id);
+    if (recipients) {
+      if (!recipients.size) skipIds.push(row.id);
+      for (const userId of recipients) {
+        const list = perUser.get(userId) ?? [];
+        list.push(row); perUser.set(userId, list);
+      }
+      continue;
+    }
+    const userId = row.newValue;
+    if (row.verb !== "assigned" || !userId || userId === row.actorId) {
+      skipIds.push(row.id);
+      continue;
+    }
+    const list = perUser.get(userId) ?? [];
+    list.push(row);
+    perUser.set(userId, list);
+  }
+
+  const users =
+    perUser.size === 0
+      ? []
+      : await prisma.user.findMany({
+          where: { id: { in: [...perUser.keys()] }, directoryStatus: "ACTIVE" },
+          select: { id: true, username: true, role: true },
+        });
+  const usernames = new Map(users.map((u) => [u.id, u.username] as const));
+  const staffIds = new Set(users.filter((u) => ["owner", "admin", "family"].includes(u.role)).map((u) => u.id));
+
+  const outgoing: Outgoing[] = [];
+  const sendIds: string[] = [];
+  for (const [userId, list] of perUser) {
+    const username = deliverableUsername("pmActivity", userId, usernames);
+    if (!username || !staffIds.has(userId)) {
+      for (const r of list) skipIds.push(r.id);
+      continue;
+    }
+    // A failed resolver propagates to cron-runtime's retry/canary path. Do not
+    // claim, publish, or permanently skip a private assignment on an unreadable
+    // access snapshot.
+    const access = await resolveAccess(userId);
+    if (!access?.features.some((f) => f.moduleId === "support")) {
+      for (const r of list) skipIds.push(r.id);
+      continue;
+    }
+    for (const r of list) sendIds.push(r.id);
+    // One ticket assigned twice in a tick is still one ticket.
+    const tickets = [...new Map(list.map((r) => [r.workItemId, r] as const)).values()];
+    if (tickets.length === 1) {
+      const row = tickets[0];
+      const key = `${row.workItem.project.identifier}-${row.workItem.sequenceId}`;
+      outgoing.push({
+        username,
+        title: truncate(row.verb === "sla_at_risk" ? `Ticket ${key} SLA at risk` : row.verb === "sla_breached" ? `Ticket ${key} SLA breached` : `Ticket ${key} assigned to you`, TITLE_MAX),
+        body: row.verb === "assigned" ? truncate(row.workItem.name, BODY_MAX) : "A ticket needs your attention.",
+        url: `/support?t=${encodeURIComponent(key)}`,
+      });
+      continue;
+    }
+    outgoing.push({
+      username,
+      title: truncate(tickets.every((r) => r.verb === "assigned") ? `${tickets.length} tickets assigned to you` : `${tickets.length} tickets need attention`, TITLE_MAX),
+      body: truncate(
+        tickets.map((r) => `${r.workItem.project.identifier}-${r.workItem.sequenceId}`).join(", "),
+        BODY_MAX,
+      ),
+      url: "/support",
+    });
+  }
+
+  const uniqueSendIds = [...new Set(sendIds)];
+  const logs = await claimAndNotify(prisma, "pmActivity", uniqueSendIds, outgoing, now);
+  const skipped = await markNotNeeded(prisma, "pmActivity", skipIds);
+  return { notified: logs > 0 ? uniqueSendIds.length : 0, skipped, logs };
 }
 
 async function sweepCrm(
@@ -680,7 +1018,7 @@ export async function runActivityNotifySweep(
   const cutoff = new Date(nowMs - SETTLE_MS);
   const resolveWatchers = opts.departmentWatchers ?? noDepartmentWatchers;
 
-  const pm = await sweepPm(prisma, cutoff, now, resolveWatchers);
+  const pm = await sweepPm(prisma, cutoff, now, resolveWatchers, opts.resolveAccess ?? resolveEffectiveAccess);
   const crm = await sweepCrm(prisma, cutoff, now);
 
   return {

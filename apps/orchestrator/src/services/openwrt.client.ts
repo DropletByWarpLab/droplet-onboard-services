@@ -1256,29 +1256,18 @@ export async function createVpnPeer(opts: {
   return res.json() as Promise<VpnPeerCreateResponse>;
 }
 
-/**
- * WARP-1385 — install/refresh a direct-punch overlay peer (ADR-030). Unlike
- * createVpnPeer, the phone brings its OWN key (enrolled via HQ), so this installs
- * the given `publicKey` with the phone's observed `endpoint` + a keepalive.
- * Idempotent on the routing side (re-install refreshes the endpoint in place).
- */
-export async function installOverlayVpnPeer(opts: {
+/** Restore a saved WireGuard public-key peer; the client initiates the tunnel. */
+export async function installVpnPeer(opts: {
   interface?: string;
   publicKey: string;
-  /** WARP-1757: OPTIONAL. Supply it only when the BOX must initiate — the NAT
-   *  hole-punch. A peer installed at approval time is client-initiated, and
-   *  WireGuard learns its endpoint from the first authenticated handshake, so
-   *  omitting it is what lets the direct / port-mapped / LAN paths work with no
-   *  rendezvous at all. */
-  endpoint?: string;
   allowedIps: string[];
   persistentKeepalive?: number;
   description?: string;
 }): Promise<{
-  status: "ok";
+  status: "ok" | "staged";
+  applied?: boolean;
   interface: string;
   public_key: string;
-  endpoint: string | null;
   allowed_ips: string[];
   persistent_keepalive: number;
 }> {
@@ -1286,18 +1275,16 @@ export async function installOverlayVpnPeer(opts: {
     public_key: opts.publicKey,
     allowed_ips: opts.allowedIps,
   };
-  // Omitted, not null — the schema's pattern only applies to a present string.
-  if (opts.endpoint !== undefined) body.endpoint = opts.endpoint;
   if (opts.interface) body.interface = opts.interface;
   if (opts.persistentKeepalive !== undefined)
     body.persistent_keepalive = opts.persistentKeepalive;
   if (opts.description !== undefined) body.description = opts.description;
-  const res = await postJson("/vpn/peers/overlay", body, "VPN install overlay peer");
+  const res = await postJson("/vpn/peers/install", body, "VPN install peer");
   return res.json() as Promise<{
-    status: "ok";
+    status: "ok" | "staged";
+    applied?: boolean;
     interface: string;
     public_key: string;
-    endpoint: string | null;
     allowed_ips: string[];
     persistent_keepalive: number;
   }>;

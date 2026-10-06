@@ -62,12 +62,6 @@
       "healthcheck": { "type": "http", "port": 8081, "path": "/health" }
     },
     {
-      "name": "device-gateway",
-      "context": ".",
-      "dockerfile": "services/device-gateway/Dockerfile",
-      "healthcheck": { "type": "http", "port": 8084, "path": "/health" }
-    },
-    {
       "name": "camera-discovery",
       "context": ".",
       "dockerfile": "services/camera-discovery/Dockerfile",
@@ -78,6 +72,18 @@
       "context": ".",
       "dockerfile": "services/voice-io/Dockerfile",
       "healthcheck": { "type": "http", "port": 8086, "path": "/health" }
+    },
+    {
+      "name": "qwen-stt",
+      "context": ".",
+      "dockerfile": "services/qwen-stt/Dockerfile",
+      "healthcheck": { "type": "none" }
+    },
+    {
+      "name": "kokoro-tts",
+      "context": ".",
+      "dockerfile": "services/kokoro-tts/Dockerfile",
+      "healthcheck": { "type": "none" }
     },
     {
       "name": "oled-display",

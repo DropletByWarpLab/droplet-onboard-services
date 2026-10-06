@@ -78,8 +78,15 @@
 .pm-scope .pm-btn:hover { background: var(--bg-hover); border-color: var(--border-strong); }
 .pm-scope .pm-btn:focus-visible { outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent); }
 .pm-scope .pm-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.pm-scope .pm-btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-.pm-scope .pm-btn.primary:hover { background: var(--color-accent-hover, var(--accent)); border-color: var(--color-accent-hover, var(--accent)); }
+/* WARP-3181 — the primary button is the accent as a SOLID FILL under text, so it
+ * takes the fill/ink pair globals.css measures for exactly that, not the raw
+ * accent with literal white. White on the vivid accent is 4.47:1 in light
+ * (#fff on #6366f1) and 2.98:1 in dark (#fff on #818cf8) — both under AA's
+ * 4.5:1. The pair below is 6.29:1 / 5.64:1 at rest and 7.90:1 / 8.44:1 on hover
+ * (light / dark); ink flips with the theme (--color-on-accent), so it must
+ * never be hardcoded here. Pinned by src/__tests__/projects-btn-primary.contrast.test.ts. */
+.pm-scope .pm-btn.primary { background: var(--color-accent-fill); border-color: var(--color-accent-fill); color: var(--color-on-accent); }
+.pm-scope .pm-btn.primary:hover { background: var(--color-accent-fill-hover); border-color: var(--color-accent-fill-hover); }
 .pm-scope .pm-btn.ghost { background: transparent; border-color: transparent; color: var(--text-2); }
 .pm-scope .pm-btn.ghost:hover { background: var(--bg-hover); color: var(--text); }
 .pm-scope .pm-btn.danger { background: var(--err); border-color: var(--err); color: #fff; }
@@ -252,6 +259,51 @@
 .pm-scope .pm-safety.read { background: rgba(16, 185, 129, 0.15); }
 .pm-scope .pm-safety.write { background: rgba(245, 158, 11, 0.15); }
 
+/* ── attachments (WARP-1505) ─────────────────────────────────────────────────
+ * File rows, upload progress, the add area, file chips and the drop hint for
+ * the work-item drawer. Existing tokens only; no animation beyond what the
+ * surface already has. */
+.pm-scope .pm-sr { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+.pm-scope .pm-attlist { list-style: none; margin: 0; padding: 0; }
+
+/* a stored file · an upload in flight · an upload that failed */
+.pm-scope .pm-att { display: flex; align-items: center; gap: 10px; padding: 9px 2px; border-bottom: 1px solid var(--border); }
+.pm-scope .pm-att.err { margin: 6px 0; padding: 9px 10px; border-bottom: none; border-radius: 10px; background: var(--err-soft); }
+.pm-scope .pm-att-pic { display: inline-flex; flex: none; border-radius: 8px; }
+.pm-scope .pm-att-ico, .pm-scope .pm-att-thumb { width: 36px; height: 36px; border-radius: 8px; flex: none; }
+.pm-scope .pm-att-ico { display: inline-flex; align-items: center; justify-content: center; background: var(--bg-sunken); color: var(--text-3); }
+.pm-scope .pm-att-thumb { display: block; object-fit: cover; background: var(--bg-sunken); border: 1px solid var(--border); }
+.pm-scope .pm-att-thumb.lg { width: 56px; height: 56px; }
+.pm-scope .pm-att-body { flex: 1; min-width: 0; }
+.pm-scope .pm-att-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; color: var(--text); text-decoration: none; border-radius: 4px; }
+.pm-scope a.pm-att-name:hover { color: var(--accent); text-decoration: underline; }
+.pm-scope .pm-att-meta { margin-top: 2px; font-size: 11.5px; line-height: 1.4; color: var(--text-3); }
+.pm-scope .pm-att-pct { flex: none; min-width: 34px; text-align: right; font-size: 11.5px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.pm-scope .pm-bar { height: 4px; margin-top: 8px; border-radius: 999px; background: var(--bg-sunken); overflow: hidden; }
+.pm-scope .pm-bar > span { display: block; height: 100%; border-radius: inherit; background: var(--accent); }
+
+/* the add area: a focusable box, so a paste has somewhere to land */
+.pm-scope .pm-att-zone { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 8px; padding: 9px 10px; border: 1px dashed var(--border-strong); border-radius: 10px; background: var(--bg-tint); }
+.pm-scope .pm-att-hint { flex: 1; min-width: 180px; font-size: 12px; line-height: 1.45; color: var(--text-3); }
+
+/* file chips: files on a comment, files staged for one */
+.pm-scope .pm-fchips { display: flex; flex-wrap: wrap; gap: 6px; }
+.pm-scope .pm-fchip { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; min-height: 28px; padding: 0 10px; border-radius: 999px; background: var(--bg-sunken); border: 1px solid var(--border); font-size: 12px; color: var(--text-2); text-decoration: none; }
+.pm-scope a.pm-fchip:hover { color: var(--text); border-color: var(--border-strong); }
+.pm-scope .pm-fchip .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pm-scope .pm-fchip .sz { flex: none; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.pm-scope .pm-fchip .rm { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 24px; height: 24px; margin-right: -6px; border: none; border-radius: 50%; background: transparent; color: var(--text-3); cursor: pointer; }
+.pm-scope .pm-fchip .rm:hover { background: var(--bg-hover); color: var(--text); }
+
+.pm-scope a.pm-att-name:focus-visible, .pm-scope .pm-att-pic:focus-visible, .pm-scope a.pm-fchip:focus-visible,
+.pm-scope .pm-fchip .rm:focus-visible, .pm-scope .pm-att-zone:focus-visible { outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent); }
+.pm-scope .pm-att-zone:focus-visible { border-color: color-mix(in srgb, var(--accent) 50%, var(--border)); }
+
+/* a file drag is over the drawer body, or over the comment box */
+.pm-scope .pm-dropveil { position: absolute; inset: -8px -12px; z-index: 3; pointer-events: none; border: 2px dashed var(--accent); border-radius: 14px; background: color-mix(in srgb, var(--accent) 6%, transparent); }
+.pm-scope .pm-dropveil span { position: sticky; top: 45vh; display: block; width: max-content; max-width: 100%; margin: 0 auto; padding: 8px 14px; border-radius: 999px; background: var(--bg-canvas); border: 1px solid var(--border); font-size: 13px; font-weight: 600; color: var(--text); }
+.pm-scope .pm-drop-over { border-radius: 10px; outline: 2px dashed var(--accent); outline-offset: 4px; background: color-mix(in srgb, var(--accent) 6%, transparent); }
+
 /* ── empty / placeholder block ──────────────────────────────────────────── */
 .pm-scope .pm-empty { display: flex; flex-direction: column; align-items: center; text-align: center; padding: 44px 24px; gap: 4px; }
 .pm-scope .pm-empty .glyph { width: 52px; height: 52px; border-radius: 14px; display: flex; align-items: center; justify-content: center; margin-bottom: 10px; }
@@ -262,12 +314,155 @@
 .pm-scope .pm-grid-projects { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; }
 .pm-scope .pm-grid-kpi { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; }
 
+/* ── WARP-3519: activity timeline · comments · reactions · watchers ───────────
+ * Existing `.pm-scope` aliases only (no new token, no hex). Secondary text on
+ * this thread uses --text-2: --text-3 / --text-4 are for decoration, and a
+ * timestamp is something people read. The editor's own styles — and the mention
+ * chip — live in components/projects/editor/editor.css. */
+.pm-scope .pm-tl-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+.pm-scope .pm-tl { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 14px; }
+.pm-scope .pm-tl-row { display: flex; align-items: flex-start; gap: 9px; font-size: 12.5px; line-height: 1.5; color: var(--text-2); }
+.pm-scope .pm-tl-dot { width: 22px; height: 22px; flex: none; display: inline-flex; align-items: center; justify-content: center; }
+.pm-scope .pm-tl-dot::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--border-strong); }
+.pm-scope .pm-tl-ai { width: 22px; height: 22px; font-size: 8px; }
+.pm-scope .pm-tl-text { flex: 1; min-width: 0; padding-top: 2px; }
+.pm-scope .pm-tl-actor { font-weight: 600; color: var(--text); }
+.pm-scope .pm-tl-when { color: var(--text-2); }
+.pm-scope .pm-tl-empty { font-size: 13px; color: var(--text-2); }
+.pm-scope .pm-tl-note { margin: 10px 0 0; font-size: 12px; color: var(--text-2); }
+.pm-scope .pm-tl-error { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; color: var(--text-2); }
+.pm-scope .pm-composer { margin-top: 14px; }
+.pm-scope .pm-pills button:focus-visible { outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent); }
+
+.pm-scope .pm-comment { display: flex; align-items: flex-start; gap: 10px; }
+.pm-scope .pm-comment-main { flex: 1; min-width: 0; }
+.pm-scope .pm-comment-head { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; margin-bottom: 3px; }
+.pm-scope .pm-comment-name { font-size: 12.5px; font-weight: 600; color: var(--text); }
+.pm-scope .pm-comment-when, .pm-scope .pm-edited { font-size: 11px; color: var(--text-2); }
+.pm-scope .pm-comment-actions { margin-left: auto; display: inline-flex; gap: 2px; }
+.pm-scope .pm-edit { display: flex; flex-direction: column; gap: 8px; }
+.pm-scope .pm-edit-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.pm-scope .pm-tombstone { font-size: 12.5px; color: var(--text-2); padding: 7px 10px; border: 1px dashed var(--border-strong); border-radius: 8px; }
+.pm-scope .pm-tombstone:focus-visible { outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent); }
+
+.pm-scope .pm-reactions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
+.pm-scope .pm-react {
+  display: inline-flex; align-items: center; gap: 5px; min-height: 26px; padding: 0 8px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--bg-canvas); color: var(--text-2);
+  font-size: 12px; font-family: inherit; cursor: default;
+}
+.pm-scope button.pm-react { cursor: pointer; }
+.pm-scope button.pm-react:hover { border-color: var(--border-strong); color: var(--text); }
+.pm-scope .pm-react.on { background: color-mix(in srgb, var(--accent) 14%, transparent); border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); color: var(--text); }
+.pm-scope .pm-react .n { font-variant-numeric: tabular-nums; }
+.pm-scope .pm-react-add { padding: 0 7px; color: var(--text-3); }
+.pm-scope .pm-react:focus-visible, .pm-scope .pm-react-pick:focus-visible { outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent); }
+.pm-scope .pm-react-picker { display: inline-flex; gap: 2px; padding: 3px; border: 1px solid var(--border); border-radius: 999px; background: var(--bg-canvas); }
+.pm-scope .pm-react-pick { width: 28px; height: 28px; border-radius: 50%; border: 1px solid transparent; background: transparent; cursor: pointer; font-size: 15px; line-height: 1; font-family: inherit; }
+.pm-scope .pm-react-pick:hover { background: var(--bg-hover); }
+.pm-scope .pm-react-pick[aria-pressed="true"] { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+
+.pm-scope .pm-watch { display: inline-flex; align-items: center; gap: 8px; }
+.pm-scope .pm-watch-btn[aria-pressed="true"] { background: color-mix(in srgb, var(--accent) 14%, transparent); border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+
+/* Stored comments can now carry what the editor writes; Tailwind's reset leaves
+ * these bare inside the thread. */
+.pm-scope .pm-prose ul { list-style: disc; }
+.pm-scope .pm-prose ol { list-style: decimal; margin: 0 0 9px; padding-left: 20px; }
+.pm-scope .pm-prose blockquote { margin: 0 0 9px; padding-left: 10px; border-left: 3px solid var(--border-strong); color: var(--text-2); }
+.pm-scope .pm-prose code { font-family: var(--font-mono); font-size: 12.5px; padding: 1px 4px; border-radius: 4px; background: var(--bg-hover); }
+.pm-scope .pm-prose pre { margin: 0 0 9px; padding: 8px 10px; border-radius: 6px; background: var(--bg-hover); overflow-x: auto; }
+.pm-scope .pm-prose pre code { padding: 0; background: transparent; }
+.pm-scope .pm-prose a { color: var(--accent); text-decoration: underline; }
+.pm-scope .pm-prose > :last-child { margin-bottom: 0; }
+
 @media (max-width: 720px) {
   .pm-scope .pm-grid-kpi { grid-template-columns: repeat(2, 1fr); }
   /* 34px is under the 44px touch minimum — see
      04-coding-standards/mobile-web-layout.md. */
   .pm-scope .pm-btn { height: 44px; }
   .pm-scope .pm-search { height: 44px; }
+}
+
+/* ── WARP-3522: filter bar, active-filter chips, saved views, popovers ──────
+ * Existing tokens only (the aliases at the top of this file). The popover's
+ * shadow is the card-hover one, repeated rather than invented. */
+.pm-scope .pm-pop-anchor { position: relative; display: inline-flex; align-items: center; }
+.pm-scope .pm-pop {
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 40;
+  width: max-content; min-width: 220px; max-width: min(360px, calc(100vw - 32px)); max-height: 360px; overflow: auto;
+  padding: 10px; background: var(--bg-canvas); border: 1px solid var(--border); border-radius: 12px;
+  box-shadow: 0 14px 30px -16px rgba(30, 30, 60, 0.28), 0 0 0 1px rgba(99, 102, 241, 0.18);
+}
+.pm-scope .pm-pop-h { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 13px; color: var(--text); }
+.pm-scope .pm-pop-sect { font-size: 11px; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase; color: var(--text-4); margin: 4px 2px 6px; }
+.pm-scope .pm-pop-list { border: none; padding: 0; margin: 8px 0 0; min-width: 0; }
+.pm-scope .pm-pop-row { display: flex; align-items: center; gap: 9px; min-height: 30px; padding: 2px 4px; border-radius: 6px; font-size: 13px; color: var(--text); cursor: pointer; }
+.pm-scope .pm-pop-row:hover { background: var(--bg-hover); }
+.pm-scope .pm-pop-row input { margin: 0; flex: none; }
+.pm-scope .pm-pop-empty { padding: 8px 4px; font-size: 12.5px; color: var(--text-3); }
+.pm-scope .pm-pop-f { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+.pm-scope .pm-pop-grid { display: flex; flex-wrap: wrap; gap: 6px; }
+.pm-scope .pm-pop-menu { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.pm-scope .pm-pop-item {
+  display: block; width: 100%; text-align: left; min-height: 32px; padding: 0 10px; border: none; border-radius: 6px;
+  background: transparent; font-size: 13px; color: var(--text); cursor: pointer; font-family: inherit;
+}
+.pm-scope .pm-pop-item:hover { background: var(--bg-hover); }
+.pm-scope .pm-pop-item:focus-visible,
+.pm-scope .pm-pop-row:focus-within,
+.pm-scope .pm-chip:focus-visible,
+.pm-scope .pm-fchip-b:focus-visible,
+.pm-scope .pm-fchip-x:focus-visible,
+.pm-scope .pm-vrow:focus-visible { outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent); }
+
+.pm-scope .pm-fchips { gap: 8px; flex-wrap: wrap; }
+.pm-scope .pm-fchip {
+  display: inline-flex; align-items: stretch; height: 30px; border-radius: 999px; overflow: visible;
+  background: rgba(99, 102, 241, 0.1); border: 1px solid color-mix(in srgb, var(--accent) 38%, var(--border));
+}
+.pm-scope .pm-fchip-b, .pm-scope .pm-fchip-x {
+  display: inline-flex; align-items: center; border: none; background: transparent; color: var(--text);
+  font-family: inherit; font-size: 12.5px; cursor: pointer;
+}
+.pm-scope .pm-fchip-b { padding: 0 6px 0 12px; border-radius: 999px 0 0 999px; max-width: 320px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pm-scope .pm-fchip-b.static { cursor: default; }
+.pm-scope .pm-fchip-x { min-width: 26px; justify-content: center; padding: 0 8px 0 4px; border-radius: 0 999px 999px 0; color: var(--text-3); }
+.pm-scope .pm-fchip-b:hover, .pm-scope .pm-fchip-x:hover { background: var(--bg-hover); }
+.pm-scope .pm-fchip-x:hover { color: var(--text); }
+
+.pm-scope .pm-vchip { display: inline-flex; align-items: center; gap: 2px; }
+.pm-scope .pm-vchip-k { width: 26px; height: 26px; opacity: 0.55; }
+.pm-scope .pm-vchip:hover .pm-vchip-k, .pm-scope .pm-vchip:focus-within .pm-vchip-k, .pm-scope .pm-vchip-k[aria-expanded="true"] { opacity: 1; }
+@media (hover: none) { .pm-scope .pm-vchip-k { opacity: 1; } }
+.pm-scope .pm-vsep { width: 1px; height: 18px; background: var(--border-strong); margin: 0 2px; }
+.pm-scope .pm-chip-add { border-style: dashed; }
+.pm-scope .pm-chip[aria-disabled="true"] { opacity: 0.5; cursor: not-allowed; }
+.pm-scope .pm-chip[aria-disabled="true"]:hover { color: var(--text-3); border-color: var(--border); }
+
+.pm-scope .pm-note {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 12px; border-radius: 10px;
+  font-size: 12.5px; color: var(--text-2); background: color-mix(in srgb, var(--info) 8%, var(--bg-canvas));
+  border: 1px solid color-mix(in srgb, var(--info) 28%, var(--border));
+}
+.pm-scope .pm-status { font-size: 12px; color: var(--text-3); }
+.pm-scope .pm-scope-label { font-size: 13px; font-weight: 600; color: var(--text); }
+
+.pm-scope .pm-vrow {
+  display: flex; align-items: center; gap: 12px; width: 100%; min-height: 44px; padding: 10px 16px; text-align: left;
+  background: transparent; border: none; border-bottom: 1px solid var(--border); color: var(--text); cursor: pointer; font-family: inherit;
+}
+.pm-scope .pm-vrow:last-child { border-bottom: none; }
+.pm-scope .pm-vrow:hover { background: var(--bg-hover); }
+.pm-scope .pm-vrow-name { display: inline-flex; align-items: center; gap: 7px; flex: 1; min-width: 0; font-size: 13.5px; font-weight: 500; }
+.pm-scope .pm-vrow-meta { font-size: 12px; color: var(--text-3); }
+.pm-scope .pm-vrow-door .pm-vrow-name { flex: none; }
+.pm-scope .pm-vrow-door .pm-vrow-meta { flex: 1; text-align: right; }
+
+@media (max-width: 720px) {
+  .pm-scope .pm-chip, .pm-scope .pm-fchip { min-height: 36px; }
+  .pm-scope .pm-fchip-b, .pm-scope .pm-fchip-x { min-height: 34px; }
+  .pm-scope .pm-pop { position: fixed; left: 16px; right: 16px; top: auto; bottom: 16px; max-width: none; width: auto; max-height: 70vh; }
 }
 
 @media (prefers-reduced-motion: reduce) {

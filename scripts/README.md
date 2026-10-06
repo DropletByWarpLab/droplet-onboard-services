@@ -15,6 +15,8 @@ cd edge-platform
 
 This single command provisions a fresh device (router host, inference host, or Linux dev machine) with everything needed to run the Droplet stack.
 
+Deploying behind an external RB5009 edge router (`setup.sh --edge-router`)? Follow [`docs/EDGE_ROUTER_DEPLOY.md`](../docs/EDGE_ROUTER_DEPLOY.md).
+
 ---
 
 ## What `setup.sh` does
@@ -492,6 +494,72 @@ full appliance ISO manifest (OpenSSL ECDSA, ADR-020), while `cosign.pub`
 signs OTA app-update release manifests (WARP-534). Do not reuse one key
 for the other.
 
+### What the publish workflow adds around the signed manifest (WARP-3429)
+
+Boxes carry no GitHub token (ADR-045), and the first-party GHCR packages stay
+private, so boxes pull from the fleet HQ registry (R2 mirror below), not from
+GHCR. Full description: `docs/SECURITY.md#public-packages`,
+`#r2-registry-mirror` and `#channel-index`.
+
+- **Pre-push image secret scan.** Between `docker build` and `docker push`,
+  `scripts/release/scan-ghcr-secrets.py --docker-save … --fail-on-app` scans
+  the image config and every layer with the pinned gitleaks. A non-vendor
+  finding not listed in `scripts/release/image-secret-baseline.txt`
+  (`<rule> <path>` per line, starts empty) fails the publish before the
+  push; the failing step prints the lines to add if it is a reviewed false
+  positive. A real secret is rotated and removed from the image, never
+  baselined. Config findings are fingerprinted per key
+  (`config.json#Env.<NAME>`), so one line never covers a whole config. The
+  scan uses `scripts/release/gitleaks-images.toml`: default rules plus one
+  allowlist entry, the python base images' public `GPG_KEY` fingerprint. Run
+  the `ghcr-secret-scan` workflow (WARP-3423; dispatch inputs `package`,
+  `shards`, `digests` split or retry a big package) first to see the findings
+  for every published image and curate the baseline.
+- **Signed channel index.** The `index` job writes `channel-<channel>.json`
+  (`scripts/release/gen-channel-pointer.py`), signs it like `release.json`,
+  and uploads it to the rolling `ota-index` release (a prerelease, never
+  latest; never delete it). If only that job fails, "Re-run failed jobs"
+  re-runs it alone.
+- **R2 registry mirror (WARP-3502).** Just before the Release is created,
+  `scripts/release/mirror-to-r2.py copy` copies every image by digest (manifest
+  tree, config and layer blobs) and its cosign `sha256-<hex>.sig` artifact from
+  GHCR into the R2 bucket the HQ registry Worker serves; a copy failure fails
+  the publish. See "R2 registry mirror: one-time setup" below.
+
+#### R2 registry mirror: one-time setup (Romain)
+
+Until these exist the publish still works: the mirror is skipped with a
+warning and `release.json` keeps naming `ghcr.io`.
+
+1. In the Cloudflare dashboard create the R2 bucket the HQ Worker binds, and an
+   R2 API token with **Object Read & Write** on that one bucket (not account
+   wide). Note the account id (32 hex), the token's Access Key ID and Secret.
+2. Set the repo secrets (`gh secret set <NAME> -R DropletByWarpLab/droplet-onboard-services`):
+   `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`
+   (the bucket name). Set all four or none: a partial set fails the publish.
+3. Dispatch a publish (stage first). It fills the bucket and prints the
+   measured cost in the job summary (`R2 mirror: N images, N blobs (N uploaded,
+   N MiB; N already present) ... s`); use that to replace the cost estimate in
+   the `publish-release.yml` header.
+4. Once the HQ Worker is deployed and reads that bucket, set the repo variable
+   `OTA_REGISTRY_HOST` (`gh variable set OTA_REGISTRY_HOST -R ... --body
+   registry.example`: host only, no `https://`, no
+   path). From the next publish `release.json` names
+   `<host>/droplet-<name>@sha256:…` (same digests), and the R2 secrets become
+   mandatory: unsetting one fails the publish before the build instead of
+   shipping a manifest that points at an empty registry. Unset the variable to
+   go back to `ghcr.io`.
+
+The layout the Worker reads (fleet contract v1, section 3): `oci/blobs/sha256/<hex>`,
+`oci/manifests/sha256/<hex>` (Content-Type = the manifest media type) and
+`oci/tags/droplet-<name>/sha256-<hex>.sig` (text `sha256:<signature manifest
+hex>`). `oci/.write-check` is the credential probe, not part of the layout.
+
+The unit suites for all of this live next to the scripts
+(`scripts/release/test_*.py`) and run through the same
+`python3 -m pytest scripts/release/` command as the manifest generator, both
+in the PR lane (`release-scripts-tests.yml`) and as the publish gate.
+
 ---
 
 ## File layout
@@ -502,6 +570,8 @@ scripts/
 ├── factory-reset.sh       Wipe all data and start fresh
 ├── verify.sh              Standalone smoke test
 ├── camera-drivers.sh      Camera driver check/install/scan/fix tool
+├── hq-enroll.sh           Enroll the box's device key with fleet HQ, once, so it can
+│                          get the device tokens private OTA pulls need (WARP-3503)
 ├── README.md              This file
 └── lib/
     ├── logging.sh         Colored output, log file, spinner

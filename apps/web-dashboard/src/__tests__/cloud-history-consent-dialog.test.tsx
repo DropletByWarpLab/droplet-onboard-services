@@ -50,10 +50,10 @@ describe("CloudHistoryConsentDialog", () => {
     await waitFor(() => expect(onDecide).toHaveBeenCalledWith("granted"));
   });
 
-  // WARP-2979 (ADR-059 P4 §6.13) — the server never replays an answer that used Security, whatever is chosen.
-  it("with a Security answer: says it stays on the Droplet, and offers only what will happen", async () => {
-    const { onDecide, onClose } = renderDialog(undefined, undefined, { neverSent: ["Security"] });
-    expect(screen.getByText(/Answers that used Security stay on this Droplet/)).toBeTruthy();
+  // The server never replays an answer that used a never-sent source, whatever is chosen.
+  it("with a never-sent source: says it stays on the Droplet, and offers only what will happen", async () => {
+    const { onDecide, onClose } = renderDialog(undefined, undefined, { neverSent: ["Private notes"] });
+    expect(screen.getByText(/Answers that used Private notes stay on this Droplet/)).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Send the whole conversation" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Only my messages" }));
     await waitFor(() => expect(onClose).toHaveBeenCalled());
@@ -62,9 +62,9 @@ describe("CloudHistoryConsentDialog", () => {
     expect(onDecide).not.toHaveBeenCalled();
   });
 
-  it("without one, both choices stay and Security is not mentioned", () => {
+  it("without one, both choices stay and no never-sent source is mentioned", () => {
     renderDialog();
-    expect(screen.queryByText(/Security/)).toBeNull();
+    expect(screen.queryByText(/Private notes/)).toBeNull();
     expect(screen.getByRole("button", { name: "Send the whole conversation" })).toBeTruthy();
   });
 

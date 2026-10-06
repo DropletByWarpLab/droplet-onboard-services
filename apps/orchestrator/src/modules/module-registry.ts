@@ -28,7 +28,6 @@ export interface AvailabilityConfig {
   DROPLET_MATTER_SERVICE_URL: string;
   ROUTING_SERVICE_URL: string;
   SWITCH_SERVICE_URL: string;
-  DOORS_ENABLED: unknown; // ADR-055 — string "1"/"true"/… or boolean, normalized by isTruthy
 }
 
 const isSet = (v: string | undefined | null): boolean => !!(v && v.trim().length > 0);
@@ -91,23 +90,6 @@ export interface ModuleDef {
   ownedPaths?: string[];
   /** Fallback enablement when there's no ModuleSetting row and no preset applied. */
   defaultEnabled: boolean;
-  /**
-   * ADR-055 — does Settings → Features still list this module on a box where it
-   * is NOT available? `true` (what a module that leaves the field out gets) keeps
-   * the greyed "Not installed on this Droplet" row that tells an operator the
-   * capability exists. `false` makes the module ABSENT until `available` is true
-   * — no row at all — for a module whose existence is not yet something
-   * customers are offered (doors ships dark while AC-001, product line or
-   * feature, is undecided).
-   *
-   * An explicit flag, never derived: "unavailable" says the backend is not
-   * deployed, and "not listed" says the product is not on offer. Those are two
-   * facts, and the second is a decision someone makes per module, not something
-   * to be inferred from the first or from the module's id. It filters the
-   * operator's VIEW only (`getModulesView`); effectiveness, gates and the
-   * toggle's own rejection still read `available`.
-   */
-  listedWhenUnavailable?: boolean;
   /** Availability signal, reusing the existing deploy-time config reads. NOTE:
    *  modules gated only by a URL with a non-empty default (files/cameras/network/
    *  switch/knowledge) read as always-available in v1 — a health-probe refinement
@@ -277,6 +259,29 @@ export const MODULES: readonly ModuleDef[] = [
     available: () => true, // native to the orchestrator
   },
   {
+    id: "support", label: "Support",
+    description: "Handle customer requests as tickets: answer, assign and follow each one through to a resolution.",
+    // WARP-3528 (ADR-069 §1) — the service desk has a door of its own. Tickets
+    // ride the PM tables (`PmProject.kind = SERVICE_DESK`) but never the PM
+    // routes: /api/pm reads `kind = PROJECT` only, so a Projects grant is no way
+    // into a customer's conversation and /support is no way into Projects.
+    category: "workspace", routePrefixes: ["/api/support"],
+    navHrefs: ["/support"],
+    // No tool domain in this slice. The assistant reaches tickets through the
+    // existing `business` domain once WS-15 (WARP-3531) adds `ticket` as an
+    // entity; claiming `business` now would WIDEN it (any owning module passes
+    // the feature intersection) for a surface with no tool yet. Same as `docs`
+    // and `contacts`: nothing is claimed until the handlers exist.
+    toolDomains: [], core: false, defaultEnabled: false,
+    // No `requires`, by the bar ModuleDef.requires sets (and `crm` met in
+    // WARP-2558): the child must have no reachable surface without the parent.
+    // /support is its own surface, so a dental front desk runs Support with
+    // Projects off. Linking a ticket to engineering work needs both grants and
+    // degrades to "linked item (no access)" otherwise. Do not restore an edge
+    // without also taking /support away.
+    available: () => true, // native to the orchestrator
+  },
+  {
     id: "contacts", label: "Contacts",
     description: "The company address book: people you add, plus those brought in from your other accounts.",
     category: "workspace", routePrefixes: ["/api/contacts"],
@@ -303,66 +308,15 @@ export const MODULES: readonly ModuleDef[] = [
     available: (c) => isSet(c.FRIGATE_URL),
   },
   {
-    // WARP-2977 (ADR-059 DS-004) — the command center. Not folded into
-    // `cameras`: network and sign-in threats are in it too, and ADR-055's
-    // doors will be. Camera grants still filter every camera row (DS-005).
-    // WARP-2979 (P4 §6.12): the `security` tool domain — four read-only tools
-    // — is claimed here in the same change that ships them, never left
-    // unclaimed (WARP-2742). The toggle and the per-person Security level
-    // therefore decide the chat tools as they decide the page.
-    //
-    // The event STORE ingests whether or not this toggle is on: patterns need
-    // 14 days of history (§4.3), and switching Security on must not start
-    // that clock from zero. The toggle decides the surface, not the capture.
-    id: "security", label: "Security",
-    description: "One feed for camera detections, camera health, and network and sign-in warnings.",
-    category: "operations", routePrefixes: ["/api/security"], navHrefs: ["/security"],
-    toolDomains: ["security"], core: false, defaultEnabled: false,
-    available: () => true, // native to the orchestrator; threats need no camera
-  },
-  {
-    // ADR-055 (P4a) — doors: the access points a box knows about and the
-    // append-only log of what happened at them. Named `doors`, never `access`:
-    // /api/access, routes/access.ts and lib/access.ts are ADR-032's RBAC.
-    //
-    // SHIPS DARK. `available` reads DOORS_ENABLED, an EXPLICIT boolean (the
-    // DOCS_ENABLED idiom — never derived from another variable's emptiness),
-    // so a box that has not turned it on has NO doors module: /api/doors 404s
-    // `module_disabled`, the module cannot be switched on in Settings, it is
-    // not listed under Features, and the `doors` tool domain below is withheld
-    // from the chat pool, `/api/llm/tools` and MCP (WARP-2972). Absent, not
-    // empty.
-    //
-    // `navHrefs: ["/doors"]` — the dashboard page arrived with P4b, and the
-    // nav gates it on this module, so it is absent from every nav surface
-    // while the flag is off. It is in no BUSINESS_TYPES preset: a box that
-    // wants doors turns the flag on.
-    //
-    // `toolDomains: ["doors"]` — the two read-only assistant tools (P4b,
-    // WARP-3438), claimed in the same change that adds them (WARP-2742). The
-    // domain also joins `MODULE_OWNED_TOOL_DOMAINS` in @droplet/tools-core, which
-    // the mcp-server fails closed on (pinned by tool-module-verdict.service.test.ts).
-    id: "doors", label: "Doors",
-    description: "The doors this box knows about, and the log of what happened at them.",
-    category: "operations", routePrefixes: ["/api/doors"], navHrefs: ["/doors"],
-    toolDomains: ["doors"], core: false, defaultEnabled: false,
-    // Absent from Settings → Features while the flag is off: a product decision
-    // still open (AC-001) is not shown to a customer who was not offered it.
-    listedWhenUnavailable: false,
-    available: (c) => isTruthy(c.DOORS_ENABLED),
-  },
-  {
     id: "smart_home", label: "Devices",
-    description: "Control lights, locks, sensors and building systems.",
+    description: "Control lights, locks and sensors.",
     // Gate ONLY the Matter/smart-home surface. "/api/devices" is deliberately
     // NOT gated here: it hosts the appliance/fleet device registry, device
     // pairing (/api/devices/pair*), push-notification subscribe
     // (/api/devices/push/*), and network device-clients (/api/devices/clients*)
     // — none of which are smart-home. Toggling this module off must never 404
     // pairing or push app-wide. Matter devices live under /api/matter/devices.
-    // `/api/building` is the device gateway (BACnet/Modbus/SNMP/KNX): the same
-    // Device control surface, so the same toggle and access grant gate it.
-    category: "operations", routePrefixes: ["/api/matter", "/api/building"], navHrefs: ["/devices"],
+    category: "operations", routePrefixes: ["/api/matter"], navHrefs: ["/devices"],
     // WARP-1527: the tools-core domain is "smart-home" ("matter"/"devices"
     // were never catalog values, so the module-off drop was a silent no-op).
     toolDomains: ["smart-home"], core: false, defaultEnabled: false,
@@ -591,22 +545,22 @@ export const BUSINESS_TYPES: readonly BusinessTypeDef[] = [
   {
     id: "professional_office", label: "Professional office",
     description: "An office — documents, email, projects, scheduling.",
-    modules: ["knowledge", "files", "docs", "email", "calendar", "projects", "network"],
+    modules: ["knowledge", "files", "docs", "email", "calendar", "projects", "support", "network"],
   },
   {
     id: "retail", label: "Retail",
     description: "A store — cameras, device control, network, managed switch.",
-    modules: ["knowledge", "files", "calendar", "cameras", "security", "smart_home", "network", "managed_switch"],
+    modules: ["knowledge", "files", "calendar", "support", "cameras", "smart_home", "network", "managed_switch"],
   },
   {
     id: "clinic", label: "Clinic / practice",
     description: "A practice — documents, scheduling, projects, cameras.",
-    modules: ["knowledge", "files", "docs", "calendar", "projects", "cameras", "security", "network"],
+    modules: ["knowledge", "files", "docs", "calendar", "projects", "support", "cameras", "network"],
   },
   {
     id: "hospitality", label: "Hospitality",
     description: "A hotel / venue — rooms, devices, voice, cameras.",
-    modules: ["knowledge", "files", "calendar", "voice", "cameras", "security", "smart_home", "network", "managed_switch"],
+    modules: ["knowledge", "files", "calendar", "support", "voice", "cameras", "smart_home", "network", "managed_switch"],
   },
   {
     id: "custom", label: "Custom",

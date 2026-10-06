@@ -24,7 +24,7 @@ import type { EventDetail, EventFilter, FilteredEventsResult } from "@/lib/types
  * events without manual refresh. Longer intervals miss live activity;
  * shorter rates burn the orchestrator's Frigate budget.
  */
-export function useEvents(filter: EventFilter) {
+export function useEvents(filter: EventFilter, scheduleKey?: string) {
   // Drop `before` from the persisted key so a page-1 fetch (no cursor)
   // and a page-N fetch (with cursor) share the same logical filter and
   // the cache survives "load more" without re-keying.
@@ -39,18 +39,18 @@ export function useEvents(filter: EventFilter) {
     (pageIndex: number, previousPageData: FilteredEventsResult | null) => {
       // First page: no cursor.
       if (pageIndex === 0) {
-        return ["events", JSON.stringify(baseFilter), null] as const;
+        return ["events", JSON.stringify(baseFilter), null, scheduleKey] as const;
       }
       // No more data — tell SWR to stop fetching.
       if (previousPageData && previousPageData.nextCursor === null) return null;
       const cursor = previousPageData?.nextCursor ?? null;
-      return ["events", JSON.stringify(baseFilter), cursor] as const;
+      return ["events", JSON.stringify(baseFilter), cursor, scheduleKey] as const;
     },
-    [baseFilter],
+    [baseFilter, scheduleKey],
   );
 
   const fetcher = useCallback(
-    ([, , cursor]: readonly [string, string, number | null]) =>
+    ([, , cursor]: readonly [string, string, number | null, string | undefined]) =>
       fetchEventsFiltered({
         ...baseFilter,
         before: cursor ?? undefined,
@@ -95,6 +95,7 @@ export function useEvents(filter: EventFilter) {
     isLoadingMore,
     error,
     hasMore,
+    scanLimitReached: lastPage?.scanLimitReached === true,
     loadMore,
     refresh: () => mutate(),
   };

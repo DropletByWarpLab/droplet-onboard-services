@@ -1,9 +1,10 @@
-// Unit tests for the work-item DetailDrawer — comment composer must revalidate
-// the activity feed (the server writes a `commented` PmActivity row in the same
-// transaction as the PmComment, so the timeline is stale until refetch). (WARP-882 / ADR-026 P5)
+// Unit tests for the work-item DetailDrawer — the comment composer must
+// revalidate the merged activity timeline (the server writes a `commented`
+// PmActivity row in the same transaction as the PmComment, so the thread is stale
+// until refetch). (WARP-882 / ADR-026 P5; the timeline itself is WARP-3519.)
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
 import { SWRConfig } from "swr";
 import { DetailDrawer } from "./detail";
 import { PeopleContext } from "./bits";
@@ -12,16 +13,25 @@ import type { PmWorkItem } from "./types";
 
 // Mock the auth layer that every usePm read/write flows through. We hand back
 // canned JSON keyed by URL and record every call (with body) so we can assert
-// the activity endpoint is re-fetched after a comment post AND that the labels
-// editor PATCHes the work item with the chosen label ids.
+// the timeline endpoint is re-fetched after a comment post AND that the labels
+// editor PATCHes the work item with the chosen label ids. The rich-text editor
+// is the plain-textarea double (timeline.test.tsx covers the Activity section
+// itself; this file only proves the drawer hosts it).
 const calls: { url: string; method: string; body?: unknown }[] = [];
+
+// WARP-3536 — what the heartbeat answers: the OTHER people on the item.
+const presence = { viewers: [] as string[] };
 
 const PROJECT_LABELS = [
   { id: "lab-1", projectId: "p", name: "bug", color: "#ef4444" },
   { id: "lab-2", projectId: "p", name: "frontend", color: "#6366f1" },
 ];
 
+vi.mock("./editor/RichTextEditor", () => import("./fakeEditor"));
+
 vi.mock("@/lib/auth", () => ({
+  // The drawer reads the role to decide whether to offer attachment writes (WARP-1505).
+  useAuth: () => ({ user: { id: "u1", username: "ada", displayName: "Ada", role: "owner" } }),
   authFetch: vi.fn((url: string, init?: RequestInit) => {
     const method = (init?.method ?? "GET").toUpperCase();
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
@@ -32,13 +42,23 @@ vi.mock("@/lib/auth", () => ({
     if (url.endsWith("/comments") && method === "POST") {
       return json({ comment: { id: "c-new", workItemId: "w1", authorId: "u1", commentHtml: "<p>hi</p>", createdAt: "2026-06-22T21:16:00.000Z" } });
     }
-    if (url.endsWith("/comments")) return json({ comments: [] });
-    if (url.endsWith("/activity")) return json({ activity: [] });
+    if (url.includes("/timeline")) {
+      return json({ timeline: [], refs: { states: {}, labels: {}, workItems: {} }, nextCursor: null, total: 0 });
+    }
+    if (url.endsWith("/watchers")) return json({ watchers: [] });
+    if (url.includes("/comments")) return json({ comments: [], nextCursor: null, total: 0 });
+    if (url.includes("/activity")) return json({ activity: [], nextCursor: null, total: 0 });
+    if (url.endsWith("/development")) return json({ links: [{
+      id: "dev-1", provider: "GITHUB", kind: "PULL_REQUEST", url: "https://github.com/acme/app/pull/4",
+      title: "INBOX-1 fix login", state: "OPEN", author: "octocat", ref: "inbox-1-fix-login",
+      number: 4, externalUpdatedAt: "2026-10-04T00:00:00.000Z", repository: { fullName: "acme/app" },
+    }] });
     if (url.includes("/work-items?parent=")) return json({ work_items: [] });
     if (url.endsWith("/labels")) return json({ labels: PROJECT_LABELS });
     if (url.match(/\/work-items\/[^/]+$/) && method === "PATCH") {
       return json({ work_item: { ...ITEM, labels: PROJECT_LABELS.filter((l) => body?.label_ids?.includes(l.id)) } });
     }
+    if (url.endsWith("/presence")) return json({ viewers: presence.viewers });
     if (url.endsWith("/users")) return json({ users: [] });
     return json({});
   }),
@@ -80,22 +100,23 @@ function renderDrawer() {
   );
 }
 
-describe("DetailDrawer — comment post revalidates activity", () => {
+describe("DetailDrawer — comment post revalidates the timeline", () => {
   beforeEach(() => {
     calls.length = 0;
   });
 
-  it("re-fetches the activity feed after a comment is sent", async () => {
+  const timelineReads = () =>
+    calls.filter((c) => c.url.includes("/timeline") && c.method === "GET").length;
+
+  it("re-fetches the timeline after a comment is sent", async () => {
     renderDrawer();
 
-    // Wait for the initial activity read so we can count subsequent ones.
-    await waitFor(() => {
-      expect(calls.some((c) => c.url.endsWith("/activity") && c.method === "GET")).toBe(true);
-    });
-    const activityReadsBefore = calls.filter((c) => c.url.endsWith("/activity") && c.method === "GET").length;
+    // Wait for the initial timeline read so we can count subsequent ones.
+    await waitFor(() => expect(timelineReads()).toBeGreaterThan(0));
+    const readsBefore = timelineReads();
 
-    const textarea = screen.getByLabelText("Write a comment");
-    fireEvent.change(textarea, { target: { value: "looks good" } });
+    const editor = screen.getByLabelText("Write a comment");
+    fireEvent.change(editor, { target: { value: "looks good" } });
     fireEvent.click(screen.getByRole("button", { name: /Send/ }));
 
     // The POST must land …
@@ -103,11 +124,16 @@ describe("DetailDrawer — comment post revalidates activity", () => {
       expect(calls.some((c) => c.url.endsWith("/comments") && c.method === "POST")).toBe(true);
     });
 
-    // … and the activity feed must be revalidated (an extra GET) afterwards.
-    await waitFor(() => {
-      const activityReadsAfter = calls.filter((c) => c.url.endsWith("/activity") && c.method === "GET").length;
-      expect(activityReadsAfter).toBeGreaterThan(activityReadsBefore);
-    });
+    // … and the thread must be revalidated (an extra GET) afterwards.
+    await waitFor(() => expect(timelineReads()).toBeGreaterThan(readsBefore));
+  });
+
+  it("hosts the Activity section and the watch control", async () => {
+    renderDrawer();
+    expect(await screen.findByRole("heading", { name: /^Activity/ })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Watch" })).toBeInTheDocument();
+    // The old append-only Comments section is gone (the filter pill is a button, not a heading).
+    expect(screen.queryByRole("heading", { name: /^Comments/ })).toBeNull();
   });
 });
 
@@ -135,5 +161,68 @@ describe("DetailDrawer — Labels field can add a label (WARP-948)", () => {
       expect(patch).toBeTruthy();
       expect((patch?.body as { label_ids?: string[] } | undefined)?.label_ids).toContain("lab-1");
     });
+  });
+});
+
+describe("DetailDrawer — Also viewing (WARP-3536)", () => {
+  beforeEach(() => {
+    calls.length = 0;
+    presence.viewers = [];
+  });
+
+  const named = (id: string) => makePerson(id, ({ "u-ben": "Ben Ortiz", "u-cy": "Cy Dunn" } as Record<string, string>)[id] ?? "Tester");
+
+  function renderWithPeople() {
+    return render(
+      <SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>
+        <PeopleContext.Provider value={named}>
+          <DetailDrawer item={ITEM} onClose={() => undefined} onChanged={() => undefined} />
+        </PeopleContext.Provider>
+      </SWRConfig>,
+    );
+  }
+
+  it("sends the heartbeat for the open item", async () => {
+    renderWithPeople();
+    await waitFor(() => {
+      expect(calls.some((c) => c.url === "/api/pm/work-items/w1/presence" && c.method === "POST")).toBe(true);
+    });
+  });
+
+  it("shows who else has it open, by name, in the header beside the key", async () => {
+    presence.viewers = ["u-ben", "u-cy"];
+    renderWithPeople();
+
+    const group = await screen.findByRole("group", { name: "Also viewing" });
+    expect(group.textContent).toContain("Also viewing");
+    expect(within(group).getByLabelText("Ben Ortiz")).toBeTruthy();
+    expect(within(group).getByLabelText("Cy Dunn")).toBeTruthy();
+    // The header is the row that carries the key and the close button.
+    // (the key appears twice: the drawer header's first, then the body's)
+    const header = screen.getAllByText("INBOX-1")[0]!.parentElement as HTMLElement;
+    expect(header.contains(group)).toBe(true);
+    expect(header.contains(screen.getByRole("button", { name: "Close" }))).toBe(true);
+  });
+
+  it("shows nothing when nobody else is there: no empty label, no placeholder", async () => {
+    renderWithPeople();
+    await waitFor(() => {
+      expect(calls.some((c) => c.url.endsWith("/presence"))).toBe(true);
+    });
+    expect(screen.queryByRole("group", { name: "Also viewing" })).toBeNull();
+    expect(screen.queryByText(/Also viewing/)).toBeNull();
+  });
+});
+
+describe("DetailDrawer — Development links", () => {
+  it("renders linked changes and copies the canonical branch name", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    renderDrawer();
+    const link = await screen.findByRole("link", { name: /PR 4 INBOX-1 fix login open/i });
+    expect(link).toHaveAttribute("href", "https://github.com/acme/app/pull/4");
+    expect(link).toHaveAttribute("rel", "noopener noreferrer");
+    fireEvent.click(screen.getByRole("button", { name: /copy development branch name/i }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("inbox-1-first-task"));
   });
 });

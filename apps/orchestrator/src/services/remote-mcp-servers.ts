@@ -43,6 +43,11 @@
  * empty set allows no server, and nothing remote is advertised until an
  * operator names a server id.
  */
+import {
+  providerDescriptors,
+  type McpProviderDescriptor,
+  type ProviderDescriptor,
+} from "@droplet/shared-types";
 import { TOOLS, type ToolDomain } from "@droplet/tools-core";
 import { createLogger } from "../lib/logger.js";
 import type { McpToolDescriptor } from "./mcp-client.port.js";
@@ -223,14 +228,83 @@ export function remoteServerIdOf(toolName: string): string | null {
 export const ATLASSIAN_REMOTE_SERVER_ID = "atlassian";
 
 /**
- * Operator domain for Atlassian's catalog.
+ * WARP-3703 (ADR-043 TC-1.2) — the OPERATOR's tool domain for each server this
+ * process can attach, by server id.
  *
- * Jira and Confluence are project-management surfaces, so `pm` — supplied by
- * the OPERATOR side of `resolveRuntimeToolDomain`'s precedence (operator >
- * server > default), because a domain a vendor declared for itself is a hint
- * from outside the box and tool selection is a decision inside it.
+ * Supplied by the OPERATOR side of `resolveRuntimeToolDomain`'s precedence
+ * (operator > server > default), because a domain a vendor declared for itself
+ * is a hint from outside the box and tool selection is a decision inside it —
+ * and because an operator-sourced domain is the only kind a role grant admits a
+ * runtime tool through. A server with no entry here is therefore NOT attached
+ * ({@link registeredRemoteServers}): it would reach selection under a guessed
+ * domain and be unreachable to every role-limited person.
+ *
+ * Jira and Confluence are project-management surfaces, so Atlassian is `pm`. A
+ * new vendor's entry is the one line this map asks of a data PR, and
+ * `adr-043-boundary.test.ts` is red until it exists. It lives HERE and not on
+ * the provider descriptor because `ToolDomain` is `@droplet/tools-core`'s, and
+ * `@droplet/shared-types` — bundled into the dashboard — cannot import it.
+ * Frozen, because it decides what a role grant can reach.
  */
-const ATLASSIAN_OPERATOR_DOMAIN: ToolDomain = "pm";
+export const REMOTE_SERVER_DOMAINS: Readonly<Record<string, ToolDomain>> =
+  Object.freeze<Record<string, ToolDomain>>({
+    [ATLASSIAN_REMOTE_SERVER_ID]: "pm",
+  });
+
+/**
+ * The operator domain for a server, or `undefined` for an id the map does not
+ * name.
+ *
+ * An OWN-property read, never a bare index: a server id is `[a-z0-9-]`, which
+ * admits `constructor`, and `REMOTE_SERVER_DOMAINS["constructor"]` is a function,
+ * not a domain.
+ */
+export function remoteServerDomain(serverId: string): ToolDomain | undefined {
+  return Object.prototype.hasOwnProperty.call(REMOTE_SERVER_DOMAINS, serverId)
+    ? REMOTE_SERVER_DOMAINS[serverId]
+    : undefined;
+}
+
+/**
+ * One server this process can attach: the descriptor that says what its
+ * credential is, the id it attaches under, and the domain its tools are
+ * selected in.
+ */
+export interface RemoteServerRegistration {
+  readonly serverId: string;
+  readonly operatorDomain: ToolDomain;
+  readonly descriptor: McpProviderDescriptor;
+}
+
+/**
+ * Every MCP-track provider this build can attach, each paired with its
+ * operator domain — what the boot attach loops over and the reconciler's
+ * re-open looks a server id up in.
+ *
+ * A descriptor with no domain is left OUT and reported at error, never attached
+ * with a guess: the boundary test makes that a CI failure, and leaving it out
+ * keeps a build that slipped past it from taking the other servers down with it.
+ *
+ * Both parameters default to the shipped registry and are injectable ONLY so a
+ * test can hand in a descriptor that exists nowhere else.
+ */
+export function registeredRemoteServers(
+  descriptors: readonly ProviderDescriptor[] = providerDescriptors(),
+  domainOf: (serverId: string) => ToolDomain | undefined = remoteServerDomain,
+): RemoteServerRegistration[] {
+  const registrations: RemoteServerRegistration[] = [];
+  for (const descriptor of descriptors) {
+    if (descriptor.track !== "mcp") continue;
+    const serverId = descriptor.mcpServerId;
+    const operatorDomain = domainOf(serverId);
+    if (operatorDomain === undefined) {
+      logger.error({ serverId }, "remote_mcp_server_has_no_operator_domain");
+      continue;
+    }
+    registrations.push({ serverId, operatorDomain, descriptor });
+  }
+  return registrations;
+}
 
 /** Why an attach did not happen. Every value is a different thing for an
  *  operator to do, and none of them is an error. */
@@ -271,7 +345,13 @@ export interface RemoteMcpConnectionRow {
   providerConfig: unknown;
 }
 
-export interface AttachAtlassianDeps {
+/**
+ * Everything an attach needs that is not about WHICH server it attaches.
+ *
+ * WARP-3703 — was `AttachAtlassianDeps`, and nothing in it was Atlassian's; the
+ * name survives below as an alias for the one wrapper that still carries it.
+ */
+export interface AttachRemoteDeps {
   mux: McpToolMultiplexer;
   /**
    * Reads the gate AND the credential — one narrow surface, injected.
@@ -317,8 +397,21 @@ export interface AttachAtlassianDeps {
   auditLifecycle?: typeof auditRemoteMcpLifecycle;
 }
 
+/** The deps {@link attachAtlassianRemote} takes: everything but the server. */
+export type AttachAtlassianDeps = AttachRemoteDeps;
+
+/** The deps {@link attachRemoteServer} takes: the shared ones, and WHICH server. */
+export type AttachRemoteServerDeps = AttachRemoteDeps & RemoteServerRegistration;
+
 /**
- * Attach the Atlassian remote, if and only if this box is entitled to.
+ * Attach one remote MCP server, if and only if this box is entitled to.
+ *
+ * WARP-3703 (ADR-043 TC-1.2) — was `attachAtlassianRemote`, whose algorithm was
+ * already per server id: the gate, the row read, the bridge, the multiplexer,
+ * the drift check and the classification record all keyed on the id and nothing
+ * else. What was Atlassian's was a constant, an operator domain and the three
+ * facts it read out of the row; those are now the {@link RemoteServerRegistration}
+ * this takes.
  *
  * ORDER IS THE POINT, and it is the same order `routes/web.ts` states: the
  * cheapest, most certain refusal first, and NOTHING is dialled until every one
@@ -334,10 +427,10 @@ export interface AttachAtlassianDeps {
  * un-opted-in box is the DEFAULT box — and a throw here would put a stack trace
  * in the boot log of every appliance in the fleet.
  */
-export async function attachAtlassianRemote(
-  deps: AttachAtlassianDeps,
+export async function attachRemoteServer(
+  deps: AttachRemoteServerDeps,
 ): Promise<RemoteAttachResult> {
-  const serverId = ATLASSIAN_REMOTE_SERVER_ID;
+  const { serverId } = deps;
   const lifecycle = deps.lifecycle ?? remoteMcpLifecycle;
   const auditLifecycle = deps.auditLifecycle ?? auditRemoteMcpLifecycle;
 
@@ -400,11 +493,12 @@ export async function attachAtlassianRemote(
   // long-lived orchestrator field for the life of the process, which is exactly
   // what the sealed column and rule 19 exist to prevent — and it would also
   // keep using a credential the operator has since rotated.
-  const credential = readAtlassianCredential(
+  const credential = readRemoteCredential(
     row,
+    deps.descriptor,
     deps.openCredentials ?? openSaasCredentials,
   );
-  if ("missing" in credential) {
+  if (!credential.ok) {
     settle("detached", "credential_incomplete");
     return {
       attached: false,
@@ -418,7 +512,7 @@ export async function attachAtlassianRemote(
   const client = deps.createClient();
   try {
     await client.open({
-      ...credential,
+      ...credential.fields,
       // Only when we HAVE a baseline. An always-present `knownTools: []` would
       // tell the bridge we vetted an empty surface.
       ...(deps.knownTools && deps.knownTools.length > 0
@@ -499,7 +593,7 @@ export async function attachAtlassianRemote(
   }
 
   const sync = syncRemoteCatalog(deps.mux, serverId, {
-    operatorDomain: ATLASSIAN_OPERATOR_DOMAIN,
+    operatorDomain: deps.operatorDomain,
     ...(deps.registry ? { registry: deps.registry } : {}),
   });
 
@@ -554,10 +648,27 @@ export async function attachAtlassianRemote(
   return { attached: true, serverId, sync, client, vettedTools };
 }
 
+/**
+ * Attach the Atlassian remote — {@link attachRemoteServer} with Atlassian's
+ * registration. Kept as the one name the Atlassian suites and the first
+ * integration read.
+ */
+export async function attachAtlassianRemote(
+  deps: AttachAtlassianDeps,
+): Promise<RemoteAttachResult> {
+  const registration = registeredRemoteServers().find(
+    (s) => s.serverId === ATLASSIAN_REMOTE_SERVER_ID,
+  );
+  if (!registration) {
+    throw new Error("the atlassian provider descriptor or its operator domain is not registered");
+  }
+  return attachRemoteServer({ ...deps, ...registration });
+}
+
 export interface DetachRemoteDeps {
   mux: McpToolMultiplexer;
   serverId: string;
-  /** The bridge client {@link attachAtlassianRemote} opened, if this process
+  /** The bridge client {@link attachRemoteServer} opened, if this process
    *  holds one. Absent when nothing attached — the in-process half of the
    *  detach still runs, and is still worth running. */
   client?: { close(): Promise<void> };
@@ -575,7 +686,7 @@ export interface DetachRemoteResult {
 }
 
 /**
- * WARP-2659 — the disconnect half of {@link attachAtlassianRemote}.
+ * WARP-2659 — the disconnect half of {@link attachRemoteServer}.
  *
  * Three things hold state after an attach, and the credential purge in
  * `integrations.service.ts` `disconnect()` reaches none of them: the bridge
@@ -635,20 +746,43 @@ async function readSessionState(
   }
 }
 
+/** What a connection row yielded: the fields to open a session with, or the
+ *  NAMES of the ones it lacked. Tagged rather than discriminated by a key,
+ *  because the fields are an open record and any key could be one of them. */
+type RemoteCredentialRead =
+  | { ok: true; fields: McpBridgeOpenInput }
+  | { ok: false; missing: string[] };
+
 /**
- * Pull the three facts a session needs out of one connection row.
+ * Pull the facts a session needs out of one connection row, as the descriptor
+ * says they are stored.
  *
- * ADR-042 §5 decides where each lives, and this reads exactly one home per
- * fact rather than accepting either: the secret (`apiToken`) comes out of the
- * sealed `providerTokensEnc` bundle, the two non-secret connection facts
- * (`email`, `cloudId`) out of `providerConfig`. A fallback between the two
- * homes would mean a credential could sit in the unencrypted column and still
- * work, which is how it would end up there.
+ * WARP-3703 — was `readAtlassianCredential`, which read exactly `email`,
+ * `cloudId` and `apiToken`. The facts are now the descriptor's own REQUIRED
+ * `credentialFields`, and ADR-042 §5 still decides where each lives: a field
+ * with `storage: "encrypted"` comes out of the sealed `providerTokensEnc`
+ * bundle, one with `storage: "providerConfig"` out of `providerConfig`. This
+ * reads exactly one home per fact rather than accepting either: a fallback
+ * between the two would mean a credential could sit in the unencrypted column
+ * and still work, which is how it would end up there. A required field stored
+ * anywhere else is counted as missing, by name, not skipped.
+ *
+ * An OPTIONAL field is never forwarded. Atlassian's `tokenExpiresAt` is a fact
+ * ABOUT the credential, not an input to the session, and sending it would hand
+ * the bridge a customer fact it did not ask for.
+ *
+ * A non-secret fact is trimmed and a secret is used verbatim. A missing field is
+ * reported by NAME, never by value, facts first and then secrets — the order the
+ * Atlassian-only reader reported a half-filled row in, kept so its message does
+ * not change.
  */
-function readAtlassianCredential(
+function readRemoteCredential(
   row: RemoteMcpConnectionRow,
+  descriptor: McpProviderDescriptor,
   open: (connectionId: string, blob: string) => Record<string, string>,
-): McpBridgeOpenInput | { missing: string[] } {
+): RemoteCredentialRead {
+  const required = descriptor.credentialFields.filter((f) => f.required);
+  const sealed = required.filter((f) => f.storage === "encrypted");
   let secrets: Record<string, string> = {};
   try {
     secrets = open(row.id, row.providerTokensEnc ?? "");
@@ -656,21 +790,30 @@ function readAtlassianCredential(
     // A bundle sealed for another row fails GCM's tag check. Reported as a
     // missing credential — never as an empty one, which would send the box to
     // the vendor with no auth and collect an opaque 401.
-    return { missing: ["apiToken (sealed credential could not be opened)"] };
+    return {
+      ok: false,
+      missing: [`${sealed.map((f) => f.name).join(", ")} (sealed credential could not be opened)`],
+    };
   }
   const config =
     typeof row.providerConfig === "object" && row.providerConfig !== null
       ? (row.providerConfig as Record<string, unknown>)
       : {};
-  const email = typeof config.email === "string" ? config.email.trim() : "";
-  const cloudId = typeof config.cloudId === "string" ? config.cloudId.trim() : "";
-  const apiToken = typeof secrets.apiToken === "string" ? secrets.apiToken : "";
 
-  const missing = [
-    email ? null : "email",
-    cloudId ? null : "cloudId",
-    apiToken ? null : "apiToken",
-  ].filter((f): f is string => f !== null);
-  if (missing.length > 0) return { missing };
-  return { email, apiToken, cloudId };
+  const fields: Record<string, string> = {};
+  const missing: string[] = [];
+  for (const field of [...required.filter((f) => f.storage !== "encrypted"), ...sealed]) {
+    const raw =
+      field.storage === "encrypted"
+        ? secrets[field.name]
+        : field.storage === "providerConfig"
+          ? config[field.name]
+          : undefined;
+    const value =
+      typeof raw !== "string" ? "" : field.storage === "providerConfig" ? raw.trim() : raw;
+    if (value) fields[field.name] = value;
+    else missing.push(field.name);
+  }
+  if (missing.length > 0) return { ok: false, missing };
+  return { ok: true, fields };
 }

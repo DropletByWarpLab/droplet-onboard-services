@@ -56,6 +56,10 @@ export type ErrorDomain =
   | "vpn"
   | "camera"
   | "projects"
+  // WARP-3528 (ADR-069) — the service desk. Its own domain: a failed ticket
+  // write must name tickets and requesters, not "that change", and its codes
+  // (invalid_assignee, contact_email_exists, desk_archived) mean nothing to PM.
+  | "support"
   // WARP-2734 — connecting a mailbox. Its own domain because every code here
   // is about somebody ELSE's mail server, and the remedy is always a field on
   // the form rather than something to do on this Droplet.
@@ -77,16 +81,6 @@ export type ErrorDomain =
   | "search-name"
   | "search-keyword"
   | "search-semantic"
-  // WARP-2977 P2b — the Security pages' writes: the site mode, the opening
-  // hours and areas. Every code is one of the orchestrator's typed
-  // `error.code`s for routes 3–15, so the copy can say exactly what happened
-  // (someone else changed it, the change could not be recorded, …).
-  | "security"
-  // ADR-055 P4b — the /doors page's writes (add, change, retire a door) and its
-  // reads. Every code is one of the orchestrator's typed `error.code`s for the
-  // doors routes, plus the statuses of a role or module refusal, which carry no
-  // typed code (a flat `{error: "..."}` body).
-  | "doors"
   | "generic";
 
 /** Domain-fallback copy. NEVER `err.message`. */
@@ -133,6 +127,8 @@ const FALLBACK: Record<ErrorDomain, string> = {
     "We couldn't reach that device right now. Check it's powered on and nearby, then try again.",
   projects:
     "We couldn't save that change right now. Try again in a moment.",
+  support:
+    "We couldn't save that change to the ticket right now. Try again in a moment.",
   // WARP-1141 — drive/pool rename + other storage settings writes. The files
   // fallback ("couldn't load those files") misdescribed a failed WRITE as a
   // load hiccup, which is exactly how the Drives-page rename bug went
@@ -159,14 +155,6 @@ const FALLBACK: Record<ErrorDomain, string> = {
     "Keyword search isn't working right now. Try again in a moment, or switch to Name search.",
   "search-semantic":
     "Semantic search isn't available right now. Name and Keyword search still work — try again in a moment.",
-  // WARP-2977 P2b. Says nothing was changed only where the server guarantees
-  // it (the typed codes below); an unknown failure might have landed.
-  security:
-    "We couldn't make that change right now. Refresh the page to see where things stand, then try again.",
-  // ADR-055 P4b. Says nothing was changed only where the server guarantees it
-  // (the typed codes below); an unknown failure might have landed.
-  doors:
-    "We couldn't make that change to your doors. Refresh the page to see where things stand, then try again.",
   generic:
     "We couldn't reach this Droplet right now. Try again in a moment.",
 };
@@ -267,6 +255,15 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "Workspace files are already shared with everyone in the company. Only an owner or admin can share them outside.",
     public_link_company_data:
       "Only an owner or admin can create or change a public link to company files, or let others re-share them. You can still share with people in the company.",
+    // WARP-3586 — the box's public-link rules (share-policy.ts).
+    public_link_expiry_required:
+      "A public link has to expire. Pick an expiry date and try again.",
+    public_link_expiry_too_far:
+      "A public link can last at most 90 days. Pick an earlier expiry date.",
+    public_link_password_too_short:
+      "A public link password needs at least 8 characters.",
+    public_link_edit_admin_only:
+      "Only an owner or admin can let people with a public link edit, upload to or delete from a folder. A view-only link is available.",
     // WARP-1658 — every 403 a share write can draw is a DETERMINISTIC policy
     // rejection: role denial (requireRole), guest read-only, or insufficient
     // rights on a household/department space (requireSpaceAccess). Without this
@@ -351,6 +348,15 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "Workspace files are already shared with everyone in the company. Only an owner or admin can share them outside.",
     public_link_company_data:
       "Only an owner or admin can create or change a public link to company files, or let others re-share them. You can still share with people in the company.",
+    // WARP-3586 — the box's public-link rules (share-policy.ts).
+    public_link_expiry_required:
+      "A public link has to expire. Pick an expiry date and try again.",
+    public_link_expiry_too_far:
+      "A public link can last at most 90 days. Pick an earlier expiry date.",
+    public_link_password_too_short:
+      "A public link password needs at least 8 characters.",
+    public_link_edit_admin_only:
+      "Only an owner or admin can let people with a public link edit, upload to or delete from a folder. A view-only link is available.",
     "403":
       "You don't have permission to share this item. Sign out and back in if your access changed recently, or ask the Droplet's owner or an admin to share it.",
     NOT_FOUND:
@@ -510,6 +516,50 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
     AUTH_REQUIRED:
       "That camera needs a username and password. Check the credentials and try again.",
     NOT_FOUND: "We couldn't find that camera on your network.",
+    // WARP-3505 — status-only failures from the discovered-camera routes (no
+    // machine code on the wire). Without these both fell through to the generic
+    // "check it's powered on" fallback, which is wrong for a camera that has
+    // simply left the discovery list (404) and for the camera system itself
+    // failing rather than the camera (502).
+    "404":
+      "We couldn't find that camera on your network any more. Scan again, then pick it from the list.",
+    "502":
+      "Your Droplet's camera system didn't accept that camera. Try again in a moment.",
+    // WARP-3505 — typing a camera's username/password. The next step differs
+    // for each, so each gets its own copy; the form shows these inline.
+    //
+    // AUTH_FAILED carries the lockout warning: Hanwha, Axis and some Hikvision
+    // firmwares lock the account after ~5 bad passwords, and a person who just
+    // saw "didn't accept" will otherwise retype guesses in a row.
+    AUTH_FAILED:
+      "The camera didn't accept that username and password. Check them and try again. A few wrong tries in a row can lock the camera.",
+    LOCKED:
+      "The camera has locked its account after too many wrong sign-ins. Wait a few minutes, then try again.",
+    // Names the control the form actually shows ("Enter the stream address
+    // instead", under the Add button) — the "Enter details" tab is a different
+    // surface and is not reachable from where this message appears.
+    NO_STREAM_PATH:
+      "We reached the camera but couldn't find its video stream. Choose “Enter the stream address instead” and type the address from your camera's manual.",
+    UNREACHABLE:
+      "We couldn't reach the camera. Check it's powered on and on the same network, then try again.",
+    DISCOVERY_UNAVAILABLE:
+      "Camera discovery isn't running, so we couldn't check the camera. Try again in a moment.",
+    // Discovery was reachable but did not answer in time (the orchestrator's
+    // wait). The camera may in fact have been added, so say that instead of
+    // sending the operator to retry blind with a password that may be right.
+    TIMEOUT:
+      "The camera took too long to answer. If it was added, it will appear in your cameras shortly; otherwise check it's powered on and try again.",
+    // Invalid input is refused before touching the camera. An unsupported
+    // password may also be found once discovery supplies the stream address:
+    // Frigate cannot store it safely, even if the camera accepted it.
+    INVALID_CREDENTIALS:
+      "Check the username and password — one of them has a character that can't be used — and try again.",
+    UNSUPPORTED_PASSWORD:
+      "Droplet can't safely pass this password to the camera's video stream. Change the camera's password to a longer one without spaces or curly braces { }, then try again.",
+    UNSUPPORTED_STREAM_ADDRESS:
+      "Droplet can't safely use this camera's stream address with its account. Check the camera's stream settings or use a different camera account.",
+    BASIC_AUTH_ONLY:
+      "Droplet didn't send your password because this camera only offers an unprotected sign-in. Switch its stream sign-in to Digest, or ask an administrator to allow this camera.",
   },
   device: {
     NETWORK:
@@ -538,6 +588,71 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
     "503":
       "The Droplet's smart-device service is still starting up. Give it a few seconds and try again.",
   },
+  // WARP-3528 (ADR-069) — the service desk (/api/support/*). Codes are the
+  // stable snake_case strings its routes emit (SUPPORT_ERRORS in
+  // services/support/support.types.ts, plus the PM / department codes the
+  // shared helpers throw). Each says what happened and what to do, in the
+  // words of the front desk: ticket, customer, status, assignee — never
+  // requester, work item or compare-and-set.
+  support: {
+    invalid_sla_configuration: "Check the targets, business hours, people and macro variables, then try again.",
+    calendar_not_found: "That business calendar is no longer available. Choose another one.",
+    calendar_in_use: "This calendar is used by a service level policy. Choose another calendar in that policy first.",
+    macro_not_found: "That macro is no longer available, or you cannot change it. Refresh the list.",
+    invalid_report_range: "Choose valid dates no more than 366 days apart.",
+    // Emitted by BOTH the box-wide module gate and the per-person grant check
+    // (identical bodies by design), so it names neither as the reason.
+    module_disabled:
+      "Support isn't available. This feature is switched off for this Droplet, or it isn't part of your access. An owner or admin can turn it on.",
+    desk_not_found:
+      "We couldn't find that service desk anymore. It may have been removed.",
+    ticket_not_found:
+      "We couldn't find that ticket anymore. It may have been removed.",
+    contact_not_found:
+      "That customer isn't available anymore. Search for them again.",
+    project_not_found:
+      "That project isn't available anymore. Pick another one.",
+    state_not_found:
+      "That status isn't available anymore. Refresh the ticket and try again.",
+    invalid_state:
+      "That status isn't available anymore. Refresh the ticket and try again.",
+    label_not_found:
+      "That label isn't available anymore. Refresh the ticket and try again.",
+    invalid_label:
+      "That label isn't available anymore. Refresh the ticket and try again.",
+    company_not_found:
+      "That customer record isn't available anymore. Refresh and try again.",
+    department_not_found:
+      "That department isn't available anymore. Refresh and try again.",
+    department_not_assignable:
+      "That department can't take tickets. Pick another one.",
+    department_archived:
+      "That department has been archived. Pick another one.",
+    invalid_assignee:
+      "That person can't be given this ticket. They need access to Support — pick someone else.",
+    invalid_requester:
+      "That person isn't an active member, so they can't be the one asking. Pick someone else.",
+    invalid_channel:
+      "Tickets you file by hand arrive as added by the team or a phone call.",
+    desk_archived:
+      "That service desk is archived, so its tickets can't be changed. Restore the desk first.",
+    identifier_taken:
+      "That key is already taken — pick another.",
+    empty_body:
+      "Write something first — there's nothing to send.",
+    contact_needs_a_name:
+      "Add a name or an email address so we know who this is.",
+    contact_email_exists:
+      "That address is already in your contacts.",
+    invalid_cursor:
+      "We couldn't load the next page of tickets. Refresh the list.",
+    // A lost compare-and-set: another person changed the ticket first and
+    // nothing was applied. Not the user's fault, and retrying is the remedy.
+    concurrent_mutation:
+      "Someone changed this ticket at the same time, so nothing was applied. Refresh and try again.",
+    "403": "You don't have permission to do that on this ticket.",
+    "404": "We couldn't find that. It may have been removed.",
+  },
   // WARP-1154/1155 — the native Projects (PM) surface. Codes are the stable
   // snake_case strings the orchestrator's /api/pm/* routes emit (PM_ERRORS in
   // pm.service.ts) plus the module gate's `module_disabled`. Anything unmapped
@@ -564,8 +679,88 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "That label isn't available anymore. Refresh and try again.",
     invalid_parent:
       "That parent item isn't available anymore. Refresh and try again.",
+    // WARP-3520 — the editing surfaces. Each names what happened and the way
+    // out, in the owner's words (column, field, option — never state group,
+    // property or tagged value).
+    work_item_archived: "That item is already archived.",
+    work_item_not_archived: "That item isn't archived.",
+    state_default_terminal:
+      "The default column can't be a done or cancelled one. Pick a column that work starts in.",
+    state_is_default:
+      "That column is where new items land. Make another column the default first, then delete this one.",
+    state_is_last: "A project needs at least one column, so this one can't be deleted.",
+    invalid_order:
+      "The list changed while you were reordering it. Refresh and try again.",
+    property_not_found:
+      "That field isn't available anymore. Refresh and try again.",
+    property_name_taken: "This project already has a field with that name.",
+    property_limit_reached: "A project can have up to 30 custom fields.",
+    invalid_options:
+      "Check the options — each one needs a name that no other option uses.",
+    invalid_value: "That value isn't allowed for this field.",
+    relation_cycle:
+      "That link would close a chain of blockers, so neither item could ever start.",
+    relation_exists: "Those two items are already linked that way.",
+    relation_self: "An item can't be linked to itself.",
+    relation_not_found: "That link is already gone. Refresh and try again.",
+    relation_scan_exhausted:
+      "This project's chain of blockers is too long to check, so the link wasn't added.",
+    concurrent_mutation:
+      "Someone changed this at the same moment, so nothing was applied. Try again.",
+    // WARP-3521 — cycles (sprints) and modules (milestones). Each says what
+    // happened and what to do, in the owner's words: cycle, module, start, end,
+    // item — never state machine, constraint or conflict.
+    cycle_not_found:
+      "We couldn't find that cycle anymore. It may have been deleted.",
+    invalid_cycle:
+      "That cycle isn't available for this item. Refresh and try again.",
+    cycle_completed:
+      "That cycle is finished, so it can't take new work. Pick another cycle.",
+    cycle_already_active:
+      "Another cycle is already running. Complete it before you start this one.",
+    cycle_not_draft:
+      "That cycle has already started. Refresh and try again.",
+    cycle_not_active:
+      "That cycle isn't running. Refresh and try again.",
+    cycle_dates_required:
+      "Set a start date and an end date first.",
+    invalid_dates:
+      "Check the dates — the end can't come before the start, and a cycle can run for at most a year.",
+    module_not_found:
+      "We couldn't find that module anymore. It may have been deleted.",
+    invalid_work_item:
+      "That item belongs to a different project, so it can't go in this module.",
+    lead_is_guest:
+      "A guest can't lead a module or a project. Pick someone on your team.",
     identifier_taken:
       "That project ID is already in use. Pick a different one.",
+    // WARP-3522 — saved views and the filter bar. Each says what to do next.
+    view_name_taken:
+      "A view with that name already exists. Pick another.",
+    view_limit_reached:
+      "You've reached the saved-view limit — delete one to add another.",
+    view_forbidden:
+      "You can't change this view. Save your own copy instead.",
+    view_not_found:
+      "That view isn't available anymore. Refresh and try again.",
+    view_is_builtin:
+      "The built-in views can't be changed.",
+    invalid_filter:
+      "That filter couldn't be applied. Clear it and try again.",
+    // WARP-3371 — the work-item API now refuses what it used to swallow. Each
+    // says what is wrong in the owner's words (item, column, person — never
+    // cycle, state or assignee) and the one thing to do.
+    parent_cycle:
+      "That would make an item a sub-item of one of its own sub-items. Pick a different parent.",
+    state_required:
+      "A work item has to sit in a column. Pick one and try again.",
+    invalid_assignee:
+      "That person isn't available anymore. Refresh and pick someone else.",
+    // WARP-3370 — hard delete. Each says what is wrong and the one thing to do.
+    project_not_archived:
+      "Only an archived project can be deleted for good. Archive it first.",
+    identifier_mismatch:
+      "That doesn't match the project's ID. Type it exactly as shown.",
     // WARP-2730 (ADR-048) — the filing review surface, which lives inside the
     // CRM and therefore inside this domain. Each string says what happened and
     // what to do about it, in the owner's words: file, customer, look, undo —
@@ -615,6 +810,30 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "Workspace can't own work — it's the group everyone is already in. Pick a department or a team.",
     department_archived:
       "That department has been archived, so new work can't be assigned to it. Pick another one, or restore it first.",
+    // WARP-1505 — files on work items and comments. Each says what happened and
+    // what to do. The upload queue builds its own sentence for too-large and
+    // blocked files (it knows the file name); these are the wording for every
+    // other path that can hit the same code.
+    attachment_forbidden:
+      "Only the person who added a file, or an owner or admin, can remove it.",
+    attachment_not_found:
+      "That file isn't available anymore. It may have been removed.",
+    attachment_storage_full:
+      "The Droplet is out of storage space, so the file wasn't saved. Free up some space and try again.",
+    attachment_bad_request:
+      "That upload didn't go through. Try adding the file again.",
+    attachment_file_required:
+      "Choose a file to attach, then try again.",
+    attachment_empty:
+      "That file is empty, so it can't be attached.",
+    attachment_too_large:
+      "That file is larger than this Droplet accepts. Try a smaller one.",
+    attachment_type_blocked:
+      "Executable files can't be attached.",
+    attachment_type_mismatch:
+      "That file doesn't look like the type its name says, so it wasn't attached.",
+    comment_not_found:
+      "That comment isn't available anymore. Refresh and try again.",
     invalid_request:
       "Some of those details weren't valid. Check the form and try again.",
     NETWORK:
@@ -725,144 +944,6 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "We can't reach this Droplet right now. Check the connection and try again.",
     TIMEOUT: "That search took too long. Try again in a moment.",
   },
-  // WARP-2977 P2b — the orchestrator's typed codes for the Security routes
-  // (areas, opening hours, the site mode). "Area" is the UI noun; never
-  // "zone", and none of the copy promises the site is watched over.
-  security: {
-    MODE_CONFLICT:
-      "Someone else changed the mode just now. Check the mode and try again.",
-    VERSION_CONFLICT:
-      "Someone else changed this while you were editing. Refresh to see their changes, then try again.",
-    AUDIT_UNAVAILABLE:
-      "Droplet couldn't record that change in its activity log, so nothing was changed. Try again in a moment.",
-    ZONE_NAME_TAKEN: "There's already an area with that name. Pick another name.",
-    // Not a server code: ZONE_NAME_TAKEN whose body carries `archivedZoneId`
-    // (the holder is a REMOVED area, which the person cannot see in the list).
-    // translateError picks it; `archivedZoneIdOf` lets the page offer Restore.
-    ZONE_NAME_TAKEN_ARCHIVED:
-      "A removed area already has that name. Restore it instead, or pick another name.",
-    // A 500: something on the box broke (not an outage, so retrying the same
-    // thing won't help). It may have landed after its commit — never claim
-    // it didn't.
-    INTERNAL_ERROR:
-      "Something went wrong on this Droplet. Refresh the page to see whether the change went through. If it keeps happening, contact support.",
-    ZONE_LIMIT: "You've reached the limit of 64 areas. Remove one before adding another.",
-    ZONE_NOT_FOUND: "That area doesn't exist any more. Refresh the page.",
-    ZONE_ARCHIVED: "That area was removed. Restore it before changing it.",
-    // WARP-2977 P2b-2: an area link can be a door lock too.
-    SOURCE_NOT_FOUND:
-      "One of those cameras, camera parts or door locks isn't set up any more, so nothing was changed. Refresh the list and try again.",
-    SOURCE_CHECK_UNAVAILABLE:
-      "Droplet couldn't check the cameras or door locks just now, so nothing was changed. Try again in a moment.",
-    INVALID_TIMEZONE: "Droplet doesn't recognise that timezone. Pick one from the list.",
-    SAME_OPEN_CLOSE:
-      "Opening and closing times can't be the same. For a day that never closes, choose Open all day.",
-    HOURS_NOT_SET: "Set the usual opening hours before adding special days.",
-    EXCEPTION_LIMIT:
-      "There are already 100 upcoming special days. Remove one before adding another.",
-    EXCEPTION_OUT_OF_RANGE: "Special days can be set from yesterday up to a year ahead.",
-    EXCEPTION_NOT_FOUND: "That special day was already removed.",
-    MODE_UNAVAILABLE: "Droplet can't tell the site's mode right now. Try again in a moment.",
-    HOURS_UNAVAILABLE: "Droplet couldn't load the opening hours right now. Try again in a moment.",
-    ZONES_UNAVAILABLE: "Droplet couldn't load the areas right now. Try again in a moment.",
-    // WARP-2980 (P5 PR-A) — the read-only patterns page. A hidden area or
-    // camera answers exactly like a missing one, so this copy never says which.
-    PATTERNS_UNAVAILABLE: "Droplet couldn't load what's usual right now. Try again in a moment.",
-    PATTERN_NOT_FOUND: "There's nothing to show for that area or camera. Pick another one.",
-    PATTERNS_NOT_BUILT: "Droplet hasn't worked out what's usual yet. It does that every night.",
-    NO_TIMEZONE: "Droplet needs the site's timezone first. Set the opening hours to choose it.",
-    // WARP-2980 (P5 PR-B) — expected activity. "Expected activity" is the UI's
-    // word; the route's "suppression" never reaches a person.
-    SUPPRESSIONS_UNAVAILABLE:
-      "Droplet couldn't load expected activity right now. This is not the same as there being none. Try again in a moment.",
-    SUPPRESSION_NOT_FOUND: "That expected activity isn't there any more. Refresh the page.",
-    SUPPRESSION_TARGET_NOT_FOUND: "That area or camera isn't there any more. Refresh the page.",
-    SUPPRESSION_LIMIT: "There can be up to 100 expected activities at a time. Remove one first. Nothing was changed.",
-    VALIDATION_ERROR: "Some of that isn't quite right. Check what you entered and try again.",
-    // WARP-2978 (ADR-059 P3 §7 routes 16–22) — incidents and who is told about
-    // alerts. A missing incident and a hidden one get ONE answer from the box
-    // (DS-005), so the copy never says which it was.
-    INCIDENT_NOT_FOUND: "That incident isn't there any more, or you can't see it. Refresh the page.",
-    INCIDENT_CONFLICT: "Someone else changed this incident at the same moment. Check it and try again.",
-    // Also what a view that went partial (an alert on a camera this person
-    // can't see) answers: the same words as the incident page's, never why.
-    NOT_ACTIONABLE: "You can't acknowledge or resolve this incident. Refresh the page to see where it stands.",
-    INCIDENTS_UNAVAILABLE: "Droplet can't read the incidents right now. Try again in a moment.",
-    // WARP-2980 (P5 PR-C) — route 35. Nothing this person can mark, or a view
-    // that went partial (a camera they can't see): one body, so the words
-    // never say which.
-    NOT_JUDGEABLE: "There's nothing here you can mark as expected or not. Refresh the page to see where it stands.",
-    NO_RECIPIENT:
-      "Someone who can open Security has to be told about alerts. Turn someone else on first, then try again.",
-    NOT_ELIGIBLE: "This person can't open Security, so they can't be told about alerts.",
-    ROUTING_UNAVAILABLE: "Droplet couldn't read who is told about alerts right now. Try again in a moment.",
-    USER_NOT_FOUND: "That person isn't on this Droplet any more. Refresh the page.",
-    // WARP-2979 (ADR-059 P4 §7 routes 23–27) — Droplet's links and what its AI
-    // may do. A missing link and one on a camera this person can't see get ONE
-    // answer from the box (DS-005), so the copy never says which.
-    LINK_NOT_FOUND: "That link isn't there any more, or you can't see it. Refresh the page.",
-    LINK_NOT_DECIDABLE: "Someone already decided on that link. Refresh the page to see where it stands.",
-    LINK_CONFLICT: "Someone else changed this area at the same moment. Refresh the page and try again.",
-    LINK_LIMIT: "This area already has 32 cameras and parts linked. Remove one before adding another.",
-    LINKS_UNAVAILABLE: "Droplet couldn't load its suggestions right now. Try again in a moment.",
-    AI_SETTINGS_UNAVAILABLE: "Droplet couldn't load these settings right now. Try again in a moment.",
-    // WARP-2979 P4 PR-2 (route 28) — "Summarise now" / "Regenerate".
-    NARRATIVE_COOLDOWN: "Droplet wrote this in the last 10 minutes. Try again later.",
-    NARRATIVE_TOO_OLD: "Droplet writes summaries only for incidents active in the last 7 days.",
-    SUMMARIES_OFF: "Summaries are turned off in Security settings.",
-    // A route-level feature gate answers 404 module_disabled (a flat body, so
-    // apiFetch carries no typed code — the status entry catches it): this
-    // person's level changed under the page, or Security was switched off.
-    module_disabled: "You can't make that change any more. Refresh the page.",
-    "404": "You can't make that change any more. Refresh the page.",
-    // The P2b helpers go through authFetch, which refreshes an expired access
-    // token and retries. A 401 that still reaches the page is NOT proof the
-    // session ended: authFetch also hands back the original 401 when the
-    // refresh was transient (a rotation race, a network blip) or when
-    // /api/auth/me could not confirm the session is dead — and the session is
-    // fine in both. A real end is already on its way to /login. So: say the
-    // change didn't land (the auth gate answers before any write), and name
-    // signing in again only as the remedy for a 401 that keeps coming back.
-    "401": "Droplet couldn't confirm you're signed in, so nothing was changed. Try again, and sign in again if this keeps happening.",
-    "403": "You don't have permission to make that change.",
-    "409": "Someone else changed this just now. Refresh the page and try again.",
-    "429": "That's a lot of changes at once. Wait a moment and try again.",
-    NETWORK:
-      "We can't reach this Droplet right now. Check the connection and try again.",
-    // securityFetch's own code for a request that never answered. Keyed here
-    // so the copy doesn't hang on inferCodeFromMessage matching the browser's
-    // wording ("Failed to fetch" in Chrome, "NetworkError …" in Firefox,
-    // "Load failed" in Safari — which matches nothing).
-    NETWORK_ERROR:
-      "We can't reach this Droplet right now. Check the connection and try again.",
-    TIMEOUT: "That took too long. Refresh the page to see whether it went through.",
-  },
-  // ADR-055 P4b — the doors routes (P4a). Writes are the owner's alone, so a
-  // 403 names who can, without saying whether the person is the owner: the
-  // same page is read by admins too. None of this promises a door is watched.
-  doors: {
-    INVALID_NAME:
-      "A door's name needs 1 to 80 characters, with no line breaks or hidden characters. Nothing was changed.",
-    VALIDATION_ERROR: "Some of that isn't quite right. Check what you entered and try again.",
-    DOOR_NOT_FOUND: "That door isn't there any more. Refresh the page.",
-    DOOR_RETIRED: "That door is retired, so it can't be changed.",
-    DOORS_UNAVAILABLE:
-      "Droplet couldn't read its doors just now. This is not the same as there being none. Try again in a moment.",
-    // A role refusal (requireRole) answers a flat 403 with no typed code.
-    "403": "Only the owner can add, change or retire doors.",
-    // A route-level module gate answers 404 module_disabled (also a flat body):
-    // Doors was switched off, or this person's access changed, under the page.
-    module_disabled: "You can't do that any more. Refresh the page.",
-    "404": "You can't do that any more. Refresh the page.",
-    "401": "Droplet couldn't confirm you're signed in, so nothing was changed. Try again, and sign in again if this keeps happening.",
-    "409": "Someone else changed this just now. Refresh the page and try again.",
-    "429": "That's a lot of changes at once. Wait a moment and try again.",
-    NETWORK:
-      "We can't reach this Droplet right now. Check the connection and try again.",
-    NETWORK_ERROR:
-      "We can't reach this Droplet right now. Check the connection and try again.",
-    TIMEOUT: "That took too long. Refresh the page to see whether it went through.",
-  },
   generic: {
     NETWORK:
       "We can't reach this Droplet right now. Check the connection and try again.",
@@ -925,22 +1006,6 @@ function inferCodeFromMessage(
 }
 
 /**
- * WARP-2977 P2b — the removed area that already holds a name, from a
- * `ZONE_NAME_TAKEN` refusal: the orchestrator puts `archivedZoneId` in the
- * error envelope when the holder is archived, and `apiFetch` keeps the whole
- * body on the thrown error as `body`. Null for anything else (an active
- * holder, another code, a non-apiFetch error).
- */
-export function archivedZoneIdOf(err: unknown): string | null {
-  if (!err || typeof err !== "object") return null;
-  const e = err as { code?: unknown; body?: unknown };
-  if (e.code !== "ZONE_NAME_TAKEN") return null;
-  const envelope = (e.body as { error?: { archivedZoneId?: unknown } } | null | undefined)?.error;
-  const id = envelope?.archivedZoneId;
-  return typeof id === "string" && id !== "" ? id : null;
-}
-
-/**
  * Translate an unknown error into plain home-user copy.
  *
  * Dispatch order:
@@ -972,11 +1037,6 @@ export function translateError(err: unknown, domain: ErrorDomain): string {
 
   const domainCodes = CODES[domain];
 
-  // WARP-2977 P2b — the name belongs to a REMOVED area: "pick another name"
-  // alone would baffle (no area in the list has it), so say where it is.
-  if (domain === "security" && code === "ZONE_NAME_TAKEN" && archivedZoneIdOf(err) !== null) {
-    return domainCodes.ZONE_NAME_TAKEN_ARCHIVED!;
-  }
   if (code && domainCodes[code]) return domainCodes[code];
   // WARP-1659 × WARP-1658 — `share-bulk` alone infers BEFORE it dispatches on
   // status. Both tickets are right and the default order cannot serve both.
@@ -1007,4 +1067,24 @@ export function translateError(err: unknown, domain: ErrorDomain): string {
     if (inferred && domainCodes[inferred]) return domainCodes[inferred];
   }
   return FALLBACK[domain];
+}
+
+// ─── WARP-3515: a Droplet with no TPM cannot encrypt a drive ──────────────────
+
+/**
+ * ADR-070 / WARP-3512: Prepare (and a pool create or format, which must be LUKS
+ * too) seals the drive's unlock key to the TPM2. A box without one refuses with
+ * `409 tpm_required` and wipes nothing. The refusal can come back as the typed
+ * `code`, as the whole error text, or as prose, and on the request that mints a
+ * confirm token or on the confirm that executes it — so every drive flow asks
+ * this one question and shows this one sentence.
+ */
+export const TPM_REQUIRED_MESSAGE =
+  "This Droplet has no security chip (TPM); drives can't be encrypted.";
+
+export function isTpmRequired(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const { code, message } = err as { code?: unknown; message?: unknown };
+  if (code === "tpm_required") return true;
+  return typeof message === "string" && /\btpm_required\b|\btpm2?\b/i.test(message);
 }

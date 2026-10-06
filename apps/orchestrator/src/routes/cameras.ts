@@ -34,8 +34,11 @@ import {
 import {
   fetchSnapshot,
   fetchEventCamera,
+  fetchEventPlaybackSpan,
   fetchEventThumbnail,
   fetchReviewCamera,
+  fetchReviewPreview,
+  fetchReviewThumbnail,
   fetchKnownFaces,
   fetchKnownPlates,
   fetchFaceImage,
@@ -47,12 +50,12 @@ import {
   tagEventAsFace,
   openBirdseyeStream,
   openMjpegStream,
-  enableDetection,
-  disableDetection,
   deleteCamera,
   deleteEvent,
   addCamera,
   syncCamerasFromDb,
+  waitForCameraStreaming,
+  withFrigateConfigLock,
   fetchEvents,
   buildRecordingClipUrl,
   buildVodMasterUrl,
@@ -64,9 +67,17 @@ import {
   restartFrigate,
   isValidIanaTimezone,
   NoRecordingsInRangeError,
+  type CameraNoStreamReason,
   type PtzAction,
 } from "../services/frigate.client.js";
-import { FrigateNotFoundError } from "../types/frigate-error.js";
+import {
+  FrigateNotFoundError,
+  FrigateUpstreamError,
+  type FrigateNotFoundCode,
+} from "../types/frigate-error.js";
+import { adoptCameraRow, readCameraKeySnapshot } from "../services/camera-adoption.service.js";
+import { toDisplayName, toFrigateKey } from "../services/camera-key.js";
+import { normalizeMac } from "../lib/mac.js";
 
 /**
  * WARP-1961 — who may LOOK at a camera.
@@ -84,7 +95,6 @@ import { FrigateNotFoundError } from "../types/frigate-error.js";
  * not the bedroom") is WARP-1962 and needs a schema change; this ships
  * first precisely so the open door does not stay open waiting for it.
  */
-const CAMERA_VIEW_ROLES = ["owner", "admin", "family"] as const;
 
 /**
  * Who may take footage OFF the box or destroy it.
@@ -125,14 +135,38 @@ function wantsDownload(req: { query: Record<string, unknown> }): boolean {
 function isCustodyRole(role: string | undefined): boolean {
   return (CAMERA_CUSTODY_ROLES as readonly string[]).includes(role ?? "");
 }
+
+/** Preserve the browser's byte-range request and Frigate's partial response. */
+function mediaRequestHeaders(req: { headers: { range?: string } }): HeadersInit | undefined {
+  return req.headers.range ? { Range: req.headers.range } : undefined;
+}
+
+function mediaResponseHeaders(upstream: globalThis.Response, res: Response): void {
+  res.status(upstream.status);
+  res.setHeader("Cache-Control", "private, no-store");
+  for (const header of ["Content-Length", "Content-Range", "Accept-Ranges"]) {
+    // Error bodies are replaced with JSON, so their upstream length is invalid.
+    if (header === "Content-Length" && !upstream.ok) continue;
+    const value = upstream.headers.get(header);
+    if (value) res.setHeader(header, value);
+  }
+}
 import { getCameraSystemStatus, type CameraSystemStatus } from "../services/camera-system.service.js";
 import {
   discoveryAuthHeaders,
   getCameraCandidates,
   macFromCandidateId,
   mutateLiveCandidate,
+  submitLiveCandidateCredentials,
 } from "../services/camera-candidates.service.js";
 import { getCameraStorage } from "../services/camera-storage.service.js";
+import { resolveRetentionDefaults } from "../services/camera-retention-defaults.js";
+import { eventPlaybackWindow } from "../services/event-playback-window.js";
+import {
+  embedRtspCredentials,
+  UnsafeCredentialsError,
+  validateCameraCredentials,
+} from "../lib/rtsp-credentials.js";
 import {
   backfillCameraRetention,
   planRetentionBackfill,
@@ -146,6 +180,7 @@ import {
   narrowCameraFilter,
   principalFromRequest,
   requireCameraAccess,
+  CAMERA_VIEW_ROLES,
   visibleCameraNames,
   setGrantsForUser,
 } from "../services/camera-access.service.js";
@@ -198,6 +233,92 @@ const logger = createLogger("cameras-routes");
 function sendFrigateDegraded(res: Response, body: unknown): void {
   res.setHeader("X-Droplet-Degraded", "frigate-unavailable");
   res.json(body);
+}
+
+/** The not-found an event's playback route answers (WARP-3509). */
+const EVENT_PLAYBACK_NOT_FOUND_MESSAGES: Partial<Record<FrigateNotFoundCode, string>> = {
+  event_not_found: "That event no longer exists.",
+};
+
+/**
+ * WARP-3509 — answer a typed Frigate failure, for the routes whose answer is
+ * bytes or a flag Frigate owns (review media, the viewed flag, an event's HLS
+ * playlist). Returns true when `err` was answered; false leaves it for the
+ * error handler.
+ *
+ *   FrigateNotFoundError                  → 404 { error: <code>, message }
+ *   FrigateUpstreamError, or a Frigate    → 503 { error: "frigate_unavailable", message }
+ *   that is unreachable or timed out        + X-Droplet-Degraded: frigate-unavailable
+ *
+ * The 503 is the WARP-3105 contract for those routes. The list routes serve an
+ * empty 200 marked degraded, which an <img> or <video> cannot use, so these say
+ * the same thing with the status: a caller can tell "Frigate is down" (503)
+ * from "there is nothing here" (404).
+ *
+ * `notFound` is the not-found codes THIS route raises, with the message to give
+ * each. Any other code reaching here (an event's on a review route, say) is a
+ * wiring bug, and the error handler should say so rather than a 404 that
+ * names the wrong thing.
+ */
+function answerFrigateFailure(
+  res: Response,
+  err: unknown,
+  subject: Record<string, string>,
+  notFound: Partial<Record<FrigateNotFoundCode, string>>,
+): boolean {
+  if (err instanceof FrigateNotFoundError) {
+    const message = notFound[err.code];
+    if (!message) return false;
+    res.status(404).json({ error: err.code, message });
+    return true;
+  }
+  if (err instanceof FrigateUpstreamError || isUpstreamUnavailable(err)) {
+    logger.warn({ err, ...subject }, "Frigate request failed; answering degraded");
+    res.status(503);
+    sendFrigateDegraded(res, {
+      error: "frigate_unavailable",
+      message: "The camera service is not responding right now. Try again in a moment.",
+    });
+    return true;
+  }
+  return false;
+}
+
+/**
+ * WARP-3511 — the same marker for a read or write that has NO honest empty
+ * answer. An empty settings form served as a 200 would be saved straight back
+ * over the camera's real configuration, so these answer 503 instead; the
+ * dashboard shows a calm "camera service restarting" state and polls again
+ * rather than retrying a 500 forever.
+ */
+function sendFrigateUnavailable(res: Response): void {
+  res.setHeader("X-Droplet-Degraded", "frigate-unavailable");
+  res.status(503).json({
+    error: "frigate_unavailable",
+    degraded: true,
+    message: "The camera service isn't responding. It may be restarting. Try again in a moment.",
+  });
+}
+
+/**
+ * The two failures every route that reads or writes a camera's Frigate config
+ * can hit, answered once: an unknown camera (404) and an unreachable or
+ * restarting Frigate (503, degraded). Returns false for anything else so the
+ * caller keeps its own handling (a real Frigate refusal is a real error, not an
+ * outage).
+ */
+function respondToConfigError(res: Response, err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (msg.includes("not found")) {
+    res.status(404).json({ error: msg });
+    return true;
+  }
+  if (isUpstreamUnavailable(err)) {
+    logger.warn({ err }, "Frigate unreachable; camera configuration unavailable");
+    sendFrigateUnavailable(res);
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -262,6 +383,20 @@ function isValidEventId(id: string): boolean {
   return EVENT_ID_RE.test(id);
 }
 
+/**
+ * WARP-3506 — what the dashboard shows when a camera was added but is not
+ * producing video. Operator-facing prose, one per reason `waitForCameraStreaming`
+ * can give.
+ */
+const NO_STREAM_MESSAGES: Record<CameraNoStreamReason, string> = {
+  no_frames:
+    "The camera was added, but no video is coming from it. Check the stream address and the camera account's username and password, then add it again with the corrected details.",
+  not_started:
+    "The camera was added, but the video system did not start it. Wait a minute and refresh; if it still has no video, restart the camera system.",
+  frigate_unreachable:
+    "The camera was added, but the video system is not responding yet, so we could not confirm it is working. Check back in a minute.",
+};
+
 export function createCamerasRouter(prisma: PrismaClient): Router {
   const router = Router();
 
@@ -293,8 +428,10 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     // invalidation, and `invalidateCamerasCache()` is itself non-throwing.
     await invalidateCamerasCache();
     try {
-      const all = await prisma.camera.findMany({ select: { name: true } });
-      const removed = await syncCamerasFromDb(all.map((c) => c.name));
+      // The DB snapshot is read INSIDE Frigate's config lock (WARP-3510): the
+      // sync hands us the lock, then asks for the rows, so it can never prune
+      // against a snapshot taken before an add it queued behind.
+      const removed = await syncCamerasFromDb(() => readCameraKeySnapshot(prisma));
       if (removed.length > 0) {
         logger.info({ removed }, "Reconciled Frigate cameras after DB change");
       }
@@ -573,7 +710,8 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       }
       const eventId = req.params.eventId;
       const url = `${config.FRIGATE_URL}/api/events/${encodeURIComponent(eventId)}/clip.mp4`;
-      const upstream = await fetch(url, { signal: AbortSignal.timeout(30_000) });
+      const upstream = await fetch(url, { headers: mediaRequestHeaders(req), signal: AbortSignal.timeout(30_000) });
+      mediaResponseHeaders(upstream, res);
       if (!upstream.ok) {
         return res.status(upstream.status).json({ error: `frigate ${upstream.status}` });
       }
@@ -595,6 +733,53 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
         res.end();
       }
     } catch (err) {
+      next(err);
+    }
+  });
+
+  // --- An event's clip, as HLS (WARP-3509) ---
+  //
+  // `clips/event/:eventId` above is Frigate's `clip.mp4`: a FRAGMENTED mp4 that
+  // ffmpeg streams on the fly (frigate/api/media.py recording_clip, `-movflags
+  // frag_keyframe+empty_moov`) — duration 0 in its header, its index at the END,
+  // no Content-Length, `Range` ignored. A browser's <video src> cannot read a
+  // duration from it (a 12 s clip showed 6.1 s), cannot seek it, and stalls on a
+  // long one. It stays for saving a file; PLAYING an event goes through here, the
+  // way the Recordings page plays an hour: HLS over the same footage, from
+  // Frigate's nginx-vod, through the same signed-segment playlist.
+  //
+  // The window is the event's start and end plus the pre/post-capture padding
+  // (an event still in progress: up to now) — see event-playback-window.ts. The
+  // padding is what the box has Frigate keep around an event for the cameras it
+  // adopts (camera-retention-defaults.ts, env-overridable); a camera set up by
+  // hand with other values just plays a little more or less lead-in.
+  router.get("/cameras/events/:eventId/playback.m3u8", requireRole(...CAMERA_VIEW_ROLES), cameraAccess, async (req, res, next) => {
+    try {
+      const eventId = req.params.eventId;
+      if (!isValidEventId(eventId)) {
+        return res.status(400).json({ error: "Invalid event id" });
+      }
+      const span = await fetchEventPlaybackSpan(eventId);
+      // The camera goes into a URL we build and a route we sign for: hold
+      // Frigate's answer to the same name rule everything else here holds.
+      if (!isValidCameraName(span.camera)) {
+        throw new FrigateUpstreamError("event lookup", 200, "unexpected camera name");
+      }
+      const padding = resolveRetentionDefaults();
+      const { after, before } = eventPlaybackWindow(
+        span,
+        { preSec: padding.preCaptureSec, postSec: padding.postCaptureSec },
+        Math.floor(Date.now() / 1000),
+      );
+
+      const playlist = await signedPlaylistFor(req.user?.id, span.camera, after, before);
+
+      // WARP-3103: playing a clip is audited once per playlist, never per segment.
+      void auditCameraWatch(req, span.camera, "clip", { saved: false, eventId });
+      sendPlaylist(res, playlist);
+    } catch (err) {
+      if (answerPlaylistFailure(res, err)) return;
+      if (answerFrigateFailure(res, err, { eventId: req.params.eventId }, EVENT_PLAYBACK_NOT_FOUND_MESSAGES)) return;
       next(err);
     }
   });
@@ -660,6 +845,11 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       const pathValid = isSafeNcPath(parsed.data.nc_path);
       if (!pathValid.ok) {
         return res.status(400).json({ error: pathValid.error });
+      }
+      // WARP-3642 — only recorded clips are shareable: the path must sit under
+      // the clips folder, not anywhere in the person's Nextcloud.
+      if (!pathValid.path.startsWith(CLIPS_SHARE_PREFIX)) {
+        return res.status(400).json({ error: "nc_path must be inside the clips folder" });
       }
 
       // Post-confirmation re-issue: the caller echoes the token from the 202.
@@ -1253,7 +1443,16 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       // A tile you cannot open is worse than no tile: the grid, the home
       // widget and the group rail all read this route, so it must agree
       // with what per-camera playback will actually allow.
-      res.json({ cameras: await filterVisibleCameras(prisma, principalFromRequest(req), cameras) });
+      const visible = await filterVisibleCameras(prisma, principalFromRequest(req), cameras);
+      // WARP-3511: when Frigate could not be read every camera's status is
+      // unknown, and "all offline" served as a plain 200 is the wrong answer.
+      // Say so, in the WARP-3105 marker clients already understand. (`?.`: a
+      // list cached by the build before this field existed has no block.)
+      if (visible.some((c) => c.recording?.degraded === true)) {
+        res.setHeader("X-Droplet-Degraded", "frigate-unavailable");
+        return res.json({ cameras: visible, degraded: true });
+      }
+      res.json({ cameras: visible });
     } catch (err) {
       next(err);
     }
@@ -1266,67 +1465,118 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   // `{FRIGATE_*}` placeholders in the URL, so braces are refused, and the URL
   // is fully parsed BEFORE the Frigate write so a bad one cannot leave Frigate
   // configured with no DB row.
+  //
+  // WARP-3506 / WARP-3510 — the pipeline, in order:
+  //   1. ONE key. The name the operator typed becomes the camera's Frigate key
+  //      (`toFrigateKey`: `Warp_Lab_Office` -> `warp_lab_office`) and is what
+  //      BOTH Frigate and `Camera.name` carry; the typed text is the label. It
+  //      used to be stored verbatim, so the reconcile below pruned the camera
+  //      it had just added.
+  //   2. Frigate write + the camera's row, under ONE hold of Frigate's config
+  //      lock. The row is the existing discovery placeholder for the device
+  //      (found by MAC, then by the URL's address) adopted in place — not a
+  //      duplicate that the next discovery merge would keep while deleting the
+  //      live camera. Holding the lock across both means a reconcile can never
+  //      snapshot a DB that does not yet name a camera Frigate already has.
+  //   3. The best-effort reconcile (#11).
+  //   4. Verification: `ok` only once the camera is actually producing frames.
+  //      Frigate 0.17 does not start a camera until it restarts, and a wrong
+  //      password never produces a frame; either way the camera IS added, so
+  //      the answer is a distinct, non-error 202 the dashboard can show.
   router.post("/cameras", requireRole(...CAMERA_ADMIN_ROLES), async (req, res, next) => {
     try {
-      const { name, rtspUrl, manufacturer, model } = req.body;
+      const { name, rtspUrl: rawRtspUrl, manufacturer, model, macAddress, username, password } = req.body;
       if (!name || typeof name !== "string" || !isValidCameraName(name)) {
         return res.status(400).json({ error: "Invalid camera name (alphanumeric + underscores/hyphens, 1-64 chars)" });
       }
-      if (!rtspUrl || typeof rtspUrl !== "string") {
+      const key = toFrigateKey(name);
+      if (!key) {
+        return res.status(400).json({ error: "Invalid camera name (needs at least one letter or number)" });
+      }
+      if (!rawRtspUrl || typeof rawRtspUrl !== "string") {
         return res.status(400).json({ error: "Missing rtspUrl" });
       }
-      if (!/^rtsps?:\/\/[^/]/.test(rtspUrl)) {
+      if (!/^rtsps?:\/\/[^/]/.test(rawRtspUrl)) {
         return res.status(400).json({ error: "rtspUrl must start with rtsp:// or rtsps://" });
       }
-      if (/[{}\s]/.test(rtspUrl)) {
+      if (/[{}\s]/.test(rawRtspUrl)) {
         return res.status(400).json({ error: "rtspUrl must not contain braces or whitespace" });
       }
+      // WARP-3505: optional camera account, merged into the URL here so the
+      // password never has to be hand-typed into (or shown in) an address.
+      // Validated BEFORE the Frigate write; the error names the field only, and
+      // carries a code the dashboard turns into words.
+      const credCheck = validateCameraCredentials(username, password);
+      if (!credCheck.ok) {
+        return res.status(400).json({ error: credCheck.error, code: credCheck.code });
+      }
       // rtsp: is not a WHATWG "special" scheme, so its host is left opaque;
-      // parse it as http(s) to get a validated hostname.
+      // parse it as http(s) to get a validated hostname. From the address AS
+      // TYPED, before the account is merged in: a raw password may hold '/', '?',
+      // '#' or '@', which move where a parser ends the authority.
       let ipAddress: string;
       try {
-        ipAddress = new URL(rtspUrl.replace(/^rtsp:\/\//, "http://").replace(/^rtsps:\/\//, "https://")).hostname;
+        ipAddress = new URL(rawRtspUrl.replace(/^rtsp:\/\//, "http://").replace(/^rtsps:\/\//, "https://")).hostname;
       } catch {
         return res.status(400).json({ error: "rtspUrl is not a valid URL" });
       }
       if (!ipAddress) {
         return res.status(400).json({ error: "rtspUrl must name a host" });
       }
-
-      // Add to Frigate
-      const success = await addCamera(name, rtspUrl);
-      if (!success) {
-        return res.status(500).json({ error: "Failed to add camera to Frigate" });
+      // Optional: the device's hardware address, so the add can find the
+      // discovery placeholder by MAC when the stream URL names a hostname or a
+      // different address (WARP-3510).
+      let mac: string | null = null;
+      if (macAddress !== undefined && macAddress !== null && macAddress !== "") {
+        try {
+          mac = normalizeMac(macAddress).toLowerCase();
+        } catch {
+          return res.status(400).json({ error: "macAddress must be a MAC address" });
+        }
       }
 
-      // Upsert DB record
-      const displayName = name.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-      await prisma.camera.upsert({
-        where: { name },
-        create: {
-          name,
-          displayName,
-          manufacturer: manufacturer || null,
-          model: model || null,
+      let rtspUrl: string;
+      try {
+        rtspUrl = embedRtspCredentials(rawRtspUrl, username, password);
+      } catch (err) {
+        if (err instanceof UnsafeCredentialsError) {
+          return res.status(400).json({ error: err.message, code: err.code });
+        }
+        throw err;
+      }
+
+      const adopted = await withFrigateConfigLock(async () => {
+        // Add to Frigate (and restart it: config/set alone never starts a camera).
+        const success = await addCamera(key, rtspUrl);
+        if (!success) return null;
+        return adoptCameraRow(prisma, {
+          key,
+          // The label derives from what the operator TYPED (keeps `Front-Door`).
+          displayName: toDisplayName(name),
           ipAddress,
-          enabled: true,
-          autoDiscovered: false,
-          lastSeen: new Date(),
-        },
-        update: {
-          displayName,
-          manufacturer: manufacturer || undefined,
-          model: model || undefined,
-          enabled: true,
-          lastSeen: new Date(),
-        },
+          macAddress: mac,
+          manufacturer: typeof manufacturer === "string" && manufacturer ? manufacturer : null,
+          model: typeof model === "string" && model ? model : null,
+        });
       });
+      if (!adopted) {
+        return res.status(500).json({ error: "Failed to add camera to Frigate" });
+      }
 
       // #11: same best-effort prune as accept/reject/delete — without it an
       // add-only operator keeps stale orphaned Frigate entries forever.
       await reconcileFrigateCameras();
 
-      res.json({ status: "ok", camera: name });
+      const verdict = await waitForCameraStreaming(key);
+      if (!verdict.streaming) {
+        return res.status(202).json({
+          status: "added_no_stream",
+          camera: key,
+          code: verdict.reason,
+          reason: NO_STREAM_MESSAGES[verdict.reason],
+        });
+      }
+      res.json({ status: "ok", camera: key });
     } catch (err) {
       next(err);
     }
@@ -1439,7 +1689,11 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       const limitRaw = parseInt(q.limit || "50", 10);
       const limit = Math.min(Math.max(Number.isFinite(limitRaw) ? limitRaw : 50, 1), 200);
 
+      if (q.businessHours !== undefined && q.businessHours !== "outside" && q.businessHours !== "inside") {
+        return res.status(400).json({ error: "businessHours must be outside or inside" });
+      }
       const result = await getEventsFiltered({
+        businessHours: q.businessHours,
         cameras,
         labels,
         minScore,
@@ -1448,7 +1702,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
         hasClip: boolOrUndef(q.has_clip),
         hasSnapshot: boolOrUndef(q.has_snapshot),
         limit,
-      }, cameraScopeOf(res));
+      }, cameraScopeOf(res), prisma);
       res.json(result);
     } catch (err) {
       if (isUpstreamUnavailable(err)) {
@@ -1615,14 +1869,18 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       const limitRaw = parseInt(q.limit || "50", 10);
       const limit = Math.min(Math.max(Number.isFinite(limitRaw) ? limitRaw : 50, 1), 200);
 
+      if (q.businessHours !== undefined && q.businessHours !== "outside" && q.businessHours !== "inside") {
+        return res.status(400).json({ error: "businessHours must be outside or inside" });
+      }
       const result = await getReviewsFiltered({
+        businessHours: q.businessHours,
         cameras,
         severity,
         before: numOrUndef(q.before),
         after: numOrUndef(q.after),
         reviewed: boolOrUndef(q.reviewed),
         limit,
-      }, cameraScopeOf(res));
+      }, cameraScopeOf(res), prisma);
       res.json(result);
     } catch (err) {
       if (isUpstreamUnavailable(err)) {
@@ -1634,6 +1892,19 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     }
   });
 
+  // --- Review viewed flag, preview and thumbnail (WARP-3509) ---
+  //
+  // Frigate 0.17 serves these at paths this router was never written against,
+  // so the thumbnail and preview 404'd and the viewed POST met a 405 that
+  // surfaced as an unhandled 500 (the paths are spelled out in
+  // frigate.client.ts). The client throws typed errors; answerFrigateFailure
+  // maps them.
+  const REVIEW_NOT_FOUND_MESSAGES: Partial<Record<FrigateNotFoundCode, string>> = {
+    review_not_found: "That review item no longer exists.",
+    thumbnail_not_found: "This review item has no thumbnail.",
+    preview_not_found: "No preview clip is available for this review item yet.",
+  };
+
   /** Frigate review IDs are UUID-ish — looser than event IDs but bound
    *  to the same character class. Same regex serves both. */
   router.post("/cameras/reviews/:reviewId/viewed", requireRole("owner", "admin", "family"), cameraAccess, async (req, res, next) => {
@@ -1644,22 +1915,25 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       await setReviewViewed(req.params.reviewId);
       res.status(204).end();
     } catch (err) {
+      if (answerFrigateFailure(res, err, { reviewId: req.params.reviewId }, REVIEW_NOT_FOUND_MESSAGES)) return;
       next(err);
     }
   });
 
-  // Review preview clip (Frigate-rendered cluster summary mp4).
+  // Review preview clip (Frigate-rendered cluster summary, as mp4).
   router.get("/cameras/reviews/:reviewId/preview", requireRole(...CAMERA_VIEW_ROLES), cameraAccess, async (req, res, next) => {
     try {
       if (!isValidEventId(req.params.reviewId)) {
         return res.status(400).json({ error: "Invalid review ID format" });
       }
-      const url = `${config.FRIGATE_URL}/api/review/${encodeURIComponent(req.params.reviewId)}/preview.mp4`;
-      const upstream = await fetch(url, { signal: AbortSignal.timeout(30_000) });
-      if (!upstream.ok) {
-        return res.status(upstream.status).json({ error: `frigate ${upstream.status}` });
-      }
-      res.setHeader("Content-Type", upstream.headers.get("content-type") || "video/mp4");
+      const upstream = await fetchReviewPreview(req.params.reviewId, mediaRequestHeaders(req));
+      mediaResponseHeaders(upstream, res);
+      if (upstream.status === 416) return res.status(416).json({ error: "frigate 416" });
+      const reviewId = req.params.reviewId;
+      void fetchReviewCamera(reviewId)
+        .then((camera) => camera ? auditCameraWatch(req, camera, "clip", { reviewId }) : undefined)
+        .catch(() => undefined);
+      res.setHeader("Content-Type", "video/mp4");
       const len = upstream.headers.get("content-length");
       if (len) res.setHeader("Content-Length", len);
       if (upstream.body) {
@@ -1668,26 +1942,29 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
         res.end();
       }
     } catch (err) {
+      if (answerFrigateFailure(res, err, { reviewId: req.params.reviewId }, REVIEW_NOT_FOUND_MESSAGES)) return;
       next(err);
     }
   });
 
-  // Review thumbnail.
+  // Review thumbnail — the file the review's `thumb_path` names, which Frigate
+  // 0.17 serves from /clips/review/ rather than from an /api route.
   router.get("/cameras/reviews/:reviewId/thumbnail", requireRole(...CAMERA_VIEW_ROLES), cameraAccess, async (req, res, next) => {
     try {
       if (!isValidEventId(req.params.reviewId)) {
         return res.status(400).json({ error: "Invalid review ID format" });
       }
-      const url = `${config.FRIGATE_URL}/api/review/${encodeURIComponent(req.params.reviewId)}/thumbnail.jpg`;
-      const upstream = await fetch(url, { signal: AbortSignal.timeout(15_000) });
-      if (!upstream.ok) {
-        return res.status(upstream.status).json({ error: `frigate ${upstream.status}` });
-      }
-      res.setHeader("Content-Type", upstream.headers.get("content-type") || "image/jpeg");
+      const thumb = await fetchReviewThumbnail(req.params.reviewId);
+      // From the validated extension: Frigate labels `.webp` under /clips/ application/octet-stream.
+      res.setHeader("Content-Type", thumb.contentType);
+      res.setHeader("X-Content-Type-Options", "nosniff");
       res.setHeader("Cache-Control", "private, no-store"); // WARP-3103: footage never lands in a cache
-      const buffer = Buffer.from(await upstream.arrayBuffer());
-      res.send(buffer);
+      // Binary Buffer; the client derives a closed JPEG/WebP MIME type from a
+      // validated thumbnail filename, never from upstream HTML or user input.
+      // nosemgrep: javascript.express.security.audit.xss.direct-response-write.direct-response-write
+      res.send(thumb.bytes);
     } catch (err) {
+      if (answerFrigateFailure(res, err, { reviewId: req.params.reviewId }, REVIEW_NOT_FOUND_MESSAGES)) return;
       next(err);
     }
   });
@@ -1748,8 +2025,13 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
 
       const searchType = q.search_type === "description" ? "description" : "thumbnail";
 
+      if (q.businessHours !== undefined && q.businessHours !== "outside" && q.businessHours !== "inside") {
+        return res.status(400).json({ error: "businessHours must be outside or inside" });
+      }
+
       try {
         const result = await searchEventsSemanticTyped({
+          businessHours: q.businessHours,
           query,
           searchType,
           cameras,
@@ -1758,7 +2040,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
           before: numOrUndef(q.before),
           after: numOrUndef(q.after),
           limit,
-        }, cameraScopeOf(res));
+        }, cameraScopeOf(res), prisma);
         res.json(result);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -1933,7 +2215,34 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     try {
       const mac = macFromCandidateId(req.params.id);
       if (mac) {
-        const result = await mutateLiveCandidate(mac, "accept");
+        // The accept is a Frigate config write by proxy — camera-discovery adds
+        // the camera — so it holds Frigate's config lock across that call AND
+        // the DB adoption below (WARP-3510): a reconcile queued meanwhile must
+        // not snapshot a DB that does not yet name the camera Frigate now has.
+        const result = await withFrigateConfigLock(async () => {
+          const accepted = await mutateLiveCandidate(mac, "accept");
+          if (accepted.ok && accepted.camera) {
+            // The camera is in Frigate now; keep the DB in step. The MQTT
+            // camera_accepted event upserts the row too, but that's
+            // asynchronous — doing it here means the very next GET /api/cameras
+            // reflects the add. The row is the placeholder discovery filed for
+            // this device (by MAC, then address), adopted in place under the key
+            // camera-discovery used — or a new ADOPTED row if there is none.
+            const key = toFrigateKey(accepted.camera.name);
+            if (key) {
+              await adoptCameraRow(prisma, {
+                key,
+                displayName: toDisplayName(accepted.camera.name),
+                ipAddress: accepted.camera.ip,
+                macAddress: accepted.camera.mac ?? mac,
+                manufacturer: accepted.camera.manufacturer,
+                model: accepted.camera.model,
+                autoDiscovered: true,
+              });
+            }
+          }
+          return accepted;
+        });
         if (!result.ok) {
           // Mirror the upstream status so a 422 ("stream did not verify — needs
           // credentials or a corrected path") reads as an actionable message
@@ -1944,23 +2253,104 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
             error: result.message ?? "Camera discovery could not add this camera",
           });
         }
-        // The camera is in Frigate now; keep the DB in step. The MQTT
-        // camera_accepted event upserts the row too, but that's asynchronous —
-        // doing it here means the very next GET /api/cameras reflects the add.
-        await prisma.camera.updateMany({
-          where: { macAddress: { in: [mac, mac.toLowerCase()] } },
-          data: { enabled: true },
-        });
-        await reconcileFrigateCameras();
+        if (result.camera) {
+          await reconcileFrigateCameras();
+        } else {
+          // Without the camera there is nothing to file a row under, and a
+          // prune now could remove a key no row owns yet; the MQTT
+          // camera_accepted event adopts the row when it arrives.
+          logger.warn({ mac }, "camera-discovery accepted a camera without naming it; skipping the reconcile");
+          await invalidateCamerasCache();
+        }
         return res.json({ status: "accepted" });
       }
 
+      // The legacy DB row. Adoption is the explicit column (WARP-3510); `enabled`
+      // alone no longer says it. NB: a DB-only candidate has no stream URL on
+      // file, so this adopts the row but writes nothing to Frigate.
       const camera = await prisma.camera.update({
         where: { id: req.params.id },
-        data: { enabled: true },
+        data: { enabled: true, adoption: "ADOPTED" },
       });
       await reconcileFrigateCameras();
       res.json({ status: "accepted", camera: camera.name });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // --- Add a discovered camera with credentials the operator typed (WARP-3505) ---
+  //
+  // A found camera whose password isn't a factory default sits at
+  // `needs_credentials` forever: the discovery ladder only tries defaults and
+  // the dashboard had no field for the real ones. camera-discovery probes RTSP
+  // with these credentials, asks ONVIF GetStreamUri only if no RTSP path was
+  // found, and adds the camera itself on success (it holds the pending record).
+  //
+  // Live (`mac:`) candidates only — a DB row has no probed stream to verify
+  // against. NET-05: the body is forwarded to the internal service and nowhere
+  // else — not logged, not stored, not echoed; failures return camera-discovery's
+  // prose + a `code` (auth_failed | locked | no_stream_path | unreachable |
+  // timeout | basic_auth_only), and credentials that cannot be used at all are a 400 with
+  // invalid_credentials | unsupported_password — refused before camera-discovery
+  // is asked, so no sign-in is spent on the camera. A discovered stream address
+  // that Frigate cannot safely store returns 400 unsupported_stream_address.
+  router.post("/cameras/discovered/:id/credentials", sensitiveRateLimit, requireRole(...CAMERA_ADMIN_ROLES), async (req, res, next) => {
+    try {
+      const mac = macFromCandidateId(req.params.id);
+      if (!mac) {
+        return res.status(400).json({
+          error: "Credentials can only be tested for a camera found on the network. Use Enter details instead.",
+        });
+      }
+      const { username, password } = (req.body ?? {}) as { username?: unknown; password?: unknown };
+      if (typeof username !== "string" || !username.trim()) {
+        return res.status(400).json({ error: "username is required", code: "invalid_credentials" });
+      }
+      if (typeof password !== "string" || !password) {
+        return res.status(400).json({ error: "password is required", code: "invalid_credentials" });
+      }
+      const credCheck = validateCameraCredentials(username, password);
+      if (!credCheck.ok) {
+        return res.status(400).json({ error: credCheck.error, code: credCheck.code });
+      }
+
+      const result = await withFrigateConfigLock(async () => {
+        const accepted = await submitLiveCandidateCredentials(mac, username, password);
+        const camera = accepted.camera;
+        const key = camera?.name ? toFrigateKey(camera.name) : "";
+        if (accepted.ok && camera?.name && camera.ip && key) {
+          // Same adoption as plain accept: the placeholder becomes the camera
+          // now in Frigate. A reconcile cannot run between that write and this row.
+          await adoptCameraRow(prisma, {
+            key,
+            displayName: toDisplayName(camera.name),
+            ipAddress: camera.ip,
+            macAddress: camera.mac ?? mac,
+            autoDiscovered: true,
+          });
+          return { ...accepted, adopted: true };
+        }
+        if (accepted.ok) {
+          // Older services omit the key: keep a matching row, but do not prune
+          // Frigate against a DB that may still carry its placeholder name.
+          await prisma.camera.updateMany({
+            where: { macAddress: { in: [mac, mac.toLowerCase()] } },
+            data: { enabled: true, adoption: "ADOPTED" },
+          });
+        }
+        return { ...accepted, adopted: false };
+      });
+      if (!result.ok) {
+        const status = result.status >= 500 && result.status !== 502 ? 502 : result.status;
+        return res.status(status).json({
+          error: result.message ?? "Camera discovery could not add this camera",
+          ...(result.code ? { code: result.code } : {}),
+        });
+      }
+      if (result.adopted) await reconcileFrigateCameras();
+      else await invalidateCamerasCache();
+      res.json({ status: "accepted" });
     } catch (err) {
       next(err);
     }
@@ -1980,19 +2370,27 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
         }
         // Discovery remembers the rejected MAC, but a DB row for the same
         // camera would keep it in the fallback list — the rejection has to
-        // clear both or the camera reappears.
+        // clear both or the camera reappears. Only a CANDIDATE row goes: the
+        // status is in the delete's own WHERE (WARP-3510), so an ADOPTED camera
+        // that shares the MAC — a live one — is never removed by a reject.
         await prisma.camera.deleteMany({
           where: {
             macAddress: { in: [mac, mac.toLowerCase()] },
-            autoDiscovered: true,
-            enabled: false,
+            adoption: "CANDIDATE",
           },
         });
         await reconcileFrigateCameras();
         return res.json({ status: "rejected" });
       }
 
-      await prisma.camera.delete({ where: { id: req.params.id } });
+      // Same rule for a DB row addressed by id: a reject removes a candidate,
+      // never a camera.
+      const { count } = await prisma.camera.deleteMany({
+        where: { id: req.params.id, adoption: "CANDIDATE" },
+      });
+      if (count === 0) {
+        return res.status(404).json({ error: "Camera candidate not found" });
+      }
       await reconcileFrigateCameras();
       res.json({ status: "rejected" });
     } catch (err) {
@@ -2216,7 +2614,16 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
           if (!isValidCameraName(name)) {
             return res.status(400).json({ error: "Invalid camera name in confirmed command" });
           }
-          await disableDetection(name);
+          // WARP-3511: detection is the persisted `detect.enabled` setting.
+          // Frigate 0.17 has no `/detect/disable` route to call. This is the
+          // production disable path, so an unknown camera or an unreachable
+          // Frigate is answered here exactly as on /enable.
+          try {
+            await updateCameraSettings(name, { detectEnabled: false });
+          } catch (err) {
+            if (respondToConfigError(res, err)) return;
+            throw err;
+          }
           await prisma.camera.updateMany({ where: { name }, data: { enabled: false } });
           // WARP-1286 follow-up: disable_camera is Tier-2, so THIS confirm
           // handler is the production disable path (the direct /disable route
@@ -2290,7 +2697,19 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
         return res.status(404).json({ error: "Camera not found" });
       }
 
-      const events = await getRecentEvents(cameraScopeOf(res), 5, req.params.name);
+      // WARP-3511: the camera comes from the (possibly degraded) list above;
+      // its recent events are a second Frigate read that must not turn an
+      // outage into a 500 for a camera we can still describe.
+      let events: Awaited<ReturnType<typeof getRecentEvents>> = [];
+      let degraded = camera.recording?.degraded === true;
+      try {
+        events = await getRecentEvents(cameraScopeOf(res), 5, req.params.name);
+      } catch (err) {
+        if (!isUpstreamUnavailable(err)) throw err;
+        logger.warn({ err }, "Frigate unreachable; serving camera without recent events");
+        degraded = true;
+      }
+      if (degraded) res.setHeader("X-Droplet-Degraded", "frigate-unavailable");
       res.json({ ...camera, recentEvents: events });
     } catch (err) {
       next(err);
@@ -2456,7 +2875,12 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       if (!isValidCameraName(req.params.name)) {
         return res.status(400).json({ error: "Invalid camera name" });
       }
-      await enableDetection(req.params.name);
+      // WARP-3511: detection is the persisted `detect.enabled` setting, the
+      // same one the settings page writes. Frigate 0.17 has no
+      // `/api/<camera>/detect/enable`, so the call this used to make answered
+      // 404 every time and "Enable" never did anything. The write restarts
+      // Frigate (briefly, every camera), exactly as a settings save does.
+      await updateCameraSettings(req.params.name, { detectEnabled: true });
       await prisma.camera.updateMany({
         where: { name: req.params.name },
         data: { enabled: true },
@@ -2466,6 +2890,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       await invalidateCamerasCache();
       res.json({ status: "enabled", camera: req.params.name });
     } catch (err) {
+      if (respondToConfigError(res, err)) return;
       next(err);
     }
   });
@@ -2495,7 +2920,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
         });
       }
 
-      await disableDetection(req.params.name);
+      await updateCameraSettings(req.params.name, { detectEnabled: false });
       await prisma.camera.updateMany({
         where: { name: req.params.name },
         data: { enabled: false },
@@ -2507,6 +2932,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       await invalidateCamerasCache();
       res.json({ status: "disabled", camera: req.params.name });
     } catch (err) {
+      if (respondToConfigError(res, err)) return;
       next(err);
     }
   });
@@ -2713,15 +3139,17 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
 
       const url = buildRecordingClipUrl(req.params.name, range.after, range.before);
       const ctrl = new AbortController();
-      req.on("close", () => ctrl.abort());
+      res.on("close", () => { if (!res.writableEnded) ctrl.abort(); });
       // Recording mp4 synthesis can take a few seconds for longer ranges.
       // Set a generous timeout but still bounded so a stuck request
       // eventually frees the connection.
       const upstream = await fetch(url, {
+        headers: mediaRequestHeaders(req),
         signal: AbortSignal.any
           ? AbortSignal.any([ctrl.signal, AbortSignal.timeout(60_000)])
           : ctrl.signal,
       });
+      mediaResponseHeaders(upstream, res);
       if (!upstream.ok) {
         return res.status(upstream.status).json({ error: `frigate ${upstream.status}` });
       }
@@ -2761,117 +3189,13 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
         return res.status(400).json({ error: range.error });
       }
 
-      const masterUrl = buildVodMasterUrl(
-        req.params.name,
-        range.after,
-        range.before,
-      );
-      let playlistText = await fetchHlsPlaylist(masterUrl);
-
-      // If the master references a sub-playlist (most common Frigate
-      // shape), follow the first non-comment .m3u8 reference. Otherwise
-      // we treat the response as already-a-media-playlist.
-      const lines = playlistText.split(/\r?\n/);
-      const subRel = lines.find(
-        (line) =>
-          !line.startsWith("#") &&
-          line.trim() !== "" &&
-          line.trim().endsWith(".m3u8"),
-      );
-      if (subRel) {
-        const subUrl = new URL(subRel.trim(), masterUrl).href;
-        playlistText = await fetchHlsPlaylist(subUrl);
-      }
-
-      // Rewrite each segment line — and any URI="…" attribute (e.g. the
-      // fMP4 init segment on #EXT-X-MAP, or a #EXT-X-KEY) — to point at our
-      // proxy. We pass the range params back through so the segment route
-      // knows which VOD window to fetch from. URL-encoding handles segment
-      // names with weird characters even though Frigate's emit boring "0.ts".
-      //
-      // WARP-3122: an absolute or protocol-relative URL is REFUSED, not
-      // passed through. Native clients (AVPlayer) attach the bearer token
-      // as an HTTP header on every request the playlist causes, including
-      // one to a third-party host, so letting one through would leak the
-      // token. Frigate never emits one in practice, so treat it the same
-      // as any other malformed upstream playlist (502 below).
-      const segPrefix = `/api/cameras/${encodeURIComponent(req.params.name)}/playback.segment?after=${range.after}&before=${range.before}&seg=`;
-      const isRemoteUri = (uri: string) => /^https?:\/\//i.test(uri) || uri.startsWith("//");
-      // WARP-3122 part 2 — each segment URL also carries a short-lived
-      // signature for THIS caller, so a native player can fetch segments
-      // without the bearer in its headers (services/segment-url-signing).
-      const expUnix = Math.floor(Date.now() / 1000) + segmentSignatureTtlSec(range.after, range.before);
-      const toProxyUri = (uri: string) =>
-        `${segPrefix}${encodeURIComponent(uri)}` +
-        signSegmentQuery(
-          { camera: req.params.name, after: String(range.after), before: String(range.before), seg: uri, userId: req.user?.id ?? "" },
-          expUnix,
-        );
-      logger.debug(
-        { userId: req.user?.id, camera: req.params.name, after: range.after, before: range.before },
-        "recordings playlist served",
-      );
-      const rewritten = playlistText
-        .split(/\r?\n/)
-        .map((line) => {
-          if (line.trim() === "") return line;
-          if (line.startsWith("#")) {
-            // Attribute-list tags (#EXT-X-MAP, #EXT-X-KEY, …) carry their
-            // own URI="…" that the segment-line branch below never sees.
-            //
-            // Fail CLOSED: `/URI="([^"]*)"/i` only ever matched the strict
-            // double-quoted form, so a single-quoted (URI='...'), unquoted
-            // (URI=...) or otherwise-cased attribute fell through as
-            // "no match" and the ORIGINAL line — absolute URL included —
-            // was forwarded unchanged. Count every case-insensitive `URI=`
-            // occurrence and require each one to be in the strict form; any
-            // mismatch refuses the whole playlist rather than guessing.
-            const uriOccurrences = line.match(/URI\s*=/gi) ?? [];
-            if (uriOccurrences.length === 0) return line;
-            const strictMatches = [...line.matchAll(/URI\s*=\s*"([^"]*)"/gi)];
-            if (strictMatches.length !== uriOccurrences.length) {
-              throw new Error("HLS playlist: refused malformed URI attribute");
-            }
-            // Rewrite every strict match on the line (there can be more
-            // than one attribute-list tag's worth of URI= on one line).
-            return line.replace(/URI\s*=\s*"([^"]*)"/gi, (_full, uri: string) => {
-              if (isRemoteUri(uri)) {
-                throw new Error("HLS playlist: refused absolute URI attribute");
-              }
-              return `URI="${toProxyUri(uri)}"`;
-            });
-          }
-          // It's a segment URL line.
-          const uri = line.trim();
-          if (isRemoteUri(uri)) {
-            throw new Error("HLS playlist: refused absolute segment URL");
-          }
-          return toProxyUri(uri);
-        })
-        .join("\n");
+      const playlist = await signedPlaylistFor(req.user?.id, req.params.name, range.after, range.before);
 
       // WARP-3103: one audit per playlist, never per segment.
       void auditCameraWatch(req, req.params.name, "recording");
-      res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
-      res.setHeader("Cache-Control", "no-store");
-      res.send(rewritten);
+      sendPlaylist(res, playlist);
     } catch (err) {
-      // "Nothing was kept for that window" is an ANSWER, not a failure.
-      // Frigate 404s an empty VOD range; reporting that as 502 told the
-      // player the recorder was broken and put a red banner over a
-      // perfectly healthy camera (WARP-1958).
-      if (err instanceof NoRecordingsInRangeError) {
-        return res
-          .status(404)
-          .json({ error: "no_recordings_in_range", message: err.message });
-      }
-      // hls.js retries on transient errors, but a clean 502 is the
-      // signal that the upstream is broken (vs 4xx for "you sent us a
-      // bad range").
-      const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes("HLS playlist")) {
-        return res.status(502).json({ error: msg });
-      }
+      if (answerPlaylistFailure(res, err)) return;
       next(err);
     }
   });
@@ -2902,7 +3226,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
         seg,
       );
       const ctrl = new AbortController();
-      req.on("close", () => ctrl.abort());
+      res.on("close", () => { if (!res.writableEnded) ctrl.abort(); });
       const upstream = await fetch(url, {
         signal: AbortSignal.any
           ? AbortSignal.any([ctrl.signal, AbortSignal.timeout(30_000)])
@@ -2952,8 +3276,9 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       const settings = await getCameraSettings(req.params.name);
       res.json({ settings });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes("not found")) return void res.status(404).json({ error: msg });
+      // WARP-3511: an outage is a 503 the dashboard can wait out, not a 500.
+      // There is deliberately no empty-settings fallback (see sendFrigateUnavailable).
+      if (respondToConfigError(res, err)) return;
       next(err);
     }
   });
@@ -3182,10 +3507,17 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       if (msg.includes("not found")) return void res.status(404).json({ error: msg });
       // Surface range/threshold errors as 400 so the dashboard can
       // render them inline next to the offending control.
-      if (
-        msg.includes("must be between") ||
-        msg.includes("Frigate rejected")
-      ) {
+      if (msg.includes("must be between")) {
+        return void res.status(400).json({ error: msg });
+      }
+      // WARP-3511: Frigate unreachable, or answering 5xx while it restarts.
+      // Checked BEFORE "Frigate rejected", whose message carries the status
+      // and so would otherwise turn a restart into a 400 shown against a field.
+      if (isUpstreamUnavailable(err)) {
+        logger.warn({ err }, "Frigate unreachable; camera settings not saved");
+        return void sendFrigateUnavailable(res);
+      }
+      if (msg.includes("Frigate rejected")) {
         return void res.status(400).json({ error: msg });
       }
       next(err);
@@ -3304,7 +3636,14 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       const caps = await fetchPtzCapabilities(req.params.name);
       res.json(caps);
     } catch (err) {
-      next(err);
+      // WARP-3511: a camera whose PTZ probe fails has no PTZ controls to show.
+      // That is a normal answer, not a 500 the dashboard retries forever. Only
+      // an outage carries the degraded marker, so a client can tell "unknown"
+      // from a real "no PTZ" and ask again.
+      logger.debug({ err, camera: req.params.name }, "PTZ probe failed; reporting no PTZ");
+      const none = { supported: false, supportsPanTilt: false, supportsZoom: false, presets: [] };
+      if (isUpstreamUnavailable(err)) return void sendFrigateDegraded(res, { ...none, degraded: true });
+      res.json(none);
     }
   });
 
@@ -3384,8 +3723,23 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     requireRole(...CAMERA_CUSTODY_ROLES),
     async (_req, res, next) => {
       try {
-        res.json({ plan: await planRetentionBackfill(prisma) });
+        // WARP-3511: the dry run also says WHAT the repair would write, so the
+        // dashboard's confirm can state it. These are the repair's own
+        // effective defaults (the POST below applies the same function's
+        // result); they are configurable per box, so they are read here and
+        // never written into copy. Only the four windows a person reads.
+        const d = resolveRetentionDefaults();
+        res.json({
+          plan: await planRetentionBackfill(prisma),
+          defaults: {
+            continuousDays: d.continuousDays,
+            motionDays: d.motionDays,
+            alertsRetainDays: d.alertsRetainDays,
+            detectionsRetainDays: d.detectionsRetainDays,
+          },
+        });
       } catch (err) {
+        if (respondToConfigError(res, err)) return;
         next(err);
       }
     },
@@ -3398,8 +3752,12 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       try {
         // `noop` travels in the payload: "nothing needed doing" and "it
         // failed quietly" must not look the same to the caller.
-        res.json(await backfillCameraRetention(prisma));
+          const result = await backfillCameraRetention(prisma);
+          if (!result.noop) await invalidateCamerasCache();
+          res.json(result);
       } catch (err) {
+        // WARP-3511: an unreachable camera service is the 503 degraded answer.
+        if (respondToConfigError(res, err)) return;
         next(err);
       }
     },
@@ -3450,6 +3808,144 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
 }
 
 /**
+ * The media playlist for one VOD window, every segment ref rewritten to our
+ * segment proxy and signed for `userId`.
+ *
+ * Shared by the recordings route and an event's playback route (WARP-3509), so
+ * there is one place that follows Frigate's master playlist and one that
+ * refuses what must never reach a player. Throws `NoRecordingsInRangeError`
+ * when Frigate has nothing for the window, and `HLS playlist: …` errors for a
+ * playlist it must refuse (`answerPlaylistFailure` maps both).
+ *
+ * It resolves Frigate's master playlist, follows it to the first media
+ * playlist, then rewrites that playlist's segment refs. A master that's already
+ * a media playlist (no #EXT-X-STREAM-INF entries, just segments) is detected
+ * and rewritten in place.
+ */
+async function signedPlaylistFor(
+  userId: string | undefined,
+  camera: string,
+  after: number,
+  before: number,
+): Promise<string> {
+  const masterUrl = buildVodMasterUrl(camera, after, before);
+  let playlistText = await fetchHlsPlaylist(masterUrl);
+
+  // If the master references a sub-playlist (most common Frigate
+  // shape), follow the first non-comment .m3u8 reference. Otherwise
+  // we treat the response as already-a-media-playlist.
+  const lines = playlistText.split(/\r?\n/);
+  const subRel = lines.find(
+    (line) =>
+      !line.startsWith("#") &&
+      line.trim() !== "" &&
+      line.trim().endsWith(".m3u8"),
+  );
+  if (subRel) {
+    // Frigate emits a basename in this VOD window. A remote host or another
+    // camera's path is upstream data, never permission to fetch outside it.
+    const variant = subRel.trim();
+    if (!/^[a-zA-Z0-9_-]{1,64}\.m3u8$/.test(variant)) {
+      throw new Error("HLS playlist: refused unsafe sub-playlist URL");
+    }
+    const subUrl = new URL(variant, masterUrl).href;
+    playlistText = await fetchHlsPlaylist(subUrl);
+  }
+
+  // Rewrite each segment line — and any URI="…" attribute (e.g. the
+  // fMP4 init segment on #EXT-X-MAP, or a #EXT-X-KEY) — to point at our
+  // proxy. We pass the range params back through so the segment route
+  // knows which VOD window to fetch from. URL-encoding handles segment
+  // names with weird characters even though Frigate's emit boring "0.ts".
+  //
+  // WARP-3122: an absolute or protocol-relative URL is REFUSED, not
+  // passed through. Native clients (AVPlayer) attach the bearer token
+  // as an HTTP header on every request the playlist causes, including
+  // one to a third-party host, so letting one through would leak the
+  // token. Frigate never emits one in practice, so treat it the same
+  // as any other malformed upstream playlist (502 below).
+  const segPrefix = `/api/cameras/${encodeURIComponent(camera)}/playback.segment?after=${after}&before=${before}&seg=`;
+  const isRemoteUri = (uri: string) => /^https?:\/\//i.test(uri) || uri.startsWith("//");
+  // WARP-3122 part 2 — each segment URL also carries a short-lived
+  // signature for THIS caller, so a native player can fetch segments
+  // without the bearer in its headers (services/segment-url-signing).
+  const expUnix = Math.floor(Date.now() / 1000) + segmentSignatureTtlSec(after, before);
+  const toProxyUri = (uri: string) =>
+    `${segPrefix}${encodeURIComponent(uri)}` +
+    signSegmentQuery(
+      { camera, after: String(after), before: String(before), seg: uri, userId: userId ?? "" },
+      expUnix,
+    );
+  logger.debug({ userId, camera, after, before }, "recordings playlist served");
+  return playlistText
+    .split(/\r?\n/)
+    .map((line) => {
+      if (line.trim() === "") return line;
+      if (line.startsWith("#")) {
+        // Attribute-list tags (#EXT-X-MAP, #EXT-X-KEY, …) carry their
+        // own URI="…" that the segment-line branch below never sees.
+        //
+        // Fail CLOSED: `/URI="([^"]*)"/i` only ever matched the strict
+        // double-quoted form, so a single-quoted (URI='...'), unquoted
+        // (URI=...) or otherwise-cased attribute fell through as
+        // "no match" and the ORIGINAL line — absolute URL included —
+        // was forwarded unchanged. Count every case-insensitive `URI=`
+        // occurrence and require each one to be in the strict form; any
+        // mismatch refuses the whole playlist rather than guessing.
+        const uriOccurrences = line.match(/URI\s*=/gi) ?? [];
+        if (uriOccurrences.length === 0) return line;
+        const strictMatches = [...line.matchAll(/URI\s*=\s*"([^"]*)"/gi)];
+        if (strictMatches.length !== uriOccurrences.length) {
+          throw new Error("HLS playlist: refused malformed URI attribute");
+        }
+        // Rewrite every strict match on the line (there can be more
+        // than one attribute-list tag's worth of URI= on one line).
+        return line.replace(/URI\s*=\s*"([^"]*)"/gi, (_full, uri: string) => {
+          if (isRemoteUri(uri)) {
+            throw new Error("HLS playlist: refused absolute URI attribute");
+          }
+          return `URI="${toProxyUri(uri)}"`;
+        });
+      }
+      // It's a segment URL line.
+      const uri = line.trim();
+      if (isRemoteUri(uri)) {
+        throw new Error("HLS playlist: refused absolute segment URL");
+      }
+      return toProxyUri(uri);
+    })
+    .join("\n");
+}
+
+/** A playlist is never cached: it is footage, and an in-progress event's grows. */
+function sendPlaylist(res: Response, playlist: string): void {
+  res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
+  res.setHeader("Cache-Control", "no-store");
+  res.send(playlist);
+}
+
+/** Answers what `signedPlaylistFor` throws. True when `err` was answered. */
+function answerPlaylistFailure(res: Response, err: unknown): boolean {
+  // "Nothing was kept for that window" is an ANSWER, not a failure.
+  // Frigate 404s an empty VOD range; reporting that as 502 told the
+  // player the recorder was broken and put a red banner over a
+  // perfectly healthy camera (WARP-1958).
+  if (err instanceof NoRecordingsInRangeError) {
+    res.status(404).json({ error: "no_recordings_in_range", message: err.message });
+    return true;
+  }
+  // hls.js retries on transient errors, but a clean 502 is the
+  // signal that the upstream is broken (vs 4xx for "you sent us a
+  // bad range").
+  const msg = err instanceof Error ? err.message : String(err);
+  if (msg.includes("HLS playlist")) {
+    res.status(502).json({ error: msg });
+    return true;
+  }
+  return false;
+}
+
+/**
  * How far past `now` a requested range may start before we call it a
  * future range. Covers ordinary client-clock skew so a browser running a
  * minute fast can still ask for the segment being written right now.
@@ -3497,6 +3993,10 @@ function parseRecordingRange(req: import("express").Request):
   }
   return { after: a, before: Math.min(b, nowSec) };
 }
+
+/** WARP-3642 — the folder exportClip writes to (clips.service.ts CLIPS_NC_ROOT);
+ *  the only place a share link may point. */
+const CLIPS_SHARE_PREFIX = "/Clips/";
 
 /** Defense-in-depth path validation mirroring PR #1's validateNcPath
  *  logic. Reject traversal markers (raw and percent-decoded) so a caller

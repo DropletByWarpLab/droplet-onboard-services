@@ -58,7 +58,19 @@ export async function auditCameraWatch(
   req: { user?: { id: string; role?: string; username?: string } },
   camera: string,
   kind: CameraWatchKind,
-  opts: { saved?: boolean; eventId?: string; now?: number } = {},
+  opts: {
+    saved?: boolean;
+    eventId?: string;
+    reviewId?: string;
+    now?: number;
+    /**
+     * WARP-3692 — the assistant fetched this frame for the user's own chat
+     * turn. Same actor, same camera, same kind of row as a human view, but the
+     * row says the AI did it and the dedupe window is its own (an AI view
+     * must not be swallowed by, or swallow, the user's own watch).
+     */
+    via?: "ai";
+  } = {},
 ): Promise<void> {
   const actorId = req.user?.id;
   if (!actorId) return;
@@ -72,7 +84,7 @@ export async function auditCameraWatch(
     kind: "camera",
     severity: "info",
     sourceIcon: "video",
-    what: opts.saved ? SAVED[kind] : WHAT[kind],
+    what: opts.saved ? SAVED[kind] : opts.via === "ai" ? `${WHAT[kind]} for the AI assistant` : WHAT[kind],
     sub: camera,
     refs: {
       surface: "camera_watch",
@@ -81,7 +93,9 @@ export async function auditCameraWatch(
       saved: opts.saved === true,
       delivery: opts.saved ? "attachment" : "inline",
       eventId: opts.eventId ?? null,
+      ...(opts.reviewId ? { reviewId: opts.reviewId } : {}),
       actor: req.user?.username ?? null,
+      ...(opts.via ? { via: opts.via } : {}),
     },
     actor: actorFromRequest(req),
   });

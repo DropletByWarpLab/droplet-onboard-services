@@ -1,0 +1,14 @@
+# CPU runtime only; no accelerated extras. All transitive runtime dependencies pinned.
+kokoro-onnx==0.6.1
+onnxruntime==1.30.0
+numpy==2.5.3
+espeakng-loader==0.2.4
+phonemizer==3.4.0
+flatbuffers==25.12.19
+packaging==26.3
+protobuf==7.36.2
+joblib==1.6.0
+cloudpickle==3.1.2
+attrs==26.1.0
+dlinfo==2.0.0
+typing-extensions==4.16.0

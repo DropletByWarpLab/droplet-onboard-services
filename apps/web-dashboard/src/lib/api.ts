@@ -18,6 +18,9 @@ import type {
   ExtensionToolClassification,
   ExtensionToolDecision,
   CameraInfo,
+  CameraBusinessHours,
+  MotionFilter,
+  MotionActivityResult,
   CameraGroupInfo,
   CameraPinInfo,
   CameraSettings,
@@ -35,6 +38,8 @@ import type {
   PtzCapabilities,
   RecordingDay,
   RecordingSegment,
+  RetentionBackfillPreview,
+  RetentionBackfillResult,
   ReviewFilter,
   FilteredReviewsResult,
   TimelineEntry,
@@ -98,11 +103,10 @@ import type {
   VpnPeerInfo,
   VpnStatusInfo,
   VpnPeerCreatedInfo,
-  OverlayLinkToken,
-  PendingOverlayEnrollment,
-  OverlayApproveResult,
   VoiceStatusInfo,
   VoiceSayResult,
+  SpeakingVoiceInfo,
+  SpeakingVoiceChange,
   VoiceCalibrationInfo,
   VoiceCalibrationApply,
   VoiceMeasureResult,
@@ -115,10 +119,6 @@ import type {
   VoiceEnrollVerifyResult,
   VoiceEnrollCommitResult,
   VoiceActivityItem,
-  BoxNameCheckResult,
-  BoxNameSetResult,
-  BoxNameCurrentResult,
-  BoxNameRenameResult,
   ToolCatalogResponse,
   DocsStatus,
   DocEditorSession,
@@ -151,46 +151,13 @@ import type {
   RoutineSchedule,
   ContextPinKind,
   ContextPinTarget,
-  SecurityEventKind,
-  SecurityEventsPage,
-  SecurityHealthRow,
-  SecurityHoursBody,
-  SecurityHoursExceptionBody,
-  SecurityHoursView,
-  SecurityHoursWriteResult,
-  SecurityPatternCells,
-  SecurityPatternsOverview,
-  SecuritySuppressionCreateBody,
-  SecuritySuppressionList,
-  SecuritySuppressionView,
-  SecurityModeAction,
-  SecurityModeActionResult,
-  SecurityModeView,
-  SecuritySourcesView,
-  SecurityZoneCreateBody,
-  SecurityZoneCreated,
-  SecurityZoneLinksBody,
-  SecurityZonePatchBody,
-  SecurityZonesResponse,
-  SecurityZoneWriteResult,
-  SecurityAiSettingsBody,
-  SecurityAiSettingsView,
-  SecurityAiSettingsWriteResult,
-  SecurityLinkDecisionResult,
-  SecurityLinkProposalsView,
   NotificationAckAllResult,
   NotificationAckResult,
   NotificationsPage,
-  AlertRoutingPerson,
-  AlertRoutingSetBody,
-  AlertRoutingView,
-  IncidentActionResult,
-  IncidentDetail,
-  IncidentNarrativeView,
-  IncidentVerdict,
-  IncidentsPage,
-  IncidentsSummary,
+  RecordingStorageChange,
+  RecordingStorageResult,
 } from "./types";
+import { normalizeRecordingStorage } from "./recording-storage";
 import { DEFAULT_API_FETCH_TIMEOUT_MS, apiFetch, type TypedError } from "./hooks/apiFetch";
 import type { RouterPortDisableGuard } from "@/lib/types/router-ports";
 import type {
@@ -344,17 +311,32 @@ export async function checkClaimGateEnabled(): Promise<boolean> {
  * Fire-and-forget from the caller's perspective: a failure to persist must
  * never block the customer from advancing the wizard locally, so we
  * swallow network errors (the in-memory step still moves forward; the next
- * successful PATCH re-syncs). Public endpoint — runs before any user
- * exists, like POST /api/auth/setup.
+ * successful PATCH re-syncs). Early first-run progress is public; steps
+ * after account creation require the owner session established by the wizard.
  */
-export async function patchSetupStep(setupStep: string): Promise<void> {
+export async function patchSetupStep(
+  setupStep: string,
+  options: { requireSuccess?: boolean } = {},
+): Promise<void> {
   try {
-    await fetch(`${BASE}/api/setup/state`, {
+    // Provider consent can start long after the access cookie expires. Renew
+    // the owner session before requiring a durable save; pre-account hints
+    // keep their public, best-effort fetch behavior.
+    const setupFetch = options.requireSuccess || !["welcome", "claim", "account"].includes(setupStep)
+      ? authFetch : fetch;
+    const res = await setupFetch(`${BASE}/api/setup/state`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
       body: JSON.stringify({ setup_step: setupStep }),
     });
-  } catch {
+    if (options.requireSuccess && !res.ok) {
+      throw new Error("Couldn't save setup progress. Please retry before connecting your account.");
+    }
+  } catch (error) {
+    // Leaving the page for provider consent requires a durable resume target.
+    // Ordinary in-page navigation keeps its existing best-effort behavior.
+    if (options.requireSuccess) throw error;
     /* non-fatal — local wizard progress is the source of truth mid-step */
   }
 }
@@ -381,7 +363,7 @@ export async function patchSetupStep(setupStep: string): Promise<void> {
  * always safe.
  */
 export async function patchSetupReady(): Promise<void> {
-  const res = await fetch(`${BASE}/api/setup/state`, {
+  const res = await authFetch(`${BASE}/api/setup/state`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     credentials: "same-origin",
@@ -402,16 +384,15 @@ export async function patchSetupReady(): Promise<void> {
  * move false → true). Once persisted, AuthGate's "ready + tour pending → tour"
  * branch stops firing and the owner passes through to the dashboard.
  *
- * Public endpoint, same as the other setup-state writes (the tour runs
- * immediately post-claim, before any session-refresh concerns), so the plain
- * `fetch` — no authFetch refresh dance. We swallow a transient network error:
+ * A ready appliance requires a session for tour writes, so renew an expired
+ * access cookie if the owner spends time in the tour. We swallow a transient network error:
  * the optimistic in-memory flip in `completeTour` already routed the owner
  * onward, and the next `/api/setup/state` GET re-syncs. Re-running the tour
  * later is an explicit Help-page action, never an accidental re-trap.
  */
 export async function patchTourCompleted(): Promise<void> {
   try {
-    await fetch(`${BASE}/api/setup/state`, {
+    await authFetch(`${BASE}/api/setup/state`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ user_tour_completed: true }),
@@ -515,13 +496,12 @@ export class OrgError extends Error {
 
 /**
  * PR #380 — name the single workspace + reserve droplet.local/<slug>. Org slots
- * AFTER account, but shares the wizard's public posture (the route is
- * allow-listed), so a bare `fetch` with same-origin credentials. On a taken
+ * AFTER account and requires the owner session, renewed if needed. On a taken
  * (409) or invalid (400) slug we throw an `OrgError` the step renders inline on
  * the URL field; the server validates the slug shape + uniqueness server-side.
  */
 export async function postOrg(input: OrgInput): Promise<OrgResult> {
-  const res = await fetch(`${BASE}/api/setup/org`, {
+  const res = await authFetch(`${BASE}/api/setup/org`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     credentials: "same-origin",
@@ -584,16 +564,19 @@ export async function postTeamInvite(
 
 export async function loginUser(
   email: string,
-  password: string
+  password: string,
+  secondFactor?: { totp?: string; recoveryCode?: string },
 ): Promise<{ user: AuthUser }> {
   const res = await authFetch(`${BASE}/api/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify({ email, password, ...secondFactor }),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || "Login failed");
+    const error = new Error(data.error || "Login failed") as Error & { code?: string };
+    error.code = data.code;
+    throw error;
   }
   return res.json();
 }
@@ -1097,7 +1080,7 @@ export async function requestCreatePool(input: {
   });
   if (res.status !== 202) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Could not start pool creation: ${res.status}`);
+    throw storageWriteError(body, res.status, "Could not start pool creation");
   }
   return res.json();
 }
@@ -1138,7 +1121,7 @@ export async function requestFormatPool(
   );
   if (res.status !== 202) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Could not start pool format: ${res.status}`);
+    throw storageWriteError(body, res.status, "Could not start pool format");
   }
   return res.json();
 }
@@ -1162,7 +1145,7 @@ export async function requestAdoptDrive(input: {
   });
   if (res.status !== 202) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Could not start drive adopt: ${res.status}`);
+    throw storageWriteError(body, res.status, "Could not start drive adopt");
   }
   return res.json();
 }
@@ -1189,7 +1172,7 @@ export async function reclaimDrive(input: {
   });
   if (res.status !== 202) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Could not start drive reclaim: ${res.status}`);
+    throw storageWriteError(body, res.status, "Could not start drive reclaim");
   }
   return res.json();
 }
@@ -1207,7 +1190,7 @@ export async function confirmPoolCommand(input: {
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Could not complete the operation: ${res.status}`);
+    throw storageWriteError(body, res.status, "Could not complete the operation");
   }
   return res.json();
 }
@@ -1368,6 +1351,256 @@ export async function updatePoolLabel(
   return res.json();
 }
 
+// --- Recording storage (WARP-3512 contract / ADR-070, consumed by WARP-3515) ---
+//
+// Decision record: docs/ADR-070-camera-recording-storage.md.
+//
+// The orchestrator side lands in WARP-3513/WARP-3514, separately from this
+// dashboard, so every function below is written to be called against an
+// orchestrator that does not have the endpoint (or the field) yet.
+
+/**
+ * GET /api/storage/recordings — where camera recordings live, how much is set
+ * aside, what each camera needs, any move in flight, and what is wrong.
+ *
+ * ABSENCE IS NOT AN ERROR: a 404 (an orchestrator that predates WARP-3514) and a
+ * 403 (a role that may not read it) both RESOLVE, to `{ available: false }`, so
+ * the card can hide itself or say "not available on this Droplet yet" instead of
+ * flashing an error. Only a transport failure or a 5xx THROWS — that is the
+ * "couldn't load right now" case, and it must not read as "not available".
+ *
+ * The body is normalised (lib/recording-storage.ts): a partial payload becomes a
+ * complete, safe value, and a 200 that is not a JSON object (a proxy's fallback
+ * page) counts as "not supported" rather than a crash.
+ */
+export async function fetchRecordingStorage(): Promise<RecordingStorageResult> {
+  const res = await authFetch(`${BASE}/api/storage/recordings`);
+  if (res.status === 404) return { available: false, reason: "not_supported" };
+  if (res.status === 403) return { available: false, reason: "forbidden" };
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw storageWriteError(body, res.status, "Failed to fetch recording storage");
+  }
+  const raw: unknown = await res.json().catch(() => null);
+  const data = normalizeRecordingStorage(raw);
+  if (!data) return { available: false, reason: "not_supported" };
+  return { available: true, data };
+}
+
+/**
+ * The tail of a tier-2 / tier-3 storage write. These routes answer 202 + a
+ * single-use confirmation token; the owner has ALREADY confirmed in the dialog
+ * that called us (a click for tier 2, a typed phrase for tier 3), so the
+ * handshake is completed here by echoing the token back through the storage
+ * confirm — the one wire path every other storage write uses
+ * (`POST /api/storage/command/confirm`, the `rebootRouter` / `disableCamera`
+ * pattern). These are confirmation-gated writes: any successful reply without
+ * the expected token is a protocol error, never a silent success.
+ *
+ * A refusal throws with the HTTP status attached (`storageWriteError`) so the UI
+ * can choose its copy (403 role, 409 move-in-progress, 404 not-there-yet).
+ */
+async function finishStorageWrite(
+  res: Response,
+  fallback: string,
+  expected: { service: string; resourceId: string },
+): Promise<void> {
+  const body = (await res.json().catch(() => ({}))) as {
+    confirmationToken?: unknown;
+    service?: unknown;
+    resourceId?: unknown;
+    error?: unknown;
+    code?: unknown;
+  };
+  if (!res.ok) throw storageWriteError(body, res.status, fallback);
+  if (res.status !== 202 || typeof body.confirmationToken !== "string" || !body.confirmationToken) {
+    throw new Error("Unexpected storage response: confirmation token was not issued");
+  }
+  if (body.service !== expected.service || body.resourceId !== expected.resourceId) {
+    throw new Error("Unexpected storage confirmation: operation or resource did not match");
+  }
+  await confirmStorageCommand({
+    confirmationToken: body.confirmationToken,
+    service: expected.service,
+    resourceId: expected.resourceId,
+  });
+}
+
+/**
+ * PUT /api/storage/recordings — change the recording mode (auto-sized slice vs
+ * whole drive) and/or the drive recordings go to. Owner/admin, tier 2: the
+ * caller confirms in a dialog first. Choosing a different drive starts a move;
+ * poll `fetchRecordingStorage` for `migration` progress.
+ */
+export async function updateRecordingStorage(change: RecordingStorageChange): Promise<void> {
+  if (!change.mode && !change.fsUuid) throw new Error("There's nothing to change.");
+  const res = await authFetch(`${BASE}/api/storage/recordings`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(change),
+  });
+  await finishStorageWrite(res, "Failed to update recording storage", {
+    service: "recordings_set",
+    resourceId: "recordings",
+  });
+}
+
+/**
+ * POST /api/storage/recordings/old-footage/delete — permanently delete the
+ * recordings still on the system drive after a move. Owner only, tier 3: the
+ * caller has the owner type a phrase first. Irreversible.
+ */
+export async function deleteOldRecordings(): Promise<void> {
+  const res = await authFetch(`${BASE}/api/storage/recordings/old-footage/delete`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  await finishStorageWrite(res, "Failed to delete the old recordings", {
+    service: "recordings_old_footage_delete",
+    resourceId: "recordings",
+  });
+}
+
+/**
+ * Why a drive's recovery key could not be handed over. `gone` is the one the UI
+ * has to word carefully: the key is shown ONCE, so 410 means it already was.
+ */
+export class RecoveryKeyUnavailableError extends Error {
+  readonly reason: "gone" | "not_found" | "forbidden";
+  constructor(reason: "gone" | "not_found" | "forbidden") {
+    super(
+      reason === "gone"
+        ? "This recovery key has already been shown."
+        : reason === "forbidden"
+          ? "Only the owner can view a recovery key."
+          : "No recovery key is available for this drive.",
+    );
+    this.name = "RecoveryKeyUnavailableError";
+    this.reason = reason;
+  }
+}
+
+/**
+ * POST /api/storage/drives/:id/recovery-key/reveal — hand over the drive's
+ * LUKS recovery key, ONCE (owner only, tier 2). `:id` is the drive's filesystem
+ * UUID, as on every other `/storage/drives/:uuid/*` route.
+ *
+ * It is a tier-2 write, so it follows the storage handshake: the POST answers
+ * 202 + a single-use token, the owner has ALREADY confirmed in the dialog that
+ * called us, and echoing the token through `POST /api/storage/command/confirm`
+ * is what executes the reveal and returns `{ recoveryKey }`. 200 the first time,
+ * 410 ever after (revealed already, or shredded after its 7-day hold). A server
+ * that answers the first POST with the key directly is accepted too.
+ *
+ * Because the reveal consumes the key, this function has hard rules:
+ *   - never retry (a retry after a reveal that succeeded server-side would 410
+ *     and the key would be lost — `authFetch` only re-sends after a 401, which
+ *     never reached the handler); a lost key is what `regenerateRecoveryKey`
+ *     is for;
+ *   - never cache (`cache: "no-store"` on BOTH requests — a secret in an HTTP
+ *     cache outlives the one-time promise);
+ *   - keep "gone" (410 → RecoveryKeyUnavailableError "gone") distinct from
+ *     "couldn't ask" (a plain Error with its status), so a flaky network is
+ *     never worded as a lost key.
+ * The key is returned, never stored: the caller holds it in component state for
+ * exactly as long as the dialog is open.
+ */
+export async function revealRecoveryKey(driveId: string): Promise<string> {
+  if (!driveId) throw new RecoveryKeyUnavailableError("not_found");
+  const first = await authFetch(
+    `${BASE}/api/storage/drives/${encodeURIComponent(driveId)}/recovery-key/reveal`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+      cache: "no-store",
+    },
+  );
+  const afterFirst = await readRecoveryKeyReply(first);
+  if (afterFirst.key) return afterFirst.key;
+  if (!afterFirst.token) throw new Error("The recovery key response was empty.");
+  const { confirmationToken, service, resourceId } = afterFirst.token;
+  if (service !== "recovery_key_reveal" || resourceId !== driveId) {
+    throw new Error("Unexpected recovery key confirmation: operation or drive did not match");
+  }
+  const confirmed = await authFetch(`${BASE}/api/storage/command/confirm`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirmationToken, service, resourceId }),
+    cache: "no-store",
+  });
+  const afterConfirm = await readRecoveryKeyReply(confirmed);
+  if (!afterConfirm.key) throw new Error("The recovery key response was empty.");
+  return afterConfirm.key;
+}
+
+/** One reply of the reveal handshake: a key, a token to confirm, or a typed
+ *  refusal. Anything else is a plain failure that carries its status. */
+async function readRecoveryKeyReply(
+  res: Response,
+): Promise<{
+  key?: string;
+  token?: { confirmationToken: string; service: string; resourceId: string };
+}> {
+  if (res.status === 410) throw new RecoveryKeyUnavailableError("gone");
+  if (res.status === 404) throw new RecoveryKeyUnavailableError("not_found");
+  if (res.status === 403) throw new RecoveryKeyUnavailableError("forbidden");
+  const body = (await res.json().catch(() => ({}))) as {
+    recoveryKey?: unknown;
+    confirmationToken?: unknown;
+    service?: unknown;
+    resourceId?: unknown;
+    error?: unknown;
+    code?: unknown;
+  };
+  if (!res.ok) throw storageWriteError(body, res.status, "Failed to fetch the recovery key");
+  const key = typeof body.recoveryKey === "string" ? body.recoveryKey.trim() : "";
+  if (key) return { key };
+  if (typeof body.confirmationToken === "string" && body.confirmationToken) {
+    if (typeof body.service !== "string" || typeof body.resourceId !== "string") {
+      throw new Error("Unexpected 202 response: missing service or resourceId");
+    }
+    return {
+      token: {
+        confirmationToken: body.confirmationToken,
+        service: body.service,
+        resourceId: body.resourceId,
+      },
+    };
+  }
+  return {};
+}
+
+/**
+ * POST /api/storage/drives/:id/recovery-key/regenerate — replace the drive's
+ * recovery key with a new one (owner only, tier 3), for when the key was missed
+ * or its 7-day hold expired. The old key stops working, so the caller has the
+ * owner type a phrase first; the new key is then revealed the same way as the
+ * first (`revealRecoveryKey`).
+ *
+ * NOTE: the WARP-3512 contract names this action ("Regenerate recovery key",
+ * owner, tier 3) but not its path. `.../recovery-key/regenerate` is the sibling
+ * of `.../recovery-key/reveal` and is assumed; this function is the one place
+ * to change if the orchestrator names it differently.
+ */
+export async function regenerateRecoveryKey(driveId: string): Promise<void> {
+  if (!driveId) throw new Error("There's no drive to generate a recovery key for.");
+  const res = await authFetch(
+    `${BASE}/api/storage/drives/${encodeURIComponent(driveId)}/recovery-key/regenerate`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+      cache: "no-store",
+    },
+  );
+  await finishStorageWrite(res, "Failed to generate a new recovery key", {
+    service: "recovery_key_regenerate",
+    resourceId: driveId,
+  });
+}
+
 // --- Health ---
 
 export async function fetchHealth(): Promise<HealthResponse> {
@@ -1434,19 +1667,18 @@ export async function fetchSystemHealthDetails(): Promise<SystemHealth> {
   return res.json();
 }
 
-/** Cert-lifecycle snapshot from the PUBLIC tls-status route (ADR-023 §3,
- *  WARP-1302). Carries no secrets — state, the CT-public FQDN, and whether
- *  HQ issuance is configured at all. */
+/** Public internal hostname and installed certificate metadata; no secrets. */
 export interface TlsStatus {
   state: string;
   fqdn: string | null;
   hqConfigured: boolean;
+  internalHostname?: string | null;
+  daysLeft: number | null;
+  coversInternalHostname: boolean | null;
 }
 
 export async function fetchTlsStatus(): Promise<TlsStatus> {
-  // Public endpoint (no auth) — the same payload the gateway's plain-HTTP
-  // status page polls. WARP-1342: dashboard chrome reads `fqdn` to upgrade
-  // the identity chip off the droplet.local fallback.
+  // The dashboard address comes from the configured internal hostname.
   const res = await fetch(`${BASE}/api/tls/status`, {
     credentials: "include",
   });
@@ -1456,19 +1688,24 @@ export async function fetchTlsStatus(): Promise<TlsStatus> {
   return res.json();
 }
 
-/** WARP-2944 — the certificate lifecycle for Settings → Device information
- *  (owner/admin): days left, when the box renews on its own, whether the
- *  last week has begun. Computed once server-side so the card and the screen
- *  never disagree on the arithmetic. */
+/** The installed HTTPS certificate for Settings → Device information
+ * (owner/admin). Expiry and hostname coverage are read from the served leaf;
+ * unreadable metadata is reported as UNKNOWN, never inferred from fleet history. */
 export interface TlsCertificate {
   state: string;
   fqdn: string | null;
   notAfter: string | null;
   daysLeft: number | null;
+  /** Compatibility field: local certificates have no automatic renewal schedule. */
   renewsInDays: number | null;
+  coversInternalHostname: boolean | null;
   expiringSoon: boolean;
   hqConfigured: boolean;
   checkedAt: string | null;
+  /** WARP-3414: SHA-256 of the served leaf's DER SPKI, uppercase hex in 16
+   *  groups of 4 — what the Droplet apps show. Owner/admin only; null when
+   *  the leaf is unreadable. NOT proof when read over this connection. */
+  fingerprint: string | null;
 }
 
 export async function fetchTlsCertificate(): Promise<TlsCertificate> {
@@ -1476,7 +1713,7 @@ export async function fetchTlsCertificate(): Promise<TlsCertificate> {
     credentials: "include",
   });
   if (!res.ok) {
-    throw new Error(`Failed to fetch certificate lifecycle: ${res.status}`);
+    throw new Error(`Failed to fetch installed certificate: ${res.status}`);
   }
   return res.json();
 }
@@ -1493,6 +1730,8 @@ export interface BackupStatus {
   lastAttemptAt: string | null;
   lastRekeyAt: string | null;
   windowHours: number;
+  /** WARP-3610: decided on the host; "unknown" is never presented as safe. */
+  repositoryLocation: "same_disk" | "off_device" | "unknown";
 }
 
 export async function fetchBackupStatus(): Promise<BackupStatus> {
@@ -2771,6 +3010,7 @@ export async function fetchReviewsFiltered(
   filter: ReviewFilter,
 ): Promise<FilteredReviewsResult> {
   const params = new URLSearchParams();
+  if (filter.businessHours) params.set("businessHours", filter.businessHours);
   if (filter.cameras?.length) params.set("cameras", filter.cameras.join(","));
   if (filter.severity?.length) params.set("severity", filter.severity.join(","));
   if (filter.before !== undefined) params.set("before", String(filter.before));
@@ -2875,6 +3115,22 @@ export function getRecordingHlsUrl(
   return `${BASE}/api/cameras/${encodeURIComponent(cameraName)}/playback.m3u8?after=${after}&before=${before}`;
 }
 
+/**
+ * Returns the proxied HLS m3u8 URL for an event's clip (WARP-3509).
+ *
+ * The box works out the window — the event's start and end plus the
+ * pre/post-capture padding, up to now for an event still in progress — so the
+ * client names the event, not a time range. Frigate's own clip.mp4 is a
+ * fragmented mp4 that a <video src> cannot read a duration from or seek in; this
+ * plays the same footage the way the Recordings page does. `refresh` re-keys
+ * the URL so the player loads the playlist again (hls.js reloads only when its
+ * source string changes), which is how an event in progress plays further.
+ */
+export function getEventHlsUrl(eventId: string, refresh = 0): string {
+  const query = refresh > 0 ? `?refresh=${refresh}` : "";
+  return `${BASE}/api/cameras/events/${encodeURIComponent(eventId)}/playback.m3u8${query}`;
+}
+
 // --- Per-camera settings (Phase 4.1) ---
 
 export async function fetchCameraSettings(
@@ -2884,6 +3140,9 @@ export async function fetchCameraSettings(
     `${BASE}/api/cameras/${encodeURIComponent(cameraName)}/settings`,
   );
   if (!res.ok) {
+    // WARP-3511: Frigate restarting (a settings save does that) is not a
+    // failure to retry forever; the caller shows a calm state and asks again.
+    if (cameraServiceDown(res)) throw new CamerasUnavailableError();
     const body = await res.json().catch(() => ({}));
     throw new Error((body as { error?: string }).error || `Failed: ${res.status}`);
   }
@@ -2923,6 +3182,37 @@ export async function renameCamera(
     throw new Error(body.error || `Failed to rename camera: ${res.status}`);
   }
   return (await res.json()) as { status: string; camera: string; displayName: string };
+}
+
+/**
+ * WARP-3511 — the box answered 503 with the camera-service marker
+ * (`X-Droplet-Degraded`): Frigate is unreachable or restarting.
+ */
+function cameraServiceDown(res: Response): boolean {
+  return res.status === 503 && !!res.headers?.get("X-Droplet-Degraded");
+}
+
+/**
+ * WARP-3511 — dry run of the retention repair: which cameras have no retention
+ * authored at all and would be given the standard windows, and what those
+ * windows are on this box. A camera whose windows were set to zero on purpose
+ * is not in the repair's reach.
+ */
+export async function fetchRetentionBackfillPlan(): Promise<RetentionBackfillPreview> {
+  const res = await authFetch(`${BASE}/api/cameras/retention/backfill`);
+  if (!res.ok) throw await cameraActionError(res, `Failed to check retention: ${res.status}`);
+  const body = (await res.json()) as Partial<RetentionBackfillPreview>;
+  return { plan: body.plan ?? [], defaults: body.defaults };
+}
+
+/**
+ * WARP-3511 — apply the retention repair (owner/admin). It writes Frigate's
+ * config, so every camera restarts briefly; the caller confirms first.
+ */
+export async function runRetentionBackfill(): Promise<RetentionBackfillResult> {
+  const res = await authFetch(`${BASE}/api/cameras/retention/backfill`, { method: "POST" });
+  if (!res.ok) throw await cameraActionError(res, `Failed to repair retention: ${res.status}`);
+  return (await res.json()) as RetentionBackfillResult;
 }
 
 /** WARP-1851 — read a camera's current storage allocation. */
@@ -3153,6 +3443,38 @@ export async function setPlaceLookupChannel(enabled: boolean): Promise<void> {
   }
 }
 
+/**
+ * WARP-3532 — the `work_integrations` off-LAN channel: whether work updates
+ * (webhooks, Slack / Teams / Discord / Google Chat) may leave this network.
+ * Default off; owner-only to change. `null` = unreadable; don't guess.
+ */
+export async function fetchWorkIntegrationsChannel(): Promise<{ enabled: boolean } | null> {
+  const res = await authFetch(`${BASE}/api/settings/off-lan`);
+  if (!res.ok) return null;
+  const body = (await res.json()) as { channels?: Array<{ key: string; enabled: boolean }> };
+  const row = body.channels?.find((c) => c.key === "work_integrations");
+  return row ? { enabled: row.enabled === true } : null;
+}
+
+/** WARP-3532 — flip `work_integrations`. Owner only (the route 403s everyone else). */
+export async function setWorkIntegrationsChannel(enabled: boolean): Promise<void> {
+  const res = await authFetch(`${BASE}/api/settings/off-lan/work_integrations`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      enabled,
+      reason: enabled
+        ? "Turned on from Work notifications"
+        : "Turned off from Work notifications",
+    }),
+  });
+  if (!res.ok) {
+    throw Object.assign(new Error(`Failed to change work notifications egress: ${res.status}`), {
+      status: res.status,
+    });
+  }
+}
+
 /** `refused` is set when the `web_push` off-LAN channel is off (WARP-2904). */
 export async function sendTestPush(): Promise<{
   sent: number;
@@ -3206,7 +3528,12 @@ export async function fetchPtzCapabilities(
   const res = await authFetch(
     `${BASE}/api/cameras/${encodeURIComponent(cameraName)}/ptz`,
   );
-  if (!res.ok) throw new Error(`Failed to fetch PTZ caps: ${res.status}`);
+  // WARP-3511: a camera with nothing to control is not an error. This used to
+  // throw on any non-2xx, and SWR retried that forever — against a camera that
+  // can never have PTZ, since adoption writes no `onvif:` block.
+  if (!res.ok) {
+    return { supported: false, supportsPanTilt: false, supportsZoom: false, presets: [] };
+  }
   return res.json();
 }
 
@@ -3278,6 +3605,7 @@ export async function patchCameraSettings(
     },
   );
   if (!res.ok) {
+    if (cameraServiceDown(res)) throw new CamerasUnavailableError();
     const body = await res.json().catch(() => ({}));
     throw new Error((body as { error?: string }).error || `Failed: ${res.status}`);
   }
@@ -3297,6 +3625,7 @@ export async function searchEventsSemantic(
   filter: EventFilter & { searchType?: "thumbnail" | "description" } = {},
 ): Promise<FilteredEventsResult> {
   const params = new URLSearchParams();
+  if (filter.businessHours) params.set("businessHours", filter.businessHours);
   params.set("query", query);
   if (filter.searchType) params.set("search_type", filter.searchType);
   if (filter.cameras?.length) params.set("cameras", filter.cameras.join(","));
@@ -3324,6 +3653,7 @@ export async function fetchEventsFiltered(
   filter: EventFilter,
 ): Promise<FilteredEventsResult> {
   const params = new URLSearchParams();
+  if (filter.businessHours) params.set("businessHours", filter.businessHours);
   if (filter.cameras?.length) params.set("cameras", filter.cameras.join(","));
   if (filter.labels?.length) params.set("labels", filter.labels.join(","));
   if (filter.minScore !== undefined) params.set("min_score", String(filter.minScore));
@@ -3340,6 +3670,38 @@ export async function fetchEventsFiltered(
   // WARP-3105: a Frigate outage is a degraded 200 + empty list, not "no events".
   if (res.headers?.get("X-Droplet-Degraded")) throw new CamerasUnavailableError();
   return res.json();
+}
+
+export async function fetchCameraBusinessHours(): Promise<CameraBusinessHours> {
+  const res = await authFetch(`${BASE}/api/cameras/business-hours`);
+  if (!res.ok) throw new Error(`Could not load business hours: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchMotionActivity(filter: MotionFilter): Promise<MotionActivityResult> {
+  const params = new URLSearchParams({ after: String(filter.after), before: String(filter.before) });
+  if (filter.cameras?.length) params.set("cameras", filter.cameras.join(","));
+  if (filter.businessHours) params.set("businessHours", filter.businessHours);
+  if (filter.limit !== undefined) params.set("limit", String(filter.limit));
+  if (filter.cursor !== undefined) params.set("cursor", String(filter.cursor));
+  const res = await authFetch(`${BASE}/api/cameras/motion?${params}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Could not load motion: ${res.status}`);
+  }
+  if (res.headers?.get("X-Droplet-Degraded")) throw new CamerasUnavailableError();
+  return res.json();
+}
+
+export async function saveCameraBusinessHours(schedule: CameraBusinessHours): Promise<CameraBusinessHours> {
+  const res = await authFetch(`${BASE}/api/cameras/business-hours`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(schedule),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || `Could not save business hours: ${res.status}`);
+  return body as CameraBusinessHours;
 }
 
 /**
@@ -3378,6 +3740,33 @@ export async function acceptDiscoveredCamera(id: string): Promise<void> {
   }
 }
 
+/**
+ * Add a camera we found on the network by typing its username and password
+ * (WARP-3505). The orchestrator hands them to camera-discovery, which re-probes
+ * the camera with them and adds it. The password travels only in the POST body.
+ *
+ * Failures throw an Error whose `code` is one of AUTH_FAILED, LOCKED,
+ * NO_STREAM_PATH, BASIC_AUTH_ONLY, UNREACHABLE, DISCOVERY_UNAVAILABLE, TIMEOUT,
+ * INVALID_CREDENTIALS, UNSUPPORTED_PASSWORD or UNSUPPORTED_STREAM_ADDRESS so
+ * `translateError` can show the matching next step. The error's own message
+ * never contains the password.
+ */
+export async function addDiscoveredCameraWithCredentials(
+  id: string,
+  username: string,
+  password: string,
+): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/cameras/discovered/${encodeURIComponent(id)}/credentials`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    },
+  );
+  if (!res.ok) throw await cameraApiError(res, `Failed to add camera: ${res.status}`);
+}
+
 export async function rejectDiscoveredCamera(id: string): Promise<void> {
   const res = await authFetch(`${BASE}/api/cameras/discovered/${encodeURIComponent(id)}/reject`, {
     method: "POST",
@@ -3388,9 +3777,20 @@ export async function rejectDiscoveredCamera(id: string): Promise<void> {
   }
 }
 
+/**
+ * WARP-3511 — why a camera action failed, in the box's own words. These used
+ * to throw "Failed to enable camera: 500" and nothing else, which a toast
+ * cannot make useful.
+ */
+async function cameraActionError(res: Response, fallback: string): Promise<Error> {
+  if (cameraServiceDown(res)) return new CamerasUnavailableError();
+  const body = (await res.json().catch(() => ({}))) as { error?: string; message?: string };
+  return new Error(body.message || body.error || fallback);
+}
+
 export async function enableCamera(name: string): Promise<void> {
   const res = await authFetch(`${BASE}/api/cameras/${encodeURIComponent(name)}/enable`, { method: "POST" });
-  if (!res.ok) throw new Error(`Failed to enable camera: ${res.status}`);
+  if (!res.ok) throw await cameraActionError(res, `Failed to enable camera: ${res.status}`);
 }
 
 /** Consume a camera-domain Tier-2 confirmation token (WARP-861).
@@ -3406,6 +3806,9 @@ export async function confirmCameraCommand(
     body: JSON.stringify({ confirmationToken, operation }),
   });
   if (!res.ok) {
+    // WARP-3511: the confirm is where a disable is actually written, so a
+    // camera service that is restarting surfaces here as well.
+    if (cameraServiceDown(res)) throw new CamerasUnavailableError();
     const body = await res.json().catch(() => ({}));
     throw new Error((body as { error?: string }).error || `Confirm failed: ${res.status}`);
   }
@@ -3413,7 +3816,7 @@ export async function confirmCameraCommand(
 
 export async function disableCamera(name: string): Promise<void> {
   const res = await authFetch(`${BASE}/api/cameras/${encodeURIComponent(name)}/disable`, { method: "POST" });
-  if (!res.ok) throw new Error(`Failed to disable camera: ${res.status}`);
+  if (!res.ok) throw await cameraActionError(res, `Failed to disable camera: ${res.status}`);
   // disable_camera is Tier 2: the route 202s with a token and does nothing
   // until the token is consumed (WARP-861 — previously this silently
   // no-opped). The user already confirmed in the UI dialog that invoked us,
@@ -3617,21 +4020,60 @@ export async function reorderCameraPins(
   return body.pins;
 }
 
+/**
+ * An Error for a failed camera call that carries the server's machine `code`
+ * (upper-cased, so it indexes friendly-errors' camera table) and the HTTP status.
+ * The message is the server's sentence and is never shown as written — the
+ * translator maps the code to copy — and never contains a credential.
+ */
+async function cameraApiError(
+  res: Response,
+  fallback: string,
+): Promise<Error & { code?: string; status?: number }> {
+  const data = await res.json().catch(() => ({}));
+  const err = new Error(data.error || fallback) as Error & { code?: string; status?: number };
+  err.status = res.status;
+  if (typeof data.code === "string") err.code = data.code.toUpperCase();
+  return err;
+}
+
+/**
+ * `added_no_stream` (WARP-3506): the camera IS added, but Frigate is not
+ * receiving video from it yet — a wrong address or password, or a camera that
+ * did not start. `reason` is operator-facing prose.
+ */
+export interface AddCameraResult {
+  status: "ok" | "added_no_stream";
+  reason?: string;
+}
+
 export async function addCameraManual(
   name: string,
   rtspUrl: string,
   manufacturer?: string,
-  model?: string
-): Promise<void> {
+  model?: string,
+  username?: string,
+  password?: string
+): Promise<AddCameraResult> {
   const res = await authFetch(`${BASE}/api/cameras`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name, rtspUrl, manufacturer, model }),
+    // WARP-3505: the orchestrator merges username/password into the stream URL
+    // server-side. Left out entirely when blank so a URL that already embeds
+    // credentials keeps working untouched.
+    body: JSON.stringify({
+      name,
+      rtspUrl,
+      manufacturer,
+      model,
+      ...(username ? { username, password: password ?? "" } : {}),
+    }),
   });
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || `Failed to add camera: ${res.status}`);
-  }
+  if (!res.ok) throw await cameraApiError(res, `Failed to add camera: ${res.status}`);
+  const data = await res.json().catch(() => ({}));
+  return data?.status === "added_no_stream"
+    ? { status: "added_no_stream", reason: typeof data.reason === "string" ? data.reason : undefined }
+    : { status: "ok" };
 }
 
 /**
@@ -6928,20 +7370,8 @@ export async function fetchVpnPeers(): Promise<{
   return res.json();
 }
 
-/**
- * Mint a WireGuard peer. `mode` selects how the device dials the box:
- *
- *   "home" — Endpoint is the box's discovered home-facing LAN IP
- *            (resolveHomeEndpointHost on the orchestrator). Works today on the
- *            home/office network. This is the DEFAULT for every user-facing
- *            surface (WARP-1391): the orchestrator route's own default is "away"
- *            (a byte-identical pre-hybrid compat contract, PR #897), and away
- *            bakes the split-horizon public FQDN Endpoint — a public-NXDOMAIN
- *            address (WARP-954 / ADR-023) the stock WireGuard app can't
- *            handshake, so an omitted mode silently minted a dead config.
- *   "away" — operator-only: dials the public FQDN / relay endpoint. Reachable
- *            via the direct API; the dashboard never mints it.
- */
+/** Mint a one-shot WireGuard config. Home dials the discovered office IP;
+ * away dials the explicitly configured direct UDP endpoint. */
 export async function createVpnPeer(
   deviceLabel: string,
   mode: "home" | "away" = "home",
@@ -6981,93 +7411,6 @@ export async function deleteVpnPeer(id: string): Promise<void> {
     err.status = res.status;
     throw err;
   }
-}
-
-// ── WARP-1475: overlay QR-enroll (ADR-030) ──
-//
-// Owner/admin mints a link token → the QR encodes it → a phone scans + redeems
-// it (no bearer) which STAGES a pending enrollment → the owner approves/denies
-// here. Approval is the load-bearing gate that turns a scan into an enrolled
-// overlay device (the box only vouches to HQ on approve).
-
-/**
- * Mint a single-use overlay link token (owner/admin). The plaintext token in
- * the response is returned ONCE — the caller renders it into a QR and forgets
- * it on dialog close. NEVER log the returned token. Minting supersedes any
- * prior available token for this owner.
- */
-export async function mintOverlayLinkToken(): Promise<OverlayLinkToken> {
-  const res = await authFetch(`${BASE}/api/vpn/overlay/link-tokens`, {
-    method: "POST",
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    const e = new Error(
-      body.error || `Failed to mint link token: ${res.status}`,
-    ) as Error & { status?: number; code?: string };
-    e.status = res.status;
-    if (typeof body.error === "string") e.code = body.error;
-    throw e;
-  }
-  return res.json();
-}
-
-/** List staged overlay enrollments awaiting owner review (owner/admin). */
-export async function fetchPendingOverlayEnrollments(): Promise<
-  PendingOverlayEnrollment[]
-> {
-  const res = await authFetch(`${BASE}/api/vpn/overlay/pending-enrollments`);
-  if (!res.ok) {
-    throw new Error(`Failed to fetch pending enrollments: ${res.status}`);
-  }
-  return res.json();
-}
-
-/**
- * Approve a staged enrollment (owner/admin). This is the point the box vouches
- * the device to HQ. On failure the thrown error carries the orchestrator's
- * typed `code` (409: `already_being_approved` / `wg_key_conflict` /
- * `overlay_device_cap_reached` / `cannot approve a <state> enrollment`; 503:
- * the vouch-retry sentence) plus the HTTP `status`, so the page can render
- * honest per-case copy via `overlayApproveErrorCopy`.
- */
-export async function approveOverlayEnrollment(
-  id: string,
-): Promise<OverlayApproveResult> {
-  const res = await authFetch(
-    `${BASE}/api/vpn/overlay/pending-enrollments/${encodeURIComponent(id)}/approve`,
-    { method: "POST" },
-  );
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    const e = new Error(
-      body.error || `Failed to approve enrollment: ${res.status}`,
-    ) as Error & { status?: number; code?: string };
-    e.status = res.status;
-    if (typeof body.error === "string") e.code = body.error;
-    throw e;
-  }
-  return res.json();
-}
-
-/** Deny a staged enrollment (owner/admin). */
-export async function denyOverlayEnrollment(
-  id: string,
-): Promise<{ state: "denied" }> {
-  const res = await authFetch(
-    `${BASE}/api/vpn/overlay/pending-enrollments/${encodeURIComponent(id)}/deny`,
-    { method: "POST" },
-  );
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    const e = new Error(
-      body.error || `Failed to deny enrollment: ${res.status}`,
-    ) as Error & { status?: number; code?: string };
-    e.status = res.status;
-    if (typeof body.error === "string") e.code = body.error;
-    throw e;
-  }
-  return res.json();
 }
 
 // --- WARP-1036: voice assistant (setup-wizard step + status) ---
@@ -7120,13 +7463,29 @@ export async function fetchVoiceStatus(
 
 /** Speaker test — the box says `text` out loud through its own speaker.
  *  Blocks for the playback duration server-side. */
-export async function sayVoiceTest(text: string): Promise<VoiceSayResult> {
+export async function sayVoiceTest(text: string, voice?: string): Promise<VoiceSayResult> {
   const res = await authFetch(`${BASE}/api/voice/say`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text }),
+    body: JSON.stringify({ text, ...(voice !== undefined ? { voice } : {}) }),
   });
   if (!res.ok) await throwVoiceError(res, "Speaker test failed");
+  return res.json();
+}
+
+export async function fetchSpeakingVoice(): Promise<SpeakingVoiceInfo> {
+  const res = await authFetch(`${BASE}/api/voice/speaking-voice`);
+  if (!res.ok) await throwVoiceError(res, "Speaking voices are unavailable");
+  return res.json();
+}
+
+export async function setSpeakingVoice(voice: string): Promise<SpeakingVoiceChange> {
+  const res = await authFetch(`${BASE}/api/voice/speaking-voice`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ voice }),
+  });
+  if (!res.ok) await throwVoiceError(res, "Couldn't save the speaking voice");
   return res.json();
 }
 
@@ -7426,85 +7785,6 @@ export async function fetchVoiceActivity(limit = 5): Promise<VoiceActivityItem[]
   }));
 }
 
-// --- WARP-979: Secured / name-your-box ---
-
-/**
- * WARP-979 — check an owner-typed box name against the shared ruleset +
- * (best-effort) availability. Called debounced from the "Secured" setup step as
- * the owner types. Public endpoint — runs during first-run onboarding before an
- * account may exist, so we call `fetch` directly (no auth refresh to ride).
- * The AbortSignal lets the caller cancel a stale in-flight check.
- */
-export async function checkBoxName(
-  name: string,
-  signal?: AbortSignal,
-): Promise<BoxNameCheckResult> {
-  const res = await fetch(
-    `${BASE}/api/setup/box-name/check?name=${encodeURIComponent(name)}`,
-    { credentials: "same-origin", signal },
-  );
-  if (!res.ok) throw new Error(`Failed to check box name: ${res.status}`);
-  return res.json();
-}
-
-/**
- * WARP-979 — persist the chosen box name so the box's tls-issuance requests
- * `<name>.droplet-us.com`. Public onboarding endpoint (re-gated server-side once
- * the appliance is claimed). Throws on a non-2xx so the step can surface the
- * inline error and NOT advance.
- */
-export async function setBoxName(name: string): Promise<BoxNameSetResult> {
-  const res = await fetch(`${BASE}/api/setup/box-name`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    credentials: "same-origin",
-    body: JSON.stringify({ name }),
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throwNetworkWriteError(body, res.status, "Failed to save box name");
-  }
-  return res.json();
-}
-
-/**
- * WARP-1039 — read the CURRENTLY saved box name back: `{ name, fqdn }`, both
- * null when no name has been chosen yet. Same public-onboarding posture as the
- * POST (the orchestrator re-gates it once the appliance is claimed), so plain
- * `fetch` with the session cookie riding along. The AddressStep rehydrates its
- * input from this on mount; the VpnStep precheck uses it to render the honest
- * "address is being set up" blocked view.
- */
-export async function fetchBoxName(): Promise<BoxNameCurrentResult> {
-  const res = await fetch(`${BASE}/api/setup/box-name`, {
-    credentials: "same-origin",
-  });
-  if (!res.ok) throw new Error(`Failed to fetch box name: ${res.status}`);
-  return res.json();
-}
-
-/**
- * WARP-1109 — CHANGE the box's secured address in place. The orchestrator
- * RELEASES the current name at HQ, then claims the NEW name and re-issues the
- * cert under the new FQDN. Same public-onboarding posture as the POST (re-gated
- * server-side once the appliance is claimed). Throws on a non-2xx so the step
- * surfaces the inline error and does NOT advance — a 409 name-taken on the new
- * name carries `code: "BOX_NAME_TAKEN"` (+ suggestions) so the picker can show
- * the conflict.
- */
-export async function renameBox(name: string): Promise<BoxNameRenameResult> {
-  const res = await fetch(`${BASE}/api/setup/box-name/rename`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    credentials: "same-origin",
-    body: JSON.stringify({ name }),
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throwNetworkWriteError(body, res.status, "Failed to rename box");
-  }
-  return res.json();
-}
 // --- WARP-204: /knowledge view (recent + semantic search + brain memory) ---
 
 /** WARP-214 — source-channel signal: what extractor produced the text. */
@@ -7762,7 +8042,7 @@ export async function fetchToolCatalog(): Promise<ToolCatalogResponse> {
 // --- Admin capabilities (nav-gating for optional admin surfaces) ---
 
 export interface AdminCapabilities {
-  /** /admin/claude-activity is wired (GitHub token OR Jira configured). */
+  /** /admin/claude-activity is on: the developer flag DROPLET_DEV_ENGINEERING_DASHBOARD (off on customer boxes) AND a GitHub token or Jira. */
   claudeActivity: boolean;
   /** /admin/rag-eval is wired (RAG_EVAL_URL set). */
   ragEval: boolean;
@@ -7792,6 +8072,10 @@ export interface AppCapabilities {
   crm: boolean;
   /** WARP-2038 — the /contacts surface. Ships false until that page exists. */
   contacts: boolean;
+  /** WARP-3528 (ADR-069) — the /support surface (the service desk). Read on its
+   *  own: there is no `requires` edge to `projects`, so a front desk can run
+   *  Support with Projects off. */
+  support: boolean;
 }
 
 /**
@@ -7841,11 +8125,43 @@ export interface AppModulesView {
   modules: AppModuleState[];
 }
 
+export interface AppBusinessType {
+  id: string;
+  label: string;
+  description: string;
+  modules: string[];
+}
+
 /** Full module states for the Settings Features panel (any signed-in role may
  *  read; the PATCH below is the admin-only half). */
 export async function fetchAppModules(): Promise<AppModulesView> {
   const res = await authFetch(`${BASE}/api/modules`);
   if (!res.ok) throw new Error(`Failed to fetch modules: ${res.status}`);
+  return res.json();
+}
+
+/** Read the code-resident business preset catalog. */
+export async function fetchBusinessTypes(): Promise<AppBusinessType[]> {
+  const res = await authFetch(`${BASE}/api/business-types`);
+  if (!res.ok) throw new Error(`Failed to fetch business types: ${res.status}`);
+  const body = (await res.json()) as { businessTypes?: AppBusinessType[] };
+  if (!Array.isArray(body.businessTypes)) {
+    throw new Error("Invalid business type catalog response");
+  }
+  return body.businessTypes;
+}
+
+/** Apply a business preset. The server returns the authoritative full module view. */
+export async function applyBusinessType(type: string): Promise<AppModulesView> {
+  const res = await authFetch(`${BASE}/api/admin/business-type`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ type }),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { message?: string };
+    throw new Error(body.message || `Failed to apply business type: ${res.status}`);
+  }
   return res.json();
 }
 
@@ -7912,6 +8228,35 @@ export async function getResetStatus(): Promise<ResetStatusResponse> {
   const res = await authFetch(`${BASE}/api/system/reset`);
   if (!res.ok) throw new Error(`Failed to load reset status: ${res.status}`);
   return res.json();
+}
+
+/**
+ * WARP-3640 -- the factory reset's receipt. A reset destroys the audit chain
+ * and the key that signs it, so before dispatching one the owner's browser
+ * saves a sealed export of the activity log (the existing
+ * POST /api/activity/export bundle, verifiable offline per
+ * docs/security/audit-bundle-verification.md). Throws when the bundle cannot be
+ * produced or sealed: the reset must not proceed without the receipt.
+ */
+export async function downloadResetReceipt(): Promise<void> {
+  const res = await authFetch(`${BASE}/api/activity/export`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  if (!res.ok) {
+    throw new Error(
+      "We couldn't save a receipt of this Droplet's activity log, so the reset was not started. Try again, or contact Droplet support.",
+    );
+  }
+  const url = URL.createObjectURL(await res.blob());
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `droplet-reset-receipt-${new Date().toISOString().slice(0, 10)}.jsonl`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 /**
@@ -8173,6 +8518,8 @@ export type CheckNowOutcome =
   | "verify_failed"
   | "channel_mismatch"
   | "already_known"
+  /** WARP-3430 — a verified release not strictly newer than the installed one. */
+  | "not_newer"
   | "pending_created";
 
 export interface CheckNowResult {
@@ -9008,6 +9355,21 @@ export interface SaasCredentialView {
    */
   credentialsPurged?: boolean;
   configured: boolean;
+  /**
+   * WARP-3434 — the connector kind (`cloud`, `rest` or `mcp`), as the box's
+   * descriptor declares it. OPTIONAL for the reason `credentialsPurged` is: a
+   * box that predates the field sends nothing, and that is not an answer.
+   */
+  track?: "cloud" | "rest" | "mcp";
+  /** WARP-3434 — whether to `POST /:provider/connect` after a save. Optional
+   *  as above; the page falls back to the descriptor's own rule. */
+  probedOnConnect?: boolean;
+  /**
+   * WARP-3434 — the credential path `fields` belongs to (Xero: `custom-connection`),
+   * or `null` for a provider with no variants. The page sends it back as
+   * `credentialVariant`: the box refuses a first save that names no path.
+   */
+  variant?: string | null;
   fields: SaasCredentialField[];
   /** Non-secret field values only. */
   values: Record<string, string | number>;
@@ -9357,7 +9719,7 @@ export interface CloudHistorySummary {
   unaskedOnBoxAnswers: number;
   userMessages: number;
   drewOn: string[];
-  /** WARP-2979 — sources whose answers are never sent to a cloud model, whatever is chosen (e.g. "Security"). */
+  /** Sources whose answers are never sent to a cloud model, whatever is chosen. */
   neverSent?: string[];
 }
 
@@ -9385,67 +9747,20 @@ export async function setCloudHistoryConsent(
   if (!res.ok) throw new Error(`Failed to record the choice: ${res.status}`);
 }
 
-// ── WARP-2977 (ADR-059 P2): the Security command center ──
-// Read-only in P2. A 503 is an outage, never an empty feed — the page renders
-// it as "not reporting", because an empty list reads as a quiet site.
-
-export interface SecurityEventsQuery {
-  cursor?: string | null;
-  limit?: number;
-  kinds?: SecurityEventKind[];
-  camera?: string;
-  includeLow?: boolean;
-  /** WARP-2977 P2b — an area id. A hidden or missing area answers an empty page, never an error. */
-  zone?: string;
-}
-
-export function securityEventsPath(q: SecurityEventsQuery = {}): string {
-  const p = new URLSearchParams();
-  if (q.limit) p.set("limit", String(q.limit));
-  if (q.cursor) p.set("cursor", q.cursor);
-  if (q.kinds && q.kinds.length > 0) p.set("kind", q.kinds.join(","));
-  if (q.camera) p.set("camera", q.camera);
-  if (q.includeLow) p.set("includeLow", "true");
-  if (q.zone) p.set("zone", q.zone);
-  const qs = p.toString();
-  return `/api/security/events${qs ? `?${qs}` : ""}`;
-}
-
-export async function getSecurityEvents(q: SecurityEventsQuery = {}): Promise<SecurityEventsPage> {
-  const res = await authFetch(`${BASE}${securityEventsPath(q)}`);
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Failed to load security events: ${res.status}`);
-  }
-  return res.json();
-}
-
-export async function getSecurityHealth(): Promise<{ sources: SecurityHealthRow[] }> {
-  const res = await authFetch(`${BASE}/api/security/health`);
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Failed to load security health: ${res.status}`);
-  }
-  return res.json();
-}
-
-// ── WARP-2977 P2b (ADR-059 §3.4, §3.6): areas, opening hours, the site mode ──
-// Routes 3–15. Every call goes through `securityFetch`, so a failure throws with
-// `.code` (the server's `error.code`) and `.status` — render it with
-// `translateError(err, "security")`, never `err.message`. Reads are view-level
-// for every household role; writes are act (mode) or manage (areas, hours) and
-// the server 404s a person below that level, so the UI hides those controls.
+// ── The typed-error transport ──
+// The notification and active-department routes below go through `typedAuthFetch`,
+// so a failure throws with `.code` (the server's `error.code`) and `.status` —
+// render it with `translateError(err, <domain>)`, never `err.message`.
 
 /**
- * The P2b transport: `authFetch`, like the P2a feed and health helpers, so an
- * expired 15-minute access token is refreshed and the request retried (and a
- * session that really ended goes to /login) — `apiFetch` never refreshes, so a
- * backgrounded /security tab came back to "can't tell the mode" and a save
- * answered "session expired" while the session was fine. With `apiFetch`'s
- * typed errors: `.code` (the server's `error.code`), `.status`, `.body`,
- * `.requestId`; TIMEOUT / NETWORK_ERROR for a request that never answered.
+ * `authFetch`, so an expired 15-minute access token is refreshed and the request
+ * retried (and a session that really ended goes to /login) — `apiFetch` never
+ * refreshes, so a backgrounded tab came back to "session expired" while the
+ * session was fine. With `apiFetch`'s typed errors: `.code` (the server's
+ * `error.code`), `.status`, `.body`, `.requestId`; TIMEOUT / NETWORK_ERROR for a
+ * request that never answered.
  */
-async function securityFetch<T>(path: string, init?: RequestInit): Promise<T> {
+async function typedAuthFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const timeout = AbortSignal.timeout(DEFAULT_API_FETCH_TIMEOUT_MS);
   let r: Response;
   try {
@@ -9472,353 +9787,15 @@ async function securityFetch<T>(path: string, init?: RequestInit): Promise<T> {
   return body as T;
 }
 
-export const SECURITY_ZONES_PATH = "/api/security/zones";
-export const SECURITY_SOURCES_PATH = "/api/security/sources";
-export const SECURITY_MODE_PATH = "/api/security/mode";
-export const SECURITY_HOURS_PATH = "/api/security/hours";
-
 const jsonBody = (method: string, body: unknown): RequestInit => ({
   method,
   headers: { "Content-Type": "application/json" },
   body: JSON.stringify(body),
 });
 
-/** 3 — visible areas with their visible links. `includeArchived` only takes effect at manage. */
-export function getSecurityZones(opts: { includeArchived?: boolean } = {}): Promise<SecurityZonesResponse> {
-  return securityFetch<SecurityZonesResponse>(
-    `${BASE}${SECURITY_ZONES_PATH}${opts.includeArchived ? "?include=archived" : ""}`,
-  );
-}
-
-/** 4 — cameras and their parts to link, plus each link's present/missing/unknown status. */
-export function getSecuritySources(): Promise<SecuritySourcesView> {
-  return securityFetch<SecuritySourcesView>(`${BASE}${SECURITY_SOURCES_PATH}`);
-}
-
-/** 5 — the effective site mode. */
-export function getSecurityMode(): Promise<SecurityModeView> {
-  return securityFetch<SecurityModeView>(`${BASE}${SECURITY_MODE_PATH}`);
-}
-
-/** 6 — the opening hours, special days, a 7-day preview and the timezone hint. */
-export function getSecurityHours(): Promise<SecurityHoursView> {
-  return securityFetch<SecurityHoursView>(`${BASE}${SECURITY_HOURS_PATH}`);
-}
-
-/** 7 (act) — Close up / Open up / Away / Back to opening hours. */
-export function postSecurityMode(action: SecurityModeAction): Promise<SecurityModeActionResult> {
-  return securityFetch<SecurityModeActionResult>(`${BASE}${SECURITY_MODE_PATH}`, jsonBody("POST", action));
-}
-
-/** 8 (manage) — 201. */
-export function createSecurityZone(body: SecurityZoneCreateBody): Promise<SecurityZoneCreated> {
-  return securityFetch<SecurityZoneCreated>(`${BASE}${SECURITY_ZONES_PATH}`, jsonBody("POST", body));
-}
-
-/** 9 (manage). */
-export function patchSecurityZone(id: string, body: SecurityZonePatchBody): Promise<SecurityZoneWriteResult> {
-  return securityFetch<SecurityZoneWriteResult>(
-    `${BASE}${SECURITY_ZONES_PATH}/${encodeURIComponent(id)}`,
-    jsonBody("PATCH", body),
-  );
-}
-
-/** 10 (manage) — "Remove area". Areas are archived, never deleted; their events stay in the feed. */
-export function archiveSecurityZone(id: string, expectedVersion: number): Promise<SecurityZoneWriteResult> {
-  return securityFetch<SecurityZoneWriteResult>(
-    `${BASE}${SECURITY_ZONES_PATH}/${encodeURIComponent(id)}/archive`,
-    jsonBody("POST", { expectedVersion }),
-  );
-}
-
-/** 11 (manage) — "Restore". */
-export function unarchiveSecurityZone(id: string, expectedVersion: number): Promise<SecurityZoneWriteResult> {
-  return securityFetch<SecurityZoneWriteResult>(
-    `${BASE}${SECURITY_ZONES_PATH}/${encodeURIComponent(id)}/unarchive`,
-    jsonBody("POST", { expectedVersion }),
-  );
-}
-
-/** 12 (manage) — replace the area's link set. */
-export function putSecurityZoneLinks(id: string, body: SecurityZoneLinksBody): Promise<SecurityZoneWriteResult> {
-  return securityFetch<SecurityZoneWriteResult>(
-    `${BASE}${SECURITY_ZONES_PATH}/${encodeURIComponent(id)}/links`,
-    jsonBody("PUT", body),
-  );
-}
-
-// ── WARP-2979 (ADR-059 P4 §7 routes 23–27): Droplet's links and its AI settings ──
-
-export const SECURITY_LINK_PROPOSALS_PATH = "/api/security/link-proposals";
-export const SECURITY_LINKS_PATH = "/api/security/links";
-export const SECURITY_AI_SETTINGS_PATH = "/api/security/ai-settings";
-
-/** 23 (view; the list is filled only at manage) — Droplet's open suggestions. */
-export function getSecurityLinkProposals(): Promise<SecurityLinkProposalsView> {
-  return securityFetch<SecurityLinkProposalsView>(`${BASE}${SECURITY_LINK_PROPOSALS_PATH}`);
-}
-
-/** 24 (manage) — add Droplet's suggestion, or Keep a link Droplet made. */
-export function acceptSecurityLink(linkId: string): Promise<SecurityLinkDecisionResult> {
-  return securityFetch<SecurityLinkDecisionResult>(
-    `${BASE}${SECURITY_LINKS_PATH}/${encodeURIComponent(linkId)}/accept`,
-    jsonBody("POST", {}),
-  );
-}
-
-/** 25 (manage) — Not this (a suggestion), or Undo (a link Droplet made). Final: Droplet never suggests it again. */
-export function rejectSecurityLink(linkId: string): Promise<SecurityLinkDecisionResult> {
-  return securityFetch<SecurityLinkDecisionResult>(
-    `${BASE}${SECURITY_LINKS_PATH}/${encodeURIComponent(linkId)}/reject`,
-    jsonBody("POST", {}),
-  );
-}
-
-/** 26 (view) — what Droplet's AI may do in Security. */
-export function getSecurityAiSettings(): Promise<SecurityAiSettingsView> {
-  return securityFetch<SecurityAiSettingsView>(`${BASE}${SECURITY_AI_SETTINGS_PATH}`);
-}
-
-/** 27 (manage) — change it; `expectedVersion` from the last read (409 VERSION_CONFLICT otherwise). */
-export function putSecurityAiSettings(body: SecurityAiSettingsBody): Promise<SecurityAiSettingsWriteResult> {
-  return securityFetch<SecurityAiSettingsWriteResult>(`${BASE}${SECURITY_AI_SETTINGS_PATH}`, jsonBody("PUT", body));
-}
-
-/** 13 (manage) — set or clear the weekly hours. */
-export function putSecurityHours(body: SecurityHoursBody): Promise<SecurityHoursWriteResult> {
-  return securityFetch<SecurityHoursWriteResult>(`${BASE}${SECURITY_HOURS_PATH}`, jsonBody("PUT", body));
-}
-
-/** 14 (manage) — add or replace one special day ('YYYY-MM-DD', site-local). */
-export function putSecurityHoursException(
-  date: string,
-  body: SecurityHoursExceptionBody,
-): Promise<SecurityHoursWriteResult> {
-  return securityFetch<SecurityHoursWriteResult>(
-    `${BASE}${SECURITY_HOURS_PATH}/exceptions/${encodeURIComponent(date)}`,
-    jsonBody("PUT", body),
-  );
-}
-
-// ── WARP-2980 (ADR-059 P5 PR-A): what normal looks like — routes 29–30 ──
-// View-level, read-only, through `securityFetch` (typed `.code`); a failure is
-// rendered with `translateError(err, "security")`.
-
-export const SECURITY_PATTERNS_PATH = "/api/security/patterns";
-
-/** 29 — the learning list, the keys the viewer may see, and the release of each flag. */
-export function getSecurityPatterns(): Promise<SecurityPatternsOverview> {
-  return securityFetch<SecurityPatternsOverview>(`${BASE}${SECURITY_PATTERNS_PATH}`);
-}
-
-/** 30 — one key's 48 hour cells for one label. 404 PATTERN_NOT_FOUND when missing or hidden. */
-export function getSecurityPatternCells(key: string, label: string): Promise<SecurityPatternCells> {
-  const qs = new URLSearchParams({ key, label }).toString();
-  return securityFetch<SecurityPatternCells>(`${BASE}${SECURITY_PATTERNS_PATH}/cells?${qs}`);
-}
-
-// ── WARP-2980 (ADR-059 P5 PR-B): expected activity (routes 32–34) ──
-// Through `securityFetch` (typed `.code`); a failure is rendered with
-// `translateError(err, "security")`. The list is view-level; add and remove
-// are manage (the page offers them only when the list's `canManage` says so).
-
-export const SECURITY_SUPPRESSIONS_PATH = "/api/security/suppressions";
-
-/** Route 32. */
-export function getSecuritySuppressions(): Promise<SecuritySuppressionList> {
-  return securityFetch<SecuritySuppressionList>(`${BASE}${SECURITY_SUPPRESSIONS_PATH}`);
-}
-
-/** Route 33. */
-export function createSecuritySuppression(body: SecuritySuppressionCreateBody): Promise<{ suppression: SecuritySuppressionView }> {
-  return securityFetch<{ suppression: SecuritySuppressionView }>(`${BASE}${SECURITY_SUPPRESSIONS_PATH}`, jsonBody("POST", body));
-}
-
-/** Route 34. The route takes no body; `{}` is sent so the JSON parser has one. */
-export function removeSecuritySuppression(id: string): Promise<{ changed: boolean }> {
-  return securityFetch<{ changed: boolean }>(`${BASE}${SECURITY_SUPPRESSIONS_PATH}/${encodeURIComponent(id)}/remove`, jsonBody("POST", {}));
-}
-
-/** 15 (manage) — 204. `version` is the hours version the page read. */
-export async function deleteSecurityHoursException(date: string, version: number): Promise<void> {
-  await securityFetch<unknown>(
-    `${BASE}${SECURITY_HOURS_PATH}/exceptions/${encodeURIComponent(date)}?version=${encodeURIComponent(String(version))}`,
-    { method: "DELETE" },
-  );
-}
-
-// ── WARP-2978 (ADR-059 P3 §7 routes 16–22): incidents and who is told about alerts ──
-// Every call goes through `securityFetch`: a failure throws with `.code` (the
-// server's `error.code`) and `.status` — render it with
-// `translateError(err, "security")`, never `err.message`. Reads are view-level
-// for every role in the business and never produce a feature-gate denial (the threat
-// mirror would show one as a threat); acknowledge/resolve are act, the routing
-// PUT is manage, and the page renders those controls only at that level.
-// Everything a read returns is already projected for the viewer (DS-005).
-
-export const SECURITY_INCIDENTS_PATH = "/api/security/incidents";
-export const SECURITY_INCIDENT_SUMMARY_PATH = "/api/security/incidents/summary";
-export const SECURITY_ALERT_ROUTING_PATH = "/api/security/alert-routing";
-
-export interface SecurityIncidentsQuery {
-  /** `attention` = open incidents nobody is on yet (visible codes only). The box defaults to `all`. */
-  state?: "attention" | "open" | "acknowledged" | "resolved" | "activity" | "all";
-  severity?: "alert" | "notice";
-  /** An area id. A hidden or missing area answers an empty page, never an error. */
-  zone?: string;
-  /** 1–100; the box defaults to 30. */
-  limit?: number;
-  /** `nextCursor` from the previous page. */
-  cursor?: string | null;
-}
-
-export function securityIncidentsPath(q: SecurityIncidentsQuery = {}): string {
-  const p = new URLSearchParams();
-  if (q.state) p.set("state", q.state);
-  if (q.severity) p.set("severity", q.severity);
-  if (q.zone) p.set("zone", q.zone);
-  if (q.limit) p.set("limit", String(q.limit));
-  if (q.cursor) p.set("cursor", q.cursor);
-  const qs = p.toString();
-  return `${SECURITY_INCIDENTS_PATH}${qs ? `?${qs}` : ""}`;
-}
-
-/** 16 — a page of incidents, newest activity first. A 503 is an outage, never an empty list. */
-export function getSecurityIncidents(q: SecurityIncidentsQuery = {}): Promise<IncidentsPage> {
-  return securityFetch<IncidentsPage>(`${BASE}${securityIncidentsPath(q)}`);
-}
-
-/** 17 — open alerts / notices for this viewer, the latest three, and whether alerts can fire. */
-export function getSecurityIncidentSummary(): Promise<IncidentsSummary> {
-  return securityFetch<IncidentsSummary>(`${BASE}${SECURITY_INCIDENT_SUMMARY_PATH}`);
-}
-
-/** 18 — one incident. 404 INCIDENT_NOT_FOUND answers a missing AND a hidden incident alike. */
-export function getSecurityIncident(id: string): Promise<IncidentDetail> {
-  return securityFetch<IncidentDetail>(`${BASE}${SECURITY_INCIDENTS_PATH}/${encodeURIComponent(id)}`);
-}
-
-/**
- * 19 (act) — "someone is on it". `notificationId` is the alert notification
- * the page was opened from (`?n=`); the box records it only when it is this
- * person's own notice for this incident, and otherwise drops it.
- */
-export function acknowledgeSecurityIncident(
-  id: string,
-  opts: { notificationId?: string | null } = {},
-): Promise<IncidentActionResult> {
-  return securityFetch<IncidentActionResult>(
-    `${BASE}${SECURITY_INCIDENTS_PATH}/${encodeURIComponent(id)}/acknowledge`,
-    jsonBody("POST", opts.notificationId ? { notificationId: opts.notificationId } : {}),
-  );
-}
-
-/**
- * 28 (act) — WARP-2979 P4 PR-2: "Summarise now" / "Regenerate". 202 {narrative}
- * in state `pending`; 409 NARRATIVE_COOLDOWN, NARRATIVE_TOO_OLD, SUMMARIES_OFF or NOT_ACTIONABLE;
- * 404 INCIDENT_NOT_FOUND. The body is strict and empty.
- */
-export function requestSecurityIncidentNarrative(id: string): Promise<{ narrative: IncidentNarrativeView }> {
-  return securityFetch<{ narrative: IncidentNarrativeView }>(
-    `${BASE}${SECURITY_INCIDENTS_PATH}/${encodeURIComponent(id)}/narrative`,
-    jsonBody("POST", {}),
-  );
-}
-
-/** 20 (act) — done, with an optional note of at most 280 characters. The body is strict: no empty note is sent. */
-export function resolveSecurityIncident(id: string, opts: { note?: string } = {}): Promise<IncidentActionResult> {
-  const note = (opts.note ?? "").trim();
-  return securityFetch<IncidentActionResult>(
-    `${BASE}${SECURITY_INCIDENTS_PATH}/${encodeURIComponent(id)}/resolve`,
-    jsonBody("POST", note ? { note } : {}),
-  );
-}
-
-/**
- * 35 (act, owner/admin — WARP-2980 P5) — Expected / Not expected. The body is
- * exactly `{verdict}` (strict on the box). It never acknowledges, resolves or
- * changes who is told; 409 NOT_JUDGEABLE when there is nothing this viewer
- * can mark (or their view is partial), 409 INCIDENT_CONFLICT on a lost race.
- */
-export function setSecurityIncidentVerdict(id: string, verdict: IncidentVerdict): Promise<IncidentActionResult> {
-  return securityFetch<IncidentActionResult>(
-    `${BASE}${SECURITY_INCIDENTS_PATH}/${encodeURIComponent(id)}/verdict`,
-    jsonBody("POST", { verdict }),
-  );
-}
-
-/** 21 — who is told: everyone at manage, the viewer's own line below it (a filter, not a gate). */
-export function getAlertRouting(): Promise<AlertRoutingView> {
-  return securityFetch<AlertRoutingView>(`${BASE}${SECURITY_ALERT_ROUTING_PATH}`);
-}
-
-/** 22 (manage) — tell or stop telling one person. 409 NO_RECIPIENT when it would leave nobody who can be told. */
-export function putAlertRouting(userId: string, body: AlertRoutingSetBody): Promise<{ person: AlertRoutingPerson }> {
-  return securityFetch<{ person: AlertRoutingPerson }>(
-    `${BASE}${SECURITY_ALERT_ROUTING_PATH}/${encodeURIComponent(userId)}`,
-    jsonBody("PUT", body),
-  );
-}
-
-// ── ADR-055 P4b: the doors page (P4a routes 1–5) ──
-// Reads are owner/admin; writes are the owner's alone. The transport is
-// `securityFetch` above (its name is historical: authFetch's token refresh
-// plus typed errors, `.code` and `.status`), so a 403 is distinguishable from
-// an outage. Render a failure with `translateError(err, "doors")`.
-// No route deletes a door: retiring one keeps its events.
-
-import type {
-  DoorCreateBody,
-  DoorEventsPage,
-  DoorPatchBody,
-  DoorView,
-  DoorsResponse,
-} from "./types";
-
-export const DOORS_PATH = "/api/doors";
-
-/** 1 — the doors, each with its newest position report. Retired doors only when asked. */
-export function getDoors(opts: { includeRetired?: boolean } = {}): Promise<DoorsResponse> {
-  return securityFetch<DoorsResponse>(`${BASE}${DOORS_PATH}${opts.includeRetired ? "?include=retired" : ""}`);
-}
-
-export interface DoorEventsQuery {
-  cursor?: string | null;
-  /** 1–200; the box defaults to 50. */
-  limit?: number;
-}
-
-export function doorEventsPath(q: DoorEventsQuery = {}): string {
-  const p = new URLSearchParams();
-  if (q.limit) p.set("limit", String(q.limit));
-  if (q.cursor) p.set("cursor", q.cursor);
-  const qs = p.toString();
-  return `${DOORS_PATH}/events${qs ? `?${qs}` : ""}`;
-}
-
-/** 2 — what happened at them, newest first, cursor-paged. */
-export function getDoorEvents(q: DoorEventsQuery = {}): Promise<DoorEventsPage> {
-  return securityFetch<DoorEventsPage>(`${BASE}${doorEventsPath(q)}`);
-}
-
-/** 3 (owner) — 201. */
-export function createDoor(body: DoorCreateBody): Promise<{ door: DoorView }> {
-  return securityFetch<{ door: DoorView }>(`${BASE}${DOORS_PATH}`, jsonBody("POST", body));
-}
-
-/** 4 (owner). 409 DOOR_RETIRED on a retired door. */
-export function patchDoor(id: string, body: DoorPatchBody): Promise<{ door: DoorView }> {
-  return securityFetch<{ door: DoorView }>(`${BASE}${DOORS_PATH}/${encodeURIComponent(id)}`, jsonBody("PATCH", body));
-}
-
-/** 5 (owner) — retiring twice is not an error. There is no way back from the dashboard. */
-export function retireDoor(id: string): Promise<{ door: DoorView }> {
-  return securityFetch<{ door: DoorView }>(`${BASE}${DOORS_PATH}/${encodeURIComponent(id)}/retire`, jsonBody("POST", {}));
-}
-
 // ── WARP-2804: notification acknowledgement (routes N1–N4) ──
 // A person reads and acknowledges their OWN notifications. The transport is
-// `securityFetch` above — authFetch (token refresh, the session cookie) with
+// `typedAuthFetch` above — authFetch (token refresh, the session cookie) with
 // typed errors (`.code` = the server's `error.code`, `.status`) — so a 404
 // NOTIFICATION_NOT_FOUND is distinguishable from a network failure. The box
 // records the sign-in that acked and what the client said it was; neither
@@ -9842,12 +9819,12 @@ export function getNotifications(q: NotificationsQuery = {}): Promise<Notificati
   if (q.cursor) p.set("cursor", q.cursor);
   if (q.state) p.set("state", q.state);
   const qs = p.toString();
-  return securityFetch<NotificationsPage>(`${BASE}${NOTIFICATIONS_PATH}${qs ? `?${qs}` : ""}`);
+  return typedAuthFetch<NotificationsPage>(`${BASE}${NOTIFICATIONS_PATH}${qs ? `?${qs}` : ""}`);
 }
 
 /** N2 — the badge. */
 export async function getUnreadNotificationCount(): Promise<number> {
-  const { unread } = await securityFetch<{ unread: number }>(`${BASE}${NOTIFICATIONS_PATH}/unread-count`);
+  const { unread } = await typedAuthFetch<{ unread: number }>(`${BASE}${NOTIFICATIONS_PATH}/unread-count`);
   return unread;
 }
 
@@ -9857,7 +9834,7 @@ export async function getUnreadNotificationCount(): Promise<number> {
  * ack stands and a repeat answers `changed: false`.
  */
 export function ackNotification(id: string, opts: { via?: "inbox" | "opened" } = {}): Promise<NotificationAckResult> {
-  return securityFetch<NotificationAckResult>(
+  return typedAuthFetch<NotificationAckResult>(
     `${BASE}${NOTIFICATIONS_PATH}/${encodeURIComponent(id)}/ack`,
     jsonBody("POST", opts.via ? { via: opts.via } : {}),
   );
@@ -9870,12 +9847,12 @@ export function ackNotification(id: string, opts: { via?: "inbox" | "opened" } =
  * that are not the person's are simply not counted.
  */
 export function ackAllNotifications(ids: readonly string[]): Promise<NotificationAckAllResult> {
-  return securityFetch<NotificationAckAllResult>(`${BASE}${NOTIFICATIONS_PATH}/ack-all`, jsonBody("POST", { ids }));
+  return typedAuthFetch<NotificationAckAllResult>(`${BASE}${NOTIFICATIONS_PATH}/ack-all`, jsonBody("POST", { ids }));
 }
 
 // ── WARP-2981 (ADR-059 P6, DS-003): the active department, on the server ──
 // The department a person's shell is arranged around follows them to every
-// device. Same transport as above (`securityFetch`: authFetch + typed errors),
+// device. Same transport as above (`typedAuthFetch`: authFetch + typed errors),
 // so a refusal is told apart from a missing route: a PUT the box refuses is a
 // 404 with `.code === "DEPARTMENT_NOT_AVAILABLE"`; a 404 with any other code
 // is an orchestrator older than this route.
@@ -9885,170 +9862,23 @@ export const ACTIVE_DEPARTMENT_PATH = "/api/me/active-department";
 /** P6-1 — the caller's choice, re-checked by the box now. `scope: "unset"` is
  *  "never chosen", which is not the same answer as a chosen Whole business. */
 export function getActiveDepartment(): Promise<ActiveDepartmentResponse> {
-  return securityFetch<ActiveDepartmentResponse>(`${BASE}${ACTIVE_DEPARTMENT_PATH}`);
+  return typedAuthFetch<ActiveDepartmentResponse>(`${BASE}${ACTIVE_DEPARTMENT_PATH}`);
 }
 
 /** P6-2 — choose a department by id, or Whole business with null. */
 export function putActiveDepartment(departmentId: string | null): Promise<ActiveDepartmentResponse> {
-  return securityFetch<ActiveDepartmentResponse>(
+  return typedAuthFetch<ActiveDepartmentResponse>(
     `${BASE}${ACTIVE_DEPARTMENT_PATH}`,
     jsonBody("PUT", { departmentId }),
   );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Device control — building systems over the device gateway (BACnet/IP,
-// Modbus TCP, SNMP, KNX/IP). Orchestrator: routes/building.ts.
-// ─────────────────────────────────────────────────────────────────────────────
-
-export type BuildingProtocol = "bacnet" | "modbus" | "snmp" | "knx";
-export type BuildingValue = boolean | number | string;
-
-export interface BuildingPoint {
-  id: string;
-  name: string;
-  kind: "number" | "boolean" | "text";
-  unit?: string | null;
-  writable: boolean;
-  min?: number | null;
-  max?: number | null;
-  [k: string]: unknown;
-}
-
-export interface BuildingDevice {
-  id: string;
-  name: string;
-  protocol: BuildingProtocol;
-  address: string;
-  room?: string | null;
-  template?: string | null;
-  points: BuildingPoint[];
-  [k: string]: unknown;
-}
-
-export interface BuildingReading {
-  value: BuildingValue | null;
-  error: string | null;
-}
-
-export interface BuildingWriteResult {
-  applied: boolean;
-  live_writes: boolean;
-  readback?: BuildingReading | null;
-}
-
-async function buildingJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await authFetch(`${BASE}/api/building${path}`, {
-    ...init,
-    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
-  });
-  if (res.status === 204) return undefined as T;
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const err = new Error(
-      data.error || data.message || `Device gateway request failed (${res.status})`,
-    ) as Error & { code?: string; status?: number };
-    err.code = data.code;
-    err.status = res.status;
-    throw err;
-  }
-  return data as T;
-}
-
-export async function listBuildingDevices(): Promise<BuildingDevice[]> {
-  return (await buildingJson<{ devices: BuildingDevice[] }>("/devices")).devices;
-}
-
-export async function readBuildingValues(
-  id: string,
-): Promise<{ read_at: string; values: Record<string, BuildingReading> }> {
-  return buildingJson(`/devices/${encodeURIComponent(id)}/values`);
-}
-
-export async function writeBuildingPoint(
-  id: string,
-  pointId: string,
-  value: BuildingValue,
-): Promise<BuildingWriteResult> {
-  return buildingJson(
-    `/devices/${encodeURIComponent(id)}/points/${encodeURIComponent(pointId)}/write`,
-    { method: "POST", body: JSON.stringify({ value }) },
-  );
-}
-
-export async function saveBuildingDevice(
-  id: string,
-  device: Record<string, unknown>,
-): Promise<BuildingDevice> {
-  return buildingJson(`/devices/${encodeURIComponent(id)}`, {
-    method: "PUT",
-    body: JSON.stringify(device),
-  });
-}
-
-export async function deleteBuildingDevice(id: string): Promise<void> {
-  await buildingJson(`/devices/${encodeURIComponent(id)}`, { method: "DELETE" });
-}
-
-export async function discoverBuildingDevices(
-  protocol: "bacnet" | "knx",
-): Promise<Record<string, unknown>[]> {
-  return (
-    await buildingJson<{ found: Record<string, unknown>[] }>("/discover", {
-      method: "POST",
-      body: JSON.stringify({ protocol }),
-    })
-  ).found;
-}
-
-// ── WARP-2981 (ADR-059 P6, §3.8): the Security wall ──
-// /security/wall reads only what /security already shows this viewer — each
-// read their own DS-005 projection, view level, never a write — and every read
-// has a 20 s timeout and a typed `.status` (`securityFetch`; the camera
-// pictures, which are not JSON, the same by hand), so a request that never
-// answers fails and is retried instead of stalling its SWR key for the TV's
-// lifetime. The rack panel's box-wide count is for the panel's service
-// principal alone and is never read from here (pinned by the wall's page test).
-import type { SecurityIncidentCounts } from "./types";
-import type { ModulesView } from "./hooks/useModuleGate";
-
-/** Route 17. A local literal: PR-C defines its own constant, and the two fold together once both land. */
-const WALL_INCIDENT_SUMMARY_PATH = "/api/security/incidents/summary";
-
-/** A count the wall may draw: a non-negative safe integer — never a string, a negative or a missing 0. */
-const isCount = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
-
-function unreadable(what: string): TypedError {
-  const e: TypedError = new Error(`${what} isn't in a shape Droplet understands.`);
-  e.code = "BAD_RESPONSE";
-  e.status = 200;
-  return e;
-}
-
-/**
- * Route 17's two counts, validated: anything but two non-negative safe
- * integers throws, so the wall never draws a number it was not given.
- * `latest` is dropped here — the wall names no incident.
- */
-export async function getSecurityIncidentCounts(): Promise<SecurityIncidentCounts> {
-  const body = await securityFetch<unknown>(`${BASE}${WALL_INCIDENT_SUMMARY_PATH}`);
-  const b = (body && typeof body === "object" ? body : {}) as { openAlerts?: unknown; openNotices?: unknown };
-  if (!isCount(b.openAlerts) || !isCount(b.openNotices)) throw unreadable("The incident counts");
-  return { openAlerts: b.openAlerts, openNotices: b.openNotices };
-}
-
-/** The P2a health read through `securityFetch` (the header's `getSecurityHealth` keeps its callers and its lack of a timeout). */
-export async function getSecurityWallHealth(): Promise<{ sources: SecurityHealthRow[] }> {
-  const body = await securityFetch<unknown>(`${BASE}/api/security/health`);
-  const sources = body && typeof body === "object" ? (body as { sources?: unknown }).sources : undefined;
-  if (!Array.isArray(sources)) throw unreadable("What Security listens to");
-  return { sources: sources as SecurityHealthRow[] };
-}
+// ── The sign-in's own end ──
 
 /**
  * `session.endsAt` of an /auth/me body when it is a string `Date.parse`
- * accepts, else null. It is the LATEST the sign-in can last (P6-A), so it is
- * shown as "by … at the latest"; absent, null or anything else shows nothing.
+ * accepts, else null. It is the LATEST the sign-in can last, so it is shown as
+ * "by … at the latest"; absent, null or anything else shows nothing.
  */
 export function signInEndsAtOf(body: unknown): string | null {
   if (!body || typeof body !== "object") return null;
@@ -10064,74 +9894,5 @@ export function signInEndsAtOf(body: unknown): string | null {
  * old one.
  */
 export async function getSignInEndsAt(): Promise<string | null> {
-  return signInEndsAtOf(await securityFetch<unknown>(`${BASE}/api/auth/me`));
-}
-
-/**
- * The wall's own read of GET /api/modules (the nav gate's endpoint). The nav
- * gate's shared read has no timeout and stops polling after one error, which a
- * TV left for hours cannot afford; the wall mirrors each answer into that
- * shared key (useSecurityWall).
- */
-export async function getWallModules(): Promise<ModulesView> {
-  const body = await securityFetch<unknown>(`${BASE}/api/modules`);
-  if (!body || typeof body !== "object" || !Array.isArray((body as { modules?: unknown }).modules)) {
-    throw unreadable("Which features are on");
-  }
-  return body as ModulesView;
-}
-
-/**
- * The cameras this viewer may see — GET /api/cameras, which the server
- * already narrows to their grants (`filterVisibleCameras`, WARP-1962; owner
- * and admin see all). The wall draws a tile for each and for nothing else
- * (DS-005). Through `securityFetch` (20 s): a hung list fails and is retried.
- * `_status: "disconnected"` (the camera system isn't reachable) comes with an
- * empty list that does NOT mean "no cameras", so it throws instead.
- */
-export async function getWallCameras(): Promise<CameraInfo[]> {
-  const body = await securityFetch<unknown>(`${BASE}/api/cameras`);
-  const b = (body && typeof body === "object" ? body : {}) as { cameras?: unknown; _status?: unknown };
-  if (b._status === "disconnected") {
-    const e: TypedError = new Error("Droplet can't reach the camera system right now.");
-    e.code = "CAMERAS_DISCONNECTED";
-    e.status = 200;
-    throw e;
-  }
-  if (!Array.isArray(b.cameras) || !b.cameras.every((c) => c && typeof c === "object" && typeof (c as { name?: unknown }).name === "string")) {
-    throw unreadable("The camera list");
-  }
-  return b.cameras as CameraInfo[];
-}
-
-/** The height the wall asks each camera's latest picture at: large enough for a quarter of a 1080p TV. */
-export const WALL_SNAPSHOT_HEIGHT = 720;
-
-/**
- * One camera's latest picture (GET /api/cameras/:name/snapshot, which checks
- * this viewer's grant), as a Blob for an object URL. Through `authFetch`, so
- * an expiring access cookie is refreshed (an `<img src>` cannot), with a 20 s
- * timeout, and `no-store`: the route allows 5 s of HTTP caching, and a
- * cached picture must never be drawn as a new one. Rejects with the status on
- * anything but 2xx.
- */
-export async function getWallCameraSnapshot(name: string): Promise<Blob> {
-  const path = `${getCameraSnapshotUrl(name)}?h=${WALL_SNAPSHOT_HEIGHT}`;
-  const timeout = AbortSignal.timeout(DEFAULT_API_FETCH_TIMEOUT_MS);
-  try {
-    const r = await authFetch(path, { signal: timeout, cache: "no-store" });
-    if (!r.ok) {
-      const e: TypedError = new Error(`HTTP ${r.status}`);
-      e.code = "SNAPSHOT_FAILED";
-      e.status = r.status;
-      throw e;
-    }
-    return await r.blob();
-  } catch (err) {
-    if ((err as TypedError).code === "SNAPSHOT_FAILED") throw err;
-    const e: TypedError = new Error(timeout.aborted ? `Request timed out: ${path}` : err instanceof Error ? err.message : "Network error");
-    e.code = timeout.aborted ? "TIMEOUT" : "NETWORK_ERROR";
-    e.status = 0;
-    throw e;
-  }
+  return signInEndsAtOf(await typedAuthFetch<unknown>(`${BASE}/api/auth/me`));
 }

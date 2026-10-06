@@ -2,10 +2,11 @@
 #
 # npm: the root lockfile covers all workspaces (apps/*, services/*,
 # packages/*); tests/ has its own lockfile. pip: every requirements*.txt
-# directory (13). github-actions keeps workflow pins fresh. The docker
-# ecosystem is intentionally OMITTED: base-image CVEs are gated by the
-# Trivy step in docker-build.yml, and 20 Dockerfile update PRs/week is
-# noise without that signal.
+# directory (13). github-actions keeps workflow pins fresh. docker keeps the
+# digest pins on every Dockerfile FROM fresh (WARP-3670): ONE grouped PR a
+# month. The old reason for omitting it (20 Dockerfile PRs a week of noise)
+# is answered by grouping and the cadence, and a digest pin nothing updates
+# is worse than a floating tag.
 #
 # NOTE: Dependabot ALERTS + SECURITY updates are separate one-time repo
 # settings — see docs/SECURITY.md#dependabot for the enable commands.
@@ -251,16 +252,14 @@ updates:
         update-types: ["minor", "patch"]
     labels: ["dependencies"]
 
-  # The ten pip directories that share one ignore policy. ai-gateway and the
-  # two RAGAS directories are deliberately NOT here — each has a ceiling none
-  # of the others share; see the blocks after this one.
+  # The nine pip directories that share one ignore policy. file-indexer,
+  # ai-gateway and the two RAGAS directories have their own ceilings below.
   - package-ecosystem: pip
     target-branch: "stage"
     directories:
       - "/services/camera-discovery"
       - "/services/device-identity-svc"
       - "/services/email-indexer"
-      - "/services/file-indexer"
       - "/services/fleet-agent"
       - "/services/oled-display"
       - "/services/ops-console"
@@ -308,6 +307,46 @@ updates:
           - "huggingface_hub"          # as spelled in requirements.txt
           - "sounddevice"              # 0.5.x — voice-io
           - "vosk"                     # 0.3.x — voice-io
+    labels: ["dependencies"]
+
+  # file-indexer alone: tokenizers 0.23.2 requires huggingface-hub <2, while
+  # faster-whisper 1.2.1 requires tokenizers <1. #2671 could not resolve.
+  # A floor widening is not labelled semver-major; match target versions.
+  # Keep this local so voice-io's compatible Hub 2.x updates still flow.
+  # Recheck when a released tokenizers <1 supports Hub 2, then lift the ignore
+  # and requirements ceiling together after testing chunking and ASR loaders.
+  - package-ecosystem: pip
+    directory: "/services/file-indexer"
+    target-branch: "stage"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    open-pull-requests-limit: 10
+    groups:
+      pip-minor-and-patch:
+        update-types: ["minor", "patch"]
+        exclude-patterns:
+          - "fastapi"
+          - "uvicorn"
+          - "pgvector"
+          - "pdfplumber"
+          - "readability-lxml"
+          - "lxml-html-clean"
+          - "lxml_html_clean"
+          - "pytesseract"
+          - "extract-msg"
+          - "python-magic"
+          - "semantic-text-splitter"
+          - "tokenizers"
+          - "python-pptx"
+          - "huggingface-hub"
+          - "huggingface_hub"
+    ignore:
+      - dependency-name: "huggingface-hub"
+        versions: [">=2.0"]
+      - dependency-name: "huggingface_hub"
+        versions: [">=2.0"]
     labels: ["dependencies"]
 
   # The two RAGAS directories alone. They are the ONLY two requirements files in
@@ -419,6 +458,37 @@ updates:
         versions: [">=1.0"]
       - dependency-name: "transformers"            # #1172, #1627
         versions: [">=5.0"]
+    labels: ["dependencies"]
+
+  # WARP-3670: every Dockerfile FROM (and the one COPY --from=<image>) is
+  # pinned tag@sha256:digest; scripts/check-dockerfile-base-pins.sh fails the
+  # hadolint leg of ci.yml on a bare tag. Pins only stay safe if something
+  # moves them, and this is that something. One grouped PR a month keeps the
+  # docker-build cost bounded (it rebuilds the affected images once, not once
+  # per base image). Major/minor runtime jumps are a deliberate migration, not
+  # a refresh: node stays on its current major until the Node 22 move (WARP-3654)
+  # lands, and python is 3.12 (the requirements files are resolved against it).
+  - package-ecosystem: docker
+    directories:
+      - "/apps/*"
+      - "/services/*"
+      - "/services/erp-connector/harness/*"
+      - "/docker/*"
+      - "/docker/dev"
+      - "/openwrt/*"
+      - "/tests"
+    target-branch: "stage"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 1
+    groups:
+      docker-base-images:
+        patterns: ["*"]
+    ignore:
+      - dependency-name: "node"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "python"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
     labels: ["dependencies"]
 
   - package-ecosystem: github-actions

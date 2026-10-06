@@ -19,7 +19,6 @@ import { RouterStatusError } from "@/lib/api";
 const fetchVpnStatus = vi.fn();
 const fetchVpnPeers = vi.fn();
 const createVpnPeer = vi.fn();
-const fetchBoxName = vi.fn();
 
 vi.mock("@/lib/api", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
@@ -28,7 +27,6 @@ vi.mock("@/lib/api", async () => {
     fetchVpnStatus: (...a: unknown[]) => fetchVpnStatus(...a),
     fetchVpnPeers: (...a: unknown[]) => fetchVpnPeers(...a),
     createVpnPeer: (...a: unknown[]) => createVpnPeer(...a),
-    fetchBoxName: (...a: unknown[]) => fetchBoxName(...a),
   };
 });
 
@@ -44,9 +42,6 @@ beforeEach(() => {
     homeEndpointHost: "192.168.1.87",
     peerCount: 0,
   });
-  // WARP-1039 — no saved name by default: the blocked precheck keeps its
-  // pre-existing "set up internet address" back-jump baseline.
-  fetchBoxName.mockResolvedValue({ name: null, fqdn: null });
   createVpnPeer.mockResolvedValue({
     peer: {
       id: "p1",
@@ -70,13 +65,13 @@ async function reachToggle() {
 describe("VpnStep — one-tap remote access (WARP-979)", () => {
   it("lands on the one-tap toggle (not a form) when no peer exists", async () => {
     render(
-      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToAddress={vi.fn()} />,
+      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} />,
     );
     await reachToggle();
     expect(toggle()).toHaveAttribute("aria-checked", "false");
     // Ported one-tap copy is present.
     expect(
-      screen.getByText(/one tap connects this device to your droplet/i),
+      screen.getByText(/create an office WireGuard configuration/i),
     ).toBeInTheDocument();
     // The named-device form is NOT the primary surface.
     expect(screen.queryByPlaceholderText(/iPhone/i)).not.toBeInTheDocument();
@@ -84,7 +79,7 @@ describe("VpnStep — one-tap remote access (WARP-979)", () => {
 
   it("mints a peer with an auto-derived label and shows the QR when toggled on", async () => {
     render(
-      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToAddress={vi.fn()} />,
+      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} />,
     );
     await reachToggle();
     fireEvent.click(toggle());
@@ -101,7 +96,7 @@ describe("VpnStep — one-tap remote access (WARP-979)", () => {
 
   it("keeps the advanced named-device form reachable from the toggle view", async () => {
     render(
-      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToAddress={vi.fn()} />,
+      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} />,
     );
     await reachToggle();
     fireEvent.click(
@@ -116,7 +111,7 @@ describe("VpnStep — one-tap remote access (WARP-979)", () => {
   it("allows Skip from the toggle view", async () => {
     const onSkip = vi.fn();
     render(
-      <VpnStep onComplete={vi.fn()} onSkip={onSkip} onBackToAddress={vi.fn()} />,
+      <VpnStep onComplete={vi.fn()} onSkip={onSkip} />,
     );
     await reachToggle();
     fireEvent.click(screen.getByRole("button", { name: /i'll do this later/i }));
@@ -125,25 +120,23 @@ describe("VpnStep — one-tap remote access (WARP-979)", () => {
 });
 
 describe("VpnStep — honest away-from-home copy (WARP-993)", () => {
-  // The default fixture omits offLanReachable — the honest default: the
-  // split-horizon FQDN has no public A record (ADR-023 §3), so the minted
-  // conf only works on the home LAN until the ADR-025 relay lands.
+  // The wizard always creates an office configuration, regardless of away status.
 
   it("does NOT promise 'from anywhere' on the toggle view when offLanReachable is absent/false", async () => {
     render(
-      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToAddress={vi.fn()} />,
+      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} />,
     );
     await reachToggle();
     expect(screen.queryAllByText(/from anywhere/i)).toHaveLength(0);
     // Low-key forward-looking note instead.
-    expect(screen.queryAllByText(/coming soon/i).length).toBeGreaterThan(0);
+    expect(screen.queryAllByText(/coming soon|secure relay/i)).toHaveLength(0);
     // The one-tap headline copy still anchors the step.
     expect(
-      screen.getByText(/one tap connects this device to your droplet/i),
+      screen.getByText(/create an office WireGuard configuration/i),
     ).toBeInTheDocument();
   });
 
-  it("keeps the full 'from anywhere' promise on the toggle view when offLanReachable is true", async () => {
+  it("keeps office copy even when an away endpoint is configured", async () => {
     fetchVpnStatus.mockResolvedValue({
       configured: true,
       endpointConfigured: true,
@@ -153,16 +146,16 @@ describe("VpnStep — honest away-from-home copy (WARP-993)", () => {
       offLanReachable: true,
     });
     render(
-      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToAddress={vi.fn()} />,
+      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} />,
     );
     await reachToggle();
-    expect(screen.queryAllByText(/from anywhere/i).length).toBeGreaterThan(0);
+    expect(screen.queryAllByText(/from anywhere/i)).toHaveLength(0);
     expect(screen.queryAllByText(/coming soon/i)).toHaveLength(0);
   });
 
   it("gates the QR (created) view copy when offLanReachable is false", async () => {
     render(
-      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToAddress={vi.fn()} />,
+      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} />,
     );
     await reachToggle();
     fireEvent.click(toggle());
@@ -171,10 +164,10 @@ describe("VpnStep — honest away-from-home copy (WARP-993)", () => {
     expect(screen.queryAllByText(/from anywhere/i)).toHaveLength(0);
     // Don't send the customer to a coffee shop to "test" a dead endpoint.
     expect(screen.queryAllByText(/cellular/i)).toHaveLength(0);
-    expect(screen.queryAllByText(/coming soon/i).length).toBeGreaterThan(0);
+    expect(screen.queryAllByText(/coming soon|secure relay/i)).toHaveLength(0);
   });
 
-  it("keeps the cellular test guidance on the created view when offLanReachable is true", async () => {
+  it("keeps the created office configuration local when an away endpoint is configured", async () => {
     fetchVpnStatus.mockResolvedValue({
       configured: true,
       endpointConfigured: true,
@@ -184,14 +177,14 @@ describe("VpnStep — honest away-from-home copy (WARP-993)", () => {
       offLanReachable: true,
     });
     render(
-      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToAddress={vi.fn()} />,
+      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} />,
     );
     await reachToggle();
     fireEvent.click(toggle());
     expect(await screen.findByTestId("vpn-qr-wrapper")).toBeInTheDocument();
 
-    expect(screen.queryAllByText(/from anywhere/i).length).toBeGreaterThan(0);
-    expect(screen.queryAllByText(/cellular/i).length).toBeGreaterThan(0);
+    expect(screen.queryAllByText(/from anywhere/i)).toHaveLength(0);
+    expect(screen.queryAllByText(/cellular/i)).toHaveLength(0);
     expect(screen.queryAllByText(/coming soon/i)).toHaveLength(0);
   });
 
@@ -201,131 +194,12 @@ describe("VpnStep — honest away-from-home copy (WARP-993)", () => {
       endpointConfigured: false,
     });
     render(
-      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToAddress={vi.fn()} />,
+      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} />,
     );
     expect(
-      await screen.findByText(/remote access needs an internet address first/i),
+      await screen.findByText(/WireGuard needs a network endpoint/i),
     ).toBeInTheDocument();
     expect(screen.queryAllByText(/from anywhere/i)).toHaveLength(0);
-  });
-});
-
-describe("VpnStep — blocked precheck honesty when a name IS saved (WARP-1039)", () => {
-  beforeEach(() => {
-    fetchVpnStatus.mockResolvedValue({
-      configured: false,
-      endpointConfigured: false,
-    });
-  });
-
-  it("renders the 'address is being set up' variant instead of the back-jump when a name is saved", async () => {
-    fetchBoxName.mockResolvedValue({
-      name: "studio",
-      fqdn: "studio.droplet-us.com",
-    });
-    const onBackToAddress = vi.fn();
-    render(
-      <VpnStep
-        onComplete={vi.fn()}
-        onSkip={vi.fn()}
-        onBackToAddress={onBackToAddress}
-      />,
-    );
-
-    expect(
-      await screen.findByRole("heading", {
-        name: /your address is being set up/i,
-      }),
-    ).toBeInTheDocument();
-    // The saved fqdn is named so the customer knows exactly what's pending.
-    expect(
-      screen.getAllByText(/studio\.droplet-us\.com/i).length,
-    ).toBeGreaterThan(0);
-    // The honest copy: remote access finishes on its own — no bounce-back.
-    expect(
-      screen.getByText(/lights up automatically/i),
-    ).toBeInTheDocument();
-    // NO back-jump button: the customer already finished the Address step.
-    expect(
-      screen.queryByRole("button", { name: /set up internet address/i }),
-    ).not.toBeInTheDocument();
-    expect(onBackToAddress).not.toHaveBeenCalled();
-    expect(createVpnPeer).not.toHaveBeenCalled();
-  });
-
-  it("Continue advances (onComplete) and Skip skips (onSkip) from the with-name blocked view", async () => {
-    fetchBoxName.mockResolvedValue({
-      name: "studio",
-      fqdn: "studio.droplet-us.com",
-    });
-    const onComplete = vi.fn();
-    const onSkip = vi.fn();
-    render(
-      <VpnStep
-        onComplete={onComplete}
-        onSkip={onSkip}
-        onBackToAddress={vi.fn()}
-      />,
-    );
-    await screen.findByRole("heading", {
-      name: /your address is being set up/i,
-    });
-
-    fireEvent.click(screen.getByRole("button", { name: /^continue$/i }));
-    expect(onComplete).toHaveBeenCalledTimes(1);
-    fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
-    expect(onSkip).toHaveBeenCalledTimes(1);
-  });
-
-  it("guards the fqdn against small-viewport overflow (min-w-0 + truncate + break-all)", async () => {
-    fetchBoxName.mockResolvedValue({
-      name: "studio",
-      fqdn: "studio.droplet-us.com",
-    });
-    render(
-      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToAddress={vi.fn()} />,
-    );
-    await screen.findByRole("heading", {
-      name: /your address is being set up/i,
-    });
-
-    // A max-length hyphen-less name (40 chars + .droplet-us.com) must not push
-    // the card past a 320px viewport — same convention as the dashboardUrl
-    // break-all further down this file.
-    const nodes = screen.getAllByText("studio.droplet-us.com");
-    const headline = nodes.find((n) => n.tagName === "P");
-    const inline = nodes.find((n) => n.tagName === "SPAN");
-    expect(headline?.className).toContain("truncate");
-    expect(inline?.className).toContain("break-all");
-    // truncate only works when the flex child may shrink below content size.
-    expect(headline?.parentElement?.className).toContain("min-w-0");
-  });
-
-  it("keeps the existing back-jump blocked view when NO name is saved", async () => {
-    // Default fetchBoxName → { name: null } from beforeEach.
-    render(
-      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToAddress={vi.fn()} />,
-    );
-    expect(
-      await screen.findByText(/remote access needs an internet address first/i),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: /set up internet address/i }),
-    ).toBeInTheDocument();
-    expect(screen.queryByText(/is being set up/i)).not.toBeInTheDocument();
-  });
-
-  it("falls back to the back-jump blocked view when the name read fails (best-effort)", async () => {
-    fetchBoxName.mockRejectedValueOnce(new Error("network down"));
-    render(
-      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToAddress={vi.fn()} />,
-    );
-    expect(
-      await screen.findByText(/remote access needs an internet address first/i),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: /set up internet address/i }),
-    ).toBeInTheDocument();
   });
 });
 
@@ -335,7 +209,7 @@ describe("VpnStep — router unreachable (WARP-807)", () => {
       new RouterStatusError("UNREACHABLE", "Create peer: fetch failed", 503),
     );
     render(
-      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToAddress={vi.fn()} />,
+      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} />,
     );
     await reachToggle();
     fireEvent.click(toggle());
@@ -351,7 +225,7 @@ describe("VpnStep — router unreachable (WARP-807)", () => {
       new RouterStatusError("UNREACHABLE", "Create peer: fetch failed", 503),
     );
     render(
-      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToAddress={vi.fn()} />,
+      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} />,
     );
     await reachToggle();
     fireEvent.click(toggle());
@@ -368,7 +242,7 @@ describe("VpnStep — router unreachable (WARP-807)", () => {
     );
     const onSkip = vi.fn();
     render(
-      <VpnStep onComplete={vi.fn()} onSkip={onSkip} onBackToAddress={vi.fn()} />,
+      <VpnStep onComplete={vi.fn()} onSkip={onSkip} />,
     );
     await reachToggle();
     fireEvent.click(toggle());
@@ -381,7 +255,7 @@ describe("VpnStep — router unreachable (WARP-807)", () => {
   it("still surfaces the real message for an ordinary (non-router) failure", async () => {
     createVpnPeer.mockRejectedValueOnce(new Error("Device name already taken"));
     render(
-      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToAddress={vi.fn()} />,
+      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} />,
     );
     await reachToggle();
     fireEvent.click(toggle());
@@ -409,17 +283,17 @@ describe("VpnStep — precheck states (SETUP-WIZARD-SPEC §D)", () => {
       <VpnStep
         onComplete={vi.fn()}
         onSkip={vi.fn()}
-        onBackToAddress={onBackToAddress}
+
       />,
     );
 
     expect(
-      await screen.findByText(/remote access needs an internet address first/i),
+      await screen.findByText(/WireGuard needs a network endpoint/i),
     ).toBeInTheDocument();
     fireEvent.click(
-      screen.getByRole("button", { name: /set up internet address/i }),
+      screen.getByRole("button", { name: /check again/i }),
     );
-    expect(onBackToAddress).toHaveBeenCalledTimes(1);
+    expect(onBackToAddress).not.toHaveBeenCalled();
     expect(createVpnPeer).not.toHaveBeenCalled();
   });
 
@@ -457,7 +331,7 @@ describe("VpnStep — precheck states (SETUP-WIZARD-SPEC §D)", () => {
       <VpnStep
         onComplete={onComplete}
         onSkip={vi.fn()}
-        onBackToAddress={vi.fn()}
+
       />,
     );
 
@@ -491,7 +365,7 @@ describe("VpnStep — precheck states (SETUP-WIZARD-SPEC §D)", () => {
       ],
     });
     render(
-      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToAddress={vi.fn()} />,
+      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} />,
     );
 
     fireEvent.click(
@@ -506,7 +380,7 @@ describe("VpnStep — precheck states (SETUP-WIZARD-SPEC §D)", () => {
     fetchVpnStatus.mockRejectedValue(new Error("network down"));
     const onSkip = vi.fn();
     render(
-      <VpnStep onComplete={vi.fn()} onSkip={onSkip} onBackToAddress={vi.fn()} />,
+      <VpnStep onComplete={vi.fn()} onSkip={onSkip} />,
     );
 
     expect(
