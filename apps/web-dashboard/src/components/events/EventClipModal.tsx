@@ -24,6 +24,8 @@ import { ThumbImage } from "./ThumbImage";
 
 interface Props {
   event: EventDetail;
+  /** Recent detections open on the larger person photo when one was saved. */
+  initialMedia?: "clip" | "snapshot";
   /** The name the household gave the camera (WARP-3509). The page resolves it
    *  from the cameras list; without one the modal shows the prettified key,
    *  never the raw slug. */
@@ -91,10 +93,12 @@ function EventClipPlayer({ event, cameraDisplay }: { event: EventDetail; cameraD
     <>
       <ThumbImage
         src={event.snapshotUrl || event.thumbnail}
+        fallbackSrc={event.snapshotUrl ? event.thumbnail : null}
         alt={`${event.label} on ${cameraDisplay}`}
         className="w-full max-h-[60vh] object-contain"
         placeholderClassName="w-full aspect-video"
         iconSize={40}
+        retryKey={event.endTime}
       />
       {event.clipUrl && playback === "failed" && (
         <div className="flex flex-wrap items-center justify-between gap-3 px-3 py-2">
@@ -127,11 +131,16 @@ function EventClipPlayer({ event, cameraDisplay }: { event: EventDetail; cameraD
  * `translateError(err, "media")` copy, never the raw err.message —
  * the audit found these were leaking orchestrator-level strings.
  */
-export function EventClipModal({ event, cameraName, onClose, onToggleRetain }: Props) {
+export function EventClipModal({ event, cameraName, onClose, onToggleRetain, initialMedia = "clip" }: Props) {
   const headingId = useId();
   const { toast } = useToast();
   const { user } = useAuth();
   const canKeep = user?.role === "owner" || user?.role === "admin";
+  const [media, setMedia] = useState(initialMedia);
+  useEffect(() => {
+    setMedia(initialMedia);
+  }, [event.id, initialMedia]);
+  const photoOnly = media === "snapshot" && Boolean(event.snapshotUrl);
 
   // Local optimistic state for the Save toggle so the button flips
   // immediately on click. Reset whenever the modal switches to a new
@@ -246,8 +255,22 @@ export function EventClipModal({ event, cameraName, onClose, onToggleRetain }: P
       </div>
 
       <div className="p-4 space-y-3">
+        {event.clipUrl && event.snapshotUrl && (
+          <div className="pills" role="group" aria-label="Detection media">
+            <button type="button" className={photoOnly ? "active" : ""} aria-pressed={photoOnly} onClick={() => setMedia("snapshot")}>
+              Photo
+            </button>
+            <button type="button" className={!photoOnly ? "active" : ""} aria-pressed={!photoOnly} onClick={() => setMedia("clip")}>
+              Clip
+            </button>
+          </div>
+        )}
         <div className="rounded-lg overflow-hidden" style={{ background: "var(--inset)" }}>
-          <EventClipPlayer key={event.id} event={event} cameraDisplay={cameraDisplay} />
+          <EventClipPlayer
+            key={`${event.id}-${photoOnly ? "snapshot" : "clip"}`}
+            event={photoOnly ? { ...event, clipUrl: null } : event}
+            cameraDisplay={cameraDisplay}
+          />
         </div>
 
         {/* GenAI description (Phase 7.7) — only renders when there is one. */}

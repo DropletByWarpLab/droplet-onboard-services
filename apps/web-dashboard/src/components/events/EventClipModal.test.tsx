@@ -117,6 +117,8 @@ describe("EventClipModal picture failure", () => {
 
     fireEvent.error(document.querySelector("img")!);
 
+    expect(document.querySelector("img")).toHaveAttribute("src", `/api/cameras/events/${ID}/thumbnail`);
+    fireEvent.error(document.querySelector("img")!);
     expect(document.querySelector("img")).toBeNull();
     expect(document.querySelector("[data-testid='thumb-fallback']")).not.toBeNull();
     expect(document.body.innerHTML).not.toContain("person on Warp Lab Office");

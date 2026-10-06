@@ -13,11 +13,12 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, cleanup, within } from "@testing-library/react";
-import type { CameraInfo, CameraRecordingState } from "@/lib/types";
+import type { CameraInfo, CameraRecordingState, DetectionEvent } from "@/lib/types";
 
 const h = vi.hoisted(() => ({
   role: "owner",
   camera: undefined as unknown as CameraInfo,
+  events: [] as DetectionEvent[],
   push: vi.fn(),
   replace: vi.fn(),
   enableCam: vi.fn(),
@@ -77,7 +78,7 @@ vi.mock("@/components/Toast", () => ({
 vi.mock("swr", () => ({
   default: (key: unknown, _fetcher: unknown, options: Record<string, unknown> = {}) => {
     h.swrCalls.push({ key, options });
-    return { data: undefined, error: undefined, isLoading: false, mutate: vi.fn() };
+    return { data: typeof key === "string" && key.includes("/events?") ? h.events : undefined, error: undefined, isLoading: false, mutate: vi.fn() };
   },
 }));
 
@@ -123,6 +124,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   h.role = "owner";
   h.camera = cam();
+  h.events = [];
   h.swrCalls = [];
   h.enableCam.mockResolvedValue(undefined);
   h.disableCam.mockResolvedValue(undefined);
@@ -327,6 +329,18 @@ describe("the PTZ probe", () => {
 });
 
 describe("what was already here", () => {
+  it("opens a recent person photo and Escape closes the viewer before leaving the camera", () => {
+    h.events = [{ id: "evt-1", camera: "front_door", label: "person", score: 0.92, startTime: 1_800_000_000, endTime: 1_800_000_010, thumbnail: "/api/cameras/events/evt-1/thumbnail", hasSnapshot: true, hasClip: false }];
+    render(<CameraFullscreenPage />);
+    fireEvent.click(screen.getByRole("button", { name: /View person/ }));
+    expect(within(screen.getByRole("dialog")).getByRole("img")).toHaveAttribute("src", "/api/cameras/events/evt-1/snapshot");
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(h.replace).not.toHaveBeenCalled();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(h.replace).toHaveBeenCalledWith("/cameras");
+  });
+
   it("the fullscreen toggle keeps its accessible name", () => {
     render(<CameraFullscreenPage />);
     expect(screen.getByRole("button", { name: "Toggle fullscreen" })).toBeTruthy();
