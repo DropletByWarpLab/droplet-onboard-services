@@ -3,6 +3,9 @@
  * ticket without its link or a consumed message with no ticket. */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PrismaClient } from "@prisma/client";
+import { addReply } from "../services/support/conversation.service.js";
+import { updateTicket } from "../services/support/ticket.service.js";
+import { grants } from "./helpers/support-routes.js";
 
 vi.unmock("@prisma/client");
 vi.mock("../services/off-lan-gate.service.js", () => ({ outboundEmailGate: vi.fn().mockResolvedValue(true) }));
@@ -108,5 +111,99 @@ describe.skipIf(!RUN)("service desk email intake (WARP-3529)", () => {
     expect(await prisma.pmComment.count({ where: { workItemId: ticketId, authorKind: "CONTACT", visibility: "PUBLIC" } })).toBe(1);
     expect(await prisma.pmTicketEmailLink.count({ where: { workItemId: ticketId, emailMessageId: repeated.id } })).toBe(1);
     expect((await prisma.emailMessage.findUniqueOrThrow({ where: { id: repeated.id } })).deskIntakeStatus).toBe("DONE");
+  });
+
+  const ctx = { canReadProjects: false, canReadCrm: false };
+  const access = { resolveAccess: async () => grants([["support", "act"]]) };
+  const viewer = () => ({ id: ownerId, role: "owner" as const });
+  async function enableSla() {
+    await prisma.pmSlaPolicy.create({ data: { projectId: deskId, targets: { none: { firstResponseMins: 60, nextResponseMins: 30, resolutionMins: 240 } } } });
+  }
+  async function inboundReply(messageId = "sla-customer-reply@example.test", receivedAt = new Date("2026-10-01T10:10:00Z")) {
+    return prisma.emailMessage.create({ data: {
+      accountId, threadId, messageId, inReplyTo: firstMessageId, fromAddr: "dana@example.test", fromName: `${PREFIX}Dana Reyes`,
+      toAddrs: [`${PREFIX}support@example.test`], subject: "Re: [EML-1] Printer offline", bodyText: "Here is the detail.", receivedAt,
+      headers: { references: [firstMessageId], autoSubmitted: "no", precedence: null, xAutoreply: null, xAutorespond: null, returnPath: "dana@example.test", reportType: null },
+    } });
+  }
+  async function emailTicket() {
+    return prisma.pmTicket.findFirstOrThrow({ where: { channel: "EMAIL", requesterEmail: "dana@example.test" }, include: { workItem: true } });
+  }
+  it("starts an assigned email ticket's promise at receipt rather than delayed processing or retry time", async () => {
+    await enableSla();
+    await prisma.pmAssignmentRule.create({ data: { projectId: deskId, mode: "ROUND_ROBIN", memberIds: [ownerId] } });
+    await intake.intakeEmailMessage(prisma, accountId, firstMessageId, new Date("2026-10-01T12:00:00Z"), access);
+    const ticket = await emailTicket();
+    expect(ticket.workItem.createdAt.toISOString()).toBe("2026-10-01T10:00:00.000Z");
+    expect(ticket.firstResponseDueAt?.toISOString()).toBe("2026-10-01T11:00:00.000Z");
+    expect(ticket.firstRespondedAt).toBeNull(); // An automatic acknowledgement is not a staff response.
+    expect((await prisma.pmWorkItemAssignee.findMany({ where: { workItemId: ticket.workItemId } })).map((a) => a.userId)).toEqual([ownerId]);
+    await intake.intakeEmailMessage(prisma, accountId, firstMessageId, new Date("2026-10-01T13:00:00Z"), access);
+    expect((await emailTicket()).firstResponseDueAt?.toISOString()).toBe("2026-10-01T11:00:00.000Z");
+    expect(await prisma.pmTicketEmailLink.count({ where: { emailMessage: { messageId: firstMessageId } } })).toBe(1);
+  });
+  it("starts the next-response promise at the customer message's immutable timestamp without resetting it on replay", async () => {
+    await enableSla();
+    await intake.intakeEmailMessage(prisma, accountId, firstMessageId, new Date("2026-10-01T10:01:00Z"));
+    const ticket = await emailTicket();
+    await addReply(prisma, viewer(), ticket.workItemId, { bodyHtml: "Checking now." }, ctx, { ...access, now: () => new Date("2026-10-01T10:05:00Z") });
+    const message = await inboundReply();
+    await intake.intakeEmailMessage(prisma, accountId, message.messageId, new Date("2026-10-01T11:00:00Z"));
+    expect((await emailTicket()).nextResponseDueAt?.toISOString()).toBe("2026-10-01T10:40:00.000Z");
+    expect((await prisma.pmComment.findFirstOrThrow({ where: { workItemId: ticket.workItemId, authorKind: "CONTACT" } })).createdAt).toEqual(message.receivedAt);
+    await intake.intakeEmailMessage(prisma, accountId, message.messageId, new Date("2026-10-01T12:00:00Z"));
+    expect((await emailTicket()).nextResponseDueAt?.toISOString()).toBe("2026-10-01T10:40:00.000Z");
+    expect(await prisma.pmComment.count({ where: { workItemId: ticket.workItemId, authorKind: "CONTACT" } })).toBe(1);
+  });
+  it("excludes the pause before a received customer message from that message's next-response clock", async () => {
+    await enableSla();
+    await intake.intakeEmailMessage(prisma, accountId, firstMessageId, new Date("2026-10-01T10:01:00Z"));
+    const ticket = await emailTicket();
+    await addReply(prisma, viewer(), ticket.workItemId, { bodyHtml: "Waiting for your detail." }, ctx, { ...access, now: () => new Date("2026-10-01T10:05:00Z") });
+    const pending = await prisma.pmState.findFirstOrThrow({ where: { projectId: deskId, name: "Pending" } });
+    const open = await prisma.pmState.findFirstOrThrow({ where: { projectId: deskId, name: "Open" } });
+    await updateTicket(prisma, viewer(), ticket.workItemId, { stateId: pending.id }, ctx, { ...access, now: () => new Date("2026-10-01T10:06:00Z") });
+    const message = await inboundReply();
+    await intake.intakeEmailMessage(prisma, accountId, message.messageId, new Date("2026-10-01T10:20:00Z"));
+    expect((await emailTicket()).slaStatus).toBe("PAUSED");
+    await updateTicket(prisma, viewer(), ticket.workItemId, { stateId: open.id }, ctx, { ...access, now: () => new Date("2026-10-01T11:00:00Z") });
+    expect((await emailTicket()).nextResponseDueAt?.toISOString()).toBe("2026-10-01T11:30:00.000Z");
+  });
+  it("rolls back ticket creation, assignment, activities and links if the transactional clock cannot be saved", async () => {
+    await enableSla();
+    await prisma.pmAssignmentRule.create({ data: { projectId: deskId, mode: "ROUND_ROBIN", memberIds: [ownerId] } });
+    const failing = prisma.$extends({ query: { pmTicket: { async update({ args, query }) {
+      if (args.data.slaTargets !== undefined) throw new Error("injected SLA write failure");
+      return query(args);
+    } } } });
+    await expect(intake.intakeEmailMessage(failing as unknown as PrismaClient, accountId, firstMessageId, new Date("2026-10-01T12:00:00Z"), access)).rejects.toThrow("injected SLA write failure");
+    expect(await prisma.pmWorkItem.count({ where: { projectId: deskId } })).toBe(0);
+    expect((await prisma.pmProject.findUniqueOrThrow({ where: { id: deskId } })).seqCounter).toBe(0);
+    expect((await prisma.pmAssignmentRule.findUniqueOrThrow({ where: { projectId: deskId } })).lastAssignedUserId).toBeNull();
+    expect(await prisma.pmActivity.count({ where: { workItem: { projectId: deskId } } })).toBe(0);
+    expect(await prisma.pmTicketEmailLink.count({ where: { emailMessage: { messageId: firstMessageId } } })).toBe(0);
+    expect((await prisma.emailMessage.findUniqueOrThrow({ where: { accountId_messageId: { accountId, messageId: firstMessageId } } })).deskIntakeStatus).toBe("FAILED");
+    await intake.intakeEmailMessage(prisma, accountId, firstMessageId, new Date("2026-10-01T13:00:00Z"), access);
+    expect((await emailTicket()).firstResponseDueAt?.toISOString()).toBe("2026-10-01T11:00:00.000Z");
+  });
+  it("rolls back the requester reply and inbound link with a failed clock update, then retries once", async () => {
+    await enableSla();
+    await intake.intakeEmailMessage(prisma, accountId, firstMessageId, new Date("2026-10-01T10:01:00Z"));
+    const ticket = await emailTicket();
+    await addReply(prisma, viewer(), ticket.workItemId, { bodyHtml: "Checking now." }, ctx, { ...access, now: () => new Date("2026-10-01T10:05:00Z") });
+    const message = await inboundReply();
+    const failing = prisma.$extends({ query: { pmTicket: { async update({ args, query }) {
+      if (args.data.slaTargets !== undefined) throw new Error("injected requester clock failure");
+      return query(args);
+    } } } });
+    await expect(intake.intakeEmailMessage(failing as unknown as PrismaClient, accountId, message.messageId, new Date("2026-10-01T11:00:00Z"))).rejects.toThrow("injected requester clock failure");
+    expect(await prisma.pmComment.count({ where: { workItemId: ticket.workItemId, authorKind: "CONTACT" } })).toBe(0);
+    expect(await prisma.pmActivity.count({ where: { workItemId: ticket.workItemId, verb: "commented", actorId: null } })).toBe(0);
+    expect(await prisma.pmTicketEmailLink.count({ where: { emailMessageId: message.id } })).toBe(0);
+    expect((await emailTicket()).nextResponseDueAt).toBeNull();
+    await intake.intakeEmailMessage(prisma, accountId, message.messageId, new Date("2026-10-01T12:00:00Z"));
+    expect((await emailTicket()).nextResponseDueAt?.toISOString()).toBe("2026-10-01T10:40:00.000Z");
+    expect(await prisma.pmComment.count({ where: { workItemId: ticket.workItemId, authorKind: "CONTACT" } })).toBe(1);
+    expect(await prisma.pmTicketEmailLink.count({ where: { emailMessageId: message.id } })).toBe(1);
   });
 });

@@ -173,6 +173,7 @@ import { registerOutboxConsumer, stopOutbox } from "./services/pm/pm-outbox.js";
 import { createPmLiveConsumer } from "./services/pm/pm-live.js";
 import { createPmLiveAudience } from "./services/pm/pm-live-audience.js";
 import { getEffectiveModuleIds } from "./services/modules.service.js";
+import { registerSupportSlaRuntime } from "./services/support/sla-runtime.js";
 import { runDevelopmentSync } from "./services/pm/pm-development.service.js";
 import { createWebhookFanOutConsumer } from "./services/pm/webhook-fanout.js";
 import {
@@ -1672,6 +1673,7 @@ async function main() {
   //     When it queues something it wakes the delivery worker (below) instead of
   //     leaving the delivery to wait out the worker's interval.
   let webhookDeliveryJob: CronJobHandle | undefined;
+  registerSupportSlaRuntime(prisma, cronRuntime);
   registerOutboxConsumer(
     createWebhookFanOutConsumer(prisma, { onQueued: () => webhookDeliveryJob?.runNow() }),
     { prisma, cronRuntime },

@@ -8,6 +8,7 @@
  */
 import type { Prisma } from "@prisma/client";
 import type { Db } from "../pm/pm.service.js";
+import { evaluateSla, parseSlaTerms } from "./sla-engine.js";
 import {
   DEPARTMENT_SELECT,
   resolveDepartmentRef,
@@ -215,6 +216,9 @@ export function resolveRequester(row: LiveTicketRow, lookups: Lookups): ApiReque
 
 export function mapTicketSummary(row: LiveTicketRow, lookups: Lookups): ApiTicketSummary {
   const t = row.ticket;
+  const clock = t.slaTargets ? evaluateSla({ createdAt: row.createdAt, now: new Date(), clock: row.state?.slaClock ?? "RUNNING",
+    firstRespondedAt: t.firstRespondedAt, solvedAt: t.solvedAt, pausedMs: Number(t.slaPausedMs), pausedAt: t.slaPausedAt,
+    terms: parseSlaTerms(t.slaTargets), previousStatus: t.slaStatus }) : null;
   return {
     id: row.id,
     key: ticketKey(row),
@@ -229,6 +233,9 @@ export function mapTicketSummary(row: LiveTicketRow, lookups: Lookups): ApiTicke
     labels: row.labels.map((l) => mapDeskLabel(l.label)),
     department: resolveDepartmentRef(row.department, row.project.department),
     slaStatus: t.slaStatus,
+    sla: clock ? { firstResponseDueAt: clock.firstResponseDueAt?.toISOString() ?? null, nextResponseDueAt: clock.nextResponseDueAt?.toISOString() ?? null,
+      resolutionDueAt: clock.resolutionDueAt?.toISOString() ?? null, remainingBusinessMins: clock.remainingBusinessMs === null ? null : Math.ceil(clock.remainingBusinessMs / 60000),
+      paused: row.state?.slaClock === "PAUSED" } : null,
     firstRespondedAt: t.firstRespondedAt?.toISOString() ?? null,
     solvedAt: t.solvedAt?.toISOString() ?? null,
     reopenCount: t.reopenCount,

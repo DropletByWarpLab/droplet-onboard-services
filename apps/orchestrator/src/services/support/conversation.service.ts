@@ -22,6 +22,7 @@ import {
 } from "./support-mappers.js";
 import { assertDeskOpen, applyStateChange, cleanHtml, findTicketRow, getTicket, pickState } from "./ticket.service.js";
 import type { SupportDeps } from "./requester.service.js";
+import { lockTicketClock, syncTicketSla } from "./sla-clock.service.js";
 import {
   type ApiConversation,
   type ApiConversationEntry,
@@ -243,9 +244,10 @@ async function addComment(
   }
 
   const comment = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+    await lockTicketClock(tx, row.id);
     // "Send and set to Pending": the move and the comment are one change.
     if (target && target.id !== row.stateId) {
-      await applyStateChange(tx, row, target, viewer.id, now, { nudge: false });
+      await applyStateChange(tx, row, target, viewer.id, now, deps, { nudge: false });
     }
     const created = await tx.pmComment.create({
       data: {
@@ -254,6 +256,7 @@ async function addComment(
         authorKind: "USER",
         visibility,
         commentHtml: html,
+        createdAt: now,
         ...(visibility === "PUBLIC" ? { deliveryStatus, deliveryFailure } : {}),
       },
     });
@@ -268,6 +271,7 @@ async function addComment(
         where: { workItemId: row.id },
         data: { lastPublicActivityAt: now },
       });
+      await syncTicketSla(tx, row.id, now, "reply", deps);
     }
     await writeActivity(tx, {
       workItemId: row.id,

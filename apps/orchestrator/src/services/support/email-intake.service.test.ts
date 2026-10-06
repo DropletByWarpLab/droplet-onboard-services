@@ -17,6 +17,7 @@ function fixture(opts: { autoReply?: boolean; claimed?: boolean; rejectCommit?: 
   const links: unknown[] = [];
   const project = { id: "desk", name: "Support", identifier: "HELP" };
   const tx = {
+    $queryRaw: vi.fn().mockResolvedValue([]),
     $executeRaw: vi.fn().mockResolvedValue(1),
     emailMessage: {
       updateMany: vi.fn().mockResolvedValue({ count: opts.claimed === false ? 0 : 1 }),
@@ -30,8 +31,10 @@ function fixture(opts: { autoReply?: boolean; claimed?: boolean; rejectCommit?: 
     },
     contactEmail: { findFirst: vi.fn().mockResolvedValue({ contact: { id: "contact", displayName: "Dana", givenName: "Dana" } }) },
     pmState: { findMany: vi.fn().mockResolvedValue([{ id: "new", isDefault: true }]) },
+    pmAssignmentRule: { findUnique: vi.fn().mockResolvedValue(null) },
     pmProject: { update: vi.fn().mockResolvedValue({ seqCounter: 1 }) },
     pmWorkItem: {
+      findFirst: vi.fn().mockResolvedValue(null),
       create: vi.fn(async ({ data }: { data: unknown }) => { tickets.push(data); return { id: "ticket" }; }),
       findUniqueOrThrow: vi.fn().mockResolvedValue({ id: "ticket", sequenceId: 1, name: "Printer offline", project, ticket: { requesterEmail: "dana@example.test" } }),
     },

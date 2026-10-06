@@ -29,6 +29,7 @@ import { QueueRail } from "@/components/support/QueueRail";
 import { TicketList, TicketListSkeleton } from "@/components/support/TicketList";
 import { TicketWorkspace } from "@/components/support/TicketWorkspace";
 import { DeskModal } from "@/components/support/DeskModal";
+import { SlaSettingsModal } from "@/components/support/SlaSettingsModal";
 import { NewTicketModal } from "@/components/support/NewTicketModal";
 import { EMPTY_COPY, isSupportQueue } from "@/components/support/support-config";
 import {
@@ -54,7 +55,7 @@ export default function SupportPage(): JSX.Element {
   );
 }
 
-type Modal = null | "ticket" | "desk-new" | "desk-edit";
+type Modal = null | "ticket" | "desk-new" | "desk-edit" | "sla";
 
 function SupportWorkspace(): JSX.Element {
   const { user } = useAuth();
@@ -121,6 +122,9 @@ function SupportWorkspace(): JSX.Element {
         <button className="btn primary" type="button" onClick={() => setModal("ticket")}>
           <PmIcon name="plus" size={14} /> New ticket
         </button>
+      )}
+      {scopedDesk && (
+        <button className="btn" type="button" onClick={() => setModal("sla")}>Service levels</button>
       )}
       {manage && scopedDesk && (
         <button className="btn" type="button" onClick={() => setModal("desk-edit")}>
@@ -296,6 +300,7 @@ function SupportWorkspace(): JSX.Element {
           onSaved={() => changed()}
         />
       )}
+      {modal === "sla" && scopedDesk && <SlaSettingsModal desk={scopedDesk} agents={agents ?? []} onClose={() => setModal(null)} />}
     </PeopleContext.Provider>
   );
 }
