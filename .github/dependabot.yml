@@ -347,6 +347,15 @@ updates:
         versions: [">=2.0"]
       - dependency-name: "huggingface_hub"
         versions: [">=2.0"]
+      # #2714 (2026-10-06, WARP-3324): av 19 removed the metadata_errors kwarg
+      # of av.open(), and faster-whisper 1.2.1 (the newest release, pinned)
+      # still passes it -- tests/test_audio.py fails with TypeError at
+      # faster_whisper/audio.py:46. The v<19 cap in requirements.txt is
+      # deliberate; this is the same floor-widening-crosses-a-major case as
+      # rule 3 above, so match the target version. Lift together with the cap
+      # when a faster-whisper release supports av 19.
+      - dependency-name: "av"
+        versions: [">=19.0"]
     labels: ["dependencies"]
 
   # The two RAGAS directories alone. They are the ONLY two requirements files in
