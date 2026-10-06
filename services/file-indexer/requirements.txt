@@ -45,7 +45,7 @@ faster-whisper==1.2.1
 # an unexpected keyword argument 'metadata_errors'`. 18.1.0 is the last release
 # that accepts it. Cap below 19 until faster-whisper is bumped to a release that
 # works with av 19, then drop this cap.
-av>=11,<19
+av>=19.0.1,<20
 # WARP-199 RAG Phase 2 email extractor + WARP-200 archive extractor
 # (both use python-magic for content-based MIME sniffing).
 extract-msg==0.56.1
