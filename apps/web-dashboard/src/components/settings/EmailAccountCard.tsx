@@ -284,6 +284,7 @@ export function EmailAccountCard(): JSX.Element {
           <label className="flex flex-col gap-1.5">
             Name it
             <input
+              className="input"
               value={displayName}
               onChange={(e) => setDisplayName(e.target.value)}
               placeholder="Front desk"
@@ -292,6 +293,7 @@ export function EmailAccountCard(): JSX.Element {
           <label className="flex flex-col gap-1.5">
             Email address
             <input
+              className="input"
               type="email"
               value={address}
               onChange={(e) => setAddress(e.target.value)}
@@ -300,6 +302,7 @@ export function EmailAccountCard(): JSX.Element {
           <label className="flex flex-col gap-1.5">
             Incoming mail server
             <input
+              className="input"
               value={imapHost}
               onChange={(e) => setImapHost(e.target.value)}
               placeholder="your mail server"
@@ -308,6 +311,7 @@ export function EmailAccountCard(): JSX.Element {
           <label className="flex flex-col gap-1.5">
             Incoming port
             <input
+              className="input"
               type="number"
               value={imapPort}
               onChange={(e) => setImapPort(Number(e.target.value))}
@@ -316,6 +320,7 @@ export function EmailAccountCard(): JSX.Element {
           <label className="flex flex-col gap-1.5">
             Outgoing mail server
             <input
+              className="input"
               value={smtpHost}
               onChange={(e) => setSmtpHost(e.target.value)}
               placeholder="your mail server"
@@ -324,6 +329,7 @@ export function EmailAccountCard(): JSX.Element {
           <label className="flex flex-col gap-1.5">
             Outgoing port
             <input
+              className="input"
               type="number"
               value={smtpPort}
               onChange={(e) => setSmtpPort(Number(e.target.value))}
@@ -331,11 +337,12 @@ export function EmailAccountCard(): JSX.Element {
           </label>
           <label className="flex flex-col gap-1.5">
             Username
-            <input value={username} onChange={(e) => setUsername(e.target.value)} />
+            <input className="input" value={username} onChange={(e) => setUsername(e.target.value)} />
           </label>
           <label className="flex flex-col gap-1.5">
             Password
             <input
+              className="input"
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}

@@ -1,4 +1,6 @@
 "use client";
+import { ThemedDateInput } from "@/components/ui/ThemedDateInput";
+
 
 import { useMemo } from "react";
 import { Filter, X } from "lucide-react";
@@ -56,7 +58,7 @@ export function MotionFilterBar({ cameras, filter, period, businessHoursConfigur
           }}><option value="recent">Last 24 hours</option><option value="day">Calendar day</option></ThemedSelect>
         </label>
         {period === "day" && <label className="type-caption-2 text-[color:var(--text-muted)]">Date
-          <input aria-label="Motion date" type="date" className={`${CONTROL} mt-1.5`} value={dateString(filter.after)} max={dateString(Date.now() / 1000)} onChange={(e) => {
+          <ThemedDateInput aria-label="Motion date" type="date" className={`${CONTROL} mt-1.5`} value={dateString(filter.after)} max={dateString(Date.now() / 1000)} onChange={(e) => {
             if (e.target.value) onChange({ ...filter, ...calendarDayRange(e.target.value) }, "day");
           }} />
         </label>}

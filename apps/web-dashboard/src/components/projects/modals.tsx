@@ -1,4 +1,6 @@
 "use client";
+import { ThemedDateInput } from "@/components/ui/ThemedDateInput";
+
 
 // Create item / create project / archive / delete-project — canonical Dialog (center).
 
@@ -149,7 +151,7 @@ export function NewItemModal({
           </div>
           <div style={{ flex: 1 }}>
             <Field label="Due date">
-              <input className="pm-input pm-mono" type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} />
+              <ThemedDateInput className="pm-input pm-mono" type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} />
             </Field>
           </div>
         </div>

@@ -344,6 +344,9 @@ describe("ThemedSelect", () => {
     expect(listbox()).toBeInTheDocument();
     fireEvent.scroll(screen.getByTestId("scroller"));
     expect(screen.queryByRole("listbox")).toBeNull();
+    fireEvent.click(trigger());
+    fireEvent.scroll(window);
+    expect(screen.queryByRole("listbox")).toBeNull();
   });
 
   it("closes on outside pointer presses and resize without stealing focus", () => {

@@ -1,4 +1,6 @@
 "use client";
+import { ThemedDateInput } from "@/components/ui/ThemedDateInput";
+
 
 // Modules (milestones / epics) — grouping work beyond the sprint boundary,
 // WARP-3521. Replaces the "Modules aren't ready yet" placeholder (design brief
@@ -249,12 +251,12 @@ function ModuleFormDialog({
         <div className="pm-row" style={{ gap: 12, alignItems: "flex-start" }}>
           <div style={{ flex: 1 }}>
             <Field label="Start date" htmlFor={startId}>
-              <input id={startId} className="pm-input pm-mono" type="date" value={start} onChange={(e) => setStart(e.target.value)} />
+              <ThemedDateInput id={startId} className="pm-input pm-mono" type="date" value={start} onChange={(e) => setStart(e.target.value)} />
             </Field>
           </div>
           <div style={{ flex: 1 }}>
             <Field label="Target date" htmlFor={targetId} error={tried || start || target ? errors.dates : undefined}>
-              <input id={targetId} className="pm-input pm-mono" type="date" value={target} onChange={(e) => setTarget(e.target.value)} />
+              <ThemedDateInput id={targetId} className="pm-input pm-mono" type="date" value={target} onChange={(e) => setTarget(e.target.value)} />
             </Field>
           </div>
         </div>

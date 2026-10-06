@@ -1,4 +1,6 @@
 "use client";
+import { ThemedDateInput } from "@/components/ui/ThemedDateInput";
+
 
 // Cycles (sprints) — the planning half of Projects, WARP-3521. Replaces the
 // "Cycles aren't ready yet" placeholder (design brief §3.7).
@@ -227,7 +229,7 @@ function CycleFormDialog({
         <div className="pm-row" style={{ gap: 12, alignItems: "flex-start" }}>
           <div style={{ flex: 1 }}>
             <Field label="Start date" htmlFor={startId}>
-              <input
+              <ThemedDateInput
                 id={startId}
                 className="pm-input pm-mono"
                 type="date"
@@ -239,7 +241,7 @@ function CycleFormDialog({
           </div>
           <div style={{ flex: 1 }}>
             <Field label="End date" htmlFor={endId} error={tried || start || end ? errors.dates : undefined}>
-              <input
+              <ThemedDateInput
                 id={endId}
                 className="pm-input pm-mono"
                 type="date"

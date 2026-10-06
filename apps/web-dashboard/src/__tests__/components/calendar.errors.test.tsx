@@ -43,7 +43,7 @@ describe("RemindersPanel — typed error → friendly toast (WARP-294)", () => {
     });
     // Date + 15-minute time dropdown — provide a future due date/time so the
     // Create button enables.
-    fireEvent.change(screen.getByLabelText(/due date/i), {
+    fireEvent.change(screen.getByLabelText(/due date/i, { selector: "input" }), {
       target: { value: "2030-01-01" },
     });
     fireEvent.change(screen.getByLabelText(/due time/i), {

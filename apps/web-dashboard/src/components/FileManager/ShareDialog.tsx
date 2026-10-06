@@ -1,4 +1,6 @@
 "use client";
+import { ThemedDateInput } from "@/components/ui/ThemedDateInput";
+
 
 import { useEffect, useState } from "react";
 import {
@@ -891,7 +893,7 @@ export function ShareDialog({
                     <Calendar size={12} />
                     Expiration date (optional)
                   </label>
-                  <input
+                  <ThemedDateInput
                     type="date"
                     value={expireDate}
                     onChange={(e) => setExpireDate(e.target.value)}

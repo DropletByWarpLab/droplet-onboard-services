@@ -1,4 +1,6 @@
 "use client";
+import { ThemedDateInput } from "@/components/ui/ThemedDateInput";
+
 
 // The work-item drawer's "Time" section (WARP-3526): total, entries, log time,
 // start/stop timer.
@@ -213,7 +215,7 @@ function EntryForm({
         </div>
         <div className="pm-field">
           <label htmlFor={ids.day}>Date</label>
-          <input
+          <ThemedDateInput
             id={ids.day}
             className="pm-input"
             type="date"

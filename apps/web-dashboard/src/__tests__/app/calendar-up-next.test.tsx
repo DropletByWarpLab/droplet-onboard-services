@@ -9,7 +9,7 @@
  * per-browser localStorage idiom the network page's sections use.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, cleanup, within } from "@testing-library/react";
+import { render, screen, fireEvent, cleanup, within, waitFor } from "@testing-library/react";
 import type { CalendarEvent } from "@/lib/hooks/useCalendar";
 
 vi.mock("next/navigation", () => ({
@@ -147,5 +147,71 @@ describe('Calendar "Up next" card — collapse + 6-event cap (WARP-1902)', () =>
       "aria-expanded",
       "true",
     );
+  });
+
+  it("keeps event detail keyboard focus inside and restores the originating event on Escape", async () => {
+    render(<CalendarPage />);
+    const trigger = within(upNextCard()).getByRole("button", { name: /Upcoming event 1\b/ });
+    trigger.focus();
+    fireEvent.click(trigger);
+
+    const detail = screen.getByRole("dialog", { name: "Upcoming event 1" });
+    const close = within(detail).getByRole("button", { name: "Close" });
+    const remove = within(detail).getByRole("button", { name: "Remove event" });
+    await waitFor(() => expect(close).toHaveFocus());
+    expect(document.body.style.overflow).toBe("hidden");
+
+    remove.focus();
+    fireEvent.keyDown(remove, { key: "Tab" });
+    expect(close).toHaveFocus();
+    fireEvent.keyDown(close, { key: "Tab", shiftKey: true });
+    expect(remove).toHaveFocus();
+
+    fireEvent.keyDown(remove, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await waitFor(() => expect(trigger).toHaveFocus());
+    expect(document.body.style.overflow).toBe("");
+  });
+
+  it("traps the report range controls and restores the Report action on Escape", async () => {
+    render(<CalendarPage />);
+    const trigger = screen.getByRole("button", { name: "Report" });
+    trigger.focus();
+    fireEvent.click(trigger);
+
+    const report = screen.getByRole("dialog", { name: "Schedule report" });
+    const close = within(report).getByRole("button", { name: "Close" });
+    const month = within(report).getByRole("button", { name: "month" });
+    await waitFor(() => expect(close).toHaveFocus());
+
+    month.focus();
+    fireEvent.keyDown(month, { key: "Tab" });
+    expect(close).toHaveFocus();
+    fireEvent.keyDown(close, { key: "Tab", shiftKey: true });
+    expect(month).toHaveFocus();
+
+    fireEvent.keyDown(month, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await waitFor(() => expect(trigger).toHaveFocus());
+  });
+
+  it("closes only the removal confirmation on Escape and keeps event detail open", async () => {
+    render(<CalendarPage />);
+    const trigger = within(upNextCard()).getByRole("button", { name: /Upcoming event 1\b/ });
+    trigger.focus();
+    fireEvent.click(trigger);
+    const detail = screen.getByRole("dialog", { name: "Upcoming event 1" });
+    const remove = within(detail).getByRole("button", { name: "Remove event" });
+    await waitFor(() => expect(within(detail).getByRole("button", { name: "Close" })).toHaveFocus());
+    remove.focus();
+    fireEvent.click(remove);
+
+    const confirm = screen.getByRole("dialog", { name: 'Remove "Upcoming event 1"?' });
+    await waitFor(() => expect(within(confirm).getByRole("button", { name: "Cancel" })).toHaveFocus());
+    fireEvent.keyDown(within(confirm).getByRole("button", { name: "Cancel" }), { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: 'Remove "Upcoming event 1"?' })).toBeNull());
+    expect(screen.getByRole("dialog", { name: "Upcoming event 1" })).toBe(detail);
+    await waitFor(() => expect(remove).toHaveFocus());
+    expect(document.body.style.overflow).toBe("hidden");
   });
 });

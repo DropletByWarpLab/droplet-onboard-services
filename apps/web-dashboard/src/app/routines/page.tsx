@@ -691,6 +691,7 @@ function SchedulePanel({
             ))}
           </ThemedSelect>
           <input
+            className="input w-auto"
             type="time"
             aria-label="At what time"
             value={time}

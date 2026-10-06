@@ -1,4 +1,6 @@
 "use client";
+import { ThemedDateInput } from "@/components/ui/ThemedDateInput";
+
 
 // WARP-3522 — the filter bar (brief §3.9): a search box, a "Filter" menu that
 // reaches every field of the filter language, and the active filters as chips.
@@ -268,9 +270,9 @@ function DateEditor({
             <option value="after">after</option>
             <option value="between">between</option>
           </ThemedSelect>
-          <input className="pm-input pm-mono" style={{ width: "auto" }} type="date" aria-label={op === "between" ? "From" : "Date"} value={a} onChange={(e) => setA(e.target.value)} />
+          <ThemedDateInput className="pm-input pm-mono" style={{ width: "auto" }} type="date" aria-label={op === "between" ? "From" : "Date"} value={a} onChange={(e) => setA(e.target.value)} />
           {op === "between" && (
-            <input className="pm-input pm-mono" style={{ width: "auto" }} type="date" aria-label="To" value={b} onChange={(e) => setB(e.target.value)} />
+            <ThemedDateInput className="pm-input pm-mono" style={{ width: "auto" }} type="date" aria-label="To" value={b} onChange={(e) => setB(e.target.value)} />
           )}
         </div>
         <div className="pm-pop-f">

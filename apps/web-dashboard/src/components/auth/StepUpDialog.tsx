@@ -131,7 +131,7 @@ export function StepUpDialog({
         <label className="block type-footnote">
           Password
           <input
-            className="w-full"
+            className="input w-full"
             type="password"
             autoComplete="current-password"
             required
@@ -142,7 +142,7 @@ export function StepUpDialog({
         <label className="block type-footnote">
           Two-factor code
           <input
-            className="w-full"
+            className="input w-full"
             inputMode="numeric"
             autoComplete="one-time-code"
             required

@@ -80,7 +80,7 @@ export function RecurringDialog({ open, onClose, triggerRef, onAdded }: Recurrin
             disabled={busy}
             onChange={(e) => setGoal(e.target.value)}
             placeholder="e.g. sweep last night's camera clips"
-            className="rounded px-2 py-1.5 text-[13px]"
+            className="input rounded px-2 py-1.5 text-[13px]"
           />
         </label>
         <label className="flex flex-col gap-1 text-[12.5px]">
@@ -104,7 +104,7 @@ export function RecurringDialog({ open, onClose, triggerRef, onAdded }: Recurrin
               disabled={busy}
               onChange={(e) => setCustomRrule(e.target.value)}
               placeholder="FREQ=DAILY;BYHOUR=6;BYMINUTE=0"
-              className="rounded px-2 py-1.5 text-[13px] font-mono"
+              className="input rounded px-2 py-1.5 text-[13px] font-mono"
             />
           </label>
         )}
@@ -116,7 +116,7 @@ export function RecurringDialog({ open, onClose, triggerRef, onAdded }: Recurrin
             value={timezone}
             disabled={busy}
             onChange={(e) => setTimezone(e.target.value)}
-            className="rounded px-2 py-1.5 text-[13px]"
+            className="input rounded px-2 py-1.5 text-[13px]"
           />
         </label>
         {error && (

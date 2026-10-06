@@ -78,7 +78,8 @@ describe("EventForm ARIA (WARP-289)", () => {
     );
     for (const stem of ["Starts", "Ends"]) {
       const dateInput = screen.getByLabelText(`${stem} date`);
-      const row = dateInput.parentElement as HTMLElement;
+      const row = dateInput.closest("div.flex") as HTMLElement;
+      expect(row).not.toBeNull();
       expect(row.className).toMatch(/\bflex\b/);
       expect(row.className).toMatch(/\bflex-wrap\b/);
     }

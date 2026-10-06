@@ -1,4 +1,6 @@
 "use client";
+import { ThemedDateInput } from "@/components/ui/ThemedDateInput";
+
 import { useEffect, useId, useMemo, useState } from "react";
 import * as Icons from "lucide-react";
 import { useSchedules } from "@/lib/hooks/useSchedules";
@@ -536,7 +538,7 @@ export function OverrideModal({
                 >
                   End at
                 </label>
-                <input
+                <ThemedDateInput
                   id="override-end-at"
                   type="datetime-local"
                   value={customEndAt}

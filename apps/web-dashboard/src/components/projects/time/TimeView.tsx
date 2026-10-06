@@ -1,4 +1,6 @@
 "use client";
+import { ThemedDateInput } from "@/components/ui/ThemedDateInput";
+
 
 // The time view (WARP-3526) — `/projects?view=time`: a weekly timesheet per
 // person and a time report with CSV export. Not a new nav row (the sidebar is at
@@ -308,7 +310,7 @@ function ReportTab({ projects, projectId }: { projects: PmProject[] | undefined;
               </option>
             ))}
           </ThemedSelect>
-          <input
+          <ThemedDateInput
             className="pm-input"
             style={{ width: "auto", height: 34 }}
             type="date"
@@ -318,7 +320,7 @@ function ReportTab({ projects, projectId }: { projects: PmProject[] | undefined;
             max={to && to < MAX_TIME_DATE ? to : MAX_TIME_DATE}
             onChange={(e) => setFrom(e.target.value)}
           />
-          <input
+          <ThemedDateInput
             className="pm-input"
             style={{ width: "auto", height: 34 }}
             type="date"

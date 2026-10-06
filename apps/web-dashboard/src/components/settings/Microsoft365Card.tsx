@@ -39,16 +39,8 @@
  * Microsoft has not approved SharePoint yet.
  */
 
-import { useCallback, useEffect, useRef, useState, type CSSProperties, type JSX } from "react";
+import { useCallback, useEffect, useRef, useState, type JSX } from "react";
 import { Mail } from "lucide-react";
-
-const inputStyle: CSSProperties = {
-  background: "var(--surface)",
-  border: "1px solid var(--border)",
-  borderRadius: "var(--radius-input)",
-  color: "var(--text)",
-};
-const inputClass = "w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] disabled:opacity-60 transition-colors";
 
 import { authFetch, useAuth } from "@/lib/auth";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -414,8 +406,7 @@ export function Microsoft365Card({
           <label className="flex flex-col gap-1.5">
             Application (client) ID
             <input
-              className={inputClass}
-              style={inputStyle}
+              className="input"
               value={clientId}
               onChange={(e) => setClientId(e.target.value)}
               spellCheck={false}
@@ -425,8 +416,7 @@ export function Microsoft365Card({
           <label className="flex flex-col gap-1.5">
             Directory (tenant) ID
             <input
-              className={inputClass}
-              style={inputStyle}
+              className="input"
               value={tenantId}
               onChange={(e) => setTenantId(e.target.value)}
               spellCheck={false}

@@ -1,4 +1,6 @@
 "use client";
+import { ThemedDateInput } from "@/components/ui/ThemedDateInput";
+
 
 // WARP-2545 — new customer / new deal, and the record drawer that shows a
 // timeline and logs to it. Same `Dialog` + `pm-*` vocabulary as the Projects
@@ -273,7 +275,7 @@ export function NewDealModal({
           </div>
           <div style={{ flex: 2 }}>
             <Field label="Expected close">
-              <input
+              <ThemedDateInput
                 className="pm-input pm-mono"
                 type="date"
                 value={closeOn}

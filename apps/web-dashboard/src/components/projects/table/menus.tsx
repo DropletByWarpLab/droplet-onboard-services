@@ -1,4 +1,6 @@
 "use client";
+import { ThemedDateInput } from "@/components/ui/ThemedDateInput";
+
 
 // WARP-3537 — the pickers a table cell and the bulk bar share: state, priority,
 // assignees, labels, due date. Each is only the CONTENT of a `FloatingMenu`; the
@@ -183,7 +185,7 @@ export function DueMenu({
     >
       <label className="pm-field" style={{ display: "block" }}>
         <span className="sr-only">Due date</span>
-        <input className="pm-input pm-mono" type="date" aria-label="Due date" value={ymd} onChange={(e) => setYmd(e.target.value)} />
+        <ThemedDateInput clearable={false} className="pm-input pm-mono" type="date" aria-label="Due date" value={ymd} onChange={(e) => setYmd(e.target.value)} />
       </label>
       <div className="pm-pop-f">
         {value !== null && (

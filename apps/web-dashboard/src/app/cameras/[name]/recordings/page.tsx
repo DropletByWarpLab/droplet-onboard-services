@@ -1,4 +1,6 @@
 "use client";
+import { ThemedDateInput } from "@/components/ui/ThemedDateInput";
+
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
@@ -370,7 +372,7 @@ export default function RecordingsPage() {
         >
           <ChevronLeft size={16} />
         </button>
-        <input
+        <ThemedDateInput
           type="date"
           aria-label="Recording date"
           value={day}

@@ -1,4 +1,6 @@
 "use client";
+import { ThemedDateInput } from "@/components/ui/ThemedDateInput";
+
 
 /**
  * New-appointment form — the entry point that feeds the write-confirm modal
@@ -61,7 +63,7 @@ export function NewAppointmentDialog({
             </Labeled>
           </div>
           <Labeled label="Date & time">
-            <input type="datetime-local" className="dp-input" value={startsAt} onChange={(e) => setStartsAt(e.target.value)} />
+            <ThemedDateInput type="datetime-local" className="dp-input" value={startsAt} onChange={(e) => setStartsAt(e.target.value)} />
           </Labeled>
           <Labeled label="Reason (optional)">
             <input className="dp-input" value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Recall, exam, …" />

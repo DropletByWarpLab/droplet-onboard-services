@@ -66,7 +66,7 @@ describe("RemindersPanel — create helper text (Samantha QA #bugs)", () => {
     expect(create).toBeDisabled();
 
     // Add a due date + time → enabled.
-    fireEvent.change(screen.getByLabelText(/due date/i), {
+    fireEvent.change(screen.getByLabelText(/due date/i, { selector: "input" }), {
       target: { value: "2026-06-01" },
     });
     fireEvent.change(screen.getByLabelText(/due time/i), {
@@ -80,7 +80,7 @@ describe("RemindersPanel — create helper text (Samantha QA #bugs)", () => {
     openForm();
     const time = screen.getByLabelText(/due time/i) as HTMLSelectElement;
     expect(time.tagName).toBe("SELECT");
-    fireEvent.change(screen.getByLabelText(/due date/i), {
+    fireEvent.change(screen.getByLabelText(/due date/i, { selector: "input" }), {
       target: { value: "2026-06-01" },
     });
     const values = Array.from(time.options).map((o) => o.value);
@@ -96,7 +96,7 @@ describe("RemindersPanel — create helper text (Samantha QA #bugs)", () => {
     fireEvent.change(screen.getByPlaceholderText(/reminder title/i), {
       target: { value: "Call dentist" },
     });
-    fireEvent.change(screen.getByLabelText(/due date/i), {
+    fireEvent.change(screen.getByLabelText(/due date/i, { selector: "input" }), {
       target: { value: "2026-06-01" },
     });
     fireEvent.change(screen.getByLabelText(/due time/i), {

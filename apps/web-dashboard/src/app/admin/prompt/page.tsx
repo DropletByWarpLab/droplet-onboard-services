@@ -194,6 +194,7 @@ export default function AssistantInspectorPage() {
             sub="Tools are chosen per message. Leave this empty to see the baseline."
             right={
               <input
+                className="input w-auto"
                 aria-label="A message they might send"
                 value={message}
                 placeholder="find the Acme contract"

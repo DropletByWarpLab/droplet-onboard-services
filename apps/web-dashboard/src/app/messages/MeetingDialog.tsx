@@ -1,4 +1,6 @@
 "use client";
+import { ThemedDateInput } from "@/components/ui/ThemedDateInput";
+
 
 /**
  * WARP-1685 — "Meeting" composer action: schedule a meeting with this
@@ -174,7 +176,7 @@ export function MeetingDialog({
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
           <label className="block">
             <span className="mx-label">Starts</span>
-            <input
+            <ThemedDateInput
               type="datetime-local"
               value={start}
               min={toLocalInputValue(new Date())}

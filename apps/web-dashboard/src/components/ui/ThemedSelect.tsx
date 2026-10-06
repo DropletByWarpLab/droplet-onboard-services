@@ -168,7 +168,7 @@ export const ThemedSelect = forwardRef<HTMLSelectElement, SelectHTMLAttributes<H
         if (!popupRef.current?.contains(event.target as Node) && event.target !== selectRef.current) close();
       };
       const scroll = (event: Event) => {
-        if (!popupRef.current?.contains(event.target as Node)) close();
+        if (!(event.target instanceof Node) || !popupRef.current?.contains(event.target)) close();
       };
       document.addEventListener("pointerdown", outside);
       document.addEventListener("mousedown", outside);

@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { parseMeetingLink } from "@droplet/shared-types";
 import { ShellPage } from "@/components/shell/ShellPage";
+import { Dialog } from "@/components/Dialog";
 import {
   useCalendarEvents,
   useCalendarSources,
@@ -306,18 +307,6 @@ export default function CalendarPage() {
     });
   }
 
-  // Escape closes whichever sheet is open (detail takes precedence).
-  useEffect(() => {
-    if (!detail && !showReport) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
-      if (detail) setDetail(null);
-      else if (showReport) setShowReport(false);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [detail, showReport]);
-
   const monthLabel = cursor.toLocaleDateString(undefined, { month: "long", year: "numeric" });
   // Toolbar nav is an implicit deselection: clear `selectedKey` so a stale
   // scroll target doesn't yank the agenda back after navigating.
@@ -589,16 +578,16 @@ export default function CalendarPage() {
         onSaved={() => refresh()}
       />
 
-      {/* iOS-style event detail sheet */}
-      {detail && (
-        <div className="ds-ios-scrim" onClick={() => setDetail(null)}>
-          <div
-            className="ds-ios-sheet"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby={detailHeadingId}
-            onClick={(e) => e.stopPropagation()}
-          >
+      {/* Sectioned event detail in the shared modal shell. */}
+      <Dialog
+        open={detail !== null}
+        onClose={() => setDetail(null)}
+        labelledBy={detailHeadingId}
+        maxWidth="2xl"
+        flush
+      >
+        {detail && (
+          <div>
             <div className="ds-ios-nav">
               <button className="x" onClick={() => setDetail(null)} aria-label="Close" type="button">
                 <X size={18} />
@@ -680,19 +669,18 @@ export default function CalendarPage() {
               </div>
             )}
           </div>
-        </div>
-      )}
+        )}
+      </Dialog>
 
-      {/* iOS-style schedule report sheet */}
-      {showReport && (
-        <div className="ds-ios-scrim" onClick={() => setShowReport(false)}>
-          <div
-            className="ds-ios-sheet"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby={reportHeadingId}
-            onClick={(e) => e.stopPropagation()}
-          >
+      {/* The shared modal keeps the report's controls and focus together. */}
+      <Dialog
+        open={showReport}
+        onClose={() => setShowReport(false)}
+        labelledBy={reportHeadingId}
+        maxWidth="2xl"
+        flush
+      >
+          <div>
             <div className="ds-ios-nav">
               <button className="x" onClick={() => setShowReport(false)} aria-label="Close" type="button">
                 <X size={18} />
@@ -747,8 +735,7 @@ export default function CalendarPage() {
             )}
             <div className="ds-ios-foot" />
           </div>
-        </div>
-      )}
+      </Dialog>
 
       <ConfirmDialog
         open={removeTarget !== null}
