@@ -161,6 +161,7 @@ import memoryExtractFact from "./handlers/memory/extract.js";
 import memoryForget from "./handlers/memory/forget.js";
 
 // WARP-466: D2 email tools
+import emailAccounts from "./handlers/email/accounts.js";
 import emailSearch from "./handlers/email/search.js";
 import emailRead from "./handlers/email/read.js";
 import emailSummarizeThread from "./handlers/email/summarize-thread.js";
@@ -393,6 +394,7 @@ const allTools: Tool[] = [
   getUpdateStatus,
   applyUpdate,
   // WARP-466: D2 email
+  emailAccounts,
   emailSearch,
   emailRead,
   emailSummarizeThread,

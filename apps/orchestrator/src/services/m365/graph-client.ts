@@ -193,8 +193,8 @@ export class GraphRequestError extends Error {
 
 /** One page of a delta or list response: its items plus its links. */
 export interface GraphPage {
-  /** The `value` array. Empty rather than absent when Graph returns no items —
-   *  a caller should never have to distinguish "no changes" from "malformed". */
+  /** The `value` array, or empty for a singleton response such as /me/drive.
+   *  Snapshot/delta landing must validate raw.value before sweeping old data. */
   readonly items: readonly Record<string, unknown>[];
   readonly links: DeltaLinks;
   /** The raw page, for a caller that needs a field this shape does not name. */
@@ -215,6 +215,18 @@ export interface GraphClientDeps {
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000;
+export const GRAPH_PREFERRED_PAGE_SIZE = 100;
+
+/** Keep the request deadline through JSON/error-body reads, including test ports. */
+async function readJsonBeforeDeadline(res: Response, signal: AbortSignal): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const aborted = () => reject(new GraphRequestError({ statusCode: 0, code: "ETIMEDOUT",
+      message: "the response from Microsoft 365 did not complete" }));
+    if (signal.aborted) { aborted(); return; }
+    signal.addEventListener("abort", aborted, { once: true });
+    res.json().then(resolve, reject).finally(() => signal.removeEventListener("abort", aborted));
+  });
+}
 
 /**
  * An authenticated, host-guarded Graph reader.
@@ -243,7 +255,7 @@ export class GraphClient {
    * `url` is validated on EVERY call, not once at construction: see the module
    * header. A delta link comes out of the database.
    */
-  async getPage(url: string, accessToken: string): Promise<GraphPage> {
+  async getPage(url: string, accessToken: string, options: { mail?: boolean } = {}): Promise<GraphPage> {
     const safe = assertSafeGraphUrl(url);
     const doFetch = this.fetchImpl ?? (globalThis.fetch as unknown as FetchLike);
     if (!doFetch) {
@@ -256,6 +268,7 @@ export class GraphClient {
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
     let res: Response;
     try {
       res = await doFetch(safe, {
@@ -264,6 +277,7 @@ export class GraphClient {
           Authorization: `Bearer ${accessToken}`,
           Accept: "application/json",
           "User-Agent": this.userAgent,
+          Prefer: `odata.maxpagesize=${GRAPH_PREFERRED_PAGE_SIZE}${options.mail ? ', IdType="ImmutableId", outlook.body-content-type="text"' : ""}`,
         },
         // Never follow a 3xx — see the module header.
         redirect: "manual",
@@ -284,8 +298,6 @@ export class GraphClient {
         code: errno,
         message: "the request to Microsoft 365 did not complete",
       });
-    } finally {
-      clearTimeout(timer);
     }
 
     if (res.status >= 300 && res.status < 400) {
@@ -296,10 +308,13 @@ export class GraphClient {
     }
 
     if (!res.ok) {
-      throw await this.toError(res);
+      throw await this.toError(res, controller.signal);
     }
 
-    const body = (await res.json().catch(() => null)) as Record<string, unknown> | null;
+    const body = (await readJsonBeforeDeadline(res, controller.signal).catch((err: unknown) => {
+      if (err instanceof GraphRequestError) throw err;
+      return null;
+    })) as Record<string, unknown> | null;
     if (!body || typeof body !== "object") {
       throw new GraphRequestError({
         statusCode: res.status,
@@ -313,6 +328,7 @@ export class GraphClient {
       links: extractDeltaLinks(body),
       raw: body,
     };
+    } finally { clearTimeout(timer); }
   }
 
   /**
@@ -327,13 +343,14 @@ export class GraphClient {
    * rendered to the owner and written to a log. `code` alone is diagnostic and
    * carries nothing secret.
    */
-  private async toError(res: Response): Promise<GraphRequestError> {
+  private async toError(res: Response, signal: AbortSignal): Promise<GraphRequestError> {
     let code: string | undefined;
     try {
-      const body = (await res.json()) as { error?: { code?: unknown } } | null;
+      const body = (await readJsonBeforeDeadline(res, signal)) as { error?: { code?: unknown } } | null;
       const raw = body?.error?.code;
       if (typeof raw === "string" && raw.trim() !== "") code = raw.trim();
-    } catch {
+    } catch (err) {
+      if (err instanceof GraphRequestError) throw err;
       // A non-JSON error body (an edge proxy, a 502 HTML page). The status is
       // still the useful half and `classifySyncFailure` reads it.
     }

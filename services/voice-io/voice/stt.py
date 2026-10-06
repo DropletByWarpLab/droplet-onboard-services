@@ -1,13 +1,12 @@
 """STT via Wyoming protocol — Rhasspy's TCP pub/sub for voice components.
 
 The wake-detect loop (`voice.pipeline`) calls into this module after a
-WakeEvent: it streams the next few seconds of captured audio to a
-wyoming-faster-whisper sidecar container and gets a transcript back.
+WakeEvent: it streams the captured utterance to a Wyoming STT
+sidecar container and gets a transcript back.
 
 We use Wyoming because it's the Home Assistant Voice ecosystem's
-standard — biggest OSS surface in this space, and the
-`rhasspy/wyoming-faster-whisper` image is a thin wrapper around
-faster-whisper that handles model loading + GPU/CPU detection for us.
+standard. The server owns model loading and inference; this client
+works with both the CPU Qwen ASR server and the Whisper fallback.
 
 Wyoming wire format (newline-delimited JSON header, optional binary
 payload immediately after):
@@ -34,9 +33,8 @@ Implementation choices:
     JSON-frame parsing; pinning rhasspy's library to dance around its
     API churn is more drag than the parser itself.
   - Streaming send. We push each captured 80 ms frame as it arrives
-    rather than batching the full 5 s — faster-whisper's server can
-    begin transcription as the audio flows, so total latency is
-    capture-time + ~300 ms instead of capture-time + 1.5 s.
+    rather than batching the full utterance in the voice service.
+    The server returns the final transcript after audio-stop.
 
 `StreamingSTT` is the abstract interface (mockable for tests).
 `WyomingSTT` is the production client. `MockSTT` returns scripted
@@ -47,6 +45,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import socket
 import time
 from abc import ABC, abstractmethod
@@ -55,16 +54,15 @@ from typing import Optional
 logger = logging.getLogger("voice.stt")
 
 
-# Wyoming defaults. Override via env in main.py.
-DEFAULT_STT_HOST = "wyoming-faster-whisper"
+# Wyoming defaults. Overrides are resolved by build_stt_from_env.
+DEFAULT_STT_HOST = "qwen-stt"
 DEFAULT_STT_PORT = 10300
 DEFAULT_STT_LANGUAGE = "en"
 DEFAULT_CONNECT_TIMEOUT_S = 5.0
-DEFAULT_TRANSCRIPT_TIMEOUT_S = 10.0  # max wait per recv for final transcript after audio-stop
+DEFAULT_TRANSCRIPT_TIMEOUT_S = 90.0  # CPU inference budget after audio-stop
 # Total wall-clock ceiling on _read_transcript, independent of the per-recv
 # timeout above (which resets on every event). Bounds a chatty/misbehaving
 # server that drips non-transcript events forever. See GW-16.
-_TOTAL_DEADLINE_MULTIPLIER = 2.0
 
 # Audio payload metadata (Wyoming requires this on every audio event).
 SAMPLE_RATE = 16_000
@@ -79,6 +77,10 @@ class STTUnavailable(Exception):
     message exposed via /voice/status — so the dashboard surfaces
     "STT degraded" instead of the entire voice service crashing.
     """
+
+
+class _ResponseDeadlineExceeded(STTUnavailable):
+    """Shared Wyoming read budget expired, independent of the socket timer."""
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -147,13 +149,13 @@ class _WyomingSession(STTSession):
         self._closed = False
         self._language = language
         self._transcript_timeout_s = transcript_timeout_s
-        # Total wall-clock budget for _read_transcript. Defaults to a multiple
-        # of the per-recv timeout so a chatty server can't hold the worker
+        # Total wall-clock budget for _read_transcript. Defaults to the
+        # per-recv timeout so a chatty server can't hold the worker
         # thread indefinitely (GW-16).
         self._total_deadline_s = (
             total_deadline_s
             if total_deadline_s is not None
-            else transcript_timeout_s * _TOTAL_DEADLINE_MULTIPLIER
+            else transcript_timeout_s
         )
         # `transcribe` is the "start a new transcription" event; data
         # carries the language hint. The server uses this to seed the
@@ -202,11 +204,7 @@ class _WyomingSession(STTSession):
     def _read_transcript(self) -> str:
         """Block until the server sends a `transcript` event.
 
-        Wyoming-faster-whisper may emit intermediate `transcript` events
-        with partial text during streaming — we ignore those and wait
-        for the final one (the one sent after `audio-stop`). In practice
-        the server only emits ONE transcript per session in batch mode,
-        so the first event is also the last.
+        The server emits one final transcript after `audio-stop`.
 
         GW-16: ``settimeout`` only bounds each individual ``recv``, and it's
         reset on every event. A misbehaving/old server that streams a steady
@@ -227,11 +225,9 @@ class _WyomingSession(STTSession):
                         f"({self._total_deadline_s:.1f} s) — server streamed "
                         f"events but no final transcript"
                     )
-                event = _read_event(self._sock)
-                # Re-check deadline after _read_event returns: the recv can block
-                # for up to _transcript_timeout_s, so the deadline may have passed
-                # during the call.  Without this second check the actual worst-case
-                # block is total_deadline_s + transcript_timeout_s, not total_deadline_s.
+                event = _read_event(self._sock, deadline=deadline)
+                # The wire helpers also bound each recv (including incomplete
+                # events). Recheck after parsing before accepting a late result.
                 if time.monotonic() >= deadline:
                     raise STTUnavailable(
                         f"transcript wall-clock deadline exceeded "
@@ -241,12 +237,25 @@ class _WyomingSession(STTSession):
                 if event is None:
                     raise STTUnavailable("server closed connection before transcript")
                 header, _payload = event  # payload already drained by _read_event
+                if header.get("type") == "error":
+                    data = header.get("data") or {}
+                    code = data.get("code") or "stt_error"
+                    raise STTUnavailable(f"STT server error: {code}")
                 if header.get("type") == "transcript":
                     text = (header.get("data") or {}).get("text", "")
                     return text.strip()
                 # Other event types we currently ignore (e.g. server-
                 # emitted `audio-stop` ack from older Wyoming versions).
+        except _ResponseDeadlineExceeded as exc:
+            raise STTUnavailable(
+                f"transcript wall-clock deadline exceeded ({self._total_deadline_s:.1f} s)"
+            ) from exc
         except socket.timeout as exc:
+            if time.monotonic() >= deadline:
+                raise STTUnavailable(
+                    f"transcript wall-clock deadline exceeded "
+                    f"({self._total_deadline_s:.1f} s)"
+                ) from exc
             raise STTUnavailable(
                 f"transcript timeout after {self._transcript_timeout_s:.1f} s"
             ) from exc
@@ -384,7 +393,9 @@ def _audio_metadata() -> dict:
     }
 
 
-def _read_json_line(sock: socket.socket) -> Optional[dict]:
+def _read_json_line(
+    sock: socket.socket, deadline: float | None = None,
+) -> Optional[dict]:
     """Read bytes up to the next \\n and decode as JSON.
 
     Returns None if the peer closed cleanly before sending anything.
@@ -392,7 +403,7 @@ def _read_json_line(sock: socket.socket) -> Optional[dict]:
     """
     buf = bytearray()
     while True:
-        b = sock.recv(1)
+        b = _recv_before_deadline(sock, 1, deadline)
         if not b:
             return None if not buf else _raise_partial(buf)
         if b == b"\n":
@@ -406,6 +417,7 @@ def _read_json_line(sock: socket.socket) -> Optional[dict]:
 
 def _read_event(
     sock: socket.socket,
+    deadline: float | None = None,
 ) -> Optional[tuple[dict, bytes]]:
     """Read one complete Wyoming event: header + optional data block +
     optional binary payload. Returns (header_with_normalized_data, payload).
@@ -424,7 +436,7 @@ def _read_event(
 
     Returns None on clean peer close before any data arrived.
     """
-    header = _read_json_line(sock)
+    header = _read_json_line(sock, deadline)
     if header is None:
         return None
     data_length = int(header.get("data_length") or 0)
@@ -433,7 +445,7 @@ def _read_event(
         # inline `data` field (servers should send one or the other,
         # not both — but if both, the v2 block is the authoritative
         # one because it's the bytes that just hit the wire).
-        raw = _read_exactly(sock, data_length)
+        raw = _read_exactly(sock, data_length, deadline)
         try:
             header["data"] = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -441,7 +453,7 @@ def _read_event(
                 f"bad JSON data block from server: {raw!r}: {exc}"
             ) from exc
     payload_length = int(header.get("payload_length") or 0)
-    payload = _read_exactly(sock, payload_length) if payload_length > 0 else b""
+    payload = _read_exactly(sock, payload_length, deadline) if payload_length > 0 else b""
     return header, payload
 
 
@@ -449,11 +461,39 @@ def _raise_partial(buf: bytearray) -> None:
     raise STTUnavailable(f"peer closed mid-line: {bytes(buf)!r}")
 
 
-def _read_exactly(sock: socket.socket, n: int) -> bytes:
+def _bound_read_timeout(sock: socket.socket, deadline: float | None) -> bool:
+    """Bound every recv, including partial headers/data, by the total budget."""
+    if deadline is None:
+        return False
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise _ResponseDeadlineExceeded("Wyoming response wall-clock deadline exceeded")
+    current = sock.gettimeout()
+    sock.settimeout(min(current, remaining) if current is not None else remaining)
+    # Subtracting monotonic timestamps can add a fractional microsecond;
+    # that must not relabel an equal total/socket budget as a socket timeout.
+    return current is None or remaining <= current + 1e-6
+
+
+def _recv_before_deadline(sock: socket.socket, count: int, deadline: float | None) -> bytes:
+    deadline_bound = _bound_read_timeout(sock, deadline)
+    try:
+        return sock.recv(count)
+    except socket.timeout as exc:
+        # Socket timers can expire slightly early on Windows. Classify by
+        # which budget bounded the read, rather than comparing clocks again.
+        if deadline_bound:
+            raise _ResponseDeadlineExceeded("Wyoming response wall-clock deadline exceeded") from exc
+        raise
+
+
+def _read_exactly(
+    sock: socket.socket, n: int, deadline: float | None = None,
+) -> bytes:
     """Block until exactly n bytes are received; raise if peer closes early."""
     buf = bytearray()
     while len(buf) < n:
-        chunk = sock.recv(n - len(buf))
+        chunk = _recv_before_deadline(sock, n - len(buf), deadline)
         if not chunk:
             raise STTUnavailable(
                 f"peer closed after {len(buf)}/{n} payload bytes",
@@ -482,14 +522,23 @@ def build_stt_from_env() -> StreamingSTT:
     if raw == "__mock__":
         logger.info("STT_URL=__mock__ → MockSTT (dev only, no transcripts)")
         return MockSTT()
+    timeout_raw = (os.environ.get("STT_TRANSCRIPT_TIMEOUT_S") or "").strip()
+    try:
+        timeout = float(timeout_raw) if timeout_raw else DEFAULT_TRANSCRIPT_TIMEOUT_S
+        if not math.isfinite(timeout) or not 1.0 <= timeout <= 300.0:
+            raise ValueError("timeout must be between 1 and 300 seconds")
+    except ValueError:
+        logger.warning("invalid STT_TRANSCRIPT_TIMEOUT_S; using %.1f s", DEFAULT_TRANSCRIPT_TIMEOUT_S)
+        timeout = DEFAULT_TRANSCRIPT_TIMEOUT_S
     if not raw:
-        return WyomingSTT(language=language)
+        return WyomingSTT(language=language, transcript_timeout_s=timeout)
     parsed = urllib.parse.urlparse(raw)
     if parsed.scheme != "tcp" or not parsed.hostname or not parsed.port:
         logger.warning(
             "STT_URL=%r not in tcp://host:port form; falling back to default", raw,
         )
-        return WyomingSTT(language=language)
+        return WyomingSTT(language=language, transcript_timeout_s=timeout)
     return WyomingSTT(
         host=parsed.hostname, port=parsed.port, language=language,
+        transcript_timeout_s=timeout,
     )

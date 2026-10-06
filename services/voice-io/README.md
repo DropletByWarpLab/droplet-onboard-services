@@ -82,27 +82,29 @@ USB mic in after the box has already booted.
 |---|---|---|
 | `VOICE_INPUT_DEVICE` | *(auto)* | Pin a specific ALSA device for input (e.g. `hw:2,0`, `default`, or the integer index from `/audio/devices`). |
 | `VOICE_OUTPUT_DEVICE` | *(auto)* | Same, for output. |
-| `VOICE_SAMPLE_RATE` | `16000` | Mic capture rate. 16 kHz is what faster-whisper expects natively. |
-| `VOICE_FRAME_MS` | `30` | Frame duration in ms for capture buffers. 30 ms is the sweet spot for openWakeWord. |
+| `VOICE_SAMPLE_RATE` | `16000` | Mic capture rate; Qwen uses 16 kHz mono PCM. |
+| `VOICE_FRAME_MS` | `30` | Capture frame duration in milliseconds. |
 | `DEVICE_RESCAN_INTERVAL` | `5` | Seconds between hot-plug rescans. |
 | `ORCHESTRATOR_URL` | `http://orchestrator:3000` | Where to POST chat turns. |
 | `ORCHESTRATOR_TOKEN` | *(empty)* | Bearer token for orchestrator. Set in compose from the same secret the rest of the stack uses. |
-| `WAKE_ENGINE` | `vosk` | Which wake-word backend to use. `vosk` (default) recognizes the `WAKE_WORD` phrases out of the box via a grammar-constrained Vosk model — no per-phrase training, no licensing fee — so "droplet" and "hey droplet" both work on every box. `openwakeword` uses the bundled-ONNX engine (`hey_jarvis`/`alexa`/`hey_mycroft`) instead. If `vosk` is selected but its model dir is missing, the service automatically falls back to openWakeWord so wake stays armed. |
-| `WAKE_WORD` | `hey droplet` | The wake phrase(s) — a **comma-separated list**; the box wakes on ANY of them (WARP-1431). Default wakes on "Hey Droplet" only. The bare one-word "droplet" is left out on purpose: grammar-forced decoding squeezes ambient speech into it at confidence up to 1.00, so no threshold filters it (~23 false wakes/hour on the bench, WARP-3128). Opt back in with `droplet,hey droplet`. Under the default `vosk` engine each phrase is recognized directly (underscores map to spaces: `hey_droplet` → "hey droplet"); any in-vocabulary English phrase works with no training. Under `openwakeword` (single-model) only the **first** phrase is used and must be a bundled model name (`hey_jarvis`, `alexa`, `hey_mycroft`) or a custom `<name>.onnx` in `/app/models/`. Set to `__mock__` for a dev box with no wake runtime. |
+| `WAKE_ENGINE` | `vosk` | The bundled Apache-licensed Vosk model recognizes the configured English phrase. A missing model reports a load error. Explicit `openwakeword` requires operator-supplied, appropriately licensed assets; its classifier weights are not bundled. |
+| `WAKE_WORD` | `hey droplet` | Comma-separated wake phrases. Default is **Hey Droplet** only; underscores map to spaces for Vosk. The bare one-word droplet is excluded to reduce false wakes. The requested phrase never silently changes. `__mock__` is for tests/dev audio without a wake runtime. |
 | `VOSK_MODEL_PATH` | `/app/models/vosk-model-small-en-us` | Directory of the Vosk model (baked into the image by the Dockerfile). Override to point at a larger/different Vosk model. |
 | `WAKE_THRESHOLD` | engine-aware (`0.85` vosk / `0.3` openWakeWord) | Detector confidence threshold (0 – 1). Unset/empty picks a default that matches the engine's score semantics (`resolve_wake_threshold` in `main.py`). Under `vosk` the score is the **minimum per-word confidence** of the finalized phrase match — a partial-hypothesis match is flushed (`FinalResult`) and re-checked before it may fire, and a match with no per-word confidence evidence never fires — so a genuinely spoken "hey droplet" scores ~0.9+ while TV/ambient speech shoehorned into the grammar lands lower; `0.85` gates the false accepts (raised from `0.7` in WARP-3128 after ambient speech cleared it at 0.73–0.94). Lower it toward `0.5` if real wakes get missed at distance; raise it if false wakes persist. openWakeWord scores are sigmoid outputs — its default stays `0.3`. |
 | `WAKE_DEBOUNCE_S` | `2.0` | Minimum seconds between wake events. A single utterance triggers many above-threshold frames; debounce coalesces them. |
-| `STT_URL` | `tcp://wyoming-faster-whisper:10300` | Wyoming-protocol Whisper server. The compose stack ships `wyoming-faster-whisper` as a sibling container on this URL. Set to `__mock__` to disable STT (wake fires but no transcription). |
-| `STT_LANGUAGE` | `en` | Language code for transcription. |
-| `STT_MAX_RECORD_S` | `5.0` | **Hard cap** on seconds of audio captured per wake. The end-of-speech VAD ends the capture sooner once you stop talking; this cap guarantees it always stops — even in a room with continuous background audio where no silence is ever detected. `5.0` is the single source of truth (code default + compose + the overview doc all agree, and the box runs 5.0). |
-| `WHISPER_CPUS` | `4.0` | **Whisper sidecar setting (WARP-3126).** voice-io does not read this; compose applies it as the `wyoming-faster-whisper` container's CPU quota. Raised from `2.0` because transcription runs after you stop talking and before the reply starts, so more cores shorten every turn. Keep it equal to `WHISPER_CPU_THREADS`. On a CPU-tight host lower both together, because Frigate and the inference runtime share the cores. STT is CPU-only. |
-| `WHISPER_CPU_THREADS` | `4` | **Whisper sidecar setting (WARP-3126).** voice-io does not read this; it is the sidecar's CTranslate2 `--cpu-threads`. It must equal `WHISPER_CPUS` (WARP-1434): more threads than cores only adds context-switch churn, and fewer leaves part of the quota idle. |
+| `STT_URL` | `tcp://qwen-stt:10300` | CPU-only Qwen3-ASR 1.7B Wyoming sidecar. Both appliance voice and dashboard dictation use it. `__mock__` disables real transcription. |
+| `STT_TRANSCRIPT_TIMEOUT_S` | `90` | Absolute transcript wait budget, range 1–300 seconds. |
+| `STT_LANGUAGE` | `en` | English first; the Qwen sidecar forces English. |
+| `STT_MAX_RECORD_S` | `30.0` | Hard cap on capture after wake; existing end-of-speech VAD finishes sooner after the user stops talking. The sidecar also rejects audio longer than 30 seconds. |
+| `WHISPER_CPUS` | `4.0` | Optional `voice-whisper` rollback sidecar CPU quota. Keep equal to `WHISPER_CPU_THREADS`. See ../../docs/cpu-voice.md. |
+| `WHISPER_CPU_THREADS` | `4` | Optional Whisper rollback sidecar CTranslate2 threads, equal to its CPU quota. |
 | `VAD_SILENCE_S` | `0.6` | End-of-speech VAD: seconds of trailing silence that end the capture once the user has started talking, so the box stops the moment they finish rather than always holding the mic for the full `STT_MAX_RECORD_S`. Raise it if the box cuts people off during a natural mid-sentence pause. |
 | `VAD_SPEECH_RMS` | `700` | int16 frame RMS above which a frame counts as "speech" — sits between a typical room floor (~400) and normal speech (~1000+). **The per-room tuning knob**: lower it in a quiet room where speech reads soft, raise it in a loud one where the floor creeps up. |
 | `VAD_MIN_SPEECH_S` | `0.4` | Minimum cumulative speech (s) before end-of-speech may fire, so the wake-word tail plus a pause before the command doesn't end the turn early. |
 | `WAKE_VISUAL_DECAY_S` | `2.0` | How long the `wake_detected` / `transcript_ready` UI hints linger on `/voice/status` before decaying back to `listening`, so the dashboard's wake + transcript pulse animations have time to play. |
-| `TTS_URL` | `tcp://wyoming-piper:10200` | Wyoming-protocol Piper server. Set to `__mock__` for silent playback (dev box without a Piper container). |
-| `TTS_VOICE` | `en_US-ryan-medium` | Piper voice name. ~70 MB per voice; downloads on first request and caches in the `piper-voices` volume. Other natural-sounding options: `en_US-lessac-medium`, `en_GB-jenny-medium`. |
+| `TTS_URL` | `tcp://kokoro-tts:10200` | CPU-only Kokoro Wyoming server with eight bundled English voices. `__mock__` provides silent playback. Legacy Piper is an optional override. |
+| `TTS_VOICE` | `af_heart` | Initial speaking voice. Owner/admin selection in Voice & microphone persists on the existing calibration volume and applies to every spoken reply and cue. Unknown legacy defaults resolve to the running server's installed default. |
+| `TTS_SYNTHESIZE_TIMEOUT_S` | `60` | Absolute synthesis response budget, range 1–300 seconds. |
 | `VOICE_FLATLINE_WINDOW_S` | `240` | Flatline watchdog (WARP-1037): seconds of at/near-digital-zero input while `state=listening` before `/health` degrades to 503. The ReSpeaker XVF3800's XMOS DSP can wedge with the USB stream still open — the pipeline keeps "listening" while every frame is pure silence. The pipeline measures a rolling input RMS inside its own frame handler (never a second stream on the same hw device) and flags the wedge so the Docker healthcheck + ops-console see it. Recovery is automatic when audio returns. `0` disables. |
 | `VOICE_FLATLINE_DBFS` | `-70.0` | Level (dBFS) below which a frame counts as "no signal" for the flatline watchdog. A healthy capture chain's noise floor sits ≈ -60…-50 dBFS; a wedged DSP emits exact zeros (-120 floor) or ±1-count dither (≈ -90). |
 | `VOICE_MAX_TOKENS` | `1024` | **Voice turn shaping (WARP-1432).** Per-turn generation cap sent to the orchestrator on every reply. The box's `gpt-oss` voice model spends reasoning-channel tokens *before* visible content, so the default is deliberately generous — enough for reasoning + a short spoken sentence; too low empties the reply (WARP-854). The gateway hard-caps at 4096; a non-numeric or out-of-range value falls back to `1024`. Voice also always sends `ephemeral:true` (a constant, not an env — voice has no persisted chat session, so a per-utterance `ChatSession` would only litter the sidebar). |
@@ -122,9 +124,11 @@ reach it via the Docker network).
 | `/audio/test-tone` | POST | Play a 440 Hz sine wave through the picked output device for 1 s. For "is my speaker wired right" debug. |
 | `/audio/test-record` | POST | Capture 2 s from the picked input, return RMS + peak level. For "is my mic working" debug. |
 | `/voice/status` | GET | Pipeline snapshot: `state` ∈ `idle\|loading\|listening\|wake_detected\|transcribing\|transcript_ready\|speaking\|error\|no_mic`, plus `wake_model`, `threshold`, `last_wake_at`, `last_wake_score`, `stt_loaded`, `last_transcript`, `last_transcript_at`, `tts_loaded`, `last_response`, `last_response_at`, `input_rms_dbfs` (rolling mic level over ~2 s, measured inside the pipeline's frame handler — safe to drive a live level meter), `last_audio_at`, `input_flatlined`, and the speaker volume: `output_level` (0-100), `output_muted`, `output_fault` (a storage fault on the volume file, or null). Read-only; safe to poll. |
-| `/voice/say` | POST | `{"text":"hello world","voice":"en_US-ryan-medium"}` — synthesize + play through the picked speaker. Test endpoint until commit 7 wires the LLM-reply path. Returns `{ok, duration_s, sample_rate}`. Plays at the speaker volume; muted means nothing is played. |
+| `/voice/say` | POST | `{"text":"hello world","voice":"af_heart"}` — optional installed-voice preview through the appliance speaker, without saving. Returns `{ok, duration_s, sample_rate}`; respects output volume/mute. |
 | `/voice/volume` | GET | Speaker volume: `{level, muted, fault}`. Works with voice switched off or no mic. See [Speaker volume](#speaker-volume). |
 | `/voice/volume` | POST | Exactly one of `{"level": 0-100}`, `{"change": -100..100}` or `{"muted": true\|false}` (strict: no strings, floats or extra keys; anything else is 422). Persists and applies from the next thing the box says; a level change also unmutes, and a negative `change` never lowers it below 10. Returns `{level, muted, fault, previous_level, previous_muted}`. |
+| `/voice/speaking-voice` | GET | Live installed choices: `{available, selectable, voice, voices, fault}`. |
+| `/voice/speaking-voice` | POST | `{"voice":"af_heart"}` — persist and apply an installed speaking voice. Owner/admin via the orchestrator; storage/service failures are reported. |
 
 ## Speaker volume
 
@@ -188,37 +192,18 @@ curl http://127.0.0.1:8086/audio/devices
 The orchestrator proxies a dashboard-facing `/api/voice/*` shell so
 you don't expose 8086 externally.
 
-## What lands in each commit
+## Current voice path
 
-This README ships in commit 1; the layered functionality is broken
-into stacked commits per `docs/voice-assistant-plan.md`:
+The original stacked implementation now provides hardware discovery, Vosk
+**Hey Droplet**, end-of-speech capture up to 30 seconds, CPU Qwen recognition,
+the existing orchestrator's streamed agent replies, and CPU Kokoro speech.
+Owners/admins can save and preview one of eight English speaking voices.
+The choice survives service recreation and applies to replies, confirmations,
+and cached cues. A failed wake-model load is visible in pipeline status.
 
-1. **Foundation** — hardware detection, audio I/O, FastAPI shell,
-   Docker. `/audio/devices`, `/audio/test-tone`, `/audio/test-record`
-   work without any wake/STT/TTS.
-2. **Wake word** — wake-word detection loop on a background thread;
-   `/voice/status` surfaces state. The default `vosk` engine recognizes
-   the branded "Droplet" and "Hey Droplet" phrases out of the box (no
-   per-phrase training, no licensing fee) — it fires on either;
-   `openwakeword` (`hey_jarvis` et al.) is available as an alternative
-   and the automatic fallback. Pluggable `WakeWordDetector` backends live
-   in `voice/wake.py`.
-3. **STT** — wyoming-faster-whisper sidecar container speaks Wyoming
-   protocol over TCP. After wake, voice-io streams the next
-   5 s of mic audio (fixed window — VAD-based cutoff in a follow-up),
-   receives the transcript, exposes it via
-   `/voice/status.last_transcript`.
-4. **TTS** (this commit) — wyoming-piper sidecar speaks Wyoming
-   protocol on TCP/10200. `pipeline.speak(text)` synthesizes + plays
-   through the picked speaker; surface via `POST /voice/say` (testing)
-   and `pipeline.speak()` (commit 7 wires it to the LLM reply).
-5. **Agent glue** — pipeline.py wires capture → wake → STT → LLM →
-   TTS → playback. Adds the four voice-control LLM tools
-   (`set_volume`, `mute_mic`, `change_voice`, `mic_status`) called
-   out by WARP-154. (None of the four is built. Speaker volume shipped
-   without a tool — see [Speaker volume](#speaker-volume).)
-6. **Dashboard UI** — voice settings page in `apps/web-dashboard`.
-   Mic-test button, wake-word selector, volume, voice picker.
+See [CPU voice qualification](../../docs/cpu-voice.md) for licenses, RAM and
+CPU limits, microphone/latency acceptance, and optional Whisper/Piper rollback.
+The main LLM and its GPU configuration are unchanged by the speech services.
 
 ## Why no PulseAudio / PipeWire
 

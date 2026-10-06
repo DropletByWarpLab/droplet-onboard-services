@@ -40,6 +40,7 @@ interface EmailThreadProps {
   error?: Error;
   /** Whether the current user may send (owner/admin). Hides the affordance if not. */
   canSend: boolean;
+  importedFromOutlook?: boolean;
   /** Called after a successful queue so the page can revalidate. */
   onSent: () => void;
 }
@@ -77,6 +78,7 @@ export function EmailThread({
   isLoading,
   error,
   canSend,
+  importedFromOutlook = false,
   onSent,
 }: EmailThreadProps) {
   if (isLoading) {
@@ -142,12 +144,13 @@ export function EmailThread({
             Indexed on-prem
           </span>
         </div>
+        {importedFromOutlook && <p className="type-caption-1 mt-2" style={{ color: "var(--text-muted)" }}>Read-only Outlook import. Sending is not available here; your Outlook mailbox stays unchanged.</p>}
       </div>
 
       {/* Messages */}
       <div className="flex-1 min-h-0 overflow-y-auto px-5 py-4 space-y-4">
         {thread.messages.map((m) => (
-          <MessageBlock key={m.id} message={m} accountId={thread.accountId} />
+          <MessageBlock key={m.id} message={m} accountId={thread.accountId} importedFromOutlook={importedFromOutlook} />
         ))}
 
         {draft && (
@@ -211,7 +214,7 @@ function AttachmentList({
   );
 }
 
-function MessageBlock({ message, accountId }: { message: EmailMessage; accountId: string }) {
+function MessageBlock({ message, accountId, importedFromOutlook }: { message: EmailMessage; accountId: string; importedFromOutlook: boolean }) {
   const name = message.fromName ?? message.fromAddr;
   return (
     <article className="card" style={{ padding: "16px" }}>
@@ -243,7 +246,8 @@ function MessageBlock({ message, accountId }: { message: EmailMessage; accountId
       >
         {message.bodyText ?? ""}
       </div>
-      {message.attachments && message.attachments.length > 0 && (
+      {importedFromOutlook && message.hasAttachments && <p className="type-caption-1 mt-3 flex items-center gap-2" style={{ color: "var(--text-muted)" }}><Paperclip size={14} aria-hidden="true" />Attachments stay in Outlook. Open the original email in Outlook to view them.</p>}
+      {!importedFromOutlook && message.attachments && message.attachments.length > 0 && (
         <AttachmentList
           accountId={accountId}
           messageId={message.id}

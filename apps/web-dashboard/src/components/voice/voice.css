@@ -306,6 +306,12 @@
   color: var(--color-label-primary);
 }
 
+.speaking-voice-card { padding: 18px; }
+.speaking-voice-card p { margin: 0 0 12px; color: var(--color-label-secondary); }
+.speaking-voice-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.speaking-voice-controls select { min-width: 230px; max-width: 100%; }
+.speaking-voice-card [role="status"] { margin-top: 12px; }
+
 .vrows {
   list-style: none;
   margin: 0;

@@ -77,7 +77,7 @@ import {
   type CloudFileItemInput,
   type CloudFileSourceScope,
 } from "../cloud-files/cloud-file-store.service.js";
-import type { PageHandler } from "./m365-sync.service.js";
+import type { PageHandler } from "./m365-contracts.js";
 
 const logger = createLogger("m365-drive-landing");
 

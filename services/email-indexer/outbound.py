@@ -41,7 +41,9 @@ import logging
 import re
 from dataclasses import dataclass, field
 from email.message import EmailMessage
-from typing import Optional, Protocol
+from typing import Awaitable, Callable, Optional, Protocol
+
+from errors import OAuthTokenUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -58,12 +60,13 @@ class DraftToSend:
     smtp_port: int
     smtp_tls: bool
     username: str
-    password_enc: str
+    password_enc: Optional[str]
     to_addrs: list[str]
     cc_addrs: Optional[list[str]]
     bcc_addrs: Optional[list[str]]
     subject: str
     body: str
+    auth_mode: str = "PASSWORD"
     #: Message-IDs of the draft's thread, oldest first, without brackets.
     thread_message_ids: list[str] = field(default_factory=list)
     #: (filename, content type, bytes) of each forwarded attachment.
@@ -165,6 +168,7 @@ def envelope_recipients(draft: DraftToSend) -> list[str]:
 async def send_one_draft(
     draft: DraftToSend,
     callback: StatusCallback,
+    get_oauth_access_token: Optional[Callable[[str], Awaitable[Optional[str]]]] = None,
 ) -> bool:
     """Claim, dispatch one draft via SMTP, then notify the orchestrator.
     Returns True on success."""
@@ -192,9 +196,27 @@ async def send_one_draft(
 
     from creds import decrypt
 
-    plaintext = decrypt(draft.password_enc)
-    if plaintext is None:
-        await callback.mark_failed(draft.id, "password decrypt failed")
+    auth_kwargs = {}
+    if draft.auth_mode == "GOOGLE_OAUTH":
+        if get_oauth_access_token is None:
+            await callback.mark_failed(draft.id, "Google sign-in needs reconnecting.")
+            return False
+
+        async def oauth_token_generator() -> str:
+            token = await get_oauth_access_token(draft.account_id)
+            if not token:
+                raise OAuthTokenUnavailable(needs_reconnect=True)
+            return token
+
+        auth_kwargs["oauth_token_generator"] = oauth_token_generator
+    elif draft.auth_mode == "PASSWORD":
+        plaintext = decrypt(draft.password_enc) if draft.password_enc else None
+        if plaintext is None:
+            await callback.mark_failed(draft.id, "password decrypt failed")
+            return False
+        auth_kwargs["password"] = plaintext
+    else:
+        await callback.mark_failed(draft.id, "Mailbox authorization is unavailable.")
         return False
 
     msg = build_message(draft)
@@ -210,12 +232,24 @@ async def send_one_draft(
             hostname=draft.smtp_host,
             port=draft.smtp_port,
             username=draft.username,
-            password=plaintext,
+            **auth_kwargs,
             use_tls=use_tls,
             start_tls=start_tls,
             recipients=recipients,
         )
     except Exception as exc:  # noqa: BLE001 — surface all SMTP failures
+        if draft.auth_mode == "GOOGLE_OAUTH":
+            if isinstance(exc, OAuthTokenUnavailable):
+                error = (
+                    "Google sign-in needs reconnecting."
+                    if exc.needs_reconnect
+                    else "Google authorization is temporarily unavailable."
+                )
+            else:
+                error = "Google mail send failed. Check the connection and try again."
+            logger.warning("OAuth SMTP send failed for draft %s", draft.id)
+            await callback.mark_failed(draft.id, error)
+            return False
         logger.warning("smtp send failed for draft %s: %s", draft.id, exc)
         await callback.mark_failed(draft.id, str(exc)[:1024])
         return False

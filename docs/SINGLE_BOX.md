@@ -75,6 +75,8 @@ a re-run without the flag keeps the host. Setup then runs `verify.sh`, which
 requires routing's `/health` to report `connected: true`. If routing cannot log
 in, setup prints the `ROUTER_AUTH` error and **exits 1** (a failed verify now
 fails setup, and the rescue SSH window stays open). Loopback hosts are refused.
+Full fresh-deployment runbook (router build, flash, pairing, later deploys):
+[`EDGE_ROUTER_DEPLOY.md`](EDGE_ROUTER_DEPLOY.md).
 
 ### Install from the autoinstall ISO (zero keystrokes)
 

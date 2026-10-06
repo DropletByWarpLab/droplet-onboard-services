@@ -67,9 +67,10 @@ function mkPrisma() {
     },
   ];
   const created: unknown[] = [];
-  return {
+  const prisma = {
     created,
     emailAccount: {
+      updateMany: vi.fn(async ({ where }: { where: { id: string } }) => ({ count: accounts[where.id] ? 1 : 0 })),
       findUnique: vi.fn(async ({ where }: { where: { id: string } }) => accounts[where.id] ?? null),
     },
     emailAttachment: {
@@ -97,13 +98,14 @@ function mkPrisma() {
       findUnique: vi.fn(async () => null),
       create: vi.fn(async (args: unknown) => {
         created.push(args);
-        return {};
+        return { id: "ingested-message" };
       }),
     },
     emailDraft: {
       create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({ id: "d1", ...data })),
     },
   };
+  return { ...prisma, $transaction: vi.fn(async (operation: (tx: typeof prisma) => Promise<unknown>) => operation(prisma)) };
 }
 
 function mkUser(id: string, role: AuthUser["role"]): AuthUser {

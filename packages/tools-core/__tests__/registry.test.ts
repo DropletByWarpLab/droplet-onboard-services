@@ -82,6 +82,7 @@ const EXPECTED_TOOL_NAMES = [
   "memory_extract_fact",
   "memory_recall",
   // WARP-466 — email tools (Phase D2)
+  "email_accounts",
   "email_draft_reply",
   "email_read",
   "email_search",

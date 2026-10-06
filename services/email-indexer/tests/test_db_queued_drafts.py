@@ -69,6 +69,7 @@ def _row(**over):
         "smtpTls": True,
         "username": "support@acme.example",
         "passwordEnc": "x",
+        "authMode": "PASSWORD",
     }
     base.update(over)
     return base

@@ -195,6 +195,21 @@ describe("GET /api/voice/devices (WARP-1036)", () => {
 });
 
 describe("POST /api/voice/say (WARP-1036)", () => {
+  it("forwards a temporary preview voice without changing the saved choice", async () => {
+    fetchSpy.mockResolvedValue(upstreamJson(200, { ok: true }));
+    const res = await request(buildApp(mkUser("owner")))
+      .post("/api/voice/say").send({ text: "Preview", voice: "bm_george", arbitrary: "discarded" });
+    expect(res.status).toBe(200);
+    expect(fetchSpy).toHaveBeenCalledWith("http://voice-io:8086/voice/say",
+      expect.objectContaining({ body: JSON.stringify({ text: "Preview", voice: "bm_george" }) }));
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+
+  it.each(["../file", "", 42, null])("rejects malformed preview voice %s", async (voice) => {
+    const res = await request(buildApp(mkUser("owner"))).post("/api/voice/say").send({ text: "Preview", voice });
+    expect(res.status).toBe(400);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
   it("forwards {text} to voice-io and relays the result", async () => {
     fetchSpy.mockResolvedValue(upstreamJson(200, { ok: true, duration_s: 1.2 }));
     const res = await request(buildApp(mkUser("owner")))
@@ -237,6 +252,47 @@ describe("POST /api/voice/say (WARP-1036)", () => {
       .send({ text: "hello" });
     expect(res.status).toBe(503);
     expect(res.body.error).toBe("voice_unavailable");
+  });
+});
+
+describe("speaking voice selection", () => {
+  it("relays the actual runtime catalog without inventing choices", async () => {
+    const catalog = { available: false, selectable: false, voice: null, voices: [], fault: "Unavailable" };
+    fetchSpy.mockResolvedValue(upstreamJson(200, catalog));
+    const res = await request(buildApp(mkUser("owner"))).get("/api/voice/speaking-voice");
+    expect(res.body).toEqual(catalog);
+  });
+
+  it.each(["owner", "admin"] as const)("allows %s to save and audits the landed voice", async (role) => {
+    fetchSpy.mockResolvedValue(upstreamJson(200, { voice: "bm_george", fault: null }));
+    const res = await request(buildApp(mkUser(role))).post("/api/voice/speaking-voice").send({ voice: "bm_george" });
+    expect(res.status).toBe(200);
+    expect(fetchSpy).toHaveBeenCalledWith("http://voice-io:8086/voice/speaking-voice",
+      expect.objectContaining({ body: JSON.stringify({ voice: "bm_george" }) }));
+    expect(recordActivityMock).toHaveBeenCalledWith(expect.objectContaining({
+      what: "Speaking voice changed", refs: { surface: "voice-speaking-voice", voice: "bm_george", upstreamStatus: 200 },
+    }));
+  });
+
+  it.each([{}, { voice: "" }, { voice: "../file" }, { voice: 5 }, { voice: "af_heart", extra: true }])(
+    "rejects malformed settings without touching the service", async (body) => {
+      const res = await request(buildApp(mkUser("owner"))).post("/api/voice/speaking-voice").send(body);
+      expect(res.status).toBe(400);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+  it("relays invalid runtime IDs and does not audit a rejected change", async () => {
+    fetchSpy.mockResolvedValue(upstreamJson(400, { detail: "Choose an available voice" }));
+    const res = await request(buildApp(mkUser("owner"))).post("/api/voice/speaking-voice").send({ voice: "not_installed" });
+    expect(res.status).toBe(400);
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+
+  it.each(["family", "guest", "service"] as const)("denies %s for reads and writes", async (role) => {
+    const app = buildApp(mkUser(role));
+    expect((await request(app).get("/api/voice/speaking-voice")).status).toBe(403);
+    expect((await request(app).post("/api/voice/speaking-voice").send({ voice: "af_heart" })).status).toBe(403);
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
 

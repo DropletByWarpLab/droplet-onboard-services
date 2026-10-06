@@ -11,8 +11,7 @@ on the returned scores. Three concrete detectors live here:
     (the default).
 
   - **OpenWakeWordDetector** — bundled-ONNX engine (hey_jarvis, alexa,
-    hey_mycroft). Used when `WAKE_ENGINE=openwakeword`, or as the
-    automatic fallback when the Vosk model isn't on disk. ONNX backend
+    hey_mycroft). Used only when `WAKE_ENGINE=openwakeword`. ONNX backend
     (NOT TFLite — `tflite-runtime` has no Python 3.12 wheel for x86_64
     and openWakeWord supports ONNX natively).
 
@@ -101,8 +100,12 @@ class WakeWordDetector(ABC):
     def loaded(self) -> bool:
         """True iff the model is ready to predict. False during the brief
         loading window after construction, or when the runtime failed to
-        initialise (in which case the pipeline falls back to no-op
-        listening)."""
+        initialise (in which case load_error explains the failure)."""
+
+    @property
+    def load_error(self) -> Optional[str]:
+        """A permanent model-load failure shown by the pipeline status."""
+        return None
 
     @abstractmethod
     def predict(self, audio_frame: np.ndarray) -> dict[str, float]:
@@ -145,31 +148,18 @@ class OpenWakeWordDetector(WakeWordDetector):
     file exists.
     """
 
-    # When the configured wake-word has neither a custom .onnx on disk
-    # nor a matching bundled model name, fall back to this so wake
-    # detection stays online while the custom model is in flight.
-    # Picked openwakeword's bundled 'hey_jarvis' because it's the
-    # closest phonetic shape to 'hey droplet' among the bundled set
-    # — both are two syllables starting with 'hey' followed by a hard
-    # consonant. Operators see the original wake word in /voice/status
-    # via `requested_wake_word`; the actively-loaded model is in
-    # `model_name` so the dashboard can surface "using hey_jarvis as
-    # fallback for hey_droplet" honestly.
-    FALLBACK_WAKE_WORD = "hey_jarvis"
-
     def __init__(
         self,
         wake_word: str = "hey_droplet",
         models_dir: str = "/app/models",
     ):
-        # `requested_wake_word` is what the operator asked for via
-        # WAKE_WORD env. `_wake_word` is what we actually loaded
-        # (may equal the fallback when the requested model isn't on disk).
+        # Load exactly the operator's chosen model. Bundled classifiers
+        # have their own weight licenses; never silently select another.
         self._requested_wake_word = wake_word
         self._wake_word = wake_word
         self._models_dir = models_dir
         self._loaded = False
-        self._using_fallback = False
+        self._load_error: Optional[str] = None
         self._model: Any = None
         self._load_attempted = False
 
@@ -183,8 +173,7 @@ class OpenWakeWordDetector(WakeWordDetector):
             # MockWakeWordDetector instead).
             from openwakeword.model import Model  # type: ignore[import-not-found]
 
-            # Resolution order: custom ONNX on disk → bundled model →
-            # bundled fallback (last-resort so the system stays armed).
+            # Resolution order: custom ONNX on disk → requested bundled model.
             custom_path = os.path.join(self._models_dir, f"{self._wake_word}.onnx")
             if os.path.exists(custom_path):
                 logger.info(
@@ -197,68 +186,46 @@ class OpenWakeWordDetector(WakeWordDetector):
                 self._loaded = True
                 return
 
-            # Try the wake-word name against openwakeword's bundled set.
-            # The library raises on unknown names — catch into the
-            # fallback branch so the system stays armed.
-            try:
-                logger.info(
-                    "openwakeword: loading bundled model %r (ONNX backend)",
-                    self._wake_word,
-                )
-                self._model = Model(
-                    wakeword_models=[self._wake_word],
-                    inference_framework="onnx",
-                )
-                self._loaded = True
-                return
-            except Exception as exc:
-                # Custom-name path: no .onnx on disk AND not bundled.
-                # If the operator asked for the fallback already, give
-                # up — would loop infinitely. Otherwise fall back.
-                if self._wake_word == self.FALLBACK_WAKE_WORD:
-                    raise
-                logger.warning(
-                    "openwakeword: %r not a bundled model and no .onnx "
-                    "on disk — falling back to %r so wake stays armed. "
-                    "Drop a trained %s.onnx into %s to switch over.",
-                    self._wake_word, self.FALLBACK_WAKE_WORD,
-                    self._requested_wake_word, self._models_dir,
-                )
-                self._using_fallback = True
-                self._wake_word = self.FALLBACK_WAKE_WORD
-                self._model = Model(
-                    wakeword_models=[self._wake_word],
-                    inference_framework="onnx",
-                )
-                self._loaded = True
+            logger.info(
+                "openwakeword: loading bundled model %r (ONNX backend)",
+                self._wake_word,
+            )
+            self._model = Model(
+                wakeword_models=[self._wake_word],
+                inference_framework="onnx",
+            )
+            self._loaded = True
         except Exception as exc:
             logger.error(
                 "openwakeword failed to load %r: %s — wake detection disabled",
                 self._wake_word, exc,
             )
             self._loaded = False
+            self._load_error = (
+                f"openWakeWord could not load requested model {self._wake_word!r}: {exc}"
+            )
 
     @property
     def model_name(self) -> str:
-        """Currently-loaded model name. Equals `requested_wake_word`
-        unless we fell back — then it's the fallback name so the
-        dashboard sees what's actually being matched."""
+        """Requested model name; no substitute is selected on failure."""
         return self._wake_word
 
     @property
     def requested_wake_word(self) -> str:
-        """What WAKE_WORD asked for. Differs from model_name iff we
-        fell back. The dashboard surfaces both so operators see
-        "configured: hey_droplet, currently: hey_jarvis (fallback)"."""
+        """What WAKE_WORD asked for."""
         return self._requested_wake_word
 
     @property
     def using_fallback(self) -> bool:
-        return self._using_fallback
+        return False
 
     @property
     def loaded(self) -> bool:
         return self._loaded
+
+    @property
+    def load_error(self) -> Optional[str]:
+        return self._load_error
 
     def predict(self, audio_frame: np.ndarray) -> dict[str, float]:
         if not self._load_attempted:
@@ -351,6 +318,7 @@ class VoskWakeWordDetector(WakeWordDetector):
         self._sample_rate = sample_rate
         self._loaded = False
         self._load_attempted = False
+        self._load_error: Optional[str] = None
         self._rec: Any = None
 
     def _ensure_loaded(self) -> None:
@@ -365,6 +333,10 @@ class VoskWakeWordDetector(WakeWordDetector):
                 self._model_path,
             )
             self._loaded = False
+            self._load_error = (
+                f"Vosk wake model is missing at {self._model_path}; "
+                f"install the bundled model to enable {self._requested_wake_word!r}"
+            )
             return
         try:
             # Lazy import — keeps the module importable on dev boxes
@@ -388,6 +360,7 @@ class VoskWakeWordDetector(WakeWordDetector):
                 "vosk failed to load (%s) — wake detection disabled", exc,
             )
             self._loaded = False
+            self._load_error = f"Vosk wake model could not load: {exc}"
 
     @property
     def model_name(self) -> str:
@@ -406,6 +379,10 @@ class VoskWakeWordDetector(WakeWordDetector):
     @property
     def loaded(self) -> bool:
         return self._loaded
+
+    @property
+    def load_error(self) -> Optional[str]:
+        return self._load_error
 
     def predict(self, audio_frame: np.ndarray) -> dict[str, float]:
         if not self._load_attempted:
@@ -738,14 +715,13 @@ def build_detector_from_env() -> WakeWordDetector:
       - "vosk" — recognizes the WAKE_WORD phrases out of the box via a
         grammar-constrained Vosk model, no per-phrase training. This is
         how "hey droplet" works for every customer with no
-        licensing fee. Falls back to openWakeWord if the Vosk model dir
-        isn't present, so a stripped image still wakes (on the bundled
-        hey_jarvis model) rather than going silent.
+        licensing fee. A missing model is reported as an error; neither
+        the configured phrase nor the selected engine is substituted.
       - "openwakeword" — the bundled-ONNX engine (hey_jarvis, alexa,
         hey_mycroft). It loads a single model, so it takes the FIRST
         configured phrase verbatim (underscores preserved — the name maps
-        to an .onnx filename / bundled model), with its own runtime
-        fallback to a bundled model when that phrase has no .onnx.
+        to an .onnx filename / bundled model). A missing model is reported
+        as an error instead of selecting a different phrase.
 
     Set `WAKE_WORD=__mock__` for a dev box with no wake runtime
     available (forces the MockWakeWordDetector).
@@ -763,31 +739,22 @@ def build_detector_from_env() -> WakeWordDetector:
     vosk_phrases = _parse_wake_words(raw)
 
     engine = os.environ.get("WAKE_ENGINE", "vosk").strip().lower()
+    models_dir = os.environ.get("WAKE_MODELS_DIR", "/app/models")
     if engine in ("openwakeword", "oww"):
-        return OpenWakeWordDetector(wake_word=oww_wake_word)
+        return OpenWakeWordDetector(wake_word=oww_wake_word, models_dir=models_dir)
     if engine and engine != "vosk":
         logger.warning("unknown WAKE_ENGINE=%r — using vosk", engine)
 
-    # Vosk path (default). A cheap on-disk check decides Vosk vs. the
-    # openWakeWord fallback WITHOUT importing vosk or loading the model,
-    # so FastAPI startup stays fast.
-    models_dir = os.environ.get("WAKE_MODELS_DIR", "/app/models")
+    # Vosk path (default). Loading is lazy so startup stays fast; an absent
+    # or broken model is surfaced on the first wake-loop tick.
     vosk_model_path = os.environ.get(
         "VOSK_MODEL_PATH",
         os.path.join(models_dir, VOSK_DEFAULT_MODEL_DIRNAME),
     )
-    if os.path.isdir(vosk_model_path):
-        logger.info(
-            "WAKE_ENGINE=vosk → VoskWakeWordDetector (phrases=%r, model=%s)",
-            vosk_phrases, vosk_model_path,
-        )
-        return VoskWakeWordDetector(
-            wake_word=vosk_phrases, model_path=vosk_model_path,
-        )
-
-    logger.warning(
-        "WAKE_ENGINE=vosk but no Vosk model at %s — falling back to "
-        "openWakeWord (wake will use its bundled fallback until the Vosk "
-        "model is present)", vosk_model_path,
+    logger.info(
+        "WAKE_ENGINE=vosk → VoskWakeWordDetector (phrases=%r, model=%s)",
+        vosk_phrases, vosk_model_path,
     )
-    return OpenWakeWordDetector(wake_word=oww_wake_word)
+    return VoskWakeWordDetector(
+        wake_word=vosk_phrases, model_path=vosk_model_path,
+    )
