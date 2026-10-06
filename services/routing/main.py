@@ -191,6 +191,28 @@ def _read_openwrt_password_file() -> str:
 pairing_state = PairingState()
 
 
+# ADR-071 slice C: the AP flow keeps its OWN pairing state (live password until
+# persisted, box fingerprint, which AP is awaiting persistence) so a claim on an
+# AP never touches the router's. ADR-071 section 2.3 keeps ONE
+# `ap_openwrt_password` secret for every AP, so this state - and the secret -
+# belongs to the AP claimed LAST: pairing a second AP replaces the credential the
+# first one was paired with (per-device escrow is future work, not invented here).
+ap_pairing_state = PairingState(role="ap")
+_ap_pending_mac: Optional[str] = None
+
+
+def current_ap_password() -> str:
+    """The password every external-AP login uses - the AP "holder" (ADR-071
+    runtime reload), the sibling of `current_openwrt_password()`.
+
+    Resolution order: the password minted by an AP claim in this process (the
+    secret file still holds the OLD value until the orchestrator persists the
+    new one) -> the secret file, re-read every call -> the value read at import
+    (which also covers the deprecated AP_OPENWRT_PASSWORD env fallback).
+    """
+    return ap_pairing_state.live_password() or _read_ap_password_file() or AP_PASSWORD
+
+
 def current_openwrt_password() -> str:
     """The password every router login uses - the "holder" the SDK resolves at
     login time (ADR-071 runtime reload), not a value frozen at construction.
@@ -245,6 +267,17 @@ def _load_ap_password() -> str:
 
 
 AP_PASSWORD = _load_ap_password()
+
+
+def _read_ap_password_file() -> str:
+    """Quiet re-read of the AP secret file (no warnings - this runs at every AP
+    login). Empty string when the file is absent, empty or unreadable."""
+    secret_path = os.environ.get("AP_OPENWRT_PASSWORD_FILE", "/run/secrets/ap_openwrt_password")
+    try:
+        with open(secret_path, "r", encoding="utf-8") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
 if not OPENWRT_PASSWORD:
     logger.warning(
         "OpenWrt password is not configured — router control will be unavailable "
@@ -2807,7 +2840,7 @@ def _router_side_staging_allowed(router) -> bool:
        router-side write IS the approval, and skipping it on a transient
        read error would turn the approval into a silent no-op.
     """
-    if AP_PASSWORD:
+    if current_ap_password():
         return False
     try:
         wireless = getattr(router, "wireless", None)
@@ -2851,13 +2884,16 @@ def _connect_ap(host: str):
 
     Single construction point for every AP-direct call (`_push_ap_wireless`,
     band steering) so the credential/port wiring can't drift between them.
+    The connection is built per call, so resolving `current_ap_password()` here
+    (ADR-071: claimed-in-process password, else the re-read secret file) means a
+    freshly paired AP's credential applies to the very next AP-direct call.
     Raises ConnectionLost / UbusError for the caller to classify.
     """
     return DropletRouter(
         host=host,
         port=AP_PORT,
         username=AP_USERNAME,
-        password=AP_PASSWORD,
+        password=current_ap_password(),
         auto_login=True,
     )
 
@@ -3519,7 +3555,7 @@ def aps_band_steering_get(mac: str):
                 "ap_detail": "mock AP",
             }
 
-        if not AP_PASSWORD:
+        if not current_ap_password():
             return {
                 "supported": False,
                 "enabled": False,
@@ -3587,7 +3623,7 @@ def aps_band_steering_put(mac: str, req: ApBandSteeringRequest, request: Request
                 "operation_id": getattr(request.state, "operation_id", None),
             }
 
-        if not AP_PASSWORD:
+        if not current_ap_password():
             # Never pretend to toggle steering on an AP we can't configure.
             return JSONResponse(status_code=422, content=_AP_BAND_STEERING_UNAVAILABLE)
 
@@ -3647,7 +3683,7 @@ def aps_clients(mac: str):
                 "ap_detail": "mock AP",
             }
 
-        if not AP_PASSWORD:
+        if not current_ap_password():
             return {
                 "supported": False,
                 "clients": [],
@@ -3707,7 +3743,7 @@ def aps_wireless_get(mac: str):
                 raise HTTPException(status_code=404, detail="AP not found")
             return {**ap.get_ap_wireless(canonical), "ap_detail": "mock AP"}
 
-        if not AP_PASSWORD:
+        if not current_ap_password():
             return {
                 "supported": False,
                 "ap_detail": "no AP credential configured",
@@ -3773,7 +3809,7 @@ def aps_wireless_put(mac: str, req: ApWirelessRequest, request: Request):
                 "operation_id": getattr(request.state, "operation_id", None),
             }
 
-        if not AP_PASSWORD:
+        if not current_ap_password():
             # Never pretend to rename a network on an AP we can't configure.
             return JSONResponse(status_code=422, content=_AP_WIRELESS_UNAVAILABLE)
 
@@ -3869,7 +3905,7 @@ def aps_approve(mac: str, req: ApApproveRequest, request: Request):
                 "router-side wifi-iface staging skipped for %s (%s)",
                 canonical,
                 "AP credential provisioned — approval is AP-direct"
-                if AP_PASSWORD else "router serves no wireless",
+                if current_ap_password() else "router serves no wireless",
             )
 
         # WARP-1675: configure the AP ITSELF when an AP credential is
@@ -3877,7 +3913,7 @@ def aps_approve(mac: str, req: ApApproveRequest, request: Request):
         # router-side staging above remains the whole story.
         ap_configured = False
         ap_detail = "no AP credential configured — router-side approval only"
-        if AP_PASSWORD:
+        if current_ap_password():
             ap_ip = _discovered_ap_ip(ap, canonical)
             if not ap_ip:
                 raise HTTPException(status_code=502, detail={
@@ -3923,6 +3959,223 @@ def aps_approve(mac: str, req: ApApproveRequest, request: Request):
         handle_router_error(exc)
 
 
+# ---------------------------------------------------------------------------
+# AP pairing (ADR-071 slice C, WARP-3739; ADR-071 section 2.3)
+# ---------------------------------------------------------------------------
+# The AP's own `droplet.pair` window (same plugin as the router's) is claimed
+# through the AP onboarding path: the AP's CURRENT address comes from the same
+# mDNS inventory `/aps/{mac}/approve` uses (`_discovered_ap_ip`), the claim runs
+# against that host, and the minted password rides the same internal hop as the
+# router's (routing -> orchestrator -> device-bridge, target "ap"). Discovery is
+# never trust: the TXT `pairing=` hint only finds the AP; the AP's own window
+# decides a claim.
+#
+# ONE secret for all APs: ADR-071 section 2.3 keeps a single
+# `ap_openwrt_password` for every AP, so pairing a second AP overwrites the
+# credential the first was paired with (the first then reads AP_AUTH until it is
+# paired again). Per-device escrow is future work.
+def _ap_pairing_block(status: PairStatus, mac: str) -> dict:
+    fingerprint = ap_pairing_state.box_fingerprint()
+    elsewhere = bool(
+        status.state == STATE_PAIRED
+        and status.paired_box
+        and fingerprint
+        and status.paired_box != fingerprint
+    )
+    pending = ap_pairing_state.pending()
+    return {
+        "state": status.state,
+        "window_ends_at": status.window_ends_at,
+        "paired_box": status.paired_box,
+        "paired_elsewhere": elsewhere,
+        "pending_persist": bool(pending["pending"] and _ap_pending_mac == mac),
+    }
+
+
+def _ap_pairing_api(host: str) -> PairingApi:
+    """Null-session `droplet.pair` client against ONE AP (module-level so tests
+    can swap it, like `_pairing_api` for the router)."""
+    return PairingApi(host, AP_PORT)
+
+
+def _resolve_ap_host(canonical: str) -> Optional[str]:
+    """The AP's current address from the live mDNS inventory (needs the router
+    session, exactly like `/aps/{mac}/approve`). None when the AP is not
+    currently visible. Router-side failures surface as the usual typed errors."""
+    try:
+        r = get_router()
+        return _discovered_ap_ip(_get_ap_namespace(r), canonical)
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+@app.get("/aps/{mac}/pairing")
+def aps_pairing_get(mac: str):
+    """The AP's `droplet.pair status` (null session), so the dashboard can show an
+    AP's window state next to its Approve button. Shaped like `/health` for the
+    orchestrator's shared pairing service: `host`, `connected`, `error_code` and a
+    `pairing` block. Read-only; `connected` is null (not probed) for an AP."""
+    canonical = _validate_mac(mac)
+    host = _resolve_ap_host(canonical)
+    if ROUTING_MODE != "real" or not host:
+        return {
+            "mac": canonical,
+            "host": host,
+            "connected": None,
+            "error_code": None if ROUTING_MODE != "real" else "AP_UNREACHABLE",
+            "pairing": _ap_pairing_block(PairStatus(), canonical),
+        }
+    error_code: Optional[str] = None
+    try:
+        status = _ap_pairing_api(host).status()
+    except PairingUnsupported:
+        status = PairStatus()
+    except (ConnectionLost, UbusError) as exc:
+        logger.warning("AP %s droplet.pair status failed: %s", canonical, exc)
+        status = PairStatus()
+        error_code = "AP_UNREACHABLE"
+    block = _ap_pairing_block(status, canonical)
+    if block["paired_elsewhere"]:
+        error_code = "AP_PAIRED_ELSEWHERE"
+    return {
+        "mac": canonical,
+        "host": host,
+        "connected": None,
+        "error_code": error_code,
+        "pairing": block,
+    }
+
+
+@app.post("/aps/{mac}/pairing/claim")
+@_uci_serialised
+def aps_pairing_claim(mac: str, req: PairingFingerprintRequest):
+    """Mint a password, claim THIS AP with it, prove the claim, go live on it."""
+    global _ap_pending_mac
+    canonical = _validate_mac(mac)
+    fingerprint = req.box_fingerprint
+    if not _valid_fingerprint(fingerprint):
+        return _pair_error(
+            400, "INVALID_FINGERPRINT", "box_fingerprint must be 64 lowercase hex characters"
+        )
+    if ROUTING_MODE != "real":
+        return _pair_error(
+            502, "PAIR_UNSUPPORTED", f"pairing is unavailable in ROUTING_MODE={ROUTING_MODE}"
+        )
+    ap_pairing_state.set_box_fingerprint(fingerprint)
+
+    host = _resolve_ap_host(canonical)
+    if not host:
+        return _pair_error(
+            502,
+            "AP_UNREACHABLE",
+            f"AP {canonical} has no discovered address to pair - is it online? Retryable.",
+        )
+
+    api = _ap_pairing_api(host)
+    try:
+        status = api.status()
+    except PairingUnsupported:
+        return _pair_error(502, "PAIR_UNSUPPORTED", "AP does not provide droplet.pair")
+    except (ConnectionLost, UbusError) as exc:
+        return _pair_error(503, "AP_UNREACHABLE", f"AP unreachable: {exc}")
+
+    if status.state == STATE_PAIRED:
+        if status.paired_box and status.paired_box != fingerprint:
+            return _pair_error(
+                409,
+                "AP_PAIRED_ELSEWHERE",
+                "AP is paired to another device; press its button to re-pair",
+                paired_box=status.paired_box,
+            )
+        return _pair_error(409, "PAIR_WINDOW_CLOSED", "AP is already paired and no pairing window is open")
+    if status.state != STATE_OPEN:
+        if status.state == STATE_CLOSED:
+            return _pair_error(409, "PAIR_WINDOW_CLOSED", "no pairing window is open")
+        return _pair_error(502, "PAIR_UNSUPPORTED", "AP pairing state could not be determined")
+
+    password = secrets.token_hex(16)
+    try:
+        api.claim(password, fingerprint)
+    except PairingUnsupported:
+        return _pair_error(502, "PAIR_UNSUPPORTED", "AP does not provide droplet.pair")
+    except PairingClaimError as exc:
+        return _pair_error(502, "PAIR_CLAIM_FAILED", str(exc))
+    except (ConnectionLost, UbusError) as exc:
+        return _pair_error(502, "PAIR_CLAIM_FAILED", f"claim request failed: {exc}")
+
+    # Prove the claim took: a FRESH login with the new password (never the
+    # holder - this must exercise the password the AP now holds).
+    verify: Optional[DropletRouter] = None
+    model: Optional[str] = None
+    try:
+        verify = DropletRouter(
+            host=host,
+            port=AP_PORT,
+            username=AP_USERNAME,
+            password=password,
+            auto_login=True,
+        )
+    except (ConnectionLost, UbusError) as exc:
+        logger.error(
+            "PAIR_VERIFY_FAILED: AP %s accepted the claim but login as %s with the "
+            "new credential failed (%s) - AP and box now disagree",
+            canonical,
+            AP_USERNAME,
+            exc,
+        )
+        return _pair_error(
+            502,
+            "PAIR_VERIFY_FAILED",
+            "claim was accepted but logging in with the new credential failed",
+        )
+    try:
+        board = verify.system.board_info()
+        if isinstance(board, dict):
+            model = board.get("model")
+    except (ConnectionLost, UbusError) as exc:
+        logger.warning("Paired AP verified but `system board` read failed: %s", exc)
+    finally:
+        try:
+            verify.disconnect()
+        except Exception:  # noqa: BLE001 - best-effort logout of the proof session
+            pass
+
+    # From here every AP-direct login (`_connect_ap`) resolves the new password.
+    paired_at = ap_pairing_state.record_claim(password, fingerprint)
+    _ap_pending_mac = canonical
+    logger.info("AP paired: mac=%s host=%s box=%s...", canonical, host, fingerprint[:16])
+    return JSONResponse(
+        content={
+            "ok": True,
+            "password": password,
+            "host": host,
+            "mac": canonical,
+            "model": model,
+            "paired_at": paired_at,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/aps/pairing/pending")
+def aps_pairing_pending():
+    """The password minted by an AP claim that the orchestrator has not yet
+    confirmed persisted (the "paired but not saved -> Retry" path)."""
+    body = ap_pairing_state.pending()
+    body["mac"] = _ap_pending_mac if body["pending"] else None
+    return JSONResponse(content=body, headers={"Cache-Control": "no-store"})
+
+
+@app.post("/aps/pairing/persisted")
+@_uci_serialised
+def aps_pairing_persisted():
+    """The orchestrator confirmed the AP secret file holds the new password."""
+    global _ap_pending_mac
+    ap_pairing_state.mark_persisted(_read_ap_password_file())
+    _ap_pending_mac = None
+    return {"ok": True}
+
+
 @app.delete("/aps/{mac}")
 @_uci_serialised
 def aps_decommission(mac: str, request: Request):
@@ -3964,7 +4217,7 @@ def aps_decommission(mac: str, request: Request):
         # must NEVER fail the decommission, only annotate it.
         ap_disabled = False
         ap_detail = "no AP credential configured — router-side decommission only"
-        if AP_PASSWORD:
+        if current_ap_password():
             ap_ip = _discovered_ap_ip(ap, canonical)
             if not ap_ip:
                 ap_detail = "AP not currently discovered — nothing to disable"

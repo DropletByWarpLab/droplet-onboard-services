@@ -150,7 +150,10 @@ class PairingApi:
 class PairingState:
     """Process-wide pairing state. Plain, explicit fields guarded by one lock."""
 
-    def __init__(self) -> None:
+    def __init__(self, role: str = "router") -> None:
+        # role only words the foreign-pairing log line; the state machine is
+        # identical for the router and (slice C) the AP flow's own instance.
+        self._role = role
         self._lock = threading.RLock()
         self._status = PairStatus()
         self._box_fingerprint: Optional[str] = None
@@ -195,9 +198,12 @@ class PairingState:
         if foreign and foreign not in self._foreign_logged:
             self._foreign_logged.add(foreign)
             logger.warning(
-                "ROUTER_PAIRED_ELSEWHERE: router is paired to a different box "
-                "(fingerprint %s...) - a router button press is needed to re-pair",
+                "%s_PAIRED_ELSEWHERE: %s is paired to a different box "
+                "(fingerprint %s...) - a %s button press is needed to re-pair",
+                self._role.upper(),
+                self._role,
                 foreign[:16],
+                self._role,
             )
 
     def foreign_paired_box(self) -> Optional[str]:
