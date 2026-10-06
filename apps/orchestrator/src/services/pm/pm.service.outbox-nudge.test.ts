@@ -37,6 +37,7 @@ function relationDeleteStub(deleteWorkItemRow: () => Promise<unknown> = async ()
       delete: vi.fn(deleteWorkItemRow),
     },
     pmWorkItemAssignee: { findMany: vi.fn(async () => []) },
+    pmAttachment: { findMany: vi.fn(async () => []) },
     user: { findMany: vi.fn(async () => []) },
     pmWorkItemRelation: {
       findMany: vi.fn(async () => [{ fromId: "wi-1", toId: "wi-2", kind: "RELATES" }]),
@@ -58,7 +59,7 @@ function relationDeleteStub(deleteWorkItemRow: () => Promise<unknown> = async ()
   const prisma = {
     tx,
     $transaction: transaction,
-    pmWorkItem: { findUnique: vi.fn(async () => ({ id: "wi-1", project: { kind: "PROJECT" } })) },
+    pmWorkItem: { findUnique: vi.fn(async () => ({ id: "wi-1", projectId: "p-1", project: { kind: "PROJECT" } })) },
   };
   return { prisma, tx, transaction, inTransaction: () => inTransaction };
 }
@@ -115,6 +116,7 @@ describe("delete tombstones nudge only after commit", () => {
     const tx = {
       pmWorkItem: { findMany: vi.fn(async () => []), delete: vi.fn(async () => ({})) },
       pmWorkItemAssignee: { findMany: vi.fn(async () => []) },
+      pmAttachment: { findMany: vi.fn(async () => []) },
       pmWorkItemRelation: { findMany: vi.fn(async () => []) },
       user: { findMany: vi.fn(async () => []) },
       pmActivity: { create: vi.fn(async () => ({})), createMany: vi.fn(async () => ({ count: 0 })) },

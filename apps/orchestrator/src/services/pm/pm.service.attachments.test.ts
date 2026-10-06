@@ -71,6 +71,8 @@ describe("deleteWorkItem unlinks the item's attachment files (WARP-1505)", () =>
         },
       },
       pmActivity: { create: async () => ({}), createMany: async () => ({ count: 0 }) },
+      pmWorkItemAssignee: { findMany: async () => [] },
+      user: { findMany: async () => [] },
       pmWorkItemRelation: { findMany: async () => [] },
       pmAttachment: {
         findMany: async ({ where, select }: { where: Row; select: Row }) => {
@@ -86,7 +88,7 @@ describe("deleteWorkItem unlinks the item's attachment files (WARP-1505)", () =>
       order.push("unlink");
       return { removed: 0, failed: 0 };
     });
-    const prisma = { systemFlag, pmWorkItem: { findUnique: async () => ({ id: "wi-1" }) }, $transaction: seam.$transaction } as never;
+    const prisma = { systemFlag, pmWorkItem: { findUnique: async () => ({ id: "wi-1", projectId: "p-1", project: { kind: "PROJECT" } }) }, $transaction: seam.$transaction } as never;
     return { prisma, seam, order, flags };
   }
 
@@ -101,7 +103,7 @@ describe("deleteWorkItem unlinks the item's attachment files (WARP-1505)", () =>
     expect(flags.size).toBe(0);
     // An upload committing between the key read and the delete must abort the
     // delete, not slip through the cascade with its blob forgotten.
-    expectAllTransactionsAt(seam, SERIALIZABLE_TX);
+    expectAllTransactionsAt(seam, { ...SERIALIZABLE_TX, timeout: 5_000 });
   });
 
   it("does not unlink anything when the delete fails", async () => {
