@@ -850,13 +850,16 @@ def _valid_fingerprint(value: Optional[str]) -> bool:
 @app.put("/pairing/identity")
 @_uci_serialised
 def pairing_identity(req: PairingFingerprintRequest):
-    """Record this box's fingerprint so a router paired to a DIFFERENT box can be
-    named ROUTER_PAIRED_ELSEWHERE even before the first claim."""
+    """Record this box's fingerprint so a router (or, slice C, an AP) paired to a
+    DIFFERENT box can be named PAIRED_ELSEWHERE even before the first claim."""
     if not _valid_fingerprint(req.box_fingerprint):
         return _pair_error(
             400, "INVALID_FINGERPRINT", "box_fingerprint must be 64 lowercase hex characters"
         )
     pairing_state.set_box_fingerprint(req.box_fingerprint)
+    # ADR-071 slice C: one box, one identity - the AP flow's own state learns it
+    # here too, so an AP enrolled to a DIFFERENT box is named before any claim.
+    ap_pairing_state.set_box_fingerprint(req.box_fingerprint)
     return {"ok": True}
 
 

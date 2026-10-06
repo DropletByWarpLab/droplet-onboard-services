@@ -237,6 +237,15 @@ class TestApPairingStatus:
         assert body["pairing"]["paired_box"] == OTHER_FP
         assert body["error_code"] == "AP_PAIRED_ELSEWHERE"
 
+    def test_the_routers_identity_publish_also_teaches_the_ap_flow(self, client, fleet):
+        fleet.by_host[AP_IP].status = PairStatus(state="paired", paired_box=OTHER_FP)
+        assert client.get(f"/aps/{MAC}/pairing", headers=AUTH).json()["error_code"] is None
+        res = client.put("/pairing/identity", json={"box_fingerprint": BOX_FP}, headers=AUTH)
+        assert res.status_code == 200
+        body = client.get(f"/aps/{MAC}/pairing", headers=AUTH).json()
+        assert body["error_code"] == "AP_PAIRED_ELSEWHERE"
+        assert body["pairing"]["paired_elsewhere"] is True
+
     def test_paired_to_this_box_is_not_elsewhere(self, client, fleet):
         main.ap_pairing_state.set_box_fingerprint(BOX_FP)
         fleet.by_host[AP_IP].status = PairStatus(state="paired", paired_box=BOX_FP)
