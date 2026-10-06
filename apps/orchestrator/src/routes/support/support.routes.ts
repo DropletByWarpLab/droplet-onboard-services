@@ -211,6 +211,9 @@ export function mapSupportError(err: unknown, res: Response): boolean {
     case support.EMAIL_CHANNEL_ERRORS.EMAIL_MODULE_DISABLED:
       res.status(409).json({ error: msg, message: "Enable the Email module before binding a mailbox." });
       return true;
+    case support.EMAIL_CHANNEL_ERRORS.ACCOUNT_READ_ONLY:
+      res.status(409).json({ error: msg, message: "Outlook email is read-only. Choose a mailbox that supports sending for this service desk." });
+      return true;
     case support.EMAIL_CHANNEL_ERRORS.INVALID_TEMPLATE:
       res.status(422).json({ error: msg });
       return true;

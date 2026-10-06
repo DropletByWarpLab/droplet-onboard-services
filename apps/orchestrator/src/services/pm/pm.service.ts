@@ -2513,6 +2513,7 @@ export async function deleteWorkItem(
     include: { project: { select: { kind: true } } },
   });
   if (!existing || isServiceDesk(existing.project)) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
+  let wroteRelationActivity = false;
   // WARP-1505: filled inside the transaction, used after it commits.
   let blobKeys: string[] = [];
   let cleanupKeys: string[] = [];
@@ -2562,6 +2563,7 @@ export async function deleteWorkItem(
         select: { fromId: true, toId: true, kind: true },
       });
       if (relations.length > 0) {
+        wroteRelationActivity = true;
         await tx.pmActivity.createMany({
           data: relations.map((rel) => {
             const otherId = rel.fromId === id ? rel.toId : rel.fromId;
@@ -2575,11 +2577,11 @@ export async function deleteWorkItem(
             };
           }),
         });
-        nudgeOutbox();
       }
 
       await tx.pmWorkItem.delete({ where: { id } });
     }, SERIALIZABLE_TX);
+    if (wroteRelationActivity) nudgeOutbox();
   } catch (err) {
     if (isPrismaCode(err, "P2025")) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
     // The SERIALIZABLE loser: an edge was committed under us between the audit

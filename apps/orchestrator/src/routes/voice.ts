@@ -44,8 +44,8 @@ const DEFAULT_VOICE_IO_URL = "http://voice-io:8086";
 /** Status/devices are in-memory reads on voice-io — fast. */
 const READ_TIMEOUT_MS = 10_000;
 
-/** `/voice/say` blocks for Piper synthesis + full playback duration. */
-const SAY_TIMEOUT_MS = 30_000;
+/** `/voice/say` waits for CPU synthesis and playback. */
+const SAY_TIMEOUT_MS = 90_000;
 
 /**
  * WARP-1055 — `/audio/measure` blocks for the requested capture window
@@ -101,6 +101,8 @@ const ENABLED_TIMEOUT_MS = 40_000;
 
 /** Mirrors voice-io's own SayRequest bound (main.py: max 2000 chars). */
 const MAX_SAY_TEXT_CHARS = 2000;
+const voiceIdSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/);
+const speakingVoiceSchema = z.object({ voice: voiceIdSchema }).strict();
 
 /** Mirrors voice-io's MeasureRequest bounds (main.py). */
 const MEASURE_KINDS = new Set(["noise_floor", "speech_peak"]);
@@ -363,10 +365,41 @@ export function createVoiceRouter(): Router {
       res.status(400).json({ error: "text_too_long" });
       return;
     }
-    // Only `text` is forwarded — the voice (Piper model) stays the
-    // box-configured default; the wizard's speaker test has no business
-    // switching voices.
-    await proxy(res, "POST", "/voice/say", { text }, SAY_TIMEOUT_MS);
+    const voice: unknown = req.body?.voice;
+    if (voice !== undefined && !voiceIdSchema.safeParse(voice).success) {
+      res.status(400).json({ error: "invalid_voice" });
+      return;
+    }
+    // A temporary preview. voice-io checks the running service's installed
+    // allowlist; the preview never changes the persisted speaking voice.
+    const body: { text: string; voice?: string } = { text };
+    if (typeof voice === "string") body.voice = voice;
+    await proxy(res, "POST", "/voice/say", body, SAY_TIMEOUT_MS);
+  });
+
+  router.get("/voice/speaking-voice", guard, async (_req, res) => {
+    await proxy(res, "GET", "/voice/speaking-voice");
+  });
+
+  router.post("/voice/speaking-voice", guard, async (req, res) => {
+    const parsed = speakingVoiceSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_voice" });
+      return;
+    }
+    const { status, payload } = await proxyWithPayload(res, "POST", "/voice/speaking-voice", parsed.data);
+    if (status < 200 || status >= 300) return;
+    // The response also carries an optional storage fault; read only the
+    // validated voice for the audit row, never client-supplied copy.
+    const voice = typeof payload === "object" && payload !== null
+      ? (payload as { voice?: unknown }).voice : undefined;
+    if (!voiceIdSchema.safeParse(voice).success) return;
+    void recordActivity({
+      kind: "voice", severity: "info", sourceIcon: "volume-2",
+      what: "Speaking voice changed", sub: null,
+      refs: { surface: "voice-speaking-voice", voice, upstreamStatus: status },
+      actor: actorFromRequest(req),
+    });
   });
 
   // ── WARP-1055: calibration wizard measurement + persistence ──

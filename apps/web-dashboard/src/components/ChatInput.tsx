@@ -11,7 +11,7 @@ import {
 } from "react";
 import { ArrowUpRight, Loader2, Mic, Plus, Square, Wrench } from "lucide-react";
 import { transcribeAudio, SttUnavailable } from "@/lib/api";
-import { canCaptureAudio, PcmRecorder } from "@/lib/audio-capture";
+import { canCaptureAudio, MAX_RECORD_SECONDS, PcmRecorder } from "@/lib/audio-capture";
 import type { ChatAttachment, ToolCatalogEntry } from "@/lib/types";
 import { AttachmentChip } from "./AttachmentChip";
 import "@/components/ui/pick-menu.css";
@@ -118,7 +118,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
   const [value, setValue] = useState(() => readDraft(draftKey));
   const [isDragging, setIsDragging] = useState(false);
   // WARP-844 — voice input. "unavailable" hides the mic after the
-  // orchestrator answers 503 (whisper sidecar not deployed); jsdom and
+  // orchestrator answers 503 (STT sidecar not deployed); jsdom and
   // non-secure contexts hide it via canCaptureAudio().
   const [voiceState, setVoiceState] = useState<
     "idle" | "recording" | "transcribing" | "unavailable"
@@ -136,17 +136,12 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     };
   }, []);
 
-  const toggleRecording = async () => {
-    if (voiceState === "transcribing" || voiceState === "unavailable") return;
-    if (voiceState === "recording") {
+  const stopRecording = useCallback(async () => {
+    const rec = recorderRef.current;
+    if (rec) {
+      recorderRef.current = null;
       setVoiceState("transcribing");
       try {
-        const rec = recorderRef.current;
-        recorderRef.current = null;
-        if (!rec) {
-          setVoiceState("idle");
-          return;
-        }
         const { pcm, rate } = await rec.stop();
         const { text } = await transcribeAudio(pcm, rate);
         if (text) {
@@ -163,6 +158,19 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
           setVoiceState("idle");
         }
       }
+    }
+  }, []);
+
+  useEffect(() => {
+    if (voiceState !== "recording") return;
+    const timer = window.setTimeout(() => void stopRecording(), MAX_RECORD_SECONDS * 1000);
+    return () => window.clearTimeout(timer);
+  }, [voiceState, stopRecording]);
+
+  const toggleRecording = async () => {
+    if (voiceState === "transcribing" || voiceState === "unavailable") return;
+    if (voiceState === "recording") {
+      await stopRecording();
       return;
     }
     try {

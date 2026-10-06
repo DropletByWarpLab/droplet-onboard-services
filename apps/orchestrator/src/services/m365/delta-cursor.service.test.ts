@@ -12,6 +12,8 @@
  */
 import { describe, it, expect, vi } from "vitest";
 
+import { matchesWhere } from "../../__tests__/helpers/fake-table.js";
+
 import {
   claimDueCursors,
   purgeCursorsForUser,
@@ -70,7 +72,7 @@ function fakePrisma(seed: Array<Record<string, unknown>> = [], connected: string
     __first: () => rows[0],
     m365Connection: {
       findMany: vi.fn(async ({ where }: any = {}) =>
-        where?.state === "CONNECTED" ? connected.map((userId) => ({ userId })) : [],
+        where?.state === "CONNECTED" ? connected.map((userId) => ({ userId, mailEnabled: true })) : [],
       ),
     },
     m365DeltaCursor: {
@@ -81,6 +83,7 @@ function fakePrisma(seed: Array<Record<string, unknown>> = [], connected: string
       }),
       findMany: vi.fn(async ({ where, take, orderBy }: any = {}) => {
         let out = rows;
+        if (where?.AND) out = out.filter((r) => matchesWhere(r, { AND: where.AND }));
         if (where?.userId?.in) out = out.filter((r) => where.userId.in.includes(r.userId));
         if (where?.state?.in) out = out.filter((r) => where.state.in.includes(r.state));
         if (where?.OR) {
@@ -461,5 +464,15 @@ describe("upsertCursor", () => {
     const prisma = fakePrisma([cursor({ deltaLink: "KEEP-ME", lastSyncedAt: NOW })]);
     await upsertCursor(prisma as never, USER, "mail", "inbox");
     expect((prisma.__first() as any).deltaLink).toBe("KEEP-ME");
+  });
+});
+
+
+describe("mail cursor selection respects per-person import and module choices", () => {
+  it("applies opt-in before the claim limit so disabled mail cannot starve other workloads", async () => {
+    const prisma = fakePrisma([cursor({ id: "off", userId: "off-person" }), cursor({ id: "on", userId: "on-person" }), cursor({ id: "files", userId: "off-person", workload: "files" })], ["off-person", "on-person"]);
+    prisma.m365Connection.findMany.mockResolvedValue([{ userId: "off-person", mailEnabled: false }, { userId: "on-person", mailEnabled: true }] as never);
+    expect((await claimDueCursors(prisma as never, 1, NOW)).map((r) => r.id)).toEqual(["on"]);
+    expect((await claimDueCursors(prisma as never, 10, NOW, false, true)).map((r) => r.id)).toEqual(["files"]);
   });
 });

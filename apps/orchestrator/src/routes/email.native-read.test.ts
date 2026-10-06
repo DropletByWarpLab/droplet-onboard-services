@@ -17,6 +17,8 @@ function fixture(role = "family") {
   drafts.push({ id: "foreign-draft", accountId: "a2", status: "draft", updatedAt: date, body: "Someone else's mail", attachmentIds: [] });
   const matches = (row: Row, where: Row): boolean => Object.entries(where).every(([key, value]) => {
     if (key === "OR") return (value as Row[]).some(clause => matches(row, clause));
+    if (key === "AND") return (value as Row[]).every(clause => matches(row, clause));
+    if (value && typeof value === "object" && "contains" in value) return String(row[key] ?? "").toLowerCase().includes(String(value.contains).toLowerCase());
     if (value instanceof Date) return (row[key] as Date).getTime() === value.getTime();
     if (value && typeof value === "object" && "lt" in value) return row[key] < value.lt;
     return row[key] === value;
@@ -47,6 +49,16 @@ function fixture(role = "family") {
 }
 
 describe("native email saved reads and keyset paging", () => {
+  it("keeps the search filter on later pages instead of returning unrelated threads", async () => {
+    const f = fixture();
+    f.threads.find(t => t.id === "c")!.subject = "needle first";
+    f.threads.find(t => t.id === "a")!.subject = "needle second";
+    const first = await request(f.app).get("/api/email/a1/threads").query({ query: "needle", limit: 1 });
+    expect(first.body.threads.map((t: Row) => t.id)).toEqual(["c"]);
+    const next = await request(f.app).get("/api/email/a1/threads").query({ query: "needle", limit: 1, cursor: first.body.nextCursor });
+    expect(next.body.threads.map((t: Row) => t.id)).toEqual(["a"]);
+    expect(next.body.nextCursor).toBeNull();
+  });
   it("pages timestamp ties without dropping or repeating a thread, even when a newer one arrives", async () => {
     const f = fixture(); const first = await request(f.app).get("/api/email/a1/threads?limit=1");
     expect(first.status).toBe(200); expect(first.body.threads.map((t: Row) => t.id)).toEqual(["c"]); expect(first.body.nextCursor).toEqual(expect.any(String));

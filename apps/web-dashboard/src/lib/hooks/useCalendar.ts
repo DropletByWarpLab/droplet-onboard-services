@@ -31,7 +31,7 @@ export interface CalendarSource {
   id: string;
   name: string;
   url: string;
-  authMode: "none" | "basic";
+  authMode: "none" | "basic" | "google_oauth" | "m365_oauth";
   username: string | null;
   syncIntervalSec: number;
   lastSyncAt: string | null;

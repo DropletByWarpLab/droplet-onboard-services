@@ -50,6 +50,7 @@ from voice.pipeline import (
     PipelineStatus,
     WakePipeline,
     classify_tool_choice,
+    strip_wake_prefix,
     transcript_is_actionable,
 )
 from voice.activity import ActivityReporter
@@ -1283,6 +1284,40 @@ class TestSTTWiring:
 
 
 class TestTranscribingFlow:
+    def test_leading_wake_address_is_removed_before_status_and_callback(self):
+        captured: list[str] = []
+        stt = _RecordingSTT(scripted_transcripts=["Hey Droplet, turn the kitchen lights off."])
+        pipe = WakePipeline(
+            detector=_ScriptedDetector([], model_name="hey_droplet"),
+            input_device_index=0,
+            stt=stt,
+            on_transcript=captured.append,
+        )
+        pipe._stt_session = stt.session()
+        pipe._finish_transcription()
+        assert captured == ["turn the kitchen lights off."]
+        assert pipe.status().last_transcript == captured[0]
+
+    def test_default_capture_allows_more_than_five_seconds_then_vad_finishes(self):
+        stt = _RecordingSTT(scripted_transcripts=["a longer spoken request"])
+        pipe = WakePipeline(
+            detector=_ScriptedDetector([{"hey_droplet": 0.9}], model_name="hey_droplet"),
+            input_device_index=0,
+            stt=stt,
+        )
+        pipe._stt_available = True
+        speech = np.full(WAKE_FRAME_SAMPLES, 6000, dtype=np.int16)
+        pipe._on_frame(speech)
+        pipe._on_frame(speech)
+        pipe._transcribe_started_at = time.time() - 6.0
+        for _ in range(6):
+            pipe._on_frame(speech)
+        assert pipe.status().state == "transcribing"
+        for _ in range(9):
+            pipe._on_frame(_silence_frame())
+        assert stt.finished is True
+        assert pipe.status().last_transcript == "a longer spoken request"
+
     def test_wake_then_next_frame_opens_stt_session(self):
         stt = _RecordingSTT(scripted_transcripts=["the answer"])
         pipe = WakePipeline(
@@ -1628,16 +1663,27 @@ class TestTranscribingFlow:
 
     def test_default_stt_max_record_constant(self):
         # Drift detector — this is the HARD cap on capture length; the
-        # end-of-speech VAD cuts sooner when the room goes quiet. WARP-1434:
-        # reconciled to 5.0 as the SINGLE source of truth (code default +
-        # compose + README + overview doc all say 5.0; the box runs 5.0).
-        assert DEFAULT_STT_MAX_RECORD_S == 5.0
+        # end-of-speech VAD cuts sooner when the room goes quiet.
+        assert DEFAULT_STT_MAX_RECORD_S == 30.0
 
     def test_default_vad_silence_constant(self):
-        # WARP-1434 — trimmed 1.0 → 0.6: a full second of trailing dead air
-        # used to end every turn; 0.6 s ends it sooner once the room goes
-        # quiet while still riding out a natural mid-sentence pause.
+        # The longer hard cap preserves the existing end-of-speech timing.
         assert DEFAULT_VAD_SILENCE_S == 0.6
+
+
+@pytest.mark.parametrize(("transcript", "wake_words", "expected"), [
+    ("Hey Droplet, switch off the lights.", "hey droplet", "switch off the lights."),
+    ("  HEY  DROPLET! Set a timer for 12 minutes", "hey_droplet", "Set a timer for 12 minutes"),
+    ("Hello Droplet: play music", "hey droplet,hello droplet", "play music"),
+    ("Hey Droplet.", "hey droplet", ""),
+    ("Tell me about Hey Droplet", "hey droplet", "Tell me about Hey Droplet"),
+    ("Hey Droplets turn on the lights", "hey droplet", "Hey Droplets turn on the lights"),
+    ("Hey Droplet's light is off", "hey droplet", "Hey Droplet's light is off"),
+    ("Hey Droplet, turn on the lights", "droplet", "Hey Droplet, turn on the lights"),
+    ("Turn on the lights", "hey droplet", "Turn on the lights"),
+])
+def test_strip_only_configured_leading_wake_phrase(transcript, wake_words, expected):
+    assert strip_wake_prefix(transcript, wake_words) == expected
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -2827,6 +2873,49 @@ class TestSpokenCues:
     """A short cue fills the dead air of a tool dispatch or a cold model
     load (WARP-3124): at most once per turn, never after the answer began,
     part of the same utterance, and never able to fail a turn."""
+
+    def test_saved_voice_change_invalidates_previously_cached_cues(self):
+        class _SelectableTTS(MockTTS):
+            selected = "af_heart"
+
+            @property
+            def voice_cache_key(self):
+                return self.selected
+
+        tts = _SelectableTTS()
+        pipe = WakePipeline(
+            detector=MockWakeWordDetector(), input_device_index=0, tts=tts,
+        )
+        pipe._tts_available = True
+        assert pipe.prime_cues() == 2
+        tts.texts_received.clear()
+        tts.selected = "am_michael"
+        assert pipe._cue_audio("tool_call") is not None
+        assert tts.texts_received == [pipeline_module.TOOL_CALL_CUE_TEXT]
+        assert pipe._cue_audio("tool_call") is not None
+        assert tts.texts_received == [pipeline_module.TOOL_CALL_CUE_TEXT]
+
+    def test_voice_change_during_synthesis_does_not_cache_old_voice_audio(self):
+        class _SelectableTTS(MockTTS):
+            selected = "af_heart"
+
+            @property
+            def voice_cache_key(self):
+                return self.selected
+
+            def synthesize(self, text, voice=None):
+                audio = super().synthesize(text, voice)
+                self.selected = "am_michael"
+                return audio
+
+        tts = _SelectableTTS()
+        pipe = WakePipeline(
+            detector=MockWakeWordDetector(), input_device_index=0, tts=tts,
+        )
+        assert pipe._cue_audio("tool_call") is not None
+        assert "tool_call" not in pipe._cue_cache
+        assert pipe._cue_audio("tool_call") is not None
+        assert tts.texts_received == [pipeline_module.TOOL_CALL_CUE_TEXT] * 2
 
     def test_prime_cues_caches_both_phrases(self):
         tts = MockTTS()

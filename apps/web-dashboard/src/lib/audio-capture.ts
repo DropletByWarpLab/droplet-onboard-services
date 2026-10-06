@@ -11,6 +11,7 @@
  */
 
 export const TARGET_SAMPLE_RATE = 16_000;
+export const MAX_RECORD_SECONDS = 30;
 
 /**
  * Linear-interpolation downsample. Good enough for speech→STT (Whisper
@@ -82,6 +83,7 @@ export class PcmRecorder {
   private processor: ScriptProcessorNode | null = null;
   private source: MediaStreamAudioSourceNode | null = null;
   private chunks: Float32Array[] = [];
+  private capturedSamples = 0;
 
   async start(): Promise<void> {
     this.stream = await navigator.mediaDevices.getUserMedia({
@@ -92,11 +94,20 @@ export class PcmRecorder {
       },
     });
     this.ctx = new AudioContext();
+    this.chunks = [];
+    this.capturedSamples = 0;
     this.source = this.ctx.createMediaStreamSource(this.stream);
     this.processor = this.ctx.createScriptProcessor(4096, 1, 1);
     this.processor.onaudioprocess = (e) => {
-      // Copy — the engine reuses the underlying buffer between callbacks.
-      this.chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+      // Bound samples even when a background tab delays its stop timer.
+      const remaining = Math.max(0, Math.floor(this.ctx!.sampleRate * MAX_RECORD_SECONDS) - this.capturedSamples);
+      const frame = e.inputBuffer.getChannelData(0);
+      const take = Math.min(frame.length, remaining);
+      if (take > 0) {
+        // Copy — the engine reuses the underlying buffer between callbacks.
+        this.chunks.push(new Float32Array(frame.subarray(0, take)));
+        this.capturedSamples += take;
+      }
     };
     this.source.connect(this.processor);
     // Required in some engines for onaudioprocess to fire; the processor

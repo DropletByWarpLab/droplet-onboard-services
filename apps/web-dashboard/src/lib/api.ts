@@ -105,6 +105,8 @@ import type {
   VpnPeerCreatedInfo,
   VoiceStatusInfo,
   VoiceSayResult,
+  SpeakingVoiceInfo,
+  SpeakingVoiceChange,
   VoiceCalibrationInfo,
   VoiceCalibrationApply,
   VoiceMeasureResult,
@@ -7445,13 +7447,29 @@ export async function fetchVoiceStatus(
 
 /** Speaker test — the box says `text` out loud through its own speaker.
  *  Blocks for the playback duration server-side. */
-export async function sayVoiceTest(text: string): Promise<VoiceSayResult> {
+export async function sayVoiceTest(text: string, voice?: string): Promise<VoiceSayResult> {
   const res = await authFetch(`${BASE}/api/voice/say`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text }),
+    body: JSON.stringify({ text, ...(voice !== undefined ? { voice } : {}) }),
   });
   if (!res.ok) await throwVoiceError(res, "Speaker test failed");
+  return res.json();
+}
+
+export async function fetchSpeakingVoice(): Promise<SpeakingVoiceInfo> {
+  const res = await authFetch(`${BASE}/api/voice/speaking-voice`);
+  if (!res.ok) await throwVoiceError(res, "Speaking voices are unavailable");
+  return res.json();
+}
+
+export async function setSpeakingVoice(voice: string): Promise<SpeakingVoiceChange> {
+  const res = await authFetch(`${BASE}/api/voice/speaking-voice`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ voice }),
+  });
+  if (!res.ok) await throwVoiceError(res, "Couldn't save the speaking voice");
   return res.json();
 }
 

@@ -38,8 +38,8 @@ If you only read one thing: the [System map](#system-map) and
 ## System map
 
 The appliance is a **single Docker Compose stack** (`docker/docker-compose.yml`,
-**36 services** — 14 default-on, the rest profile-gated; count taken from the
-compose file on 2026-09-02, when WARP-2627 added `mcp-bridge`) fronted by one
+**39 services** — 16 default-on, the rest profile-gated; count taken from the
+compose file on 2026-10-05, after adding CPU speech sidecars) fronted by one
 nginx `gateway`. The **orchestrator** is the brain —
 every client request and every internal coordination path goes through it. There
 is deliberately **no separate API gateway service** in front of the orchestrator
@@ -87,6 +87,8 @@ is deliberately **no separate API gateway service** in front of the orchestrator
 | **camera-discovery** | `services/camera-discovery/` | Python + FastAPI | ONVIF/RTSP discovery → Frigate |
 | **erp-sql-bridge** | `services/erp-sql-bridge/` | Python + FastAPI + pyodbc | Direct-SQL ERP bridge (SAP SQL Anywhere) |
 | **voice-io** | `services/voice-io/` | Python + FastAPI | Wake → STT → agent → TTS |
+| **qwen-stt** | `services/qwen-stt/` | Python + native C/OpenBLAS | Offline English Qwen3-ASR 1.7B, CPU-only Wyoming :10300 |
+| **kokoro-tts** | `services/kokoro-tts/` | Python + ONNX Runtime | Offline Kokoro speech, eight selectable English voices, CPU-only Wyoming :10200 |
 | **oled-display** | `services/oled-display/` | Python + FastAPI | Front-panel TFT screen |
 | **ops-console** | `services/ops-console/` | Python + FastAPI | Support "what's running" console |
 | **rag-eval** | `services/rag-eval/` | Python + RAGAS | Offline retrieval-quality harness |
@@ -180,6 +182,31 @@ network. Host-published ports and host-network services are called out.
   `activity` (signed audit log), `agent-runs` (durable background runs, owner/admin),
   `settings*`, `aps` (coverage-extender onboarding),
   `admin-*` (owner/admin-gated dashboards).
+- **Account linking (WARP-3788):** `routes/account-provider-setup.ts` holds
+  owner/admin-only customer app setup. `routes/google.ts` and
+  `services/google/` handle per-person Gmail/Calendar browser consent and encrypted
+  grants; the public callback mounts before session auth and verifies its
+  browser state cookie. `/api/email/:accountId/oauth-token` is restricted to
+  the email service bearer. Microsoft uses its existing per-person lifecycle,
+  with the owner's app as a default for new links. Both providers land opted-in
+  primary-calendar events in `CalendarEvent`, keyed by the calendar owner's
+  username, as read-only external events. Google takes bounded snapshots;
+  Microsoft uses its existing delta engine with durable enumeration marks.
+  The five-minute jobs use `cron-runtime` and respect Calendar enablement.
+  Outlook mail import is per-person, opt-in and Email-module gated. Full
+  `Mail.Read` (also covered by the existing `Mail.ReadWrite` grant) lands
+  received/sent history with no date cutoff through
+  `services/m365/mail-landing.service.ts` and the canonical
+  `services/email/mail-ingest.service.ts`. Plain-text bodies are readable and
+  searchable locally; unsent Outlook drafts and attachment bytes are excluded.
+  `M365_GRAPH` mailboxes are read-only and excluded from IMAP/SMTP workers and
+  service-desk sends. Case-sensitive immutable provider IDs deduplicate the
+  archive; `M365MailFolder`/`M365MailMembership` track folder changes without
+  deleting archived messages after a remote move/delete. Turning mail import
+  off purges only that local mailbox and its drafts, preserving Calendar/files.
+  No new service or public
+  inbound listener is introduced. Setup guides: [Google](integrations/google-mail.md),
+  [Microsoft](integrations/microsoft-365.md).
 - **Data model:** `prisma/schema.prisma` — **55 models, 21 enums**, PostgreSQL
   (`DATABASE_URL`). Notable: `BrainMemoryItemStatus` / `ApDeviceStatus` are
   explicit status enums (the [no-guessing rule](#repo-wide-conventions)),
@@ -463,11 +490,23 @@ network. Host-published ports and host-network services are called out.
 
 ## services/email-indexer
 
-- **Purpose:** IMAP **IDLE** ingest (one async loop per `EmailAccount`, exponential
+- **Purpose:** IMAP **IDLE** ingest (one async loop per supported `EmailAccount`, exponential
   backoff) → posts canonical MIME to the orchestrator; drains the outbound SMTP
   queue (`EmailDraft.status='queued'`). All writes go through orchestrator REST
   (schema stays centralized), not direct DB writes. Account passwords are
   Fernet-encrypted at rest; only this service holds `EMAIL_KEY_PATH`. Real, not a stub.
+- **Gmail OAuth (WARP-3788):** `EmailAccount.authMode` distinguishes password
+  mailboxes from `GOOGLE_OAUTH`. For Gmail, the worker obtains a short-lived
+  access token from the authenticated orchestrator endpoint before IMAP/SMTP
+  authentication and uses native XOAUTH2. Refresh grants and customer app
+  secrets stay encrypted in the orchestrator. Gmail hosts and TLS ports are
+  fixed. Outgoing mail still requires the existing owner enablement and
+  human-approved draft path.
+- **Transport selection:** database queries allow only `PASSWORD` and
+  `GOOGLE_OAUTH` for IMAP accounts and queued SMTP drafts. `M365_GRAPH` is a
+  read-only Graph archive populated by the orchestrator, with no mailbox
+  password or IMAP/SMTP connection. Shared ingestion preserves deduplication,
+  attachment limits and latest-thread ordering across providers.
 
 ## services/camera-discovery
 

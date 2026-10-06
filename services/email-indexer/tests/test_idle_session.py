@@ -60,6 +60,10 @@ class _FakeImap:
         self.calls.append(("login", user))
         return _Resp(self.login_result, [b"[AUTHENTICATIONFAILED] Invalid credentials for " + user.encode()])
 
+    async def xoauth2(self, user, token):
+        self.calls.append(("xoauth2", user, token))
+        return _Resp(self.login_result)
+
     async def select(self, mailbox="INBOX"):
         self.calls.append(("select", mailbox))
         return _Resp("OK", self.select_lines)
@@ -330,3 +334,83 @@ def test_imap_date_is_rfc3501_and_locale_free():
     from datetime import datetime, timezone
 
     assert idle._imap_date(datetime(2026, 8, 5, tzinfo=timezone.utc)) == "05-Aug-2026"
+
+
+@pytest.mark.asyncio
+async def test_oauth_fetches_a_fresh_token_each_cycle_without_decrypting(harness, monkeypatch):
+    make, deps, _, reports = harness
+    imap = make()
+    account = _account()
+    account.auth_mode = "GOOGLE_OAUTH"
+    account.password_enc = None
+    calls = []
+
+    async def token(account_id):
+        calls.append(account_id)
+        return f"access-{len(calls)}"
+
+    def no_password(_):
+        pytest.fail("OAuth must never use password decryption")
+
+    monkeypatch.setattr(idle, "decrypt", no_password)
+    deps.get_oauth_access_token = token
+    assert await run_idle_session(account, deps, SyncState(last_uid=1))
+    assert await run_idle_session(account, deps, SyncState(last_uid=1))
+    assert calls == [account.id, account.id]
+    assert [c for c in imap.calls if c[0] == "xoauth2"] == [
+        ("xoauth2", account.username, "access-1"),
+        ("xoauth2", account.username, "access-2"),
+    ]
+    assert not any(c[0] == "login" for c in imap.calls)
+    assert reports == [(account.id, "idle", None), (account.id, "idle", None)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["missing", "empty", "reconnect", "temporary", "exception"])
+async def test_oauth_token_refusal_never_falls_back_to_password(harness, monkeypatch, caplog, failure):
+    from errors import OAuthTokenUnavailable
+
+    make, deps, _, reports = harness
+    imap = make()
+    account = _account()
+    account.auth_mode = "GOOGLE_OAUTH"
+    secret = "access-token-must-stay-private"
+
+    async def token(_):
+        if failure == "reconnect":
+            raise OAuthTokenUnavailable(needs_reconnect=True)
+        if failure == "temporary":
+            raise OAuthTokenUnavailable()
+        if failure == "exception":
+            raise RuntimeError(secret)
+        return None
+
+    monkeypatch.setattr(idle, "decrypt", lambda _: pytest.fail("password fallback"))
+    deps.get_oauth_access_token = None if failure == "missing" else token
+    assert await run_idle_session(account, deps) is False
+    assert imap.calls == []
+    reason = {"temporary": "unreachable", "exception": "unknown"}.get(failure, "auth_failed")
+    assert reports == [(account.id, "error", reason)]
+    assert secret not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_oauth_authentication_exception_is_redacted(harness, caplog):
+    make, deps, _, reports = harness
+    imap = make()
+    account = _account()
+    account.auth_mode = "GOOGLE_OAUTH"
+    secret = "oauth-secret-never-log"
+
+    async def token(_):
+        return secret
+
+    async def xoauth2(*_):
+        raise RuntimeError(f"AUTH XOAUTH2 {secret}")
+
+    deps.get_oauth_access_token = token
+    imap.xoauth2 = xoauth2
+    assert await run_idle_session(account, deps) is False
+    assert reports == [(account.id, "error", "unknown")]
+    assert not any(c[0] == "login" for c in imap.calls)
+    assert secret not in caplog.text

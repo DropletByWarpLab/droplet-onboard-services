@@ -244,6 +244,8 @@ prepare_and_build() {
     # linux profile (audio-facing services; the OS-specific gate keeps
     # macOS Docker Desktop from trying to mount /dev/snd which doesn't exist)
     voice-io
+    qwen-stt
+    kokoro-tts
   )
 
   # eval profile: rag-eval (RAGAS scoring) is `["eval"]`-profiled and has a

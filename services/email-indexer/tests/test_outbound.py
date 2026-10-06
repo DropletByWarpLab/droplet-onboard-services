@@ -165,3 +165,117 @@ def test_forwarded_filename_loses_bidi_overrides():
     msg = build_message(_draft(attachments=[("invoice‮fdp.exe", "application/pdf", b"1")]))
     [part] = list(msg.iter_attachments())
     assert part.get_filename() == "invoice_fdp.exe"
+
+
+@pytest.mark.asyncio
+async def test_oauth_smtp_uses_lazy_generator_and_never_password(monkeypatch):
+    import aiosmtplib
+    import creds
+    from outbound import send_one_draft
+
+    cb = _FakeCallback(claim_result=True)
+    token_calls = []
+
+    async def token(account_id):
+        assert cb.claimed == ["d1"]
+        token_calls.append(account_id)
+        return "short-lived-access-token"
+
+    async def send(_message, **kwargs):
+        assert token_calls == []  # the library requests the token before AUTH
+        assert "password" not in kwargs
+        assert kwargs["username"] == "stefan@example.com"
+        assert kwargs["use_tls"] is True
+        assert await kwargs["oauth_token_generator"]() == "short-lived-access-token"
+
+    monkeypatch.setattr(aiosmtplib, "send", send)
+    monkeypatch.setattr(creds, "decrypt", lambda _: pytest.fail("password fallback"))
+    assert await send_one_draft(_draft(auth_mode="GOOGLE_OAUTH", password_enc=None), cb, token)
+    assert token_calls == ["a1"]
+    assert cb.sent == ["d1"] and cb.failed == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["missing", "empty", "reconnect", "temporary", "exception"])
+async def test_oauth_smtp_token_refusal_has_no_password_fallback(monkeypatch, caplog, failure):
+    import aiosmtplib
+    import creds
+    from errors import OAuthTokenUnavailable
+    from outbound import send_one_draft
+
+    cb = _FakeCallback(claim_result=True)
+    secret = "smtp-secret-must-stay-private"
+
+    async def token(_):
+        if failure == "reconnect":
+            raise OAuthTokenUnavailable(needs_reconnect=True)
+        if failure == "temporary":
+            raise OAuthTokenUnavailable()
+        if failure == "exception":
+            raise RuntimeError(secret)
+        return None
+
+    async def send(_message, **kwargs):
+        assert "password" not in kwargs
+        await kwargs["oauth_token_generator"]()
+        pytest.fail("send cannot continue without a token")
+
+    monkeypatch.setattr(aiosmtplib, "send", send)
+    monkeypatch.setattr(creds, "decrypt", lambda _: pytest.fail("password fallback"))
+    getter = None if failure == "missing" else token
+    assert await send_one_draft(_draft(auth_mode="GOOGLE_OAUTH"), cb, getter) is False
+    assert cb.sent == [] and len(cb.failed) == 1
+    assert secret not in caplog.text and secret not in cb.failed[0][1]
+    if failure == "temporary":
+        assert "temporarily" in cb.failed[0][1]
+
+
+@pytest.mark.asyncio
+async def test_oauth_smtp_provider_exception_is_redacted(monkeypatch, caplog):
+    import aiosmtplib
+    from outbound import send_one_draft
+
+    cb = _FakeCallback(claim_result=True)
+    secret = "never-log-the-smtp-access-token"
+
+    async def token(_):
+        return secret
+
+    async def send(_message, **kwargs):
+        access = await kwargs["oauth_token_generator"]()
+        raise RuntimeError(f"SMTP provider echoed {access}")
+
+    monkeypatch.setattr(aiosmtplib, "send", send)
+    assert await send_one_draft(_draft(auth_mode="GOOGLE_OAUTH"), cb, token) is False
+    assert secret not in caplog.text and secret not in cb.failed[0][1]
+
+
+@pytest.mark.asyncio
+async def test_password_smtp_preserves_existing_authentication(monkeypatch):
+    import aiosmtplib
+    import creds
+    from outbound import send_one_draft
+
+    cb = _FakeCallback(claim_result=True)
+
+    async def send(_message, **kwargs):
+        assert kwargs["password"] == "manual-password"
+        assert "oauth_token_generator" not in kwargs
+
+    monkeypatch.setattr(aiosmtplib, "send", send)
+    monkeypatch.setattr(creds, "decrypt", lambda _: "manual-password")
+    assert await send_one_draft(_draft(), cb)
+    assert cb.sent == ["d1"]
+
+
+@pytest.mark.asyncio
+async def test_oauth_draft_cannot_fetch_a_token_before_claim_or_with_missing_attachment(monkeypatch):
+    from outbound import send_one_draft
+
+    async def token(_):
+        pytest.fail("denied draft cannot obtain a token")
+
+    assert await send_one_draft(_draft(auth_mode="GOOGLE_OAUTH"), _FakeCallback(False), token) is False
+    cb = _FakeCallback(True)
+    assert await send_one_draft(_draft(auth_mode="GOOGLE_OAUTH", attachments_missing=True), cb, token) is False
+    assert cb.failed == [("d1", "attachment no longer on the box")]

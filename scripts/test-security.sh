@@ -469,6 +469,21 @@ for name, cfg in (data.get("services") or {}).items():
     if "droplet-internal" in (cfg.get("networks") or []):
         problems.append(f"{name} joined droplet-internal - every member is reachable from the sandbox; add it on purpose, here")
 
+# Wyoming speech peers must be isolated from the untrusted sandbox too.
+speech = nets.get("droplet-speech")
+if not isinstance(speech, dict) or speech.get("internal") is not True:
+    problems.append("networks.droplet-speech must exist with `internal: true`")
+speech_members = {
+    name for name, cfg in (data.get("services") or {}).items()
+    if "droplet-speech" in (cfg.get("networks") or [])
+}
+if speech_members != {"orchestrator", "voice-io", "qwen-stt", "kokoro-tts"}:
+    problems.append(f"droplet-speech must contain only speech services and their clients, got {sorted(speech_members)}")
+for name in ("qwen-stt", "kokoro-tts"):
+    cfg = (data.get("services") or {}).get(name) or {}
+    if cfg.get("networks") != ["droplet-speech"] or "ports" in cfg or "network_mode" in cfg:
+        problems.append(f"{name} must join only droplet-speech with no published ports or network_mode")
+
 if problems:
     print("\n".join(problems), file=sys.stderr)
     sys.exit(1)

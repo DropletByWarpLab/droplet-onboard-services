@@ -11,3 +11,15 @@ class IngestTooLarge(Exception):
     there to fetch when it does. After the cap it is skipped and logged with
     its UID, as IDX-07 decided for every other refusal.
     """
+
+
+class OAuthTokenUnavailable(Exception):
+    """Closed-set token failure; provider responses never enter an exception."""
+
+    def __init__(self, *, needs_reconnect: bool = False) -> None:
+        self.needs_reconnect = needs_reconnect
+        super().__init__(
+            "Google sign-in needs reconnecting."
+            if needs_reconnect
+            else "Google authorization is temporarily unavailable."
+        )

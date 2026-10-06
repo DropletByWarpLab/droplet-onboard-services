@@ -45,7 +45,6 @@
  * `status=queued` and waits for the email-indexer service (see PR
  * description) to pick it up via the indexer's outbound poller.
  */
-import { createHash } from "node:crypto";
 import express, { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import type { Prisma, PrismaClient } from "@prisma/client";
@@ -55,8 +54,12 @@ import { actorFromRequest } from "../services/activity.service.js";
 import { resolveAssertedUser } from "../services/asserted-user.service.js";
 import { reconcileStaleSending } from "../services/email-reconcile.service.js";
 import { deriveContacts } from "../services/email/contacts.service.js";
-import { EMAIL_HEADERS_SCHEMA } from "../services/support/email-headers.js";
-import { intakeEmailMessage } from "../services/support/email-intake.service.js";
+import {
+  afterCommitEmailIngest, prepareEmailIngest, storeEmailIngest,
+  EMAIL_ATTACHMENT_LIMITS, sanitizeAttachmentFilename,
+  MailIngestAccountMissingError, MailIngestAttachmentError, MailIngestValidationError,
+} from "../services/email/mail-ingest.service.js";
+export { EMAIL_ATTACHMENT_LIMITS, sanitizeAttachmentFilename } from "../services/email/mail-ingest.service.js";
 import {
   connectMailbox,
   disconnectMailbox,
@@ -173,13 +176,13 @@ async function assertAccountAccessible(
   req: Request,
   accountId: string,
   forwardedRoles: readonly string[] = ["owner", "admin", "family"],
-): Promise<{ id: string; userId: string | null; actor: EmailActor } | null> {
+): Promise<{ id: string; userId: string | null; authMode?: string; actor: EmailActor } | null> {
   const actor = await resolveEmailActor(prisma, req, forwardedRoles);
   if (!actor) return null;
   const account = (await prisma.emailAccount.findUnique({
     where: { id: accountId },
-    select: { id: true, userId: true },
-  })) as { id: string; userId: string | null } | null;
+    select: { id: true, userId: true, authMode: true },
+  })) as { id: string; userId: string | null; authMode?: string } | null;
   if (!account) return null;
   if (actor.privileged) return { ...account, actor };
   if (account.userId && actor.id && account.userId === actor.id)
@@ -232,16 +235,6 @@ const addressSchema = z.string().email().max(254);
  * (`services/email-indexer/parser.py`) and lists anything over them without
  * its bytes; this side refuses a payload that breaks them anyway.
  */
-export const EMAIL_ATTACHMENT_LIMITS = {
-  /** One attachment, decoded. */
-  maxBytes: 10 * 1024 * 1024,
-  /** All the stored attachments of one message (or of one forward), decoded. */
-  maxTotalBytes: 20 * 1024 * 1024,
-  /** Attachments stored per message; more are listed as `over_limit`. */
-  maxStored: 20,
-  /** Attachments listed per message at all. */
-  maxListed: 50,
-} as const;
 
 /**
  * WARP-3267 — the ingest route carries attachments as base64, far past the
@@ -279,16 +272,6 @@ const ATTACHMENT_META = {
  * pair, and no lone surrogates at all: Postgres can't store one).
  * `res.attachment` then quotes it and adds the RFC 5987 `filename*` form.
  */
-export function sanitizeAttachmentFilename(raw: string): string {
-  const base = raw.split(/[\\/]/).pop() ?? "";
-  const cleaned = base
-    .replace(/[\u0000-\u001f\u007f\u200e\u200f\u202a-\u202e\u2066-\u2069"<>:|?*]/g, "_")
-    .replace(/^[.\s]+/, "")
-    .trim()
-    .slice(0, 200)
-    .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "_");
-  return cleaned || "attachment";
-}
 
 const attachmentIdsSchema = z.array(z.string().uuid()).max(EMAIL_ATTACHMENT_LIMITS.maxStored);
 
@@ -340,6 +323,7 @@ const contactsQuerySchema = z.object({
 });
 
 interface AccountRow {
+  authMode?: string;
   id: string;
   userId: string | null;
   displayName: string;
@@ -479,13 +463,13 @@ export function createEmailRouter(
 
   router.get(
     "/email/accounts",
-    requireRole("owner", "admin", "family"),
+    requireRoleOrMcpService("owner", "admin", "family"),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         // family / guest see only their own accounts; owner/admin see all.
-        const where = isPrivilegedRole(req)
-          ? undefined
-          : { userId: req.user?.id ?? "__none__" };
+        const actor = await resolveEmailActor(prisma, req);
+        if (!actor) return res.status(404).json({ error: "Account not found" });
+        const where = actor.privileged ? undefined : { userId: actor.id ?? "__none__" };
         const rows = (await prisma.emailAccount.findMany({
           where,
           orderBy: { address: "asc" },
@@ -494,13 +478,14 @@ export function createEmailRouter(
             userId: true,
             displayName: true,
             address: true,
+            authMode: true,
             imapStatus: true,
             lastIdleAt: true,
             lastErrorAt: true,
             lastError: true,
           },
         })) as unknown as AccountRow[];
-        res.json({ accounts: rows });
+        res.json({ accounts: rows.map((row) => ({ ...row, canSend: row.authMode !== "M365_GRAPH" })) });
       } catch (err) {
         next(err);
       }
@@ -680,6 +665,8 @@ export function createEmailRouter(
           return;
         }
         const filter = filterRaw as Filter;
+        const query = z.string().trim().max(200).safeParse(req.query.query ?? "");
+        if (!query.success) return res.status(400).json({ error: "Invalid search query" });
         const limit = Math.max(
           1,
           Math.min(100, Number.parseInt(String(req.query.limit ?? "20"), 10) || 20),
@@ -689,26 +676,30 @@ export function createEmailRouter(
         try { cursor = readEmailCursor(req.query.cursor, req.params.accountId, "threads", filter); }
         catch { res.status(400).json({ error: "invalid_email_cursor" }); return; }
 
-        const where: {
-          accountId: string;
-          triageStatus?: "inbox" | "triaged" | "archived";
-          draftedByDroplet?: boolean;
-          OR?: Array<Record<string, unknown>>;
-        } = { accountId: req.params.accountId };
+        const where: Prisma.EmailThreadWhereInput = { accountId: req.params.accountId };
         if (filter === "droplet") {
           where.draftedByDroplet = true;
         } else {
           where.triageStatus = filter;
         }
+        if (query.data) {
+          const contains = { contains: query.data, mode: "insensitive" as const };
+          where.OR = [{ subject: contains }, { lastSender: contains }, { snippet: contains },
+            { messages: { some: { accountId: req.params.accountId, OR: [{ subject: contains }, { bodyText: contains }, { fromAddr: contains }, { fromName: contains }] } } }];
+        }
+
         if (cursor) {
-          where.OR = [
+          const before = [
             { lastMessageAt: { lt: new Date(cursor.at) } },
             { lastMessageAt: new Date(cursor.at), id: { lt: cursor.id } },
           ];
+          // A pagination cursor narrows the search; it never replaces it.
+          where.AND = [...(where.OR ? [{ OR: where.OR }] : []), { OR: before }];
+          delete where.OR;
         }
 
         const rows = (await prisma.emailThread.findMany({
-          where: where as any,
+          where,
           orderBy: [{ lastMessageAt: "desc" }, { id: "desc" }],
           take: limit + 1,
         })) as unknown as ThreadRow[];
@@ -1039,6 +1030,7 @@ export function createEmailRouter(
           res.status(404).json({ error: "Draft not found" });
           return;
         }
+        if (account.authMode === "M365_GRAPH") return res.status(409).json({ error: "read_only_mailbox", message: "Outlook email import is read-only. Copy this draft into Outlook to send it." });
         if (draft.status !== "draft") {
           res.status(409).json({ error: "Draft already dispatched", status: draft.status });
           return;
@@ -1216,7 +1208,7 @@ export function createEmailRouter(
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         const result = await prisma.emailDraft.updateMany({
-          where: { id: req.params.id, status: "queued" },
+          where: { id: req.params.id, status: "queued", account: { authMode: { not: "M365_GRAPH" } } },
           // claimedAt is the tamper-proof reconcile clock (NOT updatedAt, which
           // @updatedAt resets on any later row write). Set it at the moment of
           // the claim so the stale-sending sweep measures the grace window from
@@ -1270,241 +1262,45 @@ export function createEmailRouter(
   //
   // Service-principal gated — same posture as /network/throughput-sample
   // and /network/off-lan-sample-batch.
-  const ingestSchema = z.object({
-    messageId: z.string().min(1).max(998),
-    inReplyTo: z.string().max(998).nullable().optional(),
-    fromAddr: z.string().email().max(254),
-    fromName: z.string().max(254).nullable().optional(),
-    toAddrs: z.array(z.string().email().max(254)).min(1).max(100),
-    ccAddrs: z.array(z.string().email().max(254)).max(100).nullable().optional(),
-    subject: z.string().max(998),
-    bodyText: z.string().max(1_000_000).nullable().optional(),
-    bodyHtml: z.string().max(2_000_000).nullable().optional(),
-    receivedAt: z.string().datetime(),
-    threadKey: z.string().min(1).max(998),
-    // WARP-3529 — authenticated service payload facts used for threading and
-    // loop protection. Optional only for an older indexer; absent means the
-    // desk cannot claim that automatic-mail headers were checked.
-    headers: EMAIL_HEADERS_SCHEMA.optional(),
-    // WARP-3267 — `data` (base64) only when `status` is `stored`.
-    attachments: z
-      .array(
-        z.object({
-          filename: z.string().min(1).max(255),
-          contentType: z.string().min(1).max(255),
-          size: z.number().int().min(0),
-          sha256: z.string().regex(/^[0-9a-f]{64}$/),
-          contentId: z.string().max(998).nullable().optional(),
-          status: z.enum(["stored", "too_large", "over_limit"]),
-          data: z
-            .string()
-            .max(Math.ceil(EMAIL_ATTACHMENT_LIMITS.maxBytes / 3) * 4)
-            .optional(),
-        }),
-      )
-      .max(EMAIL_ATTACHMENT_LIMITS.maxListed)
-      .optional(),
-  });
-
-  type IngestAttachment = NonNullable<z.infer<typeof ingestSchema>["attachments"]>[number];
-
-  /**
-   * WARP-3267 — turn the payload's attachments into rows, or name the limit
-   * they break. The size and hash of a stored part are measured here, never
-   * taken from the payload.
-   */
-  function attachmentRows(accountId: string, list: IngestAttachment[]) {
-    let stored = 0;
-    let total = 0;
-    const rows = [];
-    for (const [partIndex, a] of list.entries()) {
-      const base = {
-        accountId,
-        partIndex,
-        // Sanitised once, here, so every surface that lists it (web, Mac,
-        // iOS) shows and saves the clean name. The download sanitises again.
-        filename: sanitizeAttachmentFilename(a.filename),
-        contentType: a.contentType,
-        contentId: a.contentId ?? null,
-        status: a.status,
-      };
-      if (a.status !== "stored") {
-        if (a.data !== undefined) return { error: "attachment_data_not_stored" as const };
-        rows.push({ ...base, size: a.size, sha256: a.sha256, data: null });
-        continue;
-      }
-      if (a.data === undefined) return { error: "attachment_data_missing" as const };
-      const bytes = Buffer.from(a.data, "base64");
-      stored += 1;
-      total += bytes.length;
-      if (
-        bytes.length > EMAIL_ATTACHMENT_LIMITS.maxBytes ||
-        total > EMAIL_ATTACHMENT_LIMITS.maxTotalBytes ||
-        stored > EMAIL_ATTACHMENT_LIMITS.maxStored
-      ) {
-        return { error: "attachment_limit_exceeded" as const };
-      }
-      rows.push({
-        ...base,
-        size: bytes.length,
-        sha256: createHash("sha256").update(bytes).digest("hex"),
-        data: bytes,
-      });
-    }
-    return { rows };
-  }
-
   router.post(
     "/email/:accountId/messages-ingest",
     requireRole("service"),
     ingestJson,
     async (req: Request, res: Response, next: NextFunction) => {
       try {
-        const parsed = ingestSchema.safeParse(req.body);
-        if (!parsed.success) {
-          res
-            .status(400)
-            .json({ error: "Invalid ingest payload", details: parsed.error.flatten() });
+        const prepared = prepareEmailIngest(req.params.accountId, req.body);
+        const result = await prisma.$transaction((tx) => storeEmailIngest(tx, prepared));
+        await afterCommitEmailIngest(prisma, [result]);
+        res.status(result.duplicate ? 200 : 201).json({ ok: true, threadId: result.threadId, duplicate: result.duplicate });
+      } catch (err) {
+        if (err instanceof MailIngestValidationError) {
+          res.status(400).json({ error: err.message, details: err.details });
           return;
         }
-        const attachments = attachmentRows(
-          req.params.accountId,
-          parsed.data.attachments ?? [],
-        );
-        if ("error" in attachments) {
-          // Only a broken LIMIT is a 413 (it holds the indexer's watermark
-          // for a few cycles); a malformed entry is a 400 the indexer skips.
-          const status = attachments.error === "attachment_limit_exceeded" ? 413 : 400;
-          res.status(status).json({ error: attachments.error });
+        if (err instanceof MailIngestAttachmentError) {
+          res.status(err.status).json({ error: err.code });
           return;
         }
-        const account = (await prisma.emailAccount.findUnique({
-          where: { id: req.params.accountId },
-          select: { id: true },
-        })) as { id: string } | null;
-        if (!account) {
+        if (err instanceof MailIngestAccountMissingError) {
           res.status(404).json({ error: "Account not provisioned" });
           return;
         }
-
-        // A re-delivery (indexer restart backfill, a held UID's neighbours)
-        // answers before the thread upsert, so it can't rewind the thread's
-        // lastMessageAt or snippet. The P2002 catch below still covers a race.
-        const existing = (await prisma.emailMessage.findUnique({
-          where: {
-            accountId_messageId: { accountId: account.id, messageId: parsed.data.messageId },
-          },
-          select: { threadId: true },
-        })) as { threadId: string } | null;
-        if (existing) {
-          // Covers a process crash after the mail row committed but before
-          // service-desk intake finished. The per-message ledger makes this a
-          // cheap no-op after a successful first pass.
-          try { await intakeEmailMessage(prisma, account.id, parsed.data.messageId); }
-          catch (err) { logger.warn({ err, accountId: account.id }, "service-desk email intake will need retry"); }
-          res.json({ ok: true, threadId: existing.threadId, duplicate: true });
-          return;
-        }
-
-        const receivedAt = new Date(parsed.data.receivedAt);
-        const snippet = (parsed.data.bodyText ?? "")
-          .replace(/\s+/g, " ")
-          .trim()
-          .slice(0, 280);
-
-        // Upsert the thread first so the FK on EmailMessage resolves.
-        const thread = (await prisma.emailThread.upsert({
-          where: {
-            accountId_threadKey: {
-              accountId: account.id,
-              threadKey: parsed.data.threadKey,
-            },
-          },
-          update: {
-            // Re-running on the same threadKey updates only the
-            // mutable fields. messageCount is bumped after the create
-            // below so an idempotent re-delivery doesn't double-count.
-            subject: parsed.data.subject,
-            lastSender: parsed.data.fromName ?? parsed.data.fromAddr,
-            snippet: snippet.length > 0 ? snippet : undefined,
-            lastMessageAt: receivedAt,
-          },
-          create: {
-            accountId: account.id,
-            threadKey: parsed.data.threadKey,
-            subject: parsed.data.subject,
-            lastSender: parsed.data.fromName ?? parsed.data.fromAddr,
-            snippet,
-            messageCount: 0,
-            lastMessageAt: receivedAt,
-          },
-        })) as unknown as ThreadRow;
-
-        // EmailMessage_accountId_messageId_key dedupes redelivery.
-        try {
-          await prisma.emailMessage.create({
-            data: {
-              accountId: account.id,
-              threadId: thread.id,
-              messageId: parsed.data.messageId,
-              inReplyTo: parsed.data.inReplyTo ?? null,
-              fromAddr: parsed.data.fromAddr,
-              fromName: parsed.data.fromName ?? null,
-              toAddrs: parsed.data.toAddrs as any,
-              ccAddrs: (parsed.data.ccAddrs ?? null) as any,
-              subject: parsed.data.subject,
-              bodyText: parsed.data.bodyText ?? null,
-              bodyHtml: parsed.data.bodyHtml ?? null,
-              receivedAt,
-              ...(parsed.data.headers
-                ? { headers: parsed.data.headers as Prisma.InputJsonValue }
-                : {}),
-              // Created with the message, so a message is never stored
-              // without the attachments it arrived with.
-              ...(attachments.rows.length > 0
-                ? { attachments: { create: attachments.rows } }
-                : {}),
-            },
-          });
-          await prisma.emailThread.update({
-            where: { id: thread.id },
-            data: { messageCount: { increment: 1 } },
-          });
-          // Intake is downstream of the committed EmailMessage. Failures are
-          // recorded in the desk ledger; they must not make the indexer replay
-          // a message that the mailbox already stored successfully.
-          try { await intakeEmailMessage(prisma, account.id, parsed.data.messageId); }
-          catch (err) { logger.warn({ err, accountId: account.id }, "service-desk email intake will need retry"); }
-        } catch (err) {
-          if ((err as { code?: string }).code === "P2002") {
-            // Re-delivery of a message we've already stored. Idempotent
-            // success — return the thread id so the indexer can decide
-            // whether to surface the duplicate or move on.
-            res.json({
-              ok: true,
-              threadId: thread.id,
-              duplicate: true,
-            });
+        // A writer predating the canonical account lock may still race the
+        // unique constraint. The failed transaction rolls back before retry.
+        if ((err as { code?: string }).code === "P2002") {
+          try {
+            const prepared = prepareEmailIngest(req.params.accountId, req.body);
+            const result = await prisma.$transaction((tx) => storeEmailIngest(tx, prepared));
+            await afterCommitEmailIngest(prisma, [result]);
+            res.status(result.duplicate ? 200 : 201).json({ ok: true, threadId: result.threadId, duplicate: result.duplicate });
             return;
-          }
-          throw err;
+          } catch (retryError) { err = retryError; }
         }
-
-        res.status(201).json({
-          ok: true,
-          threadId: thread.id,
-          duplicate: false,
-        });
-      } catch (err) {
-        logger.warn(
-          { err, accountId: req.params.accountId },
-          "messages-ingest failed",
-        );
+        logger.warn({ err, accountId: req.params.accountId }, "messages-ingest failed");
         next(err);
       }
     },
   );
-
   // ── WARP-3267 — attachments: list and download ─────────────────
   // Gated exactly like the thread read: the mailbox's owner, or owner/admin.
   // A foreign mailbox, a message of another mailbox, or an attachment of

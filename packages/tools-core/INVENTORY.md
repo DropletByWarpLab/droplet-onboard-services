@@ -99,7 +99,8 @@ Authoritative inventory of every tool exposed by `@droplet/tools-core` after the
 | list_storage_pools | system | mdadm software-RAID pools: device, level, health (active/degraded/resyncing/failed), members. Empty when none. Read-only — destructive pool ops are NOT tools (ADR-019). BUG-3. | false | false | BUG-3 |
 | memory_recall | memory | Recall durable memory facts about the user/workspace whose text contains the query (optional category filter). Tier-1 read. WARP-461. | false | false | WARP-461 |
 | memory_extract_fact | memory | Persist a durable memory fact (preference / workflow / scope / schedule). Tier-2 write — handler-enforced confirmation: first call returns confirmation_required; writes only on a confirmed re-issue (confirmed: true) after the user approves in chat. WARP-461. | true | true | WARP-461 |
-| email_search | email | List email threads in an account, filtered by triage tab (inbox/triaged/archived) or `droplet`. WARP-466. | false | false | WARP-466 |
+| email_accounts | email | Discover acting-person accessible mailbox IDs, addresses and import status; no credentials. WARP-3788. | false | false | WARP-3788 |
+| email_search | email | Search local message bodies, subjects and senders with optional query (max 200 characters), within a triage tab (inbox/triaged/archived) or `droplet`; omit query to list. WARP-466 / WARP-3788. | false | false | WARP-466 |
 | email_read | email | Fetch the full content of an email thread (subject, sender, every message in order). WARP-466. | false | false | WARP-466 |
 | email_summarize_thread | email | Structured analysis of a thread (summary, callouts, suggested actions, related refs) for the AI side panel. WARP-466. | false | false | WARP-466 |
 | email_draft_reply | email | Draft a reply (writes EmailDraft, draftedByDroplet=true). Write tier, no confirm (draft is reversible); does NOT send. WARP-466. | true | false | WARP-466 |
