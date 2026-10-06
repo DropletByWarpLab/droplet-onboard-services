@@ -311,6 +311,17 @@ EOF
   sudo install -m 0755 "$host_src/droplet-tls-bootstrap-refresh.sh" \
     /usr/local/sbin/droplet-tls-bootstrap-refresh.sh
 
+  # --- router/AP/switch pairing root executor (ADR-071 slice B, WARP-3739) --
+  # The device-bridge POST /host/router-pairing spools the claimed password and
+  # polkit-starts droplet-pair-apply.service, which runs this script as root.
+  # install-device-bridge.sh installs both on a full provision (and the polkit
+  # grant); landing them here too is what puts them on an EXISTING box through
+  # the WARP-2574 heal. The unit is never enabled: on-demand only.
+  sudo install -m 0755 "$host_src/droplet-pair-apply.sh" \
+    /usr/local/sbin/droplet-pair-apply.sh
+  sudo install -m 0644 "$host_src/etc-systemd-system/droplet-pair-apply.service" \
+    /etc/systemd/system/droplet-pair-apply.service
+
   # --- certificate key fingerprint CLI (WARP-3414) -------------------------
   # `droplet-fingerprint`: the box's certificate key fingerprint, in the form
   # the Droplet apps show, for an admin at the console or in the `support`

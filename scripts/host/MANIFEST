@@ -96,6 +96,8 @@ dir   -                                                                      /et
 dir   -                                                                      /etc/systemd/system/droplet-openwrt-attach.service.d                   -     present  drop-in dir for the override above
 file  scripts/host/etc-droplet-host-net/lan-dhcp.conf                        /etc/droplet-host-net/lan-dhcp.conf                                   0644  presence  regenerated at runtime — setup_local_dns() (scripts/lib/local-dns.sh) rewrites managed blocks in place, so a healthy box legitimately differs from the repo baseline
 file  scripts/host/droplet-tls-bootstrap-refresh.sh                          /usr/local/sbin/droplet-tls-bootstrap-refresh.sh                      0755  track
+file  scripts/host/droplet-pair-apply.sh                                   /usr/local/sbin/droplet-pair-apply.sh                                 0755  track
+file  scripts/host/etc-systemd-system/droplet-pair-apply.service           /etc/systemd/system/droplet-pair-apply.service                        0644  track
 file  scripts/host/usr-local-bin/droplet-fingerprint                          /usr/local/bin/droplet-fingerprint                                    0755  track
 
 # --- network self-heal (WARP-1680) -------------------------------------------
