@@ -14,6 +14,10 @@ from dataclasses import dataclass
 INITIAL_DELAY_SECONDS = 1.0
 MAX_DELAY_SECONDS = 60.0
 GROWTH_FACTOR = 2.0
+# Exponent is clamped so a backend that stays down for days can never
+# push `GROWTH_FACTOR ** n` past float range (OverflowError at n~1024).
+# Once the delay has saturated at MAX the exact exponent is irrelevant.
+_MAX_EXPONENT = 64
 
 
 @dataclass
@@ -34,9 +38,10 @@ class BackoffState:
     def on_failure(self) -> float:
         self.consecutive_failures += 1
         # Geometric growth from INITIAL up to MAX. Computed fresh each time
-        # so a hand-edited delay (tests, debugging) doesn't stick.
-        target = INITIAL_DELAY_SECONDS * (
-            GROWTH_FACTOR ** (self.consecutive_failures - 1)
-        )
+        # so a hand-edited delay (tests, debugging) doesn't stick. The
+        # exponent is clamped (see _MAX_EXPONENT); `consecutive_failures`
+        # itself keeps counting as a diagnostics counter.
+        exponent = min(self.consecutive_failures - 1, _MAX_EXPONENT)
+        target = INITIAL_DELAY_SECONDS * (GROWTH_FACTOR ** exponent)
         self.delay_seconds = min(MAX_DELAY_SECONDS, target)
         return self.delay_seconds
