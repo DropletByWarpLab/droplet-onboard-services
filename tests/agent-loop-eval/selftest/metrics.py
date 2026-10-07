@@ -72,7 +72,7 @@ assert rec["context_window"] > 0 and all(g["prompt_tokens_est"] > 0 and "complet
 # harness gaps explain two failures; the third (the budget) is the product's own
 assert summary["labels"] == {"harness_unscripted:get_drive_health": 1, "selection_miss:list_reminders": 1}, summary["labels"]
 assert summary["fails_excluding_harness"] == 1 and summary["pass_rate"] == 0.0 and summary["step_limit_hits"] == 0, summary
-assert summary["metrics_p50"]["iterations"] >= 1 and summary["pass_rate_ci95"][0] == 0.0, summary
+assert summary["metrics_p50"]["iterations"] >= 1 and summary["pass_all_repeats_ci95"][0] == 0.0, summary
 print("ok  labels and metrics: unscripted, selection_miss and the iteration budget, off the scripted records")
 
 # A record from before WARP-3899 (no tool_names, no context_window) scores as before: same fails, no label, no error.
@@ -109,5 +109,5 @@ assert last["cases"]["seed-001"] == 0.0 and "seed-001" not in last["quarantine_c
 base.unlink(missing_ok=True)
 cli(GOOD, "--json", "--cases", *CASES, "--baseline-out", base)
 b = json.load(open(base))
-assert "pass_all_repeats_ci95" in b and "results" not in b and b["pass_rate"] == 1.0 and b["pass_rate_ci95"][1] == 1.0, b
+assert "pass_all_repeats_ci95" in b and "results" not in b and b["pass_rate"] == 1.0 and b["pass_all_repeats_ci95"][1] == 1.0, b
 print("ok  history, flake report and baseline: one line per case, seed-001 flaky at 0.5, summary-only baseline")

@@ -491,9 +491,10 @@ prefers it.
 
 ### Statistics (WARP-3899)
 
-The summary gives `pass_rate_ci95`, `pass_all_repeats_ci95` (cases that passed all `k`
-repeats, out of cases) and `by_category_ci95`: Wilson 95% intervals (`z` = 1.96,
-rounded to 3 places) as `[low, high]`. A 66-case suite has wide intervals; a difference
+The summary gives `pass_all_repeats_ci95`: the Wilson 95% interval (`z` = 1.96, rounded
+to 3 places, `[low, high]`) on cases that passed all `k` repeats, out of cases. There is
+no interval on `pass_rate`: a case's repeats are not independent trials, so one would come
+out too narrow. A 66-case suite has wide intervals; a difference
 smaller than the interval is not a regression. Use `--compare` for two runs on the
 same cases (sign test on the discordant cases) and `--flake-report` for flakiness (see
 "Bench-box procedure").

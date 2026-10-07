@@ -277,7 +277,9 @@ async function runCase(c: Case, repeat: number, window: number, script: any[] | 
     const deps = {
       mcp, approvals,
       aiGateway: fake ?? {
-        chat: (r: any, s?: AbortSignal) => gw.chat(r, s, USER).catch(noteGatewayError),
+        // The blocking path (stream fallback, claim correction) is tapped for tool_names and the prompt estimate;
+        // ponytail: its completion_tokens_est stays 0, since reading the body would consume it before the loop does.
+        chat: (r: any, s?: AbortSignal) => { gwCalls.push({ ...tap(round, r), blocking: true }); return gw.chat(r, s, USER).catch(noteGatewayError); },
         chatStream: (r: any, s?: AbortSignal) => (async function* () {
           // WARP-3285 local tap: per-iteration provider verdict (not in product diagnostics on the stream path).
           const g: any = tap(round, r);

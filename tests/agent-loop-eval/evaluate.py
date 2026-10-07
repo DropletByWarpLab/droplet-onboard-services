@@ -678,7 +678,6 @@ def main():
     cols = {k: [r["metrics"][k] for r in rows if r["metrics"][k] is not None] for k in METRIC_KEYS}
     summary = {
         "runs": n, "cases": len(per), "pass_rate": round(passed / n, 3),
-        "pass_rate_ci95": wilson(passed, n),
         "k": min(len(v) for v in per.values()),
         "pass_all_repeats": pass_all,  # pass^k
         "pass_all_repeats_ci95": wilson(pass_all, len(per)),
@@ -696,7 +695,6 @@ def main():
         # Failed rows no harness label explains: the product's own failures. The headline rates above are unchanged.
         "fails_excluding_harness": sum(not r["pass"] and not r["labels"] for r in rows),
         "by_category": {k: f"{p}/{t}" for k, (p, t) in sorted(by_cat.items())},
-        "by_category_ci95": {k: wilson(p, t) for k, (p, t) in sorted(by_cat.items())},
     }
     if a.history:
         day = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
