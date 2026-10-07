@@ -357,7 +357,7 @@ titles of `events_titled` are expanded too.
 - No memory or brain block in the system prompt. `seed-017` exercises `memory_recall` instead of the inlined facts.
 - No query enhancement (HyDE and multi-query) and no citations. Both are off by default on a box.
 - Tool I/O is scripted, so Nextcloud, database and email behaviour is not exercised here. End-to-end checks run in the web UI against a real stack.
-- A tool's `precheck` (WARP-3349: the unconfirmed phase of the team-chat sends, run before the approval card) is not run, so an invalid recipient is refused after the approval, not before it.
+- Only the team-chat send has a scripted `precheck` (`PRECHECKS` in world.mts). A confirming tool whose production precheck is not scripted still gets its approval card first.
 - The dashboard navigation tools are withheld on a box when the turn has no page list; the harness never sends one and its base prompt does not name them as withheld (the owner's prompt is unchanged from before WARP-3545).
 - The people are one person per case: the calendar, reminders and mailbox belong to the acting role, and a `space` is the only way to make something someone else's.
 
