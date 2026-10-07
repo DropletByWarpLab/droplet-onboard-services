@@ -15,6 +15,14 @@
 # tool's precheck refusing before the approval card, search_contacts' and
 # email_draft_reply's shapes, a quoted draft not being a claim), and that
 # evaluate.py and dates.mts expand the date tokens alike.
+# WARP-3899 (harness fidelity): shapes.mts holds every scripted handler's output
+# to the shape of the REAL tools-core handler fed the orchestrator route's JSON;
+# world_checks.py asserts the new world handlers (strict accountId, route-owned
+# 202s, runs, routines, memory) off the records; metrics_cases.jsonl proves the
+# unscripted and selection_miss labels and the iteration/prompt budgets, and
+# metrics.py the per-run metrics, Wilson intervals, --compare, --history,
+# --flake-report and --baseline-out without a model. The snippet gate fails when
+# world.mts restates a 280-character search snippet that production no longer has.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ORCH=${ORCH:-$(cd ../../apps/orchestrator && pwd)}
@@ -26,6 +34,19 @@ python3 summary_judge.py --demo
 env -u NODE_OPTIONS tsx selftest/case_regressions.mts | python3 selftest/case_regressions.py
 mkdir -p runs
 fails=0
+# WARP-3899: the world restates production's 280-character search snippet (world.mts SNIPPET_CHARS,
+# file-search.service.ts CHUNK_SNIPPET_CHARS); drift there produced false results in the 2026-10-05
+# runs. world.mts cannot import the service (it drags orchestrator runtime deps), so compare the literals.
+# Paths: cwd is tests/agent-loop-eval here, ORCH is the absolute apps/orchestrator.
+snip_world=$(grep -E '^(export )?const SNIPPET_CHARS = [0-9]+' world.mts | head -n 1 | sed -E 's/.*= ([0-9]+).*/\1/' || true)
+snip_prod=$(grep -E '^(export )?const CHUNK_SNIPPET_CHARS = [0-9]+' "$ORCH/src/services/file-search.service.ts" | head -n 1 | sed -E 's/.*= ([0-9]+).*/\1/' || true)
+if [[ -n $snip_world && $snip_world == "$snip_prod" ]]; then
+  echo "ok  snippet gate: world.mts and file-search.service.ts both use $snip_world characters"
+else
+  echo "XX  snippet gate: world.mts SNIPPET_CHARS='${snip_world:-missing}' != file-search.service.ts CHUNK_SNIPPET_CHARS='${snip_prod:-missing}'"; fails=1
+fi
+# WARP-3899: every scripted handler's output shape against the real tools-core handler (exit 1 on a diff).
+env -u NODE_OPTIONS tsx selftest/shapes.mts || fails=1
 for kind in good bad; do
   ids=$(python3 -c "import json;print(','.join(json.load(open('selftest/expected.json'))['$kind']))")
   env -u NODE_OPTIONS tsx run.mts --fake selftest/$kind.json "${CASES[@]/#/--cases=}" --only "$ids" --out runs/selftest-$kind.jsonl >/dev/null 2>runs/selftest-$kind.log || { cat runs/selftest-$kind.log; exit 1; }
@@ -46,6 +67,14 @@ for m in missing: print(f"XX  {kind:4} {m} missing"); bad += 1
 sys.exit(1 if bad else 0)
 PY
 done
+# WARP-3899: the new world handlers, read off the good and bad records and evals just written.
+python3 selftest/world_checks.py || fails=1
+# WARP-3899: the metrics, labels and budgets cases through the real loop, then the statistics over the files above.
+# History and baseline are rewritten from scratch by metrics.py; drop last run's.
+rm -f runs/selftest-history.jsonl runs/selftest-baseline.json
+env -u NODE_OPTIONS tsx run.mts --fake selftest/metrics_agents.json --cases selftest/metrics_cases.jsonl --out runs/selftest-metrics.jsonl >/dev/null 2>runs/selftest-metrics.log || { cat runs/selftest-metrics.log; exit 1; }
+python3 evaluate.py runs/selftest-metrics.jsonl --json --cases selftest/metrics_cases.jsonl > runs/selftest-metrics.eval.json || true
+python3 selftest/metrics.py || fails=1
 python3 - <<'PY' || fails=1
 import datetime, json
 recs = {k: {r["case_id"]: r for r in map(json.loads, open(f"runs/selftest-{k}.jsonl"))} for k in ("good", "bad")}
