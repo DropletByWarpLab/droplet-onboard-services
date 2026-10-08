@@ -426,7 +426,7 @@ function ProviderForm({
 }
 
 /** Owns the fetch effects. Only ever mounted for an admin — see the gate. */
-function SaasCredentialsPanel({ onConnected }: { onConnected?: (provider: string) => void }) {
+function SaasCredentialsPanel() {
   const [views, setViews] = useState<SaasCredentialView[]>([]);
   const [status, setStatus] = useState<Status>({ kind: "loading" });
 
@@ -485,7 +485,6 @@ function SaasCredentialsPanel({ onConnected }: { onConnected?: (provider: string
       saved.probedOnConnect ?? isProbedOnConnect(providerDescriptor(provider));
     if (!probed || !saved.hasCredentials) {
       setStatus({ kind: "saved", provider });
-      if (saved.hasCredentials && saved.state === "CONNECTED" && providerDescriptor(provider)?.track === "mcp") onConnected?.(provider);
       return true;
     }
     try {
@@ -555,7 +554,7 @@ function SaasCredentialsPanel({ onConnected }: { onConnected?: (provider: string
   );
 }
 
-export function SaasCredentialsSection({ onConnected }: { onConnected?: (provider: string) => void } = {}) {
+export function SaasCredentialsSection() {
   const { user } = useAuth();
   const isAdmin = user?.role === "owner" || user?.role === "admin";
 
@@ -568,7 +567,7 @@ export function SaasCredentialsSection({ onConnected }: { onConnected?: (provide
   return (
     <section className="mb-10">
       <Sect title="Connector credentials" />
-      <SaasCredentialsPanel onConnected={onConnected} />
+      <SaasCredentialsPanel />
     </section>
   );
 }

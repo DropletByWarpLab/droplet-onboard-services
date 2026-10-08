@@ -1,14 +1,24 @@
 "use client";
 
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { providerDescriptor } from "@droplet/shared-types";
+import { Dialog } from "@/components/Dialog";
 import { authFetch, useAuth } from "@/lib/auth";
 
-// This transport uses the shipped legacy endpoint. Its provider key cannot
-// use the SQL provisioning wizard or the parameterised LAN connect route.
+// WARP-3904 - the Patterson API track. A connect card for it hands off to
+// `/integrations?connect=<this provider>`, and the hub mounts this form (never
+// chat does). The hub's generic Connect cannot serve it: this provider key
+// resolves to the direct-SQL tile, whose wizard provisions a database account.
+// This transport uses the shipped legacy endpoint; its provider key cannot use
+// the SQL provisioning wizard or the parameterised LAN connect route.
 const PROVIDER = "eaglesoft-api";
 const descriptor = providerDescriptor(PROVIDER)!;
 const paths = { test: "/api/integrations/eaglesoft/test", connect: "/api/integrations/eaglesoft/connect" } as const;
+
+/** True for the one provider key whose setup is this form rather than the hub's wizard. */
+export function isLanApiProvider(providerKey: string): boolean {
+  return providerKey === PROVIDER;
+}
 
 function record(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
@@ -139,4 +149,19 @@ export function LanApiConnectionSetup({ onConnected }: { onConnected?: () => voi
       <button type="submit" className="btn primary" disabled={Boolean(busy)}>{busy === "connect" ? "Connecting…" : "Connect"}</button>
     </div>
   </form>;
+}
+
+/** The hub's modal for the Patterson API track: the form above under a heading and a Close button. */
+export function LanApiSetupDialog({ open, onClose, onConnected }: { open: boolean; onClose: () => void; onConnected?: () => void }) {
+  const headingId = useId();
+  return <Dialog open={open} onClose={onClose} labelledBy={headingId} maxWidth="xl">
+    <div className="flex flex-col gap-4">
+      <h2 id={headingId} className="type-title-2 text-[var(--text)]">Connect {descriptor.displayName}</h2>
+      {/* Keyed on `open`, so re-opening mounts a fresh form with no leftover secrets. */}
+      <LanApiConnectionSetup key={open ? "open" : "closed"} onConnected={onConnected} />
+      <div className="flex justify-end">
+        <button type="button" className="btn" onClick={onClose}>Close</button>
+      </div>
+    </div>
+  </Dialog>;
 }

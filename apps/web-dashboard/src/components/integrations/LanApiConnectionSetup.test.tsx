@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { providerDescriptor } from "@droplet/shared-types";
-import { LanApiConnectionSetup } from "./LanApiConnectionSetup";
+import { LanApiConnectionSetup, LanApiSetupDialog, isLanApiProvider } from "./LanApiConnectionSetup";
 
 const mocks = vi.hoisted(() => ({ role: "owner", authFetch: vi.fn() }));
 vi.mock("@/lib/auth", () => ({ useAuth: () => ({ user: { id: "owner", role: mocks.role } }), authFetch: mocks.authFetch }));
@@ -23,7 +23,7 @@ beforeEach(() => {
   mocks.authFetch.mockResolvedValue(response({ provider: "eaglesoft-api", status: "CONNECTED" }));
 });
 
-describe("Patterson API setup in chat", () => {
+describe("Patterson API setup", () => {
   it("uses the canonical credential fields with masked secrets and requires an actual route map", () => {
     render(<LanApiConnectionSetup />);
     for (const field of providerDescriptor("eaglesoft-api")!.credentialFields) {
@@ -132,5 +132,37 @@ describe("Patterson API setup in chat", () => {
     expect(signal.aborted).toBe(true);
     await act(async () => { resolve(response({ provider: "eaglesoft-api", status: "CONNECTED" })); });
     expect(onConnected).not.toHaveBeenCalled();
+  });
+});
+
+describe("Patterson API setup dialog on the hub", () => {
+  it("claims only the Patterson API provider key, not the direct-SQL tile or any other provider", () => {
+    expect(isLanApiProvider("eaglesoft-api")).toBe(true);
+    expect(isLanApiProvider("eaglesoft")).toBe(false);
+    expect(isLanApiProvider("stripe")).toBe(false);
+    expect(isLanApiProvider("")).toBe(false);
+  });
+
+  it("names the system in its heading, holds the form, and closes from its own button", () => {
+    const onClose = vi.fn();
+    render(<LanApiSetupDialog open onClose={onClose} />);
+    expect(screen.getByRole("dialog", { name: "Connect Eaglesoft (Patterson API)" })).toBeInTheDocument();
+    expect(screen.getByRole("form", { name: "Patterson API setup" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders nothing while closed", () => {
+    render(<LanApiSetupDialog open={false} onClose={() => {}} />);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.queryByRole("form")).not.toBeInTheDocument();
+  });
+
+  it("passes the connected verdict to the hub", async () => {
+    const onConnected = vi.fn();
+    render(<LanApiSetupDialog open onClose={() => {}} onConnected={onConnected} />);
+    fill();
+    fireEvent.click(screen.getAllByRole("button", { name: "Connect" })[0]);
+    await waitFor(() => expect(onConnected).toHaveBeenCalledTimes(1));
   });
 });
