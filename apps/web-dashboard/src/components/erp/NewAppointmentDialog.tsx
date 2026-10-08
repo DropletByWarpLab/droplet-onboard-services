@@ -52,21 +52,21 @@ export function NewAppointmentDialog({
         </h2>
         <div className="mt-4 space-y-3">
           <Labeled label="Patient">
-            <input className="dp-input" value={patientName} onChange={(e) => setPatientName(e.target.value)} placeholder="Full name" />
+            <input className="form-input" value={patientName} onChange={(e) => setPatientName(e.target.value)} placeholder="Full name" />
           </Labeled>
           <div className="grid grid-cols-2 gap-3">
             <Labeled label="Provider">
-              <input className="dp-input" value={provider} onChange={(e) => setProvider(e.target.value)} placeholder="Dr. Lee" />
+              <input className="form-input" value={provider} onChange={(e) => setProvider(e.target.value)} placeholder="Dr. Lee" />
             </Labeled>
             <Labeled label="Chair">
-              <input className="dp-input" value={operatory} onChange={(e) => setOperatory(e.target.value)} placeholder="Op 2" />
+              <input className="form-input" value={operatory} onChange={(e) => setOperatory(e.target.value)} placeholder="Op 2" />
             </Labeled>
           </div>
           <Labeled label="Date & time">
-            <ThemedDateInput type="datetime-local" className="dp-input" value={startsAt} onChange={(e) => setStartsAt(e.target.value)} />
+            <ThemedDateInput type="datetime-local" className="form-input" value={startsAt} onChange={(e) => setStartsAt(e.target.value)} />
           </Labeled>
           <Labeled label="Reason (optional)">
-            <input className="dp-input" value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Recall, exam, …" />
+            <input className="form-input" value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Recall, exam, …" />
           </Labeled>
         </div>
         <div className="mt-5 flex items-center justify-end gap-2">
