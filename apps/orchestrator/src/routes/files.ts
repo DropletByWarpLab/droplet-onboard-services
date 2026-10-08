@@ -96,6 +96,7 @@ import {
   DocServerUnavailableError,
 } from "../services/docserver.client.js";
 import { getNcToken, resolveNcToken } from "../services/nextcloud-session.service.js";
+import { checkSession } from "../services/session.service.js";
 import { hydrateSlideImages, SlideAssetError, withSlideDeadline } from "../services/slide-assets.service.js";
 import { readOfficeBytes, OfficeFileError } from "../services/office-file.client.js";
 import { publish } from "../services/mqtt.service.js";
@@ -3005,6 +3006,16 @@ export function createFilesRouter(
           }
           const liveToken = await withSlideDeadline(mcp ? getNcToken(actor.id) : resolveNcToken(req), imageDeadline.signal);
           if (!liveToken) throw new SlideAssetError(401, "File access disconnected before the slide deck could be saved.");
+          // The storage credential is shared by this person's devices. A
+          // logout can retire this sign-in while another still needs that
+          // credential. Recheck the signed sid without extending its lifetime;
+          // legacy callers and MCP have no sid. Keep auth's Redis-error policy.
+          if (!mcp && req.user?.sid) {
+            const session = await withSlideDeadline(checkSession(req.user.sid, { touch: false }), imageDeadline.signal);
+            if (session.kind === "missing" || session.kind === "expired" || (session.kind === "ok" && session.record.userId !== actor.id)) {
+              throw new SlideAssetError(401, "This sign-in expired before the slide deck could be saved.");
+            }
+          }
           writeToken = liveToken;
         }
 

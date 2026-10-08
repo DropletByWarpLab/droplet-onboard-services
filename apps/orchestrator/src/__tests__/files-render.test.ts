@@ -40,6 +40,7 @@ vi.mock("../config.js", () => ({
     MAX_UPLOAD_SIZE_MB: 10,
     NEXTCLOUD_URL: "http://nextcloud.test",
     AUTH_ENABLED: false,
+    JWT_SECRET: "files-render-test-secret",
     DROPLET_SHARED_FOLDER_NAME: "Household",
     FRIGATE_URL: "http://frigate:5000",
     DOC_RENDER_URL: "http://doc-render:8020",
@@ -120,8 +121,10 @@ import { resolveAssertedUser } from "../services/asserted-user.service.js";
 import { resolveAssertedNextcloudLogin } from "../services/asserted-nextcloud-login.service.js";
 import { resolveNcToken, getNcToken } from "../services/nextcloud-session.service.js";
 import { requireSpaceAccess, checkSpaceAccess } from "../middleware/space.js";
-import { cacheDel, invalidatePrefix } from "../services/cache.service.js";
+import { cacheDel, invalidatePrefix, __setRedisForTesting } from "../services/cache.service.js";
 import { recordActivity } from "../services/activity.singleton.js";
+import { signAccessToken } from "../services/jwt.service.js";
+import { checkSession, deleteSession, SESSION_KEY_PREFIX } from "../services/session.service.js";
 
 const ncMock = nc as unknown as Record<string, ReturnType<typeof vi.fn>>;
 
@@ -409,7 +412,7 @@ describe("image deck write identity remains current", () => {
   const service = { id: "_service:mcp", username: "mcp", role: "service" };
   const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jZL0AAAAASUVORK5CYII=", "base64");
   const input = { path: "/deck.pdf", format: "pdf", slides: [{ title: "Picture", image: { path: "/photo.png" } }] };
-  function imageApp(user: Pick<typeof person, "id" | "username" | "role"> = person) {
+  function imageApp(user: Pick<typeof person, "id" | "username" | "role"> & { sid?: string } = person) {
     const app = express(); app.use(express.json());
     app.use((req, _res, next) => { Object.assign(req, { user }); next(); });
     const prisma = new PrismaClient();
@@ -438,7 +441,53 @@ describe("image deck write identity remains current", () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(PDF_BYTES)));
     (config as { DOC_RENDER_SERVICE_TOKEN: string }).DOC_RENDER_SERVICE_TOKEN = "render-token";
   });
-  afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
+  afterEach(() => { __setRedisForTesting(null); vi.useRealTimers(); vi.unstubAllGlobals(); });
+  it.each([false, true])("rechecks the original native Bearer session before saving (retired=%s)", async (retired) => {
+    const sid = "rendering-device";
+    const otherSid = "other-live-device";
+    const now = Math.floor(Date.now() / 1000);
+    const record = JSON.stringify({ userId: person.id, role: person.role, createdAt: now, lastSeenAt: now });
+    const records = new Map([
+      [SESSION_KEY_PREFIX + sid, record],
+      [SESSION_KEY_PREFIX + otherSid, record],
+      ["auth:nc-token:" + person.id, "shared-storage-token"],
+    ]);
+    __setRedisForTesting({
+      get: async (key: string) => records.get(key) ?? null,
+      del: async (key: string) => Number(records.delete(key)),
+      zrem: async () => 1,
+    } as unknown as Parameters<typeof __setRedisForTesting>[0]);
+    const actual = await vi.importActual<typeof import("../services/nextcloud-session.service.js")>("../services/nextcloud-session.service.js");
+    vi.mocked(resolveNcToken).mockImplementation(actual.resolveNcToken);
+    const bearer = signAccessToken({ ...person, role: "owner", sid });
+    const authenticated = { ...person, sid };
+    expect(await checkSession(sid, { touch: false })).toMatchObject({ kind: "ok", record: { userId: person.id } });
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      if (retired) {
+        await deleteSession(person.id, sid);
+        expect(await checkSession(sid, { touch: false })).toEqual({ kind: "missing" });
+      }
+      return new Response(PDF_BYTES);
+    }));
+    const response = await request(imageApp(authenticated)).post("/api/files/render").set("authorization", "Bearer " + bearer).send(input);
+    // Logout deliberately preserves the shared storage credential when a
+    // second device is still signed in; that credential cannot prove this sid.
+    expect(await checkSession(otherSid, { touch: false })).toMatchObject({ kind: "ok" });
+    const originalRequest = vi.mocked(resolveNcToken).mock.calls[0][0];
+    expect(await actual.resolveNcToken(originalRequest)).toBe("shared-storage-token");
+    expect(response.status).toBe(retired ? 401 : 200);
+    if (retired) expect(ncMock.ncUploadFile).not.toHaveBeenCalled();
+    else expect(ncMock.ncUploadFile).toHaveBeenCalledWith("shared-storage-token", "alice", "/", "deck.pdf", PDF_BYTES, expect.objectContaining({ ifNoneMatch: true }));
+  });
+  it.each(["legacy", "JWT"])("preserves supported sid-less native %s Bearer file access", async (kind) => {
+    __setRedisForTesting({ get: async (key: string) => key === "auth:nc-token:" + person.id ? "shared-storage-token" : null } as unknown as Parameters<typeof __setRedisForTesting>[0]);
+    const actual = await vi.importActual<typeof import("../services/nextcloud-session.service.js")>("../services/nextcloud-session.service.js");
+    vi.mocked(resolveNcToken).mockImplementation(actual.resolveNcToken);
+    const bearer = kind === "JWT" ? signAccessToken({ ...person, role: "owner" }) : "legacy-native-storage-token";
+    const response = await request(imageApp()).post("/api/files/render").set("authorization", "Bearer " + bearer).send(input);
+    expect(response.status).toBe(200);
+    expect(ncMock.ncUploadFile).toHaveBeenCalledWith(kind === "JWT" ? "shared-storage-token" : bearer, "alice", "/", "deck.pdf", PDF_BYTES, expect.objectContaining({ ifNoneMatch: true }));
+  });
   it("ignores forged human headers and uses a refreshed session token for the atomic save", async () => {
     vi.mocked(resolveNcToken).mockResolvedValueOnce("initial-human-token").mockResolvedValueOnce("fresh-human-token");
     const response = await request(imageApp()).post("/api/files/render").set("x-nextcloud-user", "victim").set("x-nextcloud-token", "stolen").send(input);
