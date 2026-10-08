@@ -8,6 +8,7 @@ vi.mock("../services/frigate.client.js", () => ({ fetchRecordings }));
 vi.mock("../services/camera.service.js", () => ({ getCameras }));
 import { createCameraMotionRouter } from "./camera-motion.js";
 import { emptyCameraBusinessHours } from "../services/camera-business-hours.service.js";
+import { userDirectory } from "../__tests__/helpers/user-directory.js";
 
 const after = Date.parse("2026-10-05T17:00:00Z") / 1000, before = after + 3600;
 const hours = { ...emptyCameraBusinessHours(), configured: true };
@@ -71,5 +72,41 @@ describe("retained motion route", () => {
     expect(response.body.coverage.before - response.body.coverage.after).toBe(86400);
     expect(getCameras).toHaveBeenCalledTimes(1);
     expect(fetchRecordings.mock.calls.map((call) => call[0])).toEqual(["office", "bedroom"]);
+  });
+});
+
+// WARP-3927: get_camera_motion / summarize_camera_activity read this route as the
+// `_service:mcp` principal. It is admitted, but only as the person it acts for.
+describe("retained motion route — MCP principal (WARP-3927)", () => {
+  const directory = userDirectory([
+    { id: "u-sam", username: "sam", nextcloudUsername: "sam", role: "family" },
+    { id: "u-romain", username: "romain", nextcloudUsername: "romain", role: "owner" },
+  ]);
+  const mcpPrisma = { user: directory, systemFlag: { findUnique: async () => ({ valueJson: hours }) },
+    cameraAccessGrant: { findMany: grantRead } } as unknown as PrismaClient;
+  function mcpApp() {
+    const server = express();
+    server.use((req, _res, next) => {
+      req.user = { id: "_service:mcp", username: "_service:mcp", displayName: "MCP Server", role: "service" };
+      next();
+    });
+    server.use("/api", createCameraMotionRouter(mcpPrisma));
+    return server;
+  }
+  it("is admitted and scoped to the acting person's granted cameras", async () => {
+    const response = await request(mcpApp()).get(`/api/cameras/motion?${query}&cameras=office,bedroom`).set("X-Nextcloud-User", "sam");
+    expect(response.status).toBe(200);
+    expect(response.body.coverage.cameras.map((camera: { camera: string }) => camera.camera)).toEqual(["office"]);
+    expect(fetchRecordings).toHaveBeenCalledExactlyOnceWith("office", after, before);
+  });
+  it("lets an acting owner see every camera", async () => {
+    const response = await request(mcpApp()).get(`/api/cameras/motion?${query}`).set("X-Nextcloud-User", "romain");
+    expect(response.status).toBe(200);
+    expect(fetchRecordings.mock.calls.map((call) => call[0])).toEqual(["office", "bedroom"]);
+  });
+  it("gets nothing when it does not say who is asking", async () => {
+    const response = await request(mcpApp()).get(`/api/cameras/motion?${query}`);
+    expect(response.status).toBe(401);
+    expect(fetchRecordings).not.toHaveBeenCalled();
   });
 });

@@ -207,6 +207,11 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "set_detection_zones",
     "delete_clip",
     "rename_camera",
+    // WARP-3927: camera activity for chat (Tier-1 reads)
+    "summarize_camera_activity",
+    "get_camera_motion",
+    "list_camera_reviews",
+    "get_camera_recording",
   ],
   switch: [
     "get_switch_ports",
@@ -438,6 +443,10 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   set_detection_zones: "Choose the areas of a camera view that trigger motion alerts",
   rename_camera: "Give a camera a name you'll recognise, like \"Driveway\"",
   delete_clip: "Permanently delete a saved camera clip",
+  summarize_camera_activity: "Ask what your cameras saw over a night or a day, like 'what happened at the front door?'",
+  get_camera_motion: "See when there was motion on a camera, and whether it was recording at the time",
+  list_camera_reviews: "See the alerts and activity your cameras flagged, most important first",
+  get_camera_recording: "Play back a moment from a camera's recordings, like 'the front door at 6:40 last night'",
   // Switch
   get_switch_ports: "See what's plugged into each network port",
   get_switch_vlans: "See how your network ports are grouped",

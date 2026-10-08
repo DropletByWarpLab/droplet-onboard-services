@@ -8,6 +8,10 @@ import {
   parseChatMedia,
   cameraSnapshotMedia,
   cameraLiveMedia,
+  recordingClipUrl,
+  recordingPlaybackUrl,
+  recordingSnapshotMedia,
+  recordingSnapshotUrl,
 } from "./chat-media";
 
 describe("isSafeMediaUrl", () => {
@@ -117,5 +121,58 @@ describe("parseChatMedia", () => {
       media: { kind: "file", name: "a.png", previewUrl: "/api/files/download?path=%2Fa.png", downloadUrl: "/api/files/download?path=%2Fa.png" },
     });
     expect(m).toMatchObject({ kind: "file", mimeType: "image/png" });
+  });
+});
+
+// WARP-3927: stills and clips from RECORDED footage.
+describe("recording builders", () => {
+  it("builds a same-origin still URL for an instant and truncates to the second", () => {
+    expect(recordingSnapshotUrl("front_door", 1791422400.9)).toBe("/api/cameras/front_door/recordings/snapshot?at=1791422400");
+    expect(isSafeMediaUrl(recordingSnapshotUrl("front_door", 1791422400))).toBe(true);
+  });
+
+  it("encodes the camera name in the path", () => {
+    expect(recordingSnapshotUrl("a b", 1791422400)).toBe("/api/cameras/a%20b/recordings/snapshot?at=1791422400");
+  });
+
+  it("a recording still is a camera_snapshot with NO liveUrl and NO eventId, and survives parseChatMedia unchanged", () => {
+    const m = recordingSnapshotMedia("front_door", 1791422400, "front_door 18:40");
+    expect(m).toEqual({
+      kind: "camera_snapshot",
+      camera: "front_door",
+      snapshotUrl: "/api/cameras/front_door/recordings/snapshot?at=1791422400",
+      label: "front_door 18:40",
+    });
+    expect(parseChatMedia({ media: [m] })).toEqual([m]);
+  });
+
+  it.each([
+    ["bad name!", 1791422400],
+    ["../x", 1791422400],
+    ["front_door", 0],
+    ["front_door", -5],
+    ["front_door", Number.NaN],
+    ["front_door", Infinity],
+  ])("refuses %j at %j", (camera, at) => {
+    expect(recordingSnapshotMedia(camera, at)).toBeNull();
+  });
+
+  it("builds mp4 and HLS URLs for a window, truncating to whole seconds", () => {
+    expect(recordingClipUrl("dock", 100.7, 200.2)).toBe("/api/cameras/dock/playback?after=100&before=200");
+    expect(recordingPlaybackUrl("dock", 100.7, 200.2)).toBe("/api/cameras/dock/playback.m3u8?after=100&before=200");
+    expect(isSafeMediaUrl(recordingClipUrl("dock", 1, 2))).toBe(true);
+    expect(isSafeMediaUrl(recordingPlaybackUrl("dock", 1, 2))).toBe(true);
+  });
+
+  it("a clip descriptor built from them is accepted by parseChatMedia", () => {
+    const clip = {
+      kind: "camera_clip",
+      camera: "dock",
+      clipUrl: recordingClipUrl("dock", 100, 200),
+      playbackUrl: recordingPlaybackUrl("dock", 100, 200),
+      startTime: 100,
+      endTime: 200,
+    };
+    expect(parseChatMedia({ media: [clip] })).toEqual([clip]);
   });
 });
