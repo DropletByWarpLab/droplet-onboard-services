@@ -366,7 +366,10 @@ def calculate(workbook, formulas):
             results[id(node)] = result
             if kind in ("ref", "range"): references.add(id(node))
         result = results[id(ast)]
-        return CellError("#VALUE!") if isinstance(result, list) else result
+        # A completed formula selecting an empty cell calculates to zero.
+        # Normalize before other formula cells read it, matching its OOXML
+        # cache, while preserving blank references inside this expression.
+        return CellError("#VALUE!") if isinstance(result, list) else 0 if result is None else result
     for target in formula_order(formulas, tick):
         tick()
         values[target] = evaluate(formulas[target][1])

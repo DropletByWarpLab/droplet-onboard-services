@@ -373,6 +373,27 @@ def test_selected_empty_cells_cache_zero_without_becoming_counted_arguments(expr
     assert _formula_result(expression, [[None, 2, ""], [5, 4, ""]])[0].value == expected
 
 
+@pytest.mark.parametrize("expression", ['A2', 'IF(TRUE,A2,0)', 'IF(FALSE,99,IF(TRUE,A2,7))'])
+def test_formula_dependencies_observe_the_same_zero_as_the_published_blank_reference_cache(expression):
+    data = render_xlsx([{"columns": ["Input", "Cached", "Count", "Average", "Direct"],
+        "rows": [[None, "", "", "", ""], [None, "", "", "", ""]],
+        "formulas": [{"cell": "B2", "expression": expression},
+            {"cell": "B3", "expression": "B2"},
+            {"cell": "C2", "expression": "COUNT(B2)"},
+            {"cell": "D2", "expression": "AVERAGE(B2,4)"},
+            {"cell": "E2", "expression": "COUNT(IF(TRUE,A2,0))"},
+            {"cell": "C3", "expression": "COUNT(B2:B3)"},
+            {"cell": "D3", "expression": "COUNTIF(B2:B3,0)"},
+            {"cell": "E3", "expression": "SUMIF(B2:B3,0,C2:C3)"}]}])
+    ws = load_workbook(io.BytesIO(data), data_only=True).active
+    assert ws["B2"].value == ws["B3"].value == 0
+    assert ws["C2"].value == 1 and ws["D2"].value == 2
+    assert ws["C3"].value == ws["D3"].value == 2 and ws["E3"].value == 3
+    # Selecting the physically empty input inside COUNT still passes a blank
+    # reference. Only a completed formula cell becomes the calculated zero.
+    assert ws["E2"].value == 0
+
+
 @pytest.mark.parametrize("expression, expected, data_type", [
     ('IF(A2>=10,"Met Target","Below Target")', "Met Target", "s"),
     ('IF(A2<10,"Met Target","Below Target")', "Below Target", "s"),
