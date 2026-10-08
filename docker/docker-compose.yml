@@ -2340,7 +2340,7 @@ services:
   #
   # Hardening (the ADR-047 §4.2 table, verbatim): non-root (USER sandbox in
   # the image), read-only rootfs, every capability dropped, no privilege
-  # escalation, a small tmpfs /tmp as the only writable path, ADR-021 limits
+  # escalation, a small tmpfs /tmp and four named workspace volumes, ADR-021 limits
   # from SANDBOX_* with a tight pid ceiling (one child per transform). No
   # Docker socket on any profile. No `env_file`: the only secret this
   # container holds is its own bearer — a code-execution container must not
@@ -2379,16 +2379,21 @@ services:
       # Nothing here changes the network: an extension listens on 127.0.0.1
       # only and the orchestrator reaches it through /extensions/<slug>/rpc.
       - SANDBOX_EXTENSIONS_DIR=/var/lib/workspace-ext
+      # WARP-3906 (HA-2): app state is separate from versioned, rebuildable code.
+      # The named volume persists across upgrades; it does NOT enforce a per-app quota.
+      - SANDBOX_EXTENSIONS_DATA_DIR=/var/lib/workspace-ext-data
       - SANDBOX_EXTENSION_PORT_RANGE=${SANDBOX_EXTENSION_PORT_RANGE:-18000-18999}
       - PYTHONDONTWRITEBYTECODE=1
     # WARP-2896: the workspace git store. Bare repos (the truth, backed up)
-    # and working checkouts (rebuildable from the bare repos) on two volumes,
-    # the only writable paths besides /tmp on this read-only rootfs.
+    # and working checkouts (rebuildable from the bare repos) on two volumes.
+    # These four volumes and /tmp are the only writable mounts on this rootfs.
     # WARP-2900: installed extensions on a third, rebuildable from the store.
+    # WARP-3906: persistent app data on a fourth, backed up and wiped on reset.
     volumes:
       - workspace-git:/var/lib/workspace-git
       - workspace-checkouts:/var/lib/workspace
       - extensions-installed:/var/lib/workspace-ext
+      - extensions-data:/var/lib/workspace-ext-data
     # WARP-2900 / WARP-3012: a stopped extension's process group and a
     # timed-out run's are killed with killpg; their orphans are reparented to
     # PID 1. An init (Docker's tini) reaps them. Without it PID 1 is the
@@ -4052,6 +4057,10 @@ volumes:
   # workspace-git after re-verifying its signed statement, so it is excluded
   # from backup like the checkouts. Wiped by factory reset.
   extensions-installed:
+  # WARP-3906 (HA-2) — persistent hosted-app state, separate from the signed
+  # code exports. Captured by device and restic backups; wiped by factory reset.
+  # A named volume alone provides no per-app filesystem quota.
+  extensions-data:
   # WARP-1055 — voice-io's applied mic-calibration record (small JSON).
   # Named so a container recreate never silently reverts the tuned
   # gain/threshold; factory-reset's volume sweep clears it.

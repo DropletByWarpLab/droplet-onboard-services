@@ -61,6 +61,19 @@ fi
 # naive whole-file grep would be a false positive.
 CODE="$(grep -vE '^[[:space:]]*#' "$RESET" | grep -vE '^[[:space:]]*$')"
 
+# WARP-3906: app state is customer data, so the fallback sweep must remove it
+# even if `down -v` failed. Check the parsed wipe list, not a comment mention.
+reset_volumes="$(awk '
+  /^VOLUMES=\(/ {inarr=1; next}
+  inarr && /^\)/ {inarr=0}
+  inarr {sub(/#.*/, ""); gsub(/["[:space:]]/, ""); if ($0 != "") print}
+' "$RESET")"
+if grep -qxF "extensions-data" <<< "$reset_volumes"; then
+  pass "factory reset wipes persistent hosted-app state (WARP-3906)"
+else
+  fail "factory reset omits extensions-data from its fallback volume sweep"
+fi
+
 # --- Root cause 1: correct project name, not the basename guess --------------
 echo "--- Project name is derived, not guessed from the directory basename ---"
 

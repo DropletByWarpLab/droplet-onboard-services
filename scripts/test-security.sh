@@ -404,6 +404,8 @@ fi
 #   - a top-level `networks.droplet-internal` with `internal: true`;
 #   - the sandbox attached to exactly that network — no `ports:`, no
 #     `network_mode`, no `env_file`, no docker socket;
+#   - exactly four declared named volumes at their pinned paths (WARP-3906),
+#     including persistent app data, with no additional mount or host bind;
 #   - the hardening stanza (read-only, cap_drop ALL, no-new-privileges, tmpfs
 #     /tmp, non-root image) and the ADR-021 trio incl. `pids_limit`;
 #   - `init: true` (WARP-2900 / WARP-3012): a stopped extension's or a timed-out
@@ -439,6 +441,19 @@ for key in ("ports", "network_mode", "env_file", "privileged", "devices"):
 for vol in sb.get("volumes") or []:
     if "docker.sock" in str(vol):
         problems.append("sandbox must never mount the docker socket")
+expected_mounts = [
+    "workspace-git:/var/lib/workspace-git",
+    "workspace-checkouts:/var/lib/workspace",
+    "extensions-installed:/var/lib/workspace-ext",
+    "extensions-data:/var/lib/workspace-ext-data",
+]
+if sb.get("volumes") != expected_mounts:
+    problems.append(f"sandbox.volumes must be exactly {expected_mounts!r}, got {sb.get('volumes')!r}")
+declared_volumes = data.get("volumes") or {}
+for mount in expected_mounts:
+    name = mount.split(":", 1)[0]
+    if name not in declared_volumes or declared_volumes[name] not in (None, {}):
+        problems.append(f"{name} must be a declared default named volume, without a host bind or external override")
 if sb.get("read_only") is not True:
     problems.append("sandbox must be read_only: true")
 if sb.get("cap_drop") != ["ALL"]:
@@ -453,6 +468,9 @@ for key in ("mem_limit", "cpus", "pids_limit"):
 if sb.get("init") is not True:
     problems.append("sandbox must set init: true (orphans of a killed process group are reaped)")
 env = sb.get("environment") or []
+env_values = dict(str(e).split("=", 1) for e in env if "=" in str(e)) if isinstance(env, list) else env
+if env_values.get("SANDBOX_EXTENSIONS_DATA_DIR") != "/var/lib/workspace-ext-data":
+    problems.append("sandbox must pin SANDBOX_EXTENSIONS_DATA_DIR=/var/lib/workspace-ext-data")
 env_keys = {str(e).split("=", 1)[0] for e in env} if isinstance(env, list) else set(env.keys())
 extra_secrets = {k for k in env_keys if k.endswith("_TOKEN") or k.endswith("_PASSWORD") or k.endswith("_SECRET")} - {"SANDBOX_SERVICE_TOKEN"}
 if extra_secrets:

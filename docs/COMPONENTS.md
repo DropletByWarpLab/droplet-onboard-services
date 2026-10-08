@@ -698,6 +698,22 @@ network. Host-published ports and host-network services are called out.
 - **Gotchas:** sits only on the `internal: true` `droplet-internal` network — its
   registered egress is **none**, which is what makes running customer-written code
   there acceptable. Holds no credential but its own bearer.
+- **Persistence (WARP-3906, HA-2):** four named volumes: `workspace-git` (bare
+  repositories), `workspace-checkouts` (rebuildable worktrees),
+  `extensions-installed` (rebuildable signed code exports), and `extensions-data`
+  (app state at `/var/lib/workspace-ext-data`, owned by uid 1000). The last is
+  included in device and restic backups and the factory-reset wipe. It has no
+  enforced per-app filesystem quota; the requested default is 1 GiB. Hosted-app
+  runtime changes require security review before enablement; see
+  [`security/extension-trust.md`](security/extension-trust.md).
+- **Hosted apps (HA-2, implemented for review):** `kind: app` installs either a
+  static public tree or a Node/Python HTTP server on an assigned loopback port.
+  `/extensions/<slug>/http/*` requires the service bearer and per-start app
+  relay key; `/extensions/<slug>/logs` exposes capped process output internally.
+  Both routes retain the default-off process-supervision gate. Workspace
+  `app-check` probes health/root within 30 seconds and cleans up its child.
+  No host port is published by this slice; the browser gateway, app sessions,
+  grants and Chat setup entry points belong to HA-3 through HA-5.
 
 ## services/web-fetch
 

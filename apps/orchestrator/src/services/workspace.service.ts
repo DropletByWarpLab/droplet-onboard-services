@@ -30,6 +30,7 @@ export const WORKSPACE_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
  * follows is checked against {@link RUN_ARG}. Mirrors services/sandbox
  * workspace.py RUN_COMMANDS — the sandbox test pins its own copy, and
  * `workspace.routes.test.ts` pins this one against the same cases.
+ * `app-check` is an exact, argument-free command handled separately below.
  */
 export const RUN_COMMANDS: ReadonlyArray<ReadonlyArray<string>> = [
   ["npm", "test"],
@@ -44,6 +45,9 @@ const RUN_ARG = /^[A-Za-z0-9_./=:@,+-]{1,128}$/;
 export function refuseRunArgv(argv: unknown): string | null {
   if (!Array.isArray(argv) || argv.length === 0 || argv.length > 16) {
     return "argv must have 1–16 entries";
+  }
+  if (argv[0] === "app-check") {
+    return argv.length === 1 ? null : "app-check takes no arguments";
   }
   if (!argv.every((a) => typeof a === "string")) return "argv must be strings";
   const words = argv as string[];

@@ -153,6 +153,11 @@ async function seedRun(db: ReturnType<typeof createAgentRunPrismaMock>, workspac
 beforeEach(() => recordActivityMock.mockClear());
 
 describe("the run allow-list (refuseRunArgv)", () => {
+  it("allows app-check only as the exact command, with no arguments", () => {
+    expect(refuseRunArgv(["app-check"])).toBeNull();
+    expect(refuseRunArgv(["app-check", "server.js"])).toBe("app-check takes no arguments");
+    expect(refuseRunArgv(["app-check", "--port=80"])).toBe("app-check takes no arguments");
+  });
   it("is closed in shape — mirrors the sandbox's own list", () => {
     // MUTATION: return null from refuseRunArgv and every refusal below is
     // green-for-the-wrong-reason — and the route test further down proves

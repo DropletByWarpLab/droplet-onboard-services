@@ -75,7 +75,7 @@ statement alone.
   never dials an extension: it calls the sandbox's bearer-gated
   `/extensions/<slug>/rpc`, and the sandbox relays over loopback with a
   timeout and an output cap that is reported when hit.
-- The child's environment is the sandbox's base environment plus an
+- The tool-extension child's environment is the sandbox's base environment plus an
   allowlist of keys (`DROPLET_EXT_ID`, `DROPLET_EXT_PORT`,
   `DROPLET_EXT_TOKEN`, `DROPLET_EXT_RELAY_KEY`, `DROPLET_ORCHESTRATOR_URL`).
   The sandbox's own bearer is not in it. The child runs as the server's uid,
@@ -238,6 +238,33 @@ ADR-043 §5 asks for. **Needs Stefan/Romain confirmation.**
   subtract the sandbox server's own RSS. `mem_limit` is the hard ceiling. A
   per-extension RSS cap needs cgroup delegation, which this `cap_drop: ALL`
   container does not have.
+
+### Hosted-app persistence (WARP-3906, HA-2)
+
+Persistent app state lives on the `extensions-data` named volume at
+`/var/lib/workspace-ext-data` (`SANDBOX_EXTENSIONS_DATA_DIR`), separate from the
+signed code exports on `extensions-installed`. The image creates the root owned
+by sandbox uid 1000; `<slug>/` app directories use mode `0700`. App processes
+receive `DROPLET_EXT_DATA_DIR` (the absolute directory), `PORT`, and
+`DROPLET_EXT_BASE_PATH` (`/<slug>/`) beside their id and loopback port; they are
+not handed the tool extension's callback bearer or relay key. Code upgrades can replace
+the installed export without replacing app state. Device and restic backups
+capture this volume, and factory reset wipes it.
+
+The requested default **1 GiB per-app filesystem quota is not enforced**.
+Docker's default named-volume driver provides no per-directory quota. The
+existing NVR quota helper runs on the host with root authority against ext4
+mounted with project quotas; it does not cover Docker's app-data volume. App
+quota enforcement needs a separately reviewed host-side provisioning path.
+No capability, host bind, published port, Docker socket or network permission
+is added to the sandbox for app storage.
+
+This is an implementation slice for review, not an enabled end-to-end hosted-app
+release. Security review is required before enabling hosted apps, including the
+HTTP relay and its authorization, writable data paths, same-uid process and
+data access, log exposure, and resource accounting. The existing shared-uid
+limitations below apply to persistent app state as well: `0700` does not isolate
+one app from another app running with the same uid.
 
 ### Known limitations (for the WARP-2923 review; WARP-2898 is the fix)
 
