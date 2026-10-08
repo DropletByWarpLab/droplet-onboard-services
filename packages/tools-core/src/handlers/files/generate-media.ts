@@ -10,7 +10,7 @@ const inputSchema = {
     kind: { type: "string", description: "image or video." },
     path: { type: "string", description: "New personal-root .png/.mp4 filename." },
     prompt: { type: "string", description: "Image/edit/video description." },
-    source_path: { type: "string", description: "Optional PNG/JPEG/WebP file; video needs LTX." },
+    source_path: { type: "string", description: "Optional PNG/JPEG/WebP file; video input needs LTX." },
     mask_path: { type: "string", description: "Optional image mask; white changes." },
     options: { type: "object", description: "Optional width,height,steps,seed; video frames (8n+1,9–49) and fps (8–24)." },
   }, additionalProperties: false,
