@@ -7,6 +7,7 @@ uvicorn[standard]==0.52.1
 # Document writers. All permissive — shipping the appliance is conveyance, so
 # a copyleft dependency here would attach an obligation to the whole image.
 #   python-docx  MIT
+#   python-pptx  MIT
 #   openpyxl     MIT
 #   reportlab    BSD-3-Clause, and PURE PYTHON: no cairo/pango/HarfBuzz, so no
 #                LGPL native layer enters the image. That is why WeasyPrint
@@ -16,6 +17,7 @@ uvicorn[standard]==0.52.1
 # they READ documents for the RAG index; reportlab is vetted there too, as a
 # dev dependency that builds PDF test fixtures.
 python-docx==1.2.0
+python-pptx==1.0.2
 openpyxl==3.1.5
 reportlab==4.2.5
 

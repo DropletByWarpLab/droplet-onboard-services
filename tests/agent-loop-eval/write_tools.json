@@ -20,6 +20,7 @@
  "create_reminder": true,
  "create_scene": true,
  "create_spreadsheet": true,
+ "create_slide_deck": true,
  "create_word_document": true,
  "decommission_ap": true,
  "delete_clip": true,

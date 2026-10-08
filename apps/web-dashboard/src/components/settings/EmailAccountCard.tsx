@@ -250,20 +250,20 @@ export function EmailAccountCard(): JSX.Element {
           {accounts.map((a) => {
             const state = describeMailbox(a);
             return (
-              <li key={a.id} className="flex items-center justify-between gap-2">
-                <span className="min-w-0">
+              <li key={a.id} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]">
+                <span className="min-w-0 break-words">
                   {a.displayName} · {a.address}
                   {a.authMode === "M365_GRAPH" && <span className="block type-caption-1" style={{ color: "var(--text-muted)" }}>Read-only Outlook import · sending unavailable</span>}
                 </span>
                 <span
-                  className={`type-caption-1 ${state.tone}`}
+                  className={`col-start-1 row-start-2 min-w-0 sm:col-start-2 sm:row-start-1 type-caption-1 ${state.tone}`}
                   style={state.tone ? undefined : { color: "var(--text-muted)" }}
                   role="status"
                 >
                   {state.label}
                 </span>
-                {a.authMode === "M365_GRAPH" && !managesMailboxes ? <a className="btn" href="/settings#connected-accounts">Manage import</a> : <button
-                  className="btn"
+                {a.authMode === "M365_GRAPH" && !managesMailboxes ? <a className="btn col-start-2 row-start-1 row-span-2 sm:col-start-3 sm:row-span-1" href="/settings#connected-accounts">Manage import</a> : <button
+                  className="btn col-start-2 row-start-1 row-span-2 sm:col-start-3 sm:row-span-1"
                   disabled={busy}
                   onClick={() => setPendingDisconnect(a)}
                 >
@@ -284,7 +284,7 @@ export function EmailAccountCard(): JSX.Element {
           <label className="flex flex-col gap-1.5">
             Name it
             <input
-              className="input"
+              className="form-input"
               value={displayName}
               onChange={(e) => setDisplayName(e.target.value)}
               placeholder="Front desk"
@@ -293,7 +293,7 @@ export function EmailAccountCard(): JSX.Element {
           <label className="flex flex-col gap-1.5">
             Email address
             <input
-              className="input"
+              className="form-input"
               type="email"
               value={address}
               onChange={(e) => setAddress(e.target.value)}
@@ -302,7 +302,7 @@ export function EmailAccountCard(): JSX.Element {
           <label className="flex flex-col gap-1.5">
             Incoming mail server
             <input
-              className="input"
+              className="form-input"
               value={imapHost}
               onChange={(e) => setImapHost(e.target.value)}
               placeholder="your mail server"
@@ -311,7 +311,7 @@ export function EmailAccountCard(): JSX.Element {
           <label className="flex flex-col gap-1.5">
             Incoming port
             <input
-              className="input"
+              className="form-input"
               type="number"
               value={imapPort}
               onChange={(e) => setImapPort(Number(e.target.value))}
@@ -320,7 +320,7 @@ export function EmailAccountCard(): JSX.Element {
           <label className="flex flex-col gap-1.5">
             Outgoing mail server
             <input
-              className="input"
+              className="form-input"
               value={smtpHost}
               onChange={(e) => setSmtpHost(e.target.value)}
               placeholder="your mail server"
@@ -329,7 +329,7 @@ export function EmailAccountCard(): JSX.Element {
           <label className="flex flex-col gap-1.5">
             Outgoing port
             <input
-              className="input"
+              className="form-input"
               type="number"
               value={smtpPort}
               onChange={(e) => setSmtpPort(Number(e.target.value))}
@@ -337,12 +337,12 @@ export function EmailAccountCard(): JSX.Element {
           </label>
           <label className="flex flex-col gap-1.5">
             Username
-            <input className="input" value={username} onChange={(e) => setUsername(e.target.value)} />
+            <input className="form-input" value={username} onChange={(e) => setUsername(e.target.value)} />
           </label>
           <label className="flex flex-col gap-1.5">
             Password
             <input
-              className="input"
+              className="form-input"
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}

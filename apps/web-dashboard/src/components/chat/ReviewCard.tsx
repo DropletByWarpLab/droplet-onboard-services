@@ -142,7 +142,7 @@ export function ReviewCard({
                 <span className="flex-1">
                   <input
                     aria-label={label}
-                    className="dp-input w-full"
+                    className="form-input w-full"
                     value={value}
                     maxLength={600}
                     autoFocus
@@ -243,7 +243,7 @@ export function ReviewCard({
           <div className="mt-2">
             <textarea
               aria-label={INTERVIEW_COPY.summaryDisclosure}
-              className="dp-input w-full"
+              className="form-input w-full"
               rows={3}
               maxLength={1500}
               value={summary}

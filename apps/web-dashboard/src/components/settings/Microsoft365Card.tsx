@@ -406,7 +406,7 @@ export function Microsoft365Card({
           <label className="flex flex-col gap-1.5">
             Application (client) ID
             <input
-              className="input"
+              className="form-input"
               value={clientId}
               onChange={(e) => setClientId(e.target.value)}
               spellCheck={false}
@@ -416,7 +416,7 @@ export function Microsoft365Card({
           <label className="flex flex-col gap-1.5">
             Directory (tenant) ID
             <input
-              className="input"
+              className="form-input"
               value={tenantId}
               onChange={(e) => setTenantId(e.target.value)}
               spellCheck={false}

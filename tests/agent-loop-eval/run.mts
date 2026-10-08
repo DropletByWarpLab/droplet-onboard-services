@@ -55,13 +55,30 @@ function noteGatewayError(e: unknown): never {
 }
 const RETRY_WAIT_MS = Number(process.env.AGENT_EVAL_RETRY_WAIT_MS ?? 60_000);
 
-// `script` is consumed across a case's attempts, so a retried case resumes it.
-function fakeGateway(script: any[]) {
+// WARP-3899: one gwCalls entry per gateway request, built the same on the streaming path and on the fake's
+// blocking one. `tools` stays the count; `tool_names` is what the model was offered (evaluate.py's
+// selection_miss label); the token figures are char/4 estimates because no gateway forwards `usage`.
+function tap(round: number, r: any) {
+  const names: string[] = (r.tools ?? []).map((t: any) => t.function?.name ?? t.name);
+  const prompt_chars = JSON.stringify(r.messages ?? []).length + JSON.stringify(r.tools ?? []).length;
+  return {
+    round, tools: names.length, tool_names: names, tool_choice: r.tool_choice, msgs: r.messages?.length,
+    prompt_chars, prompt_tokens_est: estimateTokensFromChars(prompt_chars), completion_tokens_est: 0,
+    content: "", reasoning: "", toolCalls: 0, finish: null as string | null, usage: null as unknown,
+  };
+}
+
+// `script` is consumed across a case's attempts, so a retried case resumes it. `onReq` records the request.
+function fakeGateway(script: any[], onReq: (r: any) => any) {
   let n = 0;
   return {
-    chat: async () => {
+    chat: async (r: any) => {
+      const g = onReq(r);
       const step = script.shift() ?? { text: "Done." };
       n++;
+      g.contentChars = (step.text ?? "").length; g.reasoningChars = 0; g.finish = step.call ? "tool_calls" : "stop";
+      g.toolCalls = step.call?.length ?? 0;
+      g.completion_tokens_est = estimateTokensFromChars(g.contentChars + JSON.stringify(step.call ?? []).length);
       if (step.throw) noteGatewayError(new Error(step.throw));
       const message = step.call
         ? { role: "assistant", content: "", tool_calls: step.call.map((c: any, i: number) => ({ id: `fake-${n}-${i}`, type: "function", function: { name: c.name, arguments: JSON.stringify(c.args) } })) }
@@ -87,7 +104,7 @@ const agent = await import(`${ORCH}/src/services/llm-agent.service.ts`);
 const { buildBaseSystemPrompt, todayLine } = await import(`${ORCH}/src/services/system-prompt.service.ts`);
 const { createChatApprovalStore } = await import(`${ORCH}/src/services/chat-approval.service.ts`);
 const gw = await import(`${ORCH}/src/services/ai-gateway.client.ts`);
-const { resolveTurnContextWindow } = await import(`${ORCH}/src/services/context-budget.service.ts`);
+const { resolveTurnContextWindow, estimateTokensFromChars } = await import(`${ORCH}/src/services/context-budget.service.ts`);
 const { localDayInZone } = await import(`${ORCH}/src/services/scene-schedule-tz-backfill.service.ts`);
 const { config } = await import(`${ORCH}/src/config.ts`);
 const tc = await import(PKG);
@@ -238,9 +255,11 @@ async function runCase(c: Case, repeat: number, window: number, script: any[] | 
   const t0 = Date.now();
   let final = "";
   let priorToolNames: string[] = c.prior_tool_names ?? [];
-  const fake = script ? fakeGateway(script) : null;
+  let curRound = 0;
+  const fake = script ? fakeGateway(script, (r) => { const g = tap(curRound, r); gwCalls.push(g); return g; }) : null;
   // At most one approval round-trip, the way the dashboard does it.
   for (let round = 0; round < 2; round++) {
+    curRound = round;
     let pendingChallenge: string | undefined;
     const onEvent = (e: any) => {
       if (e.type === "tool_call") steps.push({ type: "tool_call", id: e.id, tool: e.name, args: e.args, round });
@@ -258,10 +277,12 @@ async function runCase(c: Case, repeat: number, window: number, script: any[] | 
     const deps = {
       mcp, approvals,
       aiGateway: fake ?? {
-        chat: (r: any, s?: AbortSignal) => gw.chat(r, s, USER).catch(noteGatewayError),
+        // The blocking path (stream fallback, claim correction) is tapped for tool_names and the prompt estimate;
+        // ponytail: its completion_tokens_est stays 0, since reading the body would consume it before the loop does.
+        chat: (r: any, s?: AbortSignal) => { gwCalls.push({ ...tap(round, r), blocking: true }); return gw.chat(r, s, USER).catch(noteGatewayError); },
         chatStream: (r: any, s?: AbortSignal) => (async function* () {
           // WARP-3285 local tap: per-iteration provider verdict (not in product diagnostics on the stream path).
-          const g: any = { round, tools: (r.tools ?? []).length, tool_choice: r.tool_choice, msgs: r.messages?.length, content: "", reasoning: "", toolCalls: 0, finish: null, usage: null };
+          const g: any = tap(round, r);
           gwCalls.push(g);
           try {
             for await (const ch of gw.chatStream(r, s, USER) as AsyncIterable<any>) {
@@ -277,6 +298,7 @@ async function runCase(c: Case, repeat: number, window: number, script: any[] | 
             noteGatewayError(e);  // the loop then falls back to the blocking call
           }
           g.contentChars = g.content.length; g.reasoningChars = g.reasoning.length;
+          g.completion_tokens_est = estimateTokensFromChars(g.contentChars + g.reasoningChars);
           g.content = g.content.slice(0, 600); g.reasoning = g.reasoning.slice(-1500);
         })(),
       },
@@ -316,6 +338,7 @@ async function runCase(c: Case, repeat: number, window: number, script: any[] | 
   return {
     case_id: c.id, kit_id: c.kit_id, repeat, model: opt.model, selection: opt.selection, role: who.role,
     today, turns_asked: messages.slice(1, 1 + c.turns.length).map((m) => m.content),
+    context_window: window,
     steps, dispatches, calls, confirmations, turns, gwCalls,
     final_answer: final,
     stop_reason: turns.at(-1)?.stop_reason,

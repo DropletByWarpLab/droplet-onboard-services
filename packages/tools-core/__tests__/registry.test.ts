@@ -192,6 +192,7 @@ const EXPECTED_TOOL_NAMES = [
   "create_pdf_report",
   "create_word_document",
   "create_spreadsheet",
+  "create_slide_deck", // Device chat: PDF and editable PowerPoint creation.
   // WARP-2664 — file cleanup: read-only report, then organize (write +
   // confirm) and bulk delete-to-trash (write + confirm).
   "analyze_file_cleanup",
@@ -460,7 +461,7 @@ describe("TOOLS registry", () => {
     // create-new guard on the WebDAV PUT itself (WARP-2523), with the exists?
     // pre-check as a fast path — so there is no overwrite for a confirmation
     // to guard against.
-    for (const name of ["create_pdf_report", "create_word_document", "create_spreadsheet"]) {
+    for (const name of ["create_pdf_report", "create_word_document", "create_spreadsheet", "create_slide_deck"]) {
       expect(TOOLS.get(name)?.requiresWrite, name).toBe(true);
       expect(TOOLS.get(name)?.requiresConfirmation, name).toBe(false);
     }

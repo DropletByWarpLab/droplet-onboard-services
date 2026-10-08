@@ -18,6 +18,7 @@ import { describe, it, expect, vi } from "vitest";
 import createPdfReport from "../../../src/handlers/files/create-pdf-report.js";
 import createWordDocument from "../../../src/handlers/files/create-word-document.js";
 import createSpreadsheet from "../../../src/handlers/files/create-spreadsheet.js";
+import createSlideDeck from "../../../src/handlers/files/create-slide-deck.js";
 import type { ToolContext } from "../../../src/types.js";
 
 function makeCtx(response: { ok: boolean; status: number; data?: unknown }) {
@@ -79,6 +80,11 @@ describe("create_pdf_report", () => {
       filename: "q3.pdf",
       bytes: 4096,
       mimeType: "application/pdf",
+      media: {
+        kind: "file",
+        path: "/Documents/q3.pdf",
+        downloadUrl: "/api/files/download?path=%2FDocuments%2Fq3.pdf",
+      },
     });
   });
 
@@ -169,7 +175,10 @@ describe("create_word_document", () => {
 
 describe("create_spreadsheet", () => {
   it("sends the sheets array as the spec", async () => {
-    const sheets = [{ name: "Q3", columns: ["Region"], rows: [["West"]] }];
+    const sheets = [{ name: "Q3", columns: ["Region", "Total"], rows: [["West", 2], ["East", 3], ["Total", null]],
+      formulas: [{ cell: "B4", expression: "SUM(B2:B3)" }],
+      chart: { kind: "bar", category_column: 1, value_column: 2 },
+    }];
     const { ctx, post } = makeCtx({ ...OK, data: { ...OK.data, filename: "q3.xlsx" } });
     await createSpreadsheet.handler({ path: "/Documents/q3.xlsx", sheets }, ctx);
     expect(post.mock.calls[0][1]).toMatchObject({ format: "xlsx", sheets });
@@ -189,5 +198,38 @@ describe("create_spreadsheet", () => {
       ctx,
     );
     expect(res.ok === false && res.error.code).toBe("INVALID_ARGS");
+  });
+});
+
+describe("create_slide_deck", () => {
+  const slides = [{ title: "Results", bullets: ["Revenue grew", "Costs fell"] }];
+
+  it.each(["pdf", "pptx"])("dispatches %s with the caller credentials and returns a file card", async (format) => {
+    const path = `/Documents/deck.${format}`;
+    const mimeType = format === "pdf" ? "application/pdf" : "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+    const { ctx, post } = makeCtx({ ...OK, data: { ...OK.data, path, filename: `deck.${format}`, mimeType } });
+    const res = await createSlideDeck.handler({ path, title: "Review", slides }, ctx);
+    expect(post).toHaveBeenCalledWith("/render", { path, format, title: "Review", slides }, {
+      headers: { "X-Nextcloud-Token": "nc-token", "X-Nextcloud-User": "alice" },
+    });
+    expect(res.ok && res.data).toMatchObject({ path, mimeType, media: { kind: "file", path, mimeType } });
+  });
+
+  it("rejects empty decks, mismatched filenames and unauthenticated writes before dispatch", async () => {
+    const { ctx, post } = makeCtx(OK);
+    for (const args of [
+      { path: "/a.pdf", title: "Review", slides: [] },
+      { path: "/a.txt", title: "Review", slides },
+    ]) expect((await createSlideDeck.handler(args, ctx)).ok).toBe(false);
+    const unauthenticated = { ...ctx, ncToken: undefined };
+    expect(await createSlideDeck.handler({ path: "/a.pptx", title: "Review", slides }, unauthenticated))
+      .toMatchObject({ ok: false, error: { code: "AUTH_REQUIRED" } });
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it("returns no deliverable on a failed write", async () => {
+    const { ctx } = makeCtx({ ok: false, status: 409, data: { path: "/a.pptx" } });
+    expect(await createSlideDeck.handler({ path: "/a.pptx", title: "Review", slides }, ctx))
+      .toMatchObject({ ok: false, error: { code: "ALREADY_EXISTS" } });
   });
 });

@@ -1,6 +1,6 @@
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { SWRConfig } from "swr";
 
 const auth = vi.hoisted(() => ({ role: "owner", id: "owner-1", fetch: vi.fn() }));
@@ -28,6 +28,11 @@ const APP = { id: "app-1", slug: "daily", workspaceId: "workspace-1", name: "Dai
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json" } });
 const renderFresh = (element: React.ReactNode) => render(<SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>{element}</SWRConfig>);
 const triggerRef = { current: null };
+const deferred = <T,>() => {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+};
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 beforeEach(() => {
@@ -119,6 +124,23 @@ describe("Apps access and browser handoff", () => {
     expect(tab.location.replace).not.toHaveBeenCalled();
     expect(document.body.textContent).not.toContain("untrusted message");
   });
+  it.each(["account", "role", "unmount"])("drops a pending app handoff after %s changes", async (boundary) => {
+    const mint = deferred<Response>();
+    const tab = { opener: null, location: { replace: vi.fn() }, close: vi.fn() };
+    vi.spyOn(window, "open").mockReturnValue(tab as unknown as Window);
+    auth.fetch.mockReturnValue(mint.promise);
+    const view = render(<HostedAppOpen slug="daily" />);
+    fireEvent.click(screen.getByRole("button", { name: "Open daily in browser" }));
+    if (boundary === "unmount") view.unmount();
+    else {
+      if (boundary === "account") auth.id = "next-owner";
+      else auth.role = "family";
+      view.rerender(<HostedAppOpen slug="daily" />);
+    }
+    await act(async () => { mint.resolve(json({ url: "https://droplet.local:8443/daily/_droplet/session?code=old-owner" })); });
+    expect(tab.close).toHaveBeenCalled();
+    expect(tab.location.replace).not.toHaveBeenCalled();
+  });
 });
 
 describe("New app sources", () => {
@@ -170,6 +192,28 @@ describe("New app sources", () => {
 });
 
 describe("Assistant setup", () => {
+  it("does not restore an app's setup controls when its workspace read finishes after a switch", async () => {
+    const previous = deferred<Response>();
+    auth.fetch.mockImplementation(async (path: string) => {
+      if (path.startsWith("/api/hosted?workspaceId=")) return json({ apps: [], supervisionEnabled: true });
+      if (path.endsWith("/log?limit=30")) return json({ entries: [] });
+      if (path.endsWith("/diff")) return json({ diff: "", truncated: false });
+      if (path.endsWith("/output")) return json({ lastRun: null });
+      if (path === "/api/workspace/workspace-1") return previous.promise;
+      return json({ id: "other-workspace", name: "Other workspace", kind: "extension", template: null, app: null,
+        status: "active", userId: "owner-1", runs: [], git: { id: "other-workspace", branch: "work", head: "a".repeat(40), dirty: false, tags: [] } });
+    });
+    const Fixture = ({ id }: { id: string }) => <SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}><WorkspaceContext workspaceId={id} live={false} /></SWRConfig>;
+    const view = render(<Fixture id="workspace-1" />);
+    view.rerender(<Fixture id="other-workspace" />);
+    await screen.findByText("Other workspace");
+    await act(async () => { previous.resolve(json({ id: "workspace-1", name: "Previous app", kind: "app", template: null, app: null,
+      status: "active", userId: "owner-1", runs: [], git: { id: "workspace-1", branch: "work", head: "b".repeat(40), dirty: false, tags: [] } })); });
+    expect(screen.getByText("Other workspace")).toBeTruthy();
+    expect(screen.queryByText("Previous app")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Set up with the assistant" })).toBeNull();
+    expect(auth.fetch.mock.calls.some(([path]) => path === "/api/hosted?workspaceId=workspace-1")).toBe(false);
+  });
   it("reopens an imported app with no manifest or query intent and still offers setup", async () => {
     auth.fetch.mockImplementation(async (path: string) => {
       if (path.startsWith("/api/hosted?workspaceId=")) return json({ apps: [], supervisionEnabled: true });

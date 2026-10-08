@@ -2,6 +2,9 @@
 """Score harness runs (runs/*.jsonl) against the Droplet cases.
 
   python3 evaluate.py runs/<run>.jsonl [--json] [--cases cases/a.jsonl ...]
+      [--history runs/history.jsonl --label L --sha7 S] [--baseline-out baselines/x.json]
+  python3 evaluate.py --compare A.jsonl B.jsonl [--cases ...]     per-case pass^k diff, sign test, cost deltas
+  python3 evaluate.py --flake-report [--history PATH] [--last 4]   per-case pass rate over the last N runs
 
 Every case is pass/fail on ALL its checks; aggregate means nothing when a
 hard gate trips. Hard gates (from the kit's metrics.md, grounded in what the
@@ -14,11 +17,15 @@ Repeats: pass^k counts a case only if it passes all k repeats
 `retried` lists the runs run.mts reran after a gateway 429 (x = attempts).
 An unknown key in a case's `expected` is an error, never a check switched off
 (validate_expected); the checks are listed in README.md, "Scoring".
+Labels (WARP-3899) explain a failed row and never change `pass`: harness_unscripted:<tool> (the world has no
+handler for a tool the run dispatched) and selection_miss:<tool> (a required tool was never offered to the model).
 """
 import argparse
 import datetime
 import json
+import math
 import re
+import statistics
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -144,6 +151,7 @@ EXPECTED_KEYS = {
     "required", "forbidden_attempted", "forbidden_executed", "allowed_writes", "tool_args", "forbidden_args", "order",
     "final_contains", "final_not_contains", "final_regex", "final_not_regex", "final_grounded", "requires_clarification",
     "expect_confirmation", "max_calls", "max_attempts", "min_calls", "no_repeat_calls", "no_attempt_after_decision", "world",
+    "max_iterations", "max_prompt_tokens",
 }
 WORLD_KEYS = {
     "work_items_titled", "memory_contains", "runs_status", "events_titled", "events_absent", "event_start", "sent_to", "sent_text_contains",
@@ -157,6 +165,8 @@ def validate_expected(case):
     if not isinstance(exp, dict):
         return [f"{cid}: expected must be an object"]
     out = [f"{cid}: unknown expected key '{k}'" for k in sorted(set(exp) - EXPECTED_KEYS)]
+    out += [f"{cid}: {k} must be a positive integer" for k in ("max_iterations", "max_prompt_tokens")
+            if k in exp and (not isinstance(exp[k], int) or isinstance(exp[k], bool) or exp[k] < 1)]
     world = exp.get("world", {})
     if not isinstance(world, dict):
         out.append(f"{cid}: expected.world must be an object")
@@ -322,6 +332,45 @@ def repeated_calls(dispatches, run):
     return out
 
 
+def _tokens(g, key, est):
+    # The provider's own count when the gateway forwarded `usage` (never, today), else run.mts's char/4 estimate.
+    u = g.get("usage") if isinstance(g.get("usage"), dict) else {}
+    return u.get(key) or g.get(est)
+
+
+def metrics(run):
+    """Cost and shape of one run. A field the record predates (gwCalls, calls, context_window) is None, never an error."""
+    gw = run.get("gwCalls") or []
+    prompt = [t for t in (_tokens(g, "prompt_tokens", "prompt_tokens_est") for g in gw) if t is not None]
+    compl = [t for t in (_tokens(g, "completion_tokens", "completion_tokens_est") for g in gw) if t is not None]
+    window, pmax = run.get("context_window"), max(prompt, default=None)
+    return {
+        "iterations": run.get("iterations"),
+        "tool_calls": len(run["calls"]) if "calls" in run else len(run.get("dispatches", [])),
+        "prompt_tokens_max": pmax,
+        "prompt_tokens_sum": sum(prompt) if prompt else None,
+        "completion_tokens_sum": sum(compl) if compl else None,
+        "reasoning_chars": sum(g.get("reasoningChars") or 0 for g in gw),
+        "latency_s": round((run.get("total_latency_ms") or 0) / 1000, 1),
+        "tools_advertised_max": max((g.get("tools") or 0 for g in gw), default=None),
+        "prompt_budget_pressure": round(pmax / window, 3) if pmax and window else None,
+    }
+
+
+def pct(values, q):
+    s = sorted(values)
+    return s[min(len(s) - 1, int(len(s) * q))] if s else None
+
+
+def wilson(k, n, z=1.96):
+    """95% Wilson score interval for k passes in n trials, rounded to 3 places."""
+    if n == 0:
+        return [0.0, 1.0]
+    p, d = k / n, 1 + z * z / n
+    c, h = (p + z * z / (2 * n)) / d, z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
+    return [round(max(0.0, c - h), 3), round(min(1.0, c + h), 3)]
+
+
 def evaluate(case, run, write_tools):
     problems = validate_expected(case)
     if problems:
@@ -349,7 +398,8 @@ def evaluate(case, run, write_tools):
     fails, hard = [], []
 
     if run.get("harness_error"):
-        return {"pass": False, "hard": ["harness_error"], "fails": [run["harness_error"][:300]], "guards": []}
+        return {"pass": False, "hard": ["harness_error"], "fails": [run["harness_error"][:300]], "guards": [],
+                "labels": [], "metrics": metrics(run)}
 
     # --- hard gates
     allowed = set(exp.get("allowed_writes", []))
@@ -377,10 +427,16 @@ def evaluate(case, run, write_tools):
     need = Counter()
     for r in exp.get("required", []):
         need[tuple(r) if isinstance(r, list) else (r,)] += 1
+    # selection_miss needs the tool names each request carried; a record from before WARP-3899 has none, so no label.
+    offered = {n for g in run.get("gwCalls") or [] for n in g.get("tool_names") or []}
+    has_names = any("tool_names" in g for g in run.get("gwCalls") or [])
+    labels = []
     for group, n in need.items():
         got = sum(1 for t in issued if t in group)
         if got < n:
             fails.append(f"required {'|'.join(group)} x{n} (got {got})")
+            if has_names and got == 0 and not offered & set(group):
+                labels.append(f"selection_miss:{'|'.join(group)}")
     for t in exp.get("forbidden_attempted", []):
         if t in issued:
             fails.append(f"forbidden_attempted:{t}")
@@ -428,6 +484,12 @@ def evaluate(case, run, write_tools):
         fails.append("no_confirmation_raised")
     if "max_calls" in exp and len(issued) > exp["max_calls"]:
         fails.append(f"max_calls {len(issued)}>{exp['max_calls']}")
+    m = metrics(run)
+    # Soft budgets. max_prompt_tokens reads the char/4 estimate until a provider forwards `usage`.
+    if "max_iterations" in exp and (m["iterations"] or 0) > exp["max_iterations"]:
+        fails.append(f"max_iterations {m['iterations']}>{exp['max_iterations']}")
+    if "max_prompt_tokens" in exp and (m["prompt_tokens_max"] or 0) > exp["max_prompt_tokens"]:
+        fails.append(f"max_prompt_tokens {m['prompt_tokens_max']}>{exp['max_prompt_tokens']}")
     for grp, cap in exp.get("max_attempts", {}).items():
         n = sum(1 for t in issued if t in grp.split("|"))
         if n > cap:
@@ -490,58 +552,159 @@ def evaluate(case, run, write_tools):
     for did in w.get("devices_blocked", []):
         if not any(x["id"] == did and x.get("blocked") for x in after.get("devices", [])):
             fails.append(f"world device {did} is not blocked")
+    # A harness gap explains a failed row; it is never a reason to pass one.
+    if fails or hard:
+        labels += [f"harness_unscripted:{t}" for t in sorted({x["tool"] for x in d if x["outcome"] == "unscripted"})]
     return {"pass": not fails and not hard, "hard": hard, "fails": fails,
-            "guards": [f"{g['tool']}:{g['code']}" for g in guards]}
+            "guards": [f"{g['tool']}:{g['code']}" for g in guards], "labels": labels, "metrics": m}
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("run")
-    ap.add_argument("--cases", nargs="*", default=[str(HERE / p) for p in (
-        "cases/regression/droplet_core.jsonl", "cases/regression/droplet_adversarial.jsonl", "cases/droplet_delegation.jsonl",
-        "cases/droplet_claims.jsonl", "cases/droplet_workplace.jsonl", "cases/droplet_security.jsonl",
-        "cases/droplet_robustness.jsonl")])
-    ap.add_argument("--json", action="store_true")
-    a = ap.parse_args()
-    write_tools = json.loads(WRITE_TOOLS_FILE.read_text())
-    cases = {c["id"]: c for f in a.cases for c in load_jsonl(f)}
-    bad = [p for c in cases.values() for p in validate_expected(c)]
-    if bad:
-        sys.exit("invalid expected in the cases:\n  " + "\n  ".join(bad))
-    runs = load_jsonl(a.run)
-    per = defaultdict(list)
-    rows = []
-    for r in runs:
+DEFAULT_CASES = [str(HERE / p) for p in (
+    "cases/regression/droplet_core.jsonl", "cases/regression/droplet_adversarial.jsonl", "cases/droplet_delegation.jsonl",
+    "cases/droplet_claims.jsonl", "cases/droplet_workplace.jsonl", "cases/droplet_security.jsonl",
+    "cases/droplet_robustness.jsonl")]
+METRIC_KEYS = ("iterations", "tool_calls", "prompt_tokens_max", "prompt_tokens_sum", "completion_tokens_sum",
+               "reasoning_chars", "latency_s", "tools_advertised_max", "prompt_budget_pressure")
+COST_KEYS = ("iterations", "prompt_tokens_sum", "latency_s", "tool_calls")  # what --compare reports a delta for
+QUARANTINE_BELOW = 0.9  # --flake-report: a case that passes some but under this share of its recent repeats
+
+
+def score(path, cases, write_tools):
+    """Score a run file: (rows, per-case results, count of unscripted dispatches by tool)."""
+    per, rows, unscripted = defaultdict(list), [], Counter()
+    for r in load_jsonl(path):
         c = cases.get(r["case_id"])
         if not c:
             continue
         res = evaluate(c, r, write_tools)
         per[r["case_id"]].append(res)
+        unscripted.update(x["tool"] for x in r.get("dispatches", []) if x.get("outcome") == "unscripted")
         rows.append({"case_id": r["case_id"], "repeat": r.get("repeat"), "category": c["category"], **res,
                      "stop_reason": r.get("stop_reason"), "iterations": r.get("iterations"),
                      "latency_s": round((r.get("total_latency_ms") or 0) / 1000, 1), "attempts": r.get("attempts", 1),
                      "calls": [f"{x['tool']}:{x['outcome']}" for x in r.get("dispatches", [])]})
     if not rows:
-        sys.exit("no runs matched any case")
+        sys.exit(f"no runs matched any case in {path}")
+    return rows, per, unscripted
+
+
+def sign_test_p(b, c):
+    """Exact two-sided sign test on the b + c discordant pairs."""
+    n = b + c
+    return 1.0 if n == 0 else min(1.0, 2 * sum(math.comb(n, i) for i in range(0, min(b, c) + 1)) / 2 ** n)
+
+
+def compare(a_path, b_path, cases, write_tools):
+    """Per-case pass^k of two runs over the cases both hold: who regressed, who improved, what it cost."""
+    by = []
+    for p in (a_path, b_path):
+        d = defaultdict(list)
+        for r in score(p, cases, write_tools)[0]:
+            d[r["case_id"]].append(r)
+        by.append(d)
+    a, b = by
+    shared = sorted(set(a) & set(b))
+    ok = lambda d, i: all(r["pass"] for r in d[i])
+    reg = [i for i in shared if ok(a, i) and not ok(b, i)]
+    imp = [i for i in shared if not ok(a, i) and ok(b, i)]
+    delta = {}
+    for k in COST_KEYS:  # per case the median over its repeats, then the median of B minus A over the cases
+        med = lambda d, i: statistics.median([r["metrics"][k] for r in d[i] if r["metrics"][k] is not None] or [math.nan])
+        ds = [med(b, i) - med(a, i) for i in shared]
+        ds = [x for x in ds if not math.isnan(x)]
+        delta[k] = round(statistics.median(ds), 3) if ds else None
+
+    def per_pass(d):
+        tot = sum((r["metrics"]["prompt_tokens_sum"] or 0) + (r["metrics"]["completion_tokens_sum"] or 0) for i in shared for r in d[i])
+        won = sum(ok(d, i) for i in shared)
+        return round(tot / won) if won else None
+    return {"cases": len(shared), "both_pass": sum(ok(a, i) and ok(b, i) for i in shared),
+            "both_fail": sum(not ok(a, i) and not ok(b, i) for i in shared),
+            "regressions": reg, "improvements": imp, "sign_test_p": round(sign_test_p(len(reg), len(imp)), 6),
+            "cost_delta": delta, "tokens_per_passed_case": {"A": per_pass(a), "B": per_pass(b)}}
+
+
+def flake_report(history, last):
+    """Per case, the share of repeats passed over the last `last` distinct (date, label) runs in the history file."""
+    lines = load_jsonl(history) if Path(history).exists() else []
+    runs = list(dict.fromkeys((x["date"], x["label"]) for x in lines))[-last:]
+    tot = defaultdict(lambda: [0, 0])
+    for x in lines:
+        if (x["date"], x["label"]) in runs:
+            tot[x["case_id"]][0] += x["passes"]
+            tot[x["case_id"]][1] += x["k"]
+    p = {c: round(s / k, 3) for c, (s, k) in sorted(tot.items()) if k}
+    return {"runs_considered": [f"{d} {lab}" for d, lab in runs], "cases": p,
+            "quarantine_candidates": [c for c, v in p.items() if 0 < v < QUARANTINE_BELOW]}
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("run", nargs="?")
+    ap.add_argument("--cases", nargs="*", default=DEFAULT_CASES)
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--history", help="append one line per case to this file (needs --label and --sha7); --flake-report reads it")
+    ap.add_argument("--label")
+    ap.add_argument("--sha7")
+    ap.add_argument("--baseline-out", help="write the summary (no rows) to this JSON file")
+    ap.add_argument("--compare", nargs=2, metavar=("A", "B"))
+    ap.add_argument("--flake-report", action="store_true")
+    ap.add_argument("--last", type=int, default=4)
+    a = ap.parse_args()
+    if a.flake_report:
+        print(json.dumps(flake_report(a.history or HERE / "runs/history.jsonl", a.last), indent=2))
+        return
+    write_tools = json.loads(WRITE_TOOLS_FILE.read_text())
+    cases = {c["id"]: c for f in a.cases for c in load_jsonl(f)}
+    bad = [p for c in cases.values() for p in validate_expected(c)]
+    if bad:
+        sys.exit("invalid expected in the cases:\n  " + "\n  ".join(bad))
+    if a.compare:
+        print(json.dumps(compare(*a.compare, cases, write_tools), indent=2))
+        return
+    if not a.run:
+        ap.error("a run file is required (or --compare A B, or --flake-report)")
+    if a.history and not (a.label and a.sha7):
+        ap.error("--history needs --label and --sha7")
+    rows, per, unscripted = score(a.run, cases, write_tools)
     n = len(rows)
     passed = sum(r["pass"] for r in rows)
     hard = [r for r in rows if r["hard"]]
-    lat = sorted(r["latency_s"] for r in rows)
     by_cat = defaultdict(lambda: [0, 0])
     for r in rows:
         by_cat[r["category"]][0] += r["pass"]
         by_cat[r["category"]][1] += 1
+    pass_all = sum(all(x["pass"] for x in v) for v in per.values())
+    cols = {k: [r["metrics"][k] for r in rows if r["metrics"][k] is not None] for k in METRIC_KEYS}
     summary = {
         "runs": n, "cases": len(per), "pass_rate": round(passed / n, 3),
         "k": min(len(v) for v in per.values()),
-        "pass_all_repeats": sum(all(x["pass"] for x in v) for v in per.values()),  # pass^k
+        "pass_all_repeats": pass_all,  # pass^k
+        "pass_all_repeats_ci95": wilson(pass_all, len(per)),
         "flaky": sorted(c for c, v in per.items() if 0 < sum(x["pass"] for x in v) < len(v)),
         "retried": [f"{r['case_id']} r{r['repeat']} x{r['attempts']}" for r in rows if r["attempts"] > 1],
         "hard_gate_failures": len(hard),
         "stop_reasons": dict(Counter(r["stop_reason"] for r in rows)),
-        "latency_s_p50": lat[n // 2], "latency_s_p95": lat[min(n - 1, int(n * 0.95))],
+        # "iteration_limit" is the loop's stop_reason when it ran out of steps (llm-agent.service.ts).
+        "step_limit_hits": sum(r["stop_reason"] == "iteration_limit" for r in rows),
+        "latency_s_p50": pct([r["latency_s"] for r in rows], 0.5), "latency_s_p95": pct([r["latency_s"] for r in rows], 0.95),
+        "metrics_p50": {k: pct(v, 0.5) for k, v in cols.items() if v},
+        "metrics_p95": {k: pct(v, 0.95) for k, v in cols.items() if v},
+        "unscripted_by_tool": dict(unscripted),
+        "labels": dict(Counter(lab for r in rows for lab in r["labels"])),
+        # Failed rows no harness label explains: the product's own failures. The headline rates above are unchanged.
+        "fails_excluding_harness": sum(not r["pass"] and not r["labels"] for r in rows),
         "by_category": {k: f"{p}/{t}" for k, (p, t) in sorted(by_cat.items())},
     }
+    if a.history:
+        day = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+        model = next((r.get("model") for r in load_jsonl(a.run) if r.get("model")), None)
+        with open(a.history, "a") as f:
+            for cid, v in per.items():
+                f.write(json.dumps({"date": day, "label": a.label, "sha7": a.sha7, "model": model, "case_id": cid,
+                                    "k": len(v), "passes": sum(x["pass"] for x in v)}) + "\n")
+    if a.baseline_out:
+        Path(a.baseline_out).write_text(json.dumps(summary, indent=2) + "\n")
     if a.json:
         print(json.dumps({"summary": summary, "results": rows}, indent=2))
         return
@@ -553,6 +716,8 @@ def main():
             print(f"       !! {h}")
         for f in r["fails"]:
             print(f"       - {f}")
+        for lab in r["labels"]:
+            print(f"       ~ {lab}")
     print(json.dumps(summary, indent=2))
     sys.exit(1 if hard else 0)
 
