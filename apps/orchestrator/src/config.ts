@@ -1375,8 +1375,8 @@ const envSchema = z.object({
   // exceeds the shipping context window, so an unopted-in remote catalog
   // would degrade every turn (per-turn selection, WARP-2348, is what gates
   // that). It is also NOT the owner's kill switch — that is the `remote_mcp`
-  // OffLanChannelKey in ADR-043 §4, which is a schema change and a separate
-  // ticket. This variable says which servers MAY exist; the channel says
+  // OffLanChannelKey (ADR-043 §4, WARP-3912), read by `remoteMcpGate` on every
+  // remote call. This variable says which servers MAY exist; the channel says
   // whether any session may run.
   REMOTE_MCP_SERVER_ALLOWLIST: z.string().default(""),
 

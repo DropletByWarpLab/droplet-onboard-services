@@ -29,7 +29,7 @@ const fetchSpy = vi.fn(async () => {
   throw new Error("nothing may dial on the shipping default");
 });
 const findFirst = vi.fn(async () => null);
-const prisma = { integrationConnection: { findFirst } };
+const prisma = { offLanAllowlistChannel: { findUnique: async () => ({ enabled: true }) }, integrationConnection: { findFirst } };
 
 beforeEach(() => {
   vi.clearAllMocks();

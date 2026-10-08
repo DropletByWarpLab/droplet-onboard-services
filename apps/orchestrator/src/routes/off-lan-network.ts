@@ -37,6 +37,8 @@ const OFF_LAN_CHANNEL_KEYS = [
   "place_lookup",
   // WARP-3532 — work webhooks and chat-app notifications (ADR-069 §9).
   "work_integrations",
+  // WARP-3912 — outbound MCP master switch (ADR-043 §4).
+  "remote_mcp",
 ] as const;
 type ChannelKey = (typeof OFF_LAN_CHANNEL_KEYS)[number];
 const channelKeyEnum = z.enum(OFF_LAN_CHANNEL_KEYS);
@@ -135,6 +137,7 @@ export function createOffLanNetworkRouter(prisma: PrismaClient): Router {
           web_push: 0n,
           place_lookup: 0n,
           work_integrations: 0n,
+          remote_mcp: 0n,
         };
         let sampleCount = 0;
         for (const g of groups) {
