@@ -185,6 +185,7 @@ import { TOOL_CATALOG, TOOLS } from "@droplet/tools-core";
 import type { Role } from "./jwt.service.js";
 import { resolveEffectiveAccess } from "./effective-access.service.js";
 import { NO_RUNTIME_TOOLS, type RuntimeToolLookup } from "./tool-layers.service.js";
+import { runtimeToolRegistry } from "./runtime-tool-registry.service.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("tool-access");
@@ -352,6 +353,12 @@ export function toolAllowedForTier(
   isVoice = false,
 ): boolean {
   if (isPrivilegedRole(tier)) return true;
+  // WARP-3916 (ADR-072 section 3) — guests are external: no remote MCP tool, read or
+  // write, whatever their AccessRole grants. Keyed off the runtime registry (the
+  // marker every remote server's tools carry), never a server name, so owner-added
+  // servers are covered. This is axis A, so every caller of the shared predicate
+  // (chat catalog, agent loop pool, durable runs, ToolSpec, extensions) inherits it.
+  if (tier === "guest" && runtimeToolRegistry.list().some((t) => t.name === name)) return false;
   // Connection handlers and their browser routes serve members and admins;
   // even their read-only setup descriptors are not offered to external guests.
   if (CATALOG_BY_NAME.get(name)?.domain === "connections" && tier !== "family") return false;
