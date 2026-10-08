@@ -1813,9 +1813,11 @@ export interface DriveInfo {
   bus?: string;
   fs?: string;
   readonly?: boolean;
-  /** WARP-612: SMART health ("PASSED"/"FAILED") + temperature °C. Present only
-   *  when the bridge has DRIVE_SMART_ENABLED and smartctl can read the device;
-   *  the UI hides the chips when absent. */
+  /** Explicit collection status. Absent on older bridge/orchestrator versions;
+   *  missing readings then mean unknown, not disabled or healthy. */
+  smart_status?: DriveSmartStatus;
+  /** SMART health ("PASSED"/"FAILED") + temperature °C, usable only with an
+   *  available read. Older versions may report readings without status. */
   smart?: string | null;
   temp_c?: number | null;
   /** WARP-612: hot-plug auto-mounted (ejectable) vs installed storage —
@@ -1843,8 +1845,8 @@ export interface DriveInfo {
    *  `encryption`). `needs_preparing` = a data drive without LUKS2. */
   preparation?: DrivePreparation;
   /** WARP-3513 / WARP-3514: what the drive is used for. `role: "recordings"`
-   *  is the active camera-recordings drive; `reservedBytes` is the slice set
-   *  aside for it. */
+   *  is a persisted camera-recordings assignment, including setup/migration
+   *  targets; `reservedBytes` is the planned allocation. */
   usage?: DriveUsage | null;
   /** WARP-3513: true when this is the install disk. Defence in depth — it never
    *  appears in the data-drive list today, but a card that is handed one must
@@ -1854,6 +1856,8 @@ export interface DriveInfo {
 
 /** WARP-3513 / ADR-070: at-rest encryption of a drive. */
 export type DriveEncryption = "luks2" | "none" | "unknown";
+
+export type DriveSmartStatus = "disabled" | "available" | "unsupported" | "unavailable" | "unknown";
 
 /** WARP-3513: `needs_preparing` = a data drive without LUKS2 (never used for
  *  allocation, never auto-wiped); `prepared` = encrypted and ready. */

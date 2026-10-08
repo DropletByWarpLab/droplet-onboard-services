@@ -48,6 +48,7 @@ import type {
   DataStorageTotals,
   DiskInfo,
   DriveInfo,
+  DriveSmartStatus,
   PoolInfo,
   SystemDiskInfo,
 } from "@/lib/types";
@@ -198,6 +199,46 @@ function HwTag({ children, upper = true }: { children: ReactNode; upper?: boolea
   );
 }
 
+function driveSmartStatus(d: DriveInfo): DriveSmartStatus {
+  switch (d.smart_status) {
+    case "disabled":
+    case "available":
+    case "unsupported":
+    case "unavailable":
+      return d.smart_status;
+    default:
+      if (d.smart_status === undefined && (
+        d.smart === "PASSED" || d.smart === "FAILED" ||
+        (typeof d.temp_c === "number" && Number.isFinite(d.temp_c))
+      )) return "available";
+      return "unknown";
+  }
+}
+
+function SmartHealth({ drive }: { drive: DriveInfo }) {
+  const status = driveSmartStatus(drive);
+  if (status !== "available") {
+    const labels = {
+      disabled: "SMART monitoring off",
+      unsupported: "SMART not supported",
+      unavailable: "SMART data unavailable",
+      unknown: "SMART status unknown",
+    };
+    return <Badge kind="muted">{labels[status]}</Badge>;
+  }
+  const verdict = drive.smart === "PASSED" || drive.smart === "FAILED" ? drive.smart : null;
+  return (
+    <>
+      {typeof drive.temp_c === "number" && Number.isFinite(drive.temp_c) && (
+        <HwTag upper={false}>{drive.temp_c}°C</HwTag>
+      )}
+      <Badge kind={verdict === "PASSED" ? "ok" : verdict === "FAILED" ? "danger" : "muted"}>
+        {verdict ? `SMART ${verdict}` : "SMART health unknown"}
+      </Badge>
+    </>
+  );
+}
+
 // Icon tile for the leading square on drive / disk rows — the design's
 // `.lrow .ri` treatment (neutral inner surface, muted glyph).
 function IconTile({ children }: { children: ReactNode }) {
@@ -260,7 +301,7 @@ function friendlyPrepareError(err: unknown): string {
     return "That's the Droplet's system disk — it can't be erased or prepared.";
   }
   if (/recording/.test(raw)) {
-    return "This drive is storing your camera recordings, so it can't be erased. Choose another recording drive first.";
+    return "This drive is assigned to camera recordings, so it can't be erased. Choose another recording drive first.";
   }
   if (/busy|in use|mounted|unmount|close open files|open file/.test(raw)) {
     return "That drive is in use right now — close anything using it, then try again.";
@@ -291,15 +332,14 @@ function EncryptionBadge({ state }: { state: DriveEncryptionState }) {
   return null;
 }
 
-/** "Used for: Camera recordings · 120 GB reserved" — on the active recordings
- *  drive only. */
+/** Persisted recordings purpose, including targets awaiting setup/migration. */
 function UsageBadge({ drive }: { drive: Pick<DriveInfo, "usage"> }) {
   if (!isRecordingsDrive(drive)) return null;
   const reserved = recordingsReservedBytes(drive);
   return (
     <Badge kind="info">
-      Used for: Camera recordings
-      {reserved ? ` · ${formatBytes(reserved)} reserved` : ""}
+      Assigned to: Camera recordings
+      {reserved ? ` · ${formatBytes(reserved)} allocated` : ""}
     </Badge>
   );
 }
@@ -309,7 +349,7 @@ function UsageBadge({ drive }: { drive: Pick<DriveInfo, "usage"> }) {
 function RecordingsLock({ id, canChange }: { id: string; canChange: boolean }) {
   return (
     <p id={id} className="mt-2" style={{ fontSize: "12px", color: "var(--text-muted)" }}>
-      Camera recordings are stored on this drive, so it can&rsquo;t be ejected or
+      This drive is assigned to camera recordings, so it can&rsquo;t be ejected or
       erased.
       {/* The Recording storage card is owner/admin only (a family account gets a
           403 and no card), so a link to it would be a dead end for anyone else. */}
@@ -1640,8 +1680,8 @@ function DriveCard({
               href={driveContentsHref(d)}
               className="min-w-0 inline-flex items-center gap-1 group focus-visible:outline-none focus-visible:ring-2"
               style={{ borderRadius: "var(--radius-input)" }}
-              aria-label={`Open ${name}`}
             >
+              <span className="sr-only">Open </span>
               {/* WARP-1338: stretched link — this overlay spans the whole
                   (relative) card, widening the click target without adding
                   a second tab stop or nesting controls inside the anchor.
@@ -1656,6 +1696,7 @@ function DriveCard({
                 {name}
               </h3>
               <FolderOpen
+                aria-hidden="true"
                 className="flex-none h-3.5 w-3.5 transition-colors duration-150 group-hover:text-[color:var(--brand)]"
                 style={{ color: "var(--text-muted)" }}
               />
@@ -1756,17 +1797,10 @@ function DriveCard({
       {/* Hardware facts — friendly only. The raw /dev/sdX path is deliberately
           never surfaced (home-user persona, ADR-002); the bus label above is
           the only hardware identifier we show. */}
-      {(d.fs || typeof d.temp_c === "number" || d.smart) && (
-        <div className="mt-3 flex items-center gap-2 flex-wrap">
-          {d.fs && <HwTag>{d.fs}</HwTag>}
-          {typeof d.temp_c === "number" && <HwTag upper={false}>{d.temp_c}°C</HwTag>}
-          {d.smart && (
-            <Badge kind={d.smart === "PASSED" ? "ok" : "danger"}>
-              SMART {d.smart}
-            </Badge>
-          )}
-        </div>
-      )}
+      <div className="mt-3 flex items-center gap-2 flex-wrap">
+        {d.fs && <HwTag>{d.fs}</HwTag>}
+        <SmartHealth drive={d} />
+      </div>
 
       {notes && (
         <p className="mt-2 whitespace-pre-wrap break-words" style={{ fontSize: "12px", color: "var(--text-muted)" }}>
@@ -2077,8 +2111,8 @@ function PoolCard({
                   href={driveContentsHref(backingDrive)}
                   className="min-w-0 inline-flex items-center gap-1 group focus-visible:outline-none focus-visible:ring-2"
                   style={{ borderRadius: "var(--radius-input)" }}
-                  aria-label={`Open ${name}`}
                 >
+                  <span className="sr-only">Open </span>
                   <h4
                     className="truncate transition-colors duration-150 group-hover:text-[color:var(--brand)]"
                     style={{ fontSize: "14px", fontWeight: 600, color: "var(--text)" }}
@@ -2087,6 +2121,7 @@ function PoolCard({
                     {name}
                   </h4>
                   <FolderOpen
+                    aria-hidden="true"
                     className="flex-none h-3.5 w-3.5 transition-colors duration-150 group-hover:text-[color:var(--brand)]"
                     style={{ color: "var(--text-muted)" }}
                   />
@@ -2154,6 +2189,7 @@ function PoolCard({
             orchestrator reported for the mounted filesystem. */}
         {backingDrive && <EncryptionBadge state={driveEncryptionState(backingDrive)} />}
         {backingDrive && <UsageBadge drive={backingDrive} />}
+        {backingDrive && <SmartHealth drive={backingDrive} />}
       </div>
 
       {pool.notes && (

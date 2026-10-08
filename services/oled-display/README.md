@@ -333,3 +333,26 @@ This installs the three systemd units, seeds
 `scripts/factory-reset.sh` wipes the bridge's state directory and env
 file as part of a factory reset; `install-device-bridge.sh` (called
 again via `setup.sh --reinstall`) re-provisions them cleanly.
+
+### Optional drive health monitoring
+
+The host bridge leaves SMART monitoring off by default. To opt in, set
+`DRIVE_SMART_ENABLED=true` in `/etc/droplet/device-bridge.env` and restart
+`droplet-device-bridge.service`. Probing can wake sleeping disks; results are
+cached for five minutes per physical disk. `smartctl` must be installed, and
+the bridge's existing unprivileged account must already have permission to
+read the device. Enabling this flag grants no permissions and changes no
+hardware SMART settings.
+
+Each mounted drive in `GET /drives` carries `smart_status`: `disabled` when
+monitoring is off, `available` with an explicit `PASSED` or `FAILED` health
+result or a valid temperature measurement from a successful read, `unsupported`
+only when the device affirmatively reports that it lacks SMART capability,
+and `unavailable` when a read cannot establish either fact. A temperature-only
+read preserves the measurement and leaves health unknown. Missing tools,
+permission failures, timeouts and results with no valid facts
+are unavailable. Partition and encrypted mounts are resolved through the
+existing block-device inventory; RAID and ambiguous multiple-disk mounts
+remain unavailable rather than showing one member's health as the pool's.
+The existing `smart` and `temp_c` fields remain present, with null values
+whenever monitoring is not available.

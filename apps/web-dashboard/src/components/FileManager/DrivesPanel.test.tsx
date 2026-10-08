@@ -121,6 +121,50 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
+describe("DrivesPanel — explicit SMART status", () => {
+  it.each([
+    ["disabled", "SMART monitoring off"],
+    ["unsupported", "SMART not supported"],
+    ["unavailable", "SMART data unavailable"],
+    ["unknown", "SMART status unknown"],
+  ] as const)("shows %s and suppresses stale health readings", (smart_status, label) => {
+    setup({ drives: [makeDrive({ smart_status, smart: "FAILED", temp_c: 55 })] });
+    expect(screen.getByText(label)).toBeInTheDocument();
+    expect(screen.queryByText("SMART FAILED")).not.toBeInTheDocument();
+    expect(screen.queryByText("55°C")).not.toBeInTheDocument();
+  });
+
+  it("shows available health and temperature", () => {
+    setup({ drives: [makeDrive({ smart_status: "available", smart: "FAILED", temp_c: 55 })] });
+    expect(screen.getByText("SMART FAILED")).toBeInTheDocument();
+    expect(screen.getByText("55°C")).toBeInTheDocument();
+  });
+
+  it("does not claim an available temperature-only reading passed", () => {
+    setup({ drives: [makeDrive({ smart_status: "available", smart: null, temp_c: 42 })] });
+    expect(screen.getByText("SMART health unknown")).toBeInTheDocument();
+    expect(screen.getByText("42°C")).toBeInTheDocument();
+    expect(screen.queryByText("SMART PASSED")).not.toBeInTheDocument();
+  });
+
+  it("keeps an older bridge with no readings unknown", () => {
+    setup();
+    expect(screen.getByText("SMART status unknown")).toBeInTheDocument();
+  });
+
+  it("preserves legacy temperature-only data with an unknown health verdict", () => {
+    setup({ drives: [makeDrive({ temp_c: 42 })] });
+    expect(screen.getByText("SMART health unknown")).toBeInTheDocument();
+    expect(screen.getByText("42°C")).toBeInTheDocument();
+  });
+
+  it("retains affirmative legacy health readings when status is absent", () => {
+    setup({ drives: [makeDrive({ smart: "PASSED", temp_c: 42 })] });
+    expect(screen.getByText("SMART PASSED")).toBeInTheDocument();
+    expect(screen.getByText("42°C")).toBeInTheDocument();
+  });
+});
+
 describe("DrivesPanel — no raw device path (WARP-827 AC3/AC6)", () => {
   it("never renders the raw /dev/sdX path", () => {
     setup();
@@ -211,6 +255,28 @@ describe("DrivesPanel — drive contents deep-link (WARP-827 AC5)", () => {
 });
 
 describe("DrivesPanel — inline rename (WARP-827 AC2)", () => {
+  it("keeps markup-looking metadata literal and derives navigation only from the mount", async () => {
+    const displayName = "<img src=x onerror=window.pwned=1>";
+    const icon = "<script>window.pwned=2</script>";
+    const notes = "<img src=y onerror=window.pwned=3>";
+    (updateDriveLabel as ReturnType<typeof vi.fn>).mockResolvedValue({
+      uuid: "U-DATA-1", displayName, icon, notes,
+    });
+    setup({ drives: [makeDrive({ icon })] });
+    fireEvent.click(screen.getByRole("button", { name: /edit drive/i }));
+    expect(screen.getByLabelText("Drive icon")).toHaveValue(icon);
+    fireEvent.change(screen.getByLabelText("Drive name"), { target: { value: displayName } });
+    fireEvent.change(screen.getByLabelText("Drive notes"), { target: { value: notes } });
+    fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
+    await waitFor(() => expect(screen.getByText(notes)).toBeInTheDocument());
+    expect(screen.getByRole("heading", { name: /<img src=x onerror=window\.pwned=1>/i })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /open.*<img src=x onerror=window\.pwned=1>/i })).toHaveAttribute(
+      "href", "/files?path=%2Fphotos-ab12cd34",
+    );
+    expect(document.querySelector("img, script")).toBeNull();
+    expect(document.querySelector("[onerror], [onload]")).toBeNull();
+  });
+
   it("shows no edit affordance for a non-admin (family) user", () => {
     setup({ role: "family" });
     expect(screen.queryByRole("button", { name: /edit drive/i })).not.toBeInTheDocument();
@@ -988,11 +1054,8 @@ describe("DrivesPanel — format & mount an unformatted pool (WARP-936)", () => 
   });
 });
 
-// CodeQL js/xss-through-dom (DrivesPanel `aria-label={`Open ${name}`}`): the
-// rename draft is DOM text (the input's value) and reaches the card's
-// aria-label, title and heading. React sets attributes via setAttribute and
-// escapes text children, so HTML metacharacters in a name are inert — no
-// markup is ever parsed. Pinned here so the false-positive stays provable.
+// Edited metadata stays literal in headings/attributes and never controls
+// the contents URL. HTML metacharacters must not create DOM elements.
 describe("DrivesPanel — a renamed drive's name is never reinterpreted as HTML", () => {
   it("renders metacharacters verbatim in text and attributes and injects no element", async () => {
     (updateDriveLabel as ReturnType<typeof vi.fn>).mockResolvedValue({
@@ -1017,7 +1080,7 @@ describe("DrivesPanel — a renamed drive's name is never reinterpreted as HTML"
     expect(heading).toHaveAttribute("title", payload);
     expect(document.querySelector("img")).toBeNull();
     const link = screen.getByRole("link", { name: `Open ${payload}` });
-    expect(link.getAttribute("aria-label")).toBe(`Open ${payload}`);
+    expect(link).toHaveAccessibleName(`Open ${payload}`);
     // The deep-link target is built from the mount, never from the name.
     expect(link).toHaveAttribute(
       "href",

@@ -23,6 +23,7 @@ import { getRecordingsAllocator } from "../services/recordings-allocator.singlet
 import { guardRecordingsDrive, recordingsGuardRefusal } from "../services/recordings-drive-guard.service.js";
 import { RecordingsError, type SetAllocationRequest } from "../services/recordings.types.js";
 import { logStorageCommandAudit } from "../services/storage-safety.service.js";
+import { recordingsUsageByFsUuid } from "../services/recordings-capacity.js";
 
 // Rescan / eject are owner+admin device-control actions. Family users can
 // still see drives via the existing GET routes; they just can't poke the
@@ -77,11 +78,14 @@ interface BridgeDrive {
   fs?: string;
   bus?: string;
   readonly?: boolean;
-  /** WARP-612: SMART health ("PASSED"/"FAILED") + temperature °C. Present
-   *  only when the bridge has DRIVE_SMART_ENABLED and smartctl can read the
-   *  device; null/absent otherwise. The dashboard hides the chips when null. */
+  /** WARP-612: SMART health ("PASSED"/"FAILED") + temperature °C when the
+   *  collector can read the device. Either measurement may be null; clients
+   *  use smart_status to distinguish disabled, unsupported and unavailable. */
   smart?: string | null;
   temp_c?: number | null;
+  /** Explicit collector availability; an older bridge omits it. Never forward
+   *  this untrusted field without normaliseDriveSmartStatus. */
+  smart_status?: unknown;
   /** WARP-612: hot-plug auto-mounted (ejectable) vs installed/fstab — the
    *  bus-agnostic ejectability signal (ADR-011). The UI shows Eject on this,
    *  not on bus. */
@@ -120,6 +124,18 @@ export function normaliseDriveEncryption(raw: unknown): DriveEncryption {
   return DRIVE_ENCRYPTION_STATES.find((state) => state === raw) ?? "unknown";
 }
 
+export const DRIVE_SMART_STATUSES = ["disabled", "available", "unsupported", "unavailable", "unknown"] as const;
+export type DriveSmartStatus = (typeof DRIVE_SMART_STATUSES)[number];
+
+/** A legacy verdict or finite numeric temperature proves a collector read,
+ *  without claiming a missing verdict is healthy. Explicit status wins over
+ *  old/stale measurements. */
+export function normaliseDriveSmartStatus(raw: unknown, smart?: unknown, temperature?: unknown): DriveSmartStatus {
+  if (raw === undefined && (smart === "PASSED" || smart === "FAILED" ||
+    (typeof temperature === "number" && Number.isFinite(temperature)))) return "available";
+  return DRIVE_SMART_STATUSES.find((status) => status === raw) ?? "unknown";
+}
+
 /**
  * Is the drive usable as Droplet storage as it stands? An explicit enum
  * computed from the NORMALISED encryption — never from null/absence of another
@@ -150,8 +166,8 @@ export interface DriveUsage {
   reservedBytes: number | null;
 }
 
-/** Every drive is unassigned until WARP-3514 allocates it. Explicit nulls, so
- *  clients branch on the field and never on its absence. */
+/** No persisted allocation for this filesystem. Explicit nulls, so clients
+ *  branch on the field and never on its absence. */
 export function unassignedDriveUsage(): DriveUsage {
   return { role: null, reservedBytes: null };
 }
@@ -695,10 +711,11 @@ async function fetchBridgeDrives(): Promise<BridgeDrivesSnapshot> {
  * wizard's Storage step (or in /storage later); `null` when no Drive
  * row exists yet for this UUID.
  */
-interface DriveWithLabel extends Omit<BridgeDrive, "encryption" | "md"> {
+interface DriveWithLabel extends Omit<BridgeDrive, "encryption" | "md" | "smart_status"> {
   displayName: string | null;
   icon: string | null;
   notes: string | null;
+  smart_status: DriveSmartStatus;
   /** WARP-1339: bare md array name (e.g. "md127" — the exact join key the
    *  /storage/pools payload's `device` field carries, WITHOUT the /dev/
    *  prefix this drive's own `device` has) when this mounted filesystem
@@ -718,8 +735,8 @@ interface DriveWithLabel extends Omit<BridgeDrive, "encryption" | "md"> {
   encryption: DriveEncryption;
   /** WARP-3513: explicit enum from `encryption` (see drivePreparationFor). */
   preparation: DrivePreparation;
-  /** WARP-3513: what the drive is used for. Unassigned (nulls) until
-   *  WARP-3514 allocates recordings. */
+  /** Persisted purpose and reservation; lifecycle is reported separately by
+   *  the recordings API, so a pending/missing assignment retains its role. */
   usage: DriveUsage;
   /** WARP-3513: true when the bridge says this partition lives on the OS disk.
    *  Such drives are filtered out of this list, so today it is always false
@@ -988,8 +1005,8 @@ export function createStorageRouter(prisma: PrismaClient): Router {
    *                   `encryption`: only luks2 is prepared, so a plain drive
    *                   AND a drive whose state is in doubt both need preparing
    *                   (never offered for allocation, never auto-wiped);
-   *   - `usage`       `{ role, reservedBytes }`, all null until WARP-3514
-   *                   allocates recordings;
+   *   - `usage`       `{ role, reservedBytes }`, joined by filesystem UUID
+   *                   from persisted recording assignments;
    *   - `isSystemDisk` boolean;
    * and `pool` falls back to the bridge's `md` so a LUKS-over-md pool still
    * joins the pool card. Each `disks[]` entry's `encryption` is normalised the
@@ -1024,6 +1041,22 @@ export function createStorageRouter(prisma: PrismaClient): Router {
       // Drive-table join so we never query labels for junk.
       const dataDrives = userDataDrivesOf(snap);
 
+      // Role means an assigned purpose, including a pending move or a drive
+      // that has just returned while its allocation still says MISSING. Never
+      // describe an allocated drive as unassigned, or fabricate absent drives.
+      let recordingUsage: Awaited<ReturnType<typeof recordingsUsageByFsUuid>>;
+      try {
+        recordingUsage = dataDrives.length ? await recordingsUsageByFsUuid(prisma) : new Map();
+      } catch (err) {
+        logger.warn({ err }, "Failed to read recording storage assignments");
+        // A failed lookup does not prove a drive has no allocation. Refuse an
+        // actionable inventory instead of attaching false all-null roles.
+        res.status(503).json({ drives: [], count: 0, totals: null,
+          reason: "recordings_usage_unavailable",
+          error: "Recording storage assignments are unavailable right now." });
+        return;
+      }
+
       // Single batched lookup — Drive table is tiny (one row per
       // physical drive the customer has named), so an unfiltered
       // findMany is fine. The Map keeps the join O(n) total.
@@ -1038,8 +1071,10 @@ export function createStorageRouter(prisma: PrismaClient): Router {
         // WARP-3513: `encryption` and `md` are untrusted bridge input. Neither
         // is forwarded raw: `encryption` is replaced by its validated enum
         // below, and `md` reaches the client only as the validated `pool`.
-        const { encryption: bridgeEncryption, md: bridgeMd, ...bridgeDrive } = d;
+        const { encryption: bridgeEncryption, md: bridgeMd, smart_status: bridgeSmartStatus,
+          smart: bridgeSmart, temp_c: bridgeTemperature, ...bridgeDrive } = d;
         const encryption = normaliseDriveEncryption(bridgeEncryption);
+        const smartStatus = normaliseDriveSmartStatus(bridgeSmartStatus, bridgeSmart, bridgeTemperature);
         return {
           ...bridgeDrive,
           // Guarantee a bus class for the dashboard even if the bridge is
@@ -1048,6 +1083,11 @@ export function createStorageRouter(prisma: PrismaClient): Router {
           displayName: label?.displayName ?? null,
           icon: label?.icon ?? null,
           notes: label?.notes ?? null,
+          smart_status: smartStatus,
+          smart: smartStatus === "available" && (bridgeSmart === "PASSED" || bridgeSmart === "FAILED")
+            ? bridgeSmart : null,
+          temp_c: smartStatus === "available" && typeof bridgeTemperature === "number" && Number.isFinite(bridgeTemperature)
+            ? bridgeTemperature : null,
           // WARP-1339: annotate (never drop) the mounted md filesystem with
           // its bare array name so the dashboard can merge it into the pool
           // card instead of rendering it twice. WARP-3513: a LUKS-over-md
@@ -1057,7 +1097,7 @@ export function createStorageRouter(prisma: PrismaClient): Router {
           // WARP-3513: encryption + the explicit enums derived from it.
           encryption,
           preparation: drivePreparationFor(encryption),
-          usage: unassignedDriveUsage(),
+          usage: recordingUsage.get(d.uuid) ?? unassignedDriveUsage(),
           isSystemDisk: isOnSystemDisk(d, snap.os_disk),
         };
       });

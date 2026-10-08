@@ -5,15 +5,10 @@
  * `GET /api/storage/drives` — the same WARP-1144-corrected source of truth
  * `list_drives` uses (the device-bridge snapshot filtered to real data
  * drives, joined with the customer-chosen labels). The device-bridge
- * attaches `smart` ("PASSED"/"FAILED") and `temp_c` per drive ONLY when
- * `DRIVE_SMART_ENABLED` is set on the bridge (WARP-612); the fields are
- * null/absent otherwise.
- *
- * SMART-off is NOT a failure: when every drive lacks the enrichment the
- * tool still succeeds with `smartEnabled: false` plus a hint naming the
- * knob — the appliance is healthy-unknown, not broken. Any drive whose
- * SMART self-assessment reads FAILED raises a top-level `warning` so the
- * agent leads with it. Tier-1 read — no writes, no confirmation.
+ * reports explicit monitoring status alongside `smart` and `temp_c`.
+ * Only an explicit disabled status warrants the enable hint; older bridges
+ * with no readings remain unknown. A FAILED verdict from an available read
+ * raises a top-level warning. Tier-1 read — no writes, no confirmation.
  */
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 
@@ -33,7 +28,28 @@ interface DriveRow {
   free_bytes: number;
   displayName: string | null;
   smart?: string | null;
+  smart_status?: unknown;
   temp_c?: number | null;
+}
+
+type SmartStatus = "disabled" | "available" | "unsupported" | "unavailable" | "unknown";
+
+function smartStatus(d: DriveRow): SmartStatus {
+  switch (d.smart_status) {
+    case "disabled":
+    case "available":
+    case "unsupported":
+    case "unavailable":
+      return d.smart_status;
+    default:
+      // Before explicit status existed, a verdict or measured temperature
+      // proves collection worked. Explicit unknown/invalid states still win.
+      if (d.smart_status === undefined && (
+        d.smart === "PASSED" || d.smart === "FAILED" ||
+        (typeof d.temp_c === "number" && Number.isFinite(d.temp_c))
+      )) return "available";
+      return "unknown";
+  }
 }
 
 function drivesUnavailable(detail: string): ToolResult {
@@ -66,22 +82,25 @@ async function handler(_args: Record<string, unknown>, ctx: ToolContext): Promis
     return drivesUnavailable("storage service returned an unexpected shape");
   }
 
-  const drives = (payload.drives as DriveRow[]).map((d) => ({
-    // Best human name: customer label (WARP-174) → filesystem label → device.
-    name: d.displayName ?? (d.label || d.device),
-    device: d.device,
-    mount: d.mount,
-    sizeBytes: d.size_bytes,
-    usedBytes: d.used_bytes,
-    freeBytes: d.free_bytes,
-    // Normalize to the tri-state contract: only the two smartctl overall
-    // verdicts pass through; anything else (absent field on an older
-    // bridge, null when SMART is off or unreadable) is an explicit null.
-    smart: d.smart === "PASSED" || d.smart === "FAILED" ? d.smart : null,
-    tempC: typeof d.temp_c === "number" ? d.temp_c : null,
-  }));
+  const drives = (payload.drives as DriveRow[]).map((d) => {
+    const status = smartStatus(d);
+    return {
+      // Best human name: customer label (WARP-174) → filesystem label → device.
+      name: d.displayName ?? (d.label || d.device),
+      device: d.device,
+      mount: d.mount,
+      sizeBytes: d.size_bytes,
+      usedBytes: d.used_bytes,
+      freeBytes: d.free_bytes,
+      smartStatus: status,
+      smart: status === "available" && (d.smart === "PASSED" || d.smart === "FAILED") ? d.smart : null,
+      tempC: status === "available" && typeof d.temp_c === "number" && Number.isFinite(d.temp_c) ? d.temp_c : null,
+    };
+  });
 
-  const smartEnabled = drives.some((d) => d.smart !== null || d.tempC !== null);
+  const smartEnabled = drives.some((d) => ["available", "unsupported", "unavailable"].includes(d.smartStatus))
+    ? true
+    : drives.length > 0 && drives.every((d) => d.smartStatus === "disabled") ? false : null;
   const failed = drives.filter((d) => d.smart === "FAILED");
 
   return {
@@ -97,7 +116,7 @@ async function handler(_args: Record<string, unknown>, ctx: ToolContext): Promis
               .join(", ")} — back up its data and plan a replacement`,
           }
         : {}),
-      ...(smartEnabled ? {} : { hint: SMART_DISABLED_HINT }),
+      ...(smartEnabled === false ? { hint: SMART_DISABLED_HINT } : {}),
     },
   };
 }
@@ -105,7 +124,7 @@ async function handler(_args: Record<string, unknown>, ctx: ToolContext): Promis
 const tool: Tool = {
   name: "get_drive_health",
   description:
-    "Drive health for every data drive on the appliance: SMART self-assessment (PASSED/FAILED) and temperature in °C per drive, plus capacity figures. SMART monitoring is OFF by default — when disabled the result says so (smartEnabled: false; enable with DRIVE_SMART_ENABLED=1 on the device bridge) and per-drive smart/tempC are null. A FAILED drive raises a top-level warning.",
+    "Drive health for every data drive on the appliance: SMART self-assessment (PASSED/FAILED), temperature in °C, capacity, and per-drive smartStatus (available, disabled, unsupported, unavailable, or unknown). SMART monitoring is OFF by default. smartEnabled is true for enabled monitoring, false only when every reported drive explicitly says disabled, and null when unknown or no drives are reported. Only confirmed disabled monitoring gets the DRIVE_SMART_ENABLED=1 enable hint. Missing readings do not mean healthy or disabled. An available FAILED verdict raises a top-level warning.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,
