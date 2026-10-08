@@ -17,8 +17,8 @@ import { createGuardedFetch } from "../src/pinned-fetch.js";
 
 /** Obviously fake — this is a header shape, not a credential. */
 const FAKE_AUTHORIZATION = "Basic FAKE-000000000000";
-/** TEST-NET-3: documentation-only, but public as far as the table goes. */
-const PUBLIC = [{ address: "203.0.113.7", family: 4 }];
+/** A public resolver address. */
+const PUBLIC = [{ address: "8.8.8.8", family: 4 }];
 const noLocal = () => ({ addresses: [], cidrs: [] });
 
 type SendCall = [{ url: URL; addresses: { address: string }[] }, RequestInit];
@@ -37,7 +37,7 @@ describe("the guarded fetch", () => {
     expect(send).toHaveBeenCalledTimes(1);
     const [dest, init] = send.mock.calls[0] as unknown as SendCall;
     expect(dest.url.hostname).toBe("mcp.vendor.example");
-    expect(dest.addresses.map((a) => a.address)).toEqual(["203.0.113.7"]);
+    expect(dest.addresses.map((a) => a.address)).toEqual(["8.8.8.8"]);
     expect(init.method).toBe("POST");
     expect(init.body).toBe('{"jsonrpc":"2.0"}');
     expect(init.headers).toMatchObject({ authorization: FAKE_AUTHORIZATION });
@@ -65,7 +65,7 @@ describe("the transport is wired to it", () => {
 
     expect(send.mock.calls.length).toBeGreaterThan(0);
     for (const call of send.mock.calls as unknown as SendCall[]) {
-      expect(call[0].addresses.map((a) => a.address)).toEqual(["203.0.113.7"]);
+      expect(call[0].addresses.map((a) => a.address)).toEqual(["8.8.8.8"]);
     }
   });
 

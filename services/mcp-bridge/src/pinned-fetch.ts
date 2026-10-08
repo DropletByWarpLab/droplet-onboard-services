@@ -56,6 +56,10 @@ const BLOCKED_RANGES = (() => {
   list.addSubnet("198.18.0.0", 15, "ipv4"); // benchmarking
   list.addSubnet("224.0.0.0", 4, "ipv4"); // multicast
   list.addSubnet("240.0.0.0", 4, "ipv4"); // reserved, incl. 255.255.255.255
+  list.addSubnet("192.0.2.0", 24, "ipv4"); // TEST-NET-1
+  list.addSubnet("198.51.100.0", 24, "ipv4"); // TEST-NET-2
+  list.addSubnet("203.0.113.0", 24, "ipv4"); // TEST-NET-3
+  list.addSubnet("192.88.99.0", 24, "ipv4"); // 6to4 relay anycast
   list.addSubnet("::", 96, "ipv6"); // unspecified, loopback, IPv4-compatible
   list.addSubnet("fc00::", 7, "ipv6"); // ULA, incl. AWS IPv6 metadata fd00:ec2::254
   list.addSubnet("fe80::", 10, "ipv6"); // link-local
@@ -63,6 +67,11 @@ const BLOCKED_RANGES = (() => {
   // BlockList does not unwrap the IPv4 these carry, so refuse them whole.
   list.addSubnet("2002::", 16, "ipv6"); // 6to4
   list.addSubnet("64:ff9b::", 96, "ipv6"); // NAT64
+  list.addSubnet("64:ff9b:1::", 48, "ipv6"); // NAT64 local-use (RFC 8215)
+  list.addSubnet("::ffff:0:0:0", 96, "ipv6"); // IPv4-translated (RFC 2765)
+  list.addSubnet("100::", 64, "ipv6"); // discard-only
+  list.addSubnet("2001::", 23, "ipv6"); // IETF assignments, incl. Teredo 2001::/32 (embeds IPv4)
+  list.addSubnet("2001:db8::", 32, "ipv6"); // documentation
   return list;
 })();
 
@@ -168,6 +177,10 @@ export async function resolvePublicDestination(
   if (url.username !== "" || url.password !== "") {
     throw new UnsafeMcpUrlError("the URL carries userinfo");
   }
+  // ADR-072 §1: https on 443 only. The URL parser drops an explicit :443, so a
+  // port left standing is another one; a server-controlled OAuth endpoint
+  // such as https://public-host:6379/ must not be dialed.
+  if (url.port !== "") throw new UnsafeMcpUrlError(`port ${url.port} — remote MCP hops are 443 only`);
   const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
   const literal = isIP(host);
   let answers: ReadonlyArray<{ address: string; family: number }>;

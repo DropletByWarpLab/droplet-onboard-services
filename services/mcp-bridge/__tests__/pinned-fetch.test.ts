@@ -6,7 +6,7 @@
  * module owns is the `node:https` sender, which these tests replace.
  *
  * Hosts are RFC 2606 reserved names; addresses are the literals each refused
- * range is defined by, plus TEST-NET-3 (203.0.113.0/24) as the "public" answer.
+ * range is defined by, plus 8.8.8.8 as the "public" answer.
  */
 import { describe, it, expect, vi } from "vitest";
 import {
@@ -18,7 +18,7 @@ import {
 } from "../src/pinned-fetch.js";
 import { UnsafeMcpUrlError } from "../src/safe-url.js";
 
-const PUBLIC_IP = "203.0.113.7";
+const PUBLIC_IP = "8.8.8.8";
 const noLocal = () => ({ addresses: [] as string[], cidrs: [] as string[] });
 
 describe("isPublicAddress: every refused range has a case", () => {
@@ -55,6 +55,16 @@ describe("isPublicAddress: every refused range has a case", () => {
     ["IPv4-mapped CGNAT", "::ffff:100.64.0.1"],
     ["IPv4-mapped 192.168", "::ffff:c0a8:101"],
     ["bracketed literal", "[::1]"],
+    ["TEST-NET-1", "192.0.2.1"],
+    ["TEST-NET-2", "198.51.100.1"],
+    ["TEST-NET-3", "203.0.113.7"],
+    ["6to4 relay 192.88.99/24", "192.88.99.1"],
+    ["NAT64 local-use 64:ff9b:1::/48", "64:ff9b:1::a00:1"],
+    ["IPv4-translated ::ffff:0:0:0/96", "::ffff:0:a00:1"],
+    ["discard 100::/64", "100::1"],
+    ["IETF assignments 2001::/23", "2001:1::1"],
+    ["Teredo 2001::/32", "2001:0:4136:e378:8000:63bf:3fff:fdd2"],
+    ["documentation 2001:db8::/32", "2001:db8::1"],
     ["not an address at all", "mcp.vendor.example"],
   ];
   it.each(refused)("refuses %s (%s)", (_name, addr) => {
@@ -62,17 +72,17 @@ describe("isPublicAddress: every refused range has a case", () => {
   });
 
   it("refuses the box's own address and attached network, even when they look public", () => {
-    const local = { addresses: ["203.0.113.50"], cidrs: ["198.51.100.0/24"] };
-    expect(isPublicAddress("203.0.113.50", local)).toBe(false);
-    expect(isPublicAddress("198.51.100.9", local)).toBe(false);
-    expect(isPublicAddress("::ffff:203.0.113.50", local)).toBe(false);
+    const local = { addresses: ["8.8.4.4"], cidrs: ["9.9.9.0/24"] };
+    expect(isPublicAddress("8.8.4.4", local)).toBe(false);
+    expect(isPublicAddress("9.9.9.9", local)).toBe(false);
+    expect(isPublicAddress("::ffff:8.8.4.4", local)).toBe(false);
     expect(isPublicAddress(PUBLIC_IP, local)).toBe(true);
   });
 
   it("accepts public addresses, including IPv4-mapped ones", () => {
     expect(isPublicAddress(PUBLIC_IP, noLocal())).toBe(true);
-    expect(isPublicAddress("2001:db8::1", noLocal())).toBe(true);
-    expect(isPublicAddress("::ffff:203.0.113.7", noLocal())).toBe(true);
+    expect(isPublicAddress("2606:4700:4700::1111", noLocal())).toBe(true);
+    expect(isPublicAddress("::ffff:8.8.8.8", noLocal())).toBe(true);
   });
 });
 
@@ -128,6 +138,17 @@ describe("resolvePublicDestination", () => {
     const deps = { resolve: async () => [{ address: PUBLIC_IP, family: 4 }], local: noLocal };
     await expect(resolvePublicDestination("http://mcp.vendor.example/", deps)).rejects.toThrow(/not https/);
     await expect(resolvePublicDestination("https://u:p@mcp.vendor.example/", deps)).rejects.toThrow(/userinfo/);
+  });
+
+  it("refuses any port but 443, before resolving; an explicit :443 is fine", async () => {
+    const resolve = vi.fn(async () => [{ address: PUBLIC_IP, family: 4 }]);
+    for (const bad of ["https://mcp.vendor.example:6379/token", "https://8.8.8.8:8443/token"]) {
+      await expect(resolvePublicDestination(bad, { resolve, local: noLocal })).rejects.toThrow(/443 only/);
+    }
+    expect(resolve).not.toHaveBeenCalled();
+    await expect(
+      resolvePublicDestination("https://mcp.vendor.example:443/token", { resolve, local: noLocal }),
+    ).resolves.toBeDefined();
   });
 });
 
