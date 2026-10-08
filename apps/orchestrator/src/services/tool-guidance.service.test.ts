@@ -38,6 +38,9 @@ const NAMEABLE_TOOLS = [
   "list_cameras",
   "search_camera_events",
   "get_camera_snapshot",
+  "create_pdf_report",
+  "create_slide_deck",
+  "create_spreadsheet",
   "network_summary",
   "get_network_status",
   "get_system_health",
@@ -113,6 +116,31 @@ describe("composeToolGuidance", () => {
     const noSend = composeToolGuidance(["email_search", "email_draft_reply"]);
     expect(noSend).toContain("email_draft_reply");
     expect(noSend).not.toContain("email_send");
+  });
+
+  it.each([
+    ["create_pdf_report", "PDF: create_pdf_report"],
+    ["create_slide_deck", "PDF/PPTX decks: create_slide_deck"],
+    ["create_spreadsheet", "Excel/formulas/charts: create_spreadsheet"],
+  ])("guides %s without naming unavailable writers", (tool, fragment) => {
+    const block = composeToolGuidance([tool]);
+    expect(block).toContain(fragment);
+    expect(block).toContain("Use supplied or retrieved data; never invent it");
+    expect(block).toContain("Claim success only after the tool succeeds");
+    expect(block).toContain("link only returned download URLs");
+    for (const other of ["create_pdf_report", "create_slide_deck", "create_spreadsheet"]) {
+      if (other !== tool) expect(block).not.toContain(other);
+    }
+  });
+
+  it("omits creation guidance when all writers are withheld", () => {
+    const block = composeToolGuidance(
+      undefined,
+      new Set(["create_pdf_report", "create_slide_deck", "create_spreadsheet"]),
+    );
+    expect(block).not.toContain("Create files");
+    expect(block).not.toContain("create_slide_deck");
+    expect(composeToolGuidance(["search_content"])).not.toContain("Create files");
   });
 
   it("makes team chat the default way to message someone, email only when asked (WARP-3340)", () => {

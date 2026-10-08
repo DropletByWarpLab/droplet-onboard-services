@@ -97,6 +97,7 @@ const ARTIFACT_PATH_ARG: Readonly<Record<string, string>> = {
   write_file: "path",
   create_document: "path",
   create_pdf_report: "path",
+  create_slide_deck: "path",
   create_spreadsheet: "path",
   create_word_document: "path",
   copy_file: "to_path",

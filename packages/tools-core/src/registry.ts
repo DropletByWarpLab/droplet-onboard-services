@@ -59,6 +59,7 @@ import createDocument from "./handlers/files/create-document.js";
 import createPdfReport from "./handlers/files/create-pdf-report.js";
 import createWordDocument from "./handlers/files/create-word-document.js";
 import createSpreadsheet from "./handlers/files/create-spreadsheet.js";
+import createSlideDeck from "./handlers/files/create-slide-deck.js";
 // WARP-2664 — file cleanup: a read-only report (what could go, what an
 // organize would do), then the two approved writes it feeds. Bulk delete is
 // its own tool rather than a loop over delete_file so ONE confirmation is
@@ -318,6 +319,7 @@ const allTools: Tool[] = [
   createPdfReport,
   createWordDocument,
   createSpreadsheet,
+  createSlideDeck,
   analyzeFileCleanup,
   organizeFiles,
   deleteFiles,

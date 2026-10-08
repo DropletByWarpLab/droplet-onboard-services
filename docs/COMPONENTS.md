@@ -95,7 +95,7 @@ is deliberately **no separate API gateway service** in front of the orchestrator
 | **device-identity-svc** | `services/device-identity-svc/` | Python + gRPC | TPM 2.0 identity sidecar |
 | **automount** | `services/automount/` | Bash + udev | USB/NVMe auto-mount → Nextcloud |
 | **_shared** | `services/_shared/` | Python | FIPS self-test helper (Python services) |
-| **doc-render** | `services/doc-render/` | Python + FastAPI | Document spec → `.pdf` / `.docx` / `.xlsx` bytes |
+| **doc-render** | `services/doc-render/` | Python + FastAPI | Document spec → `.pdf` / `.docx` / `.xlsx` / `.pptx` bytes |
 | **egress-audit** | `services/egress-audit/` | Python (host systemd unit) | Runtime egress auditor (conntrack + DNS) |
 | **erp-connector** | `services/erp-connector/` | TypeScript | `@droplet/erp-connector` — ERP/SaaS connector framework (in-process library) |
 | **fleet-agent** | `services/fleet-agent/` | Python | Opt-in fleet telemetry to the analytics portal (profile `telemetry`) |
@@ -639,9 +639,11 @@ network. Host-published ports and host-network services are called out.
 
 ## services/doc-render
 
-- **Purpose:** turns a document spec into `.pdf` / `.docx` / `.xlsx` bytes
+- **Purpose:** turns a document spec into `.pdf` / `.docx` / `.xlsx` / `.pptx` bytes
   (WARP-2211) — the model emits a spec, this renders it. `POST /render`, open
   `GET /health`; everything else needs `DOC_RENDER_SERVICE_TOKEN` (fails closed).
+  Supports 16:9 PDF/editable PowerPoint decks and Excel local formulas/charts;
+  see [creation capabilities](chat-creation.md) for the specifications and limits.
 - **Talks to:** nothing. Stateless, no storage, no egress; the orchestrator's
   `POST /api/files/render` owns auth, paths and the upload. Port 8020, internal.
 

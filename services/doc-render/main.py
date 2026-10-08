@@ -1,7 +1,7 @@
 """
 Droplet Doc-Render Service
 ==========================
-Turns a document SPEC into .pdf / .docx / .xlsx bytes (WARP-2211).
+Turns a document SPEC into .pdf / .docx / .xlsx / .pptx bytes (WARP-2211).
 
 Why a service at all: the box's model holds a 16384-token window and can emit
 at most 4096 tokens (apps/orchestrator/src/config.ts:150,
@@ -85,17 +85,42 @@ def require_bearer(request: Request) -> None:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
+class FormulaSpec(BaseModel):
+    model_config = {"extra": "forbid"}
+    cell: str
+    expression: str
+
+
+class ChartSpec(BaseModel):
+    model_config = {"extra": "forbid"}
+    title: str = ""
+    kind: Literal["bar", "line"]
+    category_column: int = Field(strict=True)
+    value_column: int = Field(strict=True)
+
+
 class SheetSpec(BaseModel):
     name: str | None = None
     columns: list[Any] = Field(default_factory=list)
     rows: list[list[Any]] = Field(default_factory=list)
+    formulas: list[FormulaSpec] = Field(default_factory=list)
+    chart: ChartSpec | None = None
+
+
+class SlideSpec(BaseModel):
+    """Plain text only: the renderer never interprets slide text as markup."""
+
+    model_config = {"extra": "forbid"}
+    title: str
+    bullets: list[str] = Field(default_factory=list)
 
 
 class RenderRequest(BaseModel):
-    format: Literal["pdf", "docx", "xlsx"]
+    format: Literal["pdf", "docx", "xlsx", "pptx"]
     title: str = ""
     body_markdown: str = ""
     sheets: list[SheetSpec] = Field(default_factory=list)
+    slides: list[SlideSpec] = Field(default_factory=list)
 
 
 app = FastAPI(
@@ -116,9 +141,17 @@ async def render(req: RenderRequest) -> Response:
         raise HTTPException(status_code=400, detail="title_too_long")
     if len(req.body_markdown) > MAX_BODY_CHARS:
         raise HTTPException(status_code=400, detail="body_too_long")
+    if req.slides and req.format not in ("pdf", "pptx"):
+        raise HTTPException(status_code=400, detail="slides_require_pdf_or_pptx")
+    if (req.slides or req.format == "pptx") and (req.body_markdown or req.sheets):
+        raise HTTPException(status_code=400, detail="slides_cannot_mix_with_body_or_sheets")
 
     try:
-        if req.format == "xlsx":
+        if req.slides or req.format == "pptx":
+            payload = renderers.render_slide_deck(
+                req.title, [s.model_dump() for s in req.slides], req.format
+            )
+        elif req.format == "xlsx":
             payload = renderers.render_xlsx([s.model_dump() for s in req.sheets])
         elif req.format == "docx":
             payload = renderers.render_docx(req.title, req.body_markdown)
