@@ -40,13 +40,21 @@ function PersonalAccountSetup({ card, onConnected }: { card: ConnectCard & { fam
 }
 
 /** Existing connection setup UI, opened by a successful chat tool result only. */
-export function ChatConnections({ request, onClose, onOutcome, triggerRef }: {
+export function ChatConnections({ request: incomingRequest, onClose, onOutcome, triggerRef }: {
   request: ConnectSetupRequest | null;
   onClose: () => void;
   onOutcome?: (turn: string) => void;
   triggerRef?: RefObject<HTMLElement | null>;
 }) {
   const { user } = useAuth();
+  const principalKey = `${user?.id}:${user?.role}`;
+  const requestOwner = useRef({ principal: principalKey, request: incomingRequest });
+  if (requestOwner.current.request !== incomingRequest) {
+    requestOwner.current = { principal: principalKey, request: incomingRequest };
+  }
+  // Setup metadata belongs to the principal whose checked tool result opened
+  // it. Keeping this component mounted cannot carry that data across a role change.
+  const request = requestOwner.current.principal === principalKey ? incomingRequest : null;
   const canManage = user?.role === "owner" || user?.role === "admin";
   const canConnectPersonal = canManage || user?.role === "family";
   const { refresh } = useIntegrations(Boolean(request) && canManage);
@@ -63,7 +71,6 @@ export function ChatConnections({ request, onClose, onOutcome, triggerRef }: {
   const lookupRevision = useRef(0);
   const reported = useRef(new Set<string>());
   const principal = useRef("");
-  const principalKey = `${user?.id}:${user?.role}`;
   principal.current = principalKey;
   const activeRequest = useRef(request);
   activeRequest.current = request;
@@ -154,6 +161,8 @@ export function ChatConnections({ request, onClose, onOutcome, triggerRef }: {
   const backendDescriptor = card?.family === "integration" ? providerDescriptor(card.provider) : undefined;
   const wizard = request && card && allowed && !card.blocked && action?.kind === "wizard" && backendDescriptor?.catalog?.id === action.catalogId ? action.catalogId : null;
   const pending = <p className="type-footnote" role="status">Loading connection setup…</p>;
+
+  if (requestOwner.current.principal !== principalKey) return null;
 
   // The picker unmounts before the canonical wizard mounts; never two active
   // modal focus traps. No setup action changes the chat page's location.

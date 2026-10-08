@@ -860,27 +860,31 @@ export default function ChatPage() {
 
   // Rehydrated conversations describe past setup; only tool results produced
   // in this mounted chat can open a new setup popup.
-  const connectionHistory = useRef({ epoch: messagesEpoch, ids: new Set(messages.map((message) => message.id)), seenCallIds: new Set<string>() });
-  if (connectionHistory.current.epoch !== messagesEpoch) {
-    connectionHistory.current = { epoch: messagesEpoch, ids: new Set(messages.map((message) => message.id)), seenCallIds: new Set<string>() };
+  const canSetupConnections = user?.role === "owner" || user?.role === "admin" || user?.role === "family";
+  const connectionPrincipal = `${user?.id}:${user?.role}`;
+  const connectionHistory = useRef({ epoch: messagesEpoch, principal: connectionPrincipal, ids: new Set(messages.map((message) => message.id)), callIds: new Set(messages.flatMap((message) => message.toolCalls?.map((call) => call.id) ?? [])), seenCallIds: new Set<string>() });
+  if (connectionHistory.current.epoch !== messagesEpoch || connectionHistory.current.principal !== connectionPrincipal) {
+    // A role or account change closes setup built from the previous person's
+    // grants. Only a fresh tool result for the current principal can reopen it.
+    connectionHistory.current = { epoch: messagesEpoch, principal: connectionPrincipal, ids: new Set(messages.map((message) => message.id)), callIds: new Set(messages.flatMap((message) => message.toolCalls?.map((call) => call.id) ?? [])), seenCallIds: new Set<string>() };
   }
   const [pendingConnectionOutcome, setPendingConnectionOutcome] = useState<{
-    turn: string; conversationId: string | null; epoch: number; userId: string;
+    turn: string; conversationId: string | null; epoch: number; userId: string; role: string;
   } | null>(null);
   const handleConnectionOutcome = useCallback((turn: string) => {
-    if (!user) return;
-    setPendingConnectionOutcome({ turn, conversationId, epoch: messagesEpoch, userId: user.id });
-  }, [conversationId, messagesEpoch, user]);
+    if (!user?.role || !canSetupConnections) return;
+    setPendingConnectionOutcome({ turn, conversationId, epoch: messagesEpoch, userId: user.id, role: user.role });
+  }, [conversationId, messagesEpoch, user, canSetupConnections]);
   useEffect(() => {
     if (!pendingConnectionOutcome) return;
-    if (pendingConnectionOutcome.conversationId !== conversationId || pendingConnectionOutcome.epoch !== messagesEpoch || pendingConnectionOutcome.userId !== user?.id) {
+    if (!canSetupConnections || pendingConnectionOutcome.conversationId !== conversationId || pendingConnectionOutcome.epoch !== messagesEpoch || pendingConnectionOutcome.userId !== user?.id || pendingConnectionOutcome.role !== user?.role) {
       setPendingConnectionOutcome(null);
       return;
     }
     if (isStreaming || !selectedModel) return;
     setPendingConnectionOutcome(null);
     void sendMessage(pendingConnectionOutcome.turn, selectedModel, systemPrompt || undefined, selectedProvider, { preserveComposerAttachments: true });
-  }, [pendingConnectionOutcome, conversationId, messagesEpoch, user?.id, isStreaming, selectedModel, selectedProvider, systemPrompt, sendMessage]);
+  }, [pendingConnectionOutcome, conversationId, messagesEpoch, user?.id, user?.role, canSetupConnections, isStreaming, selectedModel, selectedProvider, systemPrompt, sendMessage]);
 
   // WARP-855 — the header's conversation title: the first user message,
   // clamped, or "New chat".
@@ -1262,7 +1266,7 @@ export default function ChatPage() {
                   isStreaming && idx === messages.length - 1 && msg.role === "assistant"
                 }
                 isLastAssistant={idx === lastAssistantIdx}
-                connectionSetupInteractive={msg.role === "assistant" && idx === messages.length - 1 && !connectionHistory.current.ids.has(msg.id)}
+                connectionSetupInteractive={canSetupConnections && msg.role === "assistant" && idx === messages.length - 1 && !connectionHistory.current.ids.has(msg.id) && (!connectionCall || !connectionHistory.current.callIds.has(connectionCall.id))}
                 connectionSetupSeenIds={connectionHistory.current.seenCallIds}
                 onConnectionOutcome={handleConnectionOutcome}
                 onRetry={handleRetry}

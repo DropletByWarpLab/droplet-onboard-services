@@ -3,21 +3,58 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import type { ChatMessage as Message } from "@/lib/types";
 
 const send = vi.fn();
+const auth = { user: { id: "owner", role: "owner" } as { id: string; role: string } | null };
 const state = { messages: [] as Message[], conversationId: "chat-one" as string | null, messagesEpoch: 0, isStreaming: false };
 vi.mock("@/lib/hooks/useChat", () => ({ useChat: () => ({ ...state, sendMessage: send, stop: vi.fn(), retryMessage: vi.fn(), regenerate: vi.fn(), approveScene: vi.fn(), clearMessages: vi.fn(), loadConversation: vi.fn(), attachments: [], sessionAttachments: [], attach: vi.fn(), removeAttachment: vi.fn(), clearAttachments: vi.fn() }) }));
 vi.mock("@/lib/hooks/useModels", () => ({ useModels: () => ({ models: [{ id: "m1", provider: "ollama" }] }) }));
 vi.mock("@/lib/hooks/useStickyScroll", () => ({ useStickyScroll: () => ({ scrollRef: { current: null }, isDetached: false, scrollToBottom: vi.fn(), onScroll: vi.fn(), stickyScrollToBottom: vi.fn() }) }));
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn(), replace: vi.fn() }), useSearchParams: () => new URLSearchParams(), usePathname: () => "/chat" }));
-vi.mock("@/lib/auth", () => ({ useAuth: () => ({ user: { id: "owner", role: "owner" } }), authFetch: vi.fn() }));
+vi.mock("@/lib/auth", () => ({ useAuth: () => auth, authFetch: vi.fn() }));
 vi.mock("@/components/ChatMessage", () => ({ ChatMessage: ({ message, connectionSetupInteractive, onConnectionOutcome }: { message: Message; connectionSetupInteractive?: boolean; onConnectionOutcome?: (turn: string) => void }) => <button data-testid={message.id} data-interactive={String(connectionSetupInteractive)} onClick={() => onConnectionOutcome?.("Google is connected.")}>{message.content}</button> }));
 import ChatPage from "@/app/chat/page";
 
 beforeEach(() => {
   cleanup(); send.mockReset(); sessionStorage.clear();
+  auth.user = { id: "owner", role: "owner" };
   Object.assign(state, { messages: [], conversationId: "chat-one", messagesEpoch: 0, isStreaming: false });
 });
 
 describe("chat connection setup lifecycle", () => {
+  it("does not enable connection setup or autosend outcomes for guests", async () => {
+    auth.user = { id: "guest", role: "guest" };
+    const view = render(<ChatPage />);
+    state.messages = [{ id: "live", role: "assistant", content: "Connection setup" }];
+    view.rerender(<ChatPage />);
+    expect(screen.getByTestId("live")).toHaveAttribute("data-interactive", "false");
+    fireEvent.click(screen.getByTestId("live"));
+    await act(async () => {});
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it.each(["family", "guest"])("closes old setup and drops queued outcomes after downgrade to %s", async (role) => {
+    const view = render(<ChatPage />);
+    state.messages = [{ id: "live", role: "assistant", content: "Owner connections", toolCalls: [{ id: "owner-call", name: "list_connections", args: {}, ok: true }] }];
+    state.isStreaming = true;
+    view.rerender(<ChatPage />);
+    expect(screen.getByTestId("live")).toHaveAttribute("data-interactive", "true");
+    fireEvent.click(screen.getByTestId("live"));
+    auth.user = { id: "owner", role };
+    state.isStreaming = false;
+    view.rerender(<ChatPage />);
+    expect(screen.getByTestId("live")).toHaveAttribute("data-interactive", "false");
+    await act(async () => {});
+    expect(send).not.toHaveBeenCalled();
+
+    // Persisting the same streamed result must not reactivate its old grants.
+    state.messages = [{ ...state.messages[0], id: "persisted" }];
+    view.rerender(<ChatPage />);
+    expect(screen.getByTestId("persisted")).toHaveAttribute("data-interactive", "false");
+
+    state.messages = [...state.messages, { id: "fresh", role: "assistant", content: "Current connections" }];
+    view.rerender(<ChatPage />);
+    expect(screen.getByTestId("fresh")).toHaveAttribute("data-interactive", role === "family" ? "true" : "false");
+  });
+
   it("keeps the setup component mounted when the stream replaces its assistant message id", () => {
     const view = render(<ChatPage />);
     const toolCalls = [{ id: "setup-call", name: "start_connection", args: { service: "google" }, ok: true }];
