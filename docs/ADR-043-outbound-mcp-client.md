@@ -5,6 +5,7 @@
 - **Amends:** nothing. It **narrows** [`docs/ADR-041-cloud-connector-class.md`](ADR-041-cloud-connector-class.md) by carving the outbound MCP session out of the cloud-connector class rather than letting it inherit rules written for a different shape of thing.
 - **Builds on:** ADR-041 §1 (dial-out only) and §3 (every destination registered, screened, audited) — both inherited unchanged. [`docs/ADR-009-canonical-system-architecture.md`](ADR-009-canonical-system-architecture.md) (no public inbound), [`docs/ADR-012-phone-home-egress-control.md`](ADR-012-phone-home-egress-control.md), WARP-269 / WARP-268 (the default-deny egress registry and its runtime audit), WARP-467 (the off-LAN channel vocabulary).
 - **First consumers:** the Atlassian remote MCP server and the Slack remote MCP server, both under [WARP-2300](https://warp-lab.atlassian.net/browse/WARP-2300). Slack's provisioning model is decided by [WARP-2373](https://warp-lab.atlassian.net/browse/WARP-2373), not here.
+- **Amended by:** [ADR-072](ADR-072-connecting-any-mcp-server.md) (proposed 2026-10-07) — owner-added servers beside the curated registry (§1), session teardown restated for a stateless protocol (§4), a delegated per-member sign-in model (§7), and two "not permitted" items lifted on conditions (a LAN-side callback URL; remote writes). See the Amendments section at the end; the original text above is unchanged.
 
 ## Context
 
@@ -151,3 +152,15 @@ Whichever model applies, ADR-041 §5 carries over: the credential is a key to th
 - **The Slack app-ownership decision** — [WARP-2373](https://warp-lab.atlassian.net/browse/WARP-2373). When it lands, §7 cites it as settled instead of pending.
 - **Register each server's hosts on its own ticket**, with the `kind: dynamic` entry and the exact-host guard landing together, per §6. Security review on each — assign Romain.
 - **Credential storage at rest.** ADR-041's warning applies unchanged: `schema.prisma` asserts a `secretRef` secret store and `ErpEntityCache` PHI encryption that do not exist ([WARP-2028](https://warp-lab.atlassian.net/browse/WARP-2028)). An MCP credential store must not become either model's first writer. Build the encryption or use a store that already has it; do not inherit an unkept promise.
+
+## Amendments
+
+### 2026-10-07 — [ADR-072](ADR-072-connecting-any-mcp-server.md), proposed ([WARP-3900](https://warp-lab.atlassian.net/browse/WARP-3900))
+
+The original text above is untouched. ADR-072 changes exactly these clauses, and only once it is accepted:
+
+- **§1 — owner-added servers.** The curated path (bridge profile in code, one egress entry per host, compiled tool table, setup guide) stays as written. Beside it, an owner may add any remote Streamable-HTTP server at runtime as a row with an explicit status enum, owner-only, never through an LLM tool. Its host is covered by one `kind: dynamic` egress entry (`owner-added-mcp`) and a bridge-side guard that adds public-address-only DNS pinning to the exact-host check — §6's "code-side exact-host guard" is widened, not relaxed.
+- **§4 — what "off" means.** "Tears down live sessions" is restated for the 2026-07-28 stateless protocol: refuse new requests, abort in-flight ones, close subscription streams, audit the refusal. The `remote_mcp` channel itself is unchanged and is ADR-072's first prerequisite (it is not on `stage` as of 2026-10-07).
+- **§7 — a third provisioning model.** Beside the customer-created credential and the operator-registered vendor app, a **delegated per-member sign-in** (ADR-042 model 1) through the vendor's OAuth authorization-code flow, with per-member connections by default and a Workspace connection only by an admin's explicit choice. The Slack classification and WARP-2373's ownership of that decision are unchanged.
+- **"Not permitted" — callback URL.** *"Any inbound listener, webhook, or callback URL for this feature"* becomes: no inbound listener or webhook; a **LAN-side** OAuth callback route on the box's trusted origin (the ADR-023 per-device name when issued, the canonical LAN name otherwise), plus a loopback-and-paste fallback, is permitted. Nothing becomes internet-reachable; the browser on the LAN is the only thing that follows the redirect.
+- **"Not permitted" — remote writes.** The condition is unchanged in substance and made concrete: remote calls route through the WARP-2305 interceptor, `REMOTE_WRITE_NOT_PERMITTED` is lifted only after WARP-2321's slices land, and every dispatch is additionally subject to ADR-072 §4's outbound-argument rule, read tools included.
