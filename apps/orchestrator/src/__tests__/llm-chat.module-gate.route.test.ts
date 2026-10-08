@@ -229,7 +229,7 @@ describe("/api/llm/chat — tool guidance never names a tool the pool no longer 
   it("names the camera tools while the module is on", async () => {
     const res = await chat(buildApp(createPrismaMock(null), OWNER));
     expect(res.status).toBe(200);
-    expect(systemPromptText()).toContain("For camera questions");
+    expect(systemPromptText()).toContain("Cameras: list_cameras");
   });
 
   it("drops the camera guidance for an owner when the module is off", async () => {
@@ -239,14 +239,14 @@ describe("/api/llm/chat — tool guidance never names a tool the pool no longer 
     const res = await chat(buildApp(createPrismaMock(null), OWNER));
     expect(res.status).toBe(200);
     const sys = systemPromptText();
-    expect(sys).not.toContain("For camera questions");
+    expect(sys).not.toContain("Cameras: list_cameras");
     expect(sys).not.toContain("list_cameras");
   });
 
   it("drops it for a role-less family member too (their allowed list is materialised)", async () => {
     _setToolModuleVerdictForTests(async () => withheld("cameras"));
     await chat(buildApp(createPrismaMock(null), FAMILY));
-    expect(systemPromptText()).not.toContain("For camera questions");
+    expect(systemPromptText()).not.toContain("Cameras: list_cameras");
   });
 });
 
@@ -259,7 +259,7 @@ describe("/api/llm/chat — module gating and stage's navigation withholding bot
     _setToolModuleVerdictForTests(async () => withheld("cameras"));
     await chat(buildApp(createPrismaMock(null), OWNER));
     const sys = systemPromptText();
-    expect(sys).not.toContain("For camera questions");
+    expect(sys).not.toContain("Cameras: list_cameras");
     expect(sys).not.toContain("find_dashboard_page");
   });
 
@@ -268,14 +268,14 @@ describe("/api/llm/chat — module gating and stage's navigation withholding bot
     await chat(buildApp(createPrismaMock(null), OWNER), { dashboardPages: PAGES });
     const sys = systemPromptText();
     expect(sys).toContain("find_dashboard_page");
-    expect(sys).not.toContain("For camera questions");
+    expect(sys).not.toContain("Cameras: list_cameras");
   });
 
   it("with every module on, a dashboard turn names both (the control)", async () => {
     await chat(buildApp(createPrismaMock(null), OWNER), { dashboardPages: PAGES });
     const sys = systemPromptText();
     expect(sys).toContain("find_dashboard_page");
-    expect(sys).toContain("For camera questions");
+    expect(sys).toContain("Cameras: list_cameras");
   });
 
   it("the budget estimate's guidance carries both too: an oversized pool never shows in the sized prompt", async () => {
