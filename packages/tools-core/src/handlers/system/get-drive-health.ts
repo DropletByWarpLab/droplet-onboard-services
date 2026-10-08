@@ -124,7 +124,7 @@ async function handler(_args: Record<string, unknown>, ctx: ToolContext): Promis
 const tool: Tool = {
   name: "get_drive_health",
   description:
-    "Drive health for every data drive on the appliance: SMART self-assessment (PASSED/FAILED), temperature in °C, capacity, and per-drive smartStatus (available, disabled, unsupported, unavailable, or unknown). SMART monitoring is OFF by default. smartEnabled is true for enabled monitoring, false only when every reported drive explicitly says disabled, and null when unknown or no drives are reported. Only confirmed disabled monitoring gets the DRIVE_SMART_ENABLED=1 enable hint. Missing readings do not mean healthy or disabled. An available FAILED verdict raises a top-level warning.",
+    "Drive capacity, SMART PASSED/FAILED, °C temperature and smartStatus (available/disabled/unsupported/unavailable/unknown). smartEnabled: true if enabled, false only if all drives disabled, null if unknown/no drives. SMART defaults off; only disabled gets DRIVE_SMART_ENABLED=1 hint. Missing readings prove neither health nor disablement. Available FAILED raises a warning.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,
