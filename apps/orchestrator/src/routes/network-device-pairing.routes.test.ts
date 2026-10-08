@@ -73,7 +73,9 @@ function buildApp(
 }
 
 describe("switch routes", () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
 
   it.each(["owner", "admin", "family"] as const)("GET /network/switch/pairing is readable by %s", async (role) => {
     const { app, service } = buildApp(role, registerSwitchPairingRoutes);
@@ -140,7 +142,9 @@ describe("switch routes", () => {
 });
 
 describe("AP routes", () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
 
   it.each(["owner", "admin", "family"] as const)("GET /network/aps/:mac/pairing is readable by %s", async (role) => {
     const { app, service } = buildApp(role, registerApPairingRoutes);

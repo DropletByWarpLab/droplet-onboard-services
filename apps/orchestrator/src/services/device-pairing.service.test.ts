@@ -93,7 +93,9 @@ function expectNoPassword(value: unknown) {
 
 // ---------------------------------------------------------------------------
 describe("switch role", () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
 
   const routes = (claim: Handler = claimOk()) => ({
     "PUT /pairing/identity": ok,
@@ -293,7 +295,9 @@ describe("switch role", () => {
 
 // ---------------------------------------------------------------------------
 describe("ap role", () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
 
   const routes = (claim: Handler = claimOk({ mac: MAC, host: "192.168.9.42", model: "Zyxel NWA50BE" })) => ({
     [`POST /aps/${MAC_PATH}/pairing/claim`]: claim,
