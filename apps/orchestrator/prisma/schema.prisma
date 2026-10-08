@@ -10947,11 +10947,28 @@ model RemoteToolClassification {
   /// discovered. A re-discovery with the same name and hash keeps the
   /// reviewed classification; a changed hash resets it (H3).
   inputSchemaHash      String?
+  /// WARP-3918: CHANGED when the pinned definition (name, description, input
+  /// schema, annotations) differs from the one a person reviewed. CHANGED is
+  /// refused at dispatch for every server, curated or owner-added, until a
+  /// person classifies the tool again. An explicit column, never derived
+  /// from reviewedAt being null.
+  definitionStatus     RemoteToolDefinitionStatus @default(CURRENT)
+  definitionChangedAt  DateTime?
+  /// What the review screen (WARP-2430) diffs against: the pinned hash and
+  /// description from before the change. Kept from the FIRST change until
+  /// re-review, so a second change does not erase what was reviewed.
+  previousReviewHash      String?
+  previousWireDescription String?
   firstSeenAt          DateTime  @default(now())
   lastSeenAt           DateTime  @default(now())
 
   @@unique([serverId, toolName])
   @@index([serverId])
+}
+
+enum RemoteToolDefinitionStatus {
+  CURRENT
+  CHANGED
 }
 
 /// WARP-2251 — morning briefing: one agent-written day plan per user per

@@ -59,7 +59,7 @@ function localPort(): McpClientPort {
 }
 
 /** The fixture bridge. Every call it serves is recorded. */
-function fixtureBridge() {
+function fixtureBridge(getTools: () => unknown[] = () => WIRE_TOOLS) {
   const calls: { method: string; path: string; body: unknown }[] = [];
   const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
     const path = String(url).replace(BRIDGE_URL, "");
@@ -73,7 +73,7 @@ function fixtureBridge() {
     if (path.endsWith("/open")) return json(200, { state: READY_STATE });
     // WARP-2659 — the close. The bridge answers a session it holds with 200.
     if (init?.method === "DELETE") return json(200, { closed: true });
-    if (path.endsWith("/tools")) return json(200, { tools: WIRE_TOOLS, state: READY_STATE });
+    if (path.endsWith("/tools")) return json(200, { tools: getTools(), state: READY_STATE });
     if (path.endsWith("/call")) {
       return json(200, {
         result: { content: [{ type: "text", text: "{}" }], isError: false },
@@ -108,8 +108,8 @@ function prismaWith(row: RemoteMcpConnectionRow | null) {
  *  about the ATTACH and not about the (separately tested) v1 read list. */
 const allowAll: RemoteCallPolicy = () => ({ kind: "allow" });
 
-function harness(over: { allowlist?: string[]; row?: RemoteMcpConnectionRow | null } = {}) {
-  const bridge = fixtureBridge();
+function harness(over: { allowlist?: string[]; row?: RemoteMcpConnectionRow | null; tools?: () => unknown[] } = {}) {
+  const bridge = fixtureBridge(over.tools);
   const mux = new McpToolMultiplexer(localPort(), {
     isServerAllowed: (id) => (over.allowlist ?? []).includes(id),
     remoteCallPolicy: allowAll,
@@ -125,7 +125,7 @@ function harness(over: { allowlist?: string[]; row?: RemoteMcpConnectionRow | nu
     registry,
     prisma,
     recordClassifications,
-    attach: () =>
+    attach: (extra: Partial<Parameters<typeof attachAtlassianRemote>[0]> = {}) =>
       attachAtlassianRemote({
         mux,
         prisma,
@@ -140,6 +140,7 @@ function harness(over: { allowlist?: string[]; row?: RemoteMcpConnectionRow | nu
             fetchImpl: bridge.fetchImpl,
           }),
         openCredentials: () => ({ apiToken: FAKE_API_TOKEN }),
+        ...extra,
       }),
   };
 }
@@ -400,5 +401,54 @@ describe("detach — the disconnect path (WARP-2659)", () => {
     expect(result).toEqual({ serverId: "atlassian", detached: true, sessionClosed: true });
     expect(h.mux.remoteServerIds()).toEqual([]);
     expect(h.registry.list()).toEqual([]);
+  });
+});
+
+describe("WARP-3918 — tool definitions are pinned by the bridge's hash of the wire object", () => {
+  const H1 = "a".repeat(64);
+  const H2 = "b".repeat(64);
+  const wire = (hash: string) => () => [
+    { name: "getJiraIssue", description: "Read one Jira issue", inputSchema: { type: "object" }, definitionHash: hash },
+    { name: "getConfluencePage", description: "Read one page", inputSchema: { type: "object" }, definitionHash: "c".repeat(64) },
+  ];
+
+  it("hands the recorder each tool's definition hash by WIRE name", async () => {
+    const h = harness({ allowlist: ["atlassian"], tools: wire(H1) });
+    await h.attach();
+    const [, tools] = h.recordClassifications.mock.calls[0] as unknown as [string, Array<{ name: string; definitionHash?: string }>];
+    expect(tools.map((t) => [t.name, t.definitionHash])).toEqual([
+      ["getJiraIssue", H1],
+      ["getConfluencePage", "c".repeat(64)],
+    ]);
+  });
+
+  it("a definition that changes mid-session is re-recorded on the next listing, the cache refreshed, THEN the owners told", async () => {
+    // MUTATION: drop the onListed hook → the changed tool stays callable until
+    // the next re-attach and nobody is told → red.
+    let hash = H1;
+    const h = harness({ allowlist: ["atlassian"], tools: () => wire(hash)() });
+    const order: string[] = [];
+    const record = vi.fn(async (_id: string, _tools: unknown[]) =>
+      hash === H2 ? { changes: [{ toolName: "getJiraIssue", descriptionChanged: false }] } : { changes: [] },
+    );
+    const refreshClassifications = vi.fn(async () => void order.push("refresh"));
+    const notifyOwners = vi.fn(async (_t: string, _b: string) => void order.push("notify"));
+    await h.attach({ recordClassifications: record, refreshClassifications, notifyOwners });
+    expect(record).toHaveBeenCalledTimes(1);
+    expect(notifyOwners).not.toHaveBeenCalled();
+
+    // Nothing moved: another listing records nothing.
+    await h.mux.listTools();
+    expect(record).toHaveBeenCalledTimes(1);
+
+    hash = H2;
+    await h.mux.listTools();
+    expect(record).toHaveBeenCalledTimes(2);
+    expect(order).toEqual(["refresh", "notify"]);
+    const [title, body] = notifyOwners.mock.calls[0] as [string, string];
+    expect(title).toMatch(/switched off/);
+    expect(body).toContain("getJiraIssue");
+    expect(body).toContain("arguments or hints");
+    expect(body).not.toContain("Read one Jira issue");
   });
 });

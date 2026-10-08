@@ -23,6 +23,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { FetchLike } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { pickRateLimitHeaders } from "./call-scheduler.js";
+import { toolDefinitionHash } from "./definition-hash.js";
 import { pinTransportProtocolVersion } from "./protocol-pin.js";
 import type {
   RemoteMcpConnection,
@@ -198,6 +199,9 @@ export const createStreamableHttpConnection = async (
         // fields is what makes "the wire cannot assert its own privilege" a
         // property of the code rather than a promise in a comment.
         inputSchema: (t.inputSchema ?? { type: "object", properties: {} }) as object,
+        // WARP-3918 — the annotations are HASHED (so an edit shows as a changed
+        // tool), never carried and never read.
+        definitionHash: toolDefinitionHash(t),
       }));
     },
     async callTool(name, args): Promise<RemoteToolCallOutcome> {
