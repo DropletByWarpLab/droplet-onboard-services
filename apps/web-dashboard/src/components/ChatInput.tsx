@@ -55,8 +55,6 @@ interface ChatInputProps {
    * entirely, the pill has no model control.
    */
   modelSelector?: React.ReactNode;
-  /** Connection setup is independent of the selected model or an active reply. */
-  connectionPicker?: React.ReactNode;
   /**
    * WARP-3043 — the empty chat's suggestion chips. Rendered INSIDE the
    * composer, after the pill, so the layout that centres the greeting and
@@ -111,7 +109,6 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
   slashTools,
   onToolCommand,
   modelSelector,
-  connectionPicker,
   suggestions,
   draftKey,
 }, ref) {
@@ -518,7 +515,6 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
         rows={1}
       />
       {modelSelector}
-      {connectionPicker}
       {voiceState !== "unavailable" ? (
         <button
           type="button"

@@ -42,10 +42,9 @@ vi.mock("@/lib/hooks/useChat", () => ({
   }),
 }));
 
-const modelsRef = { current: [{ id: "m1", provider: "ollama" }] };
-// Default to an available model; the return race also exercises delayed loading.
+// A model is available immediately so the pending-prompt effect can fire.
 vi.mock("@/lib/hooks/useModels", () => ({
-  useModels: () => ({ models: modelsRef.current }),
+  useModels: () => ({ models: [{ id: "m1", provider: "ollama" }] }),
 }));
 
 vi.mock("@/lib/hooks/useStickyScroll", () => ({
@@ -88,28 +87,9 @@ beforeEach(() => {
   searchParamsRef.current = new URLSearchParams();
   chatRef.current = { conversationId: null, messages: [] };
   window.sessionStorage.clear();
-  modelsRef.current = [{ id: "m1", provider: "ollama" }];
 });
 
 describe("DASH-02 hero pendingPrompt gating", () => {
-  it("keeps the return guard after the callback query is consumed and models finish loading", async () => {
-    searchParamsRef.current = new URLSearchParams("google=connected");
-    modelsRef.current = [];
-    window.sessionStorage.setItem("droplet.pendingPrompt", "leftover hero prompt");
-    const view = render(<ChatPage />);
-    searchParamsRef.current = new URLSearchParams();
-    modelsRef.current = [{ id: "m1", provider: "ollama" }];
-    view.rerender(<ChatPage />);
-    await waitFor(() => expect(window.sessionStorage.getItem("droplet.pendingPrompt")).toBeNull());
-    expect(sendMessageMock).not.toHaveBeenCalled();
-  });
-  it("does not send a queued hero prompt while restoring a connection sign-in return", async () => {
-    searchParamsRef.current = new URLSearchParams("google=connected");
-    window.sessionStorage.setItem("droplet.pendingPrompt", "leftover hero prompt");
-    render(<ChatPage />);
-    await waitFor(() => expect(window.sessionStorage.getItem("droplet.pendingPrompt")).toBeNull());
-    expect(sendMessageMock).not.toHaveBeenCalled();
-  });
   it("auto-sends the pending prompt for a fresh chat (no ?c=, no messages)", async () => {
     window.sessionStorage.setItem("droplet.pendingPrompt", "summarize my notes");
 

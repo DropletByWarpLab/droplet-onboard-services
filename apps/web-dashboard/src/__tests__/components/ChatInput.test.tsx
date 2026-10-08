@@ -5,17 +5,6 @@ import { ChatInput, type ChatInputHandle } from "@/components/ChatInput";
 import type { ChatAttachment } from "@/lib/types";
 
 describe("ChatInput", () => {
-  it("opens connection setup without sending or changing the draft, even without an available model", () => {
-    const onSend = vi.fn();
-    const onOpen = vi.fn();
-    render(<ChatInput onSend={onSend} disabled connectionPicker={<button type="button" onClick={onOpen}>Connections</button>} />);
-    const textarea = screen.getByPlaceholderText("Ask Droplet anything…");
-    fireEvent.change(textarea, { target: { value: "A draft to keep" } });
-    fireEvent.click(screen.getByRole("button", { name: "Connections" }));
-    expect(onOpen).toHaveBeenCalledTimes(1);
-    expect(onSend).not.toHaveBeenCalled();
-    expect(textarea).toHaveValue("A draft to keep");
-  });
   it("renders textarea and send button", () => {
     render(<ChatInput onSend={vi.fn()} />);
     expect(screen.getByPlaceholderText("Ask Droplet anything…")).toBeInTheDocument();

@@ -15,7 +15,7 @@ import { useToast } from "@/components/Toast";
 import { translateError } from "@/lib/friendly-errors";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 
-export function SubscriptionsPanel() {
+export function SubscriptionsPanel({ onConnected }: { onConnected?: () => void } = {}) {
   const { sources, refresh, isLoading } = useCalendarSources();
   const { toast } = useToast();
   const [showNew, setShowNew] = useState(false);
@@ -58,6 +58,7 @@ export function SubscriptionsPanel() {
       setPassword("");
       setShowNew(false);
       refresh();
+      onConnected?.();
     } catch (err) {
       // WARP-294: friendly translation; never raw err.message.
       toast(translateError(err, "subscription"), "error");

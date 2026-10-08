@@ -60,6 +60,7 @@ const DOMAIN_TEXT: Record<ToolDomain, string> = {
   crm: "customers, clients, contacts, leads or deals in the CRM",
   erp: "the practice-management or ERP system: patients, appointments, orders, inventory records",
   cloud: "connected SaaS accounts such as Stripe, HubSpot, Mailchimp or Shopify, and their data",
+  connections: "connecting, setting up, listing or disconnecting accounts and services",
   business: "the business profile, departments, policies or company facts",
   team_chat: "team chat such as Slack or Teams",
   agent_runs: "long-running background tasks the assistant works on while the user is away",

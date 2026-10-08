@@ -33,6 +33,8 @@ import { ToolApprovalPrompt } from "@/components/chat/ToolApprovalPrompt";
 import { RunCard, RunResultCard, runIdOf } from "@/components/chat/RunCard";
 import { splitMediaCalls } from "@/components/chat/media/media-split";
 import { ToolMediaCards } from "@/components/chat/media/ToolMediaCards";
+import { connectCallsOf } from "@/components/chat/connect/connect-split";
+import { ToolConnectCards } from "@/components/chat/connect/ToolConnectCards";
 import { SAFE_MARKDOWN_COMPONENTS } from "@/components/chat/safe-markdown";
 import { splitReasoningSteps } from "@/components/chat/reasoning-trace";
 import "@/components/chat/thinking.css";
@@ -151,6 +153,12 @@ interface ChatMessageProps {
    * active thumb again clears the rating (null).
    */
   onFeedback?: (messageId: string, feedback: "up" | "down" | null) => void;
+  /** True only for the newest assistant turn produced in this live session. */
+  connectionSetupInteractive?: boolean;
+  /** Fixed successful-connection outcome; setup inputs never cross this boundary. */
+  onConnectionOutcome?: (turn: string) => void;
+  /** Shared across a local assistant message being replaced by its persisted id. */
+  connectionSetupSeenIds?: Set<string>;
 }
 
 export const ChatMessage = memo(function ChatMessage({
@@ -166,6 +174,9 @@ export const ChatMessage = memo(function ChatMessage({
   onRerequestApproval,
   onEdit,
   onFeedback,
+  connectionSetupInteractive = false,
+  onConnectionOutcome,
+  connectionSetupSeenIds,
 }: ChatMessageProps) {
   // WARP-844 — inline edit state for user bubbles.
   const [editing, setEditing] = useState(false);
@@ -239,11 +250,13 @@ export const ChatMessage = memo(function ChatMessage({
   // WARP-3303 — a `start_agent_run` that produced a run is a card (below),
   // not a chip: the run outlives the turn and the card follows it.
   const runCalls = hasToolCalls ? toolCalls!.filter((c) => runIdOf(c) !== null) : [];
+  const connectCalls = !isUser ? connectCallsOf(toolCalls) : [];
+  const connectCallIds = new Set(connectCalls.map(({ call }) => call.id));
   // WARP-3691 - a successful call whose result carries valid `media` (camera
   // snapshot / live feed / clip, or a file) is a card under the message, not a
   // chip. Calls with no media, and failed ones, keep their chip.
   const { chipCalls, mediaCalls } = hasToolCalls
-    ? splitMediaCalls(toolCalls!, (c) => runIdOf(c) !== null)
+    ? splitMediaCalls(toolCalls!, (c) => runIdOf(c) !== null || connectCallIds.has(c.id))
     : { chipCalls: [], mediaCalls: [] };
   const toolChipRow = chipCalls.length > 0 ? (
     <div className="flex flex-wrap gap-1.5" data-testid="tool-call-chips">
@@ -278,6 +291,7 @@ export const ChatMessage = memo(function ChatMessage({
     !message.content &&
     !confirmCall &&
     !hasFailure &&
+    connectCalls.length === 0 &&
     (hasThinking || !hasToolCalls);
   if (isThinking) {
     // WARP-903 — cold model load. The orchestrator told us (model_loading
@@ -380,6 +394,7 @@ export const ChatMessage = memo(function ChatMessage({
             ) : null}
             {runCards}
             <ToolMediaCards calls={mediaCalls} />
+            <ToolConnectCards calls={connectCalls} interactive={connectionSetupInteractive} onOutcome={onConnectionOutcome} seenIds={connectionSetupSeenIds} />
             {/* WARP-2469 — a WARP-2305 interceptor challenge gets the real
                 approval prompt: Approve / Don't, a PHI-free argument
                 summary, and an expired state that offers a re-request.

@@ -1,4 +1,7 @@
 import type { Tool } from "./types.js";
+import listConnections from "./handlers/connections/list-connections.js";
+import startConnection from "./handlers/connections/start-connection.js";
+import disconnectConnection from "./handlers/connections/disconnect-connection.js";
 
 // network
 import listNetworkDevices from "./handlers/network/list-network-devices.js";
@@ -264,6 +267,9 @@ import workspaceRun from "./handlers/workspace/workspace-run.js";
 import workspacePropose from "./handlers/workspace/workspace-propose.js";
 
 const allTools: Tool[] = [
+  listConnections,
+  startConnection,
+  disconnectConnection,
   // network
   listNetworkDevices,
   getNetworkStatus,

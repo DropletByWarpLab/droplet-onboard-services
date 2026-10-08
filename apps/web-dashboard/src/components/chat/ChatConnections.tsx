@@ -1,216 +1,221 @@
 "use client";
 
-import { lazy, Suspense, useEffect, useId, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
-import { ArrowLeft, CalendarDays, Mail, Plug, Search, X } from "lucide-react";
+import { lazy, Suspense, useCallback, useEffect, useId, useRef, useState, type RefObject } from "react";
+import { ArrowLeft, Search, X } from "lucide-react";
+import { CONNECTION_STATUS_LABEL, connectOutcomeTurn, parseConnectCard, parseConnectionsOverview, providerDescriptor, type ConnectCard, type ConnectionsOverview } from "@droplet/shared-types";
 import { Dialog } from "@/components/Dialog";
-import { ConnectorCard } from "@/components/integrations/ConnectorCard";
-import type { ConnectAction } from "@/components/integrations/provider-descriptors";
-import { useAuth } from "@/lib/auth";
-import { useIntegrations, type HubEntry } from "@/lib/hooks/useIntegrations";
-import { chatConnectionNavigationUrl, resumeChatConnectionReturn, saveChatConnectionReturn } from "@/lib/chat-connection-return";
+import { PROVIDER_DESCRIPTORS } from "@/components/integrations/provider-descriptors";
+import { authFetch, useAuth } from "@/lib/auth";
+import { useIntegrations } from "@/lib/hooks/useIntegrations";
+import { useChatConnectionOAuth } from "@/lib/hooks/useChatConnectionOAuth";
 
-// Setup code and its status requests are loaded only after choosing a connection.
 const GoogleAccountCard = lazy(() => import("@/components/settings/GoogleAccountCard").then((module) => ({ default: module.GoogleAccountCard })));
 const Microsoft365Card = lazy(() => import("@/components/settings/Microsoft365Card").then((module) => ({ default: module.Microsoft365Card })));
 const EmailAccountCard = lazy(() => import("@/components/settings/EmailAccountCard").then((module) => ({ default: module.EmailAccountCard })));
 const SubscriptionsPanel = lazy(() => import("@/components/calendar/SubscriptionsPanel").then((module) => ({ default: module.SubscriptionsPanel })));
 const ConnectWizard = lazy(() => import("@/components/integrations/ConnectWizard").then((module) => ({ default: module.ConnectWizard })));
 const SaasCredentialsSection = lazy(() => import("@/components/integrations/SaasCredentialsSection").then((module) => ({ default: module.SaasCredentialsSection })));
+const AccountProviderSetup = lazy(() => import("@/components/settings/AccountProviderSetup").then((module) => ({ default: module.AccountProviderSetup })));
+const LanApiConnectionSetup = lazy(() => import("./connect/LanApiConnectionSetup").then((module) => ({ default: module.LanApiConnectionSetup })));
 
-type SetupView = "google" | "m365" | "mailbox" | "calendar";
-type Surface = "closed" | "catalog" | "credentials" | SetupView | { wizard: string };
+export type ConnectSetupRequest =
+  | { kind: "overview"; overview: ConnectionsOverview }
+  | { kind: "card"; card: ConnectCard };
 
-const PERSONAL_CATEGORY = "Personal accounts";
-const MAIL_CALENDAR_CATEGORY = "Mail and calendar";
-const PERSONAL_CONNECTIONS = [
-  { id: "google", name: "Google / Gmail", category: PERSONAL_CATEGORY, description: "Connect Gmail, Google Calendar, or both.", aliases: "google gmail mail calendar", icon: Mail },
-  { id: "m365", name: "Microsoft / Outlook", category: PERSONAL_CATEGORY, description: "Connect Outlook mail, Microsoft calendars, and files.", aliases: "microsoft microsoft365 m365 outlook onedrive sharepoint", icon: Mail },
-  { id: "mailbox", name: "Mailbox", category: MAIL_CALENDAR_CATEGORY, description: "Connect a mailbox using your mail server and account settings.", aliases: "imap smtp email mail mailbox", icon: Mail },
-  { id: "calendar", name: "Calendar subscription", category: MAIL_CALENDAR_CATEGORY, description: "Add an iCloud calendar, calendar share link, or CalDAV subscription.", aliases: "icloud apple ics caldav feed calendar", icon: CalendarDays },
-] as const;
-
-function matchesEntry(entry: HubEntry, query: string): boolean {
-  return [entry.meta.id, ...entry.providerKeys, entry.meta.name, entry.meta.category, entry.meta.description].join(" ").toLowerCase().includes(query);
+function PersonalAccountSetup({ card, onConnected }: { card: ConnectCard & { family: "google" | "m365" }; onConnected: () => void }) {
+  const [revision, setRevision] = useState(0);
+  const onReturn = useCallback(() => setRevision((current) => current + 1), []);
+  const oauth = useChatConnectionOAuth(card.family, { onConnected, onReturn });
+  const closeRef = useRef(oauth.close);
+  closeRef.current = oauth.close;
+  useEffect(() => () => closeRef.current(), []);
+  const navigation = { returnTo: "/chat/connect-return" as const, beforeConnect: oauth.beforeConnect, navigate: oauth.navigate, afterConnect: oauth.afterConnect };
+  return <div className="space-y-3">
+    {oauth.error && <p role="alert" className="type-footnote text-system-red">{oauth.error}</p>}
+    {oauth.status && <p role="status" className="type-footnote">{oauth.status}</p>}
+    {oauth.status?.startsWith("Finish approval") && <button type="button" className="btn" onClick={oauth.cancel}>Cancel sign-in</button>}
+    {card.family === "google" ? <GoogleAccountCard key={revision} {...navigation} /> : <Microsoft365Card key={revision} {...navigation} />}
+  </div>;
 }
 
-/** Chat entry point to the same descriptor-driven setup flows as Integrations. */
-export function ChatConnections() {
+/** Existing connection setup UI, opened by a successful chat tool result only. */
+export function ChatConnections({ request, onClose, onOutcome, triggerRef }: {
+  request: ConnectSetupRequest | null;
+  onClose: () => void;
+  onOutcome?: (turn: string) => void;
+  triggerRef?: RefObject<HTMLElement | null>;
+}) {
   const { user } = useAuth();
   const canManage = user?.role === "owner" || user?.role === "admin";
   const canConnectPersonal = canManage || user?.role === "family";
-  const router = useRouter();
-  const triggerRef = useRef<HTMLButtonElement>(null);
-  const searchRef = useRef<HTMLInputElement>(null);
+  const { refresh } = useIntegrations(Boolean(request) && canManage);
   const titleId = useId();
   const descriptionId = useId();
   const searchId = useId();
-  const [surface, setSurface] = useState<Surface>("closed");
+  const searchRef = useRef<HTMLInputElement>(null);
+  const [card, setCard] = useState<ConnectCard | null>(request?.kind === "card" ? request.card : null);
+  const [overview, setOverview] = useState<ConnectionsOverview | null>(request?.kind === "overview" ? request.overview : null);
   const [search, setSearch] = useState("");
   const [category, setCategory] = useState("");
-  // Keep the bound status refresh available through the wizard's onConnected.
-  // Closed chat and family/guest sessions never request admin-only status.
-  const { entries, isLoading, error, refresh } = useIntegrations(canManage && surface !== "closed");
+  const [loadingProvider, setLoadingProvider] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const lookupRevision = useRef(0);
+  const reported = useRef(new Set<string>());
+  const principal = useRef("");
+  principal.current = `${user?.id}:${user?.role}`;
 
   useEffect(() => {
-    if (!canConnectPersonal) return;
-    const provider = resumeChatConnectionReturn();
-    if (provider) setSurface(provider);
-  }, [canConnectPersonal]);
+    lookupRevision.current += 1;
+    setCard(request?.kind === "card" ? request.card : null);
+    setOverview(request?.kind === "overview" ? request.overview : null);
+    setLoadingProvider(null);
+    setError(null);
+    reported.current.clear();
+  }, [request]);
+  useEffect(() => () => { lookupRevision.current += 1; }, []);
 
-  useEffect(() => {
-    if (!canConnectPersonal) setSurface("closed");
-    else if (!canManage) setSurface((current) =>
-      typeof current === "object" || current === "mailbox" || current === "credentials" ? "catalog" : current,
-    );
-  }, [canConnectPersonal, canManage]);
+  const refreshOverview = useCallback(async () => {
+    if (!request || request.kind !== "overview") return;
+    const revision = lookupRevision.current;
+    try {
+      const response = await authFetch("/api/connections");
+      if (!response.ok) throw new Error("status unavailable");
+      const next = parseConnectionsOverview(await response.json());
+      if (!next) throw new Error("invalid connection status");
+      if (revision === lookupRevision.current) setOverview(next);
+    } catch {
+      if (revision === lookupRevision.current) setError("Droplet could not refresh connection status. The list may be out of date.");
+    }
+  }, [request]);
 
-  if (!canConnectPersonal) return null;
-
-  const query = search.trim().toLowerCase();
-  const personal = PERSONAL_CONNECTIONS.filter((connection) =>
-    (connection.id !== "mailbox" || canManage) &&
-    (!category || category === connection.category) &&
-    [connection.id, connection.name, connection.category, connection.description, connection.aliases].join(" ").toLowerCase().includes(query),
-  );
-  const catalog = canManage ? entries.filter((entry) => (!category || category === entry.meta.category) && matchesEntry(entry, query)) : [];
-  const categories = [...new Set([
-    PERSONAL_CATEGORY,
-    MAIL_CALENDAR_CATEGORY,
-    ...(canManage ? entries.map((entry) => entry.meta.category) : []),
-  ])];
-  const grouped = new Map<string, HubEntry[]>();
-  for (const entry of catalog) {
-    const group = grouped.get(entry.meta.category) ?? [];
-    group.push(entry);
-    grouped.set(entry.meta.category, group);
-  }
-
-  const run = (action: ConnectAction) => {
-    switch (action.kind) {
-      case "route":
-        // This route already owns a reusable, role-gated configurator. Keep
-        // its real credential fields in chat; other destinations still route.
-        if (action.href === "/integrations/credentials") {
-          setSurface("credentials");
-          return;
-        }
-        setSurface("closed");
-        router.push(action.href);
-        return;
-      case "wizard":
-        setSurface({ wizard: action.catalogId });
-        return;
-      case "unavailable":
-        // ConnectorCard renders the unavailable reason and a disabled action.
-        return;
+  const completed = useCallback((turn: string, provider = card?.provider) => {
+    void refresh();
+    void refreshOverview();
+    if (provider && !reported.current.has(provider)) {
+      reported.current.add(provider);
+      onOutcome?.(turn);
+    }
+  }, [card, onOutcome, refresh, refreshOverview]);
+  const connected = useCallback(() => { if (card) completed(connectOutcomeTurn(card.displayName, "connected")); }, [card, completed]);
+  const verifyWizardConnection = async () => {
+    const actor = principal.current;
+    const revision = lookupRevision.current;
+    try {
+      const rows = await refresh();
+      if (principal.current !== actor || lookupRevision.current !== revision) return;
+      void refreshOverview();
+      const actual = rows?.find((row) => row.provider === card?.provider);
+      if (actual?.status === "CONNECTED" || actual?.status === "CAPABILITY_LIMITED") connected();
+    } catch {
+      if (principal.current === actor && lookupRevision.current === revision) setError("Droplet could not confirm the connection's status. Check its status before trying again.");
     }
   };
 
-  const wizard = canManage && typeof surface === "object" ? surface.wizard : null;
-  const selected = PERSONAL_CONNECTIONS.find((connection) => connection.id === surface);
-  const catalogView = surface === "catalog" || surface === "closed";
+  const choose = async (provider: string) => {
+    if (!canConnectPersonal || loadingProvider) return;
+    const revision = ++lookupRevision.current;
+    setLoadingProvider(provider);
+    setError(null);
+    try {
+      const response = await authFetch(`/api/connections/card?q=${encodeURIComponent(provider)}`);
+      if (!response.ok) throw new Error("connection setup unavailable");
+      const body: unknown = await response.json();
+      const next = parseConnectCard(body && typeof body === "object" && "card" in body ? body.card : body);
+      if (!next) throw new Error("invalid connection setup");
+      if (revision === lookupRevision.current) setCard(next);
+    } catch {
+      if (revision === lookupRevision.current) setError("Droplet could not load this connection's setup. Try again.");
+    } finally {
+      if (revision === lookupRevision.current) setLoadingProvider(null);
+    }
+  };
 
-  return <>
-    <button
-      ref={triggerRef}
-      type="button"
-      className="chat-iconbtn"
-      title="Connections"
-      aria-label="Connections"
-      aria-haspopup="dialog"
-      aria-expanded={surface !== "closed"}
-      onClick={() => setSurface("catalog")}
-    >
-      <Plug size={17} aria-hidden="true" />
-    </button>
+  const back = () => {
+    lookupRevision.current += 1;
+    setLoadingProvider(null);
+    setError(null);
+    void refresh();
+    void refreshOverview();
+    if (overview) setCard(null);
+    else onClose();
+  };
+  const allowed = Boolean(card && canConnectPersonal && (card.scope !== "box" || canManage));
+  const personalCard = card?.family === "google" || card?.family === "m365";
+  const manageExistingAccount = personalCard && card?.blocked?.reason === "already_connected";
+  const descriptor = card?.family === "integration" ? PROVIDER_DESCRIPTORS.find((entry) => entry.meta.id === card.provider || entry.providerKeys.includes(card.provider)) : undefined;
+  const action = descriptor?.connect;
+  const backendDescriptor = card?.family === "integration" ? providerDescriptor(card.provider) : undefined;
+  const wizard = request && card && allowed && !card.blocked && action?.kind === "wizard" && backendDescriptor?.catalog?.id === action.catalogId ? action.catalogId : null;
+  const pending = <p className="type-footnote" role="status">Loading connection setup…</p>;
 
-    {/* Unmount the picker before mounting the wizard, so two modal focus traps
-        and closing animations never overlap. The composer trigger stays put. */}
-    {wizard ? <Suspense fallback={<Dialog open onClose={() => setSurface("catalog")} triggerRef={triggerRef} labelledBy={titleId}>
-      <h2 id={titleId} className="type-title-2">Connection setup</h2>
-      <p className="type-footnote mt-3" role="status">Loading connection setup…</p>
-      <button type="button" className="btn mt-4" onClick={() => setSurface("catalog")}>All connections</button>
-    </Dialog>}>
-      <ConnectWizard catalogId={wizard} triggerRef={triggerRef} onClose={() => setSurface("catalog")} onConnected={() => void refresh()} />
-    </Suspense> : <Dialog
-      open={surface !== "closed"}
-      onClose={() => setSurface("closed")}
-      triggerRef={triggerRef}
-      initialFocusRef={catalogView ? searchRef : undefined}
-      labelledBy={titleId}
-      describedBy={descriptionId}
-      maxWidth="xl"
-    >
-      <div className="space-y-4">
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <h2 id={titleId} className="type-title-2 text-[var(--text)]">{selected?.name ?? (surface === "credentials" ? "Connector credentials" : "Connections")}</h2>
-            <p id={descriptionId} className="type-footnote text-[var(--text-muted)] mt-2">
-              {selected?.description ?? (surface === "credentials" ? "Set up or manage the cloud service credentials on this Droplet." : "Add accounts and systems for Droplet to use. Choose a connection to start its setup.")}
-            </p>
-          </div>
-          <button type="button" className="btn" aria-label="Close connections" onClick={() => setSurface("closed")}><X size={18} aria-hidden="true" /></button>
+  // The picker unmounts before the canonical wizard mounts; never two active
+  // modal focus traps. No setup action changes the chat page's location.
+  if (wizard) return <Suspense fallback={<Dialog open onClose={back} triggerRef={triggerRef} labelledBy={titleId}>
+    <h2 id={titleId} className="type-title-2">Connection setup</h2>{pending}
+    <button type="button" className="btn mt-4" onClick={back}>Close setup</button>
+  </Dialog>}>
+    <ConnectWizard catalogId={wizard} triggerRef={triggerRef} onClose={back} onConnected={() => void verifyWizardConnection()} />
+  </Suspense>;
+
+  const query = search.trim().toLowerCase();
+  const familyAliases = { google: "gmail google calendar", m365: "microsoft outlook onedrive sharepoint", mailbox: "imap smtp mail email", calendar: "ics caldav icloud apple calendar", integration: "" };
+  const available = overview?.available.filter((entry) => {
+    const local = PROVIDER_DESCRIPTORS.find((descriptor) => descriptor.providerKeys.includes(entry.provider));
+    return (!category || entry.category === category) && [entry.provider, entry.displayName, entry.category, entry.family, familyAliases[entry.family], local?.meta.description, ...(local?.providerKeys ?? [])].join(" ").toLowerCase().includes(query);
+  }) ?? [];
+  const categories = [...new Set(overview?.available.flatMap((entry) => entry.category ? [entry.category] : []) ?? [])];
+
+  return <Dialog open={Boolean(request)} onClose={onClose} triggerRef={triggerRef} initialFocusRef={!card ? searchRef : undefined} labelledBy={titleId} describedBy={descriptionId} maxWidth="xl">
+    <div className="space-y-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h2 id={titleId} className="type-title-2 text-[var(--text)]">{card ? `Connect ${card.displayName}` : "Connections"}</h2>
+          <p id={descriptionId} className="type-footnote text-[var(--text-muted)] mt-2">{card?.summary ?? "Choose an account or system to connect. Setup opens here in chat."}</p>
         </div>
-
-        {catalogView ? <>
-          <div className="flex flex-col sm:flex-row gap-3">
-            <label htmlFor={searchId} className="flex-1 min-w-0">
-              <span className="type-caption-1 text-[var(--text-muted)]">Search connections</span>
-              <span className="flex items-center gap-2 mt-1">
-                <Search size={16} className="shrink-0 text-[var(--text-muted)]" aria-hidden="true" />
-                <input ref={searchRef} id={searchId} className="input w-full" type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Name, provider, or category" />
-              </span>
-            </label>
-            <label className="flex flex-col gap-1 type-caption-1 text-[var(--text-muted)]">
-              Filter connections
-              <select className="input" value={category} onChange={(event) => setCategory(event.target.value)}>
-                <option value="">All categories</option>
-                {categories.map((name) => <option key={name} value={name}>{name}</option>)}
-              </select>
-            </label>
-          </div>
-
-          {canManage && isLoading && <p role="status" className="type-footnote text-[var(--text-muted)]">Checking connection status…</p>}
-          {canManage && error && <div role="alert" className="card space-y-2">
-            <p className="type-footnote text-[var(--text-muted)]">{error} Connection status may be out of date.</p>
-            <button type="button" className="btn" onClick={() => void refresh()}>Retry connection status</button>
-          </div>}
-
-          {personal.length > 0 && <section aria-label="Accounts, mail, and calendars" className="space-y-3">
-            <h3 className="type-headline text-[var(--text)]">Accounts, mail, and calendars</h3>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              {personal.map((connection) => <button key={connection.id} type="button" className="card text-left" data-connection-id={connection.id} onClick={() => setSurface(connection.id)}>
-                <span className="flex items-center gap-2 type-headline text-[var(--text)]"><connection.icon size={18} aria-hidden="true" />{connection.name}</span>
-                <span className="block type-footnote text-[var(--text-muted)] mt-2">{connection.description}</span>
-                <span className="block type-caption-1 text-[var(--brand)] mt-3">Set up or manage</span>
-              </button>)}
-            </div>
-          </section>}
-
-          {!canManage && <p className="type-footnote text-[var(--text-muted)]">Your Droplet owner or administrator connects shared business systems and mailboxes.</p>}
-
-          {[...grouped].map(([name, group]) => <section key={name} aria-label={name} className="space-y-3">
-            <h3 className="type-headline text-[var(--text)]">{name}</h3>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              {group.map((entry) => <div key={entry.meta.id} data-connection-id={entry.meta.id}>
-                <ConnectorCard entry={entry} onConnect={() => run(entry.connect)} onOpen={() => run(entry.open)} onDisconnected={() => void refresh()} />
-              </div>)}
-            </div>
-          </section>)}
-
-          {personal.length === 0 && catalog.length === 0 && <p className="type-footnote text-[var(--text-muted)]" role="status">No connections match your search or filter.</p>}
-        </> : <>
-          <button type="button" className="btn" onClick={() => { if (surface === "credentials") void refresh(); setSurface("catalog"); }}><ArrowLeft size={16} aria-hidden="true" />All connections</button>
-          <Suspense fallback={<p role="status" className="type-footnote">Loading connection setup…</p>}>
-            {surface === "google" && <GoogleAccountCard returnTo="/chat" beforeConnect={() => saveChatConnectionReturn("google")} navigate={(url) => window.location.assign(chatConnectionNavigationUrl("google", url))} />}
-            {surface === "m365" && <Microsoft365Card returnTo="/chat" beforeConnect={() => saveChatConnectionReturn("m365")} navigate={(url) => window.location.assign(chatConnectionNavigationUrl("m365", url))} />}
-            {surface === "mailbox" && canManage && <EmailAccountCard />}
-            {surface === "calendar" && <SubscriptionsPanel />}
-            {surface === "credentials" && canManage && <SaasCredentialsSection />}
-          </Suspense>
-        </>}
+        <button type="button" className="btn" aria-label="Close connection setup" onClick={onClose}><X size={18} aria-hidden="true" /></button>
       </div>
-    </Dialog>}
-  </>;
+      {error && <p role="alert" className="type-footnote text-system-red">{error}</p>}
+      {loadingProvider && <p role="status" className="type-footnote">Checking setup…</p>}
+
+      {card ? <>
+        {overview && <button type="button" className="btn" onClick={back}><ArrowLeft size={16} aria-hidden="true" />All connections</button>}
+        {!allowed ? <p className="type-footnote">Ask your Droplet owner or administrator to connect this system.</p> : card.blocked && !manageExistingAccount ? <div className="space-y-3">
+          <p className="type-footnote" role="status">{card.blocked.message}</p>
+          {personalCard && card.blocked.reason === "setup_required" && canManage && <Suspense fallback={pending}><AccountProviderSetup onSaved={() => void choose(card.provider)} /></Suspense>}
+        </div> : <Suspense fallback={pending}>
+          {(card.family === "google" || card.family === "m365") && <PersonalAccountSetup key={`${card.provider}:${user?.id}:${user?.role}`} card={card as ConnectCard & { family: "google" | "m365" }} onConnected={connected} />}
+          {card.family === "mailbox" && canManage && <EmailAccountCard onConnected={connected} />}
+          {card.family === "calendar" && <SubscriptionsPanel onConnected={() => completed("Calendar subscription was added. The first sync is pending.")} />}
+          {card.family === "integration" && (card.provider === "eaglesoft-api" && backendDescriptor?.track === "lan" ? <LanApiConnectionSetup key={`${card.provider}:${user?.id}:${user?.role}`} onConnected={connected} /> : action?.kind === "route" && action.href === "/integrations/credentials" ? <SaasCredentialsSection onConnected={(provider) => {
+            const connectedDescriptor = PROVIDER_DESCRIPTORS.find((entry) => entry.providerKeys.includes(provider));
+            if (connectedDescriptor) completed(connectOutcomeTurn(connectedDescriptor.meta.name, "connected"), provider);
+          }} /> : <p className="type-footnote" role="status">{action?.kind === "unavailable" ? action.reason : "This connection has no setup flow available in chat yet."}</p>)}
+        </Suspense>}
+      </> : overview ? <>
+        <p className="type-footnote text-[var(--text-muted)]">{overview.counts.connected} connected · {overview.counts.needsAttention} need attention · {overview.counts.available} available</p>
+        {overview.connected.length > 0 && <section aria-label="Connected systems" className="space-y-3">
+          <h3 className="type-headline">Connected systems</h3>
+          {overview.connected.map((entry) => <div key={entry.id} className="card" data-connection-id={entry.id}>
+            <div className="flex items-center justify-between gap-3"><span className="type-headline">{entry.displayName}</span><span className="type-caption-1">{CONNECTION_STATUS_LABEL[entry.status]}</span></div>
+            {entry.detail && <p className="type-footnote text-[var(--text-muted)] mt-2">{entry.detail}</p>}
+            {entry.statusDetail && <p className="type-footnote text-[var(--text-muted)] mt-2">{entry.statusDetail}</p>}
+            {entry.canReconnect && canConnectPersonal && <button type="button" className="btn mt-3" disabled={Boolean(loadingProvider)} onClick={() => void choose(entry.provider)}>Reconnect {entry.displayName}</button>}
+          </div>)}
+        </section>}
+        <div className="flex flex-col sm:flex-row gap-3">
+          <label htmlFor={searchId} className="flex-1 min-w-0"><span className="type-caption-1 text-[var(--text-muted)]">Search connections</span><span className="flex items-center gap-2 mt-1"><Search size={16} className="shrink-0" aria-hidden="true" /><input ref={searchRef} id={searchId} className="input w-full" type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Name, provider, or category" /></span></label>
+          <label className="flex flex-col gap-1 type-caption-1 text-[var(--text-muted)]">Filter connections<select className="input" value={category} onChange={(event) => setCategory(event.target.value)}><option value="">All categories</option>{categories.map((name) => <option key={name} value={name}>{name}</option>)}</select></label>
+        </div>
+        <section aria-label="Available connections" className="space-y-3">
+          <h3 className="type-headline">Available connections</h3>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">{available.map((entry) => <div key={`${entry.family}:${entry.provider}`} className="card" data-connection-id={entry.provider}>
+            <h4 className="type-headline">{entry.displayName}</h4>{entry.category && <p className="type-caption-1 text-[var(--text-muted)] mt-2">{entry.category}</p>}
+            <button type="button" className="btn mt-3" disabled={!canConnectPersonal || !entry.canConnect || (entry.scope === "box" && !canManage) || Boolean(loadingProvider)} onClick={() => void choose(entry.provider)}>Set up {entry.displayName}</button>
+            {(!entry.canConnect || (entry.scope === "box" && !canManage)) && <p className="type-caption-1 text-[var(--text-muted)] mt-2">Ask an owner or administrator to connect this.</p>}
+          </div>)}</div>
+          {available.length === 0 && <p className="type-footnote" role="status">No connections match your search or filter.</p>}
+        </section>
+      </> : null}
+    </div>
+  </Dialog>;
 }

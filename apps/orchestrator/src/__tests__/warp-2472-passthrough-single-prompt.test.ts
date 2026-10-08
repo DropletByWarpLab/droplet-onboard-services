@@ -301,7 +301,8 @@ describe("WARP-2472 — the pass-through roster, enumerated from the flag", () =
     //
     // The pass-through roster below is again unchanged: none of the tools
     // touched since relays a 202.
-    expect(confirming).toHaveLength(42);
+    // Connection removal also uses interceptor-owned approval.
+    expect(confirming).toHaveLength(43);
     expect(passThrough).toEqual([
       "add_port_forward",
       "approve_ap",

@@ -8,6 +8,9 @@ import { TOOLS, TOOL_CATALOG } from "../src/index.js";
 // Authoritative inventory list — must match `INVENTORY.md`. Update both in
 // lockstep when adding/removing handlers.
 const EXPECTED_TOOL_NAMES = [
+  "list_connections",
+  "start_connection",
+  "disconnect_connection",
   // network
   "add_port_forward",
   "approve_ap",            // WARP-446

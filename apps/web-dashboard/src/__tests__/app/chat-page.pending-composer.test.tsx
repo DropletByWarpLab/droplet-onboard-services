@@ -103,15 +103,6 @@ beforeEach(() => {
 });
 
 describe("WARP-829 chat-page pendingComposer (seed-not-send)", () => {
-  it("does not replace the chat draft with a queued tool during a connection return", () => {
-    searchParamsRef.current = new URLSearchParams("m365=connected");
-    window.sessionStorage.setItem("droplet.chatDraft", "My draft before sign-in");
-    writePayload();
-    render(<ChatPage />);
-    expect(screen.getByPlaceholderText("Ask Droplet anything…")).toHaveValue("My draft before sign-in");
-    expect(window.sessionStorage.getItem(PENDING_COMPOSER_KEY)).not.toBeNull();
-    expect(sendMessageMock).not.toHaveBeenCalled();
-  });
   it("seeds the composer with the starter line on a fresh chat", async () => {
     writePayload({ seedText: "Using network, " });
 

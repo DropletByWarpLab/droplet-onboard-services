@@ -165,6 +165,7 @@ export function Microsoft365Card({
   mailPollMs = 5_000,
   returnTo,
   beforeConnect,
+  afterConnect,
 }: AccountConnectionNavigation & {
   /** Where the browser goes to sign in. Injected so tests can observe it. */
   navigate?: (url: string) => void;
@@ -283,6 +284,8 @@ export function Microsoft365Card({
       setError("Droplet could not start the Microsoft sign-in. Try again, or ask your Droplet administrator to check Account connection setup.");
     } catch {
       setError("Droplet could not reach itself to start the sign-in. Check your connection and try again.");
+    } finally {
+      afterConnect?.();
     }
     setBusy(false);
   };
