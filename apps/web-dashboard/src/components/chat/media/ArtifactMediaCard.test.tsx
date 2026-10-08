@@ -156,6 +156,35 @@ describe("interactive artifact preview", () => {
     expect(screen.queryByTitle("Demo.html")).toBeNull();
     expect(channel.port1.closed).toBe(true);
   });
+  it.each(["account", "role", "sign-out"])("requires a fresh preview click after the original viewer returns (%s)", async (change) => {
+    const fetch = mockFetch();
+    const media = artifactMediaFromPath("/Demo.html");
+    const view = render(<ArtifactMediaCard media={media} />);
+    fireEvent.click(screen.getByRole("button", { name: "Preview" }));
+    const previousNonce = nonce();
+    fireEvent.load(frame());
+    const channel = await boot();
+    await message({ type: "droplet-artifact-ready", supported: true }, channel);
+    await waitFor(() => expect(channel.port1.postMessage).toHaveBeenCalled());
+    await message({ type: "droplet-artifact-loaded" }, channel);
+    auth.user = change === "account" ? { id: "owner-2", role: "owner" } : change === "role" ? { id: "owner-1", role: "guest" } : null;
+    view.rerender(<ArtifactMediaCard media={media} />);
+    expect(screen.queryByTitle("Demo.html")).toBeNull();
+    expect(channel.port1.closed).toBe(true);
+    auth.user = { id: "owner-1", role: "owner" };
+    view.rerender(<ArtifactMediaCard media={media} />);
+    expect(screen.queryByTitle("Demo.html")).toBeNull();
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(channels).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "Preview" }));
+    expect(nonce()).not.toBe(previousNonce);
+    expect(screen.getByRole("status")).toHaveTextContent("Checking preview isolation");
+    fireEvent.load(frame());
+    await waitFor(() => expect(channels).toHaveLength(2));
+    await message({ type: "droplet-artifact-ready", supported: true }, channels[1]);
+    await waitFor(() => expect(channels[1].port1.postMessage).toHaveBeenCalled());
+    expect(fetch).toHaveBeenCalledTimes(4);
+  });
   it("drops a private fetch that resolves after the account changes", async () => {
     let resolve!: (value: Response) => void;
     const fetch = vi.fn((url: string, _options?: RequestInit) => url === "/api/artifact-preview-probe" ? Promise.resolve(new Response(null, { status: 204 })) : new Promise<Response>((done) => { resolve = done; }));

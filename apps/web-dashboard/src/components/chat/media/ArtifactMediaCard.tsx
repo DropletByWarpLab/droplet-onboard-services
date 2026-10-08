@@ -39,6 +39,13 @@ export function ArtifactMediaCard({ media }: { media: ArtifactMedia }) {
   const latestViewer = useRef(viewer);
   latestViewer.current = viewer;
   const [openedFor, setOpenedFor] = useState<string | null>(null);
+  const [previousViewer, setPreviousViewer] = useState(viewer);
+  if (previousViewer !== viewer) {
+    // Retire the Preview choice before committing this render. Returning to
+    // the original account must not revive an executable frame automatically.
+    setPreviousViewer(viewer);
+    setOpenedFor(null);
+  }
   const open = Boolean(user && openedFor === viewer);
   const [nonce, setNonce] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
