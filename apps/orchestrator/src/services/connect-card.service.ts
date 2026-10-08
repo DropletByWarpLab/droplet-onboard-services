@@ -321,7 +321,12 @@ function toConnectField(def: FieldDef): ConnectField {
 }
 
 function sentence(text: string): string {
-  return text.replace(/!/g, "").replace(/\s+/g, " ").trim().replace(/[.\s]+$/, "");
+  const normalized = text.replace(/!/g, "").replace(/\s+/g, " ").trim();
+  // Whitespace is collapsed to spaces. Scan the trailing dots and spaces, so
+  // punctuation elsewhere cannot make an anchored regex retry each suffix.
+  let end = normalized.length;
+  while (end > 0 && (normalized[end - 1] === "." || normalized[end - 1] === " ")) end -= 1;
+  return normalized.slice(0, end);
 }
 
 /** One line: what Droplet reads, and how. Sentence case, middle dots, no exclamation marks. */

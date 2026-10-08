@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { parseConnectCard, providerDescriptors } from "@droplet/shared-types";
+import { __resetRegisteredProvidersForTest, parseConnectCard, providerDescriptors, registerProviderDescriptor } from "@droplet/shared-types";
 
 const views = vi.hoisted(() => ({ google: vi.fn(), microsoft: vi.fn() }));
 vi.mock("./google/google-auth.service.js", () => ({ getGoogleConnectionView: views.google }));
@@ -15,6 +15,7 @@ const deps = { getGoogleApp: vi.fn(async (): Promise<unknown> => ({ clientId: "g
 
 beforeEach(() => {
   vi.clearAllMocks();
+  __resetRegisteredProvidersForTest();
   prisma.integrationConnection.findFirst.mockResolvedValue(null);
   views.google.mockResolvedValue({ state: "DISCONNECTED" });
   views.microsoft.mockResolvedValue({ state: "DISCONNECTED", app: null });
@@ -41,6 +42,18 @@ describe("connection provider resolution", () => {
 });
 
 describe("connection setup descriptors", () => {
+  it.each([
+    [" \tReads!\nmail. and events!... \t", "Reads mail. and events"],
+    ["Reads mail . \t. .!\n", "Reads mail"],
+    [". \t. .!\n", ""],
+    [`Reads${".".repeat(100_000)}${"\t".repeat(100_000)}events...`, `Reads${".".repeat(395)}`],
+  ])("normalizes a provider summary without rescanning punctuation runs", async (description, expected) => {
+    const template = providerDescriptors().find((descriptor) => descriptor.track === "mcp");
+    if (!template || template.track !== "mcp") throw new Error("Expected an MCP descriptor fixture");
+    registerProviderDescriptor({ ...template, id: "summary-fixture", displayName: "Summary fixture", datasets: [], description });
+    const card = await buildConnectCard(prisma as never, owner, { family: "integration", provider: "summary-fixture" }, deps);
+    expect(card.summary).toBe(expected);
+  });
   it("provides validated setup for every available catalog provider, including MCP", async () => {
     for (const descriptor of providerDescriptors()) {
       const card = await buildConnectCard(prisma as never, owner, { family: "integration", provider: descriptor.id }, deps);
