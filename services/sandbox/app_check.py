@@ -175,6 +175,25 @@ def _probe(port: int, path: str, deadline: float) -> dict[str, Any]:
             response.close()
 
 
+def _process_command(work: Path, manifest: dict[str, Any]) -> list[str]:
+    """Build only a fixed interpreter invocation, never a manifest argv."""
+    runtime = manifest.get("runtime")
+    if runtime not in {"node20", "python312"}:
+        raise StoreError(400, "app-check needs a supported process runtime")
+    entrypoint = _path(work, manifest.get("entrypoint"))
+    if not entrypoint.is_file():
+        raise StoreError(400, "app-check entrypoint is not a file")
+    resources = manifest.get("resources")
+    memory = resources.get("memoryMb") if isinstance(resources, dict) else None
+    if type(memory) is not int or not 16 <= memory <= 4096:
+        raise StoreError(400, "app-check needs a process memory budget of 16–4096 MB")
+    if type(resources.get("processes")) is not int or resources["processes"] != 1:
+        raise StoreError(400, "an app requires exactly one process")
+    if runtime == "node20":
+        return [NODE_BIN, f"--max-old-space-size={memory}", "--", str(entrypoint)]
+    return [sys.executable, "--", str(entrypoint)]
+
+
 def run(work: Path, timeout_ms: int, *, env: dict[str, str],
         with_limits: Callable[[list[str]], list[str]]) -> dict[str, Any]:
     started = time.monotonic()
@@ -195,22 +214,14 @@ def run(work: Path, timeout_ms: int, *, env: dict[str, str],
     else:
         if "dir" in manifest["http"] or "spa" in manifest["http"]:
             raise StoreError(400, "process apps cannot declare a static directory or spa")
-        entrypoint = _path(work, manifest.get("entrypoint"))
-        if not entrypoint.is_file():
-            raise StoreError(400, "app-check entrypoint is not a file")
-        resources = manifest.get("resources")
-        memory = resources.get("memoryMb") if isinstance(resources, dict) else None
-        if type(memory) is not int or not 16 <= memory <= 4096:
-            raise StoreError(400, "app-check needs a process memory budget of 16–4096 MB")
-        if type(resources.get("processes")) is not int or resources["processes"] != 1:
-            raise StoreError(400, "an app requires exactly one process")
+        command = _process_command(work, manifest)
+        memory = manifest["resources"]["memoryMb"]
         import extensions
 
         left = extensions.budget()["availableMb"]
         if memory > left:
             raise StoreError(409, f"app-check needs {memory} MB; only {left} MB remains in the sandbox")
-        executable = NODE_BIN if runtime == "node20" else sys.executable
-        command = [executable, *([f"--max-old-space-size={memory}"] if runtime == "node20" else []), str(entrypoint)]
+        executable = command[0]
         proc = None
         captures: list[_Capture] = []
         with tempfile.TemporaryDirectory(prefix="app-check-") as data_dir:
@@ -222,6 +233,10 @@ def run(work: Path, timeout_ms: int, *, env: dict[str, str],
                          "DROPLET_EXT_BASE_PATH": f"/{work.name}/", "DROPLET_EXT_DATA_DIR": data_dir}
             base_path = child_env["DROPLET_EXT_BASE_PATH"]
             try:
+                # Recheck the confined regular entrypoint at the exec boundary;
+                # the interpreter and flags are fixed, with no shell or caller argv.
+                command = _process_command(work, manifest)
+                # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-tainted-env-args -- _process_command validates manifest paths/budget and constructs fixed interpreter argv; workspace supplies stripped RUN_ENV, never request env.
                 proc = subprocess.Popen(with_limits(command), cwd=str(work), env=child_env,
                                         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                         close_fds=True, start_new_session=True, bufsize=0)

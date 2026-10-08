@@ -80,36 +80,44 @@ class RelayResponse:
         self.deadline = deadline
         self.timer = timer
         self.expired = expired
+        self._state_lock = threading.Lock()
+        self._read_lock = threading.Lock()
 
     def chunks(self) -> Iterator[bytes]:
-        if self.body is None:
-            return
         try:
             while True:
-                if self.deadline is not None:
-                    remaining = self.deadline - time.monotonic()
-                    if remaining <= 0:
+                # HTTPResponse mutates fp while decoding chunk framing. A
+                # concurrent close must interrupt the socket first, then
+                # wait for this read before closing that response object.
+                with self._read_lock:
+                    with self._state_lock:
+                        body, connection = self.body, self.connection
+                    if body is None:
+                        return
+                    if self.deadline is not None:
+                        remaining = self.deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise TimeoutError("app HTTP response deadline exceeded")
+                        if connection and connection.sock:
+                            connection.sock.settimeout(remaining)
+                        elif isinstance(body, http.client.HTTPResponse):
+                            # HTTP/1.0 closes the connection object while its
+                            # response still owns the socket.
+                            raw = getattr(getattr(body, "fp", None), "raw", None)
+                            sock = getattr(raw, "_sock", None)
+                            if sock is not None:
+                                sock.settimeout(remaining)
+                    # read1 returns available SSE bytes rather than waiting for 64KiB.
+                    reader = getattr(body, "read1", body.read)
+                    try:
+                        data = reader(65_536)
+                    except (OSError, http.client.HTTPException) as exc:
+                        if ((self.expired is not None and self.expired.is_set())
+                                or (self.deadline is not None and time.monotonic() >= self.deadline)):
+                            raise TimeoutError("app HTTP response deadline exceeded") from exc
+                        raise
+                    if self.expired is not None and self.expired.is_set():
                         raise TimeoutError("app HTTP response deadline exceeded")
-                    if self.connection and self.connection.sock:
-                        self.connection.sock.settimeout(remaining)
-                    elif isinstance(self.body, http.client.HTTPResponse):
-                        # HTTP/1.0 closes the connection object while its
-                        # response still owns the socket.
-                        raw = getattr(getattr(self.body, "fp", None), "raw", None)
-                        sock = getattr(raw, "_sock", None)
-                        if sock is not None:
-                            sock.settimeout(remaining)
-                # read1 returns available SSE bytes rather than waiting for 64KiB.
-                reader = getattr(self.body, "read1", self.body.read)
-                try:
-                    data = reader(65_536)
-                except (OSError, http.client.HTTPException) as exc:
-                    if ((self.expired is not None and self.expired.is_set())
-                            or (self.deadline is not None and time.monotonic() >= self.deadline)):
-                        raise TimeoutError("app HTTP response deadline exceeded") from exc
-                    raise
-                if self.expired is not None and self.expired.is_set():
-                    raise TimeoutError("app HTTP response deadline exceeded")
                 if not data:
                     break
                 yield data
@@ -117,8 +125,9 @@ class RelayResponse:
             self.close()
 
     def close(self) -> None:
-        body, connection, timer = self.body, self.connection, self.timer
-        self.body = self.connection = self.timer = None
+        with self._state_lock:
+            body, connection, timer = self.body, self.connection, self.timer
+            self.body = self.connection = self.timer = None
         sock = connection.sock if connection is not None else None
         if sock is None and isinstance(body, http.client.HTTPResponse):
             raw = getattr(getattr(body, "fp", None), "raw", None)
@@ -133,12 +142,13 @@ class RelayResponse:
                 pass
         if timer is not None:
             timer.cancel()
-        try:
-            if body is not None:
-                body.close()
-        finally:
-            if connection is not None:
-                connection.close()
+        with self._read_lock:
+            try:
+                if body is not None:
+                    body.close()
+            finally:
+                if connection is not None:
+                    connection.close()
 
 
 def static_root(directory: Path, http: dict[str, Any]) -> Path:

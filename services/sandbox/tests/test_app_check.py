@@ -75,6 +75,44 @@ def test_exact_app_check_argv_and_tool_refusal_before_execution(store):
     assert workspace.last_run("ws-app") is None
 
 
+@pytest.mark.parametrize("runtime", ["node20", "python312"])
+def test_process_argv_is_fixed_to_manifest_runtime_budget_and_confined_entrypoint(tmp_path, monkeypatch, runtime):
+    work = tmp_path / "work"
+    work.mkdir()
+    entry = work / "server.py"
+    entry.write_text("raise SystemExit(7)")
+    config = manifest(runtime, argv=["/bin/sh", "-c", "do-not-run"], executable="/bin/sh")
+    monkeypatch.setattr(app_check, "NODE_BIN", "/image/bin/node")
+    expected = (["/image/bin/node", "--max-old-space-size=64", "--", str(entry)] if runtime == "node20"
+                else [sys.executable, "--", str(entry)])
+    assert app_check._process_command(work, config) == expected
+    # Neither a caller-controlled executable/argv nor interpreter options
+    # in an entrypoint can replace the fixed interpreter invocation.
+    for path in ("-c", "../outside.py", "/bin/sh", "server.py --eval=bad"):
+        with pytest.raises(StoreError):
+            app_check._process_command(work, {**config, "entrypoint": path})
+
+
+def test_process_argv_is_revalidated_immediately_before_popen(tmp_path, monkeypatch):
+    entry = tmp_path / "server.py"
+    entry.write_text("raise SystemExit(7)")
+    (tmp_path / "extension-manifest.json").write_text(json.dumps(manifest()))
+    original = app_check._process_command
+    commands = []
+
+    def command(work, config):
+        commands.append(original(work, config))
+        if len(commands) == 1:
+            entry.unlink()  # The checked entry disappeared before exec.
+        return commands[-1]
+
+    monkeypatch.setattr(app_check, "_process_command", command)
+    monkeypatch.setattr(app_check.subprocess, "Popen", lambda *a, **k: pytest.fail("unchecked argv executed"))
+    result = app_check.run(tmp_path, 1000, env={}, with_limits=lambda argv: argv)
+    assert result["exitCode"] == 1 and "entrypoint is not a file" in result["stderr"]
+    assert commands == [[sys.executable, "--", str(entry)]]
+
+
 def test_python_server_gets_assigned_port_no_service_secret_and_temporary_data(store, monkeypatch):
     monkeypatch.setenv("SANDBOX_SERVICE_TOKEN", "never-copy-me")
     work = app(store, SERVER)

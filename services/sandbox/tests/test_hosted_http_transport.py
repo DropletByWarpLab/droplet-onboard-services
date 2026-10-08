@@ -169,13 +169,15 @@ def test_concurrent_close_interrupts_reader_in_drip_fed_chunk_framing(peer, conn
     body, connection, timer = response.body, response.connection, response.timer
     if connection_close:
         assert connection.sock is None  # Exercise the HTTPResponse-owned socket.
-    original_read = body.read1
+    original_read = body.fp.readline
 
-    def read(size):
+    def read(*args):
         reading.set()
-        return original_read(size)
+        return original_read(*args)
 
-    body.read1 = read
+    # Synchronize on the blocked chunk-framing read itself, rather than
+    # merely on entry into read1 before HTTPResponse has touched its fp.
+    body.fp.readline = read
     errors = []
     closed = threading.Event()
 
@@ -208,7 +210,69 @@ def test_concurrent_close_interrupts_reader_in_drip_fed_chunk_framing(peer, conn
     assert not response.expired.is_set()
     # Closing a read in progress can terminate it with a socket/HTTP error;
     # a double-close AttributeError or other internal exception is a defect.
-    assert all(isinstance(exc, (OSError, http.client.HTTPException)) for exc in errors)
+    assert all(isinstance(exc, (OSError, http.client.HTTPException)) for exc in errors), repr(errors)
+
+
+def test_close_interrupts_socket_then_waits_for_response_read_to_finish():
+    reading, shutdown, interrupted = threading.Event(), threading.Event(), threading.Event()
+    release, body_closed = threading.Event(), threading.Event()
+    errors = []
+
+    class Socket:
+        def shutdown(self, how):
+            shutdown.set()
+
+    class Connection:
+        sock = Socket()
+
+        def close(self):
+            self.sock = None
+
+    class Body:
+        def read1(self, size):
+            reading.set()
+            assert shutdown.wait(1), "close did not interrupt the socket"
+            interrupted.set()
+            assert release.wait(1), "test did not release the interrupted read"
+            raise OSError("socket shut down")
+
+        read = read1
+
+        def close(self):
+            assert release.is_set(), "response closed while read still owns fp"
+            body_closed.set()
+
+    response = hosted_http.RelayResponse(200, {}, Body(), connection=Connection())
+
+    def consume():
+        try:
+            list(response.chunks())
+        except Exception as exc:  # noqa: BLE001 — assert worker failures below.
+            errors.append(exc)
+
+    def close():
+        try:
+            response.close()
+        except Exception as exc:  # noqa: BLE001 — assert worker failures below.
+            errors.append(exc)
+
+    reader = threading.Thread(target=consume, daemon=True)
+    closer = threading.Thread(target=close, daemon=True)
+    reader.start()
+    try:
+        assert reading.wait(1)
+        closer.start()
+        assert interrupted.wait(1)
+        assert not body_closed.is_set()
+    finally:
+        release.set()
+        reader.join(timeout=1)
+        if closer.ident is not None:
+            closer.join(timeout=1)
+    assert not reader.is_alive() and not closer.is_alive()
+    assert body_closed.is_set()
+    assert len(errors) == 1 and isinstance(errors[0], OSError), repr(errors)
+    response.close()  # Idempotent after the reader and closer both cleaned up.
 
 
 def test_asgi_send_failure_before_iteration_closes_upstream(peer):
