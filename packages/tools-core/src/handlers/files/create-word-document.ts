@@ -15,11 +15,10 @@ const inputSchema = {
   properties: {
     path: {
       type: "string",
-      description: "Full target path including filename; must end in .docx.",
+      description: "New .docx file path.",
     },
     title: {
       type: "string",
-      description: "Document title, rendered as the top-level heading.",
     },
     body_markdown: {
       type: "string",
@@ -53,7 +52,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "create_word_document",
   description:
-    "Write a Word (.docx) document into the user's files. Give `path` (ending in .docx), a `title`, and `body_markdown` for the content. Prefer this over create_pdf_report when the user will edit the result; the document opens in the dashboard's editor.",
+    "Create an editable Word document in the user's files; refuses overwrite.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: false,

@@ -1,5 +1,5 @@
 """
-The three document renderers (WARP-2211): spec in, bytes out.
+The document renderers (WARP-2211): spec in, bytes out.
 
 Every function here is pure — it takes a validated spec and returns bytes. No
 filesystem, no network, no credentials. The orchestrator owns auth, path
@@ -15,6 +15,7 @@ permissive-only rule applies):
                                         LGPL native layer enters the image.
                                         WeasyPrint was rejected for exactly
                                         that; wkhtmltopdf is LGPL outright.
+    python-pptx  MIT            .pptx  — editable native text and shapes.
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ from docx.shared import Pt
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font
 from openpyxl.utils import get_column_letter
+from openpyxl.workbook.properties import CalcProperties
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_LEFT
 from reportlab.lib.pagesizes import LETTER
@@ -49,6 +51,7 @@ MIME = {
     "pdf": "application/pdf",
     "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
 }
 
 # Caps. A legitimate spec is bounded by the model's 4096-token output budget,
@@ -76,6 +79,13 @@ FORMULA_LEADER = re.compile(r"^\s*[=+\-@]")
 
 class RenderError(ValueError):
     """A spec the renderer refuses. Surfaces to the caller as 400."""
+
+
+def render_slide_deck(title: str, slides: list[dict[str, Any]], format: str) -> bytes:
+    """A bounded 16:9 deck, with the same layout in PDF and editable PPTX."""
+    from slides import render_deck
+
+    return render_deck(title, slides, format)
 
 
 # ── .docx ────────────────────────────────────────────────────────────────
@@ -235,6 +245,7 @@ def render_xlsx(sheets: list[dict[str, Any]]) -> bytes:
         raise RenderError(f"too many sheets (max {MAX_SHEETS})")
 
     wb = Workbook()
+    wb.calculation = CalcProperties(fullCalcOnLoad=True, forceFullCalc=True, calcMode="auto")
     wb.remove(wb.active)
     used: set[str] = set()
 
@@ -262,9 +273,17 @@ def render_xlsx(sheets: list[dict[str, Any]]) -> bytes:
         for row in rows:
             if not isinstance(row, list):
                 raise RenderError("each row must be an array")
-            ws.append([_cell(v) for v in row[:MAX_COLUMNS]])
+            if len(row) > MAX_COLUMNS:
+                raise RenderError(f"too many columns in a row (max {MAX_COLUMNS})")
+            ws.append([_cell(v) for v in row])
 
         _autofit(ws, columns, rows)
+        from workbook_features import WorkbookFeatureError, apply_workbook_features
+
+        try:
+            apply_workbook_features(ws, spec)
+        except WorkbookFeatureError as exc:
+            raise RenderError(str(exc)) from exc
 
     buf = io.BytesIO()
     wb.save(buf)

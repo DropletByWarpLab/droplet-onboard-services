@@ -32,7 +32,7 @@ const contentSearch: CategoryRenderer = (can) => {
     can("summarize_file") ? "summarize_file" : null,
   ].filter((n): n is string => n !== null);
   return (
-    "- For questions about the business's files, documents, notes or emails, call search_content and ground answers in the passages (cite paths)" +
+    "- Ground file, document, note and email answers in search_content passages (cite paths)" +
     (deeper.length > 0
       ? `; go deeper with ${deeper.join(" or ")}`
       : "") +
@@ -43,16 +43,15 @@ const contentSearch: CategoryRenderer = (can) => {
 const email: CategoryRenderer = (can) => {
   if (!can("email_search")) return null;
   let line =
-    "- For email questions, search with email_search" +
+    "- Search email with email_search" +
     (can("email_read") ? " and read with email_read" : "") +
     (can("email_summarize_thread")
-      ? "; summarize long threads with email_summarize_thread"
-      : "") +
-    " before answering";
+      ? "; summarize threads with email_summarize_thread"
+      : "");
   if (can("email_draft_reply")) {
     line += can("email_send")
-      ? ". Draft replies with email_draft_reply and confirm before sending with email_send"
-      : ". Prepare replies with email_draft_reply";
+      ? ". Draft with email_draft_reply and confirm before sending with email_send"
+      : ". Draft with email_draft_reply";
   }
   return line + ".";
 };
@@ -77,10 +76,10 @@ const calendar: CategoryRenderer = (can) => {
   ].filter((n): n is string => n !== null);
   if (check.length === 0) return null;
   return (
-    `- Never guess schedules: check the calendar with ${check.join(" or ")}` +
-    (can("list_reminders") ? "; track reminders with list_reminders" : "") +
-    (can("search_contacts") ? "; look people up with search_contacts" : "") +
-    (can("set_timer") ? "; set countdowns with set_timer" : "") +
+    `- Never guess schedules: use ${check.join(" or ")}` +
+    (can("list_reminders") ? "; reminders: list_reminders" : "") +
+    (can("search_contacts") ? "; contacts: search_contacts" : "") +
+    (can("set_timer") ? "; countdowns: set_timer" : "") +
     "."
   );
 };
@@ -90,14 +89,14 @@ const computation: CategoryRenderer = (can) => {
   const extras: string[] = [];
   if (can("unit_convert")) extras.push("unit_convert for units");
   if (can("currency_convert")) extras.push("currency_convert for money");
-  if (can("date_math")) extras.push("date_math for date arithmetic");
+  if (can("date_math")) extras.push("date_math for dates");
   if (can("get_current_datetime"))
-    extras.push("get_current_datetime for the date and time");
+    extras.push("get_current_datetime for date/time");
   // Strong-but-scoped mandate (locked in the 2026-07-23 spec): "never
   // mentally" steering without routing counting or algebra into a tool
   // that rejects unknown identifiers at parse time.
   return (
-    "- Never do arithmetic in your head. For any computation — totals, percentages, margins, conversions — call calculate and report its formatted result. It evaluates plain numeric expressions only: reduce the problem to numbers first, and don't use it for simple counting or solving for unknowns" +
+    "- Never do arithmetic in your head: call calculate for totals, percentages, margins or conversions; report its formatted result. Use numeric expressions only; don't use it for simple counting or solving for unknowns" +
     (extras.length > 0 ? `. Use ${extras.join(", ")}` : "") +
     "."
   );
@@ -133,6 +132,18 @@ const cameras: CategoryRenderer = (can) => {
 /** WARP-3691 - show_file puts the file in the chat as a card/preview. */
 const showFiles: CategoryRenderer = (can) =>
   can("show_file") ? "- To show a file or image, call show_file." : null;
+
+// File creation uses compact specs, not prose or invented download links.
+// Reclaim wording elsewhere so this stays inside the existing guidance cap.
+const createFiles: CategoryRenderer = (can) => {
+  const writers = [
+    can("create_pdf_report") ? "PDF: create_pdf_report" : null,
+    can("create_slide_deck") ? "PDF/PPTX decks: create_slide_deck" : null,
+    can("create_spreadsheet") ? "Excel/formulas/charts: create_spreadsheet" : null,
+  ].filter((n): n is string => n !== null);
+  if (writers.length === 0) return null;
+  return `- Create files (${writers.join(", ")}). Use supplied or retrieved data; never invent it. Claim success only after the tool succeeds; link only returned download URLs.`;
+};
 
 const networkSystem: CategoryRenderer = (can) => {
   const status = [
@@ -189,6 +200,7 @@ const CATEGORY_RENDERERS: CategoryRenderer[] = [
   smartDevices,
   cameras,
   showFiles,
+  createFiles,
   networkSystem,
   memoryPointer,
   memoryWrite,

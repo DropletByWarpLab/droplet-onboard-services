@@ -15,30 +15,48 @@ const inputSchema = {
   properties: {
     path: {
       type: "string",
-      description: "Full target path including filename; must end in .xlsx.",
+      description: "New .xlsx file path.",
     },
     sheets: {
       type: "array",
       minItems: 1,
-      description: "One or more sheets. The first is what opens.",
       items: {
         type: "object",
         properties: {
           name: {
             type: "string",
-            description:
-              "Sheet tab name. Excel forbids []:*?/\\ and caps it at 31 characters; anything longer or illegal is sanitized rather than refused.",
           },
           columns: {
             type: "array",
             items: { type: "string" },
-            description: "Header row. Rendered bold and frozen.",
+            description: "Header row.",
           },
           rows: {
             type: "array",
             items: { type: "array", items: {} },
-            description:
-              "Data rows, each an array of cell values aligned to `columns`. Numbers and booleans stay native; a short row is padded, not rejected.",
+            description: "Typed values; strings stay text.",
+          },
+          formulas: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: { cell: { type: "string" }, expression: { type: "string" } },
+              required: ["cell", "expression"],
+              additionalProperties: false,
+            },
+            description: "Existing cell formulas: arithmetic, SUM/AVERAGE/MIN/MAX/COUNT/ROUND/ABS; local references only.",
+          },
+          chart: {
+            type: "object",
+            properties: {
+              title: { type: "string" },
+              kind: { type: "string", description: "bar or line" },
+              category_column: { type: "integer" },
+              value_column: { type: "integer" },
+            },
+            required: ["kind", "category_column", "value_column"],
+            additionalProperties: false,
+            description: "1-based columns; all data rows.",
           },
         },
         required: ["columns", "rows"],
@@ -71,7 +89,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "create_spreadsheet",
   description:
-    "Write an Excel (.xlsx) workbook into the user's files. Give `path` (ending in .xlsx) and `sheets`, each with `columns` (the header row) and `rows`. Use this for anything tabular the user will sort, filter or total.",
+    "Create Excel with optional formulas (recalculate on open) and chart; refuses overwrite.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: false,

@@ -147,7 +147,7 @@ export function NewToolDialog({ open, onClose, triggerRef, onCreated, initialKin
             placeholder="e.g. Booking reminders"
             aria-invalid={nameMissing || undefined}
             aria-describedby={nameMissing ? "new-tool-name-missing" : undefined}
-            className="input rounded px-2 py-1.5 text-[13px]"
+            className="form-input rounded px-2 py-1.5 text-[13px]"
           />
           {nameMissing && (
             <p id="new-tool-name-missing" className="ws-field-error">

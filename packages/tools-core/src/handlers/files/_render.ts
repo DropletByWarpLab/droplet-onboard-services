@@ -11,9 +11,10 @@
 // WARP-861) — carrying the caller's Nextcloud credentials as headers, exactly
 // as `write_file` does. The render route reads them via getToken/getUser, so
 // the document lands in the CALLER's storage, not a service account's.
+import { fileMediaFromPath } from "@droplet/shared-types";
 import type { ToolContext, ToolResult } from "../../types.js";
 
-export type DocFormat = "pdf" | "docx" | "xlsx";
+export type DocFormat = "pdf" | "docx" | "xlsx" | "pptx";
 
 export function err(code: string, message: string): ToolResult {
   return { ok: false, status: "error", error: { code, message } };
@@ -109,13 +110,15 @@ export function interpretRenderResponse(
       filename: data.filename ?? "",
       bytes: data.bytes ?? 0,
       mimeType: data.mimeType ?? "",
+      media: fileMediaFromPath(data.path ?? requestedPath, {
+        name: data.filename,
+        mimeType: data.mimeType,
+        size: data.bytes,
+      }),
     },
   };
 }
 
 /** Shared description of the Markdown subset the renderers accept. */
 export const BODY_MARKDOWN_DESCRIPTION =
-  "Body content in a small Markdown subset: '# ', '## ', '### ' headings, " +
-  "blank-line-separated paragraphs, '- ' bullet lists, '1. ' numbered lists, " +
-  "GitHub-style pipe tables, and inline **bold** / *italic*. Anything else is " +
-  "rendered as plain text.";
+  "Markdown: #/##/### headings, paragraphs, - bullets, 1. lists, pipe tables, **bold**, *italic*; other syntax is plain text.";
