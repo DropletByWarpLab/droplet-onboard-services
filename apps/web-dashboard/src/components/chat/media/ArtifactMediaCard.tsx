@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import type { ArtifactMedia } from "@droplet/shared-types";
+import { useAuth } from "@/lib/auth";
 import { MediaCaption, MediaFrame, safeSrc } from "./shared";
 
 export const ARTIFACT_MAX_BYTES = 192 * 1024;
@@ -32,8 +33,13 @@ async function readArtifact(response: Response): Promise<string> {
 }
 
 export function ArtifactMediaCard({ media }: { media: ArtifactMedia }) {
+  const { user } = useAuth();
   const url = safeSrc(media.downloadUrl);
-  const [open, setOpen] = useState(false);
+  const viewer = `${user?.id ?? ""}:${user?.role ?? ""}:${url ?? ""}`;
+  const latestViewer = useRef(viewer);
+  latestViewer.current = viewer;
+  const [openedFor, setOpenedFor] = useState<string | null>(null);
+  const open = Boolean(user && openedFor === viewer);
   const [nonce, setNonce] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -47,14 +53,15 @@ export function ArtifactMediaCard({ media }: { media: ArtifactMedia }) {
     let ready = false;
     let started = false;
     let channel: MessageChannel | null = null;
+    const current = () => !cancelled && !controller.signal.aborted && latestViewer.current === viewer;
     const closeChannel = () => { channel?.port1.close(); channel?.port2.close(); channel = null; };
     setLoaded(false);
-    const fail = (message: string) => { clearTimeout(timer); controller.abort(); closeChannel(); if (!cancelled) setError(message); };
+    const fail = (message: string) => { const active = current(); clearTimeout(timer); controller.abort(); closeChannel(); if (active) setError(message); };
     const timer = setTimeout(() => fail(UNSUPPORTED), 15_000);
     const receive = (event: MessageEvent) => {
       // This handler belongs only to the transferred channel endpoint. Window
       // messages from generated descendants cannot impersonate the wrapper.
-      if (!channel || event.data?.nonce !== nonce || controller.signal.aborted || cancelled) return;
+      if (!channel || event.data?.nonce !== nonce || !current()) return;
       if (event.data.type === "droplet-artifact-ready" && !ready) {
         ready = true;
         if (event.data.supported !== true) { fail(UNSUPPORTED); return; }
@@ -63,13 +70,14 @@ export function ArtifactMediaCard({ media }: { media: ArtifactMedia }) {
         const port = channel.port1;
         void fetch(url, { credentials: "same-origin", signal: controller.signal })
           .then(readArtifact)
-          .then((content) => { if (!cancelled && !controller.signal.aborted && channel?.port1 === port) port.postMessage({ type: "droplet-artifact-content", nonce, content }); })
-          .catch(() => { if (!cancelled && !controller.signal.aborted) fail("Preview could not be loaded."); });
+          .then((content) => { if (current() && channel?.port1 === port) port.postMessage({ type: "droplet-artifact-content", nonce, content }); })
+          .catch(() => { if (current()) fail("Preview could not be loaded."); });
       } else if (ready && event.data.type === "droplet-artifact-loaded") {
         clearTimeout(timer); setLoaded(true);
       }
     };
     beginProbe.current = async () => {
+      if (!current()) return;
       // Never rebind after a reload/navigation: a MessagePort is tied to the
       // original document, whereas a WindowProxy can point at its replacement.
       if (started) { fail(UNSUPPORTED); return; }
@@ -78,7 +86,7 @@ export function ArtifactMediaCard({ media }: { media: ArtifactMedia }) {
       try {
         const result = await fetch("/api/artifact-preview-probe", { credentials: "omit", cache: "no-store", redirect: "error", signal: controller.signal });
         if (result.status !== 204) throw new Error("Unavailable preview host");
-        if (cancelled || controller.signal.aborted || frame.current?.contentWindow !== host) return;
+        if (!current() || frame.current?.contentWindow !== host) return;
         channel = new MessageChannel();
         channel.port1.onmessage = receive;
         channel.port1.start();
@@ -87,16 +95,17 @@ export function ArtifactMediaCard({ media }: { media: ArtifactMedia }) {
         // bound MessagePort only after the trusted wrapper proves isolation.
         // nosemgrep: javascript.browser.security.wildcard-postmessage-configuration.wildcard-postmessage-configuration
         host.postMessage({ type: "droplet-artifact-init", nonce }, "*", [channel.port2]);
-      } catch { if (!cancelled && !controller.signal.aborted) fail(UNSUPPORTED); }
+      } catch { if (current()) fail(UNSUPPORTED); }
     };
     return () => { cancelled = true; clearTimeout(timer); controller.abort(); closeChannel(); beginProbe.current = null; };
-  }, [open, url, nonce]);
+  }, [open, url, nonce, viewer]);
   function togglePreview() {
-    if (open) { setOpen(false); return; }
+    if (open) { setOpenedFor(null); return; }
+    if (!user) return;
     setLoaded(false); setError(null);
     if (typeof crypto.randomUUID !== "function") { setNonce(null); setError(UNSUPPORTED); }
     else setNonce(crypto.randomUUID());
-    setOpen(true);
+    setOpenedFor(viewer);
   }
   if (!url) return null;
   return (

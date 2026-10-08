@@ -1,11 +1,13 @@
 import React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { mediaJobMedia, fileMediaFromPath } from "@droplet/shared-types";
 import { MediaJobCard } from "./MediaJobCard";
 vi.mock("./FileMediaCard", () => ({ FileMediaCard: ({ media }: { media: { name: string } }) => <div data-testid="saved-file">{media.name}</div> }));
 const id = "e6451c31-5229-40a7-89bc-98d986531c5a";
 const descriptor = mediaJobMedia(id);
+const auth = vi.hoisted(() => ({ id: "owner-1", role: "owner" }));
+vi.mock("@/lib/auth", () => ({ useAuth: () => ({ user: auth }), authFetch: vi.fn() }));
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 function response(body: unknown, status = 200) { return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } }); }
 describe("media job card", () => {
@@ -41,5 +43,31 @@ describe("media job card", () => {
     const fetch = vi.fn().mockImplementation(() => new Promise(() => {})); vi.stubGlobal("fetch", fetch);
     const view = render(<MediaJobCard media={descriptor} />); await waitFor(() => expect(fetch).toHaveBeenCalled());
     const signal = fetch.mock.calls[0][1].signal as AbortSignal; view.unmount(); expect(signal.aborted).toBe(true);
+  });
+  it("clears a saved result when the card switches to another job", async () => {
+    const nextId = "e6451c31-5229-40a7-89bc-98d986531c5b";
+    const fetch = vi.fn().mockResolvedValueOnce(response({ id, status: "succeeded", media: fileMediaFromPath("/previous.png") }))
+      .mockResolvedValue(response({ id: nextId, status: "running" }));
+    vi.stubGlobal("fetch", fetch);
+    const view = render(<MediaJobCard media={descriptor} />);
+    await screen.findByTestId("saved-file");
+    view.rerender(<MediaJobCard media={mediaJobMedia(nextId)} />);
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+    expect(screen.queryByTestId("saved-file")).toBeNull();
+    expect(screen.getByText("Creating your media…")).toBeTruthy();
+  });
+  it("drops a cancellation result after the card switches jobs", async () => {
+    const nextId = "e6451c31-5229-40a7-89bc-98d986531c5b";
+    let finishCancel!: (value: Response) => void;
+    const pendingCancel = new Promise<Response>((done) => { finishCancel = done; });
+    const fetch = vi.fn().mockImplementation((url: string) => url.endsWith("/cancel") ? pendingCancel :
+      Promise.resolve(response({ id: url.endsWith(nextId) ? nextId : id, status: "running" })));
+    vi.stubGlobal("fetch", fetch);
+    const view = render(<MediaJobCard media={descriptor} />);
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    view.rerender(<MediaJobCard media={mediaJobMedia(nextId)} />);
+    await act(async () => { finishCancel(response({ error: "Previous job failure" }, 503)); });
+    expect(screen.queryByText("Previous job failure")).toBeNull();
   });
 });
