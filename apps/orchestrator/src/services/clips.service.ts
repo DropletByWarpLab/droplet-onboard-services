@@ -23,13 +23,12 @@
 import crypto from "node:crypto";
 import path from "node:path";
 import { ncCreateDirectory, ncUploadFile } from "./nextcloud.client.js";
-import { config } from "../config.js";
+import { buildRecordingClipUrl } from "./frigate.client.js";
 import { createLogger } from "../lib/logger.js";
 import { isWeakDeviceSecret } from "../lib/device-secret.js";
 
 const logger = createLogger("clips");
 
-const FRIGATE_URL = config.FRIGATE_URL;
 const EXPORT_TIMEOUT_MS = 60_000;
 const MAX_CLIP_BYTES = 500 * 1024 * 1024; // 500 MB cap per export
 
@@ -81,9 +80,13 @@ export async function exportClip(
   // should be done as a chunked job (deferred to Phase 5).
   if (durationSec > 60 * 60) throw new Error("clip duration capped at 60 minutes");
 
-  // Frigate exposes export at /api/<camera>/recordings/<start>/<end>/clip.mp4
-  // (epoch seconds). It returns the rendered MP4 directly.
-  const url = `${FRIGATE_URL}/api/${encodeURIComponent(input.camera)}/recordings/${startEpoch}/${endEpoch}/clip.mp4`;
+  // Frigate renders a recording-range MP4 on demand at
+  // /api/<camera>/start/<start>/end/<end>/clip.mp4 (epoch seconds) and
+  // returns the bytes directly. Build the URL through the shared helper so
+  // this path can never drift from the playback proxy again (WARP-3903: a
+  // hand-written `/recordings/<start>/<end>/clip.mp4` path here 404'd on
+  // every export because Frigate has no such route).
+  const url = buildRecordingClipUrl(input.camera, startEpoch, endEpoch);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), EXPORT_TIMEOUT_MS);
   let buffer: Buffer;
