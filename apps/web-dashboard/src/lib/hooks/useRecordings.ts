@@ -41,11 +41,14 @@ export function useRecordingsSummary(cameraName: string | null) {
  * The window key uses both timestamps so changing the date or hour
  * triggers a refetch; SWR caches by [camera, after, before] so going
  * back to a previously-viewed hour is instant.
+ * Today metadata can poll a stable full-day key; the server clamps its
+ * future end on every read. Playback ranges keep the default of no polling.
  */
 export function useRecordingsRange(
   cameraName: string | null,
   after: number | null,
   before: number | null,
+  refreshInterval = 0,
 ) {
   const enabled =
     !!cameraName &&
@@ -64,12 +67,12 @@ export function useRecordingsRange(
   const segmentsSwr = useSWR<RecordingSegment[]>(
     segmentsKey,
     () => fetchRecordingSegments(cameraName!, after!, before!),
-    { revalidateOnFocus: false },
+    { revalidateOnFocus: false, refreshInterval },
   );
   const timelineSwr = useSWR<TimelineEntry[]>(
     timelineKey,
     () => fetchTimeline(cameraName!, after!, before!),
-    { revalidateOnFocus: false },
+    { revalidateOnFocus: false, refreshInterval },
   );
 
   return {
