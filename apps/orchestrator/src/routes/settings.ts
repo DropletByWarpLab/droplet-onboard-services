@@ -233,7 +233,12 @@ function isKnownSection(name: string): name is SectionLiteral {
   return (SECTION_VALUES as readonly string[]).includes(name);
 }
 
-export function createSettingsRouter(prisma: PrismaClient): Router {
+export function createSettingsRouter(
+  prisma: PrismaClient,
+  /** WARP-3912 - run after `remote_mcp` is switched off: abort in-flight remote
+   *  MCP calls and close their sessions. Injected, like `remoteMcp.detach`. */
+  deps: { onRemoteMcpDisabled?: () => Promise<void> } = {},
+): Router {
   const router = Router();
 
   // ── /api/settings/off-lan ────────────────────────────────────
@@ -268,6 +273,8 @@ export function createSettingsRouter(prisma: PrismaClient): Router {
     "place_lookup",
     // WARP-3532 — work webhooks and chat-app notifications (ADR-069 §9).
     "work_integrations",
+    // WARP-3912 — outbound MCP master switch (ADR-043 §4).
+    "remote_mcp",
   ] as const;
   type OffLanKey = (typeof OFF_LAN_CHANNEL_KEYS)[number];
   // `work_integrations` joins `place_lookup`: both send what employees wrote
@@ -434,6 +441,14 @@ export function createSettingsRouter(prisma: PrismaClient): Router {
             reason,
           },
         });
+
+        if (key === "remote_mcp" && !enabled) {
+          // The switch is already persisted and the gate reads it per call, so a
+          // failed teardown must not fail the PATCH - log it and say so.
+          await deps.onRemoteMcpDisabled?.().catch((err: unknown) => {
+            logger.error({ err }, "remote_mcp teardown failed after the channel was turned off");
+          });
+        }
 
         res.json({
           key: updated.key,

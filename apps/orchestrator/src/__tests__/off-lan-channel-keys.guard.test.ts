@@ -48,6 +48,7 @@ describe("OffLanChannelKey mirrors (WARP-3532)", () => {
     // assertion below vacuous.
     expect(KEYS.length).toBeGreaterThanOrEqual(9);
     expect(KEYS).toContain("work_integrations");
+    expect(KEYS).toContain("remote_mcp"); // WARP-3912
   });
 
   it("seeds a default row for every key, and only for real keys", () => {
