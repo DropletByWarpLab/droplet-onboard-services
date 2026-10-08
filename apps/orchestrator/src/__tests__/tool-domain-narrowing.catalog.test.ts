@@ -354,6 +354,16 @@ describe("guest never reaches a remote MCP tool (WARP-3916)", () => {
     });
   });
 
+  /** MUTATION: key the guest rule on live registry membership (denylist) -> the first expect goes red. */
+  it("fail-closed: refused whether or not the server is attached when the predicate runs", async () => {
+    runtimeToolRegistry.clear(); // not attached yet (reconciler tick, re-attach)
+    expect(toolAllowedForPrincipal(REMOTE_READ, "guest", null)).toBe(false);
+    expect(await narrowAllowedToolsForRole("guest", [FILES_READ, REMOTE_READ], false, null)).toEqual([FILES_READ]);
+    runtimeToolRegistry.registerServerTools("remotesrv", [remote("search_issues")]); // attached at execution
+    expect(toolAllowedForPrincipal(REMOTE_READ, "guest", null)).toBe(false);
+    expect(firstToolDeniedForPrincipal([REMOTE_READ], "guest", null)).not.toBeNull();
+  });
+
   it("control: a member (family) still gets the remote read", async () => {
     expect(await narrowAllowedToolsForRole("family", undefined, false, null)).toEqual([
       FILES_READ,
