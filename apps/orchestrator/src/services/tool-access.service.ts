@@ -184,8 +184,14 @@ import type { PrismaClient } from "@prisma/client";
 import { TOOL_CATALOG, TOOLS } from "@droplet/tools-core";
 import type { Role } from "./jwt.service.js";
 import { resolveEffectiveAccess } from "./effective-access.service.js";
-import { NO_RUNTIME_TOOLS, type RuntimeToolLookup } from "./tool-layers.service.js";
+import {
+  NO_RUNTIME_TOOLS,
+  type RuntimeToolFacts,
+  type RuntimeToolLookup,
+} from "./tool-layers.service.js";
 import { createLogger } from "../lib/logger.js";
+import { EXTENSION_SERVER_PREFIX } from "./extension-token.js";
+import { parseNamespacedToolName } from "./mcp-multiplexer.service.js";
 
 const logger = createLogger("tool-access");
 
@@ -210,6 +216,13 @@ export interface ToolAccessScope {
   writeDomains: ReadonlySet<string>;
   /** §3 `locks` — role.mayOperateLocks ∧ smart_home ∈ features. */
   locks: boolean;
+  /**
+   * WARP-2434 — the role's raw `AccessRoleConnectorGrant` rows, provider →
+   * level. A vendor remote tool is reachable only through a grant here for its
+   * server id (a `read` grant never admits a write-classified tool). ABSENT is
+   * NONE, not "unrestricted": a scope built without it reaches no remote tool.
+   */
+  connectorGrants?: ReadonlyMap<string, string>;
 }
 
 /** The fail-closed scope: no domain, no write, no locks. */
@@ -377,10 +390,25 @@ export function toolAllowedInScope(
    */
   runtime: RuntimeToolLookup = NO_RUNTIME_TOOLS,
 ): boolean {
-  const entry = CATALOG_BY_NAME.get(name) ?? runtime(name);
+  const catalog = CATALOG_BY_NAME.get(name);
+  const entry = catalog ?? runtime(name);
   if (!entry) return false;
   if (!scope.domains.has(entry.domain)) return false;
   if (entry.requiresWrite && !scope.writeDomains.has(entry.domain)) return false;
+  // WARP-2434 — a vendor remote tool additionally needs the SERVER granted to
+  // the role AND the tool on that server's allowlist: an intersection with the
+  // domain checks above, so it can only narrow. Extensions keep their own
+  // review lifecycle (WARP-2900) and are not subject to it.
+  if (!catalog) {
+    const facts = entry as RuntimeToolFacts;
+    if (typeof facts.serverId !== "string") return false; // unattributable = refuse
+    if (!facts.serverId.startsWith(EXTENSION_SERVER_PREFIX)) {
+      if (facts.allowlisted !== true) return false;
+      const level = scope.connectorGrants?.get(facts.serverId);
+      if (level === undefined) return false;
+      if (facts.requiresWrite && level !== "read_write") return false;
+    }
+  }
   return true;
 }
 
@@ -479,7 +507,27 @@ export function toolAllowedForPrincipal(
   runtime: RuntimeToolLookup = NO_RUNTIME_TOOLS,
 ): boolean {
   if (!toolAllowedForTier(name, tier, isVoice)) return false;
+  if (roleLessRemoteDenied(name, tier, scope)) return false;
   return !scope || toolAllowedInScope(name, scope, runtime);
+}
+
+/**
+ * WARP-2434 — a member or guest with NO scope holds no `AccessRoleConnectorGrant`
+ * by definition, so no vendor remote tool is in reach (ADR-072 §3: owners and
+ * admins by default, members by grant). `scope === null` elsewhere means "no
+ * narrowing"; for a remote tool and a non-privileged tier it must mean "no
+ * grant". Name-only, like axis A. (Dispatch sites that hold only the scope
+ * cannot see the tier; the multiplexer's allowlist is the floor there.)
+ */
+function roleLessRemoteDenied(
+  name: string,
+  tier: string | undefined,
+  scope: ToolAccessScope | null | undefined,
+): boolean {
+  if (scope || (tier !== "family" && tier !== "guest")) return false;
+  if (CATALOG_BY_NAME.has(name)) return false;
+  const parsed = parseNamespacedToolName(name);
+  return parsed !== null && !parsed.serverId.startsWith(EXTENSION_SERVER_PREFIX);
 }
 
 /**
@@ -530,7 +578,10 @@ export function firstToolDeniedForPrincipal(
     if (!toolAllowedForTier(name, tier, isVoice)) {
       return { tool: name, axis: "write_tier" };
     }
-    if (scope && !toolAllowedInScope(name, scope, runtime)) {
+    if (
+      roleLessRemoteDenied(name, tier, scope) ||
+      (scope && !toolAllowedInScope(name, scope, runtime))
+    ) {
       return { tool: name, axis: "role_grant" };
     }
   }
@@ -750,7 +801,14 @@ async function composeScopeForRow(
       if (grant.level === "use" && domains.has(grant.domain)) writeDomains.add(grant.domain);
     }
   }
-  return { domains, writeDomains, locks: access.locks };
+  return {
+    domains,
+    writeDomains,
+    locks: access.locks,
+    // `null` (no role) cannot reach here — a role-less person returned above —
+    // and would mean "none" if it did.
+    connectorGrants: new Map(Object.entries(access.connectorGrants ?? {})),
+  };
 }
 
 // ── WARP-1580: the ATTRIBUTED principal (no request, no token) ──────

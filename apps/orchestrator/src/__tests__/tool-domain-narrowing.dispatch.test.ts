@@ -37,6 +37,9 @@ const scope = (
   domains: new Set(domains),
   writeDomains: new Set(writeDomains),
   locks,
+  // WARP-2434 — the `bookings` fixture server is granted to every scope here, so
+  // the domain rules stay the thing under test (the grant axis has its own spec).
+  connectorGrants: new Map([["bookings", "read_write"]]),
 });
 
 function callOf(name: string, args: Record<string, unknown> = {}) {
@@ -278,6 +281,7 @@ describe("runAgent — runtime tools under a scope (WARP-2897)", () => {
     requiresWrite,
     requiresConfirmation: requiresWrite,
     denied: false,
+    allowlisted: true,
     reviewedBy: "owner",
     reviewedAt: at,
     wireDescription: null,
@@ -380,5 +384,49 @@ describe("runAgent — runtime tools under a scope (WARP-2897)", () => {
     const sent = chat.mock.calls[0]![0] as { tools?: { function: { name: string } }[] };
     expect((sent.tools ?? []).map((t) => t.function.name)).toEqual([]);
     expect(callTool).not.toHaveBeenCalled();
+  });
+
+  /**
+   * WARP-2434 — the model NAMES a tool that was never offered. MUTATION: apply
+   * the allowlist / grant to the advertised pool only (drop it from
+   * `toolAllowedInScope`, which `toolDispatchDenial` shares) -> the call reaches
+   * the MCP client and this goes red.
+   */
+  it("refuses a non-allowlisted runtime tool the model names directly, without reaching the MCP client", async () => {
+    remoteToolClassificationCache.seed([
+      { ...row("list_slots", false), allowlisted: false },
+      row("book_slot", true),
+    ]);
+    const { deps, chat, callTool } = makeDeps([callOf(LIST), { role: "assistant", content: "ok" }]);
+    withRuntimePool(deps);
+    const result = await runAgent(deps, {
+      model: "m",
+      messages: [{ role: "user", content: "any free slots?" }],
+      allowed_tools: [LIST], // a stale shelf: it still names the tool
+      toolAccessScope: scope(["ext-bookings"]),
+    });
+    const sent = chat.mock.calls[0]![0] as { tools?: { function: { name: string } }[] };
+    expect((sent.tools ?? []).map((t) => t.function.name)).not.toContain(LIST);
+    expect(callTool).not.toHaveBeenCalled();
+    expect(result.trace[0]).toMatchObject({
+      tool: LIST,
+      result: { status: "error", error: { code: "FORBIDDEN_TOOL_FOR_ROLE" } },
+    });
+  });
+
+  it("refuses an allowlisted runtime tool when the role holds no grant for its server", async () => {
+    const { deps, callTool } = makeDeps([callOf(LIST), { role: "assistant", content: "ok" }]);
+    withRuntimePool(deps);
+    const result = await runAgent(deps, {
+      model: "m",
+      messages: [{ role: "user", content: "any free slots?" }],
+      allowed_tools: [LIST],
+      toolAccessScope: { ...scope(["ext-bookings"]), connectorGrants: new Map() },
+    });
+    expect(callTool).not.toHaveBeenCalled();
+    expect(result.trace[0]).toMatchObject({
+      tool: LIST,
+      result: { status: "error", error: { code: "FORBIDDEN_TOOL_FOR_ROLE" } },
+    });
   });
 });

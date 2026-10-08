@@ -189,6 +189,14 @@ export interface McpToolMultiplexerOptions {
   isServerAllowed?: (serverId: string) => boolean;
   /** WARP-2321's hook. Defaults to {@link DENY_ALL_REMOTE_TOOLS}. */
   remoteCallPolicy?: RemoteCallPolicy;
+  /**
+   * WARP-2434 — offer-time half of the per-server allowlist: a remote tool for
+   * which this returns false stays in the vetted catalog but is not listed to
+   * the model. NEVER the boundary — `remoteCallPolicy` re-decides at dispatch.
+   * Defaults to offering everything, because the dispatch policy's default is
+   * deny-all.
+   */
+  isRemoteToolOffered?: (serverId: string, wireName: string) => boolean;
 }
 
 interface AttachedRemote {
@@ -229,9 +237,11 @@ export class McpToolMultiplexer implements McpClientPort {
   readonly #rejections: RemoteRejection[] = [];
   readonly #isServerAllowed: (serverId: string) => boolean;
   readonly #remoteCallPolicy: RemoteCallPolicy;
+  readonly #isRemoteToolOffered: (serverId: string, wireName: string) => boolean;
 
   constructor(local: McpClientPort, opts: McpToolMultiplexerOptions = {}) {
     this.#local = local;
+    this.#isRemoteToolOffered = opts.isRemoteToolOffered ?? (() => true);
     this.#isServerAllowed = opts.isServerAllowed ?? (() => false);
     this.#remoteCallPolicy = opts.remoteCallPolicy ?? DENY_ALL_REMOTE_TOOLS;
   }
@@ -350,7 +360,7 @@ export class McpToolMultiplexer implements McpClientPort {
         if (!vetted) continue;
         remote.catalog.set(tool.name, vetted);
         taken.add(vetted.name);
-        out.push(vetted);
+        if (this.#isRemoteToolOffered(serverId, tool.name)) out.push(vetted);
       }
     }
     return out;

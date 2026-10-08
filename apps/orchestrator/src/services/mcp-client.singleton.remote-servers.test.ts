@@ -378,6 +378,18 @@ async function ownerReviewsAsReads(serverId: string, names: string[]): Promise<v
   await remoteToolClassificationCache.refresh(db.prisma as never);
 }
 
+/** WARP-2434 — an owner/admin allowlists tools of a server (the record rows
+ *  exist from discovery). Orthogonal to the review above. */
+async function allowlist(serverId: string, names: string[]): Promise<void> {
+  for (const name of names) {
+    const k = `${serverId} ${name}`;
+    const row = db.record.get(k);
+    if (!row) throw new Error(`${k} was never recorded`);
+    db.record.set(k, { ...row, allowlisted: true });
+  }
+  await remoteToolClassificationCache.refresh(db.prisma as never);
+}
+
 describe("the boot attach loops every registered server (TC-1.2)", () => {
   it("attaches Atlassian and a bearer-only vendor side by side, each over ITS OWN contract", async () => {
     const results = await ensureRemoteMcpAttached(db.prisma, BOTH());
@@ -479,6 +491,11 @@ describe("a vendor with no compiled table is DENIED until an owner has reviewed 
   it("refuses its tools at dispatch without touching the wire, and runs one once reviewed — while Atlassian's table needs no review", async () => {
     await ensureRemoteMcpAttached(db.prisma, BOTH());
 
+    // WARP-2434 — nothing is allowlisted yet, so the allowlist refuses first.
+    const notListed = await mcpClient.callTool("fixture-bearer__get_thing", {});
+    expect(JSON.parse(notListed.content[0]!.text!)).toMatchObject({ error: "REMOTE_TOOL_NOT_ALLOWLISTED" });
+    await allowlist(FIXTURE, ["get_thing", "list_things"]);
+
     // No table speaks for this server, so the answer is the table's own
     // refusal — NOT_CLASSIFIED — even though the record holds every advertised
     // tool (as a confirming write). Nothing is dialled.
@@ -487,7 +504,8 @@ describe("a vendor with no compiled table is DENIED until an owner has reviewed 
     expect(JSON.parse(denied.content[0]!.text!)).toMatchObject({ error: "REMOTE_TOOL_NOT_CLASSIFIED" });
     expect(bridge.callsTo(FIXTURE, "call")).toHaveLength(0);
 
-    // Atlassian's reviewed table allows its reads with no record at all.
+    // Atlassian's reviewed table allows its reads once allowlisted.
+    await allowlist(ATLASSIAN, ["getJiraIssue"]);
     const allowed = await mcpClient.callTool("atlassian__getJiraIssue", { issueKey: "WARP-1" });
     expect(allowed.isError).toBe(false);
     expect(JSON.parse(allowed.content[0]!.text!)).toEqual({ answeredBy: ATLASSIAN, name: "getJiraIssue" });
@@ -642,6 +660,7 @@ describe("a disconnect tears down ONE server and leaves the other attached (TC-1
   it("keeps the survivor callable, and the departed server's names no longer reach the wire", async () => {
     await ensureRemoteMcpAttached(db.prisma, BOTH());
     await detachRemoteMcp(FIXTURE);
+    await allowlist(ATLASSIAN, ["getJiraIssue"]);
     bridge.calls.length = 0;
 
     const survivor = await mcpClient.callTool("atlassian__getJiraIssue", {});
@@ -660,6 +679,8 @@ describe("a disconnect tears down ONE server and leaves the other attached (TC-1
   it("re-reads the gate per server on every call: disconnecting one account refuses ITS calls and not the other's", async () => {
     await ensureRemoteMcpAttached(db.prisma, BOTH());
     await ownerReviewsAsReads(FIXTURE, ["get_thing"]);
+    await allowlist(FIXTURE, ["get_thing"]);
+    await allowlist(ATLASSIAN, ["getJiraIssue"]);
     expect((await mcpClient.callTool("fixture-bearer__get_thing", {})).isError).toBe(false);
 
     rows[FIXTURE] = { ...rows[FIXTURE]!, status: "DISABLED" };
@@ -677,6 +698,32 @@ describe("a disconnect tears down ONE server and leaves the other attached (TC-1
 describe("the singleton's call policy speaks through the table registry (TC-1.3)", () => {
   const decide = (serverId: string, wireName: string) =>
     remoteCallPolicy({ serverId, wireName, namespacedName: `${serverId}__${wireName}`, args: {} });
+
+  // WARP-2434 — these assert the table behind the allowlist, so every name used
+  // below is allowlisted; the allowlist itself is covered in remote-tool-allowlist.test.ts.
+  beforeEach(() => {
+    const at = new Date(0);
+    const allowRow = (serverId: string, toolName: string): RemoteToolClassificationRow => ({
+      serverId,
+      toolName,
+      requiresWrite: true,
+      requiresConfirmation: true,
+      denied: false,
+      allowlisted: true,
+      reviewedBy: null,
+      reviewedAt: null,
+      wireDescription: null,
+      firstSeenAt: at,
+      lastSeenAt: at,
+    });
+    remoteToolClassificationCache.seed([
+      ...["getJiraIssue", "createJiraIssue", "getCompassComponents", "notATool"].map((t) =>
+        allowRow(ATLASSIAN, t),
+      ),
+      allowRow(FIXTURE, "getJiraIssue"),
+      allowRow("constructor", "getJiraIssue"),
+    ]);
+  });
 
   it("is Atlassian's reviewed table for Atlassian: a read runs, a write is blocked, a Compass tool is refused for the credential it needs", () => {
     expect(decide(ATLASSIAN, "getJiraIssue")).toEqual({ kind: "allow" });

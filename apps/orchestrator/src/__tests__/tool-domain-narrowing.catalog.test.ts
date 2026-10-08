@@ -42,6 +42,9 @@ const scope = (
   domains: new Set(domains),
   writeDomains: new Set(writeDomains),
   locks,
+  // WARP-2434 — the `bookings` fixture server is granted to every scope here, so
+  // the domain rules stay the thing under test (the grant axis has its own spec).
+  connectorGrants: new Map([["bookings", "read_write"]]),
 });
 
 const REQUESTED = [FILES_READ, FILES_WRITE, CAMERAS_READ];
@@ -140,6 +143,7 @@ describe("narrowAllowedToolsForRole — runtime tools under a scope (WARP-2897)"
     requiresWrite,
     requiresConfirmation: requiresWrite,
     denied: false,
+    allowlisted: true,
     reviewedBy: "owner",
     reviewedAt: at,
     wireDescription: null,

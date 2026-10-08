@@ -35,6 +35,7 @@ import {
   classifyRemoteTool,
   listRemoteToolClassifications,
   remoteToolClassificationCache,
+  setRemoteToolAllowlisted,
   type ClassificationPrisma,
   type RemoteToolClassificationCache,
   type RemoteToolClassificationRow,
@@ -53,6 +54,8 @@ const classifySchema = z.object({
   // (sha256 hex, from the GET). A reset in between → 409 STALE_REVIEW.
   inputSchemaHash: z.string().regex(/^[0-9a-f]{64}$/).optional(),
 });
+
+const allowlistSchema = z.object({ allowlisted: z.boolean() }).strict();
 
 /** Same bounds the multiplexer applies to what it will namespace. */
 const SERVER_ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
@@ -148,6 +151,54 @@ export function createRemoteToolClassificationsRouter(
             // recorded without one.
             inputSchemaHash: result.row.inputSchemaHash,
           },
+        });
+        res.json({ classification: result.row });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // WARP-2434 — the per-server tool allowlist. Owner OR admin (unlike the
+  // classification PATCH above): which of a server's tools reach the model is an
+  // operating decision, not a privilege review. A separate column and a
+  // separate writer — nothing here touches `requiresWrite`/`denied`, so an
+  // allowlisted tool is still subject to the classification policy behind it.
+  // `requireRole`, not `requireRoleOrMcpService`: no LLM tool changes it.
+  router.put(
+    "/admin/remote-tools/allowlist/:serverId/:toolName",
+    requireRole("owner", "admin"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const { serverId, toolName } = req.params;
+        if (!SERVER_ID.test(serverId) || !TOOL_NAME.test(toolName)) {
+          res.status(400).json({ error: "Invalid serverId or toolName" });
+          return;
+        }
+        const parsed = allowlistSchema.safeParse(req.body);
+        if (!parsed.success) {
+          res.status(400).json({ error: "Invalid allowlist change", details: parsed.error.flatten() });
+          return;
+        }
+        const result = await setRemoteToolAllowlisted(db, {
+          serverId,
+          toolName,
+          allowlisted: parsed.data.allowlisted,
+        });
+        if (!result.ok) {
+          res.status(404).json({ error: result.code });
+          return;
+        }
+        // Dispatch and the offered list read the cache; live from this request on.
+        await cache.refresh(db);
+        await recordActivity({
+          kind: "system",
+          severity: "info",
+          sourceIcon: "shield",
+          what: `Remote tool ${result.row.allowlisted ? "allowlisted" : "removed from the allowlist"}`,
+          sub: `${serverId} · ${toolName}`,
+          actor: actorFromRequest(req),
+          refs: { serverId, toolName, allowlisted: result.row.allowlisted === true },
         });
         res.json({ classification: result.row });
       } catch (err) {

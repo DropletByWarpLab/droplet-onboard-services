@@ -54,6 +54,7 @@ import {
 import {
   IMPORT_DEFAULT_CLASSIFICATION,
   listRemoteToolClassifications,
+  remoteToolAllowlisted,
   remoteToolClassificationCache,
   type ClassificationLookup,
   type ClassificationPrisma,
@@ -209,6 +210,12 @@ export async function loadToolLayers(
 export interface RuntimeToolFacts {
   domain: string;
   requiresWrite: boolean;
+  /** WARP-2434 — the server the tool came from: the key of the role's
+   *  `AccessRoleConnectorGrant` (grant provider === server id). */
+  serverId: string;
+  /** WARP-2434 — {@link remoteToolAllowlisted} for this tool, read from the
+   *  same classification snapshot as `requiresWrite`. */
+  allowlisted: boolean;
 }
 
 /** name → facts for a registered, non-denied runtime tool; `undefined` for
@@ -226,8 +233,18 @@ export function runtimeToolLookupFrom(
   classification: ClassificationLookup,
 ): RuntimeToolLookup {
   const facts = new Map<string, RuntimeToolFacts>();
-  for (const t of runtimeLayer(registry.list(), classification)) {
-    facts.set(t.name, { domain: t.domain, requiresWrite: t.requiresWrite });
+  const descriptors = registry.list();
+  const serverOf = new Map(descriptors.map((d) => [d.name, d.serverId] as const));
+  for (const t of runtimeLayer(descriptors, classification)) {
+    const serverId = serverOf.get(t.name);
+    if (serverId === undefined) continue; // unreachable: the layer came from these descriptors
+    const wireName = parseNamespacedToolName(t.name)?.wireName ?? t.name;
+    facts.set(t.name, {
+      domain: t.domain,
+      requiresWrite: t.requiresWrite,
+      serverId,
+      allowlisted: remoteToolAllowlisted(classification, serverId, wireName),
+    });
   }
   if (facts.size === 0) return NO_RUNTIME_TOOLS;
   return (name) => facts.get(name);
