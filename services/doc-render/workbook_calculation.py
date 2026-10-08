@@ -207,10 +207,12 @@ def criteria_matcher(criteria, tick):
         if len(operand) > MAX_CRITERIA_LENGTH: return CellError("#VALUE!")
         prefix = re.match(r"(<=|>=|<>|=|<|>)(.*)\Z", operand, re.DOTALL)
         if prefix: operator, operand = prefix.groups()
-        numeric = re.fullmatch(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?", operand)
+        numeric = re.fullmatch(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?", operand.strip())
         if numeric:
             operand = float(operand)
             if not math.isfinite(operand): return CellError("#VALUE!")
+        elif operand.upper() in ("TRUE", "FALSE"):
+            operand = operand.upper() == "TRUE"
     if isinstance(operand, str) and operator in ("=", "<>") and any(char in operand for char in "*?~"):
         tokens = wildcard_tokens(operand.casefold())
         def matches_wildcard(value):
@@ -220,11 +222,19 @@ def criteria_matcher(criteria, tick):
     def matches(value):
         if isinstance(value, CellError): return False
         if isinstance(operand, bool):
+            if isinstance(value, str) and value.upper() in ("TRUE", "FALSE"):
+                value = value.upper() == "TRUE"
             return compare_values(value, operand, operator) if isinstance(value, bool) else operator == "<>"
         if isinstance(operand, (int, float)):
-            if isinstance(value, str) and re.fullmatch(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?", value):
+            # Only equality/inequality coerces numeric text in the input cells.
+            # Ordered numeric criteria ignore text, even text containing digits.
+            if operator in ("=", "<>") and isinstance(value, str) and re.fullmatch(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?", value):
                 value = float(value)
-            if value is None or isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value): return operator == "<>" and value is not None
+            if value is None or isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value): return operator == "<>"
+        elif operand == "" and operator == "<>":
+            # Excel counts formula-produced empty text as a populated cell;
+            # a physically empty input remains None and is excluded.
+            return value is not None
         elif value is not None and not isinstance(value, str): return operator == "<>"
         return compare_values(value, operand, operator)
     return matches

@@ -446,6 +446,26 @@ def test_conditional_counts_and_sums_use_scalar_or_range_criteria(expression, ex
     assert _formula_result(expression)[0].value == expected
 
 
+@pytest.mark.parametrize("criterion, expected", [
+    ('TRUE', 2), ('FALSE', 2), ('"TRUE"', 2), ('"=TRUE"', 2),
+    ('"FALSE"', 2), ('"<>TRUE"', 8), ('">TRUE"', 0),
+    ('"<TRUE"', 2), ('">FALSE"', 2), ('">=TRUE"', 2),
+    ('"<>"', 9), ('""', 2), ('"0"', 1), ('">=0"', 2),
+    ('"<>0"', 9), ('"1"', 2), ('" 1 "', 2), ('"<2"', 2),
+])
+def test_conditional_aggregate_criteria_match_excel_typed_cells_and_formula_blanks(criterion, expected):
+    # Verified in Excel: boolean criteria match bool and TRUE/FALSE text;
+    # numeric equality matches numeric text, ordered comparisons do not.
+    # A formula returning "" also differs from an actually empty cell for <>.
+    rows = [[value, 1, ""] for value in (1, "1", True, False, None, "", 0, "North", "TRUE", "FALSE")]
+    data = render_xlsx([{"columns": ["Value", "Amount", "Result"], "rows": rows,
+        "formulas": [{"cell": "A7", "expression": 'IF(TRUE,"",0)'},
+            {"cell": "C2", "expression": f"COUNTIF(A2:A11,{criterion})"},
+            {"cell": "C3", "expression": f"SUMIF(A2:A11,{criterion},B2:B11)"}]}])
+    ws = load_workbook(io.BytesIO(data), data_only=True).active
+    assert ws["C2"].value == expected and ws["C3"].value == expected
+
+
 def test_criteria_numeric_strings_and_boolean_cells_preserve_underlying_types():
     data = render_xlsx([{"columns": ["Value", "Result"], "rows": [[1, ""], ["1", ""], [True, ""], [False, ""]],
         "formulas": [{"cell": "B2", "expression": "COUNTIF(A2:A5,1)"},
