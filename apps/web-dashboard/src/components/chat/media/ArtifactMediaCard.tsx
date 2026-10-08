@@ -38,43 +38,59 @@ export function ArtifactMediaCard({ media }: { media: ArtifactMedia }) {
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const frame = useRef<HTMLIFrameElement>(null);
-  const activeController = useRef<AbortController | null>(null);
+  const beginProbe = useRef<(() => Promise<void>) | null>(null);
   useEffect(() => {
     if (!open || !url || !nonce) return;
     const controller = new AbortController();
-    activeController.current = controller;
+    const host = frame.current?.contentWindow;
     let cancelled = false;
     let ready = false;
+    let started = false;
+    let channel: MessageChannel | null = null;
+    const closeChannel = () => { channel?.port1.close(); channel?.port2.close(); channel = null; };
     setLoaded(false);
-    const timer = setTimeout(() => { controller.abort(); if (!cancelled) setError(UNSUPPORTED); }, 15_000);
+    const fail = (message: string) => { clearTimeout(timer); controller.abort(); closeChannel(); if (!cancelled) setError(message); };
+    const timer = setTimeout(() => fail(UNSUPPORTED), 15_000);
     const receive = (event: MessageEvent) => {
-      // Descendant/generated frames cannot impersonate the trusted wrapper.
-      if (event.source !== frame.current?.contentWindow || event.origin !== "null" || event.data?.nonce !== nonce || controller.signal.aborted) return;
+      // This handler belongs only to the transferred channel endpoint. Window
+      // messages from generated descendants cannot impersonate the wrapper.
+      if (!channel || event.data?.nonce !== nonce || controller.signal.aborted || cancelled) return;
       if (event.data.type === "droplet-artifact-ready" && !ready) {
         ready = true;
-        if (event.data.supported !== true) { clearTimeout(timer); setError(UNSUPPORTED); return; }
+        if (event.data.supported !== true) { fail(UNSUPPORTED); return; }
         // Private bytes are fetched and transferred only after the trusted
         // HTTP host proves its connection policy active in this browser.
+        const port = channel.port1;
         void fetch(url, { credentials: "same-origin", signal: controller.signal })
           .then(readArtifact)
-          .then((content) => { if (!controller.signal.aborted) frame.current?.contentWindow?.postMessage({ type: "droplet-artifact-content", nonce, content }, "*"); })
-          .catch(() => { if (!cancelled) { clearTimeout(timer); setError("Preview could not be loaded."); } });
+          .then((content) => { if (!cancelled && !controller.signal.aborted && channel?.port1 === port) port.postMessage({ type: "droplet-artifact-content", nonce, content }); })
+          .catch(() => { if (!cancelled && !controller.signal.aborted) fail("Preview could not be loaded."); });
       } else if (ready && event.data.type === "droplet-artifact-loaded") {
         clearTimeout(timer); setLoaded(true);
       }
     };
-    window.addEventListener("message", receive);
-    return () => { cancelled = true; clearTimeout(timer); controller.abort(); activeController.current = null; window.removeEventListener("message", receive); };
+    beginProbe.current = async () => {
+      // Never rebind after a reload/navigation: a MessagePort is tied to the
+      // original document, whereas a WindowProxy can point at its replacement.
+      if (started) { fail(UNSUPPORTED); return; }
+      started = true;
+      if (!host || frame.current?.contentWindow !== host || typeof MessageChannel !== "function") { fail(UNSUPPORTED); return; }
+      try {
+        const result = await fetch("/api/artifact-preview-probe", { credentials: "omit", cache: "no-store", redirect: "error", signal: controller.signal });
+        if (result.status !== 204) throw new Error("Unavailable preview host");
+        if (cancelled || controller.signal.aborted || frame.current?.contentWindow !== host) return;
+        channel = new MessageChannel();
+        channel.port1.onmessage = receive;
+        channel.port1.start();
+        // Opaque sandbox origins cannot be named by targetOrigin. This one
+        // public bootstrap transfers a capability; all private bytes use its
+        // bound MessagePort only after the trusted wrapper proves isolation.
+        // nosemgrep: javascript.browser.security.wildcard-postmessage-configuration.wildcard-postmessage-configuration
+        host.postMessage({ type: "droplet-artifact-init", nonce }, "*", [channel.port2]);
+      } catch { if (!cancelled && !controller.signal.aborted) fail(UNSUPPORTED); }
+    };
+    return () => { cancelled = true; clearTimeout(timer); controller.abort(); closeChannel(); beginProbe.current = null; };
   }, [open, url, nonce]);
-  async function beginProbe() {
-    const controller = activeController.current;
-    if (!controller || controller.signal.aborted || !nonce) return;
-    try {
-      const result = await fetch("/api/artifact-preview-probe", { credentials: "omit", cache: "no-store", redirect: "error", signal: controller.signal });
-      if (result.status !== 204) throw new Error("Unavailable preview host");
-      if (!controller.signal.aborted) frame.current?.contentWindow?.postMessage({ type: "droplet-artifact-init", nonce }, "*");
-    } catch { if (!controller.signal.aborted) setError(UNSUPPORTED); }
-  }
   function togglePreview() {
     if (open) { setOpen(false); return; }
     setLoaded(false); setError(null);
@@ -92,7 +108,7 @@ export function ArtifactMediaCard({ media }: { media: ArtifactMedia }) {
       </MediaCaption>
       {open && error && <p role="alert" className="p-3 text-sm">{error}</p>}
       {open && !loaded && !error && <p role="status" className="p-3 text-sm">Checking preview isolation…</p>}
-      {open && nonce && !error && <iframe key={`${nonce}:${url}`} ref={frame} title={media.name} src={`/api/artifact-preview#${nonce}`} onLoad={() => { void beginProbe(); }} sandbox="allow-scripts" referrerPolicy="no-referrer" className="w-full h-[480px] border-0 bg-white" />}
+      {open && nonce && !error && <iframe key={`${nonce}:${url}`} ref={frame} title={media.name} src={`/api/artifact-preview#${nonce}`} onLoad={() => { void beginProbe.current?.(); }} sandbox="allow-scripts" referrerPolicy="no-referrer" className="w-full h-[480px] border-0 bg-white" />}
     </MediaFrame>
   );
 }

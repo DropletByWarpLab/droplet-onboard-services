@@ -18,6 +18,11 @@ describe("public artifact preview policy host", () => {
     expect(result.text).toContain('peer.iceConnectionState === "failed"');
     expect(result.text).toContain('mode: "no-cors"');
     expect(result.text).toContain('event.source !== parent');
+    expect(result.text).toContain('event.origin !== new URL(location.href).origin');
+    expect(result.text).toContain('event.ports.length !== 1');
+    expect(result.text).toContain('port.onmessage = receiveContent');
+    expect(result.text).toContain('port?.postMessage');
+    expect(result.text).not.toContain('parent.postMessage');
     expect(result.text).toContain('state !== "ready"');
     expect(result.text).toContain('frame.setAttribute("sandbox", "allow-scripts")');
     expect(result.text).toContain("connect-src 'none'");

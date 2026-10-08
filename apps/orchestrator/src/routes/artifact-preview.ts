@@ -12,7 +12,9 @@ export const ARTIFACT_PREVIEW_DOCUMENT = `<!doctype html><html><head><meta chars
   const nonce = location.hash.slice(1);
   if (!/^[a-f0-9-]{36}$/.test(nonce) || parent === window) return;
   let state = "initial";
-  const send = (type, extra = {}) => parent.postMessage({ type, nonce, ...extra }, "*");
+  let port = null;
+  const send = (type, extra = {}) => port?.postMessage({ type, nonce, ...extra });
+  addEventListener("pagehide", () => { state = "failed"; port?.close(); port = null; });
 
   // Based on the Web Platform Test for Connection-Allowlist's webrtc=block:
   // https://github.com/web-platform-tests/wpt/blob/master/content-security-policy/webrtc/webrtc.js
@@ -59,15 +61,8 @@ export const ARTIFACT_PREVIEW_DOCUMENT = `<!doctype html><html><head><meta chars
     finally { clearTimeout(timer); }
   }
 
-  addEventListener("message", async (event) => {
-    if (event.source !== parent || event.data?.nonce !== nonce) return;
-    if (state === "initial" && event.data.type === "droplet-artifact-init") {
-      state = "probing";
-      const supported = (await rtcIsBlocked()) && (await networkIsBlocked());
-      state = supported ? "ready" : "failed";
-      send("droplet-artifact-ready", { supported });
-      return;
-    }
+  const receiveContent = (event) => {
+    if (event.data?.nonce !== nonce) return;
     if (state !== "ready" || event.data.type !== "droplet-artifact-content" || typeof event.data.content !== "string") return;
     const content = event.data.content;
     if (new TextEncoder().encode(content).byteLength > 196608) { state = "failed"; return; }
@@ -80,6 +75,18 @@ export const ARTIFACT_PREVIEW_DOCUMENT = `<!doctype html><html><head><meta chars
     frame.srcdoc = '<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="' + policy + '"><meta name="referrer" content="no-referrer"></head><body>' + content + '</body></html>';
     document.body.append(frame);
     send("droplet-artifact-loaded");
+  };
+  addEventListener("message", async (event) => {
+    if (event.source !== parent || event.origin !== new URL(location.href).origin || event.data?.nonce !== nonce) return;
+    if (state !== "initial" || event.data.type !== "droplet-artifact-init" || event.ports.length !== 1) return;
+    state = "probing";
+    port = event.ports[0];
+    port.onmessage = receiveContent;
+    port.start();
+    const supported = (await rtcIsBlocked()) && (await networkIsBlocked());
+    if (state !== "probing") return;
+    state = supported ? "ready" : "failed";
+    send("droplet-artifact-ready", { supported });
   });
 })();
 </script></body></html>`;

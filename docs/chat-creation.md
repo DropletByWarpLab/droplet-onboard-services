@@ -12,8 +12,9 @@ existing authenticated Open and Download routes.
 The first document-creation PR (#2727) merged into `stage` on 2026-10-08.
 That establishes merged code, not installation on a particular device.
 The broader suite below is implemented for review and remains unreleased.
-No target device, GPU model inference, container image build, or native-client
-acceptance has been verified in this task.
+Target-device deployment, GPU model inference, container runtime acceptance
+and native-client behavior remain unverified. Image builds and other CI results
+are tracked on [the suite PR](https://github.com/DropletByWarpLab/droplet-onboard-services/pull/2733).
 
 | Capability | Device tool / implementation | Status and deployment dependencies |
 |---|---|---|
@@ -158,6 +159,12 @@ remain file cards. Private markup is downloaded only after a trusted static
 wrapper proves browser enforcement of its HTTP `Connection-Allowlist: ()`
 policy through network and WebRTC probes. Unsupported browsers show the
 download option and keep execution disabled.
+
+Private markup travels through a dedicated MessagePort after a static,
+non-sensitive port handshake with the trusted wrapper. The opaque sandbox
+requires a wildcard target for that handshake only; generated content and file
+URLs are never sent through window messages. The single scanner exception
+requires explicit security-review acknowledgement before merging.
 
 The content runs in a nested opaque-origin sandbox with restricted CSP, no
 same-origin privilege, forms, workers, popups or parent storage access. The
