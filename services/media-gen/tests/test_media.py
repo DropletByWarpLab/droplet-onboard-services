@@ -4,6 +4,7 @@ import io
 import json
 import os
 import signal
+import shutil
 from pathlib import Path
 
 import pytest
@@ -220,6 +221,40 @@ async def test_cancelled_subprocess_is_reaped(tmp_path, monkeypatch):
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(task, 2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["timeout", "cancel"])
+async def test_retired_worker_leaves_no_partial_media_or_cache(tmp_path, monkeypatch, ending):
+    record = tmp_path / "scratch.json"
+    script = tmp_path / "scratch_worker.py"
+    script.write_text("import json,os,sys,tempfile,time\nfrom pathlib import Path\nsys.stdin.buffer.read()\nwith tempfile.TemporaryDirectory(prefix='droplet-media-') as scratch:\n Path(scratch,'partial.mp4').write_bytes(b'partial')\n Path(" + repr(str(record)) + ").write_text(json.dumps({'scratch':scratch, **{key:os.getenv(key) for key in ('TMPDIR','TEMP','TMP','HF_HOME')}}))\n time.sleep(30)\n")
+    monkeypatch.setattr(main, "WORKER_SCRIPT", script)
+    monkeypatch.setattr(main, "IMAGE_TIMEOUT", 1)
+    task = asyncio.create_task(main._run_worker(contracts.RenderRequest(kind="image", prompt="a tree")))
+    details = None
+    try:
+        for _ in range(200):
+            if record.exists(): break
+            await asyncio.sleep(.01)
+        assert record.exists(), "worker did not create its partial output"
+        if ending == "cancel": task.cancel()
+        with pytest.raises(asyncio.CancelledError if ending == "cancel" else HTTPException) as result:
+            await asyncio.wait_for(task, 3)
+        if ending == "timeout": assert result.value.status_code == 504
+        details = json.loads(record.read_text())
+        assert not Path(details["scratch"]).exists(), "retired worker leaked its partial media directory"
+        root = Path(details["TMPDIR"])
+        assert details["TMPDIR"] == details["TEMP"] == details["TMP"]
+        assert Path(details["HF_HOME"]).parent == root
+        assert Path(details["scratch"]).parent == root
+        assert not root.exists(), "controller did not retire the job's scratch/cache root"
+    finally:
+        if not task.done(): task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        if record.exists():
+            details = json.loads(record.read_text())
+            shutil.rmtree(details["scratch"], ignore_errors=True)
 
 
 @pytest.mark.asyncio
