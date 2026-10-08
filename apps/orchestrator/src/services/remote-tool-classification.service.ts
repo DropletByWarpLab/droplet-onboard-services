@@ -64,6 +64,8 @@ import type { PrismaClient } from "@prisma/client";
 import { createLogger } from "../lib/logger.js";
 import {
   DENY_ALL_REMOTE_TOOLS,
+  namespacedToolName,
+  parseNamespacedToolName,
   type RemoteCallDecision,
   type RemoteCallPolicy,
 } from "./mcp-multiplexer.service.js";
@@ -350,6 +352,23 @@ export class RemoteToolClassificationCache {
   }
 
   lookup: ClassificationLookup = (serverId, toolName) => this.#rows.get(key(serverId, toolName));
+
+  /**
+   * WARP-2436 — is this NAMESPACED remote tool name classified a write right
+   * now? Read straight off the snapshot: no copy of the answer is kept, so a
+   * demotion the owner route just refreshed is the very next answer.
+   */
+  isWrite(namespacedName: string): boolean {
+    const parsed = parseNamespacedToolName(namespacedName);
+    return parsed !== null && this.#rows.get(key(parsed.serverId, parsed.wireName))?.requiresWrite === true;
+  }
+
+  /** The namespaced names of every row currently classified a write. */
+  writeNames(): string[] {
+    return [...this.#rows.values()]
+      .filter((r) => r.requiresWrite)
+      .map((r) => namespacedToolName(r.serverId, r.toolName));
+  }
 
   get size(): number {
     return this.#rows.size;
