@@ -84,7 +84,9 @@ class Parser:
         precedence = {"+": 1, "-": 1, "*": 2, "/": 2, "^": 3}
         while self.peek() in precedence and precedence[self.peek()] >= minimum:
             op = self.take(); level = precedence[op]
-            node = ("binary", op, node, self.expression(level if op == "^" else level + 1, depth + 1))
+            # Excel evaluates equal-precedence operators left to right,
+            # including powers; cached values must match its recalculation.
+            node = ("binary", op, node, self.expression(level + 1, depth + 1))
         return node
     def parse(self):
         ast = self.expression()
