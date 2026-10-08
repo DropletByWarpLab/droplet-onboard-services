@@ -53,7 +53,7 @@ const inputSchema = {
       minimum: 0,
       default: 0,
       description:
-        "0-based CHARACTER offset to resume from. Omit for the start of the file; on a follow-up call pass the `next_offset` value from the previous result.",
+        "0-based character offset; omit to start, then use the previous next_offset.",
     },
   },
   required: ["path"],
@@ -230,7 +230,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "read_file",
   description:
-    "Read the text of a file on the Droplet's File Store, in pages of up to 10,000 characters starting at `offset` (a CHARACTER offset into the file's text; omit it to start at the beginning). Long files come back in parts: when `truncated` is true, `next_offset` is a number and there is more text — call again with `offset` set to that number and keep going until `next_offset` is null. `next_offset: null` is the ONLY signal that you have the whole file, so never describe or summarize a file you have not paged to the end. `chars_total` is the file's full length in characters and `bytes_total` its size in bytes. Binary files (PDFs, Word documents, scans) are refused here — use read_document_text for their extracted text, and for files attached in chat, which live in brain memory rather than in the File Store.",
+    "Read File Store text in pages of up to 10,000 characters. Resume with offset=next_offset until next_offset is null, the ONLY completion signal; never summarize before reading every page. chars_total is text length; bytes_total is file size. For PDFs, Word docs, scans or chat attachments use read_document_text.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

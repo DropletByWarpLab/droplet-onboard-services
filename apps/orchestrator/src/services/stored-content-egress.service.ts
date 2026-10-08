@@ -66,6 +66,9 @@ import { TOOL_CATALOG, TOOL_DOMAINS, type ToolDomain } from "@droplet/tools-core
  *    decision about the Drive; no product decision to keep them on a cloud
  *    turn was ever recorded, and a result they return is sent to the cloud
  *    provider on the next model call, so they are withheld too.
+ *  - `connections` — account identities and provider status are customer
+ *    metadata. Setup and revocation stay on the appliance under the same
+ *    default-deny rule; adding these tools does not permit off-LAN access.
  *
  * DEFAULT-DENY. The set is written the other way round: the domains that MAY
  * be advertised to a cloud model are listed in {@link OFF_LAN_PERMITTED_DOMAINS},

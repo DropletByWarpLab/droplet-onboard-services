@@ -294,10 +294,14 @@ describe("GET /api/m365/callback", () => {
     expect(prisma.__row()).toMatchObject({ state: "CONNECTED", accountUpn: "sam@practice.com" });
   });
 
-  it.each(["connected", "cancelled", "expired", "failed"])("returns onboarding %s to the stored accounts step", async (outcome) => {
+  it.each([
+    ...["connected", "cancelled", "expired", "failed"].map((outcome) => ({ returnTo: "/setup?step=accounts", outcome, location: `/setup?step=accounts&m365=${outcome}` })),
+    ...["connected", "cancelled", "expired", "failed"].map((outcome) => ({ returnTo: "/chat", outcome, location: `/chat?m365=${outcome}` })),
+    ...["connected", "cancelled", "expired", "failed"].map((outcome) => ({ returnTo: "/chat/connect-return", outcome, location: `/chat/connect-return?m365=${outcome}` })),
+  ])("returns $outcome to the stored $returnTo destination", async ({ returnTo, outcome, location }) => {
     const prisma = fakePrisma();
     const entra = fakeEntra();
-    const started = await request(authedApp(prisma, entra)).post("/api/m365/connect").send({ ...APP, returnTo: "/setup?step=accounts" });
+    const started = await request(authedApp(prisma, entra)).post("/api/m365/connect").send({ ...APP, returnTo });
     expect(started.status).toBe(200);
     const state = stateCookie(started).value;
     if (outcome === "expired") prisma.__row()!.pendingFlowExpiresAt = new Date(0);
@@ -306,11 +310,11 @@ describe("GET /api/m365/callback", () => {
       returnTo: "https://evil.example", error_description: "PROVIDER_SECRET",
     }).set("Cookie", `${M365_STATE_COOKIE}=${encodeURIComponent(state)}`);
     expect(res.status).toBe(303);
-    expect(res.headers.location).toBe(`/setup?step=accounts&m365=${outcome}`);
+    expect(res.headers.location).toBe(location);
     expect(res.text).not.toMatch(/evil.example|PROVIDER_SECRET/);
   });
 
-  it.each(["https://evil.example", "//evil.example", "/setup?step=done", "/settings#x"])("rejects an untrusted Microsoft return destination %s before creating a flow", async (returnTo) => {
+  it.each(["https://evil.example", "//evil.example", "/setup?step=done", "/settings#x", "/chat?x=1", "/chat#x", "/chat/", "/chat/connect-return?x=1", "/chat/connect-return#x", "/chat/connect-return/", "/other"])("rejects an untrusted Microsoft return destination %s before creating a flow", async (returnTo) => {
     const prisma = fakePrisma();
     const res = await request(authedApp(prisma, fakeEntra())).post("/api/m365/connect").send({ ...APP, returnTo });
     expect(res.status).toBe(400);

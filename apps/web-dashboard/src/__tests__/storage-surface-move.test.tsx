@@ -65,7 +65,7 @@ describe("the old /files/drives address keeps working", () => {
   });
 });
 
-describe("Files no longer offers Drives", () => {
+describe("Files offers a shortcut to physical drive management", () => {
   function filesChildren() {
     for (const group of NAV_GROUPS) {
       const files = group.items.find((i) => i.href === "/files");
@@ -74,22 +74,22 @@ describe("Files no longer offers Drives", () => {
     throw new Error("the Files nav item is gone");
   }
 
-  it("drops the Drives child from the Files sub-nav", () => {
+  it("restores Drives alongside the existing Files sub-nav", () => {
     const hrefs = filesChildren().map((c) => c.href);
-    expect(hrefs).not.toContain("/files/drives");
     // …and the rest of the sub-nav is untouched.
     // WARP-2966 re-cut the rest of the sub-nav to three places: the "All
     // files" row repeated the parent href, Favorites is a filter reached from
     // the browser's toolbar, and Sync devices left Files for Settings.
     expect(hrefs).toEqual([
+      "/files/drives",
       "/files/recents",
       "/files/shared",
       "/files/trash",
     ]);
   });
 
-  it("points nowhere at Drives from any nav group", () => {
+  it("offers one Drives shortcut using the working redirect", () => {
     const every = NAV_GROUPS.flatMap((g) => g.items.flatMap((i) => [i, ...(i.children ?? [])]));
-    expect(every.map((i) => i.href)).not.toContain("/files/drives");
+    expect(every.filter((i) => i.href === "/files/drives").map((i) => i.label)).toEqual(["Drives"]);
   });
 });

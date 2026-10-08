@@ -537,7 +537,7 @@ _WHOLE_DISK = {
 _EXPECTED_ENTRY_KEYS = {
     "device", "parent_disk", "mount", "label", "uuid", "size_bytes",
     "used_bytes", "free_bytes", "mounted", "fs", "bus", "readonly", "smart",
-    "temp_c", "removable", "source",
+    "temp_c", "smart_status", "removable", "source",
     # WARP-3513 — the only two additions.
     "encryption", "md",
 }

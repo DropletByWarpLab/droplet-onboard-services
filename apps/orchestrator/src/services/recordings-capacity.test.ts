@@ -193,16 +193,10 @@ describe("recordingsUsageByFsUuid — the `usage` field of GET /storage/drives",
   });
 });
 
-describe("recordingsUsageByFsUuid — only a drive that HOSTS recordings is `recordings`", () => {
-  it.each([
-    ["ACTIVE", true],
-    ["MIGRATING", true],
-    ["DEGRADED", true],
-    ["PENDING", false],
-    ["MISSING", false],
-  ] as const)("a %s row → recordings: %s", async (status, hosting) => {
+describe("recordingsUsageByFsUuid — every persisted recordings purpose stays assigned", () => {
+  it.each(["ACTIVE", "MIGRATING", "DEGRADED", "PENDING", "MISSING"] as const)("a %s row retains its role and reservation", async (status) => {
     const { prisma } = fakePrisma([row({ status })]);
-    expect((await recordingsUsageByFsUuid(prisma)).has("1111-aaaa")).toBe(hosting);
+    expect((await recordingsUsageByFsUuid(prisma)).get("1111-aaaa")).toEqual({ role: "recordings", reservedBytes: g(200) });
   });
 
   it("during a drive switch both drives are recordings (the old one still records until the flip)", async () => {

@@ -3538,7 +3538,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       // fail-closed one — module-owned tools withheld, the rest listed.
       const verdict = await resolveToolModuleVerdict((req as AuthedRequest).user?.id);
       const filtered = withholdModuleTools(
-        isPrivilegedRole(role) ? tools : tools.filter((t) => !WRITE_TOOLS.has(t.name)),
+        tools.filter((t) => toolAllowedForTier(t.name, role)),
         verdict,
       );
       res.json({
@@ -3602,9 +3602,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
   router.get("/llm/tools/catalog", async (req, res, next) => {
     try {
       const role = (req as AuthedRequest).user?.role;
-      const tools = isPrivilegedRole(role)
-        ? TOOL_CATALOG
-        : TOOL_CATALOG.filter((t) => !t.requiresWrite);
+      const tools = TOOL_CATALOG.filter((t) => toolAllowedForTier(t.name, role));
       const verdict = await resolveToolModuleVerdict((req as AuthedRequest).user?.id);
       res.json({
         tools: tools.map((t) => ({

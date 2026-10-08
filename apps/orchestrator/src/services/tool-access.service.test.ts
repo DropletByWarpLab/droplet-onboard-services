@@ -23,6 +23,7 @@ import {
   resolveAttributedToolAccess,
   resolveToolAccessScope,
   toolAllowedInScope,
+  toolAllowedForTier,
   toolDispatchDenial,
   unknownToolsIn,
   WRITE_TOOLS,
@@ -50,6 +51,18 @@ const nameOf = (domain: string, write: boolean): string => {
   if (!entry) throw new Error(`no ${write ? "write" : "read"} tool in ${domain}`);
   return entry.name;
 };
+
+describe("chat connections member floor", () => {
+  const connections = ["list_connections", "start_connection", "disconnect_connection"];
+  it.each(["guest", "service", undefined])("withholds every connection tool from %s", (tier) => {
+    for (const name of connections) expect(toolAllowedForTier(name, tier)).toBe(false);
+    expect(narrowToolNamesForPrincipal(connections, tier, null)).toEqual([]);
+  });
+  it("keeps personal setup reads for members and box-wide disconnect for admins", () => {
+    expect(narrowToolNamesForPrincipal(connections, "family", null)).toEqual(["list_connections", "start_connection"]);
+    for (const tier of ["owner", "admin"]) expect(narrowToolNamesForPrincipal(connections, tier, null)).toEqual(connections);
+  });
+});
 
 describe("WARP-2665 — writeToolsIn / hasWriteTool, the one write classification", () => {
   it("uses the hosted_apps tool grant for read discovery without giving workspace writes", () => {

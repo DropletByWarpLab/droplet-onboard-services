@@ -656,6 +656,9 @@ export const TOOL_DOMAIN_GROUPS: ToolDomainGroup[] = [
   // App listing/opening has its own Chat tool grant. Individual app access
   // is still checked by the server; there is no hosted-apps feature module.
   { id: "hosted_apps", label: "Hosted apps", domains: ["hosted_apps"], feature: null },
+  // Setup spans personal accounts and box-wide providers; its canonical routes
+  // enforce the member/admin floor separately from this explicit tool grant.
+  { id: "connections", label: "Connections", domains: ["connections"], feature: null },
   { id: "system", label: "System", domains: ["system", "data"], feature: null },
 ];
 

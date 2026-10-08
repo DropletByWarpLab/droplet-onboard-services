@@ -61,7 +61,7 @@ const inputSchema = {
       type: "integer",
       minimum: 0,
       description:
-        "0-based chunk index to resume from. Omit for the start of the document; on a follow-up call pass the `next_chunk` value from the previous result.",
+        "0-based chunk index; omit to start, then use the previous next_chunk.",
     },
     max_chars: {
       type: "integer",
@@ -207,7 +207,7 @@ async function handler(
 const tool: Tool = {
   name: "read_document_text",
   description:
-    "Read the full extracted text of one document in document order, including PDFs, Word docs, and scans that read_file cannot decode. Use this — not search_content — when you need the WHOLE document (compiling a report, extracting every date or line item); use search_content when you only need the passages matching a question. Long documents come back in parts: when `next_chunk` is a number there is more text, so call again with start_chunk set to it, and keep going until `next_chunk` is null. Fails with NOT_INDEXED when the file has no extracted text rather than returning an empty document.",
+    "Read extracted document text in order, including PDFs, Word docs, scans and chat attachments. For the whole document, resume with start_chunk=next_chunk until next_chunk is null. Use search_content for matching passages. NOT_INDEXED means extracted text is unavailable.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

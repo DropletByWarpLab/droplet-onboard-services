@@ -39,7 +39,7 @@ function takeOutcome(): Outcome | null {
   return Object.hasOwn(OUTCOMES, raw) ? raw as Outcome : null;
 }
 
-export function GoogleAccountCard({ navigate = (url: string) => window.location.assign(url), calendarPollMs = 5_000, returnTo, beforeConnect }: AccountConnectionNavigation & { navigate?: (url: string) => void; calendarPollMs?: number } = {}) {
+export function GoogleAccountCard({ navigate = (url: string) => window.location.assign(url), calendarPollMs = 5_000, returnTo, beforeConnect, afterConnect }: AccountConnectionNavigation & { navigate?: (url: string) => void; calendarPollMs?: number } = {}) {
   const { user } = useAuth();
   const allowed = user?.role === "owner" || user?.role === "admin" || user?.role === "family";
   const [view, setView] = useState<GoogleConnectionView | null>(null);
@@ -130,6 +130,8 @@ export function GoogleAccountCard({ navigate = (url: string) => window.location.
       setError("Droplet could not start Google sign-in. Try again, or ask your Droplet administrator to check Account connection setup.");
     } catch {
       setError("Droplet could not start Google sign-in. Check your connection and try again.");
+    } finally {
+      afterConnect?.();
     }
     setBusy(false);
   };

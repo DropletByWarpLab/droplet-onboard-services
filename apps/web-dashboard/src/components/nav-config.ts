@@ -33,6 +33,7 @@ import {
   FolderOpen,
   Globe,
   Hammer,
+  HardDrive,
   HeartPulse,
   HelpCircle,
   Laptop,
@@ -260,9 +261,10 @@ export const NAV_GROUPS: NavGroup[] = [
         // was not one idea: an "All files" row whose href WAS the parent's,
         // four places inside the tree, and a device-pairing screen.
         //
-        // What is left is the one thing the caption can honestly name — the
-        // places a file can be that are not a folder. Reveals on any /files/*
-        // route; the Libraries rail (FilesLibrariesNav) is appended beneath.
+        // Reveals on any /files/* route; the Libraries rail
+        // (FilesLibrariesNav) is appended beneath. Drives restores the way
+        // into physical storage management through the existing redirect to
+        // Settings → Storage, which remains the panel's canonical home.
         //
         // Three rows are gone and each went somewhere:
         //  · "All files" was `{ href: "/files", exact: true }` — a child whose
@@ -275,6 +277,7 @@ export const NAV_GROUPS: NavGroup[] = [
         //    prefix (see the WARP-2966 pin in Sidebar.files-section.test.tsx).
         //  · Sync Devices left Files entirely — see the tucked entry below.
         children: [
+          { href: "/files/drives", label: "Drives", icon: HardDrive },
           { href: "/files/recents", label: "Recent", icon: Clock },
           { href: "/files/shared", label: "Shared", icon: Share2 },
           { href: "/files/trash", label: "Trash", icon: Trash2, keywords: ["deleted", "bin"] },
