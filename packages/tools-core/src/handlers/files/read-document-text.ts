@@ -61,7 +61,7 @@ const inputSchema = {
       type: "integer",
       minimum: 0,
       description:
-        "0-based chunk index to resume from. Omit for the start of the document; on a follow-up call pass the `next_chunk` value from the previous result.",
+        "0-based chunk index; omit to start, then use the previous next_chunk.",
     },
     max_chars: {
       type: "integer",

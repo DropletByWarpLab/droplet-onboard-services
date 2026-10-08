@@ -286,8 +286,8 @@ describe("accessibility", () => {
   });
 });
 
-// WARP-2966 — the rail sits directly beneath the section's three sub-nav
-// rows, at the same indent, so its caption read as a fourth row rather than
+// WARP-2966 — the rail sits directly beneath the section's sub-nav
+// rows, at the same indent, so its caption read as another row rather than
 // the head of a different kind of list. A hairline is what separates the
 // places you can be from the libraries you can be in.
 describe("the Libraries group is visually separated from the sub-nav above it", () => {

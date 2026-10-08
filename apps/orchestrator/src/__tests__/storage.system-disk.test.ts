@@ -41,6 +41,7 @@ import { ncGetUserQuota } from "../services/nextcloud.client.js";
 function prismaStub() {
   return {
     drive: { findMany: async () => [] },
+    storageAllocation: { findMany: async () => [] },
     storagePool: { findMany: async () => [] },
   } as never;
 }

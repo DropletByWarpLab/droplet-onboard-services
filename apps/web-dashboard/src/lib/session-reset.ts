@@ -43,6 +43,7 @@
  */
 import { CHAT_DRAFT_KEY, PENDING_COMPOSER_KEY, PENDING_PROMPT_KEY } from "./types";
 import { SIDE_STORAGE_KEYS } from "./assistant-side";
+import { CHAT_CONNECTION_POPUP_KEY } from "./chat-connection-popup";
 
 /** Drop the chat hand-offs, the unsent draft and the assistant layout's
  *  remembered places (see the module note). */
@@ -51,6 +52,7 @@ export function clearChatHandoffs(): void {
     PENDING_PROMPT_KEY,
     PENDING_COMPOSER_KEY,
     CHAT_DRAFT_KEY,
+    CHAT_CONNECTION_POPUP_KEY,
     SIDE_STORAGE_KEYS.ask,
     SIDE_STORAGE_KEYS.business,
   ]) {

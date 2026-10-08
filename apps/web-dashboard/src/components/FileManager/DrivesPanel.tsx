@@ -18,6 +18,7 @@ import {
   KeyRound,
   Lock,
   LockOpen,
+  Camera,
 } from "lucide-react";
 import { useDrives } from "@/lib/hooks/useDrives";
 import { usePools } from "@/lib/hooks/usePools";
@@ -36,6 +37,7 @@ import { useAuth } from "@/lib/auth";
 import { useToast } from "@/components/Toast";
 import { Meter, Badge, type BadgeKind } from "@/components/shell/primitives";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 // WARP-1915: typed-name friction for the reclaim wipe — the same
 // DestructiveConfirm the Settings Danger zone puts in front of a reformat.
 // One primitive for every type-to-confirm destructive flow, never a fork.
@@ -46,6 +48,7 @@ import type {
   DataStorageTotals,
   DiskInfo,
   DriveInfo,
+  DriveSmartStatus,
   PoolInfo,
   SystemDiskInfo,
 } from "@/lib/types";
@@ -117,6 +120,21 @@ function poolName(pool: PoolInfo): string {
 // Customer-chosen drive names are 1–64 chars, trimmed, non-empty — mirrors the
 // orchestrator's updateDriveSchema (z.string().trim().min(1).max(64)).
 const DRIVE_NAME_MAX = 64;
+const DRIVE_ICON_MAX = 48;
+const DRIVE_NOTES_MAX = 512;
+
+const DRIVE_ICONS = [
+  { value: "drive", label: "Hard drive", Icon: HardDrive },
+  { value: "usb", label: "USB drive", Icon: Usb },
+  { value: "memory-stick", label: "Memory card", Icon: MemoryStick },
+  { value: "camera", label: "Camera", Icon: Camera },
+];
+
+function DriveIcon({ icon, bus }: { icon?: string | null; bus?: string }) {
+  const choice = DRIVE_ICONS.find((option) => option.value === icon);
+  const Icon = icon === "hard-drive" ? HardDrive : choice?.Icon;
+  return Icon ? <Icon className="h-5 w-5" /> : <BusIcon bus={bus} className="h-5 w-5" />;
+}
 
 function usagePct(d: DriveInfo): number {
   return usagePctOf(d.used_bytes, d.size_bytes);
@@ -178,6 +196,46 @@ function HwTag({ children, upper = true }: { children: ReactNode; upper?: boolea
     >
       {children}
     </span>
+  );
+}
+
+function driveSmartStatus(d: DriveInfo): DriveSmartStatus {
+  switch (d.smart_status) {
+    case "disabled":
+    case "available":
+    case "unsupported":
+    case "unavailable":
+      return d.smart_status;
+    default:
+      if (d.smart_status === undefined && (
+        d.smart === "PASSED" || d.smart === "FAILED" ||
+        (typeof d.temp_c === "number" && Number.isFinite(d.temp_c))
+      )) return "available";
+      return "unknown";
+  }
+}
+
+function SmartHealth({ drive }: { drive: DriveInfo }) {
+  const status = driveSmartStatus(drive);
+  if (status !== "available") {
+    const labels = {
+      disabled: "SMART monitoring off",
+      unsupported: "SMART not supported",
+      unavailable: "SMART data unavailable",
+      unknown: "SMART status unknown",
+    };
+    return <Badge kind="muted">{labels[status]}</Badge>;
+  }
+  const verdict = drive.smart === "PASSED" || drive.smart === "FAILED" ? drive.smart : null;
+  return (
+    <>
+      {typeof drive.temp_c === "number" && Number.isFinite(drive.temp_c) && (
+        <HwTag upper={false}>{drive.temp_c}°C</HwTag>
+      )}
+      <Badge kind={verdict === "PASSED" ? "ok" : verdict === "FAILED" ? "danger" : "muted"}>
+        {verdict ? `SMART ${verdict}` : "SMART health unknown"}
+      </Badge>
+    </>
   );
 }
 
@@ -243,7 +301,7 @@ function friendlyPrepareError(err: unknown): string {
     return "That's the Droplet's system disk — it can't be erased or prepared.";
   }
   if (/recording/.test(raw)) {
-    return "This drive is storing your camera recordings, so it can't be erased. Choose another recording drive first.";
+    return "This drive is assigned to camera recordings, so it can't be erased. Choose another recording drive first.";
   }
   if (/busy|in use|mounted|unmount|close open files|open file/.test(raw)) {
     return "That drive is in use right now — close anything using it, then try again.";
@@ -274,15 +332,14 @@ function EncryptionBadge({ state }: { state: DriveEncryptionState }) {
   return null;
 }
 
-/** "Used for: Camera recordings · 120 GB reserved" — on the active recordings
- *  drive only. */
+/** Persisted recordings purpose, including targets awaiting setup/migration. */
 function UsageBadge({ drive }: { drive: Pick<DriveInfo, "usage"> }) {
   if (!isRecordingsDrive(drive)) return null;
   const reserved = recordingsReservedBytes(drive);
   return (
     <Badge kind="info">
-      Used for: Camera recordings
-      {reserved ? ` · ${formatBytes(reserved)} reserved` : ""}
+      Assigned to: Camera recordings
+      {reserved ? ` · ${formatBytes(reserved)} allocated` : ""}
     </Badge>
   );
 }
@@ -292,7 +349,7 @@ function UsageBadge({ drive }: { drive: Pick<DriveInfo, "usage"> }) {
 function RecordingsLock({ id, canChange }: { id: string; canChange: boolean }) {
   return (
     <p id={id} className="mt-2" style={{ fontSize: "12px", color: "var(--text-muted)" }}>
-      Camera recordings are stored on this drive, so it can&rsquo;t be ejected or
+      This drive is assigned to camera recordings, so it can&rsquo;t be ejected or
       erased.
       {/* The Recording storage card is owner/admin only (a family account gets a
           403 and no card), so a link to it would be a dead end for anyone else. */}
@@ -733,14 +790,13 @@ export function DrivesPanel() {
   async function onRescan() {
     setRescanning(true);
     try {
-      await rescanDrives();
-      // SWR refetches on the 30s interval; nudge an immediate refresh by
-      // toasting success — the next poll picks up new/removed drives.
-      refresh();
-      refreshPools();
-      toast("Rescanning drives — the list refreshes shortly", "success");
+      // The host rescan is owner/admin-only. Other accounts can still refresh
+      // their read-only inventory without calling a control endpoint.
+      if (isAdmin) await rescanDrives();
+      await Promise.all([refresh(), refreshPools()]);
+      toast(isAdmin ? "Rescanning drives — the list refreshes shortly" : "Drive list refreshed", "success");
     } catch (err) {
-      toast(translateError(err, "files"), "error");
+      toast(translateError(err, "storage"), "error");
     } finally {
       setRescanning(false);
     }
@@ -805,7 +861,7 @@ export function DrivesPanel() {
             style={{ marginTop: "6px" }}
           >
             <RefreshCw size={15} className={rescanning ? "animate-spin" : ""} />
-            Rescan
+            {isAdmin ? "Rescan" : "Refresh"}
           </button>
         </div>
       </div>
@@ -845,10 +901,10 @@ export function DrivesPanel() {
           onClick={onRescan}
           disabled={rescanning}
           className="btn ghost sm"
-          aria-label="Rescan drives"
+          aria-label={isAdmin ? "Rescan drives" : "Refresh drives"}
         >
           <RefreshCw size={15} className={rescanning ? "animate-spin" : ""} />
-          Rescan
+          {isAdmin ? "Rescan" : "Refresh"}
         </button>
       </div>
 
@@ -1488,10 +1544,10 @@ function AvailableDiskCard({
 }
 
 /**
- * One drive card. Read by everyone; admins additionally get an inline rename
- * (WARP-827) wired to the existing PATCH /api/storage/drives/:uuid via
- * updateDriveLabel(). The friendly name is applied optimistically and rolled
- * back if the save fails. Clicking the card title deep-links into the existing
+ * One drive card. Read by everyone; admins can edit the name, icon and notes
+ * through the existing PATCH /api/storage/drives/:uuid. Successful edits stay
+ * visible while the inventory refreshes; failed saves keep the draft for retry.
+ * Clicking the card title deep-links into the existing
  * file browser scoped to this drive — never a new endpoint. The raw /dev/sdX
  * path is intentionally NOT shown (home-user persona, ADR-002).
  */
@@ -1524,12 +1580,26 @@ function DriveCard({
   const { toast } = useToast();
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
+  const [draftIcon, setDraftIcon] = useState("");
+  const [draftNotes, setDraftNotes] = useState("");
   const [saving, setSaving] = useState(false);
-  // Optimistic display name — set on a successful (or in-flight) save so the
-  // card shows the new name before the drives list refetches; rolled back on
-  // failure.
-  const [optimisticName, setOptimisticName] = useState<string | null>(null);
-  // Return focus to the Rename trigger when edit mode exits — save and cancel
+  const [savedLabel, setSavedLabel] = useState<{
+    displayName: string; icon: string | null; notes: string | null;
+  } | null>(null);
+  const savedSnapshot = useRef(d);
+  useEffect(() => {
+    if (!savedLabel) return;
+    const matchesSaved = d.displayName === savedLabel.displayName &&
+      (d.icon ?? null) === savedLabel.icon && (d.notes ?? null) === savedLabel.notes;
+    const snapshot = savedSnapshot.current;
+    const metadataChanged = (d.displayName ?? null) !== (snapshot.displayName ?? null) ||
+      (d.icon ?? null) !== (snapshot.icon ?? null) || (d.notes ?? null) !== (snapshot.notes ?? null);
+    // Once the inventory carries new metadata it is authoritative, including
+    // a concurrent edit from another admin. A capacity-only poll keeps the
+    // saved values visible until the label has arrived.
+    if (matchesSaved || metadataChanged) setSavedLabel(null);
+  }, [d.displayName, d.icon, d.notes, savedLabel]);
+  // Return focus to the Edit trigger when edit mode exits — save and cancel
   // both unmount the input, which would otherwise drop focus to <body>
   // (WCAG 2.4.3 focus order).
   const renameBtnRef = useRef<HTMLButtonElement>(null);
@@ -1541,26 +1611,31 @@ function DriveCard({
 
   const p = usagePct(d);
   const st = statusOf(d);
-  const name = driveName(d, optimisticName);
+  const name = driveName(d, savedLabel?.displayName);
+  const icon = savedLabel ? savedLabel.icon : d.icon;
+  const notes = savedLabel ? savedLabel.notes : d.notes;
   const trimmed = draft.trim();
-  const valid = trimmed.length >= 1 && trimmed.length <= DRIVE_NAME_MAX;
+  const valid = trimmed.length >= 1 && trimmed.length <= DRIVE_NAME_MAX &&
+    draftIcon.trim().length <= DRIVE_ICON_MAX && draftNotes.trim().length <= DRIVE_NOTES_MAX;
+  const fieldId = useId();
 
   // WARP-3515 — what the orchestrator says about this drive. Every one of these
   // is false/"unreported" on an orchestrator that predates WARP-3513.
   const enc = driveEncryptionState(d);
   const recordings = isRecordingsDrive(d);
   const system = d.isSystemDisk === true;
+  const canEdit = isAdmin && !!d.uuid && !system;
   const lockId = useId();
   // The install disk never gets an action; the recordings drive keeps Eject on
   // screen but locked, with the reason attached to it.
-  const canEject = !!d.removable && d.mounted && !system;
+  const canEject = isAdmin && !!d.uuid && !!d.removable && d.mounted && !system;
   // The key can only be asked for by id, and only an encrypted drive has one.
   const showKey = isOwner && enc === "encrypted" && !!d.uuid && !system;
 
   function beginEdit() {
-    // Seed the field with the current friendly name (without the raw fallbacks
-    // that aren't user-set) so a rename edits rather than starts blank.
-    setDraft(optimisticName || d.displayName || "");
+    setDraft(savedLabel?.displayName || d.displayName || name);
+    setDraftIcon(icon || "");
+    setDraftNotes(notes || "");
     setEditing(true);
   }
 
@@ -1570,19 +1645,20 @@ function DriveCard({
   }
 
   async function save() {
-    if (!valid || saving) return;
-    const previous = optimisticName;
-    setOptimisticName(trimmed); // optimistic
+    if (!valid || saving || !canEdit) return;
+    const patch = {
+      displayName: trimmed,
+      icon: draftIcon.trim() || null,
+      notes: draftNotes.trim() || null,
+    };
     setSaving(true);
-    setEditing(false);
     try {
-      await updateDriveLabel(d.uuid, { displayName: trimmed });
-      onRenamed(); // refetch so the persisted name replaces the optimistic one
+      await updateDriveLabel(d.uuid, patch);
+      savedSnapshot.current = d;
+      setSavedLabel(patch);
+      setEditing(false);
+      onRenamed();
     } catch (err) {
-      setOptimisticName(previous); // roll back
-      // WARP-1141: storage domain, not files — a failed rename is a WRITE,
-      // and the files fallback ("couldn't load those files") read as a
-      // transient load blip, hiding the failure from the user.
       toast(translateError(err, "storage"), "error");
     } finally {
       setSaving(false);
@@ -1592,113 +1668,106 @@ function DriveCard({
   return (
     // `relative` anchors the stretched title-link overlay (WARP-1338): the
     // whole card is the click target, while later-in-DOM positioned controls
-    // (the Rename button) stack above it and stay functional.
+    // (the Edit drive button) stack above it and stay functional.
     <div role="listitem" className="card relative">
       <div className="flex items-start gap-3">
         <IconTile>
-          <BusIcon bus={d.bus} className="h-5 w-5" />
+          <DriveIcon icon={icon} bus={d.bus} />
         </IconTile>
         <div className="min-w-0 flex-1">
-          {editing ? (
-            <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-2">
+            <Link
+              href={driveContentsHref(d)}
+              className="min-w-0 inline-flex items-center gap-1 group focus-visible:outline-none focus-visible:ring-2"
+              style={{ borderRadius: "var(--radius-input)" }}
+            >
+              <span className="sr-only">Open </span>
+              {/* WARP-1338: stretched link — this overlay spans the whole
+                  (relative) card, widening the click target without adding
+                  a second tab stop or nesting controls inside the anchor.
+                  The edit button below is positioned later in the DOM,
+                  so it stacks above and stays clickable. */}
+              {!editing && <span className="absolute inset-0" aria-hidden="true" />}
+              <h3
+                className="truncate transition-colors duration-150 group-hover:text-[color:var(--brand)]"
+                style={{ fontSize: "14px", fontWeight: 600, color: "var(--text)" }}
+                title={name}
+              >
+                {name}
+              </h3>
+              <FolderOpen
+                aria-hidden="true"
+                className="flex-none h-3.5 w-3.5 transition-colors duration-150 group-hover:text-[color:var(--brand)]"
+                style={{ color: "var(--text-muted)" }}
+              />
+            </Link>
+            <HwTag>{busLabel(d.bus)}</HwTag>
+          </div>
+        </div>
+        <Badge kind={st.kind}>{st.label}</Badge>
+      </div>
+
+      {editing && canEdit && (
+        <form
+          aria-label={`Edit ${name}`}
+          className="relative mt-4 flex flex-col gap-3"
+          onSubmit={(e) => { e.preventDefault(); void save(); }}
+          onKeyDown={(e) => {
+            if (e.key === "Escape" && !saving && !e.defaultPrevented) cancelEdit();
+          }}
+        >
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <label className="flex flex-col gap-1" htmlFor={`${fieldId}-name`}>
+              <span style={{ fontSize: "12px", color: "var(--text-muted)" }}>Drive name</span>
               <input
+                id={`${fieldId}-name`}
                 autoFocus
-                aria-label="Drive name"
+                required
                 value={draft}
                 maxLength={DRIVE_NAME_MAX}
+                disabled={saving}
                 onChange={(e) => setDraft(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") save();
-                  if (e.key === "Escape") cancelEdit();
-                }}
-                className="min-w-0 flex-1 outline-none text-[16px] lg:text-[13.5px]"
-                style={{
-                  background: "var(--surface)",
-                  border: "1px solid var(--border)",
-                  borderRadius: "var(--radius-input)",
-                  color: "var(--text)",
-                  fontWeight: 500,
-                  padding: "6px 10px",
-                }}
-                placeholder="Drive name"
+                className="w-full min-w-0 outline-none text-[16px] lg:text-[13.5px] focus-visible:ring-2"
+                style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius-input)", color: "var(--text)", padding: "8px 10px" }}
               />
-              <button
-                onClick={save}
-                disabled={!valid || saving}
-                aria-label="Save"
-                className="flex-none inline-flex items-center justify-center h-11 w-11 disabled:opacity-40 transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2"
-                style={{
-                  borderRadius: "var(--radius-input)",
-                  color: "var(--brand)",
-                }}
+            </label>
+            <label className="flex flex-col gap-1" htmlFor={`${fieldId}-icon`}>
+              <span style={{ fontSize: "12px", color: "var(--text-muted)" }}>Drive icon</span>
+              <ThemedSelect
+                id={`${fieldId}-icon`}
+                value={draftIcon}
+                disabled={saving}
+                onChange={(e) => setDraftIcon(e.target.value)}
+                className="w-full min-w-0 outline-none text-[16px] lg:text-[13.5px] focus-visible:ring-2"
+                style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius-input)", color: "var(--text)", padding: "8px 10px" }}
               >
-                <Check className="h-4 w-4" />
-              </button>
-              <button
-                onClick={cancelEdit}
-                aria-label="Cancel"
-                className="flex-none inline-flex items-center justify-center h-11 w-11 transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2"
-                style={{
-                  borderRadius: "var(--radius-input)",
-                  color: "var(--text-muted)",
-                }}
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-          ) : (
-            <div className="flex items-center gap-2">
-              <Link
-                href={driveContentsHref(d)}
-                className="min-w-0 inline-flex items-center gap-1 group focus-visible:outline-none focus-visible:ring-2"
-                style={{ borderRadius: "var(--radius-input)" }}
-                aria-label={`Open ${name}`}
-              >
-                {/* WARP-1338: stretched link — this overlay spans the whole
-                    (relative) card, widening the click target without adding
-                    a second tab stop or nesting controls inside the anchor.
-                    The Rename button below is positioned later in the DOM,
-                    so it stacks above and stays clickable. */}
-                <span className="absolute inset-0" aria-hidden="true" />
-                <h3
-                  className="truncate transition-colors duration-150 group-hover:text-[color:var(--brand)]"
-                  style={{ fontSize: "14px", fontWeight: 600, color: "var(--text)" }}
-                  title={name}
-                >
-                  {name}
-                </h3>
-                <FolderOpen
-                  className="flex-none h-3.5 w-3.5 transition-colors duration-150 group-hover:text-[color:var(--brand)]"
-                  style={{ color: "var(--text-muted)" }}
-                />
-              </Link>
-              <HwTag>{busLabel(d.bus)}</HwTag>
-              {/* WARP-1141: the label row is keyed by the drive's FS UUID —
-                  the bridge can report a drive without one (automount state
-                  gap, no /dev/disk/by-uuid symlink), and renaming such a
-                  drive can never persist. Don't offer a control that is
-                  guaranteed to fail. */}
-              {isAdmin && !!d.uuid && (
-                <button
-                  ref={renameBtnRef}
-                  onClick={beginEdit}
-                  aria-label="Rename"
-                  // `relative` lifts the control above the stretched title
-                  // link's inset overlay (WARP-1338) so Rename stays clickable.
-                  className="relative flex-none ml-auto inline-flex items-center justify-center h-11 w-11 -my-2.5 -mr-2.5 transition-colors duration-150 hover:text-[color:var(--brand)] hover:bg-[var(--hover)] focus-visible:outline-none focus-visible:ring-2"
-                  style={{
-                    borderRadius: "var(--radius-input)",
-                    color: "var(--text-muted)",
-                  }}
-                >
-                  <Pencil className="h-4 w-4" />
-                </button>
-              )}
-            </div>
-          )}
-        </div>
-        {!editing && <Badge kind={st.kind}>{st.label}</Badge>}
-      </div>
+                <option value="">Automatic</option>
+                {draftIcon && !DRIVE_ICONS.some((option) => option.value === draftIcon) && (
+                  <option value={draftIcon}>Current icon</option>
+                )}
+                {DRIVE_ICONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+              </ThemedSelect>
+            </label>
+          </div>
+          <label className="flex flex-col gap-1" htmlFor={`${fieldId}-notes`}>
+            <span style={{ fontSize: "12px", color: "var(--text-muted)" }}>Drive notes</span>
+            <textarea
+              id={`${fieldId}-notes`}
+              value={draftNotes}
+              maxLength={DRIVE_NOTES_MAX}
+              rows={3}
+              disabled={saving}
+              onChange={(e) => setDraftNotes(e.target.value)}
+              className="w-full resize-y outline-none text-[16px] lg:text-[13.5px] focus-visible:ring-2"
+              style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius-input)", color: "var(--text)", padding: "8px 10px" }}
+            />
+          </label>
+          <div className="flex justify-end gap-2">
+            <button type="button" onClick={cancelEdit} disabled={saving} className="relative btn ghost sm">Cancel</button>
+            <button type="submit" disabled={!valid || saving} className="relative btn primary sm">{saving ? "Saving…" : "Save"}</button>
+          </div>
+        </form>
+      )}
 
       <div className="mt-4">
         <div
@@ -1728,21 +1797,14 @@ function DriveCard({
       {/* Hardware facts — friendly only. The raw /dev/sdX path is deliberately
           never surfaced (home-user persona, ADR-002); the bus label above is
           the only hardware identifier we show. */}
-      {(d.fs || typeof d.temp_c === "number" || d.smart) && (
-        <div className="mt-3 flex items-center gap-2 flex-wrap">
-          {d.fs && <HwTag>{d.fs}</HwTag>}
-          {typeof d.temp_c === "number" && <HwTag upper={false}>{d.temp_c}°C</HwTag>}
-          {d.smart && (
-            <Badge kind={d.smart === "PASSED" ? "ok" : "danger"}>
-              SMART {d.smart}
-            </Badge>
-          )}
-        </div>
-      )}
+      <div className="mt-3 flex items-center gap-2 flex-wrap">
+        {d.fs && <HwTag>{d.fs}</HwTag>}
+        <SmartHealth drive={d} />
+      </div>
 
-      {d.notes && (
-        <p className="mt-2" style={{ fontSize: "12px", color: "var(--text-muted)" }}>
-          {d.notes}
+      {notes && (
+        <p className="mt-2 whitespace-pre-wrap break-words" style={{ fontSize: "12px", color: "var(--text-muted)" }}>
+          {notes}
         </p>
       )}
 
@@ -1769,11 +1831,24 @@ function DriveCard({
         </div>
       )}
 
-      {(canEject || showKey) && (
+      {((canEdit && !editing) || canEject || showKey) && (
         <div
           className="mt-4 pt-3 flex items-center justify-end gap-2 flex-wrap"
           style={{ borderTop: "1px solid var(--card-bd)" }}
         >
+          {/* The UUID-keyed metadata cannot persist without a stable id.
+              Keep the edit control beside the other wrapping card actions. */}
+          {canEdit && !editing && (
+            <button
+              ref={renameBtnRef}
+              onClick={beginEdit}
+              aria-label="Edit drive"
+              className="relative btn ghost sm"
+            >
+              <Pencil size={14} aria-hidden="true" />
+              Edit drive
+            </button>
+          )}
           {showKey && (
             <button
               onClick={onShowRecoveryKey}
@@ -2036,8 +2111,8 @@ function PoolCard({
                   href={driveContentsHref(backingDrive)}
                   className="min-w-0 inline-flex items-center gap-1 group focus-visible:outline-none focus-visible:ring-2"
                   style={{ borderRadius: "var(--radius-input)" }}
-                  aria-label={`Open ${name}`}
                 >
+                  <span className="sr-only">Open </span>
                   <h4
                     className="truncate transition-colors duration-150 group-hover:text-[color:var(--brand)]"
                     style={{ fontSize: "14px", fontWeight: 600, color: "var(--text)" }}
@@ -2046,6 +2121,7 @@ function PoolCard({
                     {name}
                   </h4>
                   <FolderOpen
+                    aria-hidden="true"
                     className="flex-none h-3.5 w-3.5 transition-colors duration-150 group-hover:text-[color:var(--brand)]"
                     style={{ color: "var(--text-muted)" }}
                   />
@@ -2113,6 +2189,7 @@ function PoolCard({
             orchestrator reported for the mounted filesystem. */}
         {backingDrive && <EncryptionBadge state={driveEncryptionState(backingDrive)} />}
         {backingDrive && <UsageBadge drive={backingDrive} />}
+        {backingDrive && <SmartHealth drive={backingDrive} />}
       </div>
 
       {pool.notes && (

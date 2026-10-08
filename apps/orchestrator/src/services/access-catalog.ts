@@ -398,6 +398,9 @@ export const OWNERS_BY_DOMAIN: ReadonlyMap<string, readonly ModuleId[]> = (() =>
  * this function at all (tool-access.service.ts: null scope).
  */
 export const FEATURE_UNGATED_TOOL_DOMAINS: Readonly<Partial<Record<ToolDomain, string>>> = {
+  connections:
+    "Connection setup metadata spans modules; /api/connections resolves the acting person's " +
+    "canonical role and allows box-wide changes only for owner/admin. Credentials use the existing browser routes.",
   system:
     "Box health, drives, audit log, updates. No module owns the box itself; the tier " +
     "write filter strips apply_update below admin, and the routes behind the tools " +

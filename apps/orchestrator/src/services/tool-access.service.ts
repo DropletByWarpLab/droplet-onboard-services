@@ -352,6 +352,9 @@ export function toolAllowedForTier(
   isVoice = false,
 ): boolean {
   if (isPrivilegedRole(tier)) return true;
+  // Connection handlers and their browser routes serve members and admins;
+  // even their read-only setup descriptors are not offered to external guests.
+  if (CATALOG_BY_NAME.get(name)?.domain === "connections" && tier !== "family") return false;
   return !WRITE_TOOLS.has(name) || (isVoice && VOICE_WRITE_TOOLS.has(name));
 }
 

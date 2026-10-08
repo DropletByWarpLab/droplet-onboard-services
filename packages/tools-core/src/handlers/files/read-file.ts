@@ -53,7 +53,7 @@ const inputSchema = {
       minimum: 0,
       default: 0,
       description:
-        "0-based CHARACTER offset to resume from. Omit for the start of the file; on a follow-up call pass the `next_offset` value from the previous result.",
+        "0-based character offset; omit to start, then use the previous next_offset.",
     },
   },
   required: ["path"],

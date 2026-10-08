@@ -117,6 +117,9 @@ const dashboardOnly = (
 const none = (tool: string): ToolRouteEntry => ({ tool, client: "none", hops: [] });
 
 export const TOOL_ROUTES: ToolRouteEntry[] = [
+  { tool: "list_connections", client: "orchestrator", hops: [admit("get", "/api/connections")] },
+  { tool: "start_connection", client: "orchestrator", hops: [admit("get", "/api/connections/card")] },
+  { tool: "disconnect_connection", client: "orchestrator", hops: [admit("post", "/api/connections/disconnect")] },
   // ── network ────────────────────────────────────────────────────────────
   none("list_network_devices"), // ctx.prisma
   { tool: "get_network_status", client: "orchestrator", hops: [admit("get", "/api/network/status")] },

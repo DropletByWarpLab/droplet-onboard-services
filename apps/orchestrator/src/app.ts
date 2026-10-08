@@ -27,6 +27,7 @@ import { createPersonaRouter } from "./routes/persona.js";
 import { createBusinessProfileRouter } from "./routes/business-profile.js";
 import { createBusinessOnboardingRouter } from "./routes/business-onboarding.js";
 import { createIntegrationsRouter } from "./routes/integrations.js";
+import { createConnectionsRouter } from "./routes/connections.js";
 import { createSaasCredentialsRouter } from "./routes/saas-credentials.js";
 import { createErpDriftRouter } from "./routes/erp-drift.js";
 import { createCloudFilesRouter } from "./routes/cloud-files.js";
@@ -535,6 +536,9 @@ export function createApp(
       remoteMcp: { detach: (serverId) => detachRemoteMcp(serverId) },
     }),
   );
+  app.use("/api", createConnectionsRouter(prisma, {
+    integrations: { remoteMcp: { detach: (serverId) => detachRemoteMcp(serverId) } },
+  }));
   // WARP-2275 — the admin-only SaaS credential configurator. Descriptor-driven
   // (WARP-2217), so it adds no per-vendor routes: one generic surface renders
   // and validates whatever `credentialFields` a provider declares.

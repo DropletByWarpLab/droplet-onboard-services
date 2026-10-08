@@ -65,6 +65,7 @@ export type ToolDomain =
   // practice-management connector, and the dashboard gates the two
   // separately (`erp` reach is a connector grant, `cloud` a tool grant).
   | "cloud"
+  | "connections"
   | "business"
   | "system"
   | "data"
@@ -266,6 +267,7 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
   ],
   // WARP-2497 — one tool for all three cloud vendors; see query-dataset.ts.
   cloud: ["cloud_query_dataset"],
+  connections: ["list_connections", "start_connection", "disconnect_connection"],
   // ADR-045 slice C — `business` is claimed by BOTH the `crm` and `projects`
   // modules (WARP-2988): it passes the per-person feature intersection when
   // EITHER is held, and the orchestrator narrows `_service:mcp` on the CRM/PM
@@ -355,6 +357,9 @@ const DOMAIN_BY_NAME: ReadonlyMap<string, ToolDomain> = new Map(
  * test, so a newly-added tool can't silently ship agent-facing copy.
  */
 export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
+  list_connections: "See what is connected to your Droplet and what you can add",
+  start_connection: "Set up a service, like Gmail or Stripe, with a form that keeps your password out of chat",
+  disconnect_connection: "Disconnect a service and remove its saved access from your Droplet (you approve it first)",
   // Network
   list_network_devices: "See every device that uses your network",
   get_network_status: "Check whether your internet and Wi-Fi are working",
