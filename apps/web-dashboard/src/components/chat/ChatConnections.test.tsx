@@ -92,6 +92,27 @@ describe("connection setup through chat tool results", () => {
     expect(screen.getByRole("button", { name: "Open setup" })).toBeDisabled();
     expect(mocks.authFetch).not.toHaveBeenCalled();
   });
+  it("hides connection entries and closes the open overview after a guest downgrade", async () => {
+    const calls = connectCallsOf([tool({ kind: "connections_overview", connected: [{ id: "integration:stripe", provider: "stripe", family: "integration", displayName: "Private company Stripe", scope: "box", status: "connected", capabilities: [], manageHref: "/integrations", canDisconnect: true, canReconnect: false }], available: [], boxWideVisible: true })]);
+    const { rerender } = render(<ToolConnectCards calls={calls} interactive />);
+    expect(await screen.findByRole("dialog", { name: "Connections" })).toBeInTheDocument();
+    expect(screen.getByText("Private company Stripe")).toBeInTheDocument();
+    mocks.role = "guest";
+    rerender(<ToolConnectCards calls={calls} interactive />);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open connections" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Private company Stripe")).not.toBeInTheDocument();
+  });
+  it.each(["family", "guest"])("drops a mounted shared overview after downgrade to %s", (role) => {
+    const request = { kind: "overview" as const, overview: overview() };
+    const { rerender } = render(<ChatConnections request={request} onClose={vi.fn()} />);
+    expect(screen.getByText("Future reported system")).toBeInTheDocument();
+    mocks.role = role;
+    rerender(<ChatConnections request={request} onClose={vi.fn()} />);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.queryByText("Future reported system")).not.toBeInTheDocument();
+    expect(mocks.integrations).toHaveBeenLastCalledWith(false);
+  });
   it("does not reopen a dismissed popup when the same completed result rerenders", async () => {
     const calls = connectCallsOf([tool(card())]);
     const { rerender } = render(<ToolConnectCards calls={calls} interactive />);
@@ -220,7 +241,7 @@ describe("connection setup through chat tool results", () => {
     expect(await screen.findByRole("dialog", { name: "Provider setup" })).toBeInTheDocument();
     mocks.role = "family"; rerender(<ChatConnections request={request} onClose={vi.fn()} />);
     expect(screen.queryByRole("dialog", { name: "Provider setup" })).not.toBeInTheDocument();
-    expect(screen.getByText(/ask your droplet owner or administrator/i)).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(mocks.integrations).toHaveBeenLastCalledWith(false);
   });
   it("ignores a late wizard status reread after administrator access is lost", async () => {
