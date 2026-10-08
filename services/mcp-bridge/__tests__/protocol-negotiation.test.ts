@@ -9,6 +9,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { createStreamableHttpConnection } from "../src/streamable-http.js";
 import { classifyRemoteMcpError } from "../src/session-state.js";
+import { MAX_EVENT_BYTES, MAX_RESPONSE_BYTES } from "../src/modern-connection.js";
 
 const URL_ = "https://mcp.vendor.example/v1/mcp";
 const INPUT = {
@@ -304,5 +305,70 @@ describe("the fallback is taken ONLY on the documented signal", () => {
     await expect(
       createStreamableHttpConnection(INPUT, { ...PROBE, pinnedProtocolVersion: "2025-11-25" }),
     ).rejects.toThrow(/cannot be combined/);
+  });
+});
+
+describe("an untrusted server cannot exhaust memory", () => {
+  /** An endless body that records how many bytes were pulled from it. */
+  function endless(chunk: Uint8Array, pulled: { n: number }): ReadableStream<Uint8Array> {
+    return new ReadableStream<Uint8Array>({
+      pull(c) {
+        pulled.n += chunk.byteLength;
+        c.enqueue(chunk);
+      },
+    });
+  }
+  const CHUNK = new Uint8Array(1024 * 1024).fill(97); // 1 MiB of "a"
+
+  it("refuses an oversized JSON body without reading far past the cap", async () => {
+    const pulled = { n: 0 };
+    stubNetwork(
+      modernServer(
+        () =>
+          new Response(endless(CHUNK, pulled), {
+            headers: { "content-type": "application/json" },
+          }),
+      ),
+    );
+    const conn = await createStreamableHttpConnection(INPUT, PROBE);
+    const out = await conn.callTool("echo", {});
+    expect(out.isError).toBe(true);
+    expect(out.content[0]!.text).toMatch(/exceeded the \d+-byte limit/);
+    expect(pulled.n).toBeLessThanOrEqual(MAX_RESPONSE_BYTES + 4 * CHUNK.byteLength);
+  });
+
+  it("refuses an endless SSE event with no delimiter without buffering past the cap", async () => {
+    const pulled = { n: 0 };
+    stubNetwork(
+      modernServer(
+        () =>
+          new Response(endless(CHUNK, pulled), {
+            headers: { "content-type": "text/event-stream" },
+          }),
+      ),
+    );
+    const conn = await createStreamableHttpConnection(INPUT, PROBE);
+    const out = await conn.callTool("echo", {});
+    expect(out.isError).toBe(true);
+    expect(out.content[0]!.text).toMatch(/event exceeded/);
+    expect(pulled.n).toBeLessThanOrEqual(MAX_EVENT_BYTES + 4 * CHUNK.byteLength);
+  });
+
+  it("bounds all tools/list pages together, not each page", async () => {
+    const page = JSON.stringify({
+      jsonrpc: "2.0",
+      id: 0,
+      result: { tools: [], nextCursor: "next", pad: "x".repeat(3 * 1024 * 1024) },
+    });
+    stubNetwork((req) =>
+      req.body.method === "server/discover"
+        ? modernServer()(req)
+        : new Response(page.replace('"id":0', `"id":${req.body.id}`), {
+            headers: { "content-type": "application/json" },
+          }),
+    );
+    const conn = await createStreamableHttpConnection(INPUT, PROBE);
+    // 3 MiB x 20 pages would be 60 MiB; the shared 8 MiB budget stops it.
+    await expect(conn.listTools()).rejects.toThrow(/exceeded/);
   });
 });
