@@ -81,6 +81,7 @@ describe("chat account authorization popup", () => {
     expect(open).toHaveBeenCalledWith("about:blank", "_blank", expect.stringContaining("popup"));
     expect(popup.document.body.textContent).toMatch(/chat open/);
     expect(recordOf(popup)).toMatchObject({ provider: "google", openerOrigin: window.location.origin, startedAt: Date.now() });
+    expect(Object.keys(recordOf(popup)).sort()).toEqual(["nonce", "openerOrigin", "provider", "startedAt"]);
     expect(auth.authFetch).toHaveBeenCalledWith("/api/google/connection");
     await act(async () => { status.resolve(response({ state: "DISCONNECTED" })); await preparing; });
     expect(popup.location.href).toBe("about:blank");

@@ -394,7 +394,7 @@ export const ChatMessage = memo(function ChatMessage({
             ) : null}
             {runCards}
             <ToolMediaCards calls={mediaCalls} />
-            <ToolConnectCards calls={connectCalls} interactive={connectionSetupInteractive} onOutcome={onConnectionOutcome} seenIds={connectionSetupSeenIds} />
+            {connectCalls.length > 0 && <ToolConnectCards calls={connectCalls} interactive={connectionSetupInteractive} onOutcome={onConnectionOutcome} seenIds={connectionSetupSeenIds} />}
             {/* WARP-2469 — a WARP-2305 interceptor challenge gets the real
                 approval prompt: Approve / Don't, a PHI-free argument
                 summary, and an expired state that offers a re-request.

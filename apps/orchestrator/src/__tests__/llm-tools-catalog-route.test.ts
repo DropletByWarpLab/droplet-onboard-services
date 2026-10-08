@@ -125,6 +125,9 @@ describe("GET /api/llm/tools/catalog (WARP-555)", () => {
     const names = res.body.tools.map((t: { name: string }) => t.name);
     expect(names).toContain(READ_TOOL);
     expect(names).not.toContain(WRITE_TOOL);
+    expect(names).toContain("list_connections");
+    expect(names).toContain("start_connection");
+    expect(names).not.toContain("disconnect_connection");
     // and every returned tool is read-only
     for (const t of res.body.tools as { requiresWrite: boolean }[]) {
       expect(t.requiresWrite).toBe(false);
@@ -138,6 +141,9 @@ describe("GET /api/llm/tools/catalog (WARP-555)", () => {
     expect(res.status).toBe(200);
     const names = res.body.tools.map((t: { name: string }) => t.name);
     expect(names).not.toContain(WRITE_TOOL);
+    expect(names).not.toContain("list_connections");
+    expect(names).not.toContain("start_connection");
+    expect(res.body.tools.some((t: { domain: string }) => t.domain === "connections")).toBe(false);
   });
 
   it("hides write tools from an unauthenticated request (no role)", async () => {

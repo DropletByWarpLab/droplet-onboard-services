@@ -43,6 +43,7 @@ import { useCameraPins } from "@/lib/hooks/useCameraPins";
 import { ToastProvider, useToast } from "@/components/Toast";
 import { NotificationToaster } from "@/components/NotificationToaster";
 import { PENDING_COMPOSER_KEY, PENDING_PROMPT_KEY } from "@/lib/types";
+import { CHAT_CONNECTION_POPUP_KEY } from "@/lib/chat-connection-popup";
 import type { CameraPinInfo, EventDetail, EventFilter, FilteredEventsResult } from "@/lib/types";
 
 // ── the fake box ────────────────────────────────────────────────────────────
@@ -361,12 +362,14 @@ describe("WARP-2992 — the next person to sign in never sees the last one's dat
     // deliberately left in place when /chat was deep-linked.
     sessionStorage.setItem(PENDING_PROMPT_KEY, "summarise my lab results");
     sessionStorage.setItem(PENDING_COMPOSER_KEY, JSON.stringify({ kind: "pin", label: "Jane Doe" }));
+    sessionStorage.setItem(CHAT_CONNECTION_POPUP_KEY, JSON.stringify({ provider: "google", nonce: "12345678123456781234567812345678", openerOrigin: "https://droplet.local", startedAt: Date.now() }));
 
     fireEvent.click(screen.getByText("sign out"));
     expect(await screen.findByText("signed out")).toBeInTheDocument();
 
     expect(sessionStorage.getItem(PENDING_PROMPT_KEY)).toBeNull();
     expect(sessionStorage.getItem(PENDING_COMPOSER_KEY)).toBeNull();
+    expect(sessionStorage.getItem(CHAT_CONNECTION_POPUP_KEY)).toBeNull();
   });
 
   it("A signed out in another tab: this tab's hand-offs go when its next read finds the session dead", async () => {
@@ -374,6 +377,7 @@ describe("WARP-2992 — the next person to sign in never sees the last one's dat
     expect(await screen.findByText(ALICE_ROW)).toBeInTheDocument();
     sessionStorage.setItem(PENDING_PROMPT_KEY, "summarise my lab results");
     sessionStorage.setItem(PENDING_COMPOSER_KEY, JSON.stringify({ kind: "pin", label: "Jane Doe" }));
+    sessionStorage.setItem(CHAT_CONNECTION_POPUP_KEY, JSON.stringify({ provider: "google", nonce: "12345678123456781234567812345678", openerOrigin: "https://droplet.local", startedAt: Date.now() }));
 
     // The other tab's sign-out: the box ends A's session, and the profile
     // cached in the localStorage every tab shares goes with it. This tab's
@@ -391,6 +395,7 @@ describe("WARP-2992 — the next person to sign in never sees the last one's dat
     await waitFor(() => expect(assign).toHaveBeenCalledWith("/login?next=%2Fevents"));
     expect(sessionStorage.getItem(PENDING_PROMPT_KEY)).toBeNull();
     expect(sessionStorage.getItem(PENDING_COMPOSER_KEY)).toBeNull();
+    expect(sessionStorage.getItem(CHAT_CONNECTION_POPUP_KEY)).toBeNull();
   });
 
   it("an anonymous 401 on /setup keeps the cache: no one was signed in to forget", async () => {

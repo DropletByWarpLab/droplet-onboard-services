@@ -8,11 +8,11 @@ import { connectCallsOf } from "./connect/connect-split";
 import { ToolConnectCards } from "./connect/ToolConnectCards";
 
 const mocks = vi.hoisted(() => ({
-  role: "owner", authFetch: vi.fn(), integrations: vi.fn(), refresh: vi.fn(),
+  role: "owner", userId: "person", authFetch: vi.fn(), integrations: vi.fn(), refresh: vi.fn(),
   oauth: { beforeConnect: vi.fn().mockResolvedValue(undefined), navigate: vi.fn(), afterConnect: vi.fn(), close: vi.fn(), cancel: vi.fn(), error: null as string | null, status: null as string | null },
   oauthOptions: {} as { onConnected?: () => void; onReturn?: () => void },
 }));
-vi.mock("@/lib/auth", () => ({ useAuth: () => ({ user: { id: "person", role: mocks.role } }), authFetch: mocks.authFetch }));
+vi.mock("@/lib/auth", () => ({ useAuth: () => ({ user: { id: mocks.userId, role: mocks.role } }), authFetch: mocks.authFetch }));
 vi.mock("@/lib/hooks/useIntegrations", () => ({ useIntegrations: mocks.integrations }));
 vi.mock("@/lib/hooks/useChatConnectionOAuth", () => ({ useChatConnectionOAuth: (_provider: string, options: typeof mocks.oauthOptions) => { mocks.oauthOptions = options; return mocks.oauth; } }));
 vi.mock("@/components/settings/GoogleAccountCard", () => ({ GoogleAccountCard: ({ returnTo, beforeConnect, navigate, afterConnect }: { returnTo?: string; beforeConnect?: () => Promise<void>; navigate?: (url: string) => void; afterConnect?: () => void }) => <section aria-label="Google setup"><span>Return to {returnTo}</span><button onClick={async () => { await beforeConnect?.(); navigate?.("provider-sign-in-url"); afterConnect?.(); }}>Approve Google</button></section> }));
@@ -37,13 +37,44 @@ function overview(): ConnectionsOverview {
 function tool(data: unknown, name = "start_connection", id = "call-1") { return { id, name, args: {}, ok: true, data }; }
 
 beforeEach(() => {
-  vi.clearAllMocks(); mocks.role = "owner"; mocks.oauth.status = null; mocks.oauth.error = null;
+  vi.clearAllMocks(); mocks.role = "owner"; mocks.userId = "person"; mocks.oauth.status = null; mocks.oauth.error = null;
   mocks.integrations.mockReturnValue({ refresh: mocks.refresh });
   mocks.refresh.mockReset().mockResolvedValue([]);
   mocks.authFetch.mockResolvedValue({ ok: true, json: async () => ({ card: card() }) });
 });
 
 describe("connection setup through chat tool results", () => {
+  it("offers no Connections or setup entry to an external guest, including a saved successful result", () => {
+    mocks.role = "guest";
+    const { container } = render(<ToolConnectCards calls={connectCallsOf([tool(overview(), "list_connections")])} interactive />);
+    expect(container).toBeEmptyDOMElement();
+    expect(mocks.authFetch).not.toHaveBeenCalled();
+    expect(mocks.integrations).not.toHaveBeenCalled();
+  });
+  it("closes the previous person's setup and ignores its completion when the account changes", async () => {
+    const calls = connectCallsOf([tool(card())]);
+    const onOutcome = vi.fn();
+    const view = render(<ToolConnectCards calls={calls} interactive onOutcome={onOutcome} />);
+    await screen.findByRole("region", { name: "Google setup" });
+    const completePrevious = mocks.oauthOptions.onConnected;
+    mocks.userId = "next-person";
+    view.rerender(<ToolConnectCards calls={calls} interactive onOutcome={onOutcome} />);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(mocks.oauth.close).toHaveBeenCalled();
+    act(() => completePrevious?.());
+    expect(onOutcome).not.toHaveBeenCalled();
+  });
+  it("ignores a descriptor lookup that finishes for the previous person", async () => {
+    let resolve!: (value: unknown) => void;
+    mocks.authFetch.mockReturnValue(new Promise((done) => { resolve = done; }));
+    const request = { kind: "overview" as const, overview: overview() };
+    const view = render(<ChatConnections request={request} onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Set up Google / Gmail" }));
+    mocks.userId = "next-person";
+    view.rerender(<ChatConnections request={request} onClose={vi.fn()} />);
+    await act(async () => { resolve({ ok: true, json: async () => ({ card: card() }) }); });
+    expect(screen.queryByRole("region", { name: "Google setup" })).not.toBeInTheDocument();
+  });
   it("adds no composer or permanent connection control when closed", () => {
     const { container } = render(<ChatConnections request={null} onClose={vi.fn()} />);
     expect(container).toBeEmptyDOMElement();

@@ -4,6 +4,7 @@ import { lazy, Suspense, useCallback, useEffect, useId, useRef, useState, type R
 import { ArrowLeft, Search, X } from "lucide-react";
 import { CONNECTION_STATUS_LABEL, connectOutcomeTurn, parseConnectCard, parseConnectionsOverview, providerDescriptor, type ConnectCard, type ConnectionsOverview } from "@droplet/shared-types";
 import { Dialog } from "@/components/Dialog";
+import { ThemedSelect } from "@/components/ui/ThemedSelect";
 import { PROVIDER_DESCRIPTORS } from "@/components/integrations/provider-descriptors";
 import { authFetch, useAuth } from "@/lib/auth";
 import { useIntegrations } from "@/lib/hooks/useIntegrations";
@@ -62,7 +63,10 @@ export function ChatConnections({ request, onClose, onOutcome, triggerRef }: {
   const lookupRevision = useRef(0);
   const reported = useRef(new Set<string>());
   const principal = useRef("");
-  principal.current = `${user?.id}:${user?.role}`;
+  const principalKey = `${user?.id}:${user?.role}`;
+  principal.current = principalKey;
+  const activeRequest = useRef(request);
+  activeRequest.current = request;
 
   useEffect(() => {
     lookupRevision.current += 1;
@@ -72,30 +76,32 @@ export function ChatConnections({ request, onClose, onOutcome, triggerRef }: {
     setError(null);
     reported.current.clear();
   }, [request]);
-  useEffect(() => () => { lookupRevision.current += 1; }, []);
+  useEffect(() => () => { lookupRevision.current += 1; activeRequest.current = null; }, []);
 
   const refreshOverview = useCallback(async () => {
     if (!request || request.kind !== "overview") return;
+    const actor = principal.current;
     const revision = lookupRevision.current;
     try {
       const response = await authFetch("/api/connections");
       if (!response.ok) throw new Error("status unavailable");
       const next = parseConnectionsOverview(await response.json());
       if (!next) throw new Error("invalid connection status");
-      if (revision === lookupRevision.current) setOverview(next);
+      if (principal.current === actor && revision === lookupRevision.current) setOverview(next);
     } catch {
-      if (revision === lookupRevision.current) setError("Droplet could not refresh connection status. The list may be out of date.");
+      if (principal.current === actor && revision === lookupRevision.current) setError("Droplet could not refresh connection status. The list may be out of date.");
     }
   }, [request]);
 
   const completed = useCallback((turn: string, provider = card?.provider) => {
+    if (!request || activeRequest.current !== request || principal.current !== principalKey) return;
     void refresh();
     void refreshOverview();
     if (provider && !reported.current.has(provider)) {
       reported.current.add(provider);
       onOutcome?.(turn);
     }
-  }, [card, onOutcome, refresh, refreshOverview]);
+  }, [card, onOutcome, refresh, refreshOverview, request, principalKey]);
   const connected = useCallback(() => { if (card) completed(connectOutcomeTurn(card.displayName, "connected")); }, [card, completed]);
   const verifyWizardConnection = async () => {
     const actor = principal.current;
@@ -113,6 +119,7 @@ export function ChatConnections({ request, onClose, onOutcome, triggerRef }: {
 
   const choose = async (provider: string) => {
     if (!canConnectPersonal || loadingProvider) return;
+    const actor = principal.current;
     const revision = ++lookupRevision.current;
     setLoadingProvider(provider);
     setError(null);
@@ -122,11 +129,11 @@ export function ChatConnections({ request, onClose, onOutcome, triggerRef }: {
       const body: unknown = await response.json();
       const next = parseConnectCard(body && typeof body === "object" && "card" in body ? body.card : body);
       if (!next) throw new Error("invalid connection setup");
-      if (revision === lookupRevision.current) setCard(next);
+      if (principal.current === actor && revision === lookupRevision.current) setCard(next);
     } catch {
-      if (revision === lookupRevision.current) setError("Droplet could not load this connection's setup. Try again.");
+      if (principal.current === actor && revision === lookupRevision.current) setError("Droplet could not load this connection's setup. Try again.");
     } finally {
-      if (revision === lookupRevision.current) setLoadingProvider(null);
+      if (principal.current === actor && revision === lookupRevision.current) setLoadingProvider(null);
     }
   };
 
@@ -204,7 +211,7 @@ export function ChatConnections({ request, onClose, onOutcome, triggerRef }: {
         </section>}
         <div className="flex flex-col sm:flex-row gap-3">
           <label htmlFor={searchId} className="flex-1 min-w-0"><span className="type-caption-1 text-[var(--text-muted)]">Search connections</span><span className="flex items-center gap-2 mt-1"><Search size={16} className="shrink-0" aria-hidden="true" /><input ref={searchRef} id={searchId} className="input w-full" type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Name, provider, or category" /></span></label>
-          <label className="flex flex-col gap-1 type-caption-1 text-[var(--text-muted)]">Filter connections<select className="input" value={category} onChange={(event) => setCategory(event.target.value)}><option value="">All categories</option>{categories.map((name) => <option key={name} value={name}>{name}</option>)}</select></label>
+          <label className="flex flex-col gap-1 type-caption-1 text-[var(--text-muted)]">Filter connections<ThemedSelect className="input" value={category} onChange={(event) => setCategory(event.target.value)}><option value="">All categories</option>{categories.map((name) => <option key={name} value={name}>{name}</option>)}</ThemedSelect></label>
         </div>
         <section aria-label="Available connections" className="space-y-3">
           <h3 className="type-headline">Available connections</h3>
