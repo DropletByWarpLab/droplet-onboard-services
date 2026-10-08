@@ -509,6 +509,13 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   { tool: "translate_text", client: "orchestrator", hops: [admit("post", "/api/llm/complete")] },
   { tool: "get_weather", client: "orchestrator", hops: [admit("get", "/api/web/weather")] },
   { tool: "currency_convert", client: "orchestrator", hops: [admit("get", "/api/web/rates")] },
+  { tool: "web_search", client: "orchestrator", hops: [admit("post", "/api/web/search")] },
+  { tool: "web_fetch", client: "orchestrator", hops: [admit("post", "/api/web/fetch")] },
+  { tool: "analyze_data", client: "nextcloud", hops: [admit("post", "/api/files/analyze")] },
+  { tool: "create_audio", client: "nextcloud", hops: [admit("post", "/api/files/audio")] },
+  { tool: "generate_media", client: "nextcloud", hops: [admit("post", "/api/files/media"), admit("get", "/api/files/media"), admit("get", "/api/files/media/:id"), admit("post", "/api/files/media/:id/cancel")] },
+  { tool: "office_file", client: "nextcloud", hops: [admit("post", "/api/files/office")] },
+  { tool: "create_artifact", client: "nextcloud", hops: [admit("post", "/api/files/upload")] },
   // WARP-3074 — one hop per item; the route admits service principals only.
   { tool: "classify_items", client: "orchestrator", hops: [admit("post", "/api/llm/decide")] },
   // WARP-3116 — pure lookups over the page list carried on the call's _meta.

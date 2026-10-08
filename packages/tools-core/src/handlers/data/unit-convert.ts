@@ -275,7 +275,7 @@ async function handler(
 const tool: Tool = {
   name: "unit_convert",
   description:
-    "Convert a value between units of length, mass, temperature, volume (US), area, speed, or data size. Pass `value` plus `from` and `to` units of the same category (e.g. km→mi, kg→lb, celsius→fahrenheit, l→gal, ha→acre, kmh→mph, GB→GiB). Data units distinguish decimal kB/MB/GB/TB (powers of 1000) from binary KiB/MiB/GiB/TiB (powers of 1024). Unit names are case-insensitive and accept common aliases (plurals and long names like 'meters', 'pounds', 'fluid_ounces'). Pure computation.",
+    "Convert same-category length/mass/temperature/US volume/area/speed/data units. Names/aliases/plurals ignore case. Decimal kB/MB/GB/TB=1000 powers; binary KiB/MiB/GiB/TiB=1024 powers. Pure computation.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

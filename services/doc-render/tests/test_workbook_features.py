@@ -147,7 +147,7 @@ def test_oversized_or_deep_formulas_are_rejected_without_truncation(expression):
 
 
 @pytest.mark.parametrize("patch", [
-    {"kind": "pie"}, {"category_column": 0}, {"value_column": 3},
+    {"kind": "scatter"}, {"category_column": 0}, {"value_column": 3},
     {"category_column": True}, {"value_column": 2.0}, {"category_column": 2},
     {"title": "x" * 201},
 ])
@@ -246,3 +246,59 @@ def test_empty_sheet_does_not_get_a_filter_or_an_invented_data_grid():
     reopened, _ = _reopen(wb)
     assert reopened.active.auto_filter.ref is None
     assert reopened.active["A1"].value is None
+
+
+def test_cached_values_and_cross_sheet_formula_dependencies_reopen_without_excel():
+    data = render_xlsx([
+        {"name": "Summary", "columns": ["Value", "Rounded"], "rows": [["", ""], ["", ""]], "formulas": [
+            {"cell": "A2", "expression": "SUM('Sales Q1'!B2:B3)"},
+            {"cell": "B2", "expression": "ROUND(A2/3,2)"},
+            {"cell": "A3", "expression": "1/0"}, {"cell": "B3", "expression": "ABS(A3)"}]},
+        {"name": "Sales Q1", "columns": ["Month", "Amount"], "rows": [["Jan", 10], ["Feb", 20]]},
+    ])
+    cached = load_workbook(io.BytesIO(data), data_only=True)
+    assert cached["Summary"]["A2"].value == 30
+    assert cached["Summary"]["B2"].value == 10
+    assert cached["Summary"]["A3"].value == "#DIV/0!"
+    assert cached["Summary"]["B3"].value == "#DIV/0!"
+    assert load_workbook(io.BytesIO(data))["Summary"]["A2"].value == "=SUM('Sales Q1'!B2:B3)"
+
+
+def test_cross_sheet_cycles_are_refused_and_no_workbook_bytes_escape():
+    with pytest.raises(RenderError, match="circular"):
+        render_xlsx([
+            {"name": "One", "columns": ["Value"], "rows": [[""]], "formulas": [{"cell": "A2", "expression": "Two!A2"}]},
+            {"name": "Two", "columns": ["Value"], "rows": [[""]], "formulas": [{"cell": "A2", "expression": "One!A2"}]},
+        ])
+
+
+@pytest.mark.parametrize("kind, columns", [("bar", [2, 3]), ("line", [2, 3]), ("pie", [2])])
+def test_multiseries_and_pie_charts_include_numeric_caches(kind, columns):
+    data = render_xlsx([{"name": "Data", "columns": ["Month", "Sales", "Cost"], "rows": [["Jan", 10, 8], ["Feb", "", 9]],
+        "formulas": [{"cell": "B3", "expression": "B2*2"}],
+        "chart": {"kind": kind, "category_column": 1, "value_columns": columns}}])
+    chart = load_workbook(io.BytesIO(data)).active._charts[0]
+    assert len(chart.series) == len(columns)
+    assert [point.v for point in chart.series[0].val.numRef.numCache.pt] == [10, 20]
+
+
+def test_formats_preserve_native_types_and_iso_dates():
+    import datetime
+    data = render_xlsx([{"columns": ["Amount", "Share", "Date"], "rows": [[10, .125, "2026-10-08"]], "formats": [
+        {"range": "A2", "kind": "currency", "currency": "EUR", "precision": 2},
+        {"range": "B2", "kind": "percent", "precision": 1}, {"range": "C2", "kind": "date"}]}])
+    ws = load_workbook(io.BytesIO(data)).active
+    assert ws["A2"].value == 10 and ws["A2"].number_format == '"EUR" #,##0.00'
+    assert ws["B2"].value == .125 and ws["B2"].number_format == "0.0%"
+    assert ws["C2"].value == datetime.datetime(2026, 10, 8) and ws["C2"].number_format == "yyyy-mm-dd"
+
+
+@pytest.mark.parametrize("format_spec", [
+    {"range": "A2:B1", "kind": "number"}, {"range": "A3", "kind": "number"},
+    {"range": "A2", "kind": "currency", "currency": "BOGUS"},
+    {"range": "A2", "kind": "number", "precision": True},
+    {"range": "A2", "kind": "date"},
+])
+def test_malformed_or_unsupported_formats_fail_before_render(format_spec):
+    with pytest.raises(RenderError):
+        render_xlsx([{"columns": ["Value", "Other"], "rows": [["not a date", 2]], "formats": [format_spec]}])

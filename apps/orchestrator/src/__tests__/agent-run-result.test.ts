@@ -107,6 +107,21 @@ describe("boundSummary", () => {
 });
 
 describe("runArtifacts", () => {
+  it("includes saved derived files and omits pending, failed or unknown media jobs", () => {
+    const trace = [
+      { tool: "analyze_data", text: JSON.stringify({ ok: true, data: { artifacts: [{ path: "/Analysis-1/chart.svg" }, { path: "/../escape.csv" }] } }) },
+      { tool: "generate_media", args: { path: "/pending.png" }, text: JSON.stringify({ ok: true, data: { status: "running", path: "/pending.png" } }) },
+      { tool: "generate_media", text: JSON.stringify({ ok: true, data: { status: "succeeded", path: "/saved.png" } }) },
+      { tool: "generate_media", text: JSON.stringify({ ok: true, data: { status: "failed", path: "/failed.png" } }) },
+      { tool: "generate_media", text: JSON.stringify({ ok: true, data: { status: "succeeded", path: "/unknown.png" } }), unknownOutcome: true },
+      { tool: "create_artifact", args: { path: "/requested.html" }, text: JSON.stringify({ ok: true, data: { path: "/Demo.html" } }) },
+      { tool: "create_artifact", args: { path: "/missing.html" }, text: '{"ok":true}' },
+      { tool: "create_audio", args: { path: "/Speech.wav" }, text: JSON.stringify({ ok: true, data: { path: "/Speech.wav" } }) },
+      { tool: "office_file", text: JSON.stringify({ ok: true, data: { action: "inspect", path: "/original.xlsx" } }) },
+      { tool: "office_file", text: JSON.stringify({ ok: true, data: { action: "revise", path: "/revised.xlsx" } }) },
+    ];
+    expect(runArtifacts(trace).map((a) => a.ref)).toEqual(["/Analysis-1/chart.svg", "/saved.png", "/Demo.html", "/Speech.wav", "/revised.xlsx"]);
+  });
   it("keeps only recorded, successful file writes, once each", () => {
     const art = runArtifacts([
       { tool: "write_file", args: { path: "/a.md" }, text: '{"ok":true}' },

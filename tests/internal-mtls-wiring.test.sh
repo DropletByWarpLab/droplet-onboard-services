@@ -68,7 +68,7 @@ fi
 unset REPO_ROOT
 
 # --- 2) host client identities are issued -------------------------------------
-for ident in egress-audit device-bridge host-admin gateway; do
+for ident in egress-audit device-bridge host-admin gateway media-gen doc-render web-fetch sandbox; do
   if grep -qE "(^|[[:space:]])$ident([[:space:]]|\$)" <(sed -n '/^INTERNAL_CA_SERVICES=(/,/^)/p' "$REPO_ROOT_REAL/scripts/lib/internal-ca.sh" | grep -v '^[[:space:]]*#'); then
     pass "INTERNAL_CA_SERVICES issues '$ident'"
   else
@@ -79,7 +79,7 @@ done
 # --- 3) compose: bundle mounts + explicit knob for env_file-less services ----
 for svc_mount in orchestrator mcp-server ai-gateway file-indexer email-indexer \
                  camera-discovery routing switch oled-display matter-controller \
-                 voice-io rag-eval ops-console; do
+                 voice-io rag-eval ops-console media-gen doc-render web-fetch sandbox; do
   if grep -q "service-tls/$svc_mount:/data/service-tls:ro" "$COMPOSE"; then
     pass "compose mounts $svc_mount's /data/service-tls bundle"
   else
@@ -109,7 +109,7 @@ else
 fi
 
 # --- 5) images: TLS-aware launcher + healthcheck client ----------------------
-for svc in ai-gateway routing switch oled-display camera-discovery email-indexer voice-io; do
+for svc in ai-gateway routing switch oled-display camera-discovery email-indexer voice-io media-gen doc-render web-fetch sandbox; do
   if grep -qE '"_shared.serve"' "$REPO_ROOT_REAL/services/$svc/Dockerfile"; then
     pass "$svc image CMD uses the _shared.serve TLS-aware launcher"
   else

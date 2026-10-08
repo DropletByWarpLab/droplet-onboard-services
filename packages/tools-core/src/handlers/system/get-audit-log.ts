@@ -76,30 +76,30 @@ const inputSchema = {
     kind: {
       type: "string",
       enum: ACTIVITY_KINDS,
-      description: "Only events of this kind (omit for all kinds).",
+      description: "Event kind; omit for all.",
     },
     actor: {
       type: "string",
       enum: ACTOR_TYPES,
       description:
-        "Only events performed by this actor type: a team member (user), the AI, or the system itself.",
+        "user=team member; ai=AI; system=system.",
     },
     hours: {
       type: "integer",
       minimum: 1,
       maximum: MAX_HOURS,
-      description: `Look-back window in hours (default ${DEFAULT_HOURS}, max ${MAX_HOURS} = 30 days).`,
+      description: `Hours back (default ${DEFAULT_HOURS}, max ${MAX_HOURS}=30 days).`,
     },
     q: {
       type: "string",
       maxLength: MAX_QUERY_LENGTH,
-      description: "Case-insensitive substring match on the event text.",
+      description: "Case-insensitive event-text substring.",
     },
     limit: {
       type: "integer",
       minimum: 1,
       maximum: MAX_LIMIT,
-      description: `Max events to return (default ${DEFAULT_LIMIT}, max ${MAX_LIMIT}).`,
+      description: `Event count (default ${DEFAULT_LIMIT}, max ${MAX_LIMIT}).`,
     },
   },
   additionalProperties: false,
@@ -250,7 +250,7 @@ async function handler(
 const tool: Tool = {
   name: "get_audit_log",
   description:
-    'The workspace audit trail — what the AI and team members did (tool calls, network changes, auth events, system actions) from the tamper-evident activity log. Owner/admin only — other roles get FORBIDDEN. Filter by kind, actor (user/ai/system), or a free-text query. Use for "what did the AI do today?", "who changed the Wi-Fi?", or "show recent activity" questions. Defaults to the last 24 hours (max 720 = 30 days).',
+    "Read tamper-evident workspace activity: AI/person tool calls, network/auth/system events. Owner/admin only; others FORBIDDEN. Filter kind, actor (user/ai/system) or text. Look back 24h by default, max 720h (30 days).",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

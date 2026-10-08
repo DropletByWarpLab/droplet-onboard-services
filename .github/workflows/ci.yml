@@ -282,6 +282,14 @@ jobs:
             # has to be a leg, not just a local run.
             doc-render:
               - "services/doc-render/**"
+            media-gen:
+              - "services/media-gen/**"
+              - "docker/docker-compose.yml"
+              - "docker/docker-compose.media-gpu.yml"
+              - "scripts/lib/secrets.sh"
+              - "docker/ota/env-reconcile.sh"
+            web-fetch:
+              - "services/web-fetch/**"
             # WARP-2895: the code-execution sandbox. Its suite spawns the REAL
             # child interpreter (runner.py) for every case — the import
             # allowlist, the deadline and the output cap are what customer
@@ -420,7 +428,7 @@ jobs:
             ["ai-gateway","routing","switch","camera-discovery",
             "email-indexer","ops-console","fleet-agent","file-indexer",
             "voice-io","qwen-stt","kokoro-tts","device-identity-svc","erp-sql-bridge",
-            "inference-manager","doc-render","sandbox"]
+            "inference-manager","doc-render","media-gen","web-fetch","sandbox"]
           ALL_STORAGE: '["storage"]'
           ALL_FIPS: '["fips"]'
           ALL_HADOLINT: '["hadolint"]'

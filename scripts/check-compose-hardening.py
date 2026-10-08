@@ -34,12 +34,13 @@ COMPOSE = REPO / "docker" / "docker-compose.yml"
 # Services whose env_file ../.env was removed. They must not get it back.
 NO_ENV_FILE = {
     "cache", "db", "mcp-bridge", "fleet-agent", "erp-sql-bridge",
-    "rag-eval", "voice-io", "device-identity-svc",
+    "rag-eval", "voice-io", "device-identity-svc", "media-gen",
 }
 
 # Variables a converted service must still receive non-empty when the box has
 # them set. Everything else it reads is an optional knob.
 REQUIRED = {
+    "media-gen": {"MEDIA_GEN_SERVICE_TOKEN"},
     "db": {"POSTGRES_PASSWORD"},
     "mcp-bridge": {"MCP_BRIDGE_SERVICE_TOKEN"},
     "erp-sql-bridge": {"SERVICE_TOKEN_ERP_BRIDGE"},
@@ -53,6 +54,7 @@ REQUIRED = {
 # The secret keys a provisioned box's .env defines (scripts/lib/secrets.sh). The
 # render below sets exactly these, so a typo'd variable name renders empty.
 BOX_ENV_SECRETS = {
+    "MEDIA_GEN_SERVICE_TOKEN",
     "POSTGRES_PASSWORD", "DATABASE_URL", "MCP_BRIDGE_SERVICE_TOKEN",
     "SERVICE_TOKEN_ERP_BRIDGE", "SERVICE_TOKEN_RAG_EVAL", "RAG_EVAL_SERVICE_TOKEN",
     "RAGAS_EVAL_USER", "SERVICE_TOKEN_VOICE", "VOICE_IO_SERVICE_TOKEN",
@@ -79,7 +81,7 @@ SECRET_RECIPIENTS = {
 # this change adds it to (none of them runs a setuid helper in its main process;
 # the reasoning per service is in the PR description).
 NO_NEW_PRIVS = {
-    "web-fetch", "doc-render", "sandbox", "inference-manager", "voice-io",
+    "web-fetch", "doc-render", "sandbox", "media-gen", "inference-manager", "voice-io",
     "oled-display", "ops-console", "dmr", "dmr-cuda",
     # added by WARP-3656:
     "mcp-bridge", "erp-sql-bridge", "fleet-agent", "rag-eval",
@@ -88,12 +90,15 @@ NO_NEW_PRIVS = {
 
 # Services that run with `cap_drop: [ALL]` (the four that already did, plus
 # mcp-bridge: unprivileged `node` user, port 9096, no volume).
-CAP_DROP_ALL = {"web-fetch", "doc-render", "sandbox", "inference-manager", "mcp-bridge"}
+CAP_DROP_ALL = {"web-fetch", "doc-render", "sandbox", "media-gen", "inference-manager", "mcp-bridge"}
+TLS_BOOTSTRAP_SERVICES = {"sandbox", "media-gen"}
+TLS_BOOTSTRAP_CAPS = {"CHOWN", "DAC_OVERRIDE", "SETUID", "SETGID"}
 
 # --- WARP-3625 ---------------------------------------------------------------
 
 # (file, regex that must match) — the fail-closed bearer dependency exists.
 BEARER_WIRING = [
+    ("services/media-gen/main.py", r"dependencies=\[Depends\(require_bearer\)\]"),
     ("services/voice-io/main.py", r"dependencies=\[Depends\(require_bearer\)\]"),
     ("services/rag-eval/server.py", r"dependencies=\[Depends\(require_bearer\)\]"),
     ("services/file-indexer/main.py", r"dependencies=\[Depends\(require_bearer\)\]"),
@@ -213,6 +218,19 @@ def check(services: dict) -> list[str]:
         if cfg is not None and "ALL" not in [str(c).upper() for c in (cfg.get("cap_drop") or [])]:
             bad.append(f"{name}: lost cap_drop ALL (WARP-3656)")
 
+    # Only the root entrypoint gets these four capabilities, to stage 0600
+    # install-user-owned keys. The default image and its API remain uid1000.
+    for name in sorted(TLS_BOOTSTRAP_SERVICES):
+        cfg = services.get(name) or {}
+        if str(cfg.get("user")) != "0:0" or set(cfg.get("cap_add") or []) != TLS_BOOTSTRAP_CAPS:
+            bad.append(f"{name}: TLS bootstrap requires exactly its four startup capabilities as container root")
+        dockerfile = (REPO / "services" / name / "Dockerfile").read_text(encoding="utf-8")
+        if not re.search(r'^USER 1000$', dockerfile, re.M) or 'ENTRYPOINT ["sh", "/app/_shared/privilege_drop.sh"]' not in dockerfile:
+            bad.append(f"{name}: TLS bootstrap lost its numeric non-root default or privilege-drop entrypoint")
+    bootstrap = (REPO / "services/_shared/privilege_drop.sh").read_text(encoding="utf-8")
+    if 'exec setpriv --reuid 1000 --regid 1000 --clear-groups --inh-caps=-all --ambient-caps=-all --no-new-privs "$@"' not in bootstrap:
+        bad.append("service TLS bootstrap: lost the API's privilege/capability drop")
+
     if not any(
         line.strip() == "data/secrets"
         for line in (REPO / ".dockerignore").read_text(encoding="utf-8").splitlines()
@@ -242,6 +260,9 @@ def self_check() -> list[str]:
     m = {k: dict(v) for k, v in services.items()}
     m["web-fetch"]["environment"] = list(m["web-fetch"]["environment"]) + ["JWT_SECRET"]
     probes.append(("JWT_SECRET to web-fetch", m))
+    m = {k: dict(v) for k, v in services.items()}
+    m["media-gen"]["cap_add"] = list(TLS_BOOTSTRAP_CAPS | {"SYS_ADMIN"})
+    probes.append(("media bootstrap extra capability", m))
     miss = [label for label, svc in probes if not check(svc)]
     return [f"self-check: guard did not fail on '{label}'" for label in miss]
 

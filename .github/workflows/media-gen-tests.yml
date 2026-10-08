@@ -1,0 +1,39 @@
+name: media-gen-tests
+
+# No GPU libraries/weights in unit CI. PR coverage is the path-aware ci.yml
+# leg; this is the independent push canary required by check-ci-coverage.sh.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "services/media-gen/**"
+      - "services/_shared/**"
+      - "docker/docker-compose.yml"
+      - "docker/docker-compose.media-gpu.yml"
+      - ".github/workflows/media-gen-tests.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: media-gen-tests-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: services/media-gen
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: services/media-gen/requirements-dev.txt
+      - name: Install contract-test dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Run pytest
+        run: pytest -v

@@ -122,7 +122,7 @@ async function handler(
 const tool: Tool = {
   name: "timestamp_convert",
   description:
-    "Convert a timestamp between Unix epoch and ISO-8601. Pass either an epoch number (digits only) or an ISO-8601/RFC-2822 date string — the tool auto-detects which. For an epoch number, give `unit` as 'seconds' or 'milliseconds'; when omitted the unit is inferred by magnitude (values with 13+ digits are milliseconds, otherwise seconds). An unrecognized unit is rejected. Returns both epoch forms plus the ISO string. Pure computation.",
+    "Convert epoch or ISO8601/RFC2822 to seconds/milliseconds/ISO. Epoch digits: optional unit seconds/milliseconds; infer13+digits=milliseconds else seconds. Unknown units refused.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

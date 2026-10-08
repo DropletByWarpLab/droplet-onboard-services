@@ -123,7 +123,7 @@ async function handler(
 const tool: Tool = {
   name: "memory_extract_fact",
   description:
-    "Persist a durable memory fact about the user or workspace. Use when the conversation reveals a preference, recurring workflow, scope assumption, or schedule the user has stated. Two-step: the first call returns confirmation_required with the proposed fact — relay it to the user, and only after they explicitly approve, re-issue the SAME call with confirmed: true. Pair with memory_recall to check if the fact already exists before extracting.",
+    "Save a stated durable preference/workflow/scope/schedule/fact for user/workspace. Check memory_recall for duplicates first. Relay confirmation_required fact; only after explicit approval repeat SAME call with confirmed: true.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

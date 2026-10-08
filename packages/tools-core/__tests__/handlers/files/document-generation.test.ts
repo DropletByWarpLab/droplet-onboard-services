@@ -22,7 +22,7 @@ import createSlideDeck from "../../../src/handlers/files/create-slide-deck.js";
 import type { ToolContext } from "../../../src/types.js";
 
 function makeCtx(response: { ok: boolean; status: number; data?: unknown }) {
-  const post = vi.fn().mockResolvedValue(response);
+  const post = vi.fn().mockImplementation(() => Promise.resolve(new Response(JSON.stringify(response.data ?? {}), { status: response.status, headers: { "content-type": "application/json" } })));
   const ctx = {
     userId: "alice",
     ncToken: "nc-token",

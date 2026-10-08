@@ -166,8 +166,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 
 const tool: Tool = {
   name: "rename_camera",
-  description:
-    'Rename a security camera to something the team actually calls it, e.g. turn "Xnv C8083r E43022502afd" into "Loading dock". Accepts either the camera id or its current display name. This changes the label only — the camera\'s underlying id, its recordings, and its event history are all unaffected, and the change is instant and reversible. Use whenever the user asks to rename, re-label, or "call" a camera something.',
+  description: "Rename a camera display label using its stable ID from list_cameras; the stream ID stays unchanged.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: false,

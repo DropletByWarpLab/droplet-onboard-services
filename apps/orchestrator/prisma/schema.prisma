@@ -3155,6 +3155,7 @@ model DeviceIntentState {
 model User {
   id                 String              @id @default(uuid())
   googleConnection   GoogleConnection?
+  mediaGenerationJobs MediaGenerationJob[]
   // Login handle. Unique across the directory. For Nextcloud-mirror
   // rows this matches the OCS user id so `req.user.username` from the
   // auth middleware resolves directly to this row.
@@ -4717,6 +4718,32 @@ enum ToolRunStatus {
 /// rather than `startedAt + constant` so a config change cannot move the
 /// goalposts of a run already in flight. `maxIter` alone does not bound a run
 /// whose model calls are slow.
+/// Local inference is slower than a chat tool deadline. Metadata is durable;
+/// credentials, prompts and source bytes are never stored in this table.
+model MediaGenerationJob {
+  id          String                @id @default(uuid())
+  ownerUserId String
+  owner       User                  @relation(fields: [ownerUserId], references: [id], onDelete: Cascade)
+  kind        String
+  path        String
+  status      MediaGenerationStatus @default(running)
+  result      Json?
+  error       String?
+  deadlineAt  DateTime
+  createdAt   DateTime              @default(now())
+  updatedAt   DateTime              @updatedAt
+  @@index([ownerUserId, createdAt])
+  @@index([status, deadlineAt])
+}
+
+enum MediaGenerationStatus {
+  running
+  saving
+  succeeded
+  failed
+  cancelled
+}
+
 model AgentRun {
   id                 String                   @id @default(uuid())
   /// Attributed principal (`User.id`). Tool reach is re-resolved from it at

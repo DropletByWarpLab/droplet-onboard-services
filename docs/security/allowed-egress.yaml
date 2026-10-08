@@ -508,6 +508,44 @@ entries:
     review_by: 2027-07-20
     code_refs: [services/web-fetch/providers.py]
 
+  # Implements the search/fetch boundary recorded in screened-web-access-design.md.
+  - id: public-web-search-brave
+    kind: egress
+    service: web-fetch
+    destination:
+      hosts: [api.search.brave.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      Public research queries only, after credential/private-data screening,
+      the default-off web_fetch channel gate and signed pre-egress audit.
+      The search key stays on the edge. No stored files or user credentials.
+    ticket: WARP-1423
+    added: 2026-10-08
+    review_by: 2027-10-08
+    code_refs: [services/web-fetch/web_content.py]
+
+  - id: public-web-user-requested-url
+    kind: dynamic
+    service: web-fetch
+    config_key: web_fetch.requested_url
+    destination:
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      Explicit public HTTPS URLs only, never arbitrary private/LAN addresses.
+      The edge pins public DNS results, checks every redirect, rejects credentials,
+      limits bytes/time and treats returned content as untrusted evidence. The
+      web_fetch channel defaults off and every request is signed-audited first.
+    ticket: WARP-1423
+    added: 2026-10-08
+    review_by: 2027-10-08
+    code_refs: [services/web-fetch/web_content.py]
+
   - id: ntp-openwrt-pool
     kind: egress
     service: openwrt-router
@@ -2275,12 +2313,12 @@ entries:
     kind: reference
     service: repo
     destination:
-      hosts: [www.w3.org, www.onvif.org, nextcloud.org, owncloud.org, json-schema.org]
+      hosts: [www.w3.org, www.onvif.org, nextcloud.org, owncloud.org, json-schema.org, schemas.openxmlformats.org]
     purpose: XML/SVG/SOAP/WebDAV namespace and $schema identifiers in payload bodies
     ticket: WARP-269
     added: 2026-07-04
     review_by: 2027-07-04
-    code_refs: [apps/orchestrator/src/services/nextcloud.client.ts, services/camera-discovery/onvif_scanner.py]
+    code_refs: [apps/orchestrator/src/services/nextcloud.client.ts, services/camera-discovery/onvif_scanner.py, services/doc-render/workbook_features.py, services/doc-render/office_files.py]
 
   - id: ref-doc-links
     kind: reference

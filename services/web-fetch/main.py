@@ -1,11 +1,10 @@
 """
 Droplet Web-Fetch Service
 =========================
-The ONLY component allowed outbound HTTP for the ambient-data LLM tools
-(WARP-1436): weather via Open-Meteo and currency reference rates via the
-ECB daily XML. Keyless fixed providers only — every destination is a
-hardcoded constant in providers.py, registered in
-docs/security/allowed-egress.yaml. Design: docs/screened-web-access-design.md.
+The outbound HTTP boundary for screened public-web and ambient-data tools.
+Weather/rates have fixed keyless providers; search uses operator-provisioned
+Brave credentials; public page reads use DNS/IP pinning and redirect screens.
+Design: docs/screened-web-access-design.md.
 
 Purely request-driven: no schedulers, no caches. Caching and audit logging
 are the orchestrator's job.
@@ -33,6 +32,8 @@ from datetime import datetime, timezone
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 
 import providers
+import web_content
+from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 # Bearer token shared with the orchestrator (docker-compose:
 # WEB_FETCH_SERVICE_TOKEN). Read at import; require_bearer looks the module
@@ -72,6 +73,34 @@ app = FastAPI(
     version="1.0.0",
     dependencies=[Depends(require_bearer)],
 )
+
+
+class FetchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    url: str = Field(min_length=1, max_length=2048)
+    maxBytes: StrictInt = Field(default=web_content.MAX_RAW_BYTES, ge=1024, le=web_content.MAX_RAW_BYTES)
+
+
+class SearchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    query: str = Field(min_length=1, max_length=600)
+    count: StrictInt = Field(default=5, ge=1, le=10)
+
+
+@app.post("/fetch")
+async def fetch_page(request: FetchRequest):
+    try:
+        return await web_content.fetch_page(request.url, request.maxBytes)
+    except web_content.WebError as error:
+        raise HTTPException(status_code=error.status, detail=error.code) from None
+
+
+@app.post("/search")
+async def search_web(request: SearchRequest):
+    try:
+        return await web_content.search_web(request.query, request.count)
+    except web_content.WebError as error:
+        raise HTTPException(status_code=error.status, detail=error.code) from None
 
 
 @app.get("/health")

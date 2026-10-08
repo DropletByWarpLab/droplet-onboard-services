@@ -90,7 +90,7 @@ def test_overflow_is_a_numbered_error_instead_of_clipped_content(format):
         ([{"title": "T", "bullets": "wrong"}], "must be an array"),
         ([{"title": "T", "bullets": [5]}], "must be a string"),
         ([{"title": "T", "image": "/etc/passwd"}], "accepts only title and bullets"),
-        ([{"title": "T", "bullets": ["emoji \U0001F642"]}], "unsupported by the slide font"),
+        ([{"title": "T", "bullets": ["emoji \U0001F642"]}], "unsupported by the bundled font"),
         ([{"title": "T", "bullets": ["bad\x00text"]}], "unsupported control"),
     ],
 )
@@ -102,7 +102,8 @@ def test_invalid_or_unbounded_specs_are_rejected(spec, match):
 def test_deck_title_and_total_text_are_bounded(monkeypatch):
     with pytest.raises(renderers.RenderError, match="deck title is too long"):
         renderers.render_slide_deck("x" * 256, SAMPLE, "pptx")
-    monkeypatch.setattr(slides, "MAX_DECK_CHARS", 3)
+    import rich_slides
+    monkeypatch.setattr(rich_slides, "MAX_DECK_CHARS", 3)
     with pytest.raises(renderers.RenderError, match="deck text is too long"):
         renderers.render_slide_deck("", SAMPLE, "pdf")
 

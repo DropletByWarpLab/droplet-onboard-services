@@ -89,7 +89,7 @@ async function handler(_args: unknown, ctx: ToolContext): Promise<ToolResult> {
 const tool: Tool = {
   name: "get_camera_storage",
   description:
-    'How the security cameras are using recording storage — per-camera space used, measured recording rate, each camera\'s share of the drive, and whether the drive is nearly full. Use to answer "which camera is using the most space?", "how full is the camera drive?", or "how long until I run out of recording space?". A camera that has not recorded yet reports null rather than zero.',
+    "Per-camera recording space, measured rate, drive share/fullness; use for biggest camera or time/space remaining. No recordings means null, not zero.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

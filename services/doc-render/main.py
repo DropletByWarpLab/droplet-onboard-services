@@ -38,11 +38,13 @@ except ImportError:
 
 import hmac
 import os
+import base64
 from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import Response
-from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
+from pydantic import BaseModel, Field, StrictFloat, StrictInt
 
 import renderers
 
@@ -94,9 +96,18 @@ class FormulaSpec(BaseModel):
 class ChartSpec(BaseModel):
     model_config = {"extra": "forbid"}
     title: str = ""
-    kind: Literal["bar", "line"]
+    kind: Literal["bar", "line", "pie"]
     category_column: int = Field(strict=True)
-    value_column: int = Field(strict=True)
+    value_column: int | None = Field(default=None, strict=True)
+    value_columns: list[StrictInt] | None = None
+
+
+class CellFormatSpec(BaseModel):
+    model_config = {"extra": "forbid"}
+    range: str
+    kind: Literal["number", "currency", "percent", "date"]
+    precision: int = Field(default=2, strict=True)
+    currency: str = "USD"
 
 
 class SheetSpec(BaseModel):
@@ -105,6 +116,32 @@ class SheetSpec(BaseModel):
     rows: list[list[Any]] = Field(default_factory=list)
     formulas: list[FormulaSpec] = Field(default_factory=list)
     chart: ChartSpec | None = None
+    formats: list[CellFormatSpec] = Field(default_factory=list)
+
+
+class SlideColumnSpec(BaseModel):
+    model_config = {"extra": "forbid"}
+    title: str = ""
+    bullets: list[str] = Field(default_factory=list)
+
+
+class SlideTableSpec(BaseModel):
+    model_config = {"extra": "forbid"}
+    headers: list[str]
+    rows: list[list[str]]
+
+
+class SlideSeriesSpec(BaseModel):
+    model_config = {"extra": "forbid"}
+    name: str
+    values: list[StrictInt | StrictFloat]
+
+
+class SlideChartSpec(BaseModel):
+    model_config = {"extra": "forbid"}
+    kind: Literal["bar", "line", "pie"]
+    labels: list[str]
+    series: list[SlideSeriesSpec]
 
 
 class SlideSpec(BaseModel):
@@ -113,6 +150,11 @@ class SlideSpec(BaseModel):
     model_config = {"extra": "forbid"}
     title: str
     bullets: list[str] = Field(default_factory=list)
+    subtitle: str = ""
+    columns: list[SlideColumnSpec] = Field(default_factory=list)
+    table: SlideTableSpec | None = None
+    chart: SlideChartSpec | None = None
+    notes: str = ""
 
 
 class RenderRequest(BaseModel):
@@ -121,6 +163,15 @@ class RenderRequest(BaseModel):
     body_markdown: str = ""
     sheets: list[SheetSpec] = Field(default_factory=list)
     slides: list[SlideSpec] = Field(default_factory=list)
+    theme: Literal["droplet", "light", "dark"] = "droplet"
+
+
+class OfficeRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+    action: Literal["inspect", "revise"] = "inspect"
+    format: Literal["docx", "xlsx", "pptx"]
+    content_base64: str = Field(max_length=14_000_000)
+    changes: dict[str, Any] = Field(default_factory=dict)
 
 
 app = FastAPI(
@@ -133,6 +184,20 @@ app = FastAPI(
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.post("/office")
+async def office(req: OfficeRequest):
+    from office_files import OfficeError, inspect_office, revise_office
+    try:
+        raw = base64.b64decode(req.content_base64, validate=True)
+        if req.action == "inspect":
+            if req.changes: raise OfficeError("Inspection cannot contain revision operations")
+            return await run_in_threadpool(inspect_office, raw, req.format)
+        output = await run_in_threadpool(revise_office, raw, req.format, req.changes)
+        return Response(content=output, media_type=renderers.MIME[req.format])
+    except (OfficeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @app.post("/render")
@@ -149,7 +214,7 @@ async def render(req: RenderRequest) -> Response:
     try:
         if req.slides or req.format == "pptx":
             payload = renderers.render_slide_deck(
-                req.title, [s.model_dump() for s in req.slides], req.format
+                req.title, [s.model_dump(exclude_none=True) for s in req.slides], req.format, req.theme
             )
         elif req.format == "xlsx":
             payload = renderers.render_xlsx([s.model_dump() for s in req.sheets])

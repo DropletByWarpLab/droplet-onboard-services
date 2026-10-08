@@ -193,6 +193,13 @@ const EXPECTED_TOOL_NAMES = [
   "create_word_document",
   "create_spreadsheet",
   "create_slide_deck", // Device chat: PDF and editable PowerPoint creation.
+  "create_audio",
+  "generate_media",
+  "office_file",
+  "create_artifact", // Droplet chat capability suite
+  "analyze_data",
+  "web_search",
+  "web_fetch",
   // WARP-2664 — file cleanup: read-only report, then organize (write +
   // confirm) and bulk delete-to-trash (write + confirm).
   "analyze_file_cleanup",

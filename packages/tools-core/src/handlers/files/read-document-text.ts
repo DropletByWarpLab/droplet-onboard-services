@@ -207,7 +207,7 @@ async function handler(
 const tool: Tool = {
   name: "read_document_text",
   description:
-    "Read the full extracted text of one document in document order, including PDFs, Word docs, and scans that read_file cannot decode. Use this — not search_content — when you need the WHOLE document (compiling a report, extracting every date or line item); use search_content when you only need the passages matching a question. Long documents come back in parts: when `next_chunk` is a number there is more text, so call again with start_chunk set to it, and keep going until `next_chunk` is null. Fails with NOT_INDEXED when the file has no extracted text rather than returning an empty document.",
+    "Read extracted PDF/Word/scan/attachment text in document order. Whole-document extraction: this tool; matching passages: search_content. Follow next_chunk with start_chunk until null. NOT_INDEXED means no extracted text, not an empty document.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

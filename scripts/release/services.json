@@ -110,6 +110,12 @@
       "healthcheck": { "type": "http", "port": 8020, "path": "/health" }
     },
     {
+      "name": "media-gen",
+      "context": ".",
+      "dockerfile": "services/media-gen/Dockerfile",
+      "healthcheck": { "type": "http", "port": 8040, "path": "/health" }
+    },
+    {
       "name": "sandbox",
       "context": ".",
       "dockerfile": "services/sandbox/Dockerfile",

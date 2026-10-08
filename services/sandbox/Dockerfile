@@ -30,7 +30,7 @@ FROM python:3.12-slim@sha256:02108f5d322dd89f1c9e552442c25acb0543dfdbc455693a559
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-      git openssl ca-certificates && \
+      git openssl ca-certificates util-linux && \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
@@ -66,11 +66,14 @@ COPY services/_shared/fips_selftest.py /app/_shared/fips_selftest.py
 COPY services/_shared/internal_tls.py /app/_shared/internal_tls.py
 COPY services/_shared/serve.py /app/_shared/serve.py
 COPY services/_shared/healthcheck.py /app/_shared/healthcheck.py
+COPY services/_shared/privilege_drop.sh /app/_shared/privilege_drop.sh
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-USER sandbox
+# Compose bootstraps as root to stage TLS, then immediately drops to this uid.
+USER 1000
+ENTRYPOINT ["sh", "/app/_shared/privilege_drop.sh"]
 
 EXPOSE 8030
 CMD ["python", "-m", "_shared.serve", "main:app", "--host", "0.0.0.0", "--port", "8030"]

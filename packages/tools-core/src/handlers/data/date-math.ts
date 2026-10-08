@@ -314,7 +314,7 @@ async function handler(
 const tool: Tool = {
   name: "date_math",
   description:
-    "Calendar/date arithmetic in UTC: 'add'/'subtract' a duration (years, months, weeks, days, hours, minutes — months clamp to month-end, e.g. Jan 31 + 1 month = Feb 28), 'diff' two dates (signed totals plus a days/hours/minutes breakdown of other_date - date), or 'next_weekday' (first occurrence strictly after the date). Accepts ISO-8601 date-only or datetime; naive datetimes are treated as UTC; date-only inputs yield date-only results. Pure computation.",
+    "UTC dates: add/subtract duration (month/year clamp to month-end); diff=other_date-date; next_weekday strictly after date. ISO dates/datetimes; naive=UTC, date-only inputs yield dates.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

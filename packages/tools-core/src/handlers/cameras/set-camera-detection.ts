@@ -157,7 +157,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "set_camera_detection",
   description:
-    "Turn a security camera's detection and recording on or off at runtime — no NVR restart, takes effect immediately, and is fully reversible (re-enable any time). Use to pause a camera and its alerts (e.g. while the user works in view) or to bring a disabled camera back online. Two-step: the first call returns confirmation_required with the effect — relay it to the user, and only after they explicitly approve, re-issue the SAME call with confirmed: true.",
+    "Reversibly enable/disable camera detection AND recording at runtime without NVR restart. Relay confirmation_required effect; only after explicit approval repeat SAME call with confirmed: true.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

@@ -123,5 +123,33 @@ else
   bad "a second migrate_env run changed .env"
 fi
 
+# Optional media is provisioned without enabling its profile; re-runs preserve
+# a real bearer and the value never reaches logs. Absent-only matches doc-render.
+if grep -qE '^MEDIA_GEN_SERVICE_TOKEN=[0-9a-f]{64}$' "$ENV"; then
+  ok "generate_env provisions the media service bearer"
+else
+  bad "generate_env omitted the media service bearer"
+fi
+grep -v '^MEDIA_GEN_SERVICE_TOKEN=' "$ENV" > "$ENV.t"; mv "$ENV.t" "$ENV"
+: > "$LOG_FILE"
+migrate_env >/dev/null 2>&1 || true
+media_token="$(grep '^MEDIA_GEN_SERVICE_TOKEN=' "$ENV" | cut -d= -f2-)"
+if [[ "$media_token" =~ ^[0-9a-f]{64}$ ]]; then
+  ok "missing media bearer is backfilled"
+else
+  bad "media bearer backfill missing"
+fi
+migrate_env >/dev/null 2>&1 || true
+if [ "$(grep '^MEDIA_GEN_SERVICE_TOKEN=' "$ENV" | cut -d= -f2-)" = "$media_token" ]; then
+  ok "media bearer survives setup re-run"
+else
+  bad "media bearer was rotated"
+fi
+if [ -n "$media_token" ] && grep -qF -- "$media_token" "$LOG_FILE"; then
+  bad "media bearer reached setup log"
+else
+  ok "media bearer is absent from setup log"
+fi
+
 printf '\n%d passed, %d failed\n\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

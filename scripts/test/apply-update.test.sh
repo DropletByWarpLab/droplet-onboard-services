@@ -573,12 +573,18 @@ printf 'env-reconcile %s\n' "\$*" >> "$STUB_DIR/calls.log"
 printf '%s\n' "\${REC_STUB_OUT:-}"
 exit "\${REC_STUB_EXIT:-0}"
 RECEOF
+cat > "$REC_ROOT/docker/ota/reconcile-service-tls.sh" <<RECEOF
+#!/bin/bash
+printf 'service-tls %s\n' "\$*" >> "$STUB_DIR/calls.log"
+exit "\${REC_TLS_STUB_EXIT:-0}"
+RECEOF
 stub_reset
 REC_OUT="$(TUNNEL_TOKEN=legacy-ignored DOCKER_STUB_RETIRED_CONNECTOR=retired-cid \
   REC_STUB_OUT="$REC_REPORT" run_apply reconcile-env --compose-file "$COMPOSE_FILE" \
   --update-id "$UPDATE_ID" --image "$REC_IMG" 2>/dev/null)"; REC_RC=$?
 if [ "$REC_RC" -eq 0 ] && [ "$REC_OUT" = "$REC_REPORT" ] \
-  && grep -qxF -- "env-reconcile $REC_ROOT $UPDATE_ID" "$STUB_DIR/calls.log" \
+   && grep -qxF -- "env-reconcile $REC_ROOT $UPDATE_ID" "$STUB_DIR/calls.log" \
+   && grep -qxF -- "service-tls $REC_ROOT" "$STUB_DIR/calls.log" \
   && ! grep -q '^run ' "$STUB_DIR/calls.log"; then
   pass "reconcile-env runs the STAGED script directly on the host (no nested container)"
 else
@@ -609,6 +615,13 @@ if REC_STUB_EXIT=1 run_apply reconcile-env --compose-file "$COMPOSE_FILE" \
   fail "reconcile-env must fail when the host script fails"
 else
   pass "reconcile-env fails loudly when the host script fails"
+fi
+stub_reset
+if REC_TLS_STUB_EXIT=1 run_apply reconcile-env --compose-file "$COMPOSE_FILE" \
+    --update-id "$UPDATE_ID" --image "$REC_IMG" >/dev/null 2>&1; then
+  fail "reconcile-env must fail before swaps when service certificate reconciliation fails"
+else
+  pass "reconcile-env fails loudly when the service certificate issuer fails"
 fi
 if run_apply reconcile-env --compose-file "$COMPOSE_FILE" \
     --update-id "$UPDATE_ID" --image "ghcr.io/x/orchestrator:latest" >/dev/null 2>&1; then

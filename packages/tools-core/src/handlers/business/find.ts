@@ -653,7 +653,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "business_find",
   description:
-    "Look up business records: customers, contacts, deals, projects, work items, the pipeline roll-up, or what the box worked out on its own — `finding` (something that needs attention: overdue money, a slipping deal) and `digest` (standing facts read out of documents). With `id`, that one record plus what links to it, each linked list with its `_total`; without, a search with a `total`. History lives in business_timeline. Amounts are in major units (e.g. dollars).",
+    "Find customer/contact/deal/project/work_item/pipeline/finding/digest. finding=issue needing attention; digest=document-derived facts. id returns record+linked lists with _total; search returns total. Amounts in major units (currency). History: business_timeline.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

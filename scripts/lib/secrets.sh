@@ -648,6 +648,8 @@ generate_env() {
   # added to this function, which is why /api/web/* fails closed on a box
   # nobody hand-edited.
   doc_render_service_token=$(openssl rand -hex 32)
+  local media_gen_service_token
+  media_gen_service_token=$(openssl rand -hex 32)
   # WARP-2895: bearer for the code-execution sandbox (orchestrator → sandbox).
   sandbox_service_token=$(openssl rand -hex 32)
   # WARP-2627: bearer the orchestrator presents to the services/mcp-bridge
@@ -1026,6 +1028,10 @@ RAG_EVAL_ENABLED=1
 # its side is empty.
 DOC_RENDER_SERVICE_TOKEN=$doc_render_service_token
 
+# --- Local media bearer (orchestrator → media-gen; optional media profile) ---
+# No provider credential. Rotate both ends and recreate both containers.
+MEDIA_GEN_SERVICE_TOKEN=$media_gen_service_token
+
 # --- Sandbox bearer (orchestrator → sandbox) ---
 # WARP-2895. The orchestrator presents this on POST /transform to the sandbox
 # container, which runs a routine's transform / when steps in a child
@@ -1329,6 +1335,8 @@ migrate_env() {
   # refuse until someone hand-edited .env. Backfill is only-when-missing, so
   # an operator who already set one keeps it.
   _migrate_ensure_key DOC_RENDER_SERVICE_TOKEN "$(openssl rand -hex 32)"
+  # Provision the bearer without enabling the optional media profile.
+  _migrate_ensure_key MEDIA_GEN_SERVICE_TOKEN "$(openssl rand -hex 32)"
   # WARP-2895: same backfill for the sandbox's bearer — without one every
   # transform step fails closed until someone hand-edits .env.
   _migrate_ensure_key SANDBOX_SERVICE_TOKEN "$(openssl rand -hex 32)"

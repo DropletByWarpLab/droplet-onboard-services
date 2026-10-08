@@ -69,6 +69,7 @@ import {
 } from "../services/cache.service.js";
 import { readUserEmail } from "../services/user-directory.service.js";
 import { resolveAssertedUser } from "../services/asserted-user.service.js";
+import { internalBaseUrl, internalFetch } from "../lib/internal-tls.js";
 import {
   defaultPublicLinkExpiry,
   exposesOutside,
@@ -2824,6 +2825,7 @@ export function createFilesRouter(
           body_markdown?: unknown;
           sheets?: unknown;
           slides?: unknown;
+          theme?: unknown;
         };
 
         const format = body.format;
@@ -2866,6 +2868,13 @@ export function createFilesRouter(
         const targetPath = await rootForSpace(prisma, space, dir);
         const token = await getToken(req);
         const user = await getUser(req, prisma);
+        const mcp = req.user?.id === "_service:mcp" && req.user.role === "service";
+        const resolvedActor = mcp ? await resolveAssertedUser(prisma, req.header("x-nextcloud-user") ?? "") : null;
+        const actor = resolvedActor?.ok ? resolvedActor.user : !mcp ? req.user : null;
+        if (!actor || !["owner", "admin", "family"].includes(actor.role)) {
+          res.status(403).json({ error: "The acting person is not allowed to create documents." });
+          return;
+        }
         const uploadedPath =
           targetPath === "/" ? `/${filename}` : `${targetPath}/${filename}`;
 
@@ -2895,7 +2904,7 @@ export function createFilesRouter(
 
         let upstream: globalThis.Response;
         try {
-          upstream = await fetch(`${config.DOC_RENDER_URL}/render`, {
+          upstream = await internalFetch(`${internalBaseUrl(config.DOC_RENDER_URL)}/render`, {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
@@ -2908,8 +2917,10 @@ export function createFilesRouter(
                 typeof body.body_markdown === "string" ? body.body_markdown : "",
               sheets: Array.isArray(body.sheets) ? body.sheets : [],
               slides: Array.isArray(body.slides) ? body.slides : [],
+              ...(body.theme !== undefined ? { theme: body.theme } : {}),
             }),
             signal: AbortSignal.timeout(DOC_RENDER_TIMEOUT_MS),
+            redirect: "error",
           });
         } catch (err) {
           logger.error({ err }, "files/render: doc-render unreachable");
@@ -2961,7 +2972,7 @@ export function createFilesRouter(
           throw uploadErr;
         }
 
-        const ownerUserId = (req as { user?: { id?: string } }).user?.id ?? null;
+        const ownerUserId = actor.id;
         if (ownerUserId) {
           // Best-effort, exactly as in /files/upload: a registry failure must
           // not fail a write that already landed.

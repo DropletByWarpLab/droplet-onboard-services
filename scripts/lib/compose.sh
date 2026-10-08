@@ -264,6 +264,11 @@ prepare_and_build() {
   case ",${active_profiles}," in
     *,web,*) build_services+=(web-fetch) ;;
   esac
+  # Media weights/hardware are operator-provisioned; do not build the large
+  # diffusion runtime on a box that never enables this optional profile.
+  case ",${active_profiles}," in
+    *,media,*) build_services+=(media-gen) ;;
+  esac
   # erp profile: erp-sql-bridge (WARP-1106 direct-SQL ERP bridge) is
   # `["erp"]`-profiled and has a `build:` section, so the same "No such image"
   # failure at `up` applies. Same build-only-when-active idiom: the profile is
@@ -297,6 +302,7 @@ prepare_and_build() {
   # Deliberately NOT in build_services (accounted for here, not built):
   #   rag-eval    — appended above only when the eval profile is active
   #   web-fetch   — appended above only when the web profile is active
+  #   media-gen   — appended above only when the media profile is active
   #                 (WARP-1436 screened ambient-data fetcher)
   #   erp-sql-bridge — appended above only when the erp profile is active
   #                 (WARP-1106 direct-SQL ERP bridge)
@@ -325,7 +331,7 @@ prepare_and_build() {
         --env-file "$COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" config --format json 2>/dev/null \
       | jq -r '.services | to_entries[] | select(.value.build) | .key' 2>/dev/null || true)
     _drift=$(compute_build_list_drift \
-      "$(IFS=,; printf '%s' "${build_services[*]}"),rag-eval,web-fetch,erp-sql-bridge,openwrt,ops-console,fleet-agent,inference-manager,mcp-bridge" \
+      "$(IFS=,; printf '%s' "${build_services[*]}"),rag-eval,web-fetch,media-gen,erp-sql-bridge,openwrt,ops-console,fleet-agent,inference-manager,mcp-bridge" \
       <<<"$_drift_buildable")
     if [ -n "$_drift" ]; then
       if [ -n "${CI:-}" ]; then

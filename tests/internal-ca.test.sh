@@ -66,9 +66,34 @@ fp3="$(openssl x509 -in "$B/cert.pem" -noout -fingerprint)"
 internal_ca_issue_all
 for svc in orchestrator gateway ai-gateway mcp-server voice-io email-indexer rag-eval \
            ops-console file-indexer routing switch oled-display matter-controller \
-           camera-discovery broker frigate cache nextcloud db; do
+           camera-discovery broker frigate cache nextcloud db media-gen doc-render web-fetch sandbox; do
   [ -s "$WORK/data/secrets/service-tls/$svc/cert.pem" ] || fail "issue_all missed $svc"
 done
+
+# An OTA bundle ships docker/ but not the current scripts/ identity list.
+# Exercise its additive issuer against an installed host library and CA.
+OTA_BOX="$WORK/ota-box"
+mkdir -p "$OTA_BOX/scripts/lib" "$OTA_BOX/data/secrets/internal-ca"
+cp "$REPO_ROOT/scripts/lib/internal-ca.sh" "$OTA_BOX/scripts/lib/internal-ca.sh"
+cp "$WORK/data/secrets/internal-ca/ca.pem" "$WORK/data/secrets/internal-ca/ca.key" "$OTA_BOX/data/secrets/internal-ca/"
+printf 'DROPLET_INTERNAL_TLS=1\n' > "$OTA_BOX/.env"
+OTA_TLS="$REPO_ROOT/docker/ota/reconcile-service-tls.sh"
+bash "$OTA_TLS" "$OTA_BOX" >/dev/null 2>&1 || fail "OTA service identity reconciliation"
+ota_ca_before="$(openssl x509 -in "$OTA_BOX/data/secrets/internal-ca/ca.pem" -noout -fingerprint)"
+ota_leaf_before="$(openssl x509 -in "$OTA_BOX/data/secrets/service-tls/media-gen/cert.pem" -noout -fingerprint)"
+for svc in media-gen doc-render web-fetch sandbox; do
+  openssl verify -CAfile "$OTA_BOX/data/secrets/internal-ca/ca.pem" "$OTA_BOX/data/secrets/service-tls/$svc/cert.pem" >/dev/null || fail "OTA $svc certificate chain"
+  [ "$(stat -c %a "$OTA_BOX/data/secrets/service-tls/$svc/key.pem" 2>/dev/null || stat -f %Lp "$OTA_BOX/data/secrets/service-tls/$svc/key.pem" 2>/dev/null)" = "600" ] || fail "OTA $svc key permission"
+done
+bash "$OTA_TLS" "$OTA_BOX" >/dev/null 2>&1 || fail "OTA identity reconcile re-run"
+[ "$ota_ca_before" = "$(openssl x509 -in "$OTA_BOX/data/secrets/internal-ca/ca.pem" -noout -fingerprint)" ] || fail "OTA replaced the device CA"
+[ "$ota_leaf_before" = "$(openssl x509 -in "$OTA_BOX/data/secrets/service-tls/media-gen/cert.pem" -noout -fingerprint)" ] || fail "OTA rotated a fresh leaf"
+OTA_EMPTY="$WORK/ota-empty"; mkdir -p "$OTA_EMPTY"
+printf 'DROPLET_INTERNAL_TLS=0\n' > "$OTA_EMPTY/.env"
+bash "$OTA_TLS" "$OTA_EMPTY" >/dev/null 2>&1 || fail "plaintext box without CA must remain a no-op"
+[ ! -e "$OTA_EMPTY/data/secrets/internal-ca" ] || fail "OTA minted a new CA"
+printf 'export DROPLET_INTERNAL_TLS = "1" # enabled\n' > "$OTA_EMPTY/.env"
+if bash "$OTA_TLS" "$OTA_EMPTY" >/dev/null 2>&1; then fail "mTLS box without CA must refuse before swaps"; fi
 # 5. rotate-internal-certs.sh --service reissues exactly that bundle
 fp_orch="$(openssl x509 -in "$WORK/data/secrets/service-tls/orchestrator/cert.pem" -noout -fingerprint)"
 fp_ai="$(openssl x509 -in "$WORK/data/secrets/service-tls/ai-gateway/cert.pem" -noout -fingerprint)"

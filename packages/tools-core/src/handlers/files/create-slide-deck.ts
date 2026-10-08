@@ -6,6 +6,7 @@ const inputSchema = {
   properties: {
     path: { type: "string", description: "New .pdf/.pptx path." },
     title: { type: "string" },
+    theme: { type: "string", description: "droplet, light or dark" },
     slides: {
       type: "array",
       items: {
@@ -13,11 +14,16 @@ const inputSchema = {
         properties: {
           title: { type: "string" },
           bullets: { type: "array", items: { type: "string" } },
+          subtitle: { type: "string" },
+          columns: { type: "array", items: { type: "object" }, description: "Two {title?,bullets:string[]} columns." },
+          table: { type: "object", description: "{headers:string[],rows:cell[][]}." },
+          chart: { type: "object", description: "{kind:bar|line|pie,labels:string[],series:[{name,values:number[]}]}." },
+          notes: { type: "string" },
         },
-        required: ["title", "bullets"],
+        required: ["title"],
         additionalProperties: false,
       },
-      description: "1-60 plain Latin-text slides; 0-8 bullets each.",
+      description: "1-60 slides; one layout: bullets, columns, table or chart. Latin/Greek/Cyrillic text.",
     },
   },
   required: ["path", "title", "slides"],
@@ -35,7 +41,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   if (!ctx.userId || !ctx.ncToken) return err("AUTH_REQUIRED", "auth_required");
   const res = await ctx.http.nextcloud.post(
     "/render",
-    { path: v.path, format, title: args.title, slides: args.slides },
+    { path: v.path, format, title: args.title, slides: args.slides, ...(args.theme !== undefined ? { theme: args.theme } : {}) },
     { headers: ncHeaders(ctx) },
   );
   return interpretRenderResponse(res, v.path);

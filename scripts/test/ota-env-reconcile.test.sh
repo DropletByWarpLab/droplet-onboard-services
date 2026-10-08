@@ -66,6 +66,10 @@ OUT="$(reconcile "$BOX" upd1 2>"$TMP/err")"; RC=$?
 
 grep -q '^SANDBOX_SERVICE_TOKEN=[0-9a-f]\{64\}$' "$BOX/.env" \
   && pass "missing token key added (64 hex)" || fail "SANDBOX_SERVICE_TOKEN not added"
+grep -q '^MEDIA_GEN_SERVICE_TOKEN=[0-9a-f]\{64\}$' "$BOX/.env" \
+  && pass "optional media bearer added without enabling media" || fail "MEDIA_GEN_SERVICE_TOKEN not added"
+grep -q '^COMPOSE_PROFILES=.*media' "$BOX/.env" \
+  && fail "OTA silently enabled media" || pass "media stays opt-in after OTA"
 grep -q '^JWT_SECRET=[0-9a-f]\{128\}$' "$BOX/.env" \
   && pass "hex64 key added (128 hex)" || fail "JWT_SECRET not added as hex64"
 grep -qx "DROPLET_OTA_APPLY_SCRIPT=$BOX/docker/ota/apply-update.sh" "$BOX/.env" \
@@ -107,6 +111,8 @@ echo "$OUT" | grep -q '"addedProfiles":\["email"\]' \
   && pass "report lists added keys, profiles and the unit change" || fail "report wrong: $OUT"
 echo "$OUT" | grep -q "$(grep '^SANDBOX_SERVICE_TOKEN=' "$BOX/.env" | cut -d= -f2)" \
   && fail "report leaks a secret value" || pass "report carries no values"
+echo "$OUT" | grep -q "$(grep '^MEDIA_GEN_SERVICE_TOKEN=' "$BOX/.env" | cut -d= -f2)" \
+  && fail "report leaks media bearer" || pass "report hides media bearer"
 echo "$OUT" | grep -q '"SERVICE_TOKEN_VOICE"' && fail "report lists an existing key" || pass "report omits existing keys"
 python3 -c 'import json,sys; json.loads(sys.argv[1])' "$OUT" 2>/dev/null \
   && pass "report is valid JSON" || fail "report is not JSON: $OUT"
