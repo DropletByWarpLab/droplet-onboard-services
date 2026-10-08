@@ -5,9 +5,9 @@ import { err, ncHeaders } from "./_render.js";
 const inputSchema = {
   type: "object",
   properties: {
-    path: { type: "string", description: "New personal-root .wav filename, e.g. /narration.wav." },
+    path: { type: "string", description: "New personal-root .wav path." },
     text: { type: "string", description: "Speech text, 1–2,000 characters." },
-    voice: { type: "string", description: "Optional installed local voice name; omitted uses the server default." },
+    voice: { type: "string", description: "Installed local voice; omitted=server default." },
   },
   required: ["path", "text"],
   additionalProperties: false,
@@ -31,7 +31,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 
 const tool: Tool = {
   name: "create_audio",
-  description: "Create a downloadable WAV speech file using local Kokoro/Piper voices. Refuses overwrite. Saves to personal files without playing on the room speaker.",
+  description: "Local Kokoro/Piper to personal WAV download; no overwrite or room-speaker playback.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: false,

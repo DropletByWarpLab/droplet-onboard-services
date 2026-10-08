@@ -7,13 +7,13 @@ const inputSchema = {
   type: "object",
   properties: {
     action: { type: "string", description: "inspect (default) or revise." },
-    source_path: { type: "string", description: "DOCX/XLSX/PPTX File Store path; exactly one source_path or item_id." },
+    source_path: { type: "string", description: "DOCX/XLSX/PPTX path; exactly one source_path/item_id." },
     item_id: { type: "string", description: "Owned chat attachment ID." },
-    path: { type: "string", description: "For revise: new personal-root filename, same Office extension. Original stays unchanged." },
+    path: { type: "string", description: "Revise: new personal-root path, same Office extension; original retained." },
     changes: { type: "object", properties: {
-      cells: { type: "array", items: { type: "object" }, description: "XLSX: [{sheet,cell,value}]; existing A1 cells only; JSON scalars, strings are literal." },
-      text: { type: "array", items: { type: "object" }, description: "DOCX/PPTX: [{id,text}]; paragraph IDs from inspect; first text-run style retained." },
-    }, additionalProperties: false, description: "Revise only: 1–200 edits, 1 MiB total. Inspect first; truncated inspection is incomplete." },
+      cells: { type: "array", items: { type: "object" }, description: "XLSX [{sheet,cell,value}]: existing A1 cells; JSON scalars, literal strings." },
+      text: { type: "array", items: { type: "object" }, description: "DOCX/PPTX [{id,text}]: inspect paragraph IDs; retains first-run style." },
+    }, additionalProperties: false, description: "Revise: inspect first; truncation=incomplete. 1–200 edits, ≤1 MiB." },
   },
   additionalProperties: false,
 } as const;
@@ -61,7 +61,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 }
 const tool: Tool = {
   name: "office_file",
-  description: "Inspect Office structure and text, then revise XLSX cells or DOCX/PPTX paragraphs into a new copy while preserving native formatting, charts and assets. Refuses active/external content.",
+  description: "Inspect Office, then revise XLSX cells or DOCX/PPTX text into a new copy; retain native formatting/charts/assets. No active/external content.",
   inputSchema, requiresWrite: true, requiresConfirmation: false, handler,
 };
 export default tool;

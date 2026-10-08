@@ -5,13 +5,13 @@ import { err, ncHeaders } from "./_render.js";
 const inputSchema = {
   type: "object",
   properties: {
-    action: { type: "string", description: "create (default), status, list or cancel." },
-    job_id: { type: "string", description: "Returned job id for status/cancel." },
+    action: { type: "string", description: "create(default)|status|list|cancel." },
+    job_id: { type: "string", description: "Returned ID for status/cancel." },
     kind: { type: "string", description: "image or video." },
     path: { type: "string", description: "New personal-root .png/.mp4 filename." },
-    prompt: { type: "string", description: "Describe the requested image, edit or video." },
-    source_path: { type: "string", description: "Optional PNG/JPEG/WebP in files; video input needs LTX." },
-    mask_path: { type: "string", description: "Optional image edit mask; white areas change." },
+    prompt: { type: "string", description: "Image/edit/video description." },
+    source_path: { type: "string", description: "Optional PNG/JPEG/WebP file; video needs LTX." },
+    mask_path: { type: "string", description: "Optional image mask; white changes." },
     options: { type: "object", description: "Optional width,height,steps,seed; video frames (8n+1,9–49) and fps (8–24)." },
   }, additionalProperties: false,
 } as const;
@@ -82,6 +82,6 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 }
 export default {
   name: "generate_media",
-  description: "Create/edit images or short videos locally. Returns a job; its chat card shows the file when saved. Use status when asked; never claim a pending job succeeded. Missing models fail explicitly. Refuses overwrite.",
+  description: "Local image/edit/short-video job; card shows saved file. Status when asked; pending is not success. Missing models fail; no overwrite.",
   inputSchema, requiresWrite: true, requiresConfirmation: false, handler,
 } satisfies Tool;
