@@ -1,6 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import express from "express";
 import request from "supertest";
+import type { ModuleId } from "@prisma/client";
+import { config } from "../config.js";
+import { createModuleGate } from "../middleware/module-gate.js";
+import { mountModuleGates } from "../modules/module-mounts.js";
+import { MODULES } from "../modules/module-registry.js";
 
 const services = vi.hoisted(() => ({
   overview: vi.fn(), disconnectIntegration: vi.fn(), deleteCalendar: vi.fn(), disconnectMailbox: vi.fn(), auditMailbox: vi.fn(),
@@ -20,8 +25,9 @@ import { createConnectionsRouter } from "./connections.js";
 const owner = { id: "owner-id", username: "owner", role: "owner", directoryStatus: "ACTIVE", displayName: "Owner", email: null };
 const family = { ...owner, id: "member-id", username: "member", role: "family" };
 const mcp = { id: "_service:mcp", username: "_service:mcp", role: "service" };
-function world(person = owner, users = [owner, family]) {
+function world(person = owner, users = [owner, family], disabled: ModuleId[] = []) {
   const prisma = {
+    moduleSetting: { findMany: vi.fn(async () => MODULES.map((module) => ({ moduleId: module.id, enabled: !disabled.includes(module.id) }))) },
     user: { findMany: vi.fn(async ({ where }: { where: { OR: Record<string, string>[] } }) => users.filter((user) => where.OR.some((arm) => Object.entries(arm).every(([key, value]) => user[key as keyof typeof user] === value))).slice(0, 2)) },
     emailAccount: { findMany: vi.fn(async () => [{ id: "mail" }]), findUnique: vi.fn(async () => ({ authMode: "PASSWORD" })) },
     calendarSource: { findMany: vi.fn(async () => [{ id: "feed" }]), findUnique: vi.fn(async () => ({ userId: person.username, authMode: "basic", name: "Personal feed" })) },
@@ -30,6 +36,13 @@ function world(person = owner, users = [owner, family]) {
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => { req.user = person as never; next(); });
+  if (disabled.length) {
+    // The same registry-driven gate composition app.ts uses. Feature reads
+    // remain blocked while the independent connection control plane is mounted.
+    mountModuleGates(app, createModuleGate(prisma as never, { ...config, SERVICE_TOKEN_EMAIL: "test-email-service" }, 0));
+    app.get("/api/calendar/sources", (_req, res) => res.json({ sources: [] }));
+    app.get("/api/email/accounts", (_req, res) => res.json({ accounts: [] }));
+  }
   app.use("/api", createConnectionsRouter(prisma as never));
   return { app, prisma };
 }
@@ -75,6 +88,24 @@ describe("connections endpoint identity boundary", () => {
 });
 
 describe("connection cards and disconnect dispatch", () => {
+  it("keeps disabled Calendar reads blocked while members can revoke only their own feed", async () => {
+    const { app, prisma } = world(family, [owner, family], ["calendar"]);
+    expect((await request(app).get("/api/calendar/sources")).status).toBe(404);
+    expect((await request(app).post("/api/connections/disconnect").send({ id: "calendar:feed" })).status).toBe(200);
+    expect(services.deleteCalendar).toHaveBeenCalledWith(prisma, family.username, "feed");
+    services.deleteCalendar.mockClear();
+    prisma.calendarSource.findUnique.mockResolvedValue({ userId: owner.username, authMode: "basic", name: "Owner feed" });
+    expect((await request(app).post("/api/connections/disconnect").send({ id: "calendar:other" })).status).toBe(404);
+    expect(services.deleteCalendar).not.toHaveBeenCalled();
+  });
+  it("keeps disabled Email reads blocked while shared-mailbox cleanup remains admin-only", async () => {
+    const { app } = world(owner, [owner, family], ["email"]);
+    expect((await request(app).get("/api/email/accounts")).status).toBe(404);
+    expect((await request(app).post("/api/connections/disconnect").send({ id: "mailbox:mail" })).status).toBe(200);
+    services.disconnectMailbox.mockClear();
+    expect((await request(world(family, [owner, family], ["email"]).app).post("/api/connections/disconnect").send({ id: "mailbox:mail" })).status).toBe(403);
+    expect(services.disconnectMailbox).not.toHaveBeenCalled();
+  });
   it("returns an actionable specific provider descriptor", async () => {
     const response = await request(world().app).get("/api/connections/card").query({ q: "connect Stripe" });
     expect(response.status).toBe(200);

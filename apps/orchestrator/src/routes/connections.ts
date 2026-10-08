@@ -34,6 +34,10 @@
  *
  * No response here carries a token, key, host password, ciphertext or a
  * vendor's raw error: statuses are mapped to short fixed lines in the services.
+ * Connection cleanup is an independent control-plane operation: disabling
+ * Calendar or Email still blocks their feature APIs, but must not prevent a
+ * person/admin revoking an owned connection. Role and ownership checks apply
+ * even while a module is off, as they do for Google/Microsoft revocation.
  */
 import { Router, type Request, type Response } from "express";
 import { z } from "zod";
