@@ -9,6 +9,8 @@
 import { describe, it, expect, vi } from "vitest";
 import type { McpClientPort } from "./mcp-client.port.js";
 import { McpBridgeError } from "./mcp-bridge.client.js";
+import { withRemoteCallAttribution } from "./remote-call-attribution.js";
+import { redactSecretParams, REDACTION_PLACEHOLDER } from "../lib/log-redaction.js";
 import {
   auditRemoteMcp,
   createGatedRemoteMcpPort,
@@ -24,6 +26,13 @@ vi.mock("./activity.singleton.js", () => ({
   recordActivity: (params: Record<string, unknown>) => recordActivity(params),
   getActivitySigner: () => null,
 }));
+
+// WARP-2439 — capture every log line so the rule-19 test can assert on them.
+const logged = vi.hoisted(() => [] as unknown[][]);
+vi.mock("../lib/logger.js", () => {
+  const sink = (...a: unknown[]) => void logged.push(a);
+  return { createLogger: () => ({ warn: sink, info: sink, error: sink, debug: sink }) };
+});
 
 const SERVER = "atlassian";
 
@@ -204,5 +213,116 @@ describe("the audit row's shape", () => {
       (c) => (c[0] as unknown as { severity: string }).severity,
     );
     expect(severities).toEqual(["info", "warn"]);
+  });
+});
+
+// WARP-2439 — every remote call writes a PHI-free row naming the member.
+describe("every remote call is audited, with the requesting member", () => {
+  const REFUSED: RemoteMcpGateDecision = { allowed: false, reason: "no_credential", message: "off" };
+  const rows = () =>
+    recordActivity.mock.calls.map(
+      (c) => c[0] as unknown as { actor: { type: string }; sub: string; refs: Record<string, unknown> },
+    );
+
+  function realAudit(decision: RemoteMcpGateDecision, over: Partial<McpClientPort> = {}) {
+    const up = upstreamDouble(over);
+    recordActivity.mockClear();
+    return createGatedRemoteMcpPort({ serverId: SERVER, upstream: up.port, gate: async () => decision });
+  }
+
+  it("a refused call writes a row naming the member, the server and the tool", async () => {
+    const port = realAudit(REFUSED);
+    await withRemoteCallAttribution({ userId: "alice", agentRunId: "run-1" }, () =>
+      port.callTool("getJiraIssue", { issue: "PHI-123" }),
+    );
+    expect(rows()).toHaveLength(1);
+    expect(rows()[0]!.refs).toMatchObject({
+      serverId: SERVER,
+      op: "call_tool",
+      outcome: "refused_gate",
+      tool: "getJiraIssue",
+      reason: "no_credential",
+      userId: "alice",
+      agentRunId: "run-1",
+    });
+    expect(rows()[0]!.sub).toContain("alice");
+  });
+
+  it("an allowed call names the member", async () => {
+    const port = realAudit({ allowed: true });
+    await withRemoteCallAttribution({ userId: "alice" }, () => port.callTool("t", {}));
+    expect(rows()[0]!.refs).toMatchObject({ outcome: "allowed", userId: "alice" });
+  });
+
+  it("a provider error names the member", async () => {
+    const port = realAudit(
+      { allowed: true },
+      {
+        callTool: vi.fn(async () => {
+          throw new McpBridgeError("SESSION_NOT_READY", "x", 503);
+        }),
+      },
+    );
+    await withRemoteCallAttribution({ userId: "bob" }, () => port.callTool("t", {}));
+    expect(rows()[0]!.refs).toMatchObject({ outcome: "provider_error", userId: "bob" });
+  });
+
+  it("an aborted call is its own outcome", async () => {
+    const abort = Object.assign(new Error("aborted"), { name: "AbortError" });
+    const port = realAudit(
+      { allowed: true },
+      {
+        callTool: vi.fn(async () => {
+          throw abort;
+        }),
+      },
+    );
+    await port.callTool("t", {});
+    expect(rows()[0]!.refs).toMatchObject({ outcome: "aborted", reason: "aborted" });
+  });
+
+  it("a catalog listing outside a member scope names no member", async () => {
+    const port = realAudit({ allowed: true });
+    await port.listTools();
+    expect(rows()[0]!.refs).toMatchObject({ op: "list_tools", outcome: "allowed" });
+    expect(rows()[0]!.refs).not.toHaveProperty("userId");
+  });
+});
+
+// WARP-2439 — rule 19: a remote tool's arguments never reach a log line or the row.
+describe("a remote tool's arguments never reach logs or the audit row", () => {
+  const SECRETS = ["sk-live-AAAA1111BBBB2222", "hunter2-p@ssw0rd", "ghp_abcdefghijklmnopqrstuvwxyz0123456789"];
+  const args = {
+    api_key: SECRETS[0],
+    nested: { password: SECRETS[1], note: "patient John Doe, DOB 1970-01-01" },
+    headers: { Authorization: `Bearer ${SECRETS[2]}` },
+  };
+
+  it("denied and failed calls leave no argument value in the rows or the logs", async () => {
+    recordActivity.mockClear();
+    logged.length = 0;
+    const failing = upstreamDouble({
+      callTool: vi.fn(async () => {
+        throw new McpBridgeError("REMOTE_CALL_FAILED", "boom", 502);
+      }),
+    });
+    const decisions: RemoteMcpGateDecision[] = [
+      { allowed: false, reason: "gate_unavailable", message: "closed" },
+      { allowed: true },
+    ];
+    for (const d of decisions) {
+      const port = createGatedRemoteMcpPort({ serverId: SERVER, upstream: failing.port, gate: async () => d });
+      await port.callTool("createIssue", args);
+    }
+    const everything = JSON.stringify([recordActivity.mock.calls, logged]);
+    for (const s of SECRETS) expect(everything).not.toContain(s);
+    expect(everything).not.toContain("John Doe");
+    expect(recordActivity).toHaveBeenCalledTimes(2);
+  });
+
+  it("the shared redaction helper masks secret-looking argument values", () => {
+    const out = JSON.stringify(redactSecretParams(args));
+    for (const s of SECRETS) expect(out).not.toContain(s);
+    expect(out).toContain(REDACTION_PLACEHOLDER);
   });
 });

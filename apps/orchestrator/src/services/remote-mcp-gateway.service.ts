@@ -55,6 +55,7 @@ import type {
   McpToolDescriptor,
 } from "./mcp-client.port.js";
 import { McpBridgeError } from "./mcp-bridge.client.js";
+import { remoteCallAttribution, type RemoteCallAttribution } from "./remote-call-attribution.js";
 
 const logger = createLogger("remote-mcp-gateway");
 
@@ -62,7 +63,14 @@ const logger = createLogger("remote-mcp-gateway");
 export type RemoteMcpOp = "list_tools" | "call_tool";
 
 /** What lands in `refs.outcome`. A fixed set, like `routes/web.ts`'s. */
-export type RemoteMcpOutcome = "allowed" | "refused_gate" | "provider_error";
+export type RemoteMcpOutcome =
+  | "allowed"
+  | "refused_gate"
+  // WARP-2439 — refused by the multiplexer before the gate (not in the vetted
+  // catalog, or the call policy denied it). Still a call attempt worth a row.
+  | "refused_policy"
+  | "provider_error"
+  | "aborted";
 
 /**
  * Why the gate refused.
@@ -162,13 +170,21 @@ export function auditRemoteMcp(input: {
   outcome: RemoteMcpOutcome;
   tool?: string;
   reason?: string;
+  /** Who the call ran for. Defaults to the multiplexer's in-process scope
+   *  (remote-call-attribution.ts); a caller outside that scope passes it. */
+  who?: RemoteCallAttribution;
 }): void {
+  // WARP-2439 — the requesting member, the way the stdio `tool_call` row names
+  // them: the Nextcloud USERNAME in `refs.userId`, not a UUID, so the actor
+  // stays `ai` (WARP-181: `user` requires a canonical UUID). Ids and names
+  // only — never argument values or result content (rule 19).
+  const who = input.who ?? remoteCallAttribution();
   void recordActivity({
     kind: "network",
     severity: input.outcome === "allowed" ? "info" : "warn",
     sourceIcon: "globe",
     what: `Remote MCP: ${input.serverId}`,
-    sub: "remote_mcp",
+    sub: who?.userId ? `remote_mcp for ${who.userId}` : "remote_mcp",
     refs: {
       channel: "remote_mcp",
       serverId: input.serverId,
@@ -176,6 +192,8 @@ export function auditRemoteMcp(input: {
       outcome: input.outcome,
       ...(input.tool ? { tool: input.tool } : {}),
       ...(input.reason ? { reason: input.reason } : {}),
+      ...(who?.userId ? { userId: who.userId } : {}),
+      ...(who?.agentRunId ? { agentRunId: who.agentRunId } : {}),
     },
     // The agent loop is what drives a remote tool call, so `ai` — the same
     // mapping `network-safety.service.ts` applies to MCP-channel network ops.
@@ -229,8 +247,8 @@ export function createGatedRemoteMcpPort(opts: GatedRemoteMcpPortOptions): McpCl
         audit({
           serverId,
           op: "list_tools",
-          outcome: "provider_error",
-          reason: err instanceof McpBridgeError ? err.code : "unknown",
+          outcome: isAbort(err) ? "aborted" : "provider_error",
+          reason: isAbort(err) ? "aborted" : err instanceof McpBridgeError ? err.code : "unknown",
         });
         throw err;
       }
@@ -260,9 +278,9 @@ export function createGatedRemoteMcpPort(opts: GatedRemoteMcpPortOptions): McpCl
         audit({
           serverId,
           op: "call_tool",
-          outcome: "provider_error",
+          outcome: isAbort(err) ? "aborted" : "provider_error",
           tool: name,
-          reason: code,
+          reason: isAbort(err) ? "aborted" : code,
         });
         return errorOutcome(
           code,
@@ -272,6 +290,11 @@ export function createGatedRemoteMcpPort(opts: GatedRemoteMcpPortOptions): McpCl
       }
     },
   };
+}
+
+/** WARP-2439 — a caller-side abort is its own outcome, not a provider fault. */
+function isAbort(err: unknown): boolean {
+  return err instanceof Error && err.name === "AbortError";
 }
 
 /** Same envelope `mcp-multiplexer.service.ts` uses for a refusal, so the model

@@ -16,6 +16,13 @@ import {
 } from "./mcp-multiplexer.service.js";
 import type { McpClientPort, McpToolDescriptor } from "./mcp-client.port.js";
 
+// WARP-2439 — a refused remote call still writes an audit row.
+const recordActivity = vi.fn(async (_p: Record<string, unknown>) => null);
+vi.mock("./activity.singleton.js", () => ({
+  recordActivity: (p: Record<string, unknown>) => recordActivity(p),
+  getActivitySigner: () => null,
+}));
+
 function tool(name: string): McpToolDescriptor {
   return { name, description: `${name} desc`, inputSchema: { type: "object" } };
 }
@@ -246,6 +253,28 @@ describe("WARP-2321 hook — every remote tool defaults to the deny tier", () =>
     expect(res.isError).toBe(true);
     expect(res.content[0].text).toContain("REMOTE_TOOL_NOT_CLASSIFIED");
     expect(remote.callTool).not.toHaveBeenCalled();
+  });
+
+  // WARP-2439. MUTATION: delete the `auditRemoteMcp` call on the deny path → red.
+  it("writes a refused_policy audit row naming the member, with no argument values", async () => {
+    const remote = portDouble([tool("jira_get_issue")]);
+    const mux = new McpToolMultiplexer(portDouble([]), { isServerAllowed: allowAll });
+    mux.attachRemote("atlassian", remote);
+    await mux.listTools();
+    recordActivity.mockClear();
+
+    await mux.callTool("atlassian__jira_get_issue", { password: "hunter2-secret" }, { userId: "alice" });
+
+    expect(recordActivity).toHaveBeenCalledTimes(1);
+    const row = recordActivity.mock.calls[0]![0] as { refs: Record<string, unknown> };
+    expect(row.refs).toMatchObject({
+      serverId: "atlassian",
+      tool: "jira_get_issue",
+      outcome: "refused_policy",
+      reason: "REMOTE_TOOL_NOT_CLASSIFIED",
+      userId: "alice",
+    });
+    expect(JSON.stringify(row)).not.toContain("hunter2");
   });
 
   it("the deny decision names the tool and tells the model not to retry", () => {
