@@ -512,9 +512,21 @@ html .dark {
     --tw-ring-opacity: 0.4;
   }
 
-  /* Indigo shell form fields. The component layer beats native resets but
-     stays below utility overrides for compact widths, icon padding and type.
+  /* Use the shell palette for existing field wrappers as well as native
+     controls. Auth and setup keep the global dp-input treatment above. */
+  :where(.droplet-shell) .dp-input {
+    min-width: 0;
+    background-color: var(--surface);
+    border-color: var(--border);
+    border-radius: var(--radius-input);
+    color: var(--text);
+    --tw-ring-color: var(--brand);
+  }
+  /* One treatment for forms, including the older shell input alias.
+     The component layer stays below compact sizing and icon-padding utilities.
+     Global fallbacks also keep standalone cards usable outside ShellPage.
      Explicit markers keep search and composer controls on their own styles. */
+  .form-input,
   :where(.droplet-shell) .input:where(input, textarea) {
     box-sizing: border-box;
     width: 100%;
@@ -522,19 +534,25 @@ html .dark {
     max-width: 100%;
     min-height: 40px;
     padding: 10px 12px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-input);
-    background: var(--surface);
-    color: var(--text);
-    font: inherit;
-    transition: border-color 160ms var(--ease), outline-color 160ms var(--ease);
+    border: 1px solid var(--border, var(--color-separator));
+    border-radius: var(--radius-input, 8px);
+    background: var(--surface, var(--color-surface-secondary));
+    color: var(--text, var(--color-label-primary));
+    transition: border-color 160ms var(--ease, ease), outline-color 160ms var(--ease, ease);
   }
-  :where(.droplet-shell) .input:where(input, textarea)::placeholder { color: var(--text-muted); }
+  .form-input:where(input, textarea)::placeholder,
+  :where(.droplet-shell) .input:where(input, textarea)::placeholder {
+    color: var(--text-muted, var(--color-label-tertiary));
+  }
+  .form-input:where(:focus-visible),
+  .form-input:where(:not(input, textarea, select)):where(:focus-within),
   :where(.droplet-shell) .input:where(input, textarea):focus-visible {
-    outline: 2px solid var(--brand);
+    outline: 2px solid var(--brand, var(--color-accent));
     outline-offset: 2px;
   }
+  .form-input:disabled,
   :where(.droplet-shell) .input:where(input, textarea):disabled { opacity: 0.6; cursor: not-allowed; }
+  .form-input:where(textarea),
   :where(.droplet-shell) .input:where(textarea) { min-height: 80px; line-height: 1.5; resize: vertical; }
 
   /* Native <select> popup options. `color-scheme` on the theme root makes the

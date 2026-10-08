@@ -415,7 +415,7 @@ export default function CameraSettingsPage() {
                 value={nameDraft}
                 onChange={(e) => setNameDraft(e.target.value)}
                 placeholder="e.g. Driveway"
-                className="input"
+                className="form-input"
                 style={{ maxWidth: 280 }}
                 aria-label="Camera name"
               />
@@ -590,7 +590,7 @@ export default function CameraSettingsPage() {
                 value={budgetGb}
                 onChange={(e) => setBudgetGb(e.target.value)}
                 placeholder="e.g. 200"
-                className="input"
+                className="form-input"
                 style={{ maxWidth: 140 }}
                 aria-label="Storage budget in gibibytes"
               />
