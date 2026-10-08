@@ -106,6 +106,32 @@ the list of required contexts.
 `semgrep` and `gitleaks` are passed a hard-coded non-empty suite list, so
 "skipped" can never be read as "nothing to do" for them.
 
+### Creation and research coverage — PR #2733
+
+The creation suite adds two path-aware services to the existing `python`
+matrix in `ci.yml`. Both report through the required `ci-summary`; no new
+required context or ruleset change is introduced.
+
+| check name | PR coverage |
+| --- | --- |
+| `python / media-gen pytest` | `services/media-gen/**`, media Compose configuration, secret provisioning and OTA environment reconciliation |
+| `python / web-fetch pytest` | `services/web-fetch/**` |
+
+The existing `python / doc-render pytest` and `python / sandbox pytest` legs
+cover document rendering and private analysis; the sandbox filter also includes
+`services/_shared/**`. Main pushes and dispatches include both new services in
+the full Python matrix. `media-gen-tests.yml` is a push-to-main and manual
+canary, and `web-fetch-tests.yml` drops its duplicate PR trigger. GPU libraries
+and model weights are excluded from media unit jobs.
+
+The `media-gen` image joins the path-aware `docker-build.yml` matrix, whose
+`docker-build ok` verdict remains advisory. The planning estimate reported for
+[PR #2733](https://github.com/DropletByWarpLab/droplet-onboard-services/pull/2733)
+is about **1,340 incremental runner-min/month** (970 media + 370 web), not a
+measurement of billed usage. It is below the **5,000 min/month** sign-off
+threshold in [the CI cost policy](ci-cost-budget.md#estimating-the-cost-of-a-ci-change);
+that policy requires an explicit cost callout above **2,000 min/month**.
+
 ### The one-line rule
 
 **A check blocks a merge only if it is a `ci-summary` leg, or is itself a
