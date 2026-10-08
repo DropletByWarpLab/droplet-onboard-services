@@ -96,5 +96,3 @@ export function ArtifactMediaCard({ media }: { media: ArtifactMedia }) {
     </MediaFrame>
   );
 }
-
-

@@ -78,6 +78,7 @@ import extensions
 import gitstore
 import supervisor
 import workspace
+from analysis_artifacts import validate_artifacts
 
 SANDBOX_SERVICE_TOKEN = os.getenv("SANDBOX_SERVICE_TOKEN", "").strip()
 
@@ -332,6 +333,15 @@ def run_transform(req: TransformRequest, analysis: bool = False) -> dict[str, An
     if isinstance(result, dict) and ("output" in result or "error" in result):
         if "error" in result:
             return {"error": str(result["error"])}
+        if analysis:
+            try:
+                # The child can introspect/replace its helpers and globals.
+                # Validate bytes here, after it exits, in the trusted parent.
+                result["artifacts"] = validate_artifacts(result.get("artifacts"))
+                if len(json.dumps(result, separators=(",", ":"), allow_nan=False).encode("utf-8")) > req.outputCapBytes:
+                    return {"error": f"output exceeded {req.outputCapBytes} bytes after artifact validation"}
+            except (ValueError, TypeError) as exc:
+                return {"error": f"invalid analysis artifacts: {exc}"}
         return result if analysis else {"output": result["output"]}
 
     # The child died without answering — a MemoryError past what runner.py

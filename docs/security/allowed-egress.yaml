@@ -2313,7 +2313,7 @@ entries:
     kind: reference
     service: repo
     destination:
-      hosts: [www.w3.org, www.onvif.org, nextcloud.org, owncloud.org, json-schema.org, schemas.openxmlformats.org]
+      hosts: [www.w3.org, www.onvif.org, nextcloud.org, owncloud.org, json-schema.org, schemas.openxmlformats.org, schemas.microsoft.com]
     purpose: XML/SVG/SOAP/WebDAV namespace and $schema identifiers in payload bodies
     ticket: WARP-269
     added: 2026-07-04

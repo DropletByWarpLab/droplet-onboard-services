@@ -218,8 +218,11 @@ class Log:
 
 def analyze(request):
     try:
-        seal_analysis(request.get("scratchDir", ""))
+        # libc's setrlimit uses prlimit64 on supported Linux runtimes. Apply
+        # the hard memory/process ceilings before sealing, then deny ALL
+        # resource-limit manipulation (including other same-UID processes).
         runner._apply_limits(int(request.get("maxMemoryBytes") or 256 * 1024 * 1024))
+        seal_analysis(request.get("scratchDir", ""))
         tables, warnings = [], []
         sources = request.get("sources") or []
         if not isinstance(sources, list) or len(sources) > 4:

@@ -230,6 +230,9 @@ def check(services: dict) -> list[str]:
     bootstrap = (REPO / "services/_shared/privilege_drop.sh").read_text(encoding="utf-8")
     if 'exec setpriv --reuid 1000 --regid 1000 --clear-groups --inh-caps=-all --ambient-caps=-all --no-new-privs "$@"' not in bootstrap:
         bad.append("service TLS bootstrap: lost the API's privilege/capability drop")
+    sandbox_image = (REPO / "services/sandbox/Dockerfile").read_text(encoding="utf-8")
+    if '"_shared.sandbox_serve"' not in sandbox_image or "COPY services/_shared/sandbox_isolation.py" not in sandbox_image:
+        bad.append("sandbox: lost the TLS-key filesystem boundary before customer processes")
 
     if not any(
         line.strip() == "data/secrets"

@@ -109,13 +109,18 @@ else
 fi
 
 # --- 5) images: TLS-aware launcher + healthcheck client ----------------------
-for svc in ai-gateway routing switch oled-display camera-discovery email-indexer voice-io media-gen doc-render web-fetch sandbox; do
+for svc in ai-gateway routing switch oled-display camera-discovery email-indexer voice-io media-gen doc-render web-fetch; do
   if grep -qE '"_shared.serve"' "$REPO_ROOT_REAL/services/$svc/Dockerfile"; then
     pass "$svc image CMD uses the _shared.serve TLS-aware launcher"
   else
     fail "$svc image CMD does not use _shared.serve"
   fi
 done
+if grep -qE '"_shared.sandbox_serve"' "$REPO_ROOT_REAL/services/sandbox/Dockerfile"; then
+  pass "sandbox image CMD loads TLS before sealing customer filesystem access"
+else
+  fail "sandbox image lost the TLS-isolating launcher"
+fi
 # ops-console inbound is a documented exemption — plain uvicorn CLI stays.
 if grep -qE '^CMD \["uvicorn", "main:app"' "$REPO_ROOT_REAL/services/ops-console/Dockerfile"; then
   pass "ops-console CMD stays plain uvicorn (inbound exemption)"

@@ -27,6 +27,7 @@ def probe_url_and_context(port: str, path: str) -> tuple[str, ssl.SSLContext | N
     """
     if not internal_tls.enabled():
         return f"http://localhost:{port}{path}", None
+    internal_tls.protect_process()
     # The bundle's SAN always includes DNS:localhost (internal_ca_issue), so
     # default hostname verification against https://localhost holds.
     ctx = ssl.create_default_context(cafile=internal_tls._ca())

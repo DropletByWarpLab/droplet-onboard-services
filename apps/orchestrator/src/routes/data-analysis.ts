@@ -155,14 +155,27 @@ export function createDataAnalysisRouter(prisma: PrismaClient, client: AnalysisC
         for (const file of files) {
           const path = `${directory}/${file.name}`;
           try {
-            if (controller.signal.aborted) throw new SandboxError("Data analysis was cancelled.", "TIMEOUT");
+            if (controller.signal.aborted) {
+              artifactErrors.push({ name: file.name, error: "The result-saving deadline was reached before this artifact could be saved." });
+              continue;
+            }
             await bounded(ncUploadFile(token, login, directory, file.name, file.bytes, { ifNoneMatch: true, signal: controller.signal }));
             artifacts.push({ path, name: file.name, mimeType: file.mimeType, bytes: file.bytes.byteLength });
-          } catch { if (controller.signal.aborted) throw new SandboxError("Data analysis was cancelled.", "TIMEOUT"); artifactErrors.push({ name: file.name, error: "The analysis succeeded but this artifact could not be saved. Retry with a fresh invocation." }); continue; }
+          } catch { artifactErrors.push({ name: file.name, error: "The analysis succeeded but storage did not confirm this artifact. Retry with a fresh invocation." }); continue; }
           try {
-            const fileId = await bounded(ncGetFileId(token, login, path, controller.signal));
-            if (fileId === null) warnings.push(`${file.name}: saved; metadata registration is pending.`);
-            else await bounded(upsertFileRegistryEntry(prisma, { ncFileId: fileId, ownerUserId: userId, path, departmentId: null, sizeBytes: file.bytes.byteLength }));
+            // Confirmed storage must survive a slow metadata peer. Limit the
+            // whole bookkeeping phase, keeping time for remaining outputs.
+            let metadataTimer: ReturnType<typeof setTimeout> | undefined;
+            try {
+              await bounded(Promise.race([
+                (async () => {
+                  const fileId = await ncGetFileId(token, login, path, controller.signal);
+                  if (fileId === null) throw new Error("metadata unavailable");
+                  await upsertFileRegistryEntry(prisma, { ncFileId: fileId, ownerUserId: userId, path, departmentId: null, sizeBytes: file.bytes.byteLength });
+                })(),
+                new Promise<never>((_resolve, reject) => { metadataTimer = setTimeout(() => reject(new Error("metadata deadline")), 3000); }),
+              ]));
+            } finally { if (metadataTimer) clearTimeout(metadataTimer); }
           } catch { warnings.push(`${file.name}: saved; metadata registration is pending.`); }
         }
         await bounded(invalidatePrefix(`files:list:${login}:`)).catch(() => {});

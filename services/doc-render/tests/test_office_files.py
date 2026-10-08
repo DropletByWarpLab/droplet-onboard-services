@@ -9,6 +9,10 @@ from docx import Document
 from openpyxl import Workbook, load_workbook
 from openpyxl.chart import BarChart, Reference
 from openpyxl.styles import Font, PatternFill
+from openpyxl.workbook.defined_name import DefinedName
+from openpyxl.worksheet.datavalidation import DataValidation
+from openpyxl.formatting.rule import FormulaRule
+from openpyxl.worksheet.table import Table, TableFormula
 from PIL import Image
 from pptx import Presentation
 from pptx.chart.data import CategoryChartData
@@ -209,6 +213,148 @@ def test_local_structured_references_and_formula_string_literals_are_inert(xlsx)
     formula.text = 'Table1[Revenue]-Unchanged!A1+IF(A1="WEBSERVICE(|)",1,0)'
     data["xl/worksheets/sheet1.xml"] = ET.tostring(root)
     assert inspect_office(package(data), "xlsx")["format"] == "xlsx"
+
+
+def named_workbook(expression, name="DangerousName", **flags):
+    workbook = Workbook(); sheet = workbook.active
+    sheet["A1"] = "=" + name; sheet["B1"] = 1
+    workbook.defined_names.add(DefinedName(name, attr_text=expression, **flags))
+    return save(workbook)
+
+
+@pytest.mark.parametrize("expression", ['WEBSERVICE("https://example.invalid/private")', 'CALL("kernel32","WinExec","JC","cmd",1)', 'REGISTER.ID("library","entry","C")', 'EXEC("cmd")', 'RUN("ExternalMacro")'])
+def test_named_formula_indirection_cannot_survive_an_unrelated_revision(expression):
+    raw = named_workbook(expression)
+    # A1 contains only an innocent-looking name, while updating B1 would
+    # request recalculation of that name's hidden executable expression.
+    with pytest.raises(OfficeError, match="formulas"): inspect_office(raw, "xlsx")
+    with pytest.raises(OfficeError, match="formulas"):
+        revise_office(raw, "xlsx", {"cells": [{"sheet": "Sheet", "cell": "B1", "value": 2}]})
+
+
+@pytest.mark.parametrize("name,flags", [("auto_open", {}), ("_xlnm.Auto_Close", {}), ("auto_activate", {}), ("_xlnm.AUTO_DEACTIVATE", {}), ("MacroName", {"xlm": True}), ("MacroName", {"function": True}), ("MacroName", {"vbProcedure": True})])
+def test_auto_names_and_legacy_macro_name_flags_are_refused(name, flags):
+    with pytest.raises(OfficeError, match="defined names"):
+        inspect_office(named_workbook("Sheet!$B$1", name, **flags), "xlsx")
+
+
+def test_safe_named_formula_and_false_macro_flags_are_preserved():
+    raw = named_workbook("0.2", "TaxRate", xlm=False, function=False, vbProcedure=False)
+    assert inspect_office(raw, "xlsx")["format"] == "xlsx"
+    revised = revise_office(raw, "xlsx", {"cells": [{"sheet": "Sheet", "cell": "B1", "value": 2}]})
+    reopened = load_workbook(io.BytesIO(revised))
+    assert reopened.defined_names["TaxRate"].attr_text == "0.2"
+    assert reopened.active["A1"].value == "=TaxRate" and reopened.active["B1"].value == 2
+
+
+@pytest.mark.parametrize("location", ["validation-formula1", "validation-formula2", "conditional-format", "calculated-column", "table-total"])
+def test_network_formulas_in_native_validation_rules_or_tables_are_refused(location):
+    workbook = Workbook(); sheet = workbook.active
+    sheet.append(["Name", "Value"]); sheet.append(["A", 1]); sheet.append(["B", 2])
+    dangerous = 'WEBSERVICE("https://example.invalid/private")'
+    if location.startswith("validation"):
+        validation = DataValidation(type="whole", operator="between", formula1=dangerous if location.endswith("1") else "1", formula2=dangerous if location.endswith("2") else "10")
+        sheet.add_data_validation(validation); validation.add("B2:B3")
+    elif location == "conditional-format":
+        sheet.conditional_formatting.add("B2:B3", FormulaRule(formula=[dangerous]))
+    else:
+        table = Table(displayName="Values", ref="A1:B3"); table._initialise_columns()
+        table.tableColumns[0].name = "Name"; table.tableColumns[1].name = "Value"
+        if location == "calculated-column": table.tableColumns[1].calculatedColumnFormula = TableFormula(attr_text=dangerous)
+        else: table.tableColumns[1].totalsRowFormula = TableFormula(attr_text=dangerous)
+        sheet.add_table(table)
+    raw = save(workbook)
+    with pytest.raises(OfficeError, match="formulas"): inspect_office(raw, "xlsx")
+    with pytest.raises(OfficeError, match="formulas"):
+        revise_office(raw, "xlsx", {"cells": [{"sheet": "Sheet", "cell": "A2", "value": "Unrelated edit"}]})
+
+
+@pytest.mark.parametrize("tag", ["f", "fmla", "formula", "formula1", "formula2", "calculatedColumnFormula", "totalsRowFormula", "futureFormula"])
+def test_extension_formula_tags_share_the_guard(xlsx, tag):
+    data = parts(xlsx); root = ET.fromstring(data["xl/worksheets/sheet1.xml"])
+    extension = ET.SubElement(ET.SubElement(root, f"{{{S}}}extLst"), f"{{{S}}}ext", uri="{test-extension}")
+    formula = ET.SubElement(extension, f"{{http://schemas.microsoft.com/office/excel/2006/main}}{tag}")
+    formula.text = 'WEBSERVICE("https://example.invalid/private")'
+    data["xl/worksheets/sheet1.xml"] = ET.tostring(root)
+    with pytest.raises(OfficeError, match="formulas"): inspect_office(package(data), "xlsx")
+
+
+@pytest.mark.parametrize("attribute", ["formula", "formula1", "formula2", "refersTo", "refersToR1C1"])
+def test_extension_formula_attributes_share_the_guard(xlsx, attribute):
+    data = parts(xlsx); root = ET.fromstring(data["xl/worksheets/sheet1.xml"])
+    extension = ET.SubElement(ET.SubElement(root, f"{{{S}}}extLst"), f"{{{S}}}ext", uri="{test-extension}")
+    rule = ET.SubElement(extension, "{http://schemas.microsoft.com/office/spreadsheetml/2009/9/main}rule")
+    rule.set(attribute, 'WEBSERVICE("https://example.invalid/private")')
+    data["xl/worksheets/sheet1.xml"] = ET.tostring(root)
+    with pytest.raises(OfficeError, match="formulas"): inspect_office(package(data), "xlsx")
+
+
+@pytest.mark.parametrize("content_type", ["application/vnd.openxmlformats-officedocument.spreadsheetml.connections+xml", "application/vnd.openxmlformats-officedocument.spreadsheetml.queryTable+xml", "application/vnd.openxmlformats-officedocument.spreadsheetml.externalLink+xml", "application/vnd.ms-excel.macrosheet+xml"])
+def test_renaming_a_connection_query_link_or_macro_part_cannot_bypass_guard(xlsx, content_type):
+    data = parts(xlsx); data["xl/renamed-part.xml"] = b"<payload/>"
+    root = ET.fromstring(data["[Content_Types].xml"])
+    ET.SubElement(root, "{http://schemas.openxmlformats.org/package/2006/content-types}Override", PartName="/xl/renamed-part.xml", ContentType=content_type)
+    data["[Content_Types].xml"] = ET.tostring(root)
+    with pytest.raises(OfficeError, match="Active Office content"): inspect_office(package(data), "xlsx")
+
+
+@pytest.mark.parametrize("relation", ["connections", "queryTable", "externalLink", "externalLinkPath", "oleObject"])
+def test_internal_connection_query_and_ole_relationships_cannot_hide_in_generic_parts(xlsx, relation):
+    data = parts(xlsx); data["xl/renamed-part.xml"] = b"<payload/>"
+    root = ET.fromstring(data["xl/_rels/workbook.xml.rels"])
+    ET.SubElement(root, f"{{{R}}}Relationship", Id="hiddenRelationship", Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/" + relation, Target="renamed-part.xml")
+    data["xl/_rels/workbook.xml.rels"] = ET.tostring(root)
+    with pytest.raises(OfficeError, match="Embedded or active"): inspect_office(package(data), "xlsx")
+
+
+def complex_field(paragraph, instructions, result="", nested=False):
+    def field_marker(kind):
+        marker = ET.SubElement(ET.SubElement(paragraph, f"{{{W}}}r"), f"{{{W}}}fldChar")
+        marker.set(f"{{{W}}}fldCharType", kind)
+    field_marker("begin")
+    for index, text in enumerate(instructions):
+        ET.SubElement(ET.SubElement(paragraph, f"{{{W}}}r"), f"{{{W}}}instrText").text = text
+        if nested and index == 0: complex_field(paragraph, ['QUOTE "TEXT"'], "TEXT")
+    field_marker("separate")
+    ET.SubElement(ET.SubElement(paragraph, f"{{{W}}}r"), f"{{{W}}}t").text = result
+    field_marker("end")
+
+
+@pytest.mark.parametrize("instructions", [["INCLUDE", 'TEXT "https://example.invalid/private"'], ["DD", 'EAUTO cmd /c calc'], ["INCLUDE", 'PICTURE "https://example.invalid/image"']])
+def test_split_word_field_instructions_are_checked_before_unrelated_revision(docx, instructions):
+    data = parts(docx); root = ET.fromstring(data["word/document.xml"])
+    paragraph = list(root.iter(f"{{{W}}}p"))[1]
+    complex_field(paragraph, instructions, "Cached field output")
+    data["word/document.xml"] = ET.tostring(root); raw = package(data)
+    with pytest.raises(OfficeError, match="Word fields"): inspect_office(raw, "docx")
+    with pytest.raises(OfficeError, match="Word fields"):
+        revise_office(raw, "docx", {"text": [{"id": "word/document.xml:p:0", "text": "Unrelated paragraph edit"}]})
+
+
+def test_safe_flat_page_field_preserved_when_another_paragraph_changes(docx):
+    data = parts(docx); root = ET.fromstring(data["word/footer1.xml"])
+    complex_field(next(root.iter(f"{{{W}}}p")), ["PA", "GE"], "1")
+    data["word/footer1.xml"] = ET.tostring(root); raw = package(data)
+    assert inspect_office(raw, "docx")["format"] == "docx"
+    revised = revise_office(raw, "docx", {"text": [{"id": "word/document.xml:p:0", "text": "Unrelated edit"}]})
+    assert parts(revised)["word/footer1.xml"] == data["word/footer1.xml"]
+
+
+def test_nested_word_fields_refused_instead_of_interpreting_dynamic_instructions(docx):
+    data = parts(docx); root = ET.fromstring(data["word/document.xml"])
+    complex_field(list(root.iter(f"{{{W}}}p"))[1], ["INCLUDE", ' "https://example.invalid/private"'], nested=True)
+    data["word/document.xml"] = ET.tostring(root); raw = package(data)
+    with pytest.raises(OfficeError, match="Nested Word fields"): inspect_office(raw, "docx")
+    with pytest.raises(OfficeError, match="Nested Word fields"):
+        revise_office(raw, "docx", {"text": [{"id": "word/document.xml:p:0", "text": "Unrelated edit"}]})
+
+
+def test_pretty_printed_simple_word_field_uses_instruction_attribute(docx):
+    data = parts(docx); root = ET.fromstring(data["word/document.xml"])
+    field = ET.SubElement(list(root.iter(f"{{{W}}}p"))[1], f"{{{W}}}fldSimple")
+    field.set(f"{{{W}}}instr", 'INCLUDETEXT "https://example.invalid/private"'); field.text = "\n  "
+    data["word/document.xml"] = ET.tostring(root)
+    with pytest.raises(OfficeError, match="Word fields"): inspect_office(package(data), "docx")
 
 
 def test_refuses_dde_word_fields_without_external_relationships(docx):

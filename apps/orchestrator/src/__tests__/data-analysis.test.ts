@@ -149,8 +149,18 @@ describe("data analysis artifact handoff", () => {
     expect(response.status).toBe(200);
     expect(response.body.artifacts).toEqual([]);
     expect(response.body.media).toEqual([]);
-    expect(response.body.artifactErrors).toEqual([{ name: "summary.csv", error: expect.stringContaining("could not be saved") }]);
+    expect(response.body.artifactErrors).toEqual([{ name: "summary.csv", error: expect.stringContaining("storage did not confirm") }]);
   });
+  it("preserves acknowledged artifacts and completes remaining saves when metadata stalls", async () => {
+    analyze.mockResolvedValue({ ...RESULT, artifacts: [csv, { ...csv, name: "second.csv" }] });
+    vi.mocked(nc.ncGetFileId).mockImplementation(() => new Promise(() => {}));
+    const response = await request(app()).post("/api/files/analyze").send({ code: "output=1" });
+    expect(response.status).toBe(200);
+    expect(nc.ncUploadFile).toHaveBeenCalledTimes(2);
+    expect(response.body.artifacts.map((a: { name: string }) => a.name)).toEqual(["summary.csv", "second.csv"]);
+    expect(response.body.media).toHaveLength(2);
+    expect(response.body.warnings).toHaveLength(2);
+  }, 10_000);
   it("preserves timeout and missing deployment configuration errors", async () => {
     analyze.mockRejectedValueOnce(new SandboxError("sandbox not configured", "NOT_CONFIGURED"));
     expect((await request(app()).post("/api/files/analyze").send({ code: "output=1" })).status).toBe(503);

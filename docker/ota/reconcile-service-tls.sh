@@ -28,6 +28,35 @@ log_warn() { echo "[service-tls] WARN: $*" >&2; }
 log_success() { echo "[service-tls] $*" >&2; }
 # shellcheck disable=SC1091
 . "$REPO_ROOT/scripts/lib/internal-ca.sh"
+missing=()
 for service in media-gen doc-render web-fetch sandbox; do
-  internal_ca_issue "$service"
+  # Older issuers treat a fresh cert as complete even if its private key was
+  # lost. Repair that partial bundle before any container is swapped.
+  if [ ! -s "$SERVICE_TLS_DIR/$service/key.pem" ]; then
+    INTERNAL_CA_FORCE=1 internal_ca_issue "$service"
+  else
+    internal_ca_issue "$service"
+  fi
+  case " ${INTERNAL_CA_SERVICES[*]} " in
+    *" $service "*) ;;
+    *) missing+=("$service") ;;
+  esac
 done
+
+# The installed daily renewal timer sources this host library, which OTA's
+# docker-only archive does not replace. Persist just its missing identities
+# so these new leaf certificates also renew after the first upgrade.
+if [ "${#missing[@]}" -gt 0 ]; then
+  issuer="$REPO_ROOT/scripts/lib/internal-ca.sh"
+  staged=$(mktemp "${issuer}.service-tls.XXXXXX")
+  trap 'rm -f "$staged"' EXIT
+  cp -p "$issuer" "$staged"
+  {
+    printf '\n# Service identities installed by OTA for daily certificate renewal.\nINTERNAL_CA_SERVICES+=('
+    printf ' %s' "${missing[@]}"
+    printf ' )\n'
+  } >> "$staged"
+  mv -f "$staged" "$issuer"
+  trap - EXIT
+  log_success "Added daily renewal identities: ${missing[*]}"
+fi

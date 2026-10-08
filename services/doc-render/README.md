@@ -129,6 +129,10 @@ All inputs pass a ZIP/XML guard before inspection or revision: 10 MiB input,
 ratio, no unsafe paths/duplicate names/symlinks/encryption/DTD/entities,
 macros, OLE/ActiveX, active/external SVG assets, external relationships,
 external workbook links/data connections, network/DDE formulas or Word fields.
+Formula screening also covers defined names, validation/table/extension formulas
+and legacy XLM paths before a revision can request recalculation. Word field
+instructions are joined across runs; external instructions and nested/malformed
+fields are refused. Flat local fields such as PAGE can be preserved.
 Native PowerPoint chart workbooks are accepted only when a chart references
 them and their embedded XLSX passes the same guard. Other embedded objects
 are refused. No storage credentials or paths enter this service and it makes

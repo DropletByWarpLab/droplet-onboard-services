@@ -28,6 +28,7 @@ if [ "${DROPLET_INTERNAL_TLS:-0}" = 1 ]; then
   install -m 644 "${DROPLET_TLS_CA:-/data/service-tls/ca.pem}" "$stage/ca.pem"
   chown 1000:1000 "$stage" "$stage/key.pem" "$stage/cert.pem" "$stage/ca.pem"
   export DROPLET_TLS_KEY="$stage/key.pem" DROPLET_TLS_CERT="$stage/cert.pem" DROPLET_TLS_CA="$stage/ca.pem"
+  export DROPLET_TLS_STAGING_DIR="$stage"
 fi
 
 exec setpriv --reuid 1000 --regid 1000 --clear-groups --inh-caps=-all --ambient-caps=-all --no-new-privs "$@"

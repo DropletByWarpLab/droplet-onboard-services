@@ -2,6 +2,10 @@
 
 No Office executable, macros, embedded objects, network resolution or storage.
 ZIP parts not edited are copied byte-for-byte, preserving native charts/styles.
+Formula-bearing names, validation rules, tables and extensions share the same
+network/XLM refusal guard. Flat Word fields are checked after concatenating
+instruction runs; nested or malformed fields are unsupported because their
+dynamic instructions cannot be resolved safely without executing Word.
 """
 from __future__ import annotations
 import io
@@ -25,6 +29,9 @@ R = "http://schemas.openxmlformats.org/package/2006/relationships"
 OR = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
 CELL = re.compile(r"([A-Z]{1,3})([1-9][0-9]{0,6})\Z")
+FORMULA_TAGS = frozenset({"f", "fmla", "formula", "formula1", "formula2", "definedname", "calculatedcolumnformula", "totalsrowformula"})
+AUTO_MACRO_NAMES = frozenset({"auto_open", "auto_close", "auto_activate", "auto_deactivate"})
+UNSAFE_FORMULA_FUNCTION = re.compile(r"\b(?:WEBSERVICE|RTD|CALL|REGISTER(?:\.ID)?|EXEC(?:UTE)?|EVALUATE|RUN|SEND\.KEYS|SQL\.REQUEST|FOPEN|FREAD|FWRITE|FCLOSE|HYPERLINK|IMAGE|STOCKHISTORY|IMPORTXML|IMPORTDATA|IMPORTHTML|IMPORTRANGE)\s*\(", re.I)
 
 class OfficeError(ValueError):
     pass
@@ -47,6 +54,67 @@ def _xml(data):
         return ET.fromstring(data, parser=ET.XMLParser(resolve_entities=False, no_network=True, load_dtd=False))
     except ET.XMLSyntaxError as exc:
         raise OfficeError("Office file contains malformed XML") from exc
+
+def _guard_formula(text):
+    # Formula strings are literals, even if they contain names of network
+    # functions. XML comments/tails must not split executable identifiers.
+    formula = re.sub(r'"(?:[^"]|"")*"', '""', text)
+    if "|" in formula or re.search(r"\[[^\]]+\][^+\-*/(),<>=;]*!|'(?:[^']|'')*\[[^\]]+\](?:[^']|'')*'!", formula) or UNSAFE_FORMULA_FUNCTION.search(formula):
+        raise OfficeError("External, DDE or network/XLM-dependent workbook formulas are unsupported")
+
+def _guard_formula_nodes(root, part_name):
+    for node in root.iter():
+        if not isinstance(node.tag, str): continue
+        tag = ET.QName(node)
+        namespace = tag.namespace or ""
+        local = tag.localname.lower()
+        spreadsheet = part_name.startswith("xl/") or "spreadsheetml" in namespace or namespace.startswith("http://schemas.microsoft.com/office/excel/") or namespace == "urn:schemas-microsoft-com:office:excel"
+        chart = "drawingml" in namespace and namespace.endswith("/chart") or namespace.startswith("http://schemas.microsoft.com/office/drawing/") and "chart" in namespace
+        if not (spreadsheet or chart): continue
+        if local in FORMULA_TAGS or local.endswith("formula"):
+            _guard_formula("".join(node.itertext()))
+        if local == "definedname":
+            name = node.get("name", "").casefold().rsplit(".", 1)[-1]
+            if name in AUTO_MACRO_NAMES or any(node.get(flag, "0").casefold() not in ("0", "false") for flag in ("xlm", "function", "vbProcedure")):
+                raise OfficeError("Auto-executing or XLM/macro defined names are unsupported")
+        for key, value in node.attrib.items():
+            attribute = ET.QName(key).localname.lower()
+            if attribute in FORMULA_TAGS - {"definedname"} or attribute.endswith("formula") or attribute in ("refersto", "referstor1c1"):
+                _guard_formula(value)
+
+def _guard_word_instruction(instruction):
+    if re.search(r"\b(?:DDE|DDEAUTO|INCLUDETEXT|INCLUDEPICTURE|LINK|DATABASE|RD)\b", instruction, re.I):
+        raise OfficeError("External or DDE Word fields are unsupported")
+
+def _guard_word_fields(root):
+    # Word field code is a sequence of runs, not an instrText node. A stack
+    # distinguishes instructions from displayed results and validates field
+    # boundaries spanning multiple paragraphs. Nested dynamic fields are
+    # refused: their runtime results could assemble an external instruction.
+    fields = []
+    for node in root.iter():
+        if node.tag == f"{{{W}}}fldSimple":
+            if fields or any(parent.tag == f"{{{W}}}fldSimple" for parent in node.iterancestors()):
+                raise OfficeError("Nested Word fields are unsupported; use plain text instead")
+            _guard_word_instruction(node.get(f"{{{W}}}instr", ""))
+        elif node.tag == f"{{{W}}}fldChar":
+            marker = node.get(f"{{{W}}}fldCharType", "")
+            if marker == "begin":
+                if fields or any(parent.tag == f"{{{W}}}fldSimple" for parent in node.iterancestors()):
+                    raise OfficeError("Nested Word fields are unsupported; use plain text instead")
+                fields.append({"instruction": [], "result": False})
+            elif marker == "separate" and fields and not fields[-1]["result"]:
+                fields[-1]["result"] = True
+            elif marker == "end" and fields:
+                _guard_word_instruction("".join(fields.pop()["instruction"]))
+            else:
+                raise OfficeError("Malformed Word fields are unsupported; use plain text instead")
+        elif node.tag in (f"{{{W}}}instrText", f"{{{W}}}delInstrText"):
+            if not fields or fields[-1]["result"]:
+                raise OfficeError("Unbound or malformed Word fields are unsupported; use plain text instead")
+            fields[-1]["instruction"].append("".join(node.itertext()))
+    if fields:
+        raise OfficeError("Unclosed Word fields are unsupported; use plain text instead")
 
 def _package(raw, format, _budget=None):
     if format not in ("xlsx", "docx", "pptx") or not isinstance(raw, bytes) or not 0 < len(raw) <= MAX_INPUT_BYTES:
@@ -102,18 +170,11 @@ def _package(raw, format, _budget=None):
             # Revisions request recalculation on open. Do not preserve an
             # unlinked network/DDE formula or Word include/link field whose
             # behavior is hidden inside XML instead of a .rels file.
-            for node in root.iter():
-                if node.tag == f"{{{S}}}f":
-                    formula = re.sub(r'"(?:[^"]|"")*"', '""', node.text or "")
-                    if "|" in formula or re.search(r"\[[^\]]+\][^+\-*/(),<>=;]*!|'(?:[^']|'')*\[[^\]]+\](?:[^']|'')*'!", formula) or re.search(r"\b(?:WEBSERVICE|RTD|CALL|REGISTER\.ID|EXEC|EVALUATE|HYPERLINK|IMAGE|STOCKHISTORY|IMPORTXML|IMPORTDATA|IMPORTHTML|IMPORTRANGE)\s*\(", formula, re.I):
-                        raise OfficeError("External, DDE or network-dependent workbook formulas are unsupported")
-                if node.tag in (f"{{{W}}}instrText", f"{{{W}}}fldSimple"):
-                    instruction = node.text or node.get(f"{{{W}}}instr", "")
-                    if re.search(r"\b(?:DDE|DDEAUTO|INCLUDETEXT|INCLUDEPICTURE|LINK)\b", instruction, re.I):
-                        raise OfficeError("External or DDE Word fields are unsupported")
+            _guard_formula_nodes(root, name)
+            _guard_word_fields(root)
             if name == "[Content_Types].xml":
                 types = " ".join(node.get("ContentType", "") for node in root).lower()
-                if any(token in types for token in ("macroenabled", "vba", "activex", "oleobject")):
+                if any(token in types for token in ("macroenabled", "macrosheet", "vba", "activex", "oleobject", "connections", "querytable", "externallink")):
                     raise OfficeError("Active Office content is unsupported")
                 expected = {"xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml", "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml", "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"}[format]
                 if not any(node.get("PartName") == "/" + main and node.get("ContentType") == expected for node in root):
@@ -134,7 +195,7 @@ def _package(raw, format, _budget=None):
                     resolved = posixpath.normpath(posixpath.join(base, target.lstrip("/"))) if not target.startswith("/") else target[1:]
                     if resolved.startswith("../") or (resolved.split("#", 1)[0] not in parts):
                         raise OfficeError("Office file has a missing or unsafe relationship target")
-                    if relationship.get("Type", "").lower().endswith(("/oleobject", "/control", "/attachedtemplate", "/afchunk")):
+                    if relationship.get("Type", "").lower().endswith(("/oleobject", "/control", "/attachedtemplate", "/afchunk", "/connections", "/querytable", "/externallink", "/externallinkpath")):
                         raise OfficeError("Embedded or active Office objects are unsupported")
                     if format == "pptx" and re.fullmatch(r"ppt/charts/_rels/chart[0-9]+\.xml\.rels", name) and relationship.get("Type") == OR + "/package" and resolved.lower().endswith(".xlsx"):
                         embedded_chart_data.add(resolved)

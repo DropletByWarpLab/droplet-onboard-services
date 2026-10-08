@@ -19,6 +19,42 @@ class IsolationUnavailable(RuntimeError):
     pass
 
 
+# Reviewed against the Linux x86_64 and asm-generic (aarch64) UAPI tables:
+# https://github.com/torvalds/linux/blob/master/arch/x86/entry/syscalls/syscall_64.tbl
+# https://github.com/torvalds/linux/blob/master/include/uapi/asm-generic/unistd.h
+# Each pair is (x86_64, aarch64). Everything absent is denied, including future
+# syscall numbers. No process creation/signalling/inspection, network, IPC,
+# keyring, BPF, inotify, metadata path reads/mutations, or resource-limit changes.
+_RUNTIME_SYSCALLS = {
+    "brk": (12, 214), "mmap": (9, 222), "mprotect": (10, 226),
+    "munmap": (11, 215), "mremap": (25, 216), "madvise": (28, 233),
+    "rt_sigaction": (13, 134), "rt_sigprocmask": (14, 135),
+    "rt_sigreturn": (15, 139), "sigaltstack": (131, 132),
+    "futex": (202, 98), "sched_yield": (24, 124),
+    "getpid": (39, 172), "gettid": (186, 178),
+    "getuid": (102, 174), "geteuid": (107, 175),
+    "getgid": (104, 176), "getegid": (108, 177),
+    "gettimeofday": (96, 169), "clock_gettime": (228, 113),
+    "clock_getres": (229, 114), "nanosleep": (35, 101),
+    "clock_nanosleep": (230, 115), "getrandom": (318, 278),
+    "exit": (60, 93), "exit_group": (231, 94),
+}
+# Descriptors start with stdio only (Popen close_fds). Every subsequently opened
+# file/directory must pass Landlock: read-only runtime or this private scratch.
+# fstat is descriptor-only; fstatat/statx are NOT interchangeable safe aliases.
+# Landlock guards name creation/removal/rename and writable opens. fd-only
+# ftruncate requires a writable descriptor. chmod/chown/xattr/ioctl are absent.
+_PRIVATE_FS_SYSCALLS = {
+    "read": (0, 63), "write": (1, 64), "close": (3, 57),
+    "fstat": (5, 80), "lseek": (8, 62),
+    "pread64": (17, 67), "pwrite64": (18, 68),
+    "readv": (19, 65), "writev": (20, 66), "getdents64": (217, 61),
+    "fsync": (74, 82), "fdatasync": (75, 83), "ftruncate": (77, 46),
+    "mkdirat": (258, 34), "unlinkat": (263, 35),
+    "renameat": (264, 38), "renameat2": (316, 276), "getcwd": (79, 17),
+}
+
+
 def _fail(libc, operation):
     number = ctypes.get_errno()
     raise IsolationUnavailable(f"secure analysis isolation unavailable: {operation}: {os.strerror(number)}")
@@ -28,8 +64,8 @@ def seal_analysis(scratch_dir: str) -> int:
     """Allow only read-only Python/runtime + this call's private scratch.
 
     Landlock v1 is sufficient for content reads; later write/truncate rights are
-    handled when supported. Seccomp also denies path metadata/O_PATH, sockets,
-    process spawning, signals and process-memory/fd inspection. No capabilities.
+    handled when supported. Seccomp permits only the documented runtime/private
+    file-I/O syscall allowlist; all other APIs and unknown calls are denied.
     """
     if not sys.platform.startswith("linux"):
         raise IsolationUnavailable("secure data analysis requires Linux with Landlock; this platform is unsupported")
@@ -98,45 +134,31 @@ def seal_analysis(scratch_dir: str) -> int:
 
     if machine in ("x86_64", "amd64"):
         architecture = 0xC000003E
-        deny = [41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 288, 299, 307,
-                29, 30, 31, 64, 65, 66, 67, 68, 69, 70, 71, 220,
-                56, 57, 58, 59, 62, 101, 155, 165, 166, 200, 234, 272, 298, 303, 304, 308, 310, 311, 312, 322,
-                424, 425, 426, 427, 434, 435, 438, 440]
-        # Landlock does NOT restrict stat/access/readlink/O_PATH. Do not allow
-        # known paths outside this invocation to disclose size/times/targets.
-        # fd-only fstat (5) remains available: every non-stdio fd was opened
-        # through the Landlock boundary, and inherited fds are closed by Popen.
-        deny.extend([4, 6, 21, 80, 81, 89, 161, 262, 267, 269, 332, 437, 439])
-        # Path/descriptor metadata mutations are not covered by Landlock.
-        # Refuse them even for runtime descriptors, whose contents are read
-        # only. Pathname truncate also needs denial on Landlock ABI < 3.
-        deny.extend([76, 90, 91, 92, 93, 94, 132, 137, 188, 189, 190,
-                     191, 192, 194, 195, 197, 198, 199, 235, 260, 261, 268, 280, 452])
+        number_index = 0
         open_flags = [(2, 24), (257, 32)]  # open arg 1 / openat arg 2
     else:
         architecture = 0xC00000B7
-        deny = [198, 199, 200, 201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, 242, 243, 269,
-                186, 187, 188, 189, 190, 191, 192, 193, 194, 195, 196, 197,
-                39, 40, 41, 97, 117, 129, 130, 131, 220, 221, 241, 264, 265, 268, 270, 271, 272, 281,
-                424, 425, 426, 427, 434, 435, 438, 440]
-        # aarch64 uses fstat (80), fstatat (79), statx (291), openat (56).
-        deny.extend([48, 49, 50, 51, 78, 79, 291, 437, 439])
-        deny.extend([5, 6, 7, 8, 9, 11, 12, 14, 15, 16, 43, 45, 52, 53, 54, 55, 88, 452])
+        number_index = 1
         open_flags = [(56, 32)]
     # Load arch, kill a different ABI, then load syscall nr. x32 uses the same
     # audit arch with a high syscall bit; refuse it as well, rather than bypass.
     instructions = [(0x20, 0, 0, 4), (0x15, 1, 0, architecture), (0x06, 0, 0, 0x80000000),
                     (0x20, 0, 0, 0), (0x35, 0, 1, 0x40000000), (0x06, 0, 0, 0x00050000 | errno.EACCES)]
-    # O_PATH can pin ANY path without a Landlock read check. BPF can inspect
-    # scalar open/openat flags directly. openat2's flags live behind a pointer,
-    # so that syscall is refused above instead of leaving an inspection bypass.
+    # O_PATH can pin ANY path without a Landlock read check. BPF inspects the
+    # scalar open/openat flags directly. Also reject O_RDONLY|O_TRUNC: older
+    # Landlock ABIs do not restrict truncation, and a read-only runtime fd must
+    # never gain a write effect. Normal scratch w/w+ opens remain permitted.
+    # openat2's flags live behind a pointer and are NOT on the allowlist.
     for number, offset in open_flags:
-        instructions.extend([(0x15, 0, 4, number), (0x20, 0, 0, offset),
+        instructions.extend([(0x15, 0, 8, number), (0x20, 0, 0, offset),
                              (0x45, 0, 1, os.O_PATH), (0x06, 0, 0, 0x00050000 | errno.EACCES),
-                             (0x20, 0, 0, 0)])
-    for number in sorted(set(deny)):
-        instructions.extend([(0x15, 0, 1, number), (0x06, 0, 0, 0x00050000 | errno.EACCES)])
-    instructions.append((0x06, 0, 0, 0x7FFF0000))
+                             (0x45, 0, 3, os.O_TRUNC), (0x54, 0, 0, os.O_ACCMODE),
+                             (0x15, 0, 1, os.O_RDONLY), (0x06, 0, 0, 0x00050000 | errno.EACCES),
+                             (0x06, 0, 0, 0x7FFF0000)])
+    allowed = {pair[number_index] for table in (_RUNTIME_SYSCALLS, _PRIVATE_FS_SYSCALLS) for pair in table.values()}
+    for number in sorted(allowed):
+        instructions.extend([(0x15, 0, 1, number), (0x06, 0, 0, 0x7FFF0000)])
+    instructions.append((0x06, 0, 0, 0x00050000 | errno.EACCES))
     filters = (Filter * len(instructions))(*(Filter(*entry) for entry in instructions))
     program = Program(len(instructions), filters)
     if libc.prctl(22, 2, ctypes.byref(program), 0, 0) != 0:  # PR_SET_SECCOMP, SECCOMP_MODE_FILTER

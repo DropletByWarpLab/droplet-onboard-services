@@ -106,6 +106,57 @@ def test_native_introspection_escape_cannot_make_network_or_inspect_kill_spawn_p
     assert result["output"] == [-1, 13]
 
 
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="real default-deny syscall boundary requires Linux")
+def test_native_alternate_process_ipc_and_unknown_syscalls_are_denied():
+    import platform
+
+    index = 0 if platform.machine().lower() in ("x86_64", "amd64") else 1
+    # Invalid signal targets and null pointers make these probes harmless even
+    # if the filter regresses. prlimit queries our own limits without changing
+    # them; inotify_init1 would only allocate a child-local descriptor.
+    calls = [
+        ("queued_signal", (129, 138), (-1, 0, 0)),
+        ("queued_thread_signal", (297, 240), (-1, -1, 0, 0)),
+        ("own_prlimit", (302, 261), (0, 7, 0, 0)),
+        ("peer_prlimit", (302, 261), (1, 7, 0, 0)),
+        ("setrlimit", (160, 164), (7, 0)),
+        ("inotify", (294, 26), (0,)),
+        ("inotify_watch", (254, 27), (-1, 0, 0)),
+        ("keyring", (250, 219), (0, 0, 0)),
+        ("message_queue", (240, 180), (0, 0, 0, 0)),
+        ("bpf", (321, 280), (0, 0, 0)),
+        ("exec", (59, 221), (0, 0, 0)),
+        ("clone3", (435, 435), (0, 0)),
+        ("new_xattr_api", (463, 463), (0, 0, 0, 0, 0)),
+        ("new_fileattr_api", (468, 468), (0, 0, 0, 0)),
+        ("unknown_future_call", (10000, 10000), (0,)),
+    ]
+    probes = [(name, pair[index], arguments) for name, pair, arguments in calls]
+    code = LIBC + "output={}\n"
+    code += "for name,number,args in inputs['probes']:\n output[name]=[libc.syscall(number,*args),c.get_errno()]\n"
+    result = execute(code, {"probes": probes})
+    assert result["output"] == {name: [-1, 13] for name, _, _ in probes}, result
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="real scalar open flag filtering requires Linux")
+def test_read_only_truncating_open_is_denied_without_changing_scratch():
+    code = REAL_OPEN + "os=g['sys'].modules['os']\n"
+    code += "PermissionError=g['sys'].modules['builtins'].PermissionError\n"
+    code += "file=real_open('retained.txt','w')\nfile.write('retain these bytes')\nfile.close()\n"
+    code += "try:\n os.open('retained.txt',os.O_RDONLY|os.O_TRUNC)\n output='unexpected open'\n"
+    code += "except PermissionError:\n output=real_open('retained.txt').read()\n"
+    result = execute(code)
+    assert result.get("output") == "retain these bytes", result
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="real pre-seal memory ceiling requires Linux")
+def test_memory_ceiling_is_installed_before_resource_syscalls_are_denied():
+    # malloc reserves address space without touching the pages. The default
+    # 256 MiB hard limit must reject this after seccomp has denied prlimit64.
+    code = LIBC + "libc.malloc.restype=c.c_void_p\noutput=libc.malloc(512*1024*1024) is None\n"
+    assert execute(code)["output"] is True
+
+
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="real scratch scope requires Linux")
 def test_child_can_only_write_and_read_its_own_ephemeral_scratch():
     result = execute(REAL_OPEN + "file=real_open('scratch.txt','w')\nfile.write('private scratch')\nfile.close()\noutput=real_open('scratch.txt').read()")
@@ -122,6 +173,10 @@ def test_child_can_only_write_and_read_its_own_ephemeral_scratch():
     code += f"output={{'contents':file.read(),'fstat':libc.syscall({fstat},file.fileno(),buf)}}\nfile.close()"
     result = execute(code)
     assert result["output"] == {"contents": "abc", "fstat": 0}, result
+    getdents = 217 if platform.machine().lower() in ("x86_64", "amd64") else 61
+    code = LIBC + "os=g['sys'].modules['os']\nfd=os.open('.',os.O_RDONLY|os.O_DIRECTORY)\nbuf=c.create_string_buffer(4096)\n"
+    code += f"output=libc.syscall({getdents},fd,buf,4096)>0\nos.close(fd)"
+    assert execute(code)["output"] is True
 
 
 def test_artifact_helpers_remain_portable_and_escape_markup():

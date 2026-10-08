@@ -65,6 +65,8 @@ COPY services/_shared/__init__.py /app/_shared/__init__.py
 COPY services/_shared/fips_selftest.py /app/_shared/fips_selftest.py
 COPY services/_shared/internal_tls.py /app/_shared/internal_tls.py
 COPY services/_shared/serve.py /app/_shared/serve.py
+COPY services/_shared/sandbox_serve.py /app/_shared/sandbox_serve.py
+COPY services/_shared/sandbox_isolation.py /app/_shared/sandbox_isolation.py
 COPY services/_shared/healthcheck.py /app/_shared/healthcheck.py
 COPY services/_shared/privilege_drop.sh /app/_shared/privilege_drop.sh
 
@@ -76,4 +78,4 @@ USER 1000
 ENTRYPOINT ["sh", "/app/_shared/privilege_drop.sh"]
 
 EXPOSE 8030
-CMD ["python", "-m", "_shared.serve", "main:app", "--host", "0.0.0.0", "--port", "8030"]
+CMD ["python", "-m", "_shared.sandbox_serve", "main:app", "--host", "0.0.0.0", "--port", "8030"]

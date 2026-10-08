@@ -88,10 +88,14 @@ retains the first text-run style; mixed style reconstruction is not supported.
 Cell string edits are literal values. XLSX formula caches affected by revision
 are cleared and recalculation requested.
 
-Macros, OLE, unsafe external relationships, DTD/entities, encrypted/linked ZIP
+Macros, legacy XLM execution, network/DDE formulas (including defined names,
+validation and extension formulas), external Word field instructions, OLE,
+unsafe external relationships, DTD/entities, encrypted/linked ZIP
 parts and expansion bombs are refused. External hyperlinks in supplied Office
-files are currently refused along with other external relationships. The source
-ceiling is 10 MiB; aggregate edit JSON is limited to 1 MiB. Revisions recheck the
+files are currently refused along with other external relationships. Nested or
+malformed Word fields are unsupported; flat local fields such as PAGE are
+preserved. The source ceiling is 10 MiB; aggregate edit JSON is limited to
+1 MiB. Revisions recheck the
 live acting person and File Store session before saving.
 
 ## Data analysis
@@ -106,14 +110,31 @@ Source limits: 3 MiB combined, ten XLSX sheets, 100,000 cells, 10,000 rows and
 missing caches are null and are not silently recalculated. Results include
 bounded JSON/stdout, source summaries and warnings. Up to eight CSV/SVG outputs
 (maximum 512,000 bytes each) are saved in a fresh private Analysis directory.
+The trusted parent validates every output after the child exits: CSV is parsed
+and rewritten with formula-leading text escaped, while strict numeric negatives
+remain numeric. SVG accepts only the bounded generated chart format, without
+scripts, links, events or arbitrary styles. Invalid output rejects the response;
+mutating the child's helper objects cannot bypass these checks.
 
 Kernel Landlock limits filesystem access to read-only Python runtime and the
-call's fresh scratch directory. Seccomp denies network/process/inspection
-syscalls. This remains effective against Python object-introspection escapes;
+call's fresh scratch directory. Seccomp defaults to denial and permits only
+required runtime/private-scratch syscalls; network, process control, metadata
+inspection/mutation and unknown future calls are refused. Memory ceilings are
+installed before sealing. This remains effective against Python object-introspection escapes;
 the import guard alone is not a security boundary. Unsupported platforms,
 kernels or container policies refuse execution. Tokens never enter user code.
 Caller ACLs and approval holds are checked before reads; identity and session
 revocation are checked before writes.
+
+The sandbox API also installs an inherited Landlock filesystem policy before
+starting workspace or extension code whenever a TLS identity is configured or
+its raw key is mounted. It loads the TLS context first, removes only its marked
+temporary key copies, protects key-holding processes from same-user inspection,
+and excludes the raw TLS mount from child access. Workspace files, git, installed
+Python/Node runtimes and sockets remain available. Missing kernel support stops
+startup before serving customer code, including plaintext mode with mounted
+keys. Native Linux probes verify this boundary; target container/kernel
+acceptance remains required.
 
 ## Web research
 
