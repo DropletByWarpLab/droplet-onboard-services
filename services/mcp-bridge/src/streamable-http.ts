@@ -23,6 +23,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { FetchLike } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { pickRateLimitHeaders } from "./call-scheduler.js";
+import { connectModern } from "./modern-connection.js";
 import { pinTransportProtocolVersion } from "./protocol-pin.js";
 import { createGuardedFetch, guardedFetch, type GuardDeps } from "./pinned-fetch.js";
 import type {
@@ -59,6 +60,19 @@ export interface StreamableHttpConnectionOptions {
    * and adopt any of its five supported versions.
    */
   pinnedProtocolVersion?: string;
+  /**
+   * WARP-3921 — how the MCP revision is negotiated. Per profile.
+   *
+   *   - `"legacy"` (default): `initialize` only, exactly as before. The curated
+   *     Atlassian profile stays here, with its pin.
+   *   - `"probe"`: try revision 2026-07-28 first (`server/discover`), and fall
+   *     back to `initialize` ONLY on the spec's documented signal: a `400` whose
+   *     body is not a recognized modern JSON-RPC error. See
+   *     `modern-connection.ts` for the quoted wording and spec URLs.
+   *
+   * Incompatible with `pinnedProtocolVersion` (a pin names one legacy version).
+   */
+  protocolNegotiation?: "legacy" | "probe";
   /**
    * Called with a response's rate-limit headers, and ONLY those
    * ({@link pickRateLimitHeaders}), for every response the transport receives.
@@ -161,6 +175,18 @@ export const createStreamableHttpConnection = async (
   input: RemoteMcpConnectInput,
   opts: StreamableHttpConnectionOptions = {},
 ): Promise<RemoteMcpConnection> => {
+  if (opts.protocolNegotiation === "probe") {
+    if (opts.pinnedProtocolVersion !== undefined) {
+      throw new Error("protocolNegotiation \"probe\" cannot be combined with pinnedProtocolVersion");
+    }
+    const modern = await connectModern(
+      input,
+      createObservingFetch(opts.onRateLimitHeaders),
+      opts.clientInfo ?? MCP_BRIDGE_CLIENT_INFO,
+    );
+    if (modern !== "legacy") return modern;
+    // Documented legacy signal: carry on with the `initialize` handshake below.
+  }
   const transport = new StreamableHTTPClientTransport(new URL(input.url), {
     // The credential rides here and nowhere else. `headers` is built fresh by
     // the credential closure per connect (see `credentials.ts`), so nothing
