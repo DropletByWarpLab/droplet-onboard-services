@@ -1244,6 +1244,38 @@ entries:
       - apps/orchestrator/src/services/off-lan-gate.service.ts
       - apps/orchestrator/src/routes/device-clients.ts
 
+  - id: owner-added-mcp
+    kind: dynamic
+    service: mcp-bridge
+    config_key: RemoteMcpServer.url (per row, added by an owner or admin; plus the issuer and token-endpoint hosts pinned on the same row at sign-in)
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      Remote Streamable-HTTP MCP servers an owner or admin adds at runtime in
+      the dashboard (ADR-072 §1): one dynamic entry for every owner-added
+      server, because the destination is a database row and no hostname can be
+      written down in advance. Carries the arguments of a tool call a member
+      asked for, and the OAuth leg to the issuer and token hosts pinned at
+      sign-in; never ambient, never a background crawl. The curated servers
+      keep their own static entries. Off unless the remote_mcp off-LAN switch
+      is on (ADR-043 §4).
+
+      A dynamic entry contributes ZERO host patterns (docs/SECURITY.md,
+      Egress). It is the registration and review record, not the control.
+      THE ENFORCEMENT IS IN CODE: the bridge dials only the exact host stored
+      on the row, resolves it once and pins the connection to the resolved
+      address (WARP-3914), and refuses private, loopback and link-local
+      answers. Treat that guard as the control this entry documents. The
+      RemoteMcpServer model lands with WARP-3913, so config_key names a model
+      that does not exist yet; there is no host literal to point code_refs at.
+
+      Romain's security review of this entry is the policy acceptance for
+      owner-added MCP servers (ADR-072 §1, §10).
+    ticket: WARP-3915
+    added: 2026-10-08
+    review_by: 2027-10-08
+    code_refs: [services/mcp-bridge/src/safe-url.ts]
+
   - id: sso-custom-issuer
     kind: dynamic
     service: orchestrator

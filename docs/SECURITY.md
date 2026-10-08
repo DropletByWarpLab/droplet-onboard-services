@@ -312,6 +312,11 @@ ever be `data_class: ambient-customer-content` — such a request is rejected
 in review, no exceptions. Hostnames that are not egress (XML namespaces,
 doc links) register as `kind: reference`; runtime-configured destinations
 (user mail servers, fleet HQ URL) as `kind: dynamic` with their config key.
+The dynamic entries are `fleet-hq-registry`, `user-mail-servers`,
+`user-calendar-servers`, `work-webhooks`, `sso-custom-issuer`,
+`eaglesoft-rest-api`, `mailchimp-marketing-api` and `owner-added-mcp` (every
+MCP server an owner or admin adds, ADR-072 §1; the exact-host-plus-DNS-pinning
+guard in the bridge is the enforcement, the entry is the review).
 
 The registry must also stay honest in the other direction. A `kind: egress`
 entry's `code_refs` are load-bearing: one of its hosts has to appear there as
