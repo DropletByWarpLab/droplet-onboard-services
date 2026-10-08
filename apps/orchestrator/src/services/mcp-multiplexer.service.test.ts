@@ -15,6 +15,7 @@ import {
   REMOTE_TOOL_NAME_SEPARATOR,
 } from "./mcp-multiplexer.service.js";
 import type { McpClientPort, McpToolDescriptor } from "./mcp-client.port.js";
+import { createToolCallInterceptor } from "@droplet/tools-core";
 
 function tool(name: string): McpToolDescriptor {
   return { name, description: `${name} desc`, inputSchema: { type: "object" } };
@@ -397,5 +398,110 @@ describe("the rejection window is bounded", () => {
     // …oldest dropped: the window starts at 51, so 1-50 are gone.
     expect(kept[0]!.message).toContain("outage 51");
     expect(kept.some((r) => r.message.endsWith("outage 1"))).toBe(false);
+  });
+});
+
+describe("WARP-2437 — a remote write fails closed without an interceptor and routes through one with it", () => {
+  const writePolicy = () => ({ kind: "allow" as const, requiresConfirmation: true });
+  async function setup(opts: ConstructorParameters<typeof McpToolMultiplexer>[1] = {}) {
+    const remote = portDouble([tool("jira_create_issue")]);
+    const mux = new McpToolMultiplexer(portDouble([]), {
+      isServerAllowed: allowAll,
+      remoteCallPolicy: writePolicy,
+      ...opts,
+    });
+    mux.attachRemote("atlassian", remote);
+    await mux.listTools();
+    return { mux, remote };
+  }
+  const parse = (res: { content: { text?: string }[] }) => JSON.parse(res.content[0].text ?? "{}");
+
+  /**
+   * MUTATION: in `#confirmWrite`, replace the `!interceptor` refusal with a
+   * fall-through to dispatch → red (remote.callTool is called).
+   */
+  it("with NO interceptor registered, a write refuses with a distinct code, an audit event, and never dials", async () => {
+    const events: unknown[] = [];
+    const { mux, remote } = await setup({ onConfirmationEvent: (e) => events.push(e) });
+
+    const res = await mux.callTool("atlassian__jira_create_issue", { summary: "x" }, { userId: "alice" });
+
+    expect(res.isError).toBe(true);
+    expect(parse(res).error.code).toBe("REMOTE_WRITE_NO_INTERCEPTOR");
+    expect(parse(res).error.details.interceptor).toMatchObject({ outcome: "denied" });
+    expect(remote.callTool).not.toHaveBeenCalled();
+    expect(events).toEqual([
+      { outcome: "denied", tool: "atlassian__jira_create_issue", reason: "REMOTE_WRITE_NO_INTERCEPTOR" },
+    ]);
+  });
+
+  it("a throwing audit sink does not turn a refusal into a dispatch", async () => {
+    const { mux, remote } = await setup({
+      onConfirmationEvent: () => {
+        throw new Error("sink down");
+      },
+    });
+    const res = await mux.callTool("atlassian__jira_create_issue", {});
+    expect(res.isError).toBe(true);
+    expect(remote.callTool).not.toHaveBeenCalled();
+  });
+
+  it("with the interceptor, the first call is a challenge and executes nothing", async () => {
+    const events: { outcome: string }[] = [];
+    const { mux, remote } = await setup({
+      writeInterceptor: createToolCallInterceptor(),
+      onConfirmationEvent: (e) => events.push(e),
+    });
+
+    const res = await mux.callTool("atlassian__jira_create_issue", { summary: "x" });
+
+    expect(res.isError).toBe(false);
+    const body = parse(res);
+    expect(body.status).toBe("confirmation_required");
+    expect(body.error.details.interceptor.confirmationToken).toEqual(expect.any(String));
+    expect(remote.callTool).not.toHaveBeenCalled();
+    expect(events.map((e) => e.outcome)).toEqual(["confirmation_required"]);
+  });
+
+  /**
+   * MUTATION: skip `interceptor.intercept` and dispatch on `allow` → the
+   * first-call test above and this one go red.
+   */
+  it("executes only after the token comes back for the SAME args, once, and never forwards the token", async () => {
+    const events: { outcome: string }[] = [];
+    const { mux, remote } = await setup({
+      writeInterceptor: createToolCallInterceptor(),
+      onConfirmationEvent: (e) => events.push(e),
+    });
+    const args = { summary: "x" };
+    const challenge = async () =>
+      parse(await mux.callTool("atlassian__jira_create_issue", args)).error.details.interceptor
+        .confirmationToken as string;
+    const token = await challenge();
+
+    // Different args: refused, not run.
+    const other = await mux.callTool("atlassian__jira_create_issue", { summary: "y" }, { confirmationToken: token });
+    expect(parse(other).error.code).toBe("CONFIRMATION_REJECTED");
+    expect(remote.callTool).not.toHaveBeenCalled();
+
+    // Same args: runs once; the wire call carries the arguments and nothing else.
+    const token2 = await challenge();
+    const ok = await mux.callTool("atlassian__jira_create_issue", args, { confirmationToken: token2, userId: "alice" });
+    expect(ok.isError).toBe(false);
+    expect(remote.callTool).toHaveBeenCalledTimes(1);
+    expect(remote.callTool).toHaveBeenCalledWith("jira_create_issue", args);
+    expect(JSON.stringify(remote.callTool.mock.calls)).not.toContain(token2);
+    expect(events.map((e) => e.outcome)).toContain("confirmed");
+
+    // Replay of a spent token: refused.
+    const replay = await mux.callTool("atlassian__jira_create_issue", args, { confirmationToken: token2 });
+    expect(parse(replay).error.code).toBe("CONFIRMATION_REJECTED");
+    expect(remote.callTool).toHaveBeenCalledTimes(1);
+  });
+
+  it("a read (no requiresConfirmation) still runs with no interceptor registered", async () => {
+    const { mux, remote } = await setup({ remoteCallPolicy: () => ({ kind: "allow" }) });
+    await mux.callTool("atlassian__jira_create_issue", {});
+    expect(remote.callTool).toHaveBeenCalledTimes(1);
   });
 });

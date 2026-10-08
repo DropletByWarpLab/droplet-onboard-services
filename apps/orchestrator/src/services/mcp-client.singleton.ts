@@ -19,7 +19,10 @@
  * `"type": "module"`, so `import.meta.url` would trip tsc.
  */
 import path from "node:path";
+import { defaultToolCallInterceptor } from "@droplet/tools-core";
 import { config } from "../config.js";
+import { recordActivity } from "./activity.singleton.js";
+import { confirmationActivityParams } from "./confirmation-audit.js";
 import { createLogger } from "../lib/logger.js";
 import { McpBridgeClient } from "./mcp-bridge.client.js";
 import { McpClientService } from "./mcp-client.service.js";
@@ -158,6 +161,18 @@ export const remoteCallPolicy: RemoteCallPolicy = (input) =>
 export const mcpClient = new McpToolMultiplexer(localClient, {
   isServerAllowed: isRemoteServerAllowed,
   remoteCallPolicy,
+  // WARP-2437 — a remote WRITE is routed through the SAME WARP-2305
+  // interceptor the local tools use, and refuses when none is registered.
+  // WARP-2214 builds the generic one; this is the registration point to swap
+  // (and the stub in the multiplexer to remove) when it lands. No policy marks
+  // a remote call a write yet, so this is dormant until remote writes are
+  // deliberately enabled.
+  writeInterceptor: defaultToolCallInterceptor,
+  onConfirmationEvent: (event, ctx) => {
+    void recordActivity(confirmationActivityParams(event, ctx)).catch(() => {
+      // Recorder already swallows internally; defence-in-depth.
+    });
+  },
 });
 
 let started = false;
