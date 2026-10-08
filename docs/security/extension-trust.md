@@ -274,8 +274,13 @@ HTTP relay; app processes listen on assigned loopback ports and static apps
 need no process. The dashboard's TLS listener refuses the hosted relay.
 Opening an app uses a short-lived, one-use session code and an app-scoped,
 HttpOnly, Secure, SameSite=Lax cookie. The relay checks the active user and
-current app grant for every request. It strips dashboard credentials, arbitrary
-identity headers, app Set-Cookie and CORS headers. Apps receive only the
+current app grant for every request.
+Exchange codes and app tokens are bound to the originating dashboard session;
+revoking that session also refuses pending exchanges and subsequent app requests.
+An unavailable session store refuses app authentication rather than extending a
+twelve-hour credential through the dashboard's short-token availability fallback.
+It strips dashboard credentials, arbitrary identity headers, app Set-Cookie
+and CORS headers. Apps receive only the
 validated user's id, username and role. Cookie-authenticated API writes with a
 foreign Origin are refused globally; authenticated Bearer callers retain their
 existing path.

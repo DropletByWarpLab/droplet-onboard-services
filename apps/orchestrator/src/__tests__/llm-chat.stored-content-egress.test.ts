@@ -76,6 +76,8 @@ const LIVE_TOOLS = [
   { name: "search_content" },
   { name: "list_files" },
   { name: "memory_recall" },
+  { name: "list_hosted_apps" },
+  { name: "hosted_app_logs" },
   // WARP-2990 — the business profile / CRM / brain-findings door.
   { name: "business_profile_get" },
   { name: "business_find" },
@@ -355,6 +357,8 @@ describe("POST /api/llm/chat — a cloud turn carries no stored content", () => 
     expect(allowed).not.toContain("memory_recall");
     expect(allowed).not.toContain("business_profile_get");
     expect(allowed).not.toContain("business_find");
+    expect(allowed).not.toContain("list_hosted_apps");
+    expect(allowed).not.toContain("hosted_app_logs");
     // The other half of the contract: it subtracted, it didn't nuke.
     expect(allowed).toContain("get_network_status");
   });
@@ -380,6 +384,8 @@ describe("POST /api/llm/chat — a cloud turn carries no stored content", () => 
     expect(allowed).toContain("memory_recall");
     expect(allowed).toContain("business_profile_get");
     expect(allowed).toContain("business_find");
+    expect(allowed).toContain("list_hosted_apps");
+    expect(allowed).toContain("hosted_app_logs");
   });
 
   it("withholds them from the OWNER too — the role most likely to be on a cloud model", async () => {

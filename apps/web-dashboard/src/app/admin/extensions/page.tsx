@@ -83,6 +83,11 @@ function isPreflight(v: unknown): v is ExtensionPreflight {
 
 export default function ExtensionsAdminPage() {
   const { user } = useAuth();
+  return <ExtensionsAdminContent key={JSON.stringify([user?.id, user?.role])} />;
+}
+
+function ExtensionsAdminContent() {
+  const { user } = useAuth();
   const isOwner = user?.role === "owner";
   const ext = useExtensions();
   const { domains } = useToolCatalog();

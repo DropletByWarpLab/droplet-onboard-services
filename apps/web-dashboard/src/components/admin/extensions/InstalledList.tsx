@@ -30,6 +30,7 @@ import { STATUS_BADGE, displayVersion, explainExtensionError, explainLifecycleFa
 import { HostedAppOpen } from "@/components/hosted/AppActions";
 import { AppGrantDialog } from "@/components/hosted/AppGrantDialog";
 import { AppUninstallDialog } from "@/components/hosted/AppUninstallDialog";
+import { useAuth } from "@/lib/auth";
 
 export interface InstalledListProps {
   extensions: ExtensionListItem[];
@@ -48,10 +49,13 @@ function signerLabel(signer: string): string {
 }
 
 export function InstalledList(props: InstalledListProps) {
+  const { user } = useAuth();
+  const principal = JSON.stringify([user?.id, user?.role]);
   const [confirmingUninstall, setConfirmingUninstall] = useState<string | null>(null);
   const confirmRef = useRef<HTMLButtonElement | null>(null);
-  const [appDialog, setAppDialog] = useState<{ slug: string; kind: "grants" | "uninstall" | "delete-data" } | null>(null);
+  const [appDialog, setAppDialog] = useState<{ slug: string; kind: "grants" | "uninstall" | "delete-data"; principal: string } | null>(null);
   const appTrigger = useRef<HTMLElement | null>(null);
+  useEffect(() => { setAppDialog(null); setConfirmingUninstall(null); }, [principal, props.canManage]);
   // Uninstall swaps its own button for Confirm / Keep: put focus on Confirm so
   // a keyboard or screen-reader user is not left on a button that is gone.
   useEffect(() => {
@@ -117,7 +121,7 @@ export function InstalledList(props: InstalledListProps) {
                   <Badge kind={badge.kind}>{app && ext.status === "installed" ? "Starting" : badge.label}</Badge>
                   {app && ext.status === "live" && <HostedAppOpen slug={ext.id} disabled={busy} />}
                   {app && props.canManage && <button type="button" className="btn sm" disabled={busy} aria-label={`Access for ${ext.id}`}
-                    onClick={(event) => { appTrigger.current = event.currentTarget; setAppDialog({ slug: ext.id, kind: "grants" }); }}>Access</button>}
+                    onClick={(event) => { appTrigger.current = event.currentTarget; setAppDialog({ slug: ext.id, kind: "grants", principal }); }}>Access</button>}
                   {props.canManage ? (
                     confirmingUninstall === ext.id ? (
                       <>
@@ -154,7 +158,7 @@ export function InstalledList(props: InstalledListProps) {
                         Reinstall
                       </button>
                       {app && <button type="button" className="btn ghost sm" disabled={busy} aria-label={`Remove saved data for ${ext.id}`}
-                        onClick={(event) => { appTrigger.current = event.currentTarget; setAppDialog({ slug: ext.id, kind: "delete-data" }); }}>Remove saved data</button>}</>
+                        onClick={(event) => { appTrigger.current = event.currentTarget; setAppDialog({ slug: ext.id, kind: "delete-data", principal }); }}>Remove saved data</button>}</>
                     ) : (
                       <>
                         {ext.status === "disabled" || ext.status === "failed" ? (
@@ -185,7 +189,7 @@ export function InstalledList(props: InstalledListProps) {
                           disabled={busy}
                           aria-label={`Uninstall ${ext.id}`}
                           onClick={(event) => {
-                            if (app) { appTrigger.current = event.currentTarget; setAppDialog({ slug: ext.id, kind: "uninstall" }); }
+                            if (app) { appTrigger.current = event.currentTarget; setAppDialog({ slug: ext.id, kind: "uninstall", principal }); }
                             else setConfirmingUninstall(ext.id);
                           }}
                         >
@@ -201,9 +205,9 @@ export function InstalledList(props: InstalledListProps) {
         })}
       </div>
     </Card>
-    {appDialog?.kind === "grants" && <AppGrantDialog key={appDialog.slug} slug={appDialog.slug} triggerRef={appTrigger}
+    {props.canManage && appDialog?.principal === principal && appDialog.kind === "grants" && <AppGrantDialog key={appDialog.slug} slug={appDialog.slug} triggerRef={appTrigger}
       onClose={() => setAppDialog(null)} onSaved={props.onRefresh ?? (async () => undefined)} />}
-    {appDialog && appDialog.kind !== "grants" && <AppUninstallDialog key={appDialog.slug} slug={appDialog.slug} triggerRef={appTrigger} dataOnly={appDialog.kind === "delete-data"}
+    {props.canManage && appDialog?.principal === principal && appDialog.kind !== "grants" && <AppUninstallDialog key={appDialog.slug} slug={appDialog.slug} triggerRef={appTrigger} dataOnly={appDialog.kind === "delete-data"}
       onClose={() => setAppDialog(null)} onDone={props.onRefresh ?? (async () => undefined)} />}
     </>
   );

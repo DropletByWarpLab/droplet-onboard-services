@@ -12,10 +12,12 @@ import { deriveHostedAppRelayKey, encryptColumn } from "./column-crypto.service.
 
 vi.mock("../config.js", () => ({ config: { JWT_SECRET: "dashboard-secret-with-at-least-32-bytes", DEVICE_SECRET_KEY: Buffer.alloc(32, 7).toString("base64"), SANDBOX_PROCESS_SUPERVISION: true, SANDBOX_URL: "http://sandbox:8030", SANDBOX_SERVICE_TOKEN: "sandbox-bearer", DROPLET_LAN_HOSTNAME: "droplet-ai.lan" } }));
 vi.mock("./activity.singleton.js", () => ({ recordActivity: vi.fn() }));
+vi.mock("./session.service.js", () => ({ checkSession: vi.fn(async () => ({ kind: "ok", record: { userId: "user-id" } })) }));
+vi.mock("./auth-denylist.service.js", () => ({ isUserDenied: vi.fn(async () => false) }));
 
 const servers: Server[] = [];
 afterEach(async () => { await Promise.all(servers.splice(0).map(async (server) => { server.closeAllConnections(); await new Promise<void>((done) => server.close(() => done())); })); });
-const token = () => jwt.sign({}, hostedJwtKey(), { subject: "user-id", audience: "app:shop", issuer: "droplet-hosted", expiresIn: "1h" });
+const token = () => jwt.sign({ sid: "dashboard-sid" }, hostedJwtKey(), { subject: "user-id", audience: "app:shop", issuer: "droplet-hosted", expiresIn: "1h" });
 const manifest = Buffer.from(JSON.stringify({ schemaVersion: 1, id: "shop", name: "Shop", version: "1.0.0", kind: "app", runtime: "static", http: { health: "/", dir: "." }, provides: { tools: [], routineDrafts: [], proposedGrants: [] }, resources: { memoryMb: 64, processes: 1 }, egress: "none" }));
 function app(fetchImpl: typeof fetch, requestTimeoutMs = 60_000) {
   const prisma = { user: { findUnique: async () => ({ id: "user-id", username: "alice", displayName: "Alice", role: "owner", directoryStatus: "ACTIVE" }) }, extension: { findUnique: async () => ({ id: "shop", kind: "app", status: "live", currentVersion: { manifestBytes: manifest }, hostedAppGrants: [], appRelayKeyEnc: encryptColumn(deriveHostedAppRelayKey(), "k".repeat(43), "hosted-app:shop") }) } } as unknown as PrismaClient;

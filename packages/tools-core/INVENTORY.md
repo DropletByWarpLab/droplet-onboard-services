@@ -168,15 +168,15 @@ Authoritative inventory of every tool exposed by `@droplet/tools-core` after the
 | set_wifi_password | network | Rotate the Wi-Fi password (WPA2-PSK 8–63 printable ASCII); the password never appears in any tool response; confirmation warns every device must reconnect. WARP-1443. | true | true | orchestrator → routing |
 | set_device_schedule | network | Per-device internet schedules over the WARP-93/94 Schedule CRUD: set (create-or-replace weekly block windows), clear, list. Windows BLOCK during the window; confirmation echo states the direction. WARP-1443. | true | true | orchestrator (prisma + ticker) |
 
+| list_hosted_apps | hosted_apps | List permitted hosted web apps, statuses and URLs, paged via nextCursor. | false | false | orchestrator |
+| hosted_app_logs | hosted_apps | Bounded process logs for a hosted app; owner/admin only. | false | false | orchestrator |
+
 ## Deferred (not ported in WARP-102)
 
 | Name | Reason |
 |---|---|
 | list_sync_targets | Hits `/api/sync/targets` which does not exist in `apps/orchestrator/src/routes/`. No backing endpoint. Defer to a follow-up ticket once the sync surface is real. |
 | trigger_sync | Hits `/api/sync/trigger` which does not exist in `apps/orchestrator/src/routes/`. No backing endpoint. Defer to a follow-up ticket once the sync surface is real. |
-
-| list_hosted_apps | hosted_apps | List permitted hosted web apps, statuses and URLs, paged via nextCursor. | false | false | orchestrator |
-| hosted_app_logs | hosted_apps | Bounded process logs for a hosted app; owner/admin only. | false | false | orchestrator |
 
 ## Counts
 

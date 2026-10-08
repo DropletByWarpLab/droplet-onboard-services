@@ -15,6 +15,8 @@ import { createExtensionSandboxClient, isInternalSandboxUrl, type ExtensionSandb
 import { recordActivity } from "./activity.singleton.js";
 import type { RecordParams } from "./activity.service.js";
 import { WORKSPACE_ID } from "./workspace.service.js";
+import { checkSession } from "./session.service.js";
+import { isUserDenied } from "./auth-denylist.service.js";
 
 export const HOSTED_BODY_CAP = 32 * 1024 * 1024;
 export const HOSTED_TIMEOUT_MS = 60_000;
@@ -48,12 +50,13 @@ export function appCookie(req: Request, slug: string): string | null {
   if (matches.length !== 1) return null;
   return matches[0].slice(name.length + 1);
 }
-export function verifyHostedToken(token: string | null, slug: string): string {
+export function verifyHostedToken(token: string | null, slug: string): { userId: string; sid: string } {
   if (!token || token.length > 4096) throw new HostedError(401, "app_session_required");
   try {
     const value = jwt.verify(token, hostedJwtKey(), { algorithms: ["HS256"], audience: `app:${slug}`, issuer: "droplet-hosted" });
-    if (typeof value === "string" || typeof value.sub !== "string") throw new Error("missing subject");
-    return value.sub;
+    if (typeof value === "string" || typeof value.sub !== "string" || typeof value.sid !== "string"
+        || !/^[A-Za-z0-9_-]{1,128}$/.test(value.sid)) throw new Error("missing session subject");
+    return { userId: value.sub, sid: value.sid };
   } catch { throw new HostedError(401, "app_session_required"); }
 }
 
@@ -122,9 +125,23 @@ export function createHostedService(prisma: PrismaClient, deps: HostedDeps = {})
     await audit({ kind: "tool_run", severity, sourceIcon: "app-window", what: `Hosted app ${op}`,
       actor: { type: "user", id: user.id }, refs: { extensionId: slug, op, ticket: "WARP-3907" } });
   }
-  async function authorized(slug: string, userId: string) {
+  async function dashboardSession(userId: string, sid: unknown): Promise<string> {
+    if (typeof sid !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(sid)) {
+      throw new HostedError(401, "app_session_required");
+    }
+    const checked = await checkSession(sid);
+    // The dashboard's availability fallback is bounded by a 15-minute JWT;
+    // these 12-hour app credentials must confirm the revocation record.
+    if (checked.kind === "error") throw new HostedError(503, "app_session_unavailable");
+    if (checked.kind !== "ok" || checked.record.userId !== userId || await isUserDenied(userId)) {
+      throw new HostedError(401, "app_session_revoked");
+    }
+    return sid;
+  }
+  async function authorized(slug: string, userId: string, sid: unknown) {
     gate();
     const user = await person(userId);
+    await dashboardSession(user.id, sid);
     const result = await app(slug);
     granted(user, result.row.hostedAppGrants);
     return { ...result, user };
@@ -170,12 +187,13 @@ export function createHostedService(prisma: PrismaClient, deps: HostedDeps = {})
     async mint(req: Request, slug: string) {
       gate();
       const user = await actor(req);
-      try { await authorized(slug, user.id); }
+      const sid = req.user?.sid;
+      try { await authorized(slug, user.id, sid); }
       catch (error) { await record("open denied", slug, user, "warn"); throw error; }
       const code = randomBytes(32).toString("base64url");
       await prisma.hostedAppSessionCode.deleteMany({ where: { expiresAt: { lte: now() } } });
       await prisma.hostedAppSessionCode.create({ data: { codeHash: createHash("sha256").update(code).digest("hex"),
-        extensionId: slug, userId: user.id, expiresAt: new Date(now().getTime() + HOSTED_CODE_SECONDS * 1000) } });
+        extensionId: slug, userId: user.id, sessionId: sid!, expiresAt: new Date(now().getTime() + HOSTED_CODE_SECONDS * 1000) } });
       await record("session minted", slug, user);
       const origin = new URL(await resolveTrustedOriginUrl(req)); origin.protocol = "https:"; origin.port = "8443";
       return { url: `${origin.origin}/${slug}/_droplet/session?code=${code}` };
@@ -188,13 +206,16 @@ export function createHostedService(prisma: PrismaClient, deps: HostedDeps = {})
       if (!found || found.extensionId !== slug || found.expiresAt <= now()) throw new HostedError(401, "exchange_code_invalid");
       const used = await prisma.hostedAppSessionCode.deleteMany({ where: { codeHash, extensionId: slug, expiresAt: { gt: now() } } });
       if (used.count !== 1) throw new HostedError(401, "exchange_code_invalid");
-      const { user } = await authorized(slug, found.userId);
-      const token = jwt.sign({ role: user.role }, hostedJwtKey(), { algorithm: "HS256", subject: user.id,
+      const { user } = await authorized(slug, found.userId, found.sessionId);
+      const token = jwt.sign({ role: user.role, sid: found.sessionId }, hostedJwtKey(), { algorithm: "HS256", subject: user.id,
         audience: `app:${slug}`, issuer: "droplet-hosted", expiresIn: HOSTED_SESSION_SECONDS });
       await record("session exchanged", slug, user);
       return token;
     },
-    async session(req: Request, slug: string) { return authorized(slug, verifyHostedToken(appCookie(req, slug), slug)); },
+    async session(req: Request, slug: string) {
+      const { userId, sid } = verifyHostedToken(appCookie(req, slug), slug);
+      return authorized(slug, userId, sid);
+    },
     async logs(req: Request, slug: string, limit: number, since?: number) {
       gate();
       const user = await actor(req, true);
@@ -218,7 +239,8 @@ export function createHostedService(prisma: PrismaClient, deps: HostedDeps = {})
       return { roles: (await prisma.hostedAppGrant.findMany({ where: { extensionId: slug } })).map((g) => g.role) };
     },
     async relay(req: Request, res: Response, slug: string) {
-      const { row, user } = await authorized(slug, verifyHostedToken(appCookie(req, slug), slug));
+      const { userId, sid } = verifyHostedToken(appCookie(req, slug), slug);
+      const { row, user } = await authorized(slug, userId, sid);
       if (!row.appRelayKeyEnc) throw new HostedError(503, "app_relay_unavailable");
       let key: string;
       try { key = decryptColumn(deriveHostedAppRelayKey(), row.appRelayKeyEnc, `hosted-app:${slug}`); }
