@@ -150,10 +150,10 @@ export async function getRecordingsReservedBytes(prisma: AllocationDb): Promise<
 export async function recordingsUsageByFsUuid(
   prisma: AllocationDb,
 ): Promise<Map<string, { role: "recordings"; reservedBytes: number }>> {
-  // A drive that HOSTS recordings (ACTIVE, MIGRATING, or DEGRADED = still recording but needs
-  // attention) is `recordings`; a row that has not been applied yet (PENDING) or whose drive is
-  // absent (MISSING) is not hosting anything. `files` / null are WARP-3513's call.
-  const hosting = new Set<AllocationStatusName>(["ACTIVE", "MIGRATING", "DEGRADED"]);
-  const rows = (await recordingsRows(prisma)).filter((r) => hosting.has(r.status));
-  return new Map(rows.map((r) => [r.fsUuid, { role: "recordings" as const, reservedBytes: Number(r.reservedBytes) }]));
+  // The purpose stays assigned while a move is pending or the drive is absent.
+  // This role does not claim footage already exists or that recording is active;
+  // the recordings API reports that lifecycle separately. The route joins only
+  // present data drives, so a MISSING row cannot fabricate an inventory card.
+  const rows = await loadRecordingsAllocations(prisma);
+  return new Map(rows.map((r) => [r.fsUuid, { role: "recordings" as const, reservedBytes: r.reservedBytes }]));
 }

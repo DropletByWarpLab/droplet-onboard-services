@@ -7,7 +7,7 @@ const inputSchema = {
   type: "object",
   properties: {
     path: { type: "string", description: "New .html path." },
-    content: { type: "string", description: "Self-contained HTML/CSS/JS; inline assets only. Max 192 KB." },
+    content: { type: "string", description: "HTML/CSS/JS; self-contained, inline assets; ≤192 KiB." },
   },
   required: ["path", "content"],
   additionalProperties: false,
@@ -47,7 +47,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 
 const tool: Tool = {
   name: "create_artifact",
-  description: "Create an interactive HTML app, simulation, chart or dashboard in chat. Isolated preview has no network or device access. Save revisions under new paths.",
+  description: "Interactive HTML app/simulation/chart/dashboard; chat preview has no network/device access. Revise to new paths.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: false,

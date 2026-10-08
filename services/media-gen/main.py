@@ -8,6 +8,7 @@ import json
 import os
 import signal
 import sys
+import tempfile
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
@@ -51,23 +52,31 @@ async def capabilities():
 
 
 async def _kill(process: asyncio.subprocess.Process) -> None:
-    if process.returncode is None:
-        try:
-            if os.name == "posix":
-                os.killpg(process.pid, signal.SIGKILL)
-            else:
-                process.kill()
-        except ProcessLookupError:
-            pass
+    try:
+        if os.name == "posix":
+            # The leader may already have exited while its encoder/children
+            # still own pipes or resources. Always clean up the whole group.
+            os.killpg(process.pid, signal.SIGKILL)
+        elif process.returncode is None:
+            process.kill()
+    except ProcessLookupError:
+        pass
     await process.wait()
 
 
 async def _run_worker(job: RenderRequest) -> bytes:
+    # SIGKILL cannot run a worker's TemporaryDirectory cleanup. The controller
+    # owns the complete scratch/cache root and retires it after the group.
+    with tempfile.TemporaryDirectory(prefix="droplet-media-job-") as scratch:
+        return await _run_worker_in(job, Path(scratch))
+
+
+async def _run_worker_in(job: RenderRequest, scratch: Path) -> bytes:
     # Give inference only OS/accelerator knobs, never the API bearer, TLS key
     # paths, provider credentials or the appliance's inherited environment.
-    allowed = {"PATH", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "LANG", "LC_ALL", "LD_LIBRARY_PATH", "CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES", "NVIDIA_DRIVER_CAPABILITIES", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "MEDIA_GEN_MODEL_ROOT", "MEDIA_GEN_DEVICE", "MEDIA_GEN_VIDEO_ENGINE"}
+    allowed = {"PATH", "SYSTEMROOT", "WINDIR", "LANG", "LC_ALL", "LD_LIBRARY_PATH", "CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES", "NVIDIA_DRIVER_CAPABILITIES", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "MEDIA_GEN_MODEL_ROOT", "MEDIA_GEN_DEVICE", "MEDIA_GEN_VIDEO_ENGINE"}
     worker_env = {key: value for key, value in os.environ.items() if key.upper() in allowed}
-    worker_env.update({"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "HF_HUB_DISABLE_TELEMETRY": "1", "HF_HUB_DISABLE_IMPLICIT_TOKEN": "1", "HF_HOME": str(Path(os.getenv("TEMP", "/tmp")) / "huggingface"), "PYTHONDONTWRITEBYTECODE": "1", "PYTHONUNBUFFERED": "1"})
+    worker_env.update({"TMPDIR": str(scratch), "TEMP": str(scratch), "TMP": str(scratch), "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "HF_HUB_DISABLE_TELEMETRY": "1", "HF_HUB_DISABLE_IMPLICIT_TOKEN": "1", "HF_HOME": str(scratch / "huggingface"), "PYTHONDONTWRITEBYTECODE": "1", "PYTHONUNBUFFERED": "1"})
     process = await asyncio.create_subprocess_exec(sys.executable, "-I", str(WORKER_SCRIPT), env=worker_env, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, start_new_session=os.name == "posix")
     async def input_job():
         assert process.stdin

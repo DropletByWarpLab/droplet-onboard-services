@@ -115,6 +115,20 @@ afterEach(() => {
 });
 
 describe("useChat.attach (WARP-203)", () => {
+  it("keeps staged files out of a connection outcome turn and preserves them for the next composed message", async () => {
+    mockUploadBrainFile.mockResolvedValue({ itemId: "draft-file", status: "ready" });
+    mockSendChat.mockImplementation(() => Promise.resolve(quickSseResponse()));
+    let value: ProbeValue | null = null;
+    render(<Probe onValue={(v) => (value = v)} />);
+    await act(async () => { await value!.attach(new File(["private draft"], "draft.txt", { type: "text/plain" })); });
+    await act(async () => { await value!.sendMessage("Google is connected.", "llama3", undefined, undefined, { preserveComposerAttachments: true }); });
+    expect(mockSendChat.mock.calls[0][0].attachments).toBeUndefined();
+    expect(value!.attachments).toHaveLength(1);
+    expect(value!.sessionAttachments).toHaveLength(0);
+    await act(async () => { await value!.sendMessage("Use my draft", "llama3"); });
+    expect(mockSendChat.mock.calls[1][0].attachments).toEqual([{ itemId: "draft-file" }]);
+    expect(value!.attachments).toHaveLength(0);
+  });
   it("renders a pending chip immediately and flips to indexing on 202", async () => {
     let resolveUpload: (v: { itemId: string; status: "indexing" }) => void = () => {};
     mockUploadBrainFile.mockImplementationOnce(

@@ -116,6 +116,9 @@ async def _read(url: str, max_bytes: int, *, headers: dict[str, str] | None = No
             ip = await resolve_public(host)
             pinned = httpx.URL(current).copy_with(host=ip)
             request_headers = {"Host": host, "User-Agent": "Droplet-Screened-Web/1.0", "Accept-Encoding": "identity", **(headers or {})}
+            # httpx stores response cookies against the pinned IP URL. Never
+            # replay them, including to another origin sharing that public IP.
+            client.cookies.clear()
             async with client.stream("GET", pinned, headers=request_headers, extensions={"sni_hostname": host}) as response:
                 if response.status_code in (301, 302, 303, 307, 308):
                     if not redirects or hop == 3 or not response.headers.get("location"):

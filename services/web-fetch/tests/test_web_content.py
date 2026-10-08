@@ -84,6 +84,23 @@ def test_redirect_count_bounded(client, boundary):
     assert len([c for c in calls if c[0] == "http"]) == 4
 
 
+@pytest.mark.parametrize("location", ["/next", "https://other.example/next"])
+def test_redirect_never_replays_server_cookies(client, boundary, location):
+    calls = []
+
+    def handler(req):
+        calls.append(req)
+        if len(calls) == 1:
+            return response(status=302, headers={"location": location, "set-cookie": "tracking=private; Path=/; Secure"})
+        return response("Public evidence")
+
+    boundary(handler)
+    result = client.post("/fetch", json={"url": "https://example.com/start"}, headers=AUTH)
+    assert result.status_code == 200
+    assert len(calls) == 2
+    assert all("cookie" not in req.headers for req in calls)
+
+
 @pytest.mark.parametrize("headers,code,status", [({"Content-Type": "application/pdf"}, "unsupported_content_type", 400), ({"Content-Encoding": "gzip"}, "unsupported_content_encoding", 400), ({"Content-Length": "524289"}, "response_too_large", 413)])
 def test_response_headers_fail_closed(client, boundary, headers, code, status):
     boundary(lambda _: response(headers=headers))

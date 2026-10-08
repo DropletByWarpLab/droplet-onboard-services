@@ -653,6 +653,9 @@ export const TOOL_DOMAIN_GROUPS: ToolDomainGroup[] = [
   // and an operator has to be able to withhold it on its own. No module gates
   // it (there is no connectors AccessModuleId), so `feature` stays null.
   { id: "cloud", label: "Cloud accounts", domains: ["cloud"], feature: null },
+  // Setup spans personal accounts and box-wide providers; its canonical routes
+  // enforce the member/admin floor separately from this explicit tool grant.
+  { id: "connections", label: "Connections", domains: ["connections"], feature: null },
   { id: "system", label: "System", domains: ["system", "data"], feature: null },
 ];
 

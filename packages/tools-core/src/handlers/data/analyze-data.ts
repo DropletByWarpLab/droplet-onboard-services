@@ -4,9 +4,9 @@ import { err, ncHeaders } from "../files/_render.js";
 const inputSchema = {
   type: "object",
   properties: {
-    code: { type: "string", description: "Python: inputs dict; tables source/sheets/columns/rows; assign JSON output. math/statistics/decimal/collections/itertools/json/re/datetime/textwrap only. print logs; emit_csv(name.csv,columns,rows); emit_chart(name.svg,title,labels,values,kind='bar' or 'line'). No files/network/packages." },
-    inputs: { type: "object", description: "Optional named JSON data." },
-    sources: { type: "array", items: { type: "object", properties: { path: { type: "string" }, item_id: { type: "string" } }, additionalProperties: false }, description: "Up to 4 CSV/XLSX files: exactly one full File Store path or chat attachment item_id each. 3 MiB total; first row headers; XLSX cached values only." },
+    code: { type: "string", description: "Python: inputs dict; tables source/sheets/columns/rows; set JSON output; print logs. Only math/statistics/decimal/collections/itertools/json/re/datetime/textwrap. emit_csv(name.csv,columns,rows); emit_chart(name.svg,title,labels,values,kind='bar' or 'line'). No files/network/packages." },
+    inputs: { type: "object", description: "Named JSON data (optional)." },
+    sources: { type: "array", items: { type: "object", properties: { path: { type: "string" }, item_id: { type: "string" } }, additionalProperties: false }, description: "≤4 CSV/XLSX, ≤3 MiB total: one full File Store path or chat item_id each; first-row headers, XLSX cached values." },
   },
   required: ["code"],
   additionalProperties: false,
@@ -26,7 +26,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 }
 const tool: Tool = {
   name: "analyze_data",
-  description: "Execute bounded Python over JSON or CSV/XLSX sources in the offline sandbox. Return computed JSON/logs and optional new CSV/chart files.",
+  description: "Bounded offline Python on JSON/CSV/XLSX; returns computed JSON/logs and optional new CSV/chart files.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: false,

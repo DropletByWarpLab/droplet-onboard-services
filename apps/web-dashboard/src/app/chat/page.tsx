@@ -859,6 +859,34 @@ export default function ChatPage() {
     return -1;
   }, [messages]);
 
+  // Rehydrated conversations describe past setup; only tool results produced
+  // in this mounted chat can open a new setup popup.
+  const canSetupConnections = user?.role === "owner" || user?.role === "admin" || user?.role === "family";
+  const connectionPrincipal = `${user?.id}:${user?.role}`;
+  const connectionHistory = useRef({ epoch: messagesEpoch, principal: connectionPrincipal, ids: new Set(messages.map((message) => message.id)), callIds: new Set(messages.flatMap((message) => message.toolCalls?.map((call) => call.id) ?? [])), seenCallIds: new Set<string>() });
+  if (connectionHistory.current.epoch !== messagesEpoch || connectionHistory.current.principal !== connectionPrincipal) {
+    // A role or account change closes setup built from the previous person's
+    // grants. Only a fresh tool result for the current principal can reopen it.
+    connectionHistory.current = { epoch: messagesEpoch, principal: connectionPrincipal, ids: new Set(messages.map((message) => message.id)), callIds: new Set(messages.flatMap((message) => message.toolCalls?.map((call) => call.id) ?? [])), seenCallIds: new Set<string>() };
+  }
+  const [pendingConnectionOutcome, setPendingConnectionOutcome] = useState<{
+    turn: string; conversationId: string | null; epoch: number; userId: string; role: string;
+  } | null>(null);
+  const handleConnectionOutcome = useCallback((turn: string) => {
+    if (!user?.role || !canSetupConnections) return;
+    setPendingConnectionOutcome({ turn, conversationId, epoch: messagesEpoch, userId: user.id, role: user.role });
+  }, [conversationId, messagesEpoch, user, canSetupConnections]);
+  useEffect(() => {
+    if (!pendingConnectionOutcome) return;
+    if (!canSetupConnections || pendingConnectionOutcome.conversationId !== conversationId || pendingConnectionOutcome.epoch !== messagesEpoch || pendingConnectionOutcome.userId !== user?.id || pendingConnectionOutcome.role !== user?.role) {
+      setPendingConnectionOutcome(null);
+      return;
+    }
+    if (isStreaming || !selectedModel) return;
+    setPendingConnectionOutcome(null);
+    void sendMessage(pendingConnectionOutcome.turn, selectedModel, systemPrompt || undefined, selectedProvider, { preserveComposerAttachments: true });
+  }, [pendingConnectionOutcome, conversationId, messagesEpoch, user?.id, user?.role, canSetupConnections, isStreaming, selectedModel, selectedProvider, systemPrompt, sendMessage]);
+
   // WARP-855 — the header's conversation title: the first user message,
   // clamped, or "New chat".
   const headerTitle = useMemo(() => {
@@ -1149,6 +1177,10 @@ export default function ChatPage() {
           )}
           <div className="chat-wrap">
             {messages.map((msg, idx) => {
+              // The stream replaces the temporary message id with its persisted
+              // id. Keep a setup form mounted across that replacement.
+              const connectionCall = msg.toolCalls?.find((call) => ["list_connections", "start_connection", "disconnect_connection"].includes(call.name));
+              const messageKey = connectionCall ? `connection-${messagesEpoch}-${idx}-${connectionCall.id}` : msg.id;
               // WARP-1121 §9.3 — interview turn shaping: markers are
               // stripped before render; a proposal fence suppresses raw
               // token paint (ChatMessage's own thinking indicator shows via
@@ -1169,7 +1201,7 @@ export default function ChatPage() {
                   if (streamingThis) {
                     return (
                       <ChatMessage
-                        key={msg.id}
+                        key={messageKey}
                         message={{ ...msg, content: "" }}
                         isStreaming
                         isLastAssistant={idx === lastAssistantIdx}
@@ -1230,12 +1262,15 @@ export default function ChatPage() {
               }
               return (
               <ChatMessage
-                key={msg.id}
+                key={messageKey}
                 message={msg}
                 isStreaming={
                   isStreaming && idx === messages.length - 1 && msg.role === "assistant"
                 }
                 isLastAssistant={idx === lastAssistantIdx}
+                connectionSetupInteractive={canSetupConnections && msg.role === "assistant" && idx === messages.length - 1 && !connectionHistory.current.ids.has(msg.id) && (!connectionCall || !connectionHistory.current.callIds.has(connectionCall.id))}
+                connectionSetupSeenIds={connectionHistory.current.seenCallIds}
+                onConnectionOutcome={handleConnectionOutcome}
                 onRetry={handleRetry}
                 onCopy={handleCopy}
                 onQuote={handleQuote}

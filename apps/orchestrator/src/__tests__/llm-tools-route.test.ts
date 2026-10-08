@@ -60,6 +60,13 @@ import { initDeviceService } from "../services/device.service.js";
 describe("GET /api/llm/tools", () => {
   let app: ReturnType<typeof createApp>;
 
+  it.each(["guest", "family"])("advertises connection setup only at the member floor (%s)", async (role) => {
+    mockListTools.mockResolvedValueOnce(["list_connections", "start_connection", "disconnect_connection"].map((name) => ({ name, description: name, inputSchema: { type: "object", properties: {} } })));
+    const res = await request(app).get("/api/llm/tools").set("x-test-role", role);
+    expect(res.status).toBe(200);
+    expect(res.body.tools.map((t: { name: string }) => t.name)).toEqual(role === "family" ? ["list_connections", "start_connection"] : []);
+  });
+
   beforeAll(() => {
     const prisma = new PrismaClient();
     initDeviceService(prisma);

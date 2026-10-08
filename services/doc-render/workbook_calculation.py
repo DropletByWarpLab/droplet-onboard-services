@@ -108,7 +108,9 @@ class Parser:
         precedence = {**{op: 0 for op in COMPARISONS}, "+": 1, "-": 1, "*": 2, "/": 2, "^": 3}
         while self.peek() in precedence and precedence[self.peek()] >= minimum:
             op = self.take(); level = precedence[op]
-            node = ("binary", op, node, self.expression(level if op == "^" else level + 1, depth + 1))
+            # Excel evaluates equal-precedence operators left to right,
+            # including powers; cached values must match its recalculation.
+            node = ("binary", op, node, self.expression(level + 1, depth + 1))
         return node
     def parse(self):
         ast = self.expression()
@@ -314,7 +316,9 @@ def calculate(workbook, formulas):
                     results[id(node)] = result
                     continue
                 flat = [value for arg in args for value in (arg if isinstance(arg, list) else [arg])]
-                result = next((value for value in flat if isinstance(value, CellError)), None)
+                # COUNT ignores error cells, along with other non-numbers;
+                # the other numeric functions propagate those errors.
+                result = None if node[1] == "COUNT" else next((value for value in flat if isinstance(value, CellError)), None)
                 if result is None:
                     numbers = [float(value) for value in flat if isinstance(value, (int, float)) and not isinstance(value, bool)]
                     name = node[1]

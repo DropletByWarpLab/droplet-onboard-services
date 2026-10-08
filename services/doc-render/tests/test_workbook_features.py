@@ -137,7 +137,7 @@ def test_duplicate_formula_targets_are_refused_instead_of_overwritten():
     assert ws["A3"].value == ""
 
 
-@pytest.mark.parametrize("expression", ["1+" * 5000 + "1", "(" * 40 + "1" + ")" * 40, "+" * 40 + "1", "1^" * 40 + "1"])
+@pytest.mark.parametrize("expression", ["1+" * 5000 + "1", "(" * 40 + "1" + ")" * 40, "+" * 40 + "1", "1^(" * 40 + "1" + ")" * 40])
 def test_oversized_or_deep_formulas_are_rejected_without_truncation(expression):
     spec = {"columns": ["Value"], "rows": [[""]], "formulas": [{"cell": "A2", "expression": expression}]}
     _, ws = _sheet(spec)
@@ -262,6 +262,28 @@ def test_cached_values_and_cross_sheet_formula_dependencies_reopen_without_excel
     assert cached["Summary"]["A3"].value == "#DIV/0!"
     assert cached["Summary"]["B3"].value == "#DIV/0!"
     assert load_workbook(io.BytesIO(data))["Summary"]["A2"].value == "=SUM('Sales Q1'!B2:B3)"
+
+
+@pytest.mark.parametrize("expression, expected", [
+    ("2^3^2", 64), ("2^-2^3", .015625),
+    ("2^(3^2)", 512), ("(2^3)^2", 64), ("-2^2", 4),
+])
+def test_formula_cache_uses_excel_power_associativity(expression, expected):
+    data = render_xlsx([{"columns": ["Value"], "rows": [[""]],
+        "formulas": [{"cell": "A2", "expression": expression}]}])
+    assert load_workbook(io.BytesIO(data), data_only=True).active["A2"].value == expected
+    assert load_workbook(io.BytesIO(data)).active["A2"].value == "=" + expression
+
+
+@pytest.mark.parametrize("expression, expected", [
+    ("COUNT(A2:A4)", 1), ("COUNT(A3)", 0), ("COUNT(A3,5)", 1),
+])
+def test_count_cache_ignores_errors_and_non_numeric_cells(expression, expected):
+    data = render_xlsx([{"columns": ["Values", "Count"], "rows": [[10, ""], ["", ""], [True, ""]],
+        "formulas": [{"cell": "A3", "expression": "1/0"}, {"cell": "B2", "expression": expression}]}])
+    cached = load_workbook(io.BytesIO(data), data_only=True).active
+    assert cached["A3"].value == "#DIV/0!"
+    assert cached["B2"].value == expected
 
 
 def test_cross_sheet_cycles_are_refused_and_no_workbook_bytes_escape():

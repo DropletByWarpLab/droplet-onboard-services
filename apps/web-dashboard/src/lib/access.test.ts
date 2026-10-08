@@ -204,6 +204,18 @@ describe("feature catalog (one vocabulary — the App-Modules ModuleId enum)", (
     expect(cal.domains).toEqual(["calendar", "reminders", "notifications"]);
   });
 
+  it("lets an operator grant Connections without inventing it on an untouched existing role", () => {
+    expect(TOOL_DOMAIN_GROUPS.find((g) => g.id === "connections")).toMatchObject({ label: "Connections", domains: ["connections"], feature: null });
+    const draft = blankRoleDraft("admin");
+    draft.touchedToolGroups = [];
+    draft.originalToolGrants = [{ domain: "system", level: "view" }];
+    expect(draftToRolePayload(draft).toolGrants).toEqual([{ domain: "system", level: "view" }]);
+    draft.touchedToolGroups = ["connections"];
+    draft.tools.connections = "use";
+    expect(draftToRolePayload(draft).toolGrants).toContainEqual({ domain: "connections", level: "use" });
+    expect(draftToRolePayload(draft).toolGrants).toContainEqual({ domain: "system", level: "view" });
+  });
+
   it("business is its own on-box row, and System no longer carries it (WARP-2583)", () => {
     // ADR-045 collapsed every PM and CRM tool into the `business` domain. The
     // Projects row used to write the `pm` grant — empty since — while

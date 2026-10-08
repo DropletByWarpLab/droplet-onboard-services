@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { artifactMediaFromPath } from "@droplet/shared-types";
 import { ArtifactMediaCard, ARTIFACT_MAX_BYTES } from "./ArtifactMediaCard";
+const auth = vi.hoisted(() => ({ user: { id: "owner-1", role: "owner" } as { id: string; role: string } | null }));
+vi.mock("@/lib/auth", () => ({ useAuth: () => auth, authFetch: vi.fn() }));
 
 class TestPort {
   onmessage: ((event: MessageEvent) => void) | null = null;
@@ -23,7 +25,7 @@ class TestChannel {
   constructor() { this.port1.peer = this.port2; this.port2.peer = this.port1; channels.push(this); }
 }
 beforeEach(() => { channels.length = 0; vi.stubGlobal("MessageChannel", TestChannel); });
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks(); vi.useRealTimers(); });
+afterEach(() => { cleanup(); auth.user = { id: "owner-1", role: "owner" }; vi.unstubAllGlobals(); vi.restoreAllMocks(); vi.useRealTimers(); });
 function frame() { return screen.getByTitle("Demo.html") as HTMLIFrameElement; }
 function nonce() { return frame().getAttribute("src")!.split("#")[1]; }
 function windowMessage(data: Record<string, unknown>, overrides: MessageEventInit = {}) {
@@ -139,6 +141,39 @@ describe("interactive artifact preview", () => {
     });
     expect(fetch).toHaveBeenCalledTimes(2);
     expect(channel.port1.postMessage).not.toHaveBeenCalled();
+  });
+  it.each(["account", "role", "sign-out"])("removes an executable preview when the viewer changes (%s)", async (change) => {
+    mockFetch();
+    const media = artifactMediaFromPath("/Demo.html");
+    const view = render(<ArtifactMediaCard media={media} />);
+    fireEvent.click(screen.getByRole("button", { name: "Preview" }));
+    fireEvent.load(frame());
+    const channel = await boot();
+    await message({ type: "droplet-artifact-ready", supported: true }, channel);
+    await waitFor(() => expect(channel.port1.postMessage).toHaveBeenCalled());
+    auth.user = change === "account" ? { id: "owner-2", role: "owner" } : change === "role" ? { id: "owner-1", role: "guest" } : null;
+    view.rerender(<ArtifactMediaCard media={media} />);
+    expect(screen.queryByTitle("Demo.html")).toBeNull();
+    expect(channel.port1.closed).toBe(true);
+  });
+  it("drops a private fetch that resolves after the account changes", async () => {
+    let resolve!: (value: Response) => void;
+    const fetch = vi.fn((url: string, _options?: RequestInit) => url === "/api/artifact-preview-probe" ? Promise.resolve(new Response(null, { status: 204 })) : new Promise<Response>((done) => { resolve = done; }));
+    vi.stubGlobal("fetch", fetch);
+    const media = artifactMediaFromPath("/Demo.html");
+    const view = render(<ArtifactMediaCard media={media} />);
+    fireEvent.click(screen.getByRole("button", { name: "Preview" }));
+    fireEvent.load(frame());
+    const channel = await boot();
+    await message({ type: "droplet-artifact-ready", supported: true }, channel);
+    const signal = fetch.mock.calls[1][1]!.signal!;
+    auth.user = { id: "owner-2", role: "owner" };
+    view.rerender(<ArtifactMediaCard media={media} />);
+    await act(async () => { resolve(new Response("PRIVATE-OLD-ACCOUNT")); });
+    expect(signal.aborted).toBe(true);
+    expect(channel.port1.closed).toBe(true);
+    expect(channel.port1.postMessage).not.toHaveBeenCalled();
+    expect(screen.queryByTitle("Demo.html")).toBeNull();
   });
   it("fails closed on a duplicate frame load after binding the port", async () => {
     const fetch = mockFetch(); open();
