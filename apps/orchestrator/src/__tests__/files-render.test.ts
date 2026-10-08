@@ -244,6 +244,33 @@ describe("POST /api/files/render (WARP-2211)", () => {
     expect(renderCalls()).toHaveLength(0);
   });
 
+  it.each(["pdf", "pptx"])("forwards structured %s slides and uploads a new file", async (format) => {
+    const slides = [{ title: "Summary", bullets: ["Source-backed result"] }];
+    const res = await request(app).post("/api/files/render")
+      .send({ path: `/Documents/deck.${format}`, format, title: "Review", slides });
+    expect(res.status).toBe(200);
+    expect(res.body.mimeType).toBe(format === "pdf" ? "application/pdf" : "application/vnd.openxmlformats-officedocument.presentationml.presentation");
+    expect(JSON.parse(renderCalls()[0][1].body)).toMatchObject({ format, title: "Review", slides });
+    expect(ncMock.ncUploadFile).toHaveBeenCalledWith(expect.any(String), "dev", "/Documents",
+      `deck.${format}`, expect.any(Buffer), { ifNoneMatch: true });
+  });
+
+  it("refuses malformed slides before rendering", async () => {
+    const res = await request(app).post("/api/files/render")
+      .send({ path: "/deck.pdf", format: "pdf", slides: "invalid" });
+    expect(res.status).toBe(400);
+    expect(renderCalls()).toHaveLength(0);
+  });
+
+  it("maps renderer schema rejection to a spec error without uploading", async () => {
+    fetchMock.mockResolvedValue({ ok: false, status: 422, json: async () => ({ detail: [{ msg: "wrong type" }] }) });
+    const res = await request(app).post("/api/files/render")
+      .send({ path: "/deck.pptx", format: "pptx", slides: [{}] });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("invalid document spec");
+    expect(ncMock.ncUploadFile).not.toHaveBeenCalled();
+  });
+
   it("rejects a path whose extension contradicts the format", async () => {
     const res = await request(app)
       .post("/api/files/render")

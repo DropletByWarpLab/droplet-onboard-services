@@ -177,10 +177,11 @@ export function keepBothName(name: string, n: number): string {
 const MAX_KEEP_BOTH_SUFFIX = 99;
 const joinDir = (dir: string, name: string) => (dir === "/" ? `/${name}` : `${dir}/${name}`);
 
-const DOC_RENDER_MIME: Record<"pdf" | "docx" | "xlsx", string> = {
+const DOC_RENDER_MIME: Record<"pdf" | "docx" | "xlsx" | "pptx", string> = {
   pdf: "application/pdf",
   docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
 };
 
 /**
@@ -2822,11 +2823,16 @@ export function createFilesRouter(
           title?: unknown;
           body_markdown?: unknown;
           sheets?: unknown;
+          slides?: unknown;
         };
 
         const format = body.format;
-        if (format !== "pdf" && format !== "docx" && format !== "xlsx") {
-          res.status(400).json({ error: "format must be pdf, docx or xlsx" });
+        if (format !== "pdf" && format !== "docx" && format !== "xlsx" && format !== "pptx") {
+          res.status(400).json({ error: "format must be pdf, docx, xlsx or pptx" });
+          return;
+        }
+        if (body.slides !== undefined && !Array.isArray(body.slides)) {
+          res.status(400).json({ error: "slides must be an array" });
           return;
         }
 
@@ -2901,6 +2907,7 @@ export function createFilesRouter(
               body_markdown:
                 typeof body.body_markdown === "string" ? body.body_markdown : "",
               sheets: Array.isArray(body.sheets) ? body.sheets : [],
+              slides: Array.isArray(body.slides) ? body.slides : [],
             }),
             signal: AbortSignal.timeout(DOC_RENDER_TIMEOUT_MS),
           });
@@ -2918,6 +2925,10 @@ export function createFilesRouter(
             .json()
             .then((j) => (j as { detail?: string }).detail)
             .catch(() => undefined);
+          if (upstream.status === 422) {
+            res.status(400).json({ error: "invalid document spec" });
+            return;
+          }
           if (upstream.status === 400 || upstream.status === 413) {
             res.status(upstream.status).json({ error: detail ?? "render_failed" });
             return;

@@ -179,6 +179,7 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   { tool: "create_pdf_report", client: "nextcloud", hops: [admit("post", "/api/files/render")] },
   { tool: "create_word_document", client: "nextcloud", hops: [admit("post", "/api/files/render")] },
   { tool: "create_spreadsheet", client: "nextcloud", hops: [admit("post", "/api/files/render")] },
+  { tool: "create_slide_deck", client: "nextcloud", hops: [admit("post", "/api/files/render")] },
   // WARP-2664 — file cleanup. analyze walks the tree through the same
   // listing hop list_files uses; organize lists once then mkdir + move per
   // file; delete_files reads the parent listing before every delete so a

@@ -121,6 +121,20 @@ describe("runArtifacts", () => {
     expect(art.map((a) => a.ref)).toEqual(["/a.md", "/b.md"]);
     expect(art[0]).toEqual({ kind: "file", ref: "/a.md", title: "a.md" });
   });
+
+  it("returns PDF and PowerPoint decks only after a recorded successful render", () => {
+    const artifacts = runArtifacts([
+      { tool: "create_slide_deck", args: { path: "/Docs/pitch.pdf" }, text: '{"ok":true}' },
+      { tool: "create_slide_deck", args: { path: "/Docs/pitch.pptx" }, text: '{"ok":true}' },
+      { tool: "create_slide_deck", args: { path: "/Docs/failed.pdf" }, text: '{"ok":false,"status":"error"}' },
+      { tool: "create_slide_deck", args: { path: "/Docs/unknown.pptx" }, text: '{"ok":true}', unknownOutcome: true },
+      { tool: "create_slide_deck", args: { path: "/Docs/unrecorded.pdf" } },
+    ]);
+    expect(artifacts).toEqual([
+      { kind: "file", ref: "/Docs/pitch.pdf", title: "pitch.pdf" },
+      { kind: "file", ref: "/Docs/pitch.pptx", title: "pitch.pptx" },
+    ]);
+  });
 });
 
 describe("deliverRunResults", () => {
