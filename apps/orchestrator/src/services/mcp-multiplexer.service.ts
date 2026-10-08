@@ -233,10 +233,16 @@ interface AttachedRemote {
   catalogLoaded: boolean;
 }
 
+/**
+ * A call the multiplexer REFUSED. `status: "blocked"` (WARP-2432) is the
+ * distinguishable state: a remote server's own failure never carries it, and
+ * a successful empty answer is not `isError` at all, so a blocked call can
+ * never be mistaken for "the tool ran and found nothing".
+ */
 function errorOutcome(code: string, tool: string, message: string): McpToolCallOutcome {
   return {
     isError: true,
-    content: [{ type: "text", text: JSON.stringify({ error: code, tool, message }) }],
+    content: [{ type: "text", text: JSON.stringify({ status: "blocked", error: code, tool, message }) }],
   };
 }
 
