@@ -51,14 +51,15 @@ async def capabilities():
 
 
 async def _kill(process: asyncio.subprocess.Process) -> None:
-    if process.returncode is None:
-        try:
-            if os.name == "posix":
-                os.killpg(process.pid, signal.SIGKILL)
-            else:
-                process.kill()
-        except ProcessLookupError:
-            pass
+    try:
+        if os.name == "posix":
+            # The leader may already have exited while its encoder/children
+            # still own pipes or resources. Always clean up the whole group.
+            os.killpg(process.pid, signal.SIGKILL)
+        elif process.returncode is None:
+            process.kill()
+    except ProcessLookupError:
+        pass
     await process.wait()
 
 

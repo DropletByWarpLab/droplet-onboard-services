@@ -2,6 +2,8 @@ import asyncio
 import base64
 import io
 import json
+import os
+import signal
 from pathlib import Path
 
 import pytest
@@ -167,6 +169,34 @@ async def test_deadline_also_bounds_worker_after_pipes_close(tmp_path, monkeypat
     with pytest.raises(HTTPException) as result:
         await main._run_worker(contracts.RenderRequest(kind="image", prompt="a tree"))
     assert result.value.status_code == 504
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name != "posix", reason="POSIX worker process-group cleanup")
+async def test_timeout_kills_child_after_worker_exits(tmp_path, monkeypatch):
+    pid_file = tmp_path / "child.pid"
+    child = "import os,time; from pathlib import Path; Path(" + repr(str(pid_file)) + ").write_text(str(os.getpid())); time.sleep(30)"
+    script = tmp_path / "exited_worker.py"
+    script.write_text("import subprocess,sys\nsys.stdin.buffer.read()\nsubprocess.Popen([sys.executable,'-c'," + repr(child) + "])\n")
+    monkeypatch.setattr(main, "WORKER_SCRIPT", script)
+    monkeypatch.setattr(main, "IMAGE_TIMEOUT", 1)
+    try:
+        with pytest.raises(HTTPException) as result:
+            await asyncio.wait_for(main._run_worker(contracts.RenderRequest(kind="image", prompt="a tree")), 3)
+        assert result.value.status_code == 504
+        pid = int(pid_file.read_text())
+        for _ in range(100):
+            status = Path(f"/proc/{pid}/stat")
+            if not status.exists() or status.read_text().rsplit(")", 1)[1].split()[0] == "Z":
+                break
+            await asyncio.sleep(.01)
+        else:
+            pytest.fail("the exited worker's child survived the job deadline")
+    finally:
+        if pid_file.exists():
+            pid = int(pid_file.read_text())
+            try: os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError: pass
 
 
 @pytest.mark.asyncio
