@@ -43,6 +43,19 @@ describe("exportClip", () => {
     );
   });
 
+  it("requests the Frigate recording-range clip at /api/<camera>/start/<s>/end/<e>/clip.mp4 (WARP-3903)", async () => {
+    await exportClip("nctok", "alice", {
+      camera: "front",
+      startsAt: new Date("2026-04-23T14:00:00Z"),
+      endsAt: new Date("2026-04-23T14:01:00Z"),
+    });
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    const [url] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    // Frigate has no /recordings/<start>/<end>/clip.mp4 route — only the
+    // /start/<s>/end/<e>/ form — so pin the exact URL shape here.
+    expect(url).toBe("http://frigate.test:5000/api/front/start/1776952800/end/1776952860/clip.mp4");
+  });
+
   it("rejects an invalid camera name", async () => {
     await expect(
       exportClip("nctok", "alice", {
