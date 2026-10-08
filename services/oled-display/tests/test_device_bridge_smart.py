@@ -105,6 +105,17 @@ def test_successful_temperature_only_read_keeps_health_unknown(monkeypatch, stat
     assert bridge._smart_for("/dev/sdb") == (None, 34, "available")
 
 
+@pytest.mark.parametrize("temp", [None, 34])
+@pytest.mark.parametrize("rc", [8, 24])
+def test_failed_health_exit_bit_is_not_lost_when_json_omits_verdict(monkeypatch, temp, rc):
+    bridge = _load_bridge(monkeypatch)
+    data = {"smartctl": {"exit_status": rc}}
+    if temp is not None:
+        data["temperature"] = {"current": temp}
+    _read(monkeypatch, bridge, data, rc=rc)
+    assert bridge._smart_for("/dev/sdb") == ("FAILED", temp, "available")
+
+
 @pytest.mark.parametrize("rc", [1, 2, 4])
 def test_error_with_temperature_only_output_is_still_unavailable(monkeypatch, rc):
     bridge = _load_bridge(monkeypatch)

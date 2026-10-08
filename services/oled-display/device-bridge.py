@@ -1659,8 +1659,9 @@ def _smart_for(device):
     """Return (health, temp_c, status) for a verified physical device.
 
     status is disabled | available | unsupported | unavailable. Available
-    requires an explicit SMART health boolean or a plausible temperature
-    measurement from a successful read; temperature alone leaves health None.
+    requires an explicit SMART health boolean, a failed-health exit bit, or a
+    plausible temperature measurement from a successful read; temperature
+    alone leaves health None.
     Process success alone says nothing about the drive. Nonavailable results
     carry no stale facts. All probe results, including failures, share a 5 min TTL.
     """
@@ -1708,10 +1709,14 @@ def _smart_for(device):
         # Bit 3 is a FAILED health verdict and must not discard that verdict.
         if unsupported and lacks_capability and rc in (0, 4) and type(passed) is not bool:
             result = (None, None, "unsupported")
-        elif not unsupported and not (rc & 0b111) and (type(passed) is bool or temp is not None):
+        elif not unsupported and not (rc & 0b111) and (
+                type(passed) is bool or temp is not None or rc & 0b1000):
             if passed is True and rc & 0b1000:
                 raise ValueError("inconsistent SMART health")
-            health = "PASSED" if passed is True else "FAILED" if passed is False else None
+            # Bit 3 is itself an explicit failed SMART assessment. Some
+            # device JSON lacks smart_status.passed; never lose that warning
+            # or replace it with a temperature-only unknown verdict.
+            health = "FAILED" if passed is False or rc & 0b1000 else "PASSED" if passed is True else None
             result = (health, temp, "available")
     except Exception:                                              # noqa: BLE001
         pass  # missing tool, timeout, permission failure or malformed output
