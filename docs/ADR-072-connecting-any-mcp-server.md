@@ -145,24 +145,25 @@ Three levels: the `remote_mcp` channel (owner, tears everything down); per-serve
 
 | Slice | Ticket |
 |---|---|
-| Ship the `remote_mcp` off-LAN channel as the master switch (enum, defaults, keys, parity test; teardown on off) | new — *remote_mcp channel: enum value, defaults and teardown* |
-| Owner-added server rows, the dashboard form and the generic bridge profile | new — *Owner-added MCP servers: row, owner-and-admin route, generic bridge profile* |
-| Port public-address pinning into the bridge; apply it to MCP, discovery and token hops | new — *Bridge DNS pinning for owner-added hosts and OAuth hops* |
-| `owner-added-mcp` dynamic egress entry, Romain's security review | new — *Register owner-added MCP hosts as kind: dynamic* |
-| CIMD-first ladder, PKCE refusal, `resource` | WARP-2401 |
-| Callback route, `state` + `iss`, loopback paste fallback | WARP-2405 (extend AC with the paste path) |
-| Per-member and Workspace connection model with `principal`, `NEEDS_RECONNECT` | WARP-2409 (extend with `principal` / `memberId`) |
+| Ship the `remote_mcp` off-LAN channel as the master switch (enum, defaults, keys, parity test; teardown on off) | [WARP-3912](https://warp-lab.atlassian.net/browse/WARP-3912) |
+| Owner-added server rows, the dashboard form and the generic bridge profile | [WARP-3913](https://warp-lab.atlassian.net/browse/WARP-3913) |
+| Port public-address pinning into the bridge; apply it to MCP, discovery and token hops | [WARP-3914](https://warp-lab.atlassian.net/browse/WARP-3914) |
+| `owner-added-mcp` dynamic egress entry, Romain's security review | [WARP-3915](https://warp-lab.atlassian.net/browse/WARP-3915) |
+| CIMD-first ladder, PKCE refusal, `resource` | WARP-2401 (extended 2026-10-08 with the ladder order and scope step-up) |
+| Callback route, `state` + `iss`, loopback paste fallback | WARP-2405 (extended 2026-10-08 with the paste path) |
+| Per-member and Workspace connection model with `principal`, `NEEDS_RECONNECT` | WARP-2409 (extended 2026-10-08 with `principal` / `memberId`) |
 | Token key derivation, AAD-bound | WARP-2412 |
 | Proactive refresh on `cron-runtime` | WARP-2416 |
-| Per-server role grants; guests never; the UNVERIFIED guest path tested | WARP-2434 + new — *Test: role-less guest cannot reach a remote read* |
-| Requesting member on every remote audit row | WARP-2439 (extend AC) |
-| Chat renderer never auto-loads remote images or link previews | new — *Verify and enforce no zero-click fetch in chat rendering* |
-| Pin every remote tool definition by hash; unreviewed on change | new — *Tool-definition pinning beyond ext-\** |
-| Cap tool descriptions to the model; full text to the reviewer | new — *Remote tool description cap* |
-| Label tool results as untrusted with server provenance | new — *Provenance labels on remote tool results* |
+| Per-server role grants; guests never; the UNVERIFIED guest path tested | WARP-2434 (extended 2026-10-08) + [WARP-3916](https://warp-lab.atlassian.net/browse/WARP-3916) |
+| Requesting member on every remote audit row | WARP-2439 (extended 2026-10-08) |
+| Chat renderer never auto-loads remote images or link previews | [WARP-3917](https://warp-lab.atlassian.net/browse/WARP-3917) |
+| Pin every remote tool definition by hash; unreviewed on change | [WARP-3918](https://warp-lab.atlassian.net/browse/WARP-3918) |
+| Cap tool descriptions to the model; full text to the reviewer | [WARP-3919](https://warp-lab.atlassian.net/browse/WARP-3919) |
+| Label tool results as untrusted with server provenance | [WARP-3920](https://warp-lab.atlassian.net/browse/WARP-3920) |
 | Route remote calls through the interceptor; lift `REMOTE_WRITE_NOT_PERMITTED` | WARP-2437, WARP-2432, WARP-2436 (the deny tier set) |
-| Probe-and-fallback across protocol eras | new — *Speak 2026-07-28 and legacy MCP revisions* |
-| Import recipes as data; curated recipes; on-demand chat import; deletion sweep | new — *Import recipes: schema, scheduler, landing and sweep* |
-| Granola personal-tier import over MCP | new, after the Granola plan's write-principal spike |
-| Disconnect revokes (RFC 7009), deletes registration, offers purge | new — *Connection disconnect: revoke, deregister, purge* |
-| Dashboard review screen for vendor and owner-added tool rows (today `ToolReview.tsx` is `ext-*` only) | WARP-2430 (extend) |
+| Probe-and-fallback across protocol eras | [WARP-3921](https://warp-lab.atlassian.net/browse/WARP-3921) |
+| Import recipes as data; curated recipes; on-demand chat import; deletion sweep | [WARP-3922](https://warp-lab.atlassian.net/browse/WARP-3922) |
+| Granola personal-tier import over MCP | [WARP-3923](https://warp-lab.atlassian.net/browse/WARP-3923), after the Granola plan's write-principal spike |
+| Disconnect revokes (RFC 7009), deletes registration, offers purge | [WARP-3924](https://warp-lab.atlassian.net/browse/WARP-3924) |
+| Dashboard review screen for vendor and owner-added tool rows (today `ToolReview.tsx` is `ext-*` only) | WARP-2430 (extended 2026-10-08) |
+| Durable runs may call remote reads; remote writes park (§7) | [WARP-3925](https://warp-lab.atlassian.net/browse/WARP-3925) |
