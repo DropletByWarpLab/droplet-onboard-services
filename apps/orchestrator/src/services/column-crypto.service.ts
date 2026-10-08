@@ -168,6 +168,36 @@ export function deriveSaasCredentialKey(): Buffer { return hkdf(deviceIkm(), "sa
 export function saasCredentialAad(connectionId: string): string {
   return `saas-credential:${connectionId}`;
 }
+/** WARP-2412 / ADR-072 — column key for `McpOAuthConnection.tokensEnc` and
+ *  `.clientSecretEnc`: OAuth tokens (a long-lived key to a member's account at
+ *  a third-party MCP server) and the client secret. Its OWN `info` label, never
+ *  `deriveErpCloudTokenKey` or another "closest" key: those open ERP and mail
+ *  grants, and one compromised key must not open the other. Same
+ *  DEVICE_SECRET_KEY ikm, so a factory reset crypto-shreds every stored grant;
+ *  the member simply signs in again. */
+export function deriveMcpOAuthTokenKey(): Buffer { return hkdf(deviceIkm(), "mcp-oauth-token"); }
+/**
+ * The AAD that binds an MCP OAuth blob to the row AND the owner holding it:
+ * `mcp-oauth:<id>:MEMBER:<memberId>` or `mcp-oauth:<id>:WORKSPACE`. A blob
+ * copied to another row, to another member's row, or re-scoped to WORKSPACE
+ * fails to decrypt. Throws on a MEMBER row with no owner rather than sealing
+ * under an ambiguous binding (fail closed; never "no owner means Workspace").
+ */
+export function mcpOAuthAad(row: {
+  id: string;
+  scope: "MEMBER" | "WORKSPACE";
+  memberId: string | null;
+}): string {
+  if (!row.id) throw new Error("column-crypto: mcp-oauth AAD needs a row id");
+  if (row.scope === "WORKSPACE") {
+    if (row.memberId) throw new Error("column-crypto: WORKSPACE mcp-oauth row has an owner");
+    return `mcp-oauth:${row.id}:WORKSPACE`;
+  }
+  if (row.scope !== "MEMBER" || !row.memberId) {
+    throw new Error("column-crypto: MEMBER mcp-oauth row needs a memberId");
+  }
+  return `mcp-oauth:${row.id}:MEMBER:${row.memberId}`;
+}
 export function generateDek(): Buffer { return randomBytes(32); }
 
 function seal(key: Buffer, plaintext: Buffer, aad?: Buffer): Buffer {
