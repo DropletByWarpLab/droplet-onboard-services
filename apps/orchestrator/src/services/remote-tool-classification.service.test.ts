@@ -536,6 +536,67 @@ describe("WARP-3918 — a changed definition is not callable until a person revi
   });
 });
 
+describe("WARP-3918 — dispatch compares the LIVE definition hash, not the outcome of a database write", () => {
+  const R1 = remoteToolReviewHash("Read a page.", "1".repeat(64));
+  const R2 = remoteToolReviewHash("Read a page.", "2".repeat(64));
+  const reviewedRow = (over: Partial<RemoteToolClassificationRow> = {}) =>
+    row({ toolName: "getPage", requiresWrite: false, requiresConfirmation: false, reviewedBy: "owner", reviewedAt: T0, inputSchemaHash: R1, ...over });
+  const policy = (rows: RemoteToolClassificationRow[], live?: Map<string, string>) => {
+    const cache = new RemoteToolClassificationCache();
+    cache.seed(rows);
+    if (live) cache.setLiveDefinitions("atlassian", live);
+    return composeRemoteCallPolicy({ lookup: cache.lookup, table: () => ({ kind: "allow" }), live: cache.liveDefinition });
+  };
+
+  it("live hash equals the reviewed hash: allowed", () => {
+    expect(policy([reviewedRow()], new Map([["getPage", R1]]))(call("atlassian", "getPage"))).toEqual({ kind: "allow" });
+  });
+
+  it("the database write failed (row still holds the OLD reviewed hash): the changed tool is still refused", () => {
+    // MUTATION: drop the live check from composeRemoteCallPolicy → the table's
+    // allow stands because the row was never reset → red.
+    expect(policy([reviewedRow()], new Map([["getPage", R2]]))(call("atlassian", "getPage"))).toMatchObject({
+      kind: "deny",
+      code: RECORD_DENY_CODES.definitionChanged,
+    });
+  });
+
+  it("a tool the latest listing carried no hash for is refused", () => {
+    expect(policy([reviewedRow()], new Map())(call("atlassian", "getPage"))).toMatchObject({ code: RECORD_DENY_CODES.definitionChanged });
+  });
+
+  it("a row with no stored hash is refused, and no row at all is refused", () => {
+    const live = new Map([["getPage", R1]]);
+    expect(policy([reviewedRow({ inputSchemaHash: null })], live)(call("atlassian", "getPage"))).toMatchObject({ code: RECORD_DENY_CODES.definitionChanged });
+    expect(policy([], live)(call("atlassian", "getPage"))).toMatchObject({ code: RECORD_DENY_CODES.definitionChanged });
+  });
+
+  it("a server that reports no hashes (not tracked) is untouched", () => {
+    expect(policy([reviewedRow({ inputSchemaHash: null })])(call("atlassian", "getPage"))).toEqual({ kind: "allow" });
+  });
+
+  it("the upgrade baseline is an explicit recorded step that runs once: refused before it, allowed after, never re-adopted", async () => {
+    const { prisma, rows } = fakePrisma();
+    // A pre-pin reviewed row: no stored hash.
+    await recordDiscoveredRemoteTools(prisma, "atlassian", [{ wireName: "getPage", description: "Read a page." }], T0);
+    await classifyRemoteTool(prisma, { serverId: "atlassian", toolName: "getPage", requiresWrite: false, requiresConfirmation: false, denied: false, reviewedBy: "owner" }, T0);
+    const live = new Map([["getPage", remoteToolReviewHash("Read a page.", "1".repeat(64))]]);
+    const cache = new RemoteToolClassificationCache();
+    cache.setLiveDefinitions("atlassian", live);
+    const p = composeRemoteCallPolicy({ lookup: cache.lookup, table: () => ({ kind: "allow" }), live: cache.liveDefinition });
+    await cache.refresh(prisma);
+    expect(p(call("atlassian", "getPage"))).toMatchObject({ code: RECORD_DENY_CODES.definitionChanged });
+    // The baseline write.
+    await recordDiscoveredRemoteTools(prisma, "atlassian", [{ wireName: "getPage", description: "Read a page.", inputSchemaHash: "1".repeat(64) }], T1, { baselineUnpinned: true });
+    await cache.refresh(prisma);
+    expect(p(call("atlassian", "getPage"))).toEqual({ kind: "allow" });
+    // A later change is a change, not a second baseline.
+    const out = await recordDiscoveredRemoteTools(prisma, "atlassian", [{ wireName: "getPage", description: "Read a page.", inputSchemaHash: "2".repeat(64) }], T1, { baselineUnpinned: true });
+    expect(out.reset).toEqual(["getPage"]);
+    expect(rows.get("atlassian|getPage")).toMatchObject({ definitionStatus: "CHANGED", reviewedBy: null });
+  });
+});
+
 describe("every import path", () => {
   it("no file outside the service creates or upserts a classification row", () => {
     // Enumerates the tree rather than trusting a list: a second writer added

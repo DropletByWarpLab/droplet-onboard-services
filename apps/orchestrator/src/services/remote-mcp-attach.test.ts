@@ -12,6 +12,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { McpBridgeClient } from "./mcp-bridge.client.js";
+import { remoteToolReviewHash } from "./remote-tool-classification.service.js";
 import { McpToolMultiplexer, type RemoteCallPolicy } from "./mcp-multiplexer.service.js";
 import type { McpClientPort, McpToolDescriptor } from "./mcp-client.port.js";
 import {
@@ -450,5 +451,31 @@ describe("WARP-3918 — tool definitions are pinned by the bridge's hash of the 
     expect(body).toContain("getJiraIssue");
     expect(body).toContain("arguments or hints");
     expect(body).not.toContain("Read one Jira issue");
+  });
+
+  it("publishes the live hashes BEFORE any database write, so a recorder that throws cannot leave a changed tool callable", async () => {
+    // MUTATION: publish after the record step → a throwing recorder skips it → red.
+    let hash = H1;
+    const h = harness({ allowlist: ["atlassian"], tools: () => wire(hash)() });
+    const published: Array<Map<string, string>> = [];
+    const setLiveDefinitions = vi.fn((_id: string, m: ReadonlyMap<string, string>) => void published.push(new Map(m)));
+    const record = vi.fn(async (_id: string, _tools: unknown[]) => {
+      throw new Error("db down");
+    });
+    const result = await h.attach({ recordClassifications: record, setLiveDefinitions });
+    expect(result.attached).toBe(true);
+    expect(published[0]?.get("getJiraIssue")).toBe(remoteToolReviewHash("Read one Jira issue", H1));
+    hash = H2;
+    await h.mux.listTools();
+    expect(published[published.length - 1]?.get("getJiraIssue")).toBe(remoteToolReviewHash("Read one Jira issue", H2));
+    // The failed write is retried on the next listing.
+    expect(record.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("a tool with no hash on the listing is absent from the published live hashes", async () => {
+    const h = harness({ allowlist: ["atlassian"] });
+    const setLiveDefinitions = vi.fn();
+    await h.attach({ setLiveDefinitions });
+    expect(setLiveDefinitions).toHaveBeenCalledWith("atlassian", new Map());
   });
 });

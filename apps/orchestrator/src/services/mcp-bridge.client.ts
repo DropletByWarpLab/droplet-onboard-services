@@ -214,6 +214,7 @@ export class McpBridgeClient implements McpClientPort {
    */
   #lastAdvertised: readonly string[] = [];
   #lastDefinitionHashes: ReadonlyMap<string, string> = new Map();
+  #lastListed: readonly (McpToolDescriptor & { definitionHash?: string })[] = [];
   #onListed: ((tools: readonly (McpToolDescriptor & { definitionHash?: string })[]) => void | Promise<void>) | null = null;
 
   constructor(opts: McpBridgeClientOptions) {
@@ -253,6 +254,7 @@ export class McpBridgeClient implements McpClientPort {
       `/sessions/${this.serverId}/tools`,
     );
     this.#lastAdvertised = body.tools.map((t) => t.name);
+    this.#lastListed = body.tools;
     // WARP-3918 — the bridge hashes the whole wire object (annotations
     // included, which never reach this process). Kept by wire name.
     this.#lastDefinitionHashes = new Map(
@@ -266,6 +268,11 @@ export class McpBridgeClient implements McpClientPort {
       }
     }
     return body.tools;
+  }
+
+  /** WARP-3918 — the last listing as the bridge sent it (descriptions and hashes). */
+  lastListedTools(): readonly (McpToolDescriptor & { definitionHash?: string })[] {
+    return this.#lastListed;
   }
 
   /** WARP-3918 — wire name → the bridge's definition hash, from the last listing. */

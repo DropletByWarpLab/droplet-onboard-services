@@ -137,6 +137,8 @@ export function isRemoteServerAllowed(serverId: string): boolean {
 const vendorRemoteCallPolicy: RemoteCallPolicy = composeRemoteCallPolicy({
   lookup: remoteToolClassificationCache.lookup,
   table: remoteToolTablePolicy,
+  // WARP-3918 — fail-closed pin against the latest listing's definition hash.
+  live: remoteToolClassificationCache.liveDefinition,
 });
 
 /**
@@ -213,6 +215,7 @@ async function attachRegistered(
     // WARP-3918 — a changed tool definition is refused at the next call and
     // announced to owners and admins. Lazy import: this module is imported by
     // nearly everything and the notification stack must not load with it.
+    setLiveDefinitions: (id, hashes) => remoteToolClassificationCache.setLiveDefinitions(id, hashes),
     refreshClassifications: () =>
       remoteToolClassificationCache.refresh(
         prisma as unknown as Parameters<typeof remoteToolClassificationCache.refresh>[0],
