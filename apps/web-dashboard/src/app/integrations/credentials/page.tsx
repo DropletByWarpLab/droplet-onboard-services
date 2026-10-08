@@ -16,6 +16,7 @@
 
 import { KeyRound } from "lucide-react";
 import { ShellPage } from "@/components/shell/ShellPage";
+import { RemoteMcpSwitch } from "@/components/integrations/RemoteMcpSwitch";
 import { SaasCredentialsSection } from "@/components/integrations/SaasCredentialsSection";
 
 export default function IntegrationCredentialsPage() {
@@ -26,6 +27,7 @@ export default function IntegrationCredentialsPage() {
       title="Connector credentials"
       sub="Give Droplet the keys to the cloud services you already pay for."
     >
+      <RemoteMcpSwitch />
       <SaasCredentialsSection />
     </ShellPage>
   );
