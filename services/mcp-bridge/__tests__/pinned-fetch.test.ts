@@ -58,7 +58,6 @@ describe("isPublicAddress: every refused range has a case", () => {
     ["TEST-NET-1", "192.0.2.1"],
     ["TEST-NET-2", "198.51.100.1"],
     ["TEST-NET-3", "203.0.113.7"],
-    ["6to4 relay 192.88.99/24", "192.88.99.1"],
     ["NAT64 local-use 64:ff9b:1::/48", "64:ff9b:1::a00:1"],
     ["IPv4-translated ::ffff:0:0:0/96", "::ffff:0:a00:1"],
     ["discard 100::/64", "100::1"],

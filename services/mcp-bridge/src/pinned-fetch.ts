@@ -59,7 +59,6 @@ const BLOCKED_RANGES = (() => {
   list.addSubnet("192.0.2.0", 24, "ipv4"); // TEST-NET-1
   list.addSubnet("198.51.100.0", 24, "ipv4"); // TEST-NET-2
   list.addSubnet("203.0.113.0", 24, "ipv4"); // TEST-NET-3
-  list.addSubnet("192.88.99.0", 24, "ipv4"); // 6to4 relay anycast
   list.addSubnet("::", 96, "ipv6"); // unspecified, loopback, IPv4-compatible
   list.addSubnet("fc00::", 7, "ipv6"); // ULA, incl. AWS IPv6 metadata fd00:ec2::254
   list.addSubnet("fe80::", 10, "ipv6"); // link-local
