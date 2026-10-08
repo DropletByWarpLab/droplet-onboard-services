@@ -15,11 +15,10 @@ const inputSchema = {
   properties: {
     path: {
       type: "string",
-      description: "Full target path including filename; must end in .pdf.",
+      description: "New .pdf file path.",
     },
     title: {
       type: "string",
-      description: "Report title, rendered as the document's heading.",
     },
     body_markdown: {
       type: "string",
@@ -53,7 +52,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "create_pdf_report",
   description:
-    "Write a PDF report into the user's files. Give `path` (ending in .pdf), a `title`, and `body_markdown` for the content. Use this when the user asks for a PDF, a report, or something to print or send.",
+    "Create a PDF report in the user's files; refuses overwrite.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: false,

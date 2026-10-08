@@ -266,7 +266,10 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   // `rename`/`relabel` claims files AND cameras (below): "rename Blue Eye
   // to Kitchen" names the target only by its label, so the verb is the
   // ONLY signal. A false-positive domain is cheap (see the rule comment).
-  { pattern: /\b(files?|documents?|docs?|pdf|photos?|images?|pictures?|notes?|folders?|receipts?|invoices?|csv|spreadsheets?|uploads?|attachments?|downloads?|scans?|presentations?|slides?|renam(e[sd]?|ing)|re-?label(s|l?ed|l?ing)?)\b/i, domains: ["files"] },
+  // Creation requests often name the output app or format instead of a file:
+  // "make an Excel workbook" and "prepare a PowerPoint deck" must reach the
+  // same writers as "create a spreadsheet" and "make presentation slides".
+  { pattern: /\b(files?|documents?|docs?|pdf|photos?|images?|pictures?|notes?|folders?|receipts?|invoices?|csv|spreadsheets?|excel|xlsx|workbooks?|power[ -]?point|pptx|decks?|uploads?|attachments?|downloads?|scans?|presentations?|slides?|renam(e[sd]?|ing)|re-?label(s|l?ed|l?ing)?)\b/i, domains: ["files"] },
   // WARP-2664 — the CLEANUP vocabulary. "what's cluttering my drive, get rid
   // of the junk" names no file, folder or document; without these verbs the
   // turn advertised the core four and none of the cleanup tools.

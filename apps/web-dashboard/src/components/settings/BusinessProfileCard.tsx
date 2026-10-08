@@ -190,7 +190,7 @@ export function BusinessProfileCard() {
               <span className="flex-1">
                 <input
                   id={`bp-${field}`}
-                  className="dp-input w-full"
+                  className="form-input w-full"
                   value={fields[field] ?? ""}
                   maxLength={600}
                   onChange={(e) =>

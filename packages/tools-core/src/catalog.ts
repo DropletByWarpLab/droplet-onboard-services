@@ -164,6 +164,7 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "create_pdf_report",
     "create_word_document",
     "create_spreadsheet",
+    "create_slide_deck",
     // WARP-2664 — cleanup: the read-only report and the two writes it feeds.
     "analyze_file_cleanup",
     "organize_files",
@@ -400,6 +401,7 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   create_pdf_report: "Write a finished PDF report and save it to your files",
   create_word_document: "Write a Word document you can keep editing",
   create_spreadsheet: "Build a spreadsheet from a table of data",
+  create_slide_deck: "Create a PDF or editable PowerPoint slide deck",
   analyze_file_cleanup: "See what is cluttering a folder before anything is touched",
   organize_files: "Sort a folder's files into tidy subfolders",
   delete_files: "Clear out a list of files you have agreed to delete",

@@ -69,6 +69,56 @@ describe("selectAdvertisedTools (spec §3)", () => {
     expect(r.advertised).toEqual(POOL);
   });
 
+  describe("document creation phrasing reaches file writers", () => {
+    const WRITERS = ["create_pdf_report", "create_slide_deck", "create_spreadsheet"];
+    const CREATION_POOL = [...POOL, ...WRITERS];
+
+    it.each([
+      "Make an Excel budget for the launch",
+      "Turn these numbers into an XLSX",
+      "Build a workbook from the quarterly sales",
+      "Prepare a PowerPoint about Droplet",
+      "Make a power point for the team",
+      "Export that as PPTX",
+      "Draft a pitch deck for investors",
+      "Create a PDF slide deck from this outline",
+    ])("%s advertises the actual creation tools on a fresh turn", (userMessage) => {
+      const r = selectAdvertisedTools({
+        mode: "domains",
+        userMessage,
+        pool: CREATION_POOL,
+        conversationToolNames: [],
+      });
+      expect(r.matchedDomains).toContain("files");
+      for (const writer of WRITERS) expect(r.advertised).toContain(writer);
+    });
+
+    it.each([
+      "That sounds excellent, thank you",
+      "Is the deckhand back today?",
+    ])("%s does not match format names inside other words", (userMessage) => {
+      const r = selectAdvertisedTools({
+        mode: "domains",
+        userMessage,
+        pool: CREATION_POOL,
+        conversationToolNames: [],
+      });
+      expect(r.matchedDomains).not.toContain("files");
+      for (const writer of WRITERS) expect(r.advertised).not.toContain(writer);
+    });
+
+    it("keeps creation tools outside a restricted caller's pool unavailable", () => {
+      const r = selectAdvertisedTools({
+        mode: "domains",
+        userMessage: "Make an Excel workbook and a PowerPoint deck",
+        pool: POOL,
+        conversationToolNames: [],
+      });
+      expect(r.matchedDomains).toContain("files");
+      for (const writer of WRITERS) expect(r.advertised).not.toContain(writer);
+    });
+  });
+
   /**
    * WARP-1921 — the rules must answer sentences a household member would
    * actually type, not the vocabulary already inside the pattern.

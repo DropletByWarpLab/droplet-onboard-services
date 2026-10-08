@@ -363,7 +363,7 @@ export const ChatMessage = memo(function ChatMessage({
                 aria-label="Edit message"
                 rows={Math.min(6, Math.max(2, editDraft.split("\n").length))}
                 autoFocus
-                className="dp-input type-subheadline w-full resize-y bg-surface-primary text-label-primary"
+                className="form-input type-subheadline w-full resize-y"
               />
               <div className="flex gap-2 justify-end">
                 <button
