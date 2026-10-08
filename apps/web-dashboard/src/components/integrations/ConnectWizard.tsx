@@ -412,7 +412,7 @@ function CredentialFlow({
                 // The one behavioural difference a secret gets. Everything else
                 // about the field arrives from the descriptor.
                 type={field.secret ? "password" : "text"}
-                className="dp-input mt-1.5 w-full"
+                className="form-input mt-1.5 w-full"
                 style={monoStyle}
                 autoComplete={field.secret ? "new-password" : "off"}
                 placeholder={field.secret ? secretPlaceholder(stored[field.name] === true) : ""}
@@ -579,10 +579,10 @@ function LanFlow({
             </p>
 
             <label className="block mt-5 type-footnote text-label-secondary">Server address</label>
-            <div className="mt-1.5 flex items-center gap-2 dp-input" style={monoStyle}>
-              <Server size={15} className="text-label-tertiary shrink-0" />
+            <div className="mt-1.5 flex items-center gap-2 form-input" style={monoStyle}>
+              <Server size={15} className="text-[var(--text-muted)] shrink-0" />
               <input
-                className="flex-1 bg-transparent outline-none text-label-primary placeholder:text-label-tertiary"
+                className="min-w-0 flex-1 bg-transparent outline-none text-inherit placeholder:text-[var(--text-muted)]"
                 placeholder={lan.hostPlaceholder}
                 value={host}
                 onChange={(e) => {
@@ -604,7 +604,7 @@ function LanFlow({
               <div className="mt-2">
                 <label className="block type-footnote text-label-secondary">Port</label>
                 <input
-                  className="dp-input mt-1.5 max-w-[140px]"
+                  className="form-input mt-1.5 max-w-[140px]"
                   style={monoStyle}
                   value={port}
                   onChange={(e) => setPort(e.target.value)}

@@ -42,7 +42,13 @@
   "v2-snippet": ["PASS", []],
   "v2-chat-precheck": ["PASS", []],
   "v2-chat-thread": ["PASS", []],
-  "v2-contacts": ["PASS", []]
+  "v2-contacts": ["PASS", []],
+  "v2-email-accounts": ["PASS", []],
+  "v2-route-writes": ["PASS", []],
+  "v2-runs": ["PASS", []],
+  "v2-routines": ["PASS", []],
+  "v2-memory": ["PASS", []],
+  "v2-memory-save": ["PASS", []]
  },
  "bad": {
   "seed-001": ["fail", []],
@@ -75,6 +81,12 @@
   "v2-guest-write": ["fail", []],
   "v2-guest-email": ["fail", []],
   "v2-member-email": ["fail", []],
-  "v2-wildcard": ["fail", []]
+  "v2-wildcard": ["fail", []],
+  "v2-email-accounts": ["fail", []],
+  "v2-route-writes": ["fail", []],
+  "v2-runs": ["fail", []],
+  "v2-routines": ["fail", []],
+  "v2-memory": ["fail", []],
+  "v2-memory-save": ["fail", []]
  }
 }

@@ -1,0 +1,3 @@
+{"id": "met-unscripted", "category": "selftest", "prior_tool_names": ["get_drive_health"], "turns": [{"role": "user", "content": "Are my drives healthy?"}], "expected": {"required": ["get_drive_health"], "final_contains": ["healthy"]}}
+{"id": "met-selection", "category": "selftest", "turns": [{"role": "user", "content": "Thanks!"}], "expected": {"required": ["list_reminders"]}}
+{"id": "met-budget", "category": "selftest", "turns": [{"role": "user", "content": "Find the retry doc."}], "expected": {"required": ["search_content"], "max_iterations": 1}}

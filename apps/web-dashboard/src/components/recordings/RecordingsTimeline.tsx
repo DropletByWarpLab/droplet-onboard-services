@@ -7,6 +7,7 @@ import type { RecordingDay, RecordingSegment, TimelineEntry } from "@/lib/types"
 export interface TimelineSelection { startSec: number; endSec: number }
 const SEC_IN_DAY = 86400;
 const MIN_VIEW = 5 * 60;
+const TICK_STEPS = [60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600, 43200, SEC_IN_DAY];
 interface Viewport { start: number; span: number }
 
 interface Props {
@@ -22,6 +23,17 @@ interface Props {
   selection?: TimelineSelection | null;
   onSelectionChange?: (next: TimelineSelection | null) => void;
   onScrubTo?: (secOfDay: number) => void;
+  /** Open an event's clip instead of seeking the continuous archive. */
+  onSelectEvent?: (entry: TimelineEntry) => void;
+  selectedEventId?: string | null;
+  /** Camera playback scrolls through time; the archive retains scroll-to-zoom. */
+  wheelMode?: "zoom" | "pan";
+  /** Initial/day-change zoom. Omit to retain the archive's whole-day view. */
+  initialSpanSec?: number;
+  /** Center an explicit seek request, retaining the user's current zoom. */
+  focusSec?: number | null;
+  /** Change this to repeat a seek request at the same timestamp. */
+  focusKey?: number | string;
   nowSecOfDay?: number | null;
   retentionOldestDay?: string | null;
 }
@@ -53,6 +65,7 @@ export function zoomTimelineViewport(view: Viewport, factor: number, anchor: num
 
 export function RecordingsTimeline({ day, summary, timeline, recordings, selectedHour,
   playheadFraction, playheadSec, onSelectHour, selection, onSelectionChange, onScrubTo,
+  onSelectEvent, selectedEventId = null, wheelMode = "zoom", initialSpanSec, focusSec, focusKey,
   nowSecOfDay = null, retentionOldestDay = null }: Props) {
   const [year, month, date] = day.split("-").map(Number);
   const dayStart = new Date(year, month - 1, date).getTime() / 1000;
@@ -62,12 +75,37 @@ export function RecordingsTimeline({ day, summary, timeline, recordings, selecte
     const local = new Date((dayStart + sec) * 1000);
     return `${String(local.getHours()).padStart(2, "0")}:${String(local.getMinutes()).padStart(2, "0")}`;
   };
-  const [view, setView] = useState<Viewport>({ start: 0, span: SEC_IN_DAY });
+  const selectedEvent = selectedEventId === null ? undefined : timeline.find((event) => event.sourceId === selectedEventId && event.timestamp >= dayStart && event.timestamp < dayStart + daySeconds);
+  const focusTarget = focusSec ?? (selectedEvent ? selectedEvent.timestamp - dayStart : null);
+  const initialSpan = Math.max(MIN_VIEW, Math.min(daySeconds, initialSpanSec ?? daySeconds));
+  const [view, setView] = useState<Viewport>(() => ({ start: focusTarget === null ? 0 : Math.max(0, Math.min(daySeconds - initialSpan, focusTarget - initialSpan / 2)), span: initialSpan }));
   const [drag, setDrag] = useState<TimelineSelection | null>(null);
+  const [rulerWidth, setRulerWidth] = useState(1000);
   const gridRef = useRef<HTMLDivElement | null>(null);
-  const originRef = useRef<{ x: number; sec: number; pointerId: number } | null>(null);
+  const originRef = useRef<{ x: number; sec: number; pointerId: number; view: Viewport; width: number; moved: boolean } | null>(null);
   const dragRef = useRef<TimelineSelection | null>(null);
-  useEffect(() => { setView({ start: 0, span: daySeconds }); setDrag(null); originRef.current = null; dragRef.current = null; }, [day, daySeconds]);
+  const previousViewConfig = useRef({ day, daySeconds, initialSpan });
+  useEffect(() => {
+    const ruler = gridRef.current;
+    if (!ruler) return;
+    const measure = (width: number) => { if (width > 0) setRulerWidth(width); };
+    measure(ruler.getBoundingClientRect().width);
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(([entry]) => { if (entry) measure(entry.contentRect.width); });
+    observer.observe(ruler);
+    return () => observer.disconnect();
+  }, []);
+  useEffect(() => {
+    const previous = previousViewConfig.current;
+    const reset = previous.day !== day || previous.daySeconds !== daySeconds || previous.initialSpan !== initialSpan;
+    previousViewConfig.current = { day, daySeconds, initialSpan };
+    setView((current) => {
+      const span = reset ? initialSpan : current.span;
+      const start = focusTarget === null ? reset ? 0 : current.start : Math.max(0, Math.min(daySeconds - span, focusTarget - span / 2));
+      return current.start === start && current.span === span ? current : { start, span };
+    });
+    setDrag(null); originRef.current = null; dragRef.current = null;
+  }, [day, daySeconds, initialSpan, focusTarget, focusKey, selectedEventId]);
 
   const entry = summary.find((d) => d.day === day);
   const hours = useMemo(() => Array.from({ length: 24 }, (_, hour) => {
@@ -105,20 +143,27 @@ export function RecordingsTimeline({ day, summary, timeline, recordings, selecte
       e.preventDefault();
       const rect = grid!.getBoundingClientRect();
       if (!rect.width) return;
-      if (e.shiftKey) setView((v) => ({ ...v, start: Math.max(0, Math.min(daySeconds - v.span, v.start + Math.sign(e.deltaY || e.deltaX) * v.span / 8)) }));
-      else setView((v) => zoomTimelineViewport(v, e.deltaY < 0 ? 0.75 : 4 / 3, (e.clientX - rect.left) / rect.width, daySeconds));
+      const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+      if (!delta) return;
+      if (wheelMode === "pan" && !e.ctrlKey && !e.metaKey) {
+        // WheelEvent deltas may be pixels, lines, or pages. Keep trackpads smooth.
+        const pixels = delta * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? rect.width : 1);
+        setView((v) => ({ ...v, start: Math.max(0, Math.min(daySeconds - v.span, v.start + pixels / rect.width * v.span)) }));
+      } else if (wheelMode === "zoom" && e.shiftKey) {
+        setView((v) => ({ ...v, start: Math.max(0, Math.min(daySeconds - v.span, v.start + Math.sign(delta) * v.span / 8)) }));
+      } else setView((v) => zoomTimelineViewport(v, delta < 0 ? 0.75 : 4 / 3, (e.clientX - rect.left) / rect.width, daySeconds));
     }
     grid.addEventListener("wheel", wheel, { passive: false });
     return () => grid.removeEventListener("wheel", wheel);
-  }, [daySeconds]);
+  }, [daySeconds, wheelMode]);
 
-  const tickStep = view.span > 12 * 3600 ? 3 * 3600 : view.span > 3 * 3600 ? 3600 : view.span > 3600 ? 15 * 60 : view.span > 15 * 60 ? 5 * 60 : 60;
+  const tickStep = TICK_STEPS.find((step) => step / view.span * rulerWidth >= 70) ?? SEC_IN_DAY;
   const ticks = [];
   for (let sec = Math.ceil(view.start / tickStep) * tickStep; sec <= view.start + view.span; sec += tickStep) ticks.push(sec);
   const events = useMemo(() => {
     const [y, m, d] = day.split("-").map(Number);
     const after = new Date(y, m - 1, d).getTime() / 1000, before = new Date(y, m - 1, d + 1).getTime() / 1000;
-    return timeline.filter((t) => t.timestamp >= after && t.timestamp < before).map((t) => ({ ...t, sec: t.timestamp - after }));
+    return timeline.filter((t) => t.timestamp >= after && t.timestamp < before).map((entry) => ({ entry, sec: entry.timestamp - after }));
   }, [timeline, day]);
   const ranges = useMemo(() => recordings?.map((s) => ({ ...s, start: Math.max(0, s.startTime - dayStart), end: Math.min(daySeconds, s.endTime - dayStart) })).filter((s) => s.end > s.start), [recordings, dayStart, daySeconds]);
   const recordedRanges = useMemo(() => ranges === undefined ? undefined : mergeRanges(ranges), [ranges]);
@@ -165,11 +210,29 @@ export function RecordingsTimeline({ day, summary, timeline, recordings, selecte
             else return;
             e.preventDefault(); if (target !== null) jump(target);
           }}
-          onPointerDown={(e) => { if (e.button !== 0) return; dragRef.current = null; const sec = xToSec(e.clientX); if (sec === null) return; originRef.current = { x: e.clientX, sec, pointerId: e.pointerId }; e.currentTarget.setPointerCapture?.(e.pointerId); }}
-          onPointerMove={(e) => { const origin = originRef.current; if (!origin || Math.abs(e.clientX - origin.x) < 4) return; const sec = xToSec(e.clientX); if (sec === null) return; const next = { startSec: clamp(origin.sec), endSec: clamp(sec) }; dragRef.current = next; setDrag(next); }}
+          onPointerDown={(e) => {
+            if (e.button !== 0) return;
+            dragRef.current = null;
+            const sec = xToSec(e.clientX), rect = gridRef.current?.getBoundingClientRect();
+            if (sec === null || !rect?.width) return;
+            originRef.current = { x: e.clientX, sec, pointerId: e.pointerId, view, width: rect.width, moved: false };
+            e.currentTarget.setPointerCapture?.(e.pointerId);
+          }}
+          onPointerMove={(e) => {
+            const origin = originRef.current;
+            if (!origin || origin.pointerId !== e.pointerId || (!origin.moved && Math.abs(e.clientX - origin.x) < 4)) return;
+            origin.moved = true;
+            if (!onSelectionChange) {
+              setView({ ...origin.view, start: Math.max(0, Math.min(daySeconds - origin.view.span, origin.view.start - (e.clientX - origin.x) / origin.width * origin.view.span)) });
+              return;
+            }
+            const sec = xToSec(e.clientX); if (sec === null) return;
+            const next = { startSec: clamp(origin.sec), endSec: clamp(sec) }; dragRef.current = next; setDrag(next);
+          }}
           onPointerUp={(e) => {
-            const origin = originRef.current; if (!origin) return; originRef.current = null; e.currentTarget.releasePointerCapture?.(e.pointerId);
+            const origin = originRef.current; if (!origin || origin.pointerId !== e.pointerId) return; originRef.current = null; e.currentTarget.releasePointerCapture?.(e.pointerId);
             const range = dragRef.current; dragRef.current = null; setDrag(null);
+            if (origin.moved && !onSelectionChange) return;
             if (!range) { jump(origin.sec); return; }
             const startSec = Math.min(range.startSec, range.endSec), endSec = Math.max(range.startSec, range.endSec);
             if (endSec - startSec >= 1) onSelectionChange?.({ startSec, endSec }); jump(startSec);
@@ -180,7 +243,14 @@ export function RecordingsTimeline({ day, summary, timeline, recordings, selecte
             aria-valuetext={currentSec === null ? "No time selected" : formatRuler(currentSec)}
             className="absolute inset-0 pointer-events-none rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--brand)]" />
           <div data-testid="time-axis" className="absolute inset-x-0 top-0 h-7 border-b border-[var(--border)] pointer-events-none">
-            {ticks.map((sec) => <span key={sec} title={new Date((dayStart + sec) * 1000).toLocaleTimeString([], { timeZoneName: "short" })} className="absolute type-caption-2 text-[color:var(--text-muted)] font-mono" style={{ left: `${left(sec)}%`, transform: sec === daySeconds ? "translateX(-100%)" : sec === 0 ? "none" : "translateX(-50%)" }}>{formatRuler(sec)}<span className="block h-2 w-px mx-auto bg-[var(--border)]" /></span>)}
+            {ticks.map((sec) => {
+              const position = left(sec) / 100 * rulerWidth;
+              const transform = position < 24 ? "none" : position > rulerWidth - 24 ? "translateX(-100%)" : "translateX(-50%)";
+              return <span key={sec} className="absolute top-0" style={{ left: `${left(sec)}%` }}>
+                <span data-testid="time-tick-label" title={new Date((dayStart + sec) * 1000).toLocaleTimeString([], { timeZoneName: "short" })} className="absolute whitespace-nowrap type-caption-2 text-[color:var(--text-muted)] font-mono" style={{ transform }}>{formatRuler(sec)}</span>
+                <span className="absolute top-4 h-2 w-px bg-[var(--border)]" />
+              </span>;
+            })}
           </div>
           {hours.filter((h) => visible(h.start, h.end)).map((h) => (
             <div key={h.hour} data-testid={`hour-cell-${h.hour}`} data-has-footage={h.duration > 0 ? "true" : "false"} data-coverage={h.coverage.toFixed(3)} data-future={h.future ? "true" : "false"}
@@ -195,7 +265,11 @@ export function RecordingsTimeline({ day, summary, timeline, recordings, selecte
             <div key={h.hour} data-testid={`motion-band-${h.hour}`} className="absolute top-[60px] bg-system-orange opacity-70 pointer-events-none" style={{ left: `${left(h.start)}%`, width: `${width(h.start, h.end)}%`, height: `${Math.max(6, h.motion / motionMax * 20)}%` }} />
           )) : recordedRanges?.filter((s) => visible(s.start, s.end)).map((s) => <span key={s.start} data-testid="recorded-segment" title={`Recorded ${formatRuler(s.start)} – ${formatRuler(s.end)}`} className="absolute top-8 h-6 bg-[var(--brand)] opacity-70 pointer-events-none" style={{ left: `${left(s.start)}%`, width: `${width(s.start, s.end)}%`, minWidth: 1 }} />)}
           {motionRanges.filter((s) => visible(s.start, s.end)).map((s) => <span key={s.start} data-testid="motion-segment" className="absolute top-[68px] h-4 bg-system-orange pointer-events-none" style={{ left: `${left(s.start)}%`, width: `${width(s.start, s.end)}%`, minWidth: 2 }} />)}
-          {events.filter((t) => visible(t.sec, t.sec + 1)).map((t, i) => <button key={`${t.sourceId}-${t.timestamp}-${i}`} type="button" data-testid="motion-blip" aria-label={`${t.label || t.classType} at ${formatRuler(t.sec)}`} title={`${t.label || t.classType}${t.zone ? ` · ${t.zone}` : ""} · ${new Date(t.timestamp * 1000).toLocaleTimeString([], { timeZoneName: "short" })}`} className="absolute top-[102px] w-2 h-4 rounded-sm bg-system-orange z-20" style={{ left: `calc(${left(t.sec)}% - 4px)` }} onPointerDown={(e) => e.stopPropagation()} onClick={() => jump(t.sec)} />)}
+          {events.filter((t) => visible(t.sec, t.sec + 1)).map(({ entry: event, sec }, i) => <button key={`${event.sourceId}-${event.timestamp}-${i}`} type="button" data-testid="motion-blip"
+            aria-label={`${event.label || event.classType} at ${formatRuler(sec)}`} aria-pressed={selectedEventId === event.sourceId}
+            title={`${event.label || event.classType}${event.zone ? ` · ${event.zone}` : ""} · ${new Date(event.timestamp * 1000).toLocaleTimeString([], { timeZoneName: "short" })}`}
+            className={`absolute top-[102px] w-2 h-4 rounded-sm bg-system-orange z-20 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--brand)] ${selectedEventId === event.sourceId ? "ring-2 ring-[var(--brand)] ring-offset-2 ring-offset-[var(--inset)]" : ""}`}
+            style={{ left: `calc(${left(sec)}% - 4px)` }} onPointerDown={(e) => e.stopPropagation()} onClick={() => onSelectEvent ? onSelectEvent(event) : jump(sec)} />)}
           {nowSecOfDay !== null && <div data-testid="now-marker" title="Now" className="absolute top-6 bottom-0 w-px bg-[var(--text-muted)] pointer-events-none z-30" style={{ left: `${left(nowSecOfDay)}%` }} />}
           {currentSec !== null && currentSec >= view.start && currentSec <= view.start + view.span && <div data-testid="playhead" className="absolute top-5 bottom-0 w-0.5 bg-[var(--brand)] pointer-events-none z-30" style={{ left: `${left(currentSec)}%` }}><span className="absolute -top-1 -left-1 w-2.5 h-2.5 rotate-45 bg-[var(--brand)]" /></div>}
           {selectionView && selectionEnd > selectionStart && visible(selectionStart, selectionEnd) && <div data-testid="selection-band" className="absolute top-6 bottom-0 pointer-events-none z-20 bg-[var(--brand-subtle)] border-x-2 border-[var(--brand)]" style={{ left: `${left(selectionStart)}%`, width: `${width(selectionStart, selectionEnd)}%` }} />}
@@ -205,7 +279,7 @@ export function RecordingsTimeline({ day, summary, timeline, recordings, selecte
         <span><span className="inline-block w-2 h-2 bg-[var(--brand)] mr-1" />Footage kept <span className="inline-block w-2 h-2 bg-system-orange ml-3 mr-1" />Motion / events <span className="ml-3">Empty space: nothing kept</span></span>
         <span className="font-mono">{formatRuler(view.start)} – {formatRuler(view.start + view.span)}</span>
       </div>
-      <p className="type-caption-1 mt-2 text-[color:var(--text-muted)]">Click to seek · scroll to zoom · Shift+scroll to pan · drag to select a range · click an event to jump</p>
+      <p className="type-caption-1 mt-2 text-[color:var(--text-muted)]">Click to seek · {wheelMode === "pan" ? "scroll to pan · Ctrl/⌘+scroll to zoom" : "scroll to zoom · Shift+scroll to pan"} · {onSelectionChange ? "drag to select a range" : "drag to pan"} · {onSelectEvent ? "click an event to play its clip" : "click an event to jump"}</p>
     </div>
   );
 }
