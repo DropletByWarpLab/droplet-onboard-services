@@ -1152,6 +1152,60 @@ else
 fi
 
 # =============================================================================
+# Test 26: HA-3 — the hosted-app TLS origin is relay-only, bounded and does
+# not log single-use exchange credentials. Removing ANY invariant is a failure.
+# =============================================================================
+_hosted_exit=0
+_hosted_output=$(python3 - "$COMPOSE_FILE" "$REPO_ROOT/docker/nginx/nginx.conf" <<'PYEOF' 2>&1
+import re, sys, yaml
+from pathlib import Path
+compose = yaml.safe_load(Path(sys.argv[1]).read_text(encoding='utf-8'))
+services = compose['services']
+ports = services['gateway'].get('ports', [])
+assert '8443:8443' in ports, 'gateway must publish hosted TLS :8443'
+assert not services['sandbox'].get('ports'), 'app processes must never publish a port'
+env = services['orchestrator'].get('environment', [])
+assert 'SANDBOX_PROCESS_SUPERVISION=${SANDBOX_PROCESS_SUPERVISION:-0}' in env, 'orchestrator supervision gate must match sandbox'
+text = re.sub(r'#[^\n]*', '', Path(sys.argv[2]).read_text(encoding='utf-8'))
+starts = list(re.finditer(r'server\s*\{\s*listen\s+8443\s+ssl\s*;', text))
+assert len(starts) == 1, 'exactly one hosted TLS server is required'
+start = starts[0].start()
+depth = 0
+seen = False
+for end in range(start, len(text)):
+    if text[end] == '{': depth += 1; seen = True
+    elif text[end] == '}':
+        depth -= 1
+        if seen and depth == 0: break
+block = text[start:end + 1]
+assert len(re.findall(r'\blocation\s+', block)) == 1 and 'location / {' in block, 'hosted listener serves only its relay location'
+assert len(re.findall(r'\bproxy_pass\s+', block)) == 1, 'only one hosted upstream is allowed'
+assert '"orchestrator:3000"' in block and 'proxy_pass $internal_scheme://$upstream_hosted_orchestrator;' in block, 'hosted traffic must preserve internal mTLS policy'
+for directive in ('access_log off;', 'error_log /dev/null;', 'proxy_buffering off;', 'proxy_request_buffering off;',
+                  'client_max_body_size 32m;', 'proxy_read_timeout 60s;', 'proxy_set_header X-Forwarded-Port 8443;',
+                  'proxy_set_header X-Droplet-Hosted-Ingress 8443;', 'proxy_set_header Authorization "";',
+                  'proxy_set_header Upgrade "";', 'include /etc/nginx/cipher-profile.active.conf;'):
+    assert directive in block, 'missing hosted invariant: ' + directive
+assert 'rewrite ^/(.*)$ /api/hosted/relay/$1 break;' in block, 'hosted origin must route only through authenticated relay'
+assert 'proxy_set_header X-Droplet-Hosted-Ingress "";' in text, 'dashboard ingress must overwrite forged hosted marker'
+imports = re.findall(r'location\s*=\s*/api/workspace/import\s*\{([^}]*)\}', text)
+assert len(imports) == 1, 'exactly one dashboard archive import location is required'
+for directive in ('client_max_body_size 257m;', 'proxy_request_buffering off;',
+                  'set $upstream_orchestrator "orchestrator:3000";', 'proxy_pass $internal_scheme://$upstream_orchestrator;',
+                  'proxy_set_header Authorization $http_authorization;', 'proxy_set_header Host $host;',
+                  'proxy_set_header X-Forwarded-Port $server_port;', 'proxy_set_header X-Droplet-Hosted-Ingress "";',
+                  'proxy_read_timeout 360s;', 'proxy_send_timeout 360s;'):
+    assert directive in imports[0], 'missing archive import invariant: ' + directive
+PYEOF
+) || _hosted_exit=$?
+if [ "$_hosted_exit" -eq 0 ]; then
+  pass "hosted TLS :8443 is relay-only, credential-safe and bounded (HA-3)"
+else
+  fail "hosted TLS origin security invariants failed (HA-3)"
+  printf '%s\n' "$_hosted_output" >&2
+fi
+
+# =============================================================================
 # Summary
 # =============================================================================
 printf "\n"

@@ -516,6 +516,8 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   // WARP-2180 — background runs. The route admits the mcp principal on
   // behalf of the named chat user (requireRoleOrMcpService).
   { tool: "start_agent_run", client: "orchestrator", hops: [admit("post", "/api/agent-runs")] },
+  { tool: "list_hosted_apps", client: "orchestrator", hops: [admit("get", "/api/hosted")] },
+  { tool: "hosted_app_logs", client: "orchestrator", hops: [admit("get", "/api/hosted/:slug/logs")] },
   // WARP-3302 — `run_id` reads one run; cancel stops one. Owner-scoped by the route guard.
   { tool: "list_agent_runs", client: "orchestrator", hops: [admit("get", "/api/agent-runs"), admit("get", "/api/agent-runs/:id")] },
   { tool: "cancel_agent_run", client: "orchestrator", hops: [admit("post", "/api/agent-runs/:id/cancel")] },

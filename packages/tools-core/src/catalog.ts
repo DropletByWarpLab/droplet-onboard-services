@@ -85,7 +85,8 @@ export type ToolDomain =
   // WARP-2896 (ADR-056 §6.2) — the workshop's workspace tools. Its own
   // domain: they are reachable inside a workshop run only, and the run
   // worker admits them structurally (agent-run-worker WORKSPACE_TOOLS).
-  | "workspace";
+  | "workspace"
+  | "hosted_apps";
 
 export interface ToolCatalogEntry {
   name: string;
@@ -282,6 +283,7 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
   team_chat: ["team_chat_send_message", "team_chat_send_meeting_invite"],
   // WARP-2180 — durable background runs.
   agent_runs: ["start_agent_run", "list_agent_runs", "cancel_agent_run"],
+  hosted_apps: ["list_hosted_apps", "hosted_app_logs"],
   routines: ["routine_draft", "routine_list", "routine_run"],
   workspace: [
     "workspace_read",
@@ -554,6 +556,8 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   workspace_commit: "Save a version of the extension being built",
   workspace_run: "Run the extension's tests, build or checks",
   workspace_propose: "Hand the finished extension to you for review",
+  list_hosted_apps: "Show the web apps hosted on your Droplet",
+  hosted_app_logs: "Check why a hosted app is having trouble",
 };
 
 /** Humanized fallback for a tool with no home description yet — turns

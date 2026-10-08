@@ -23,10 +23,13 @@
  *     than vanishing and leaving the owner no way back but a new version.
  */
 import { useEffect, useRef, useState } from "react";
-import { Puzzle } from "lucide-react";
+import { AppWindow, Puzzle } from "lucide-react";
 import { Badge, Card, Row } from "@/components/shell/primitives";
 import type { ExtensionListItem } from "@/lib/types";
 import { STATUS_BADGE, displayVersion, explainExtensionError, explainLifecycleFailure } from "./copy";
+import { HostedAppOpen } from "@/components/hosted/AppActions";
+import { AppGrantDialog } from "@/components/hosted/AppGrantDialog";
+import { AppUninstallDialog } from "@/components/hosted/AppUninstallDialog";
 
 export interface InstalledListProps {
   extensions: ExtensionListItem[];
@@ -37,6 +40,7 @@ export interface InstalledListProps {
   busy: string | null;
   onSetEnabled: (slug: string, enabled: boolean) => void;
   onUninstall: (slug: string) => void;
+  onRefresh?: () => Promise<void>;
 }
 
 function signerLabel(signer: string): string {
@@ -46,6 +50,8 @@ function signerLabel(signer: string): string {
 export function InstalledList(props: InstalledListProps) {
   const [confirmingUninstall, setConfirmingUninstall] = useState<string | null>(null);
   const confirmRef = useRef<HTMLButtonElement | null>(null);
+  const [appDialog, setAppDialog] = useState<{ slug: string; kind: "grants" | "uninstall" | "delete-data" } | null>(null);
+  const appTrigger = useRef<HTMLElement | null>(null);
   // Uninstall swaps its own button for Confirm / Keep: put focus on Confirm so
   // a keyboard or screen-reader user is not left on a button that is gone.
   useEffect(() => {
@@ -84,11 +90,13 @@ export function InstalledList(props: InstalledListProps) {
   }
 
   return (
+    <>
     <Card>
       <div className="rows">
         {shown.map((ext) => {
           const badge = STATUS_BADGE[ext.status];
           const busy = props.busy === ext.id;
+          const app = ext.readback?.kind === "app";
           const lines = ext.readback?.lines ?? [];
           const sub = [
             ext.version ? `version ${displayVersion(ext.version.version)} · ${signerLabel(ext.version.signer)}` : "no signed version",
@@ -100,13 +108,16 @@ export function InstalledList(props: InstalledListProps) {
           return (
             <Row
               key={ext.id}
-              icon={<Puzzle size={15} />}
+              icon={app ? <AppWindow size={15} /> : <Puzzle size={15} />}
               iconBrand
               title={ext.id}
               sub={sub}
               right={
                 <span style={{ display: "inline-flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                  <Badge kind={badge.kind}>{badge.label}</Badge>
+                  <Badge kind={badge.kind}>{app && ext.status === "installed" ? "Starting" : badge.label}</Badge>
+                  {app && ext.status === "live" && <HostedAppOpen slug={ext.id} disabled={busy} />}
+                  {app && props.canManage && <button type="button" className="btn sm" disabled={busy} aria-label={`Access for ${ext.id}`}
+                    onClick={(event) => { appTrigger.current = event.currentTarget; setAppDialog({ slug: ext.id, kind: "grants" }); }}>Access</button>}
                   {props.canManage ? (
                     confirmingUninstall === ext.id ? (
                       <>
@@ -133,7 +144,7 @@ export function InstalledList(props: InstalledListProps) {
                         </button>
                       </>
                     ) : ext.status === "uninstalled" ? (
-                      <button
+                      <><button
                         type="button"
                         className="btn sm"
                         disabled={busy || !ext.version}
@@ -142,6 +153,8 @@ export function InstalledList(props: InstalledListProps) {
                       >
                         Reinstall
                       </button>
+                      {app && <button type="button" className="btn ghost sm" disabled={busy} aria-label={`Remove saved data for ${ext.id}`}
+                        onClick={(event) => { appTrigger.current = event.currentTarget; setAppDialog({ slug: ext.id, kind: "delete-data" }); }}>Remove saved data</button>}</>
                     ) : (
                       <>
                         {ext.status === "disabled" || ext.status === "failed" ? (
@@ -171,7 +184,10 @@ export function InstalledList(props: InstalledListProps) {
                           className="btn ghost sm"
                           disabled={busy}
                           aria-label={`Uninstall ${ext.id}`}
-                          onClick={() => setConfirmingUninstall(ext.id)}
+                          onClick={(event) => {
+                            if (app) { appTrigger.current = event.currentTarget; setAppDialog({ slug: ext.id, kind: "uninstall" }); }
+                            else setConfirmingUninstall(ext.id);
+                          }}
                         >
                           Uninstall
                         </button>
@@ -185,5 +201,10 @@ export function InstalledList(props: InstalledListProps) {
         })}
       </div>
     </Card>
+    {appDialog?.kind === "grants" && <AppGrantDialog key={appDialog.slug} slug={appDialog.slug} triggerRef={appTrigger}
+      onClose={() => setAppDialog(null)} onSaved={props.onRefresh ?? (async () => undefined)} />}
+    {appDialog && appDialog.kind !== "grants" && <AppUninstallDialog key={appDialog.slug} slug={appDialog.slug} triggerRef={appTrigger} dataOnly={appDialog.kind === "delete-data"}
+      onClose={() => setAppDialog(null)} onDone={props.onRefresh ?? (async () => undefined)} />}
+    </>
   );
 }

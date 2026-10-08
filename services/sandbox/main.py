@@ -67,12 +67,14 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 from starlette.types import Receive, Scope, Send
 
+import archive_import
 import connector_draft
 import extensions
 import gitstore
@@ -554,8 +556,8 @@ async def stop_extension(slug: str):
 
 
 @app.delete("/extensions/{slug}", dependencies=[Depends(_processes_enabled)])
-async def uninstall_extension(slug: str):
-    return await _ext_thread(extensions.uninstall, slug)
+async def uninstall_extension(slug: str, deleteData: bool = False):
+    return await _ext_thread(extensions.uninstall, slug, delete_data=deleteData)
 
 
 # ── Slice G (WARP-2896): workspaces + the git store ────────────────────────
@@ -642,6 +644,34 @@ async def list_templates():
 @app.post("/workspaces")
 async def create_workspace(req: CreateWorkspaceRequest):
     return await _in_thread(gitstore.create_workspace, req.id, req.template, req.author.pair())
+
+
+@app.post("/workspaces/{workspace_id}/import", dependencies=[Depends(_processes_enabled)])
+async def import_workspace(workspace_id: str, request: Request, format: str):
+    import anyio
+
+    if format not in {"zip", "tar.gz"}:
+        raise HTTPException(status_code=400, detail="archive format must be zip or tar.gz")
+    _store(gitstore.check_id, workspace_id)
+    try:
+        author = WorkspaceAuthor(name=unquote(request.headers.get("x-droplet-author-name", "")),
+                                 email=unquote(request.headers.get("x-droplet-author-email", "")))
+    except ValidationError as exc:
+        raise HTTPException(status_code=400, detail="archive author is invalid") from exc
+    gitstore.ensure_dirs()
+    with tempfile.SpooledTemporaryFile(max_size=1024 * 1024, dir=gitstore.WORK_DIR) as spool:
+        size = 0
+        try:
+            with anyio.fail_after(archive_import.IMPORT_TIMEOUT_S):
+                async for chunk in request.stream():
+                    size += len(chunk)
+                    if size > archive_import.MAX_ARCHIVE_BYTES:
+                        raise HTTPException(status_code=413, detail="archive exceeds 256 MiB")
+                    spool.write(chunk)
+        except TimeoutError as exc:
+            raise HTTPException(status_code=504, detail="archive upload timed out") from exc
+        spool.seek(0)
+        return await _in_thread(archive_import.import_workspace, workspace_id, format, spool, author.pair())
 
 
 @app.get("/workspaces/{workspace_id}")

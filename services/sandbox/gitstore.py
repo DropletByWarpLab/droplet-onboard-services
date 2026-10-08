@@ -352,12 +352,16 @@ def export_commit(workspace_id: str, commit: str, tree: str, dest: Path) -> None
     actual = cp.stdout.strip()
     if actual != tree:
         raise StoreError(409, f"commit {commit[:12]} has tree {actual[:12]}, the signed statement names {tree[:12]}")
-    archive = git(["archive", "--format=tar", commit], bare, binary=True, timeout=120)
-    if archive.returncode != 0:
-        raise StoreError(500, "could not export the commit")
-    dest.mkdir(parents=True, exist_ok=False)
-    with tarfile.open(fileobj=io.BytesIO(archive.stdout), mode="r:") as tar:
-        tar.extractall(dest, filter="data")
+    # Imported vendored trees can exceed the container's memory ceiling.
+    # Reuse the bounded disk spool rather than capture the tar in memory.
+    archive, _, _ = _git_stdout_spooled(["archive", "--format=tar", commit], bare,
+                                       1024 * 1024 * 1024 + 64 * 1024 * 1024, 120)
+    try:
+        dest.mkdir(parents=True, exist_ok=False)
+        with tarfile.open(fileobj=archive, mode="r|") as tar:
+            tar.extractall(dest, filter="data")
+    finally:
+        archive.close()
 
 
 # ── connector drafts: export + readback (WARP-2899) ────────────────────────

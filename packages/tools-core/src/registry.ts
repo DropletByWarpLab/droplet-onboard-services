@@ -248,6 +248,8 @@ import findDashboardPage from "./handlers/dashboard/find-dashboard-page.js";
 import openDashboardPage from "./handlers/dashboard/open-dashboard-page.js";
 // WARP-2180: durable background runs (epic WARP-2176)
 import startAgentRun from "./handlers/agent-runs/start-agent-run.js";
+import listHostedApps from "./handlers/hosted-apps/list-hosted-apps.js";
+import hostedAppLogs from "./handlers/hosted-apps/hosted-app-logs.js";
 import listAgentRuns from "./handlers/agent-runs/list-agent-runs.js";
 import cancelAgentRun from "./handlers/agent-runs/cancel-agent-run.js";
 import routineDraft from "./handlers/routines/routine-draft.js";
@@ -461,6 +463,8 @@ const allTools: Tool[] = [
   // WARP-2180: background agent runs — start is Tier-2 (unattended compute),
   // list is Tier-1. The worker keeps start_agent_run OUT of a run's pool.
   startAgentRun,
+  listHostedApps,
+  hostedAppLogs,
   listAgentRuns,
   // WARP-3302: stop one run (write, no prompt: it only stops work). Checking
   // one run is list_agent_runs({run_id}). The worker keeps cancel out of runs.

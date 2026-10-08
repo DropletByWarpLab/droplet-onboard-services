@@ -3731,6 +3731,10 @@ export interface RuntimeToolsResponse {
 
 /** The promote readback, derived server-side from provides/resources/egress only. */
 export interface ExtensionReadback {
+  kind?: "extension" | "app";
+  runtime?: "node20" | "python312" | "static";
+  http?: { health: string; dir?: string; spa?: boolean };
+  proposedGrantRoles?: string[];
   tools: { total: number; startsAsWriteWithConfirmation: number; proposedReadOnly: number };
   routineDrafts: number;
   proposedGrants: number;

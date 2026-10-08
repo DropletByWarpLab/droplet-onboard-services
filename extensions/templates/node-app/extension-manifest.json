@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "node-app",
+  "name": "Node App",
+  "version": "0.1.0",
+  "kind": "app",
+  "runtime": "node20",
+  "http": {
+    "health": "/healthz"
+  },
+  "provides": {
+    "tools": [],
+    "routineDrafts": [],
+    "proposedGrants": []
+  },
+  "resources": {
+    "memoryMb": 128,
+    "processes": 1
+  },
+  "egress": "none",
+  "entrypoint": "server.mjs"
+}

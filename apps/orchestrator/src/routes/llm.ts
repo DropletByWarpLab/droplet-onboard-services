@@ -2949,6 +2949,19 @@ export function createLlmRouter(prisma: PrismaClient): Router {
   //
   // All three endpoints scope by `req.user.username` — owner/admin do
   // NOT get visibility into other users' chats (privacy boundary).
+  router.post("/llm/conversations", requireRole("owner", "admin", "family", "guest"), async (req, res, next) => {
+    try {
+      const userId = (req as AuthedRequest).user?.username;
+      if (!userId) { res.status(401).json({ error: "auth_required" }); return; }
+      const parsed = z.object({ title: z.string().trim().min(1).max(120).optional() }).strict().safeParse(req.body);
+      if (!parsed.success) { res.status(400).json({ error: "Invalid conversation" }); return; }
+      const model = await resolveActiveModel(prisma);
+      if (!model) { res.status(400).json({ error: "No active model" }); return; }
+      const conversation = await persistence.ensureConversation({ conversationId: null, userId, model, firstUserContent: parsed.data.title ?? null });
+      res.status(201).json({ id: conversation.id });
+    } catch (err) { next(err); }
+  });
+
   router.get("/llm/conversations", async (req, res, next) => {
     try {
       const userId = (req as AuthedRequest).user?.username;

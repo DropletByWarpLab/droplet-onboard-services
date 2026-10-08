@@ -16,6 +16,7 @@
  * ToolSpec walker) so the routes are testable without a container.
  */
 import { pipeline, Readable, Transform } from "node:stream";
+import { createReadStream } from "node:fs";
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
 import { parseConnectorDraftFacts, type ConnectorDraftFacts } from "./connector-draft.js";
@@ -92,6 +93,8 @@ export class WorkspaceSandboxError extends Error {
 export interface WorkspaceSandboxClient {
   templates(): Promise<string[]>;
   create(id: string, template: string | null, author: WorkspaceAuthor): Promise<SandboxWorkspaceStatus>;
+  /** Human archive upload; streamed from a temporary file and never executed. */
+  importArchive?(id: string, format: "zip" | "tar.gz", author: WorkspaceAuthor, file: string, bytes: number): Promise<SandboxWorkspaceStatus>;
   status(id: string): Promise<SandboxWorkspaceStatus>;
   remove(id: string): Promise<void>;
   op(id: string, op: WorkspaceOp, body: Record<string, unknown>, timeoutMs?: number): Promise<unknown>;
@@ -234,6 +237,30 @@ export function createWorkspaceSandboxClient(opts: WorkspaceSandboxClientOptions
         await call("POST", "/workspaces", { id, template, author }, DEFAULT_OP_TIMEOUT_MS),
         "create workspace",
       );
+    },
+    async importArchive(id, format, author, file, bytes) {
+      const { baseUrl, token } = settings();
+      const source = createReadStream(file);
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 300_000);
+      try {
+        const init = {
+          method: "POST", body: source, duplex: "half", signal: controller.signal,
+          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/octet-stream",
+            "Content-Length": String(bytes), "X-Droplet-Author-Name": encodeURIComponent(author.name),
+            "X-Droplet-Author-Email": encodeURIComponent(author.email) },
+        } as unknown as RequestInit;
+        const response = await fetchImpl(`${baseUrl}/workspaces/${encodeURIComponent(id)}/import?format=${encodeURIComponent(format)}`, init);
+        return unwrap<SandboxWorkspaceStatus>({status: response.status, json: await response.json().catch(() => null)}, "import archive");
+      } catch (err) {
+        if (err instanceof WorkspaceSandboxError) throw err;
+        throw new WorkspaceSandboxError(controller.signal.aborted ? "archive import timed out" : "archive import could not reach the sandbox",
+          controller.signal.aborted ? 504 : 502, controller.signal.aborted ? "TIMEOUT" : "UNREACHABLE");
+      } finally {
+        clearTimeout(timer);
+        controller.abort();
+        source.destroy();
+      }
     },
     async status(id) {
       return unwrap<SandboxWorkspaceStatus>(

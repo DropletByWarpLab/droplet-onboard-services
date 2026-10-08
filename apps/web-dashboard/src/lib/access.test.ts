@@ -225,6 +225,15 @@ describe("feature catalog (one vocabulary — the App-Modules ModuleId enum)", (
     expect(grants).toContainEqual({ domain: "system", level: "use" });
     expect(grants.filter((g) => g.level === "use").map((g) => g.domain)).not.toContain("business");
   });
+  it("exposes the compiled hosted_apps Chat grant exactly once without a feature module", () => {
+    const groups = toolDomainGroupsWith([{ domain: "hosted_apps" }], ["hosted_apps"]);
+    expect(groups.filter((group) => group.domains.includes("hosted_apps"))).toEqual([
+      { id: "hosted_apps", label: "Hosted apps", domains: ["hosted_apps"], feature: null },
+    ]);
+    const draft = blankRoleDraft("family", groups);
+    draft.tools.hosted_apps = "use";
+    expect(draftToRolePayload(draft, groups).toolGrants).toContainEqual({ domain: "hosted_apps", level: "use" });
+  });
 });
 
 describe("floor clamping (§5.2 — blocked levels shown, never hidden)", () => {

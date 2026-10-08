@@ -26,6 +26,13 @@ function ctxWith(http: Partial<HttpClient>, extra: Partial<ToolContext> = {}): T
 }
 
 describe("start_agent_run (WARP-2180)", () => {
+  it("starts app setup only in a chat with a bound workspace", async () => {
+    const post = vi.fn().mockResolvedValue(makeResponse(201, { id: "run-1", status: "queued" }));
+    expect(await startAgentRun.handler({ goal: "host this", workspace: "ws-app", brief: "app-setup" }, ctxWith({ post }))).toMatchObject({ ok: false, error: { code: "INVALID_ARGS" } });
+    expect(post).not.toHaveBeenCalled();
+    await startAgentRun.handler({ goal: "host this", workspace: "ws-app", brief: "app-setup" }, ctxWith({ post }, { conversationId: "chat-1" }));
+    expect(post).toHaveBeenCalledWith("/api/agent-runs", expect.objectContaining({ brief: "app-setup", workspaceId: "ws-app", sessionId: "chat-1", origin: "chat" }), expect.anything());
+  });
   it("is Tier-2", () => {
     expect(startAgentRun.requiresWrite).toBe(true);
     expect(startAgentRun.requiresConfirmation).toBe(true);

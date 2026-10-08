@@ -503,7 +503,7 @@ def normalize_manifest(existing: dict[str, Any], defaults: dict[str, Any]) -> di
         resources["memoryMb"] = legacy_mb if isinstance(legacy_mb, int) else DEFAULT_MEMORY_MB
     resources["processes"] = 1
     manifest["resources"] = resources
-    for key in ("runtime", "entrypoint"):
+    for key in (("runtime",) if manifest.get("runtime") == "static" else ("runtime", "entrypoint")):
         if key not in manifest and key in defaults:
             manifest[key] = defaults[key]
     for key in ("schemaVersion", "id", "name", "version"):
@@ -543,7 +543,7 @@ def propose(workspace_id: str, name: str, version: str, summary: str, author: Au
                 manifest = normalize_manifest(existing, defaults)
         except (json.JSONDecodeError, OSError):
             pass
-    manifest["kind"] = "extension"
+    manifest["kind"] = "app" if manifest.get("kind") == "app" else "extension"
     manifest["egress"] = "none"
     manifest["summary"] = summary
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -557,7 +557,7 @@ def propose(workspace_id: str, name: str, version: str, summary: str, author: Au
     # `kind` says what was proposed. A connector draft (WARP-2899) answers
     # "connector-draft" from _propose_connector_draft below, with no
     # manifest, and the orchestrator lists that as not promotable.
-    return {"kind": "extension", "commit": head, "tag": tag, "manifest": manifest}
+    return {"kind": manifest["kind"], "commit": head, "tag": tag, "manifest": manifest}
 
 
 # ── connector drafts (WARP-2899) ────────────────────────────────────────────

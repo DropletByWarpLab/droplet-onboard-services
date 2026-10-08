@@ -239,7 +239,7 @@ ADR-043 §5 asks for. **Needs Stefan/Romain confirmation.**
   per-extension RSS cap needs cgroup delegation, which this `cap_drop: ALL`
   container does not have.
 
-### Hosted-app persistence (WARP-3906, HA-2)
+### Hosted-app persistence
 
 Persistent app state lives on the `extensions-data` named volume at
 `/var/lib/workspace-ext-data` (`SANDBOX_EXTENSIONS_DATA_DIR`), separate from the
@@ -259,12 +259,44 @@ quota enforcement needs a separately reviewed host-side provisioning path.
 No capability, host bind, published port, Docker socket or network permission
 is added to the sandbox for app storage.
 
-This is an implementation slice for review, not an enabled end-to-end hosted-app
-release. Security review is required before enabling hosted apps, including the
+The full hosted-app flow is implemented for review and remains unreleased and
+default-off. Security review is required before enabling hosted apps, including the
 HTTP relay and its authorization, writable data paths, same-uid process and
 data access, log exposure, and resource accounting. The existing shared-uid
 limitations below apply to persistent app state as well: `0700` does not isolate
 one app from another app running with the same uid.
+
+### Hosted-app browser and source boundaries
+
+The browser reaches apps only on the gateway's separate TLS origin at port
+8443. Its route goes through the orchestrator and the authenticated sandbox
+HTTP relay; app processes listen on assigned loopback ports and static apps
+need no process. The dashboard's TLS listener refuses the hosted relay.
+Opening an app uses a short-lived, one-use session code and an app-scoped,
+HttpOnly, Secure, SameSite=Lax cookie. The relay checks the active user and
+current app grant for every request. It strips dashboard credentials, arbitrary
+identity headers, app Set-Cookie and CORS headers. Apps receive only the
+validated user's id, username and role. Cookie-authenticated API writes with a
+foreign Origin are refused globally; authenticated Bearer callers retain their
+existing path.
+
+Apps share the 8443 origin with one another. Per-app cookie paths and audiences
+constrain authentication, but do not establish browser origin isolation between
+apps. Combined with the shared sandbox uid, this v1 supports owner-reviewed
+trusted code, not mutually hostile tenants. Stronger isolation belongs to the
+separate-container runtime work.
+
+Operator archive imports accept ZIP and gzip TAR with a 256 MiB compressed,
+1 GiB unpacked and 50,000-entry ceiling. Imports reject traversal, absolute
+paths, Git metadata, symlinks, hard links, devices, duplicates and malformed
+archive metadata before exposing a workspace. The first commit records the
+operator. Built UI assets and vendored dependencies survive imported ignore
+rules. No archive copy is retained. Git source access requires owner/admin.
+
+The `app-setup` brief runs through the existing durable agent architecture,
+bound to the operator's workspace and Chat conversation. It can inspect, edit,
+build/test, run `app-check` and propose a version. It cannot promote or grant
+access: those operations remain owner-MFA routes outside the tool catalog.
 
 ### Known limitations (for the WARP-2923 review; WARP-2898 is the fix)
 

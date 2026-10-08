@@ -4718,6 +4718,8 @@ enum ToolRunStatus {
 /// goalposts of a run already in flight. `maxIter` alone does not bound a run
 /// whose model calls are slow.
 model AgentRun {
+  /// Validated fixed instructions, persisted for retries/resume; null for ordinary runs.
+  brief              String?
   id                 String                   @id @default(uuid())
   /// Attributed principal (`User.id`). Tool reach is re-resolved from it at
   /// EVERY claim (the WARP-1580 ticker rule), never cached at creation, so a
@@ -4875,6 +4877,8 @@ enum AgentRunStatus {
 /// presence of a tag.
 model WorkshopWorkspace {
   id          String          @id
+  /// Creation intent survives missing/unfinished app manifests and reopening.
+  kind        String          @default("extension")
   /// The owning person (`User.id`). Runs in this workspace are attributed to
   /// them; the dashboard shows an owner their own, an admin everyone's.
   userId      String
@@ -4927,12 +4931,38 @@ model Extension {
   currentVersionId  String?            @unique
   currentVersion    ExtensionVersion?  @relation("ExtensionCurrentVersion", fields: [currentVersionId], references: [id], onDelete: SetNull)
   serviceTokenHash  String?            @unique
+  /// Explicit signed-manifest class; app relays never attach MCP tools.
+  kind              String             @default("extension")
+  /// AES-GCM sealed per-install app relay key, AAD-bound to this slug.
+  appRelayKeyEnc     String?
+  lastHealthAt       DateTime?
+  hostedAppGrants    HostedAppGrant[]
+  hostedSessionCodes HostedAppSessionCode[]
   failureReason     String?
   createdAt         DateTime           @default(now())
   updatedAt         DateTime           @updatedAt
   versions          ExtensionVersion[] @relation("ExtensionVersions")
 
   @@index([status])
+}
+
+model HostedAppGrant {
+  extensionId String
+  role        Role
+  extension   Extension @relation(fields: [extensionId], references: [id], onDelete: Cascade)
+  @@id([extensionId, role])
+}
+
+/// Only a SHA256 of the exchange code is persisted. Redemption deletes it
+/// atomically, so independent orchestrator workers cannot redeem it twice.
+model HostedAppSessionCode {
+  codeHash    String @id
+  extensionId String
+  userId      String
+  expiresAt   DateTime
+  createdAt   DateTime @default(now())
+  extension   Extension @relation(fields: [extensionId], references: [id], onDelete: Cascade)
+  @@index([expiresAt])
 }
 
 /// One signed version of an extension: the statement the box (or Warp Lab's

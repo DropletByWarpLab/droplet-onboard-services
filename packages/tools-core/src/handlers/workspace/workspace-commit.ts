@@ -14,7 +14,7 @@ const inputSchema = {
   properties: {
     message: {
       type: "string",
-      description: "The commit message: what changed and why, one line first.",
+      description: "Commit message: what and why.",
     },
   },
   required: ["message"],

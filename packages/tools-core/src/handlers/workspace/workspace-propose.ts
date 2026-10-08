@@ -23,15 +23,15 @@ const inputSchema = {
   properties: {
     name: {
       type: "string",
-      description: "The extension's name as a person will see it.",
+      description: "Name for the reviewer.",
     },
     version: {
       type: "string",
-      description: "Semantic version, e.g. 0.1.0. A version already proposed is refused; bump it.",
+      description: "New semver, e.g. 0.1.0; never reuse a version.",
     },
     summary: {
       type: "string",
-      description: "What the extension does and what was verified, for the person reviewing it.",
+      description: "What it does and checks actually run.",
     },
   },
   required: ["name", "version", "summary"],
@@ -94,7 +94,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const workspacePropose: Tool = {
   name: "workspace_propose",
   description:
-    "Finish this run by proposing the workspace as an extension: writes the manifest, commits, tags proposal/<version> and hands it to the person for review. Needs their confirmation. Nothing runs after it.",
+    "Final action: confirm a pinned app/extension proposal for owner review. Commits and tags proposal/<version>; ends this run.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

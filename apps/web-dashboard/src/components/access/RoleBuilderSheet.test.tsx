@@ -337,6 +337,13 @@ describe("usage limits (axis 3)", () => {
 });
 
 describe("AI tools & connectors (axis 4)", () => {
+  it("offers Hosted apps as a separate Chat tool grant without a feature switch", () => {
+    renderSheet({ base: blankRoleDraft("family") });
+    const row = screen.getByTestId("access-tools-hosted_apps");
+    expect(within(row).getByText("Hosted apps")).toBeInTheDocument();
+    expect(within(row).getByRole("button", { name: "View" })).toBeEnabled();
+    expect(within(row).getByRole("button", { name: "Use" })).toBeEnabled();
+  });
   it("auto-offs a tool domain whose feature is off, with the verbatim reason", () => {
     const base = blankRoleDraft("family");
     base.features.cameras = { on: false, level: "view" };

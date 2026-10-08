@@ -225,6 +225,8 @@ const EXPECTED_TOOL_NAMES = [
   "workspace_commit",
   "workspace_run",
   "workspace_propose",
+  "list_hosted_apps",
+  "hosted_app_logs",
 ];
 
 describe("TOOLS registry", () => {

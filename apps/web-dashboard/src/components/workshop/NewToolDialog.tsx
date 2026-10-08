@@ -17,6 +17,7 @@ import { useEffect, useRef, useState, type ReactNode, type RefObject } from "rea
 import { Hammer } from "lucide-react";
 import { Dialog } from "@/components/Dialog";
 import { createWorkspace, listWorkspaceTemplates, TEMPLATE_INFO } from "./workspaces/api";
+import { APP_TEMPLATES, NewAppForm } from "./NewAppForm";
 
 const CALM_ERROR = "Something went wrong on the box. Try again in a moment.";
 
@@ -30,17 +31,19 @@ const BLANK = "";
  */
 function groupTemplates(ids: string[]): { languages: string[]; others: string[] } {
   const languages = Object.keys(TEMPLATE_INFO).filter((id) => TEMPLATE_INFO[id].kind === "language" && ids.includes(id));
-  return { languages, others: ids.filter((id) => !languages.includes(id)) };
+  return { languages, others: ids.filter((id) => !languages.includes(id) && !APP_TEMPLATES.includes(id)) };
 }
 
 export interface NewToolDialogProps {
   open: boolean;
   onClose: () => void;
   triggerRef?: RefObject<HTMLElement | null>;
-  onCreated: (workspace: { id: string; name: string }) => void;
+  initialKind?: "tool" | "app";
+  onCreated: (workspace: { id: string; name: string; kind?: "app" }) => void;
 }
 
-export function NewToolDialog({ open, onClose, triggerRef, onCreated }: NewToolDialogProps) {
+export function NewToolDialog({ open, onClose, triggerRef, onCreated, initialKind = "tool" }: NewToolDialogProps) {
+  const [kind, setKind] = useState<"tool" | "app">(initialKind);
   const [name, setName] = useState("");
   const [nameMissing, setNameMissing] = useState(false);
   const [template, setTemplate] = useState(BLANK);
@@ -52,6 +55,7 @@ export function NewToolDialog({ open, onClose, triggerRef, onCreated }: NewToolD
 
   useEffect(() => {
     if (!open) return;
+    setKind(initialKind);
     setError(null);
     setNameMissing(false);
     setTemplatesError(null);
@@ -66,7 +70,7 @@ export function NewToolDialog({ open, onClose, triggerRef, onCreated }: NewToolD
         setTemplate(BLANK);
         setTemplatesError(err instanceof Error ? err.message : String(err));
       });
-  }, [open]);
+  }, [open, initialKind]);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -101,13 +105,19 @@ export function NewToolDialog({ open, onClose, triggerRef, onCreated }: NewToolD
   return (
     <Dialog
       open={open}
-      onClose={onClose}
+      onClose={() => { if (!busy) onClose(); }}
       triggerRef={triggerRef}
       labelledBy="new-tool-heading"
       describedBy="new-tool-sub"
       initialFocusRef={nameRef}
       maxWidth="lg"
     >
+      <fieldset className="m-0 p-0 border-0 flex gap-4 mb-4" disabled={busy}>
+        <legend className="text-[12.5px] font-medium mb-1">Build</legend>
+        <label><input type="radio" name="workspace-kind" checked={kind === "tool"} onChange={() => setKind("tool")} /> Tool</label>
+        <label><input type="radio" name="workspace-kind" checked={kind === "app"} onChange={() => setKind("app")} /> App</label>
+      </fieldset>
+      {kind === "app" ? <NewAppForm templates={templates} onCreated={onCreated} onClose={onClose} initialFocusRef={nameRef} onBusyChange={setBusy} /> : (
       <form onSubmit={(e) => void submit(e)} noValidate aria-label="New custom tool" className="flex flex-col gap-4">
         <div>
           <h2 id="new-tool-heading" className="flex items-center gap-2 text-[16px] font-semibold m-0">
@@ -224,6 +234,7 @@ export function NewToolDialog({ open, onClose, triggerRef, onCreated }: NewToolD
           </button>
         </div>
       </form>
+      )}
     </Dialog>
   );
 }

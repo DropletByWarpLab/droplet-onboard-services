@@ -653,6 +653,9 @@ export const TOOL_DOMAIN_GROUPS: ToolDomainGroup[] = [
   // and an operator has to be able to withhold it on its own. No module gates
   // it (there is no connectors AccessModuleId), so `feature` stays null.
   { id: "cloud", label: "Cloud accounts", domains: ["cloud"], feature: null },
+  // App listing/opening has its own Chat tool grant. Individual app access
+  // is still checked by the server; there is no hosted-apps feature module.
+  { id: "hosted_apps", label: "Hosted apps", domains: ["hosted_apps"], feature: null },
   { id: "system", label: "System", domains: ["system", "data"], feature: null },
 ];
 

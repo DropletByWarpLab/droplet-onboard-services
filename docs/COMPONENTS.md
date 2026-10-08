@@ -698,7 +698,7 @@ network. Host-published ports and host-network services are called out.
 - **Gotchas:** sits only on the `internal: true` `droplet-internal` network — its
   registered egress is **none**, which is what makes running customer-written code
   there acceptable. Holds no credential but its own bearer.
-- **Persistence (WARP-3906, HA-2):** four named volumes: `workspace-git` (bare
+- **Persistence (hosted apps):** four named volumes: `workspace-git` (bare
   repositories), `workspace-checkouts` (rebuildable worktrees),
   `extensions-installed` (rebuildable signed code exports), and `extensions-data`
   (app state at `/var/lib/workspace-ext-data`, owned by uid 1000). The last is
@@ -706,14 +706,19 @@ network. Host-published ports and host-network services are called out.
   enforced per-app filesystem quota; the requested default is 1 GiB. Hosted-app
   runtime changes require security review before enablement; see
   [`security/extension-trust.md`](security/extension-trust.md).
-- **Hosted apps (HA-2, implemented for review):** `kind: app` installs either a
+- **Hosted apps (implemented, unreleased):** `kind: app` installs either a
   static public tree or a Node/Python HTTP server on an assigned loopback port.
   `/extensions/<slug>/http/*` requires the service bearer and per-start app
   relay key; `/extensions/<slug>/logs` exposes capped process output internally.
   Both routes retain the default-off process-supervision gate. Workspace
   `app-check` probes health/root within 30 seconds and cleans up its child.
-  No host port is published by this slice; the browser gateway, app sessions,
-  grants and Chat setup entry points belong to HA-3 through HA-5.
+  The gateway's separate TLS listener on **8443** relays through the orchestrator
+  with app-scoped sessions and current role grants. App processes have no
+  published host port. The dashboard's Apps page opens authorized apps; Workshop
+  accepts templates, bounded archives and operator Git pushes. “Set up with
+  assistant” creates a real Chat conversation and a durable workspace-bound
+  `app-setup` run that can check and propose the app. Owner MFA promotion remains
+  the installation boundary. See [`hosted-apps.md`](hosted-apps.md).
 
 ## services/web-fetch
 

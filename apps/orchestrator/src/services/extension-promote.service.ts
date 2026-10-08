@@ -184,6 +184,14 @@ export interface PromoteOwner {
   actor: ActivityActor;
 }
 
+async function requireCurrentAppOwner(prisma: PrismaClient, owner: PromoteOwner, manifest: ExtensionManifest): Promise<void> {
+  if (manifest.kind !== "app") return;
+  const current = await prisma.user.findUnique({ where: { id: owner.id }, select: { role: true, directoryStatus: true } });
+  if (!current || current.role !== "owner" || current.directoryStatus !== "ACTIVE") {
+    throw new PromoteError(403, "current_owner_required", "a current active owner must manage this app");
+  }
+}
+
 export interface PromotePhase1 {
   confirmationToken: string;
   expiresAt: string;
@@ -303,6 +311,7 @@ export async function preparePromotion(
     );
   }
   const readback = deriveReadback(parsed.manifest);
+  await requireCurrentAppOwner(deps.prisma, owner, parsed.manifest);
 
   const preflight = await preflightNow(deps, slug, parsed.manifest);
   if (!preflight.ok) {
@@ -339,6 +348,7 @@ export interface PromotePhase2Input {
   confirmationToken: string;
   manifestSha256: string;
   operatorDomain?: string | null;
+  hostedAppRoles?: string[];
 }
 
 export async function confirmPromotion(
@@ -378,6 +388,12 @@ export async function confirmPromotion(
     // between can have taken a tool name or the memory.
     const reparsed = parseExtensionManifest(manifestBytes);
     if (!reparsed.ok) throw new PromoteError(422, "manifest_invalid", reparsed.detail);
+    await requireCurrentAppOwner(deps.prisma, owner, reparsed.manifest);
+    const appRoles = input.hostedAppRoles ?? [];
+    if (appRoles.some((role) => role !== "family") || new Set(appRoles).size !== appRoles.length
+        || (reparsed.manifest.kind !== "app" && appRoles.length > 0)) {
+      throw new PromoteError(400, "invalid_app_grants", "apps may explicitly grant family only; guests and services never open apps");
+    }
     const preflight = await preflightNow(deps, deriveExtensionSlug(workspaceId), reparsed.manifest);
     if (!preflight.ok) {
       throw new PromoteError(
@@ -425,12 +441,15 @@ export async function confirmPromotion(
             name: signed.manifest.name,
             installedByUserId: owner.id,
             status: "signed",
+            kind: signed.manifest.kind,
             operatorDomain: input.operatorDomain ?? null,
           },
           update: {
             name: signed.manifest.name,
             installedByUserId: owner.id,
             status: "signed",
+            kind: signed.manifest.kind,
+            appRelayKeyEnc: null,
             failureReason: null,
             ...(input.operatorDomain != null ? { operatorDomain: input.operatorDomain } : {}),
           },
@@ -459,6 +478,10 @@ export async function confirmPromotion(
           select: { id: true },
         });
         await tx.extension.update({ where: { id: slug }, data: { currentVersionId: row.id } });
+        if (signed.manifest.kind === "app") {
+          await tx.hostedAppGrant.deleteMany({ where: { extensionId: slug } });
+          if (appRoles.length) await tx.hostedAppGrant.createMany({ data: appRoles.map(() => ({ extensionId: slug, role: "family" as const })) });
+        }
         // READ COMMITTED: the lock above then answers "no row" for a workspace
         // a delete removed meanwhile, where a snapshot would abort instead.
       }, READ_COMMITTED_TX);
@@ -486,6 +509,7 @@ export async function confirmPromotion(
       ticket: EXTENSION_TICKET,
       workspaceId,
       version,
+      hostedAppRoles: input.hostedAppRoles ?? [],
       commit: signed.statement.commit,
       signer: signed.signer,
       keyFingerprint: signed.keyFingerprint,

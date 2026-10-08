@@ -82,6 +82,7 @@ services:
     ports:
       - "80:80"
       - "443:443"
+      - "8443:8443"
       # nginx.conf also listens on :9981 (WARP-2903 docs-discovery — the leg
       # Nextcloud fetches Collabora's discovery through). Compose-internal by
       # design: reachable as gateway:9981 from siblings, NEVER published here.
@@ -233,6 +234,7 @@ services:
       # WARP-2895: the code-execution service, reachable only over the
       # internal network. SANDBOX_SERVICE_TOKEN arrives via env_file.
       - SANDBOX_URL=http://sandbox:8030
+      - SANDBOX_PROCESS_SUPERVISION=${SANDBOX_PROCESS_SUPERVISION:-0}
       # WARP-2131: the model-catalog sidecar. SET EXPLICITLY — this is not
       # cosmetic. model-catalog.service.ts does NOT treat an unset value as
       # "no manager"; it falls back to http://host.docker.internal:8002, and
