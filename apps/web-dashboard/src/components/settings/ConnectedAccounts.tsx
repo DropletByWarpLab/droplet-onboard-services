@@ -7,7 +7,7 @@ import { GoogleAccountCard } from "./GoogleAccountCard";
 import { AccountProviderSetup } from "./AccountProviderSetup";
 
 export interface AccountConnectionNavigation {
-  returnTo?: "/settings" | "/setup?step=accounts";
+  returnTo?: "/settings" | "/setup?step=accounts" | "/chat";
   /** Persist the wizard's resume point before leaving for provider approval. */
   beforeConnect?: () => Promise<void>;
 }

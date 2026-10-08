@@ -13,6 +13,7 @@ import {
   X,
 } from "lucide-react";
 import Link from "next/link";
+import dynamic from "next/dynamic";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ChatMessage } from "@/components/ChatMessage";
 import { ChatInput, type ChatInputHandle } from "@/components/ChatInput";
@@ -82,6 +83,11 @@ import { isLocalProvider } from "@/lib/provider";
 /** WARP-3475 — browser-storage key holding the interview chat id whose resume
  *  banner the person closed. */
 const RESUME_DISMISS_KEY = "droplet.interviewResumeDismissed";
+
+const ChatConnections = dynamic(
+  () => import("@/components/chat/ChatConnections").then((module) => module.ChatConnections),
+  { ssr: false },
+);
 
 export default function ChatPage() {
   // WARP-331: history panel imperative handle + mobile drawer state.
@@ -212,6 +218,11 @@ export default function ChatPage() {
   // round trip.
   const searchParams = useSearchParams();
   const urlConversationId = searchParams?.get("c") ?? null;
+  // The connection picker restores `c` after its lazy module mounts. Do not
+  // let a queued hero/tool handoff replace the draft during that return.
+  const returningFromConnection = useRef(
+    ["google", "m365", "connect"].some((key) => searchParams?.has(key)),
+  ).current;
 
   // WARP-1121 — is the open conversation the onboarding-interview session at
   // all? True across the WHOLE lifecycle (in_progress / re_running /
@@ -490,7 +501,7 @@ export default function ChatPage() {
     }
     // Gate the auto-send on a fresh chat: no `?c=` deep link in the URL and no
     // messages already present (a loaded/hydrated thread). Otherwise discard.
-    if (urlConversationId || messages.length > 0) return;
+    if (urlConversationId || messages.length > 0 || returningFromConnection) return;
     sendMessage(pending, selectedModel, systemPrompt || undefined, selectedProvider);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedModel]);
@@ -512,7 +523,7 @@ export default function ChatPage() {
     }
     if (!payload) return;
     if (payload.kind !== "tool" && payload.kind !== "pin") return;
-    if (urlConversationId || messages.length > 0) return;
+    if (urlConversationId || messages.length > 0 || returningFromConnection) return;
     // One-shot: clear before seeding so it can't resurface on a later mount.
     try {
       window.sessionStorage.removeItem(PENDING_COMPOSER_KEY);
@@ -1353,6 +1364,7 @@ export default function ChatPage() {
           onStop={stop}
           slashTools={slashTools}
           onToolCommand={handleToolCommand}
+          connectionPicker={<ChatConnections />}
           // WARP-904 — per-turn quick-switch, compact + next to the
           // composer instead of up in the header where a long thread
           // scrolls it out of reach. A cloud model names its provider on the
