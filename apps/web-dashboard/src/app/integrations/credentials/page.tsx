@@ -27,7 +27,9 @@ export default function IntegrationCredentialsPage() {
       title="Connector credentials"
       sub="Give Droplet the keys to the cloud services you already pay for."
     >
-      <RemoteMcpSwitch />
+      <div className="mb-6">
+        <RemoteMcpSwitch />
+      </div>
       <SaasCredentialsSection />
     </ShellPage>
   );

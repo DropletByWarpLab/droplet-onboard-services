@@ -50,7 +50,7 @@ export function RemoteMcpSwitch() {
   }
 
   return (
-    <div className="card mb-6">
+    <div className="card">
       <label className="flex items-start gap-3">
         <input
           type="checkbox"
