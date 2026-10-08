@@ -15,6 +15,14 @@
  * between the orchestrator and the session.
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
+
+// WARP-3914: this suite stubs the SOCKET (`globalThis.fetch`), so the DNS-
+// pinning fetch is swapped for a pass-through to it. The pin itself is covered
+// in pinned-fetch.test.ts and streamable-http.test.ts.
+vi.mock("../src/pinned-fetch.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/pinned-fetch.js")>()),
+  guardedFetch: (url: string | URL, init?: RequestInit) => globalThis.fetch(url, init),
+}));
 import { ATLASSIAN_MCP_PROTOCOL_VERSION, ATLASSIAN_MCP_URL } from "../src/atlassian.js";
 import { RemoteMcpSession, type RemoteMcpConnection } from "../src/remote-session.js";
 import { handleBridgeRequest, BridgeSessionStore } from "../src/http-api.js";

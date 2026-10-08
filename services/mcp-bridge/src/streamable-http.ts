@@ -24,6 +24,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { FetchLike } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { pickRateLimitHeaders } from "./call-scheduler.js";
 import { pinTransportProtocolVersion } from "./protocol-pin.js";
+import { createGuardedFetch, guardedFetch, type GuardDeps } from "./pinned-fetch.js";
 import type {
   RemoteMcpConnection,
   RemoteMcpConnectInput,
@@ -49,6 +50,9 @@ export const MCP_BRIDGE_CLIENT_INFO = {
  */
 export interface StreamableHttpConnectionOptions {
   clientInfo?: { name: string; version: string };
+  /** TEST SEAM for the DNS-pinning guard (resolver, own addresses, sender).
+   *  Nothing in production passes it. */
+  guard?: GuardDeps;
   /**
    * Refuse the session unless the negotiated protocol version is exactly this,
    * then keep sending exactly this. Omitted means the SDK's default: accept
@@ -106,8 +110,7 @@ const TRANSPORT_RECONNECTION = {
  * Exported so the option can be tested without opening a socket: nothing in
  * this workspace dials in CI.
  */
-export const noRedirectFetch: FetchLike = (url, init) =>
-  fetch(url, { ...init, redirect: "error" });
+export const noRedirectFetch: FetchLike = guardedFetch;
 
 /**
  * {@link noRedirectFetch}, plus the one thing only this layer can see.
@@ -129,10 +132,12 @@ export const noRedirectFetch: FetchLike = (url, init) =>
  */
 export function createObservingFetch(
   onRateLimitHeaders?: (headers: Record<string, string>) => void,
+  guard?: GuardDeps,
 ): FetchLike {
-  if (!onRateLimitHeaders) return noRedirectFetch;
+  const guarded = guard ? createGuardedFetch(guard) : guardedFetch;
+  if (!onRateLimitHeaders) return guarded;
   return async (url, init) => {
-    const response = await fetch(url, { ...init, redirect: "error" });
+    const response = await guarded(url, init);
     const picked = pickRateLimitHeaders((name) => response.headers.get(name));
     if (picked) {
       try {
@@ -165,7 +170,7 @@ export const createStreamableHttpConnection = async (
     // keeps it true for the life of the session. See `noRedirectFetch`. The
     // same wrapper is where the rate-limit headers are read, because it is the
     // last place the `Response` exists — see `onRateLimitHeaders`.
-    fetch: createObservingFetch(opts.onRateLimitHeaders),
+    fetch: createObservingFetch(opts.onRateLimitHeaders, opts.guard),
     reconnectionOptions: { ...TRANSPORT_RECONNECTION },
     ...(input.sessionId ? { sessionId: input.sessionId } : {}),
   });
