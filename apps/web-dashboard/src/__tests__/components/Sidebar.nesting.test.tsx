@@ -216,10 +216,11 @@ describe("<Sidebar> Files section reads as one idea (WARP-2966)", () => {
     capsRef.current = { claudeActivity: false, ragEval: false };
   });
 
-  it("reveals exactly three sub-rows — Recent, Shared, Trash", () => {
+  it("reveals Drives, Recent, Shared and Trash", () => {
     render(<Sidebar />);
     const aside = desktopAside();
     for (const [name, href] of [
+      ["Drives", "/files/drives"],
       ["Recent", "/files/recents"],
       ["Shared", "/files/shared"],
       ["Trash", "/files/trash"],

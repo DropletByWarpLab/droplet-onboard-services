@@ -6,8 +6,8 @@
  * duplicate, four places and a device-pairing screen, under one caption. The
  * list could not be read as a single thought because it was not one.
  *
- * Option B (the shipped shape): THREE children, all of them places you can be
- * inside the file tree — Recent, Shared, Trash. The parent IS Browse, so the
+ * WARP-2966 left three file views — Recent, Shared, Trash. Drives now adds a
+ * shortcut to Settings → Storage. The parent IS Browse, so the
  * duplicate row goes. Favorites becomes a filter you reach from the browser
  * itself, and Sync Devices leaves Files for Settings
  * (`docs/design/files-surface-addendum.md` §2.3 — a move, not a deletion).
@@ -29,18 +29,24 @@ function findItem(href: string): NavItem {
 }
 
 describe("Files section shape (WARP-2966)", () => {
-  it("has exactly three children — Recent, Shared, Trash", () => {
+  it("offers Drives alongside Recent, Shared and Trash", () => {
     const files = findItem("/files");
     expect(files.children?.map((c) => c.label)).toEqual([
+      "Drives",
       "Recent",
       "Shared",
       "Trash",
     ]);
     expect(files.children?.map((c) => c.href)).toEqual([
+      "/files/drives",
       "/files/recents",
       "/files/shared",
       "/files/trash",
     ]);
+  });
+
+  it("keeps the Drives shortcut under the Files module gate", () => {
+    expect(moduleForPath("/files/drives")?.moduleId).toBe("files");
   });
 
   it("has no child whose href is its own — the parent IS Browse", () => {

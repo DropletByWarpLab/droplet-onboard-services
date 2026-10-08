@@ -47,7 +47,7 @@ export function isEncryptionReported(drives: ReadonlyArray<EncryptionFields>): b
   return drives.some((d) => d.encryption !== undefined || d.preparation !== undefined);
 }
 
-/** The active camera-recordings drive. */
+/** A persisted camera-recordings assignment, including setup/migration targets. */
 export function isRecordingsDrive(d: UsageFields): boolean {
   return d.usage?.role === "recordings";
 }

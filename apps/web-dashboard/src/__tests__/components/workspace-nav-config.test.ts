@@ -229,7 +229,7 @@ describe("workspace-nav-config — Level 3 views", () => {
     const views = dest("/files")?.views ?? [];
     expect(views[0]?.href).toBe("/files");
     expect(views[0]?.exact).toBe(true);
-    expect(views.map((v) => v.label)).toEqual(["Files", "Recent", "Shared", "Trash"]);
+    expect(views.map((v) => v.label)).toEqual(["Files", "Drives", "Recent", "Shared", "Trash"]);
     // Sync devices left Files entirely — it is its own Work chip now.
     expect(dest("/files/devices")?.item.label).toBe("Sync devices");
   });

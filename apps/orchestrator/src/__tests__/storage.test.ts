@@ -85,6 +85,7 @@ function createPrismaMock() {
   const rows = new Map<string, any>();
   return {
     rows,
+    storageAllocation: { findMany: vi.fn(async () => []) },
     drive: {
       findMany: vi.fn(async ({ where }: any = {}) => {
         const uuids = where?.uuid?.in ?? [];

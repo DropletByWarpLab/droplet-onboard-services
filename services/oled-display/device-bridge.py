@@ -1604,47 +1604,124 @@ def _os_disk():
 # WARP-612: SMART health + temperature. OFF by default — smartctl spins up
 # disks and adds a subprocess per drive, which we don't want on the 10s drive
 # poll. Operators opt in with DRIVE_SMART_ENABLED=true; results are cached per
-# device for 5 min so even then smartctl isn't hammered. Best-effort: any
-# failure (smartctl absent, not root, a USB bridge without SAT passthrough)
-# yields (None, None) and the dashboard simply hides the SMART/temp chips.
+# physical disk for 5 min so even then smartctl isn't hammered. Monitoring
+# runs with the bridge's existing permissions: no sudo, no device writes and
+# no attempt to enable SMART on hardware. A missing/failed read is explicitly
+# unavailable rather than looking like a healthy drive or unsupported hardware.
 SMART_ENABLED = os.environ.get(
     "DRIVE_SMART_ENABLED", "false").lower() in ("1", "true", "yes", "on")
-_smart_cache = {}  # device -> (checked_at, health, temp_c)
+_smart_cache = {}  # physical device -> (checked_at, health, temp_c, status)
 _SMART_TTL_S = 300
+_SMART_UNSUPPORTED_OUTPUT = "SMART support is: Unavailable - device lacks SMART capability."
+
+
+def _smart_target(lsblk_tree, device):
+    """One verified physical disk for a mounted device, else None.
+
+    Resolve partitions and encrypted/LVM mounts from the same inventory tree
+    the snapshot already reads. Unlike _whole_disk's presentation fallback,
+    every occurrence matters: md appears under each member, and an LV can
+    span disks. Never present one arbitrary member's health as pool health.
+    """
+    name = _block_device_name(device)
+    if not name or not isinstance(lsblk_tree, dict):
+        return None
+    disks = set()
+    found = False
+    ambiguous = False
+
+    def descend(nodes, physical, raid):
+        nonlocal found, ambiguous
+        if not isinstance(nodes, list):
+            return
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            kind = node.get("type")
+            disk = node.get("name") if kind == "disk" else physical
+            md = raid or _is_md_name(node.get("name")) or (
+                isinstance(kind, str) and kind.startswith("raid"))
+            if node.get("name") == name:
+                found = True
+                if md or not isinstance(disk, str) or not disk:
+                    ambiguous = True
+                else:
+                    disks.add(disk)
+            descend(node.get("children"), disk, md)
+
+    descend(lsblk_tree.get("blockdevices"), None, False)
+    if not found or ambiguous or len(disks) != 1:
+        return None
+    return "/dev/" + next(iter(disks))
 
 
 def _smart_for(device):
-    """Return (health, temp_c) for a device. health is 'PASSED'/'FAILED'/None;
-    temp_c is an int °C or None. Gated by DRIVE_SMART_ENABLED, cached 5 min,
-    never raises."""
-    if not SMART_ENABLED or not device:
-        return None, None
+    """Return (health, temp_c, status) for a verified physical device.
+
+    status is disabled | available | unsupported | unavailable. Available
+    requires an explicit SMART health boolean, a failed-health exit bit, or a
+    plausible temperature measurement from a successful read; temperature
+    alone leaves health None.
+    Process success alone says nothing about the drive. Nonavailable results
+    carry no stale facts. All probe results, including failures, share a 5 min TTL.
+    """
+    if not SMART_ENABLED:
+        return None, None, "disabled"
+    if not device:
+        return None, None, "unavailable"
     now = time.time()
     hit = _smart_cache.get(device)
     if hit and now - hit[0] < _SMART_TTL_S:
-        return hit[1], hit[2]
-    health = None
-    temp = None
+        return hit[1], hit[2], hit[3]
+    result = (None, None, "unavailable")
     # `-j` (JSON) so we read the canonical fields instead of scraping columns:
     # `temperature.current` is the real °C, and `smart_status.passed` is an
     # unambiguous bool. The old `-A` text scrape took the first plausible int on
     # the Temperature_Celsius row — usually the *normalized* value (~100), not
     # the raw temperature, so the chip showed the wrong number.
-    _rc, out, _err = _run(["smartctl", "-j", "-H", "-A", device], timeout=8)
+    # `=o` includes original output IN the JSON. smart_support.available=false
+    # also represents unknown ATA support, so unsupported needs the affirmative
+    # capability statement too. It never comes from a generic error string.
     try:
+        rc, out, _err = _run(["smartctl", "-j=o", "-H", "-A", device], timeout=8)
         data = json.loads(out or "{}")
-        passed = data.get("smart_status", {}).get("passed")
-        if passed is True:
-            health = "PASSED"
-        elif passed is False:
-            health = "FAILED"
-        cur = data.get("temperature", {}).get("current")
-        if isinstance(cur, int) and 0 < cur < 120:  # plausible drive temp in °C
-            temp = cur
-    except (ValueError, AttributeError):
-        pass  # non-JSON output (smartctl absent / too old) → no SMART chips
-    _smart_cache[device] = (now, health, temp)
-    return health, temp
+        if not isinstance(data, dict) or type(rc) is not int or not 0 <= rc <= 255:
+            raise ValueError("invalid SMART response")
+        ctl = data.get("smartctl", {})
+        if not isinstance(ctl, dict):
+            raise ValueError("invalid SMART command metadata")
+        reported_rc = ctl.get("exit_status", rc)
+        if type(reported_rc) is not int or reported_rc != rc:
+            raise ValueError("inconsistent SMART exit status")
+        status = data.get("smart_status", {})
+        passed = status.get("passed") if isinstance(status, dict) else None
+        temperature = data.get("temperature", {})
+        cur = temperature.get("current") if isinstance(temperature, dict) else None
+        temp = cur if type(cur) is int and 0 < cur < 120 else None
+        support = data.get("smart_support", {})
+        unsupported = isinstance(support, dict) and support.get("available") is False
+        output = ctl.get("output", [])
+        lacks_capability = isinstance(output, list) and any(
+            isinstance(line, str) and line.strip() == _SMART_UNSUPPORTED_OUTPUT
+            for line in output)
+        # smartctl exit status is a bitmask. Bits 0/1 are command/device-open
+        # failures; bit 2 is a failed SMART read (also set on unsupported ATA).
+        # Bit 3 is a FAILED health verdict and must not discard that verdict.
+        if unsupported and lacks_capability and rc in (0, 4) and type(passed) is not bool:
+            result = (None, None, "unsupported")
+        elif not unsupported and not (rc & 0b111) and (
+                type(passed) is bool or temp is not None or rc & 0b1000):
+            if passed is True and rc & 0b1000:
+                raise ValueError("inconsistent SMART health")
+            # Bit 3 is itself an explicit failed SMART assessment. Some
+            # device JSON lacks smart_status.passed; never lose that warning
+            # or replace it with a temperature-only unknown verdict.
+            health = "FAILED" if passed is False or rc & 0b1000 else "PASSED" if passed is True else None
+            result = (health, temp, "available")
+    except Exception:                                              # noqa: BLE001
+        pass  # missing tool, timeout, permission failure or malformed output
+    _smart_cache[device] = (now, *result)
+    return result
 
 
 # Filesystem types we consider "data storage" worth surfacing in the UI.
@@ -2355,7 +2432,6 @@ def drives_snapshot(invalidate=False):
             # deferred eject/fsck work will trust it — for a data-integrity-first
             # product an unknown state must not present as writable.
             fs, readonly = mount_meta.get(mp, ("", True))
-            smart, temp = _smart_for(device)  # one smartctl pass, not two
             by_mount[mp] = {
                 "device": device,
                 "parent_disk": parent_disk,
@@ -2369,8 +2445,6 @@ def drives_snapshot(invalidate=False):
                 "fs": fs,
                 "bus": _bus_for(m.get("device")),
                 "readonly": readonly,
-                "smart": smart,
-                "temp_c": temp,
                 # Hot-plug auto-mounted → removable/ejectable regardless of bus.
                 "removable": True,
                 "source": "automount",
@@ -2410,7 +2484,6 @@ def drives_snapshot(invalidate=False):
                 if os_disk and parent_disk and parent_disk == os_disk:
                     continue  # WARP-827: partition on the OS/root disk, not a data drive
                 label, uuid = _label_and_uuid_for(dev)
-                smart, temp = _smart_for(dev)  # one smartctl pass, not two
                 by_mount[mp] = {
                     "device": dev,
                     "parent_disk": parent_disk,
@@ -2425,8 +2498,6 @@ def drives_snapshot(invalidate=False):
                     "bus": _bus_for(dev),
                     # Same fail-safe default as the automount branch above.
                     "readonly": mount_meta.get(mp, (fs, True))[1],
-                    "smart": smart,
-                    "temp_c": temp,
                     # Installed (fstab) storage — not hot-plug, not ejectable.
                     "removable": False,
                     "source": "fstab",
@@ -2454,6 +2525,12 @@ def drives_snapshot(invalidate=False):
         device = entry.get("device") or ""
         entry["encryption"] = _encryption_for(lsblk_tree, device)
         entry["md"] = _md_for(lsblk_tree, device)
+        # Same inventory, one physical target. Unknown/multiple-disk/RAID
+        # ancestry remains unavailable; never probe a guessed last member.
+        smart, temp, smart_status = _smart_for(_smart_target(lsblk_tree, device))
+        entry["smart"] = smart
+        entry["temp_c"] = temp
+        entry["smart_status"] = smart_status
 
     snap = {
         "drives": mounts,

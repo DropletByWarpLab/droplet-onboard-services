@@ -7,7 +7,7 @@
  *
  *   - GET /api/storage/drives gives every drive an `encryption` that is one of
  *     a CLOSED set, a `preparation` enum computed from it, a `usage` shape
- *     WARP-3514 will fill, and an `isSystemDisk` flag. Nothing is derived from
+ *     joined from recordings assignments, and an `isSystemDisk` flag. Nothing is derived from
  *     the absence or nullness of another field, and a bridge that says
  *     something outside the set is "unknown", not trusted.
  *   - `unknown` is `needs_preparing`, not `prepared`: a drive whose state is in
@@ -108,10 +108,11 @@ function buildApp(): express.Express {
     };
     next();
   });
-  // The drives routes only ever read the Drive table; the prepare flow also
+  // Drive inventory reads labels and recording assignments; the prepare flow also
   // writes a CommandAuditLog row, which a stub that swallows it is enough for.
   const prisma = {
     drive: { findMany: async () => [] },
+    storageAllocation: { findMany: async () => [] },
     storagePool: { findMany: async () => [] },
     commandAuditLog: { create: async () => ({}) },
   };

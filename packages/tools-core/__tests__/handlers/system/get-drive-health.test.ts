@@ -3,10 +3,8 @@
  *
  * SMART status + temperature per data drive from the orchestrator's
  * GET /api/storage/drives (the WARP-1144-corrected source of truth
- * list_drives also uses). The device-bridge only attaches `smart`
- * ("PASSED"/"FAILED") and `temp_c` when DRIVE_SMART_ENABLED is set
- * (WARP-612) — an all-drives-missing-smart snapshot is an INFORMATIVE
- * SUCCESS (smartEnabled:false + hint), never an error. Tier-1 read.
+ * list_drives also uses). Explicit monitoring status distinguishes disabled
+ * monitoring from unavailable readings; missing legacy fields remain unknown.
  */
 import { describe, it, expect, vi } from "vitest";
 import type { Mock } from "vitest";
@@ -101,6 +99,7 @@ describe("get_drive_health", () => {
             usedBytes: 400_000_000_000,
             freeBytes: 600_000_000_000,
             smart: "PASSED",
+            smartStatus: "available",
             tempC: 41,
           },
           {
@@ -111,6 +110,7 @@ describe("get_drive_health", () => {
             usedBytes: 1_500_000_000_000,
             freeBytes: 500_000_000_000,
             smart: "PASSED",
+            smartStatus: "available",
             tempC: 38,
           },
         ],
@@ -151,9 +151,7 @@ describe("get_drive_health", () => {
     }
   });
 
-  it("is an INFORMATIVE SUCCESS (not an error) when every drive lacks smart data", async () => {
-    // DRIVE_SMART_ENABLED off on the bridge → no smart/temp_c on any drive
-    // (older bridges omit the fields entirely; newer ones may send null).
+  it("keeps missing legacy data unknown instead of claiming monitoring is disabled", async () => {
     const get = vi.fn().mockResolvedValue(
       okResponse([
         drive({}), // fields absent
@@ -167,21 +165,65 @@ describe("get_drive_health", () => {
       const data = res.data as {
         type: string;
         drives: Array<{ smart: string | null; tempC: number | null }>;
-        smartEnabled: boolean;
+        smartEnabled: boolean | null;
         hint?: string;
         warning?: string;
       };
       expect(data.type).toBe("get_drive_health");
-      expect(data.smartEnabled).toBe(false);
-      expect(data.hint).toBe(
-        "SMART monitoring is disabled — set DRIVE_SMART_ENABLED=1 on the device bridge",
-      );
+      expect(data.smartEnabled).toBeNull();
+      expect(data.hint).toBeUndefined();
       expect(data.warning).toBeUndefined();
       // Drives are still listed, with explicit nulls the agent can report.
       expect(data.drives).toHaveLength(2);
-      expect(data.drives[0]).toMatchObject({ smart: null, tempC: null });
-      expect(data.drives[1]).toMatchObject({ smart: null, tempC: null });
+      expect(data.drives[0]).toMatchObject({ smartStatus: "unknown", smart: null, tempC: null });
+      expect(data.drives[1]).toMatchObject({ smartStatus: "unknown", smart: null, tempC: null });
     }
+  });
+
+  it.each(["disabled", "unsupported", "unavailable", "unknown", null, "invalid"])(
+    "treats explicit %s status as authoritative over stale FAILED readings",
+    async (status) => {
+      const res = await getDriveHealth.handler({}, ctxWithGet(vi.fn().mockResolvedValue(
+        okResponse([drive({ smart_status: status, smart: "FAILED", temp_c: 55 })]),
+      )));
+      expect(res.ok).toBe(true);
+      if (res.ok) {
+        expect(res.data).toMatchObject({
+          drives: [{ smartStatus: ["disabled", "unsupported", "unavailable"].includes(status as string) ? status : "unknown", smart: null, tempC: null }],
+        });
+        expect(res.data).not.toHaveProperty("warning");
+      }
+    },
+  );
+
+  it.each([
+    { statuses: ["disabled", "disabled"], enabled: false, hint: true },
+    { statuses: ["unavailable"], enabled: true, hint: false },
+    { statuses: ["unsupported", "disabled"], enabled: true, hint: false },
+    { statuses: ["available", "unknown"], enabled: true, hint: false },
+    { statuses: ["disabled", "unknown"], enabled: null, hint: false },
+    { statuses: [], enabled: null, hint: false },
+  ])("reports monitoring from explicit statuses $statuses", async ({ statuses, enabled, hint }) => {
+    const res = await getDriveHealth.handler({}, ctxWithGet(vi.fn().mockResolvedValue(
+      okResponse(statuses.map((smart_status) => drive({ smart_status }))),
+    )));
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.data).toMatchObject({ smartEnabled: enabled });
+      if (hint) expect(res.data).toHaveProperty("hint", "SMART monitoring is disabled — set DRIVE_SMART_ENABLED=1 on the device bridge");
+      else expect(res.data).not.toHaveProperty("hint");
+    }
+  });
+
+  it("preserves a legacy temperature-only reading without inferring a health verdict", async () => {
+    const res = await getDriveHealth.handler({}, ctxWithGet(vi.fn().mockResolvedValue(
+      okResponse([drive({ temp_c: 42 })]),
+    )));
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.data).toMatchObject({
+      smartEnabled: true,
+      drives: [{ smartStatus: "available", smart: null, tempC: 42 }],
+    });
   });
 
   it("returns DRIVES_UNAVAILABLE when the fetch throws", async () => {

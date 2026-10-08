@@ -191,16 +191,16 @@ describe("DrivesPanel — encryption badge", () => {
 });
 
 describe("DrivesPanel — what a drive is used for", () => {
-  it("names the recordings drive and what is reserved for it", () => {
+  it("names the recordings assignment and allocated capacity", () => {
     setup({ drives: [recordingsDrive()] });
     expect(
-      within(cardOf("Bay 2")).getByText("Used for: Camera recordings · 120 GB reserved"),
+      within(cardOf("Bay 2")).getByText("Assigned to: Camera recordings · 120 GB allocated"),
     ).toBeInTheDocument();
   });
 
   it("omits the reservation when there is none", () => {
     setup({ drives: [recordingsDrive({ usage: { role: "recordings", reservedBytes: null } })] });
-    expect(within(cardOf("Bay 2")).getByText("Used for: Camera recordings")).toBeInTheDocument();
+    expect(within(cardOf("Bay 2")).getByText("Assigned to: Camera recordings")).toBeInTheDocument();
   });
 
   it("says nothing for a drive that only holds files", () => {
@@ -223,7 +223,7 @@ describe("DrivesPanel — the recordings drive cannot be ejected or erased", () 
     // The explanation is the button's accessible description, not just nearby text.
     const describedBy = eject.getAttribute("aria-describedby")!;
     expect(document.getElementById(describedBy)).toHaveTextContent(
-      /camera recordings are stored on this drive/i,
+      /this drive is assigned to camera recordings/i,
     );
     // (typographic apostrophe in the copy, so `.` rather than a literal ')
     expect(document.getElementById(describedBy)).toHaveTextContent(/can.t be ejected or erased/i);
@@ -520,7 +520,7 @@ describe("DrivesPanel — pools", () => {
     displayName: "Family pool",
   };
 
-  it("shows the encryption and recordings role of the filesystem backing a pool", () => {
+  it("shows the pool's assignment and explicit SMART availability without one member's verdict", () => {
     setup({
       pools: [pool],
       drives: [
@@ -529,12 +529,16 @@ describe("DrivesPanel — pools", () => {
           pool: "md127",
           uuid: "U-POOL",
           usage: { role: "recordings", reservedBytes: 50 * GIB },
+          smart_status: "unavailable",
+          smart: "PASSED",
         }),
       ],
     });
     const card = screen.getByRole("heading", { name: /family pool/i }).closest('[role="listitem"]') as HTMLElement;
     expect(within(card).getByText("Encrypted")).toBeInTheDocument();
-    expect(within(card).getByText("Used for: Camera recordings · 50 GB reserved")).toBeInTheDocument();
+    expect(within(card).getByText("Assigned to: Camera recordings · 50 GB allocated")).toBeInTheDocument();
+    expect(within(card).getByText("SMART data unavailable")).toBeInTheDocument();
+    expect(within(card).queryByText("SMART PASSED")).not.toBeInTheDocument();
   });
 
   it("a never-formatted pool says Format will encrypt it, and the owner gets the key after", async () => {
@@ -564,7 +568,7 @@ describe("DrivesPanel — never crashes on a half-adopted payload", () => {
   it("renders a drive with only some of the new fields", () => {
     setup({ drives: [makeDrive({ preparation: "needs_preparing" }), makeDrive({ uuid: "U-2", displayName: "Other", usage: { role: "recordings", reservedBytes: null } })] });
     expect(screen.getByText("Needs preparing — will be encrypted")).toBeInTheDocument();
-    expect(screen.getByText("Used for: Camera recordings")).toBeInTheDocument();
+    expect(screen.getByText("Assigned to: Camera recordings")).toBeInTheDocument();
   });
 });
 
@@ -666,7 +670,7 @@ describe("DrivesPanel — the recordings explanation, for whoever reads it", () 
   it("a family member gets the reason but not a link into a card they cannot see", () => {
     setup({ role: "family", drives: [recordingsDrive()] });
     const card = cardOf("Bay 2");
-    expect(card).toHaveTextContent(/camera recordings are stored on this drive/i);
+    expect(card).toHaveTextContent(/this drive is assigned to camera recordings/i);
     expect(within(card).queryByRole("link", { name: /recording storage/i })).not.toBeInTheDocument();
   });
 });
