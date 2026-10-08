@@ -2,8 +2,8 @@
  * WARP-827 — Drives panel remake.
  *
  * Covers the dashboard-side acceptance criteria:
- *   - AC2: inline, admin-only rename wired to updateDriveLabel(uuid,
- *     { displayName }). Edit → save shows the new name optimistically;
+ *   - AC2: inline, admin-only editing wired to updateDriveLabel(uuid,
+ *     { displayName, icon, notes }). Successful edits appear before refetch;
  *     non-admins get no edit affordance; validation rejects empty/too-long.
  *   - AC3/AC6: the raw /dev/sdX device path is NEVER rendered to the user.
  *   - AC5: a drive card deep-links into the existing Nextcloud file browser
@@ -11,7 +11,7 @@
  *
  * The two data hooks are mocked so the suite drives the render/interaction
  * layer directly; `updateDriveLabel` is mocked to assert the wired call and
- * exercise the optimistic update + rollback. useAuth is mocked to flip the
+ * exercise saving and retry after failure. useAuth is mocked to flip the
  * admin gate (same pattern as the auth-gate suites).
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -59,6 +59,8 @@ vi.mock("@/lib/api", () => ({
 
 import {
   updateDriveLabel,
+  ejectDrive,
+  rescanDrives,
   adoptDrive,
   reclaimDrive,
   confirmStorageCommand,
@@ -88,6 +90,7 @@ function makeDrive(overrides: Partial<DriveInfo> = {}): DriveInfo {
 }
 
 const refresh = vi.fn();
+const refreshPools = vi.fn();
 
 function setup({
   role = "owner",
@@ -110,7 +113,7 @@ function setup({
     bridgeError,
     refresh,
   });
-  usePoolsMock.mockReturnValue({ pools, refresh: vi.fn() });
+  usePoolsMock.mockReturnValue({ pools, refresh: refreshPools });
   return render(<DrivesPanel />);
 }
 
@@ -174,9 +177,9 @@ describe("DrivesPanel — drive contents deep-link (WARP-827 AC5)", () => {
     expect(document.querySelector("a button")).toBeNull();
   });
 
-  it("keeps the Rename control clickable above the stretched link (WARP-1338)", () => {
+  it("keeps the Edit drive control clickable above the stretched link (WARP-1338)", () => {
     setup({ drives: [makeDrive()] });
-    fireEvent.click(screen.getByRole("button", { name: /rename/i }));
+    fireEvent.click(screen.getByRole("button", { name: /edit drive/i }));
     expect(screen.getByLabelText("Drive name")).toBeInTheDocument();
   });
 
@@ -196,7 +199,7 @@ describe("DrivesPanel — drive contents deep-link (WARP-827 AC5)", () => {
     const card = overlay!.closest('[role="listitem"]');
     expect(card).not.toBeNull();
     const controls = Array.from(card!.querySelectorAll("button"));
-    expect(controls.length).toBeGreaterThanOrEqual(2); // Rename + Eject
+    expect(controls.length).toBeGreaterThanOrEqual(2); // Edit drive + Eject
     for (const control of controls) {
       expect(control.className).toMatch(/(?:^|\s)relative(?:\s|$)/);
     }
@@ -210,10 +213,10 @@ describe("DrivesPanel — drive contents deep-link (WARP-827 AC5)", () => {
 describe("DrivesPanel — inline rename (WARP-827 AC2)", () => {
   it("shows no edit affordance for a non-admin (family) user", () => {
     setup({ role: "family" });
-    expect(screen.queryByRole("button", { name: /rename|edit name/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /edit drive/i })).not.toBeInTheDocument();
   });
 
-  it("admin can edit → save and sees the new name optimistically", async () => {
+  it("admin can edit → save and sees the new name before refetch", async () => {
     (updateDriveLabel as ReturnType<typeof vi.fn>).mockResolvedValue({
       uuid: "U-DATA-1",
       displayName: "Wedding Photos",
@@ -222,7 +225,7 @@ describe("DrivesPanel — inline rename (WARP-827 AC2)", () => {
     });
     setup({ role: "owner" });
 
-    fireEvent.click(screen.getByRole("button", { name: /rename|edit name/i }));
+    fireEvent.click(screen.getByRole("button", { name: /edit drive/i }));
     const input = screen.getByRole("textbox", { name: /drive name/i });
     fireEvent.change(input, { target: { value: "Wedding Photos" } });
     fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
@@ -231,15 +234,17 @@ describe("DrivesPanel — inline rename (WARP-827 AC2)", () => {
     await waitFor(() =>
       expect(updateDriveLabel).toHaveBeenCalledWith("U-DATA-1", {
         displayName: "Wedding Photos",
+        icon: null,
+        notes: null,
       }),
     );
-    // Optimistic: the new name is on screen before/without a refetch.
+    // The saved name is on screen before/without a refetch.
     expect(await screen.findByText("Wedding Photos")).toBeInTheDocument();
   });
 
   it("trims and rejects an empty name without calling the API", () => {
     setup({ role: "owner" });
-    fireEvent.click(screen.getByRole("button", { name: /rename|edit name/i }));
+    fireEvent.click(screen.getByRole("button", { name: /edit drive/i }));
     const input = screen.getByRole("textbox", { name: /drive name/i });
     fireEvent.change(input, { target: { value: "   " } });
     const save = screen.getByRole("button", { name: /^save$/i }) as HTMLButtonElement;
@@ -249,7 +254,7 @@ describe("DrivesPanel — inline rename (WARP-827 AC2)", () => {
 
   it("cancel exits edit mode and keeps the original name", () => {
     setup({ role: "owner", drives: [makeDrive({ displayName: "Photos" })] });
-    fireEvent.click(screen.getByRole("button", { name: /rename|edit name/i }));
+    fireEvent.click(screen.getByRole("button", { name: /edit drive/i }));
     fireEvent.change(screen.getByRole("textbox", { name: /drive name/i }), {
       target: { value: "Changed" },
     });
@@ -258,11 +263,11 @@ describe("DrivesPanel — inline rename (WARP-827 AC2)", () => {
     expect(screen.getByText("Photos")).toBeInTheDocument();
   });
 
-  it("rolls back the optimistic name when the save fails", async () => {
+  it("keeps the original name when the save fails", async () => {
     (updateDriveLabel as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("boom"));
     setup({ role: "owner", drives: [makeDrive({ displayName: "Photos" })] });
 
-    fireEvent.click(screen.getByRole("button", { name: /rename|edit name/i }));
+    fireEvent.click(screen.getByRole("button", { name: /edit drive/i }));
     fireEvent.change(screen.getByRole("textbox", { name: /drive name/i }), {
       target: { value: "Wedding Photos" },
     });
@@ -290,7 +295,7 @@ describe("DrivesPanel — inline rename (WARP-827 AC2)", () => {
     );
     setup({ role: "owner", drives: [makeDrive({ displayName: "Photos" })] });
 
-    fireEvent.click(screen.getByRole("button", { name: /rename|edit name/i }));
+    fireEvent.click(screen.getByRole("button", { name: /edit drive/i }));
     fireEvent.change(screen.getByRole("textbox", { name: /drive name/i }), {
       target: { value: "Wedding Photos" },
     });
@@ -310,7 +315,197 @@ describe("DrivesPanel — inline rename (WARP-827 AC2)", () => {
   // offer a save that is guaranteed to fail.
   it("shows no rename affordance for a drive the bridge reports without a UUID", () => {
     setup({ role: "owner", drives: [makeDrive({ uuid: "" })] });
-    expect(screen.queryByRole("button", { name: /rename|edit name/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /edit drive/i })).not.toBeInTheDocument();
+  });
+});
+
+describe("DrivesPanel — drive metadata editing", () => {
+  it("seeds the editor with the visible name and saves name, icon and notes together", async () => {
+    (updateDriveLabel as ReturnType<typeof vi.fn>).mockResolvedValue({});
+    setup({ role: "admin", drives: [makeDrive({ label: "Photos", icon: "usb", notes: "Original notes" })] });
+    fireEvent.click(screen.getByRole("button", { name: "Edit drive" }));
+    expect(screen.getByLabelText("Drive name")).toHaveValue("Photos");
+    expect(screen.getByLabelText("Drive icon")).toHaveValue("usb");
+    expect(screen.getByLabelText("Drive notes")).toHaveValue("Original notes");
+    fireEvent.change(screen.getByLabelText("Drive name"), { target: { value: " Recordings " } });
+    fireEvent.change(screen.getByLabelText("Drive icon"), { target: { value: "camera" } });
+    fireEvent.change(screen.getByLabelText("Drive notes"), { target: { value: " Front entrance \n" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(updateDriveLabel).toHaveBeenCalledWith("U-DATA-1", {
+      displayName: "Recordings", icon: "camera", notes: "Front entrance",
+    }));
+    await waitFor(() => expect(screen.queryByLabelText("Drive notes")).not.toBeInTheDocument());
+    expect(screen.getByText("Front entrance")).toBeInTheDocument();
+    const card = screen.getByRole("link", { name: "Open Recordings" }).closest('[role="listitem"]');
+    expect(card?.querySelector(".lucide-camera")).not.toBeNull();
+    expect(screen.queryByLabelText("Drive notes")).not.toBeInTheDocument();
+  });
+
+  it("clears optional metadata with null values", async () => {
+    (updateDriveLabel as ReturnType<typeof vi.fn>).mockResolvedValue({});
+    setup({ drives: [makeDrive({ displayName: "Photos", icon: "camera", notes: "Old notes" })] });
+    fireEvent.click(screen.getByRole("button", { name: "Edit drive" }));
+    fireEvent.change(screen.getByLabelText("Drive icon"), { target: { value: "" } });
+    fireEvent.change(screen.getByLabelText("Drive notes"), { target: { value: "  " } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(updateDriveLabel).toHaveBeenCalledWith("U-DATA-1", {
+      displayName: "Photos", icon: null, notes: null,
+    }));
+    await waitFor(() => expect(screen.queryByText("Old notes")).not.toBeInTheDocument());
+  });
+
+  it("preserves an unknown stored icon while using the bus icon as a fallback", async () => {
+    (updateDriveLabel as ReturnType<typeof vi.fn>).mockResolvedValue({});
+    setup({ drives: [makeDrive({ displayName: "Photos", icon: "legacy-icon" })] });
+    const card = screen.getByRole("link", { name: "Open Photos" }).closest('[role="listitem"]');
+    expect(card?.querySelector(".lucide-usb")).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Edit drive" }));
+    expect(screen.getByLabelText("Drive icon")).toHaveValue("legacy-icon");
+    fireEvent.change(screen.getByLabelText("Drive notes"), { target: { value: "Keep this icon" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(updateDriveLabel).toHaveBeenCalledWith("U-DATA-1", {
+      displayName: "Photos", icon: "legacy-icon", notes: "Keep this icon",
+    }));
+  });
+
+  it("keeps the draft after a failed save and lets the user retry", async () => {
+    (updateDriveLabel as ReturnType<typeof vi.fn>)
+      .mockRejectedValueOnce(new Error("save failed"))
+      .mockResolvedValueOnce({});
+    setup({ drives: [makeDrive({ displayName: "Photos", notes: "Original notes" })] });
+    fireEvent.click(screen.getByRole("button", { name: "Edit drive" }));
+    fireEvent.change(screen.getByLabelText("Drive name"), { target: { value: "Archive" } });
+    fireEvent.change(screen.getByLabelText("Drive notes"), { target: { value: "Keep this draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(toastMock).toHaveBeenCalledWith(expect.stringMatching(/couldn.t save/i), "error"));
+    expect(screen.getByLabelText("Drive name")).toHaveValue("Archive");
+    expect(screen.getByLabelText("Drive notes")).toHaveValue("Keep this draft");
+    expect(screen.getByText("Photos")).toBeInTheDocument();
+    expect(screen.getByText("Original notes")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(screen.queryByLabelText("Drive notes")).not.toBeInTheDocument());
+    expect(screen.getByText("Keep this draft")).toBeInTheDocument();
+    expect(updateDriveLabel).toHaveBeenCalledTimes(2);
+  });
+
+  it("enforces name and notes limits before writing", () => {
+    setup({ drives: [makeDrive({ displayName: "Photos" })] });
+    fireEvent.click(screen.getByRole("button", { name: "Edit drive" }));
+    expect(screen.getByLabelText("Drive name")).toHaveAttribute("maxlength", "64");
+    expect(screen.getByLabelText("Drive notes")).toHaveAttribute("maxlength", "512");
+    fireEvent.change(screen.getByLabelText("Drive notes"), { target: { value: "x".repeat(513) } });
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("Drive notes"), { target: { value: "" } });
+    fireEvent.change(screen.getByLabelText("Drive name"), { target: { value: "x".repeat(65) } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(updateDriveLabel).not.toHaveBeenCalled();
+  });
+
+  it("requires an icon to fit the API limit before saving", () => {
+    setup({ drives: [makeDrive({ displayName: "Photos", icon: "x".repeat(49) })] });
+    fireEvent.click(screen.getByRole("button", { name: "Edit drive" }));
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("Drive icon"), { target: { value: "" } });
+    expect(screen.getByRole("button", { name: "Save" })).toBeEnabled();
+  });
+
+  it("Escape cancels editing and restores focus to Edit drive", () => {
+    setup({ drives: [makeDrive({ displayName: "Photos" })] });
+    fireEvent.click(screen.getByRole("button", { name: "Edit drive" }));
+    fireEvent.keyDown(screen.getByLabelText("Drive name"), { key: "Escape" });
+    expect(screen.queryByLabelText("Drive name")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Edit drive" })).toHaveFocus();
+  });
+
+  it("keeps editing locked until a pending save settles", async () => {
+    let finishSave!: (value: unknown) => void;
+    (updateDriveLabel as ReturnType<typeof vi.fn>).mockReturnValueOnce(new Promise((resolve) => { finishSave = resolve; }));
+    setup({ drives: [makeDrive({ displayName: "Photos" })] });
+    fireEvent.click(screen.getByRole("button", { name: "Edit drive" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
+    fireEvent.keyDown(screen.getByLabelText("Drive name"), { key: "Escape" });
+    expect(screen.getByLabelText("Drive name")).toBeInTheDocument();
+    finishSave({});
+    await waitFor(() => expect(screen.queryByLabelText("Drive name")).not.toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Edit drive" })).toHaveFocus();
+  });
+
+  it("never offers edit or eject for a system drive", () => {
+    setup({ drives: [makeDrive({ isSystemDisk: true })] });
+    expect(screen.queryByRole("button", { name: /edit drive|eject/i })).not.toBeInTheDocument();
+  });
+
+  it("uses later inventory metadata after the saved values have arrived", async () => {
+    (updateDriveLabel as ReturnType<typeof vi.fn>).mockResolvedValue({});
+    const view = setup({ drives: [makeDrive({ displayName: "Photos" })] });
+    fireEvent.click(screen.getByRole("button", { name: "Edit drive" }));
+    fireEvent.change(screen.getByLabelText("Drive name"), { target: { value: "Archive" } });
+    fireEvent.change(screen.getByLabelText("Drive icon"), { target: { value: "camera" } });
+    fireEvent.change(screen.getByLabelText("Drive notes"), { target: { value: "Saved notes" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(screen.queryByLabelText("Drive name")).not.toBeInTheDocument());
+    useDrivesMock.mockReturnValue({
+      drives: [makeDrive({ displayName: "Archive", icon: "camera", notes: "Saved notes" })],
+      isLoading: false, refresh,
+    });
+    view.rerender(<DrivesPanel />);
+    useDrivesMock.mockReturnValue({
+      drives: [makeDrive({ displayName: "Team files", icon: "memory-stick", notes: "Changed elsewhere" })],
+      isLoading: false, refresh,
+    });
+    view.rerender(<DrivesPanel />);
+    expect(screen.getByRole("link", { name: "Open Team Files" })).toBeInTheDocument();
+    expect(screen.getByText("Changed elsewhere")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Edit drive" }));
+    expect(screen.getByLabelText("Drive name")).toHaveValue("Team files");
+    expect(screen.getByLabelText("Drive icon")).toHaveValue("memory-stick");
+    expect(screen.getByLabelText("Drive notes")).toHaveValue("Changed elsewhere");
+  });
+
+  it("accepts concurrent inventory metadata even if it differs from the saved values", async () => {
+    (updateDriveLabel as ReturnType<typeof vi.fn>).mockResolvedValue({});
+    const view = setup({ drives: [makeDrive({ displayName: "Photos" })] });
+    fireEvent.click(screen.getByRole("button", { name: "Edit drive" }));
+    fireEvent.change(screen.getByLabelText("Drive name"), { target: { value: "Archive" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(screen.queryByLabelText("Drive name")).not.toBeInTheDocument());
+    useDrivesMock.mockReturnValue({
+      drives: [makeDrive({ displayName: "Other admin", icon: "camera", notes: "Latest notes" })],
+      isLoading: false, refresh,
+    });
+    view.rerender(<DrivesPanel />);
+    expect(screen.getByRole("link", { name: "Open Other Admin" })).toBeInTheDocument();
+    expect(screen.getByText("Latest notes")).toBeInTheDocument();
+  });
+});
+
+describe("DrivesPanel — storage control permissions", () => {
+  it.each(["family", "guest"] as const)("%s can refresh inventory without host controls", async (role) => {
+    setup({ role });
+    expect(screen.queryByRole("button", { name: "Edit drive" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /eject|rescan/i })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Refresh drives" }));
+    await waitFor(() => expect(refresh).toHaveBeenCalledTimes(1));
+    expect(refreshPools).toHaveBeenCalledTimes(1);
+    expect(rescanDrives).not.toHaveBeenCalled();
+    expect(ejectDrive).not.toHaveBeenCalled();
+  });
+
+  it("offers read-only refresh when storage is unavailable", async () => {
+    setup({ role: "family", bridgeError: "unreachable" });
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() => expect(refresh).toHaveBeenCalled());
+    expect(rescanDrives).not.toHaveBeenCalled();
+  });
+
+  it("owners can still rescan the host drive inventory", async () => {
+    setup();
+    fireEvent.click(screen.getByRole("button", { name: "Rescan drives" }));
+    await waitFor(() => expect(rescanDrives).toHaveBeenCalledTimes(1));
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(refreshPools).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "Eject" })).toBeInTheDocument();
   });
 });
 
@@ -811,7 +1006,7 @@ describe("DrivesPanel — a renamed drive's name is never reinterpreted as HTML"
     // maps separator runs to spaces, and this must compare byte-for-byte.
     const payload = '<IMG SRC=X ONERROR="ALERT(1)"> & "QUOTES"';
 
-    fireEvent.click(screen.getByRole("button", { name: /rename|edit name/i }));
+    fireEvent.click(screen.getByRole("button", { name: /edit drive/i }));
     fireEvent.change(screen.getByRole("textbox", { name: /drive name/i }), {
       target: { value: payload },
     });
