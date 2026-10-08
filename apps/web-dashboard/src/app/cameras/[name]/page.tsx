@@ -208,7 +208,9 @@ export default function CameraFullscreenPage() {
   // page (typically /cameras), not into a dead-end of the same route.
   useEffect(() => {
     function onKey(ev: KeyboardEvent) {
-      if (ev.key === "Escape" && !document.querySelector('[role="dialog"][aria-modal="true"]')) {
+      if (ev.key === "Escape" && !ev.defaultPrevented && !document.querySelector('[role="dialog"][aria-modal="true"]')) {
+        const editingField = 'input, textarea, select, [contenteditable]:not([contenteditable="false"])';
+        if ((ev.target instanceof Element && ev.target.closest(editingField)) || document.activeElement?.closest(editingField)) return;
         if (cameraPlaybackActive || playbackSelection || activeItem) {
           returnToLive();
           return;

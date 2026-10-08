@@ -266,6 +266,51 @@ describe("camera-page event playback", () => {
     expect(h.replace).toHaveBeenCalledWith("/cameras");
   });
 
+  it("keeps live viewing open while the timeline date input has focus", () => {
+    render(<CameraFullscreenPage />);
+    const dateInput = screen.getByLabelText("Timeline date");
+    dateInput.focus();
+    fireEvent.keyDown(dateInput, { key: "Escape" });
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.getByRole("img", { name: /Front door.*live/i })).toBeInTheDocument();
+    expect(h.replace).not.toHaveBeenCalled();
+
+    dateInput.blur();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(h.replace).toHaveBeenCalledWith("/cameras");
+  });
+
+  it("keeps the selected clip playing while the timeline date input has focus", () => {
+    render(<CameraFullscreenPage />);
+    const row = screen.getByRole("button", { name: /Play person clip,/ });
+    fireEvent.click(row);
+    const inlinePlayer = screen.getByTestId("camera-playback-source");
+    const dateInput = screen.getByLabelText("Timeline date");
+    dateInput.focus();
+    fireEvent.keyDown(dateInput, { key: "Escape" });
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.getByTestId("camera-playback-source")).toBe(inlinePlayer);
+    expect(row).toHaveAttribute("aria-pressed", "true");
+    expect(h.replace).not.toHaveBeenCalled();
+
+    dateInput.blur();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByTestId("camera-playback-source")).not.toBeInTheDocument();
+    expect(h.replace).not.toHaveBeenCalled();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(h.replace).toHaveBeenCalledWith("/cameras");
+  });
+
+  it("leaves an already-handled Escape to its originating control", () => {
+    render(<CameraFullscreenPage />);
+    const event = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+    event.preventDefault();
+    fireEvent(window, event);
+    expect(h.replace).not.toHaveBeenCalled();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(h.replace).toHaveBeenCalledWith("/cameras");
+  });
+
   it("also returns a recording opened from the live timeline to live before navigating away", () => {
     render(<CameraFullscreenPage />);
     const ruler = screen.getByTestId("timeline-ruler");
