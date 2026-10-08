@@ -4959,6 +4959,8 @@ model HostedAppSessionCode {
   codeHash    String @id
   extensionId String
   userId      String
+  /// The existing dashboard sign-in record also governs the app session.
+  sessionId   String
   expiresAt   DateTime
   createdAt   DateTime @default(now())
   extension   Extension @relation(fields: [extensionId], references: [id], onDelete: Cascade)

@@ -1,13 +1,20 @@
 "use client";
-import { useRef, useState, type RefObject } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 import { Dialog } from "@/components/Dialog";
 import { uninstallExtension } from "@/lib/api";
 import { explainExtensionError } from "@/components/admin/extensions/copy";
 import { useOwnerConfirmation } from "./useOwnerConfirmation";
+import { useHostedActionScope } from "./useHostedActionScope";
 
 export function AppUninstallDialog({ slug, onClose, onDone, triggerRef, dataOnly = false }: {
   slug: string; onClose: () => void; onDone: () => Promise<void>; triggerRef: RefObject<HTMLElement | null>; dataOnly?: boolean;
 }) {
+  const scope = useHostedActionScope(`uninstall:${slug}:${dataOnly}`, ["owner"]);
+  const openedBy = useRef(scope.key);
+  const retired = useRef(false);
+  if (openedBy.current !== scope.key) retired.current = true;
+  const visible = scope.key !== null && !retired.current;
+  useEffect(() => { if (!visible) onClose(); }, [visible, onClose]);
   const cancelRef = useRef<HTMLButtonElement>(null);
   const [deleteData, setDeleteData] = useState(dataOnly);
   const [confirmSlug, setConfirmSlug] = useState("");
@@ -15,14 +22,18 @@ export function AppUninstallDialog({ slug, onClose, onDone, triggerRef, dataOnly
   const [error, setError] = useState<string | null>(null);
   const owner = useOwnerConfirmation({ actionLabel: dataOnly ? "Delete saved data" : "Uninstall app", destructive: true, onError: setError, triggerRef });
   const uninstall = async (currentPassword?: string) => {
+    const isCurrent = scope.capture();
+    if (!visible || !isCurrent()) return;
     if (deleteData && confirmSlug !== slug) return;
     setBusy(true); setError(null);
     try {
       await uninstallExtension(slug, deleteData ? { deleteData: true, confirmSlug } : undefined, currentPassword);
-      await onDone(); onClose();
-    } catch (err) { if (!owner.requestConfirmation(err, uninstall)) setError(explainExtensionError(err)); }
-    finally { setBusy(false); }
+      if (!isCurrent()) return;
+      await onDone(); if (isCurrent()) onClose();
+    } catch (err) { if (isCurrent() && !owner.requestConfirmation(err, uninstall)) setError(explainExtensionError(err)); }
+    finally { if (isCurrent()) setBusy(false); }
   };
+  if (!visible) return null;
   return <>
     <Dialog open={!owner.confirmingIdentity} onClose={() => { if (!busy) onClose(); }} triggerRef={triggerRef} initialFocusRef={cancelRef} labelledBy="app-uninstall-heading">
       <form className="flex flex-col gap-3" onSubmit={(event) => { event.preventDefault(); if (!busy) void uninstall(); }}>

@@ -213,11 +213,11 @@ export async function listWorkspaceTemplates(): Promise<string[]> {
   return body.templates ?? [];
 }
 
-export async function createWorkspace(input: { name: string; template?: string; kind?: "app" }): Promise<{ id: string; name: string }> {
+export async function createWorkspace(input: { name: string; template?: string; kind?: "app" }, signal?: AbortSignal): Promise<{ id: string; name: string }> {
   const res = await authFetch("/api/workspace", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input),
+    body: JSON.stringify(input), ...(signal ? { signal } : {}),
   });
   if (!res?.ok) throw await readError(res, "Couldn't create this workspace");
   return (await res.json()) as { id: string; name: string };
@@ -229,12 +229,12 @@ export async function getWorkspace(id: string): Promise<WorkspaceDetail> {
   return (await res.json()) as WorkspaceDetail;
 }
 
-export async function importWorkspaceArchive(input: { name: string; archive: File; id?: string }): Promise<{ id: string; name: string }> {
+export async function importWorkspaceArchive(input: { name: string; archive: File; id?: string }, signal?: AbortSignal): Promise<{ id: string; name: string }> {
   const body = new FormData();
   body.set("name", input.name);
   body.set("archive", input.archive);
   if (input.id) body.set("id", input.id);
-  const res = await authFetch("/api/workspace/import", { method: "POST", body });
+  const res = await authFetch("/api/workspace/import", { method: "POST", body, ...(signal ? { signal } : {}) });
   if (!res.ok) throw await readError(res, "Couldn't import this archive");
   return res.json() as Promise<{ id: string; name: string }>;
 }

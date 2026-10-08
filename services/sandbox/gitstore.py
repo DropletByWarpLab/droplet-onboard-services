@@ -256,11 +256,17 @@ def _extract_template(template: str, into: Path) -> None:
 # ── workspaces ──────────────────────────────────────────────────────────────
 
 DEFAULT_IGNORE = "node_modules/\n__pycache__/\n.workspace/\ndist/\n"
+WORKSPACE_CREATE_LOCK = threading.Lock()
 
 
 def create_workspace(workspace_id: str, template: str | None, author: Author) -> dict[str, Any]:
     """A new bare repo + a checkout on the `work` branch, optionally
     populated from one template directory of templates.git."""
+    with WORKSPACE_CREATE_LOCK:
+        return _create_workspace(workspace_id, template, author)
+
+
+def _create_workspace(workspace_id: str, template: str | None, author: Author) -> dict[str, Any]:
     ensure_dirs()
     bare = bare_path(workspace_id)
     work = work_path(workspace_id)
@@ -270,9 +276,20 @@ def create_workspace(workspace_id: str, template: str | None, author: Author) ->
         available = list_templates()
         if template not in available:
             raise StoreError(400, f"unknown template {template!r}; available: {', '.join(available) or 'none'}")
-    must(git(["init", "--bare", "-q", "-b", WORK_BRANCH, str(bare)], REPOS_DIR), "init repo")
+    # Claim ownership before git init (which happily reinitializes an existing
+    # repository). A competing creator must never clean up the winner's data.
     try:
-        work.mkdir(parents=True)
+        bare.mkdir()
+    except FileExistsError as exc:
+        raise StoreError(409, f"workspace {workspace_id} already exists") from exc
+    owns_work = False
+    try:
+        must(git(["init", "--bare", "-q", "-b", WORK_BRANCH, str(bare)], REPOS_DIR), "init repo")
+        try:
+            work.mkdir()
+        except FileExistsError as exc:
+            raise StoreError(409, f"workspace {workspace_id} already exists") from exc
+        owns_work = True
         must(git(["init", "-q", "-b", WORK_BRANCH], work), "init checkout")
         must(git(["remote", "add", "origin", str(bare)], work), "add origin")
         if template:
@@ -286,9 +303,9 @@ def create_workspace(workspace_id: str, template: str | None, author: Author) ->
         must(git(["commit", "-q", "-m", subject], work, author=author), "initial commit")
         must(git(["push", "-q", "-u", "origin", WORK_BRANCH], work), "push")
     except Exception:
-        for p in (bare, work):
-            if p.exists():
-                _rmtree(p)
+        if owns_work:
+            _rmtree(work)
+        _rmtree(bare)
         raise
     return status(workspace_id)
 
@@ -331,7 +348,13 @@ def read_at_tag(workspace_id: str, tag: str) -> dict[str, Any]:
         raise StoreError(404, f"no tag {tag} in workspace {workspace_id}")
     commit = cp.stdout.strip()
     tree = must(git(["rev-parse", f"{commit}^{{tree}}"], bare), "rev-parse tree").stdout.strip()
-    shown = git(["cat-file", "blob", f"{commit}:{MANIFEST_PATH}"], bare, binary=True)
+    manifest_object = f"{commit}:{MANIFEST_PATH}"
+    # The pinned commit's object is immutable. Check its size before capturing
+    # bytes: an imported/vendored tree may contain a manifest far beyond RAM.
+    size = git(["cat-file", "-s", manifest_object], bare)
+    if size.returncode == 0 and int(size.stdout.strip()) > MAX_MANIFEST_BYTES:
+        raise StoreError(413, f"{MANIFEST_PATH} exceeds {MAX_MANIFEST_BYTES} bytes")
+    shown = git(["cat-file", "blob", manifest_object], bare, binary=True)
     manifest: bytes | None = shown.stdout if shown.returncode == 0 else None
     if manifest is not None and len(manifest) > MAX_MANIFEST_BYTES:
         raise StoreError(413, f"{MANIFEST_PATH} exceeds {MAX_MANIFEST_BYTES} bytes")

@@ -14,6 +14,8 @@ vi.mock("../config.js", () => ({ config: {
   corsAllowedOrigins: ["https://droplet-ai.lan"], DROPLET_LAN_HOSTNAME: "droplet-ai.lan",
 } }));
 vi.mock("./activity.singleton.js", () => ({ recordActivity: vi.fn() }));
+vi.mock("./session.service.js", () => ({ checkSession: vi.fn(async () => ({ kind: "ok", record: { userId: "user-id" } })) }));
+vi.mock("./auth-denylist.service.js", () => ({ isUserDenied: vi.fn(async () => false) }));
 vi.mock("node:dns/promises", () => ({ lookup: vi.fn(async () => [{ address: "10.0.0.2", family: 4 }]) }));
 
 const manifest = Buffer.from(JSON.stringify({ schemaVersion: 1, id: "shop", name: "Shop", version: "1.0.0",
@@ -26,7 +28,7 @@ function fixture() {
   const row = { id: "shop", workspaceId: "shop-workspace", name: "Shop", kind: "app", status: "live",
     appRelayKeyEnc: encryptColumn(deriveHostedAppRelayKey(), "internal-app-key", "hosted-app:shop"), lastHealthAt: new Date(),
     currentVersion: { version: "1.0.0", manifestBytes: manifest }, hostedAppGrants: [] as { role: string }[] };
-  const codes = new Map<string, { codeHash: string; extensionId: string; userId: string; expiresAt: Date }>();
+  const codes = new Map<string, { codeHash: string; extensionId: string; userId: string; sessionId: string; expiresAt: Date }>();
   const db = {
     user: { findUnique: vi.fn(async () => user), findMany: vi.fn(async () => [user]) },
     extension: { findUnique: vi.fn(async () => row), findMany: vi.fn(async () => [row]) },
@@ -55,8 +57,8 @@ function fixture() {
     gatewayPeer: async (req: Request) => req.header("x-forwarded-port") === "8443" && req.header("x-droplet-hosted-ingress") === "8443" };
   return { db, prisma: db as unknown as PrismaClient, row, user, codes, audit, sandbox, deps };
 }
-const req = () => ({ user: { id: "user-id", role: "owner" }, query: {}, headers: {}, header: () => undefined }) as unknown as Request;
-const token = () => jwt.sign({ role: "owner" }, hostedJwtKey(), { subject: "user-id", audience: "app:shop", issuer: "droplet-hosted", expiresIn: HOSTED_SESSION_SECONDS });
+const req = () => ({ user: { id: "user-id", role: "owner", sid: "dashboard-sid" }, query: {}, headers: {}, header: () => undefined }) as unknown as Request;
+const token = () => jwt.sign({ role: "owner", sid: "dashboard-sid" }, hostedJwtKey(), { subject: "user-id", audience: "app:shop", issuer: "droplet-hosted", expiresIn: HOSTED_SESSION_SECONDS });
 
 describe("hosted app sessions and grants", () => {
   beforeEach(() => vi.clearAllMocks());
@@ -70,7 +72,7 @@ describe("hosted app sessions and grants", () => {
     expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
     expect(f.codes.size).toBe(0);
     const appToken = results.find((r) => r.status === "fulfilled") as PromiseFulfilledResult<string>;
-    expect(jwt.verify(appToken.value, hostedJwtKey(), { audience: "app:shop" })).toMatchObject({ sub: "user-id", aud: "app:shop" });
+    expect(jwt.verify(appToken.value, hostedJwtKey(), { audience: "app:shop" })).toMatchObject({ sub: "user-id", aud: "app:shop", sid: "dashboard-sid" });
     expect(() => jwt.verify(appToken.value, "dashboard-secret-with-at-least-32-bytes")).toThrow();
     expect(() => jwt.verify(appToken.value, hostedJwtKey(), { audience: "app:other" })).toThrow();
   });

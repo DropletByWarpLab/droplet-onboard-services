@@ -13,6 +13,7 @@ CREATE TABLE "HostedAppSessionCode" (
   "codeHash" TEXT PRIMARY KEY,
   "extensionId" TEXT NOT NULL REFERENCES "Extension"("id") ON DELETE CASCADE,
   "userId" TEXT NOT NULL,
+  "sessionId" TEXT NOT NULL,
   "expiresAt" TIMESTAMP(3) NOT NULL,
   "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
 );

@@ -8,6 +8,7 @@ const router = vi.hoisted(() => ({ push: vi.fn() }));
 const lifecycle = vi.hoisted(() => ({ uninstall: vi.fn() }));
 vi.mock("@/lib/auth", () => ({ useAuth: () => ({ user: { role: auth.role, id: auth.id }, isLoading: false }), authFetch: (...args: unknown[]) => auth.fetch(...args) }));
 vi.mock("next/navigation", () => ({ useRouter: () => router }));
+vi.mock("@/lib/hooks/useBoxAddress", () => ({ useBoxAddress: () => "localhost" }));
 vi.mock("@/components/shell/ShellPage", () => ({ ShellPage: ({ title, actions, children }: { title: string; actions?: React.ReactNode; children: React.ReactNode }) => <main><h1>{title}</h1>{actions}{children}</main> }));
 vi.mock("@/lib/api", async (original) => ({ ...(await original<typeof import("@/lib/api")>()), uninstallExtension: (...args: unknown[]) => lifecycle.uninstall(...args) }));
 
@@ -23,7 +24,7 @@ import { ARCHIVE_CAP_BYTES } from "@/components/workshop/NewAppForm";
 import type { WorkspaceDetail } from "@/components/workshop/workspaces/api";
 import { ExtensionRequestError } from "@/lib/api";
 
-const APP = { id: "app-1", slug: "daily", workspaceId: "workspace-1", name: "Daily dashboard", version: "0.1.0", status: "live", url: "https://droplet.local:8443/daily/", memoryMb: 128, lastHealthAt: null, grants: ["family"] };
+const APP = { id: "app-1", slug: "daily", workspaceId: "workspace-1", name: "Daily dashboard", version: "0.1.0", status: "live", url: "https://localhost:8443/daily/", memoryMb: 128, lastHealthAt: null, grants: ["family"] };
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json" } });
 const renderFresh = (element: React.ReactNode) => render(<SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>{element}</SWRConfig>);
 const triggerRef = { current: null };
@@ -86,18 +87,18 @@ describe("Apps access and browser handoff", () => {
   it("mints a session and navigates a reserved tab, using the returned single-use URL", async () => {
     const tab = { opener: "original", location: { replace: vi.fn() }, close: vi.fn() };
     vi.spyOn(window, "open").mockReturnValue(tab as unknown as Window);
-    auth.fetch.mockResolvedValue(json({ url: "https://droplet.local:8443/daily/_droplet/session?code=single-use" }));
+    auth.fetch.mockResolvedValue(json({ url: "https://localhost:8443/daily/_droplet/session?code=single-use" }));
     render(<HostedAppOpen slug="daily" />);
     fireEvent.click(screen.getByRole("button", { name: "Open daily in browser" }));
-    await waitFor(() => expect(tab.location.replace).toHaveBeenCalledWith("https://droplet.local:8443/daily/_droplet/session?code=single-use"));
+    await waitFor(() => expect(tab.location.replace).toHaveBeenCalledWith("https://localhost:8443/daily/_droplet/session?code=single-use"));
     expect(tab.opener).toBeNull();
     expect(auth.fetch).toHaveBeenCalledWith("/api/hosted/daily/session", expect.objectContaining({ method: "POST", body: "{}" }));
   });
   it.each([
-    "javascript:alert(1)", "http://droplet.local:8443/daily/_droplet/session?code=x",
-    "https://droplet.local/daily/_droplet/session?code=x", "https://droplet.local:3000/daily/_droplet/session?code=x",
-    "https://name:password@droplet.local:8443/daily/_droplet/session?code=x",
-    "https://droplet.local:8443/other/_droplet/session?code=x", "https://droplet.local:8443/daily/",
+    "javascript:alert(1)", "http://localhost:8443/daily/_droplet/session?code=x",
+    "https://localhost/daily/_droplet/session?code=x", "https://localhost:3000/daily/_droplet/session?code=x",
+    "https://name:password@localhost:8443/daily/_droplet/session?code=x",
+    "https://localhost:8443/other/_droplet/session?code=x", "https://localhost:8443/daily/",
   ])("refuses an invalid session handoff URL %s", async (url) => {
     const tab = { opener: null, location: { replace: vi.fn() }, close: vi.fn() };
     vi.spyOn(window, "open").mockReturnValue(tab as unknown as Window);

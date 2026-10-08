@@ -6,7 +6,6 @@ import stat
 import struct
 import tarfile
 import tempfile
-import threading
 import time
 import zipfile
 from pathlib import Path
@@ -19,7 +18,6 @@ MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
 MAX_UNPACKED_BYTES = 1024 * 1024 * 1024
 MAX_ENTRIES = 50_000
 IMPORT_TIMEOUT_S = 120
-_create_lock = threading.Lock()
 
 
 class _BoundedTarInfo(tarfile.TarInfo):
@@ -53,9 +51,21 @@ def _bounded_zip_index(source: BinaryIO) -> None:
     _, disk, start_disk, on_disk, count, size, start, comment = struct.unpack("<4s4H2LH", tail[offset:offset + 22])
     if disk or start_disk or on_disk != count or count > MAX_ENTRIES or size > 64 * 1024 * 1024:
         raise StoreError(413, "archive zip directory exceeds import limits")
-    if offset + 22 + comment != len(tail) or start + size > length:
+    end_position = length - len(tail) + offset
+    # ZipFile consults a ZIP64 locator immediately before the selected EOCD,
+    # even when that footer is inside another EOCD's comment. Its 64-bit fields
+    # override these classic bounds. Our import caps do not require ZIP64.
+    if end_position >= 20:
+        source.seek(end_position - 20)
+        if source.read(4) == b"PK\x06\x07":
+            raise StoreError(413, "archive ZIP64 directories are not supported")
+    # ZipFile derives its actual directory from the EOCD's physical position
+    # and size, adjusting offsets for prepended data. Count that SAME directory
+    # before allocation, not a caller-selected prefix at the raw start offset.
+    directory_start = end_position - size
+    if offset + 22 + comment != len(tail) or directory_start < 0 or start > directory_start:
         raise StoreError(400, "archive zip directory is malformed")
-    source.seek(start)
+    source.seek(directory_start)
     remaining = size
     records = 0
     while remaining:
@@ -176,15 +186,25 @@ def import_workspace(workspace_id: str, format: str, source: BinaryIO, author: g
         staging = Path(temp) / "tree"
         staging.mkdir()
         unpack(source, format, staging)
-        with _create_lock:
+        with gitstore.WORKSPACE_CREATE_LOCK:
             if bare.exists() or work.exists():
                 raise StoreError(409, "workspace already exists")
-            bare.mkdir()
+            try:
+                bare.mkdir()
+            except FileExistsError as exc:
+                raise StoreError(409, "workspace already exists") from exc
             owns_work = False
             try:
                 gitstore.must(gitstore.git(["init", "--bare", "-q", "-b", gitstore.WORK_BRANCH, str(bare)], gitstore.REPOS_DIR), "init repo")
-                os.rename(staging, work)
+                # Claim the checkout too: POSIX rename could otherwise replace
+                # a competing creator's empty directory and make it ours.
+                try:
+                    work.mkdir()
+                except FileExistsError as exc:
+                    raise StoreError(409, "workspace already exists") from exc
                 owns_work = True
+                for child in staging.iterdir():
+                    os.rename(child, work / child.name)
                 gitstore.must(gitstore.git(["init", "-q", "-b", gitstore.WORK_BRANCH], work), "init checkout")
                 gitstore.must(gitstore.git(["remote", "add", "origin", str(bare)], work), "add origin")
                 # Offline dependencies and built UI survive imported ignore rules.

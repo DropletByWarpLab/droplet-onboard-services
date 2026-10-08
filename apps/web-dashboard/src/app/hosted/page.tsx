@@ -17,6 +17,11 @@ import "@/components/workshop/workshop.css";
 
 const SUB = "Web apps that run on your Droplet. Open an app you have access to, or bring your own code.";
 export default function HostedPage() {
+  const { user } = useAuth();
+  return <HostedPageContent key={JSON.stringify([user?.id, user?.role])} />;
+}
+
+function HostedPageContent() {
   const { user, isLoading } = useAuth();
   const manager = isAdminRole(user?.role);
   const allowed = manager || user?.role === "family";

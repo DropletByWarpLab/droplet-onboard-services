@@ -1,39 +1,50 @@
 "use client";
-import { useId, useRef, useState, type RefObject } from "react";
+import { useEffect, useId, useRef, useState, type RefObject } from "react";
 import { Dialog } from "@/components/Dialog";
 import { StepUpDialog } from "@/components/auth/StepUpDialog";
 import { ExtensionRequestError } from "@/lib/api";
 import { HostedAppError } from "./api";
+import { useHostedActionScope } from "./useHostedActionScope";
 
 /** Uses the box's existing credential gate, including passkey-only accounts. */
 export function useOwnerConfirmation({ actionLabel, onError, triggerRef, destructive = false }: {
   actionLabel: string; onError: (message: string) => void;
   triggerRef?: RefObject<HTMLElement | null>; destructive?: boolean;
 }) {
+  const scope = useHostedActionScope("owner-confirmation", ["owner"]);
   const heading = useId();
   const passwordRef = useRef<HTMLInputElement>(null);
-  const [mode, setMode] = useState<"mfa" | "password" | null>(null);
+  const [prompt, setPrompt] = useState<{ id: number; mode: "mfa" | "password"; action: (currentPassword?: string) => Promise<void>; isCurrent: () => boolean } | null>(null);
   const [password, setPassword] = useState("");
-  const retry = useRef<((currentPassword?: string) => Promise<void>) | null>(null);
-  const close = () => { setMode(null); setPassword(""); };
+  const nextPrompt = useRef(0);
+  const close = () => { setPrompt(null); setPassword(""); };
+  useEffect(() => { setPrompt(null); setPassword(""); }, [scope.key]);
+  const shown = prompt?.isCurrent() ? prompt : null;
+  // StepUpDialog closes before onVerified; this render's prompt remains the
+  // verified action, while a principal change or unmount invalidates its scope.
+  const runVerified = async (currentPassword?: string) => {
+    if (!prompt?.isCurrent()) return;
+    close();
+    await prompt.action(currentPassword);
+  };
   const requestConfirmation = (error: unknown, action: (currentPassword?: string) => Promise<void>) => {
+    const isCurrent = scope.capture();
+    if (!isCurrent()) return false;
     const code = error instanceof ExtensionRequestError || error instanceof HostedAppError ? error.code : null;
     if (code === "mfa_required" || code === "mfa_stale" || code === "STEP_UP_PASSWORD_REQUIRED" || code === "INVALID_PASSWORD") {
-      retry.current = action;
       setPassword("");
-      setMode(code === "mfa_required" || code === "mfa_stale" ? "mfa" : "password");
+      setPrompt({ id: ++nextPrompt.current, mode: code === "mfa_required" || code === "mfa_stale" ? "mfa" : "password", action, isCurrent });
       return true;
     }
     return false;
   };
-  return { requestConfirmation, confirmingIdentity: mode !== null, confirmation: <>
-    <StepUpDialog open={mode === "mfa"} onClose={close} onVerified={() => retry.current?.()}
-      onError={onError} actionLabel={actionLabel} destructive={destructive} triggerRef={triggerRef} />
-    <Dialog open={mode === "password"} onClose={close} triggerRef={triggerRef} initialFocusRef={passwordRef} labelledBy={heading} maxWidth="sm">
+  return { requestConfirmation, confirmingIdentity: shown !== null, confirmation: <>
+    <StepUpDialog key={shown?.id ?? "closed"} open={shown?.mode === "mfa"} onClose={close} onVerified={() => runVerified()}
+      onError={(message) => { if (prompt?.isCurrent()) onError(message); }} actionLabel={actionLabel} destructive={destructive} triggerRef={triggerRef} />
+    <Dialog key={scope.key ?? "retired"} open={shown?.mode === "password"} onClose={close} triggerRef={triggerRef} initialFocusRef={passwordRef} labelledBy={heading} maxWidth="sm">
       <form className="flex flex-col gap-3" onSubmit={(event) => {
         event.preventDefault();
-        const value = password; close();
-        void retry.current?.(value);
+        void runVerified(password).catch((error) => { if (prompt?.isCurrent()) onError(error instanceof Error ? error.message : "The Droplet could not complete that."); });
       }}>
         <h2 id={heading} className="type-headline">Confirm it&apos;s you</h2>
         <p className="sub">Enter your current password to continue.</p>

@@ -1,7 +1,8 @@
 "use client";
-import { useEffect, useState, type RefObject } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 import { fetchHostedApps } from "@/components/hosted/api";
 import { createWorkspace, importWorkspaceArchive, TEMPLATE_INFO } from "./workspaces/api";
+import { useHostedActionScope } from "@/components/hosted/useHostedActionScope";
 
 type Source = "template" | "archive" | "push";
 export const APP_TEMPLATES = ["static-site", "node-app", "python-app"];
@@ -14,6 +15,8 @@ export function NewAppForm({ templates, onCreated, onClose, initialFocusRef, onB
   initialFocusRef: RefObject<HTMLInputElement | null>;
   onBusyChange: (busy: boolean) => void;
 }) {
+  const scope = useHostedActionScope("create-app", ["owner", "admin"]);
+  const controller = useRef<AbortController | null>(null);
   const [name, setName] = useState("");
   const [source, setSource] = useState<Source>("template");
   const [template, setTemplate] = useState("static-site");
@@ -25,18 +28,22 @@ export function NewAppForm({ templates, onCreated, onClose, initialFocusRef, onB
   const nameRef = initialFocusRef;
   useEffect(() => {
     let active = true;
+    setName(""); setFile(null); setSource("template"); setEnabled(null); setStatusError(false); setError(null); setBusy(false);
+    onBusyChange(false);
+    if (!scope.key) return;
     nameRef.current?.focus();
     fetchHostedApps().then((state) => { if (active) setEnabled(state.supervisionEnabled); })
       .catch(() => { if (active) setStatusError(true); });
-    return () => { active = false; };
-  }, []);
+    return () => { active = false; controller.current?.abort(); controller.current = null; };
+  }, [scope.key]);
   useEffect(() => {
     if (templates && !templates.includes(template)) setTemplate(APP_TEMPLATES.find((id) => templates.includes(id)) ?? "");
   }, [templates, template]);
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (busy || enabled !== true) return;
+    const isCurrent = scope.capture();
+    if (busy || enabled !== true || !isCurrent()) return;
     if (!name.trim()) { setError("Give the app a name first."); nameRef.current?.focus(); return; }
     if (source === "template" && !template) { setError("Choose an app template on this Droplet."); return; }
     if (source === "archive" && (!file || !/\.(zip|tar\.gz)$/i.test(file.name))) {
@@ -46,14 +53,16 @@ export function NewAppForm({ templates, onCreated, onClose, initialFocusRef, onB
       setError("That archive is too large. The limit is 256 MiB."); return;
     }
     setBusy(true); onBusyChange(true); setError(null);
+    const operation = new AbortController(); controller.current = operation;
     try {
       const workspace = source === "archive"
-        ? await importWorkspaceArchive({ name: name.trim(), archive: file! })
-        : await createWorkspace({ name: name.trim(), kind: "app", ...(source === "template" ? { template } : {}) });
+        ? await importWorkspaceArchive({ name: name.trim(), archive: file! }, operation.signal)
+        : await createWorkspace({ name: name.trim(), kind: "app", ...(source === "template" ? { template } : {}) }, operation.signal);
+      if (!isCurrent()) return;
       onCreated({ ...workspace, kind: "app" });
       onClose();
-    } catch { setError("The Droplet could not create this app workspace. Try again in a moment."); }
-    finally { setBusy(false); onBusyChange(false); }
+    } catch { if (isCurrent()) setError("The Droplet could not create this app workspace. Try again in a moment."); }
+    finally { if (controller.current === operation) controller.current = null; if (isCurrent()) { setBusy(false); onBusyChange(false); } }
   };
   return <form onSubmit={(e) => void submit(e)} noValidate aria-label="New app" className="flex flex-col gap-4">
     <div><h2 id="new-tool-heading" className="text-[16px] font-semibold m-0">New app</h2>
@@ -84,6 +93,6 @@ export function NewAppForm({ templates, onCreated, onClose, initialFocusRef, onB
     <p className="ws-note">Droplet connects the app for you. Open it in your browser from Apps.</p>
     {error && <p role="alert" className="ws-field-error">{error}</p>}
     <div className="flex justify-end gap-2"><button type="button" className="btn" onClick={onClose} disabled={busy}>Cancel</button>
-      <button type="submit" className="btn primary" disabled={busy || enabled !== true || (source === "template" && templates === null)} aria-busy={busy}>{busy ? "Creating…" : "Create app workspace"}</button></div>
+      <button type="submit" className="btn primary" disabled={busy || !scope.key || enabled !== true || (source === "template" && templates === null)} aria-busy={busy}>{busy ? "Creating…" : "Create app workspace"}</button></div>
   </form>;
 }

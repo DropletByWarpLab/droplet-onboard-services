@@ -58,9 +58,9 @@ export const fetchHostedApps = (options: { cursor?: string; workspaceId?: string
   if (options.workspaceId) query.set("workspaceId", options.workspaceId);
   return request(`/api/hosted${query.size ? `?${query}` : ""}`);
 };
-export const mintHostedAppSession = (slug: string): Promise<{ url: string }> => request(
+export const mintHostedAppSession = (slug: string, signal?: AbortSignal): Promise<{ url: string }> => request(
   `/api/hosted/${encodeURIComponent(slug)}/session`,
-  { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" },
+  { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}", ...(signal ? { signal } : {}) },
 );
 export const fetchHostedAppLogs = (slug: string): Promise<HostedLogs> => request(
   `/api/hosted/${encodeURIComponent(slug)}/logs?limit=200`,
@@ -77,15 +77,23 @@ export const updateHostedAppGrants = (slug: string, roles: string[], currentPass
 export class HostedSetupError extends Error {
   constructor(readonly sessionId: string, readonly cause: unknown) { super("Could not start app setup"); }
 }
-export async function startHostedAppSetup(workspaceId: string, name: string, existingSessionId?: string): Promise<string> {
+export async function startHostedAppSetup(workspaceId: string, name: string, existingSessionId?: string,
+  options: { signal?: AbortSignal; isCurrent?: () => boolean } = {}): Promise<string> {
+  const requireCurrent = () => {
+    if (options.signal?.aborted || options.isCurrent?.() === false) throw new DOMException("App setup retired", "AbortError");
+  };
+  requireCurrent();
   const conversation = existingSessionId ? { id: existingSessionId } : await request<{ id: string }>("/api/llm/conversations", {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ title: `Set up ${name}` }),
+    body: JSON.stringify({ title: `Set up ${name}` }), signal: options.signal,
   });
+  // The first request may finish after navigation or an account replacement.
+  requireCurrent();
   try { await request("/api/agent-runs", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ brief: "app-setup", workspaceId, sessionId: conversation.id,
-      goal: `Set up the hosted app in workspace ${workspaceId}. Read its files, build and check it, then propose a version for the owner to review.` }),
+      goal: `Set up the hosted app in workspace ${workspaceId}. Read its files, build and check it, then propose a version for the owner to review.` }), signal: options.signal,
   }); } catch (error) { throw new HostedSetupError(conversation.id, error); }
+  requireCurrent();
   return `/chat?c=${encodeURIComponent(conversation.id)}`;
 }
