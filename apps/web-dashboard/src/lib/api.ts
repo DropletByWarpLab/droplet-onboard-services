@@ -9676,9 +9676,10 @@ export function setExtensionEnabled(
   );
 }
 
-export function uninstallExtension(slug: string, data?: { deleteData: true; confirmSlug: string }, currentPassword?: string): Promise<{ id: string; status: string }> {
+export function uninstallExtension(slug: string, data?: { deleteData: true; confirmSlug: string }, currentPassword?: string, signal?: AbortSignal): Promise<{ id: string; status: string }> {
   return extensionRequest(`/api/extensions/${encodeURIComponent(slug)}`, {
     method: "DELETE",
+    ...(signal ? { signal } : {}),
     ...(data || currentPassword ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...data, ...(currentPassword ? { currentPassword } : {}) }) } : {}),
   });
 }

@@ -289,7 +289,7 @@ describe("Owner app access and data", () => {
     const done = vi.fn().mockResolvedValue(undefined);
     const view = render(<AppUninstallDialog slug="daily" triggerRef={triggerRef} onClose={vi.fn()} onDone={done} />);
     fireEvent.click(screen.getByRole("button", { name: "Confirm uninstall" }));
-    await waitFor(() => expect(lifecycle.uninstall).toHaveBeenCalledWith("daily", undefined, undefined));
+    await waitFor(() => expect(lifecycle.uninstall).toHaveBeenCalledWith("daily", undefined, undefined, expect.any(AbortSignal)));
     view.unmount(); lifecycle.uninstall.mockClear();
     render(<AppUninstallDialog slug="daily" triggerRef={triggerRef} onClose={vi.fn()} onDone={done} />);
     fireEvent.click(screen.getByLabelText(/Also permanently delete/));
@@ -299,7 +299,7 @@ describe("Owner app access and data", () => {
     expect(confirm).toBeDisabled();
     fireEvent.change(screen.getByLabelText("Type daily to delete its data"), { target: { value: "daily" } });
     fireEvent.click(confirm);
-    await waitFor(() => expect(lifecycle.uninstall).toHaveBeenCalledWith("daily", { deleteData: true, confirmSlug: "daily" }, undefined));
+    await waitFor(() => expect(lifecycle.uninstall).toHaveBeenCalledWith("daily", { deleteData: true, confirmSlug: "daily" }, undefined, expect.any(AbortSignal)));
   });
   it("requires typed confirmation to remove retained data from an uninstalled app", async () => {
     render(<AppUninstallDialog slug="daily" dataOnly triggerRef={triggerRef} onClose={vi.fn()} onDone={vi.fn().mockResolvedValue(undefined)} />);
@@ -307,7 +307,7 @@ describe("Owner app access and data", () => {
     expect(screen.queryByLabelText(/Also permanently delete/)).toBeNull();
     fireEvent.change(screen.getByLabelText("Type daily to delete its data"), { target: { value: "daily" } });
     fireEvent.click(screen.getByRole("button", { name: "Delete saved data" }));
-    await waitFor(() => expect(lifecycle.uninstall).toHaveBeenCalledWith("daily", { deleteData: true, confirmSlug: "daily" }, undefined));
+    await waitFor(() => expect(lifecycle.uninstall).toHaveBeenCalledWith("daily", { deleteData: true, confirmSlug: "daily" }, undefined, expect.any(AbortSignal)));
   });
   it("uses the existing MFA dialog and retries the same uninstall after verification", async () => {
     lifecycle.uninstall.mockRejectedValueOnce(new ExtensionRequestError("untrusted detail", 401, "mfa_stale"));
@@ -330,6 +330,6 @@ describe("Owner app access and data", () => {
     const dialog = await screen.findByRole("dialog", { name: "Confirm it's you" });
     fireEvent.change(within(dialog).getByLabelText("Password"), { target: { value: "current" } });
     fireEvent.click(within(dialog).getByRole("button", { name: "Uninstall app" }));
-    await waitFor(() => expect(lifecycle.uninstall).toHaveBeenLastCalledWith("daily", undefined, "current"));
+    await waitFor(() => expect(lifecycle.uninstall).toHaveBeenLastCalledWith("daily", undefined, "current", expect.any(AbortSignal)));
   });
 });

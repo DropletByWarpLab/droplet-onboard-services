@@ -15,6 +15,8 @@ export function AppUninstallDialog({ slug, onClose, onDone, triggerRef, dataOnly
   if (openedBy.current !== scope.key) retired.current = true;
   const visible = scope.key !== null && !retired.current;
   useEffect(() => { if (!visible) onClose(); }, [visible, onClose]);
+  const pending = useRef<AbortController | null>(null);
+  useEffect(() => () => { pending.current?.abort(); pending.current = null; }, [scope.key]);
   const cancelRef = useRef<HTMLButtonElement>(null);
   const [deleteData, setDeleteData] = useState(dataOnly);
   const [confirmSlug, setConfirmSlug] = useState("");
@@ -25,13 +27,14 @@ export function AppUninstallDialog({ slug, onClose, onDone, triggerRef, dataOnly
     const isCurrent = scope.capture();
     if (!visible || !isCurrent()) return;
     if (deleteData && confirmSlug !== slug) return;
+    const operation = new AbortController(); pending.current = operation;
     setBusy(true); setError(null);
     try {
-      await uninstallExtension(slug, deleteData ? { deleteData: true, confirmSlug } : undefined, currentPassword);
+      await uninstallExtension(slug, deleteData ? { deleteData: true, confirmSlug } : undefined, currentPassword, operation.signal);
       if (!isCurrent()) return;
       await onDone(); if (isCurrent()) onClose();
     } catch (err) { if (isCurrent() && !owner.requestConfirmation(err, uninstall)) setError(explainExtensionError(err)); }
-    finally { if (isCurrent()) setBusy(false); }
+    finally { if (pending.current === operation) pending.current = null; if (isCurrent()) setBusy(false); }
   };
   if (!visible) return null;
   return <>

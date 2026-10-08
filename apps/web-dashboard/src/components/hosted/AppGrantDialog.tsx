@@ -15,6 +15,10 @@ export function AppGrantDialog({ slug, onClose, onSaved, triggerRef }: {
   if (openedBy.current !== scope.key) retired.current = true;
   const visible = scope.key !== null && !retired.current;
   useEffect(() => { if (!visible) onClose(); }, [visible, onClose]);
+  const pending = useRef<AbortController | null>(null);
+  // authFetch can retry after a shared refresh; retire the request itself as
+  // well as its UI callbacks before it can act with replacement credentials.
+  useEffect(() => () => { pending.current?.abort(); pending.current = null; }, [scope.key]);
   const initialFocus = useRef<HTMLInputElement>(null);
   const grants = useSWR(visible ? `/api/extensions/${slug}/grants` : null, () => fetchHostedAppGrants(slug));
   const [members, setMembers] = useState<boolean | null>(null);
@@ -25,10 +29,11 @@ export function AppGrantDialog({ slug, onClose, onSaved, triggerRef }: {
   const save = async (currentPassword?: string) => {
     const isCurrent = scope.capture();
     if (!visible || !isCurrent()) return;
+    const operation = new AbortController(); pending.current = operation;
     setBusy(true); setError(null);
-    try { await updateHostedAppGrants(slug, allowMembers ? ["family"] : [], currentPassword); if (!isCurrent()) return; await onSaved(); if (isCurrent()) onClose(); }
+    try { await updateHostedAppGrants(slug, allowMembers ? ["family"] : [], currentPassword, operation.signal); if (!isCurrent()) return; await onSaved(); if (isCurrent()) onClose(); }
     catch (err) { if (isCurrent() && !owner.requestConfirmation(err, save)) setError(hostedErrorCopy(err)); }
-    finally { if (isCurrent()) setBusy(false); }
+    finally { if (pending.current === operation) pending.current = null; if (isCurrent()) setBusy(false); }
   };
   if (!visible) return null;
   return <>

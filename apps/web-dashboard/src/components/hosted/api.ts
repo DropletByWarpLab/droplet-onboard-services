@@ -68,9 +68,9 @@ export const fetchHostedAppLogs = (slug: string): Promise<HostedLogs> => request
 export const fetchHostedAppGrants = (slug: string): Promise<{ roles: string[] }> => request(
   `/api/extensions/${encodeURIComponent(slug)}/grants`,
 );
-export const updateHostedAppGrants = (slug: string, roles: string[], currentPassword?: string): Promise<{ roles: string[] }> => request(
+export const updateHostedAppGrants = (slug: string, roles: string[], currentPassword?: string, signal?: AbortSignal): Promise<{ roles: string[] }> => request(
   `/api/extensions/${encodeURIComponent(slug)}/grants`,
-  { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ roles, ...(currentPassword ? { currentPassword } : {}) }) },
+  { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ roles, ...(currentPassword ? { currentPassword } : {}) }), ...(signal ? { signal } : {}) },
 );
 
 /** Create a saved chat before starting its run, so it can be watched there. */
