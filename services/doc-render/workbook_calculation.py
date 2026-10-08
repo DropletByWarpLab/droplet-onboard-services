@@ -165,7 +165,9 @@ def calculate(workbook, formulas):
             else:
                 args = [results[id(child)] for child in children]
                 flat = [value for arg in args for value in (arg if isinstance(arg, list) else [arg])]
-                result = next((value for value in flat if isinstance(value, CellError)), None)
+                # COUNT ignores error cells, along with other non-numbers;
+                # the other numeric functions propagate those errors.
+                result = None if node[1] == "COUNT" else next((value for value in flat if isinstance(value, CellError)), None)
                 if result is None:
                     numbers = [float(value) for value in flat if isinstance(value, (int, float)) and not isinstance(value, bool)]
                     name = node[1]

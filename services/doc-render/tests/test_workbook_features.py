@@ -275,6 +275,17 @@ def test_formula_cache_uses_excel_power_associativity(expression, expected):
     assert load_workbook(io.BytesIO(data)).active["A2"].value == "=" + expression
 
 
+@pytest.mark.parametrize("expression, expected", [
+    ("COUNT(A2:A4)", 1), ("COUNT(A3)", 0), ("COUNT(A3,5)", 1),
+])
+def test_count_cache_ignores_errors_and_non_numeric_cells(expression, expected):
+    data = render_xlsx([{"columns": ["Values", "Count"], "rows": [[10, ""], ["", ""], [True, ""]],
+        "formulas": [{"cell": "A3", "expression": "1/0"}, {"cell": "B2", "expression": expression}]}])
+    cached = load_workbook(io.BytesIO(data), data_only=True).active
+    assert cached["A3"].value == "#DIV/0!"
+    assert cached["B2"].value == expected
+
+
 def test_cross_sheet_cycles_are_refused_and_no_workbook_bytes_escape():
     with pytest.raises(RenderError, match="circular"):
         render_xlsx([
