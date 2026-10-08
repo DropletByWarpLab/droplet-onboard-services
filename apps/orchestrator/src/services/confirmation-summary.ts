@@ -115,6 +115,7 @@ export interface ConfirmationShownValue {
  * {@link APPROVAL_NO_SAFE_VALUE}.
  */
 export const APPROVAL_SHOWN_ARGUMENTS: Readonly<Record<string, readonly string[]>> = {
+  disconnect_connection: ["connection"],
   // Files
   delete_file: ["path"],
   delete_files: ["paths"],

@@ -878,6 +878,7 @@ export function useChat(options: UseChatOptions = {}) {
       // the orchestrator persists an explicit provider on this turn
       // instead of inferring one from the model name.
       provider?: string,
+      sendOptions?: { preserveComposerAttachments?: boolean },
     ) => {
       // WARP-859 — files staged in the composer ride onto THIS message
       // and then leave the input. Snapshot the staged chips for display
@@ -885,7 +886,7 @@ export function useChat(options: UseChatOptions = {}) {
       // session list (deduped by itemId) so they stay attached to the
       // chat (SessionHeader, per-turn re-injection) after the composer
       // clears.
-      const stagedSnapshot = attachmentsRef.current.slice();
+      const stagedSnapshot = sendOptions?.preserveComposerAttachments ? [] : attachmentsRef.current.slice();
       const sessionKey = conversationIdRef.current ?? DRAFT_CONV_KEY;
       const mergedSession = (() => {
         const byKey = new Map(

@@ -44,6 +44,21 @@ const PM_POOL = [
 ];
 
 describe("selectAdvertisedTools (spec §3)", () => {
+  describe("connection setup through natural language", () => {
+    const tools = ["list_connections", "start_connection", "disconnect_connection"];
+    it.each([
+      "show me our integrations", "what connections do I have?", "connect my Stripe account",
+      "add Gmail", "set up QuickBooks", "hook up our mail server", "sign in to Outlook",
+      "disconnect my calendar", "which services are available services?",
+    ])("%s", (userMessage) => {
+      const result = selectAdvertisedTools({ mode: "domains", userMessage, pool: [...POOL, ...tools], conversationToolNames: [] });
+      for (const name of tools) expect(result.advertised).toContain(name);
+    });
+    it("cannot widen a caller's connection tool grant", () => {
+      const result = selectAdvertisedTools({ mode: "domains", userMessage: "connect Stripe", pool: POOL, conversationToolNames: [] });
+      for (const name of tools) expect(result.advertised).not.toContain(name);
+    });
+  });
   it("mode off is a pass-through", () => {
     const r = selectAdvertisedTools({
       mode: "off",
