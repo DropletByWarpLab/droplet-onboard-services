@@ -136,6 +136,16 @@ describe("GET /api/cameras/:name/recordings/snapshot", () => {
     );
   });
 
+  it("never serves a non-image Content-Type from upstream", async () => {
+    frigateAnswers(200, "<html>proxy page</html>", { "content-type": "text/html" });
+    const res = await request(appAs(member)).get(PATH());
+    expect(res.status).toBe(200);
+    expect(res.headers["content-type"]).toBe("image/jpeg");
+    frigateAnswers(200, JPEG, { "content-type": "image/webp" });
+    const second = await request(appAs(member)).get(PATH());
+    expect(second.headers["content-type"]).toBe("image/webp");
+  });
+
   it("truncates a fractional instant to the second", async () => {
     await request(appAs(member)).get(PATH("front", `at=${AT}.9`));
     expect(String(fetchSpy.mock.calls[0]![0])).toContain(`/recordings/${AT}/snapshot.jpg`);

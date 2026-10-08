@@ -3129,13 +3129,19 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       }
       const height = Math.min(Math.max(parseInt(req.query.h as string) || 480, 100), 1080);
       const upstream = await fetchRecordingSnapshot(req.params.name, at, height);
-      res.setHeader("Content-Type", upstream.headers.get("content-type") || "image/jpeg");
+      // An image type from Frigate is passed through; anything else (an HTML error page
+      // from a proxy in front of it, say) is served as the JPEG this route promises.
+      const upstreamType = upstream.headers.get("content-type") ?? "";
+      res.setHeader("Content-Type", /^image\/(jpeg|png|webp)\b/i.test(upstreamType) ? upstreamType : "image/jpeg");
       res.setHeader("X-Content-Type-Options", "nosniff");
       res.setHeader("Cache-Control", "private, no-store"); // WARP-3103: footage never lands in a cache
       const buffer = Buffer.from(await upstream.arrayBuffer());
       // Past footage, so audited like a recording view (one row per actor +
       // camera per dedupe window), unlike the live frame above.
       void auditCameraWatch(req, req.params.name, "recording");
+      // Binary Buffer of Frigate's JPEG with an explicit image Content-Type and nosniff;
+      // no HTML is built from user input.
+      // nosemgrep: javascript.express.security.audit.xss.direct-response-write.direct-response-write
       res.send(buffer);
     } catch (err) {
       if (answerFrigateFailure(res, err, { camera: req.params.name }, RECORDING_SNAPSHOT_NOT_FOUND_MESSAGES)) return;
