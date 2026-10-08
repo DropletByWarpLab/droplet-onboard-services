@@ -275,13 +275,22 @@ describe("composition with AccessRoleConnectorGrant — the INTERSECTION, never 
     );
   });
 
-  it("a member with no role at all holds no grant, so no vendor remote tool is in reach; owner/admin and local tools are unchanged", () => {
-    const remote = `${SERVER}__tool_0`;
-    expect(toolAllowedForPrincipal(remote, "family", null)).toBe(false);
-    expect(toolAllowedForPrincipal(remote, "guest", null)).toBe(false);
-    expect(toolAllowedForPrincipal(remote, "owner", null)).toBe(true);
-    expect(toolAllowedForPrincipal(remote, "admin", null)).toBe(true);
-    // An extension keeps its own lifecycle; not part of this axis.
-    expect(toolAllowedForPrincipal("ext-wc__word_count", "family", null)).toBe(true);
+  /**
+   * Romain, 2026-10-08: a member with no AccessRole (scope null) is governed by
+   * the allowlist alone. The scope-only dispatch sites answer "no narrowing" for
+   * them, and the multiplexer floor (same predicate as the offered list) decides.
+   */
+  it("a role-less member: an allowlisted tool is offered and runs, a non-allowlisted one the model names is refused", async () => {
+    const { mux, fetchImpl } = build({ cache: seededCache(allowedNames) });
+    // No scope: the principal helpers and the dispatch gate narrow nothing.
+    expect(toolAllowedForPrincipal(`${SERVER}__tool_0`, "family", null)).toBe(true);
+    expect(toolDispatchDenial(`${SERVER}__tool_20`, {}, null, lookup)).toBeNull();
+    // Offer time and dispatch agree through the one predicate.
+    const offered = (await mux.listTools()).map((t) => t.name);
+    expect(offered).toEqual(allowedNames.map((n) => `${SERVER}__${n}`));
+    expect((await mux.callTool(`${SERVER}__tool_0`, {})).isError).toBe(false);
+    const refused = await mux.callTool(`${SERVER}__tool_20`, {});
+    expect(JSON.parse(refused.content[0]!.text!)).toMatchObject({ error: RECORD_DENY_CODES.notAllowlisted });
+    expect(calledTools(fetchImpl)).toEqual(["tool_0"]);
   });
 });

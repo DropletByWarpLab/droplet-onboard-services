@@ -191,7 +191,6 @@ import {
 } from "./tool-layers.service.js";
 import { createLogger } from "../lib/logger.js";
 import { EXTENSION_SERVER_PREFIX } from "./extension-token.js";
-import { parseNamespacedToolName } from "./mcp-multiplexer.service.js";
 
 const logger = createLogger("tool-access");
 
@@ -507,27 +506,11 @@ export function toolAllowedForPrincipal(
   runtime: RuntimeToolLookup = NO_RUNTIME_TOOLS,
 ): boolean {
   if (!toolAllowedForTier(name, tier, isVoice)) return false;
-  if (roleLessRemoteDenied(name, tier, scope)) return false;
+  // WARP-2434 (Romain, 2026-10-08): a member with no AccessRole (no scope) is
+  // governed by the server allowlist alone, which the multiplexer enforces at
+  // both offer and dispatch; a scoped member also needs a connector grant.
+  // Guests are first-party-only through `toolAllowedForTier` (#2736).
   return !scope || toolAllowedInScope(name, scope, runtime);
-}
-
-/**
- * WARP-2434 — a member or guest with NO scope holds no `AccessRoleConnectorGrant`
- * by definition, so no vendor remote tool is in reach (ADR-072 §3: owners and
- * admins by default, members by grant). `scope === null` elsewhere means "no
- * narrowing"; for a remote tool and a non-privileged tier it must mean "no
- * grant". Name-only, like axis A. (Dispatch sites that hold only the scope
- * cannot see the tier; the multiplexer's allowlist is the floor there.)
- */
-function roleLessRemoteDenied(
-  name: string,
-  tier: string | undefined,
-  scope: ToolAccessScope | null | undefined,
-): boolean {
-  if (scope || (tier !== "family" && tier !== "guest")) return false;
-  if (CATALOG_BY_NAME.has(name)) return false;
-  const parsed = parseNamespacedToolName(name);
-  return parsed !== null && !parsed.serverId.startsWith(EXTENSION_SERVER_PREFIX);
 }
 
 /**
@@ -578,10 +561,7 @@ export function firstToolDeniedForPrincipal(
     if (!toolAllowedForTier(name, tier, isVoice)) {
       return { tool: name, axis: "write_tier" };
     }
-    if (
-      roleLessRemoteDenied(name, tier, scope) ||
-      (scope && !toolAllowedInScope(name, scope, runtime))
-    ) {
+    if (scope && !toolAllowedInScope(name, scope, runtime)) {
       return { tool: name, axis: "role_grant" };
     }
   }
