@@ -1,6 +1,6 @@
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 
-const inputSchema = { type: "object", properties: { creation: { type: "boolean", description: "Creation readiness." } }, additionalProperties: false } as const;
+const inputSchema = { type: "object", properties: { creation: { type: "boolean" } }, additionalProperties: false } as const;
 
 // The orchestrator's rolled-up snapshot lives at GET /api/orchestrator/health
 // (apps/orchestrator/src/routes/health.ts) — same shape the dashboard's

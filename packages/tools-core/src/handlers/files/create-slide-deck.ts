@@ -7,7 +7,7 @@ const inputSchema = {
     path: { type: "string", description: "New .pdf/.pptx path." },
     both: { type: "boolean", description: "Save both formats." },
     title: { type: "string" },
-    theme: { type: "string", description: "droplet, light or dark" },
+    theme: { type: "string", description: "droplet/light/dark" },
     slides: {
       type: "array",
       items: {
@@ -16,7 +16,7 @@ const inputSchema = {
           title: { type: "string" },
           bullets: { type: "array", items: { type: "string" } },
           subtitle: { type: "string" },
-          columns: { type: "array", items: { type: "object" }, description: "Two {title?,bullets:string[]} objects." },
+          columns: { type: "array", items: { type: "object" }, description: "Two {title?,bullets:string[]}." },
           table: { type: "object", description: "{headers:string[],rows:cell[][]}." },
           chart: { type: "object", description: "{kind:bar|line|pie,labels:string[],series:[{name,values:number[]}]}." },
           image: { type: "object", description: "{path|item_id,caption?,alt?}; authorized PNG/JPEG." },
@@ -25,7 +25,7 @@ const inputSchema = {
         required: ["title"],
         additionalProperties: false,
       },
-      description: "1-60 slides; one layout per slide. Latin/Greek/Cyrillic.",
+      description: "1-60 slides; one layout. Latin/Greek/Cyrillic.",
     },
   },
   required: ["path", "title", "slides"],
@@ -122,7 +122,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 
 const tool: Tool = {
   name: "create_slide_deck",
-  description: "Create 16:9 PDF/editable PowerPoint decks; both saves both. New files only.",
+  description: "New PDF/editable PPTX decks; both=true saves both.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: false,
