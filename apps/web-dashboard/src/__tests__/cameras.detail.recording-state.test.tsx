@@ -7,12 +7,13 @@
  *    refused, nothing happened and nothing told you.
  *  - "Settings" keeps its label on a phone (it is where "not saving" is fixed).
  *  - The "not saving" banner links to Settings for real, and offers the repair.
- *  - The rail carries the Recording block.
+ *  - Recording information remains available in the camera details.
  *  - While the camera service cannot be read, the screen says so instead of
  *    "Camera offline", and the PTZ probe is never retried forever.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, cleanup, within } from "@testing-library/react";
+import type { ReactNode } from "react";
 import type { CameraInfo, CameraRecordingState, DetectionEvent } from "@/lib/types";
 
 const h = vi.hoisted(() => ({
@@ -60,8 +61,26 @@ vi.mock("@/lib/hooks/useRecordings", () => ({
   useRecordingsSummary: () => ({ days: [], isLoading: false, error: undefined, refresh: vi.fn() }),
 }));
 
+// This suite owns camera management and recording status. Playback behavior is
+// exercised with the real panel in cameras.detail.playback.test.tsx.
+vi.mock("@/components/cameras/CameraPlaybackPanel", () => ({
+  CameraPlaybackPanel: ({ children, selection, onReturnToLive }: {
+    children: ReactNode;
+    selection: { kind: "event"; event: DetectionEvent } | { kind: "motion"; activity: { id: string } } | null;
+    onReturnToLive: () => void;
+  }) => selection ? (
+    <div>
+      <p data-testid="selected-camera-clip">
+        {selection.kind === "event" ? selection.event.id : selection.activity.id}
+      </p>
+      <button onClick={onReturnToLive}>Return to live</button>
+    </div>
+  ) : children,
+}));
+
 vi.mock("@/lib/api", () => ({
   fetchPtzCapabilities: vi.fn(),
+  fetchMotionActivity: vi.fn(),
   getCameraLiveUrl: (n: string) => `/api/cameras/${n}/live`,
   getCameraSnapshotUrl: (n: string) => `/api/cameras/${n}/snapshot`,
   fetchRetentionBackfillPlan: vi.fn(),
@@ -260,7 +279,7 @@ describe("the 'not saving' banner", () => {
 });
 
 describe("the rail", () => {
-  it("carries the Recording block with the camera's own reading", () => {
+  it("keeps the Recording block available with the camera's own reading", () => {
     render(<CameraFullscreenPage />);
     const block = screen.getByTestId("camera-recording-summary");
     expect(within(block).getByTestId("recording-mode").textContent).toBe("24/7");
@@ -269,6 +288,8 @@ describe("the rail", () => {
 
   it("links on to the camera's other pages", () => {
     render(<CameraFullscreenPage />);
+    const details = screen.getByTestId("camera-related-links").closest("details");
+    if (details) fireEvent.click(details.querySelector("summary")!);
     const links = within(screen.getByTestId("camera-related-links"));
     expect(links.getByRole("link", { name: "Notifications" }).getAttribute("href")).toBe("/cameras/notifications");
     expect(links.getByRole("link", { name: "System" }).getAttribute("href")).toBe("/cameras/system");
@@ -329,13 +350,14 @@ describe("the PTZ probe", () => {
 });
 
 describe("what was already here", () => {
-  it("opens a recent person photo and Escape closes the viewer before leaving the camera", () => {
-    h.events = [{ id: "evt-1", camera: "front_door", label: "person", score: 0.92, startTime: 1_800_000_000, endTime: 1_800_000_010, thumbnail: "/api/cameras/events/evt-1/thumbnail", hasSnapshot: true, hasClip: false }];
+  it("selects the recent person's clip inline and Escape returns to live before leaving the camera", () => {
+    h.events = [{ id: "evt-1", camera: "front_door", label: "person", score: 0.92, startTime: 1_800_000_000, endTime: 1_800_000_010, thumbnail: "/api/cameras/events/evt-1/thumbnail", hasSnapshot: true, hasClip: true }];
     render(<CameraFullscreenPage />);
-    fireEvent.click(screen.getByRole("button", { name: /View person/ }));
-    expect(within(screen.getByRole("dialog")).getByRole("img")).toHaveAttribute("src", "/api/cameras/events/evt-1/snapshot");
-    fireEvent.keyDown(window, { key: "Escape" });
+    fireEvent.click(screen.getByRole("button", { name: /Play person clip/ }));
+    expect(screen.getByTestId("selected-camera-clip")).toHaveTextContent("evt-1");
     expect(screen.queryByRole("dialog")).toBeNull();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByTestId("selected-camera-clip")).toBeNull();
     expect(h.replace).not.toHaveBeenCalled();
     fireEvent.keyDown(window, { key: "Escape" });
     expect(h.replace).toHaveBeenCalledWith("/cameras");
