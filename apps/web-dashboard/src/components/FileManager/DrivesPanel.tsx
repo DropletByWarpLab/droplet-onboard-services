@@ -1604,7 +1604,7 @@ function DriveCard({
     setDraft("");
   }
 
-  async function save() {
+  async function saveDriveMetadata() {
     if (!valid || saving || !canEdit) return;
     const patch = {
       displayName: trimmed,
@@ -1670,7 +1670,7 @@ function DriveCard({
         <form
           aria-label={`Edit ${name}`}
           className="relative mt-4 flex flex-col gap-3"
-          onSubmit={(e) => { e.preventDefault(); void save(); }}
+          onSubmit={(e) => { e.preventDefault(); void saveDriveMetadata(); }}
           onKeyDown={(e) => {
             if (e.key === "Escape" && !saving && !e.defaultPrevented) cancelEdit();
           }}
