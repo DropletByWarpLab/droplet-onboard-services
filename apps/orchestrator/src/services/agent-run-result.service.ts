@@ -117,13 +117,18 @@ export function runArtifacts(trace: unknown): AgentRunArtifact[] {
     if ((!arg && !["analyze_data", "generate_media", "office_file", "create_artifact", "create_audio"].includes(e.tool)) || e.text === undefined || e.isError || e.unknownOutcome) continue;
     if (e.confirmation === "parked" || e.confirmation === "denied") continue;
     if (!succeeded(e.text)) continue;
-    if (arg) { add(e.args?.[arg]); continue; }
+    if (arg && e.tool !== "create_slide_deck") { add(e.args?.[arg]); continue; }
     // Derived names come from acknowledged storage results. A pending media
     // job is not a file, whatever destination the caller originally requested.
     try {
       const value = JSON.parse(e.text);
       const data = value?.data ?? value;
-      if (e.tool === "analyze_data" && Array.isArray(data?.artifacts)) {
+      if (e.tool === "create_slide_deck") {
+        if (Array.isArray(data?.artifacts)) {
+          for (const item of data.artifacts) add(item?.path);
+        } else if (typeof data?.path === "string") add(data.path);
+        else if (e.args?.both !== true) add(e.args?.path); // Legacy single-format traces.
+      } else if (e.tool === "analyze_data" && Array.isArray(data?.artifacts)) {
         for (const item of data.artifacts) add(item?.path);
       } else if (e.tool === "generate_media" && data?.status === "succeeded") add(data.path);
       else if (e.tool === "office_file" && data?.action === "revise") add(data.path);

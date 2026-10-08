@@ -3,12 +3,14 @@ from __future__ import annotations
 import datetime
 import io
 import math
+import re
 import zipfile
 import xml.etree.ElementTree as ET
 from typing import Any
 from openpyxl.chart import BarChart, LineChart, PieChart, Reference
 from openpyxl.chart.data_source import NumData, NumVal
 from openpyxl.utils import column_index_from_string, get_column_letter
+from openpyxl.worksheet.table import Table, TableStyleInfo
 from workbook_calculation import CELL, Parser, coordinate, formula_order, calculate, CellError, FormulaError as WorkbookFeatureError
 
 MAX_FORMULAS = 1000
@@ -87,6 +89,37 @@ def _formats(ws, specs, dimensions):
                 changes.append((row, column, code, value))
     return changes
 
+def _table(ws, spec, dimensions, formula_targets, formats):
+    if "table_name" not in spec: return None
+    name = spec["table_name"]
+    if not isinstance(name, str) or not 1 <= len(name) <= 255 or not (name[0].isalpha() or name[0] == "_") or any(not (char.isalpha() or char.isdecimal() or char in "_.") for char in name):
+        raise WorkbookFeatureError("table_name must be 1-255 letters, digits, underscores or periods, starting with a letter or underscore")
+    folded = name.casefold()
+    if CELL.fullmatch(name) or folded in ("r", "c", "rc") or re.match(r"R[1-9][0-9]*C[1-9][0-9]*", name, re.IGNORECASE) or re.fullmatch(r"R[1-9][0-9]*C|RC[1-9][0-9]*", name, re.IGNORECASE) or folded.startswith(("_xlnm.", "_xlpm.", "_xlfn.")):
+        raise WorkbookFeatureError("table_name cannot be a cell reference, R1C1 reference or reserved Excel name")
+    existing = {table_name.casefold() for sheet in ws.parent for table_name in sheet.tables}
+    existing.update(defined_name.casefold() for defined_name in ws.parent.defined_names)
+    if folded in existing: raise WorkbookFeatureError("table names must be unique across the workbook")
+    columns = spec.get("columns") or []
+    if not columns or not spec.get("rows") or len(columns) != dimensions[1]:
+        raise WorkbookFeatureError("named tables require explicit headers for every column and at least one data row")
+    if any(CELL.fullmatch(target)[2] == "1" for target in formula_targets):
+        raise WorkbookFeatureError("named table headers cannot be formula targets")
+    if any(row == 1 and not isinstance(value, str) for row, _, _, value in formats):
+        raise WorkbookFeatureError("named table headers must remain literal text after formatting")
+    headers = [ws.cell(1, column).value for column in range(1, dimensions[1] + 1)]
+    if any(not isinstance(raw, str) or not isinstance(header, str) or not header.strip() or len(header) > 255 or ws.cell(1, column).data_type != "s" for column, (raw, header) in enumerate(zip(columns, headers), 1)):
+        raise WorkbookFeatureError("named table headers must be nonblank literal strings of at most 255 characters")
+    if any(not (char in "\t\n\r" or 0x20 <= ord(char) <= 0xD7FF or 0xE000 <= ord(char) <= 0xFFFD or 0x10000 <= ord(char) <= 0x10FFFF) for header in headers for char in header):
+        raise WorkbookFeatureError("named table headers must contain valid XML text")
+    if len({header.strip().casefold() for header in headers}) != len(headers):
+        raise WorkbookFeatureError("named table headers must be unique ignoring case and surrounding spaces")
+    table = Table(displayName=name, ref=f"A1:{get_column_letter(dimensions[1])}{dimensions[0]}")
+    table.tableStyleInfo = TableStyleInfo(name="TableStyleMedium2", showFirstColumn=False, showLastColumn=False, showRowStripes=True, showColumnStripes=False)
+    table._initialise_columns()
+    for column, header in zip(table.tableColumns, headers): column.name = header
+    return table
+
 def apply_workbook_features(ws: Any, spec: dict[str, Any]) -> None:
     dimensions = _dimensions(ws, spec)
     workbook = ws.parent
@@ -109,13 +142,15 @@ def apply_workbook_features(ws: Any, spec: dict[str, Any]) -> None:
         if not spec.get("columns"): raise WorkbookFeatureError("chart needs explicit column headers")
         chart = _chart(spec["chart"], ws, dimensions, spec.get("rows") or [], targets)
     formats = _formats(ws, spec.get("formats") or [], dimensions)
+    table = _table(ws, spec, dimensions, targets, formats)
     for row, column, number_format, value in formats:
         ws.cell(row, column).number_format = number_format
         ws.cell(row, column).value = value
     for (_, column, row), (expression, _, _) in validated.items(): ws.cell(row, column).value = expression
     ws._droplet_formulas = validated
     ws._droplet_dimensions = dimensions
-    if spec.get("columns") and spec.get("rows") and dimensions[1]: ws.auto_filter.ref = f"A1:{get_column_letter(dimensions[1])}{dimensions[0]}"
+    if table is not None: ws.add_table(table)
+    elif spec.get("columns") and spec.get("rows") and dimensions[1]: ws.auto_filter.ref = f"A1:{get_column_letter(dimensions[1])}{dimensions[0]}"
     if chart is not None: ws.add_chart(chart, f"{get_column_letter(dimensions[1] + 2)}2")
 
 def workbook_caches(workbook):

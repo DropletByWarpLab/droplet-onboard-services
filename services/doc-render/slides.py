@@ -1,6 +1,7 @@
 """Stateless slide writer: shared measured layout for PDF and editable PPTX.
 
-No images, HTML, file paths, or external resources enter this spec.
+Only bounded raster bytes hydrated by the orchestrator enter image slides;
+HTML, file paths and external resources never reach this writer.
 Rather than shrink or discard crowded text, reject it with a slide number so
 the caller can split that slide. The bundled font supports Latin, Greek and Cyrillic; unsupported glyphs
 and scripts needing shaping fail explicitly instead of producing broken text.
@@ -57,6 +58,7 @@ class SlideLayout:
     table: Any = None
     chart: Any = None
     notes: str = ""
+    image: Any = None
 
 
 def _validate_text(text: Any, limit: int, location: str, *, required: bool = False) -> str:

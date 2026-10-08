@@ -19,8 +19,8 @@ are tracked on [the suite PR](https://github.com/DropletByWarpLab/droplet-onboar
 | Capability | Device tool / implementation | Status and deployment dependencies |
 |---|---|---|
 | PDF and editable Word | `create_pdf_report`, `create_word_document` | Existing writers; saved file cards merged into stage |
-| PDF and editable PowerPoint | `create_slide_deck` | Basic decks merged into stage; rich layouts, charts, notes, themes and wider fonts implemented for review |
-| Excel | `create_spreadsheet` | Basic formulas/charts merged into stage; cached calculations, cross-sheet references, multiple series, pie charts and formats implemented for review |
+| PDF and editable PowerPoint | `create_slide_deck` | Basic decks merged into stage; paired exports, authorized images, rich layouts, charts, notes, themes and wider fonts implemented for review |
+| Excel | `create_spreadsheet` | Basic formulas/charts merged into stage; cached calculations, conditionals, criteria functions, named tables, cross-sheet references, charts and formats implemented for review |
 | Office inspection/revision | `office_file` | Implemented; local doc-render revision API, new copy only |
 | Private data analysis | `analyze_data` | Implemented; local sandbox with Linux Landlock/seccomp, fails closed without support |
 | Public-web research | `web_search`, `web_fetch` | Implemented; default-off web egress permission, audited screened edge; search also requires provisioned Brave key |
@@ -28,6 +28,7 @@ are tracked on [the suite PR](https://github.com/DropletByWarpLab/droplet-onboar
 | Speech recordings | `create_audio` | Implemented; installed local Wyoming TTS voices; saves WAV without room playback |
 | Images, image editing, short video | `generate_media` | Job API, local worker and deployment profile implemented; model/GPU inference unverified, profile remains off |
 | Background research/work | Existing `start_agent_run` and workspace tools | Creation/research selection and saved-file handoff expanded; existing confirmation and execution rules apply |
+| Live creation availability | Chat and Settings panels; `get_system_health` with `creation:true` | Implemented; caller-specific permissions, local service/model prerequisites and explicit unverified states |
 
 Requests such as “produce PDF and PowerPoint from these notes”, “analyze this
 spreadsheet and chart the result”, “revise this presentation”, “research these
@@ -39,11 +40,16 @@ successful storage acknowledgement. A pending media job is not a completed file.
 ## Slide decks
 
 `create_slide_deck` accepts `path`, `title`, optional `theme` (droplet/light/dark),
-and 1–60 `slides`. Use two calls with identical slide content and distinct .pdf
-and .pptx paths when both formats are requested.
+and 1–60 `slides`. Set `both:true` to save identical content as PDF and editable
+PowerPoint. The companion uses the acknowledged primary filename with the
+other extension. Both writes refuse overwrite independently. The 55-second
+total deadline bounds transport and response parsing. A confirmed primary
+file remains in the result if the companion fails; `complete:false` and
+`exportErrors` describe partial completion. An interrupted, unacknowledged
+write has an unknown storage outcome: check that filename before retrying.
 
 A slide has a title, optional subtitle and speaker notes, and exactly one
-layout: bullets, two columns, a table, or a bar/line/pie chart. PowerPoint uses
+layout: bullets, two columns, a table, a bar/line/pie chart, or an image. PowerPoint uses
 editable native text, tables and charts with embedded Excel data. PDF uses
 vector layouts; notes are text annotations rather than extra presented pages.
 
@@ -52,8 +58,20 @@ eight bullets per section (500 characters each), tables of at most six columns
 and ten rows, charts with ten labels and four series (one for pie), and 50,000
 total text characters. Measured layouts refuse content that cannot fit at
 readable type sizes. Bundled OFL Noto Sans supports extended Latin, Greek and
-Cyrillic; unsupported glyphs/shaping are refused. External images, custom
-templates, arbitrary layouts and CJK/RTL shaping remain future work.
+Cyrillic; unsupported glyphs/shaping are refused. Custom templates, arbitrary
+layouts and CJK/RTL shaping remain future work.
+
+An `image` supplies exactly one File Store `path` or owned approved attachment
+`item_id`, with optional `caption` and `alt`. Sources must be PNG/JPEG. The
+orchestrator checks live caller access and hydrates bytes for the credential-free
+worker; URLs and caller-supplied inline bytes are refused. Limits are 12 images,
+3 MiB each, 12 MiB combined for both source and reconstructed bytes, 16 million
+pixels per image and per deck, and 8,192 pixels per dimension. PNG text expansion
+is capped at 64 KiB per chunk and 256 KiB combined. Full decoding and
+re-encoding discard metadata and appended content. Images
+retain their complete aspect ratio, with measured captions and native
+PowerPoint picture alternative text. Access and destination membership are
+rechecked before saving. Bounded bookkeeping cannot withhold an acknowledged save.
 
 ## Excel
 
@@ -61,9 +79,14 @@ Supplied grids preserve native numeric/boolean values and literal strings.
 Formula-looking ordinary strings are escaped; only explicit `formulas`
 create formulas. Targets and references must fit supplied grids.
 
-The bounded numeric grammar supports arithmetic, A1 cells/ranges, quoted or
-unquoted supplied sheet names, and SUM, AVERAGE, MIN, MAX, COUNT, ROUND and ABS.
-The local evaluator saves cached values while retaining formulas and requesting
+The bounded grammar supports arithmetic, A1 cells/ranges, quoted or unquoted
+supplied sheet names, scalar comparisons, quoted text, TRUE/FALSE, and SUM,
+AVERAGE, MIN, MAX, COUNT, ROUND, ABS, IF, COUNTIF and SUMIF. IF evaluates only the
+selected branch, while all branches undergo syntax, reference and cycle checks.
+Criteria support numeric/comparison/text matching and case-insensitive `*`, `?`
+and `~` wildcards. SUMIF requires equal-shaped criteria and sum ranges. Nesting,
+cell reads, work and elapsed calculation time are bounded.
+The local evaluator saves numeric, boolean, text and error caches while retaining formulas and requesting
 recalculation on open. Circular dependencies across the workbook are refused;
 Excel error results remain explicit. Arbitrary functions, external links,
 macros, network functions and DDE are refused.
@@ -72,8 +95,30 @@ Each sheet supports one native editable chart: bar/line with one to eight
 value columns, or a one-series pie. Choose `value_column` or `value_columns`.
 Optional formats cover existing ranges with number/currency/percent/date
 styles, precision 0–8 and bounded currency symbols. Headers are frozen and
-filtered. General Excel function parity, pivots and complex chart types remain
-future work.
+filtered. Optional `table_name` creates a native styled table over the supplied
+grid, with unique literal text headers and a workbook-wide unique valid name.
+Formula or formatted headers that would violate native table rules are refused.
+Table structured references, general Excel function parity, pivots and complex
+chart types remain future work.
+
+## Creation availability
+
+Open Creation capabilities in chat, or the administrator Settings card, to check
+local readiness before a task. `GET /api/capabilities/creation` and
+`get_system_health` with `creation:true` return the same caller-specific status.
+The bounded read-only check respects Files enablement, effective grants,
+personal drive access and the default-off audited web policy. It probes fixed
+local worker endpoints and installed Wyoming voices without rendering files,
+running user code, downloading models, starting GPU inference or contacting a
+public search provider. Tokens, worker errors, prompts and internal paths are
+never included in the result.
+
+Status distinguishes permission restrictions, disabled features, missing setup,
+offline services, busy workers and unverified prerequisites. Installed media
+models, kernel analysis eligibility and a configured search key remain
+unverified until their respective execution paths prove successful. Browser
+support for isolated HTML execution is checked separately by the preview.
+Refreshing replaces the previous snapshot; status can change during a task.
 
 ## Revising Office files
 
@@ -205,8 +250,8 @@ licenses, optional GPU overlay and outstanding hardware checks.
 These implementations substantially extend chat, but do not establish full
 parity with any flagship service. Remaining work includes target-device
 acceptance, model quality/latency, native iOS/Android/Windows/Linux card parity,
-general browser automation, richer spreadsheet functions/pivots, templates and
-slide images, advanced Office layout revisions, broader font shaping, and
+general browser automation, richer spreadsheet functions/pivots, templates,
+advanced Office layout revisions, broader font shaping, and
 provider-specific connector coverage. Existing memory, routines, integrations,
 email/calendar and workspace tools are retained; their mere presence is not
 proof that every provider and device flow works.

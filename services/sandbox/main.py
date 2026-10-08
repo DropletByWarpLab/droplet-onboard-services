@@ -122,7 +122,7 @@ AUTH_EXEMPT_PATHS = frozenset({"/health"})
 
 RUNNER = Path(__file__).resolve().parent / "runner.py"
 ANALYSIS_RUNNER = Path(__file__).resolve().parent / "analysis_runner.py"
-ANALYSIS_LOCK = threading.BoundedSemaphore(1)
+ANALYSIS_LOCK = threading.Lock()
 
 # Ceilings the request may ask for, never exceed. The orchestrator passes its
 # own (config SANDBOX_TRANSFORM_TIMEOUT_MS / SANDBOX_OUTPUT_CAP_BYTES); these
@@ -220,6 +220,13 @@ app = FastAPI(
 @app.get("/health")
 async def health():
     return {"status": "ok", "processes": supervisor.SUPERVISION_ENABLED, "workspaces": gitstore.REPOS_DIR.is_dir()}
+
+
+@app.get("/capabilities")
+async def creation_capabilities():
+    # Query kernel support without sealing this API or executing user/sample code.
+    from analysis_readiness import kernel_eligible
+    return {"version": 1, "analysisEligible": kernel_eligible(), "busy": ANALYSIS_LOCK.locked()}
 
 
 def _read_capped(stream, cap: int) -> tuple[bytes, bool]:

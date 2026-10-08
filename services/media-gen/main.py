@@ -47,7 +47,7 @@ async def capabilities():
         engine = video_engine()
     except ValueError:
         raise HTTPException(status_code=503, detail="invalid_operator_video_engine") from None
-    return {"image": model_path(MODEL_ROOT, "sdxl") is not None, "video": model_path(MODEL_ROOT, engine) is not None, "engine": {"image": "sdxl", "video": engine}, "videoSourceImage": engine == "ltx", "offline": True, "inferenceVerified": False, "busy": inflight.locked(), "limits": {"inputBytes": 4 * 1024 * 1024, "outputBytes": MAX_OUTPUT_BYTES, "imageTimeoutSeconds": IMAGE_TIMEOUT, "videoTimeoutSeconds": VIDEO_TIMEOUT}}
+    return {"version": 1, "image": model_path(MODEL_ROOT, "sdxl") is not None, "video": model_path(MODEL_ROOT, engine) is not None, "engine": {"image": "sdxl", "video": engine}, "videoSourceImage": engine == "ltx", "offline": True, "inferenceVerified": False, "busy": inflight.locked(), "limits": {"inputBytes": 4 * 1024 * 1024, "outputBytes": MAX_OUTPUT_BYTES, "imageTimeoutSeconds": IMAGE_TIMEOUT, "videoTimeoutSeconds": VIDEO_TIMEOUT}}
 
 
 async def _kill(process: asyncio.subprocess.Process) -> None:

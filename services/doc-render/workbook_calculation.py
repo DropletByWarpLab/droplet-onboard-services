@@ -1,24 +1,36 @@
-"""Bounded Excel numeric grammar/evaluator. No eval, external links or macros."""
+"""Bounded Excel business-formula evaluator. No eval, external links or macros."""
 from __future__ import annotations
 import math
 import re
+import time
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
 from openpyxl.utils import column_index_from_string, get_column_letter
 from openpyxl.utils.datetime import to_excel
 import datetime
 
-FUNCTIONS = {"SUM", "AVERAGE", "MIN", "MAX", "COUNT", "ROUND", "ABS"}
+FUNCTIONS = {"SUM", "AVERAGE", "MIN", "MAX", "COUNT", "ROUND", "ABS", "IF", "COUNTIF", "SUMIF"}
+COMPARISONS = {"=", "<>", "<", "<=", ">", ">="}
+MAX_CELL_READS = 1_000_000
+MAX_EVALUATION_STEPS = 1_000_000
+MAX_DEPENDENCY_CHECKS = 1_000_000
+MAX_CALCULATION_SECONDS = 5
+MAX_CRITERIA_LENGTH = 255
 CELL = re.compile(r"\$?([A-Za-z]{1,3})\$?([1-9][0-9]{0,6})\Z")
 REF = re.compile(r"(?:(?:'((?:[^']|'')+)'|([A-Za-z_][A-Za-z0-9_]*))!)?(\$?[A-Za-z]{1,3}\$?[1-9][0-9]{0,6})\Z")
 NUMBER = re.compile(r"(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?\Z")
-TOKEN = re.compile(r"(?:(?:'(?:[^']|'')+'|[A-Za-z_][A-Za-z0-9_]*)!)?\$?[A-Za-z]{1,3}\$?[1-9][0-9]{0,6}|(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?|[A-Za-z]+|[+*/^%(),:\-]")
+TOKEN = re.compile(r'''"(?:[^"\x00-\x08\x0b\x0c\x0e-\x1f]|"")*"|(?:(?:'(?:[^']|'')+'|[A-Za-z_][A-Za-z0-9_]*)!)?\$?[A-Za-z]{1,3}\$?[1-9][0-9]{0,6}|(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?|[A-Za-z]+|<>|<=|>=|[=<>+*/^%(),:\-]''')
 
 class FormulaError(ValueError):
     pass
 
 class CellError:
     def __init__(self, code): self.code = code
+
+def range_shape(node):
+    if node[0] == "ref": return 1, 1
+    if node[0] == "range": return node[5] - node[3] + 1, node[4] - node[2] + 1
+    raise FormulaError("conditional aggregate arguments must be workbook cell ranges")
 
 def coordinate(raw: Any, dimensions: tuple[int, int]) -> str:
     match = CELL.fullmatch(raw) if isinstance(raw, str) else None
@@ -68,6 +80,13 @@ class Parser:
             if end_column < column or end_row < row: raise FormulaError("formula ranges must run from top-left to bottom-right")
             self.refs.add((name, column, row, end_column, end_row))
             node = ("ref", name, column, row) if (column, row) == (end_column, end_row) else ("range", name, column, row, end_column, end_row)
+        elif token.startswith('"'):
+            value = token[1:-1].replace('""', '"')
+            if any(not (ch in "\t\n\r" or 0x20 <= ord(ch) <= 0xD7FF or 0xE000 <= ord(ch) <= 0xFFFD or 0x10000 <= ord(ch) <= 0x10FFFF) for ch in value):
+                raise FormulaError("formula string literals must contain valid XML text")
+            node = ("string", value)
+        elif token.upper() in ("TRUE", "FALSE"):
+            node = ("boolean", token.upper() == "TRUE")
         elif NUMBER.fullmatch(token):
             value = float(token)
             if not math.isfinite(value): raise FormulaError("formula numeric literals must be finite")
@@ -77,11 +96,16 @@ class Parser:
             while self.peek() == ",": self.take(); args.append(self.expression(0, depth + 1))
             if self.take() != ")": raise FormulaError("formula has unmatched function parentheses")
             name = token.upper()
-            if (name == "ROUND" and len(args) != 2) or (name == "ABS" and len(args) != 1): raise FormulaError("formula has an invalid numeric-function argument count")
+            counts = {"ROUND": (2,), "ABS": (1,), "IF": (3,), "COUNTIF": (2,), "SUMIF": (2, 3)}
+            if name in counts and len(args) not in counts[name]: raise FormulaError("formula has an invalid function argument count")
+            if name in ("COUNTIF", "SUMIF"):
+                shape = range_shape(args[0])
+                if name == "SUMIF" and len(args) == 3 and range_shape(args[2]) != shape:
+                    raise FormulaError("SUMIF ranges must have identical row and column counts")
             node = ("function", name, args)
-        else: raise FormulaError("formula supports only numeric literals, workbook cells and approved functions")
+        else: raise FormulaError("formula supports only scalar literals, workbook cells and approved functions")
         while self.peek() == "%": self.take(); node = ("unary", "%", node)
-        precedence = {"+": 1, "-": 1, "*": 2, "/": 2, "^": 3}
+        precedence = {**{op: 0 for op in COMPARISONS}, "+": 1, "-": 1, "*": 2, "/": 2, "^": 3}
         while self.peek() in precedence and precedence[self.peek()] >= minimum:
             op = self.take(); level = precedence[op]
             node = ("binary", op, node, self.expression(level if op == "^" else level + 1, depth + 1))
@@ -96,20 +120,30 @@ class Parser:
             if match:
                 prefix = token.rsplit("!", 1)[0] + "!" if "!" in token else ""
                 normalized.append(prefix + match[3].upper())
-            else: normalized.append(token.upper())
+            else: normalized.append(token if token.startswith('"') else token.upper())
         return "=" + "".join(normalized), ast, self.refs
 
-def formula_order(formulas):
+def formula_order(formulas, tick=None):
+    checks, deadline = 0, time.monotonic() + MAX_CALCULATION_SECONDS
+    def check():
+        nonlocal checks
+        checks += 1
+        if checks > MAX_DEPENDENCY_CHECKS: raise FormulaError("formula dependencies exceed their work limit")
+        if checks % 64 == 0 and time.monotonic() >= deadline: raise FormulaError("formula dependencies exceed their time limit")
+        if tick: tick()
     dependents = {target: set() for target in formulas}
     pending = {}
     for target, (_, _, references) in formulas.items():
         dependencies = set()
         for sheet, left, top, right, bottom in references:
+            check()
             if left == right and top == bottom:
                 reference = (sheet, left, top)
                 if reference in formulas: dependencies.add(reference)
             else:
-                dependencies.update(key for key in formulas if key[0] == sheet and left <= key[1] <= right and top <= key[2] <= bottom)
+                for key in formulas:
+                    check()
+                    if key[0] == sheet and left <= key[1] <= right and top <= key[2] <= bottom: dependencies.add(key)
         pending[target] = len(dependencies)
         for dependency in dependencies: dependents[dependency].add(target)
     ready = [target for target, count in pending.items() if count == 0]
@@ -122,14 +156,94 @@ def formula_order(formulas):
     if len(ordered) != len(formulas): raise FormulaError("formula dependencies must not contain a circular reference")
     return ordered
 
+def compare_values(left, right, operator):
+    """Excel scalar ordering: numbers, case-insensitive text, then booleans."""
+    error = next((value for value in (left, right) if isinstance(value, CellError)), None)
+    if error is not None: return error
+    if isinstance(left, list) or isinstance(right, list): return CellError("#VALUE!")
+    if left is None: left = "" if isinstance(right, str) else False if isinstance(right, bool) else 0
+    if right is None: right = "" if isinstance(left, str) else False if isinstance(left, bool) else 0
+    def ordered(value):
+        if isinstance(value, bool): return 2, value
+        if isinstance(value, str): return 1, value.casefold()
+        return 0, value
+    a, b = ordered(left), ordered(right)
+    return a == b if operator == "=" else a != b if operator == "<>" else a < b if operator == "<" else a <= b if operator == "<=" else a > b if operator == ">" else a >= b
+
+def wildcard_tokens(pattern):
+    tokens, index = [], 0
+    while index < len(pattern):
+        char = pattern[index]; index += 1
+        if char == "~" and index < len(pattern) and pattern[index] in "*?~":
+            tokens.append(("literal", pattern[index])); index += 1
+        elif char == "*":
+            if not tokens or tokens[-1][0] != "star": tokens.append(("star", ""))
+        elif char == "?": tokens.append(("question", ""))
+        else: tokens.append(("literal", char))
+    return tokens
+
+def wildcard_match(text, tokens, tick):
+    """Bounded greedy matching avoids regex backtracking on customer text."""
+    offset, position, star, retry = 0, 0, -1, 0
+    while offset < len(text):
+        tick()
+        if position < len(tokens) and (tokens[position][0] == "question" or tokens[position] == ("literal", text[offset])):
+            offset += 1; position += 1
+        elif position < len(tokens) and tokens[position][0] == "star":
+            star, retry = position, offset; position += 1
+        elif star >= 0:
+            retry += 1; offset, position = retry, star + 1
+        else: return False
+    while position < len(tokens) and tokens[position][0] == "star": position += 1
+    return position == len(tokens)
+
+def criteria_matcher(criteria, tick):
+    if isinstance(criteria, CellError): return criteria
+    if isinstance(criteria, list): return CellError("#VALUE!")
+    operator, operand = "=", 0 if criteria is None else criteria
+    if isinstance(operand, str):
+        if len(operand) > MAX_CRITERIA_LENGTH: return CellError("#VALUE!")
+        prefix = re.match(r"(<=|>=|<>|=|<|>)(.*)\Z", operand, re.DOTALL)
+        if prefix: operator, operand = prefix.groups()
+        numeric = re.fullmatch(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?", operand)
+        if numeric:
+            operand = float(operand)
+            if not math.isfinite(operand): return CellError("#VALUE!")
+    if isinstance(operand, str) and operator in ("=", "<>") and any(char in operand for char in "*?~"):
+        tokens = wildcard_tokens(operand.casefold())
+        def matches_wildcard(value):
+            matched = isinstance(value, str) and wildcard_match(value.casefold(), tokens, tick)
+            return matched if operator == "=" else not matched
+        return matches_wildcard
+    def matches(value):
+        if isinstance(value, CellError): return False
+        if isinstance(operand, bool):
+            return compare_values(value, operand, operator) if isinstance(value, bool) else operator == "<>"
+        if isinstance(operand, (int, float)):
+            if isinstance(value, str) and re.fullmatch(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?", value):
+                value = float(value)
+            if value is None or isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value): return operator == "<>" and value is not None
+        elif value is not None and not isinstance(value, str): return operator == "<>"
+        return compare_values(value, operand, operator)
+    return matches
+
 def calculate(workbook, formulas):
-    values, visits = {}, [0]
+    values, visits, steps = {}, [0], [0]
+    deadline = time.monotonic() + MAX_CALCULATION_SECONDS
+    def tick():
+        steps[0] += 1
+        if steps[0] > MAX_EVALUATION_STEPS: raise FormulaError("formula calculation exceeds its work limit")
+        if (steps[0] == 1 or steps[0] % 64 == 0) and time.monotonic() >= deadline: raise FormulaError("formula calculation exceeds its time limit")
     def read(sheet, column, row):
+        tick()
         visits[0] += 1
-        if visits[0] > 1_000_000: raise FormulaError("formula calculation exceeds one million cell reads")
+        if visits[0] > MAX_CELL_READS: raise FormulaError("formula calculation exceeds one million cell reads")
         key = (sheet, column, row)
         if key in values: return values[key]
-        value = workbook[sheet].cell(row, column).value
+        cell = workbook[sheet].cell(row, column)
+        value = cell.value
+        if cell.data_type == "e": return CellError(value)
+        if value == "": return None
         if isinstance(value, (datetime.datetime, datetime.date)): return to_excel(value)
         return value
     def numeric(value):
@@ -140,17 +254,38 @@ def calculate(workbook, formulas):
         except (ValueError, TypeError): return CellError("#VALUE!")
     def evaluate(ast):
         # Iterative post-order also handles long left-associative expressions.
-        stack, results = [(ast, False)], {}
+        stack, results = [(ast, 0)], {}
         while stack:
-            node, visited = stack.pop(); kind = node[0]
+            tick()
+            node, phase = stack.pop(); kind = node[0]
+            if kind == "function" and node[1] == "IF":
+                test, yes, no = node[2]
+                if phase == 0:
+                    stack.extend(((node, 1), (test, 0))); continue
+                condition = results[id(test)]
+                if isinstance(condition, CellError): result = condition
+                elif isinstance(condition, list): result = CellError("#VALUE!")
+                elif isinstance(condition, str) and condition.upper() not in ("TRUE", "FALSE"): result = CellError("#VALUE!")
+                else:
+                    selected = yes if (condition.upper() == "TRUE" if isinstance(condition, str) else bool(condition)) else no
+                    if phase == 1:
+                        stack.extend(((node, 2), (selected, 0))); continue
+                    result = results[id(selected)]
+                    if isinstance(result, list): result = CellError("#VALUE!")
+                    elif isinstance(result, (int, float)) and not math.isfinite(result): result = CellError("#NUM!")
+                results[id(node)] = result
+                continue
             children = [node[2]] if kind == "unary" else [node[2], node[3]] if kind == "binary" else node[2] if kind == "function" else []
-            if children and not visited:
-                stack.append((node, True)); stack.extend((child, False) for child in reversed(children)); continue
-            if kind == "number": result = node[1]
+            if children and not phase:
+                stack.append((node, 1)); stack.extend((child, 0) for child in reversed(children)); continue
+            if kind in ("number", "string", "boolean"): result = node[1]
             elif kind == "ref": result = read(*node[1:])
             elif kind == "range": result = [read(node[1], col, row) for row in range(node[3], node[5] + 1) for col in range(node[2], node[4] + 1)]
             elif kind in ("binary", "unary"):
-                operands = [numeric(results[id(child)]) for child in children]
+                operands = [results[id(child)] for child in children]
+                if kind == "binary" and node[1] in COMPARISONS:
+                    results[id(node)] = compare_values(*operands, node[1]); continue
+                operands = [numeric(value) for value in operands]
                 result = next((value for value in operands if isinstance(value, CellError)), None)
                 if result is None:
                     a = operands[0]
@@ -162,6 +297,22 @@ def calculate(workbook, formulas):
                         except (OverflowError, ValueError): result = CellError("#NUM!")
             else:
                 args = [results[id(child)] for child in children]
+                if node[1] in ("COUNTIF", "SUMIF"):
+                    matcher = criteria_matcher(args[1], tick)
+                    if isinstance(matcher, CellError): result = matcher
+                    else:
+                        inputs = args[0] if isinstance(args[0], list) else [args[0]]
+                        sums = (args[2] if isinstance(args[2], list) else [args[2]]) if len(args) == 3 else inputs
+                        result = 0
+                        for value, amount in zip(inputs, sums):
+                            tick()
+                            if isinstance(value, CellError) or not matcher(value): continue
+                            if node[1] == "COUNTIF": result += 1
+                            elif isinstance(amount, CellError): result = amount; break
+                            elif isinstance(amount, (int, float)) and not isinstance(amount, bool): result += amount
+                    if isinstance(result, (int, float)) and not math.isfinite(result): result = CellError("#NUM!")
+                    results[id(node)] = result
+                    continue
                 flat = [value for arg in args for value in (arg if isinstance(arg, list) else [arg])]
                 result = next((value for value in flat if isinstance(value, CellError)), None)
                 if result is None:
@@ -187,5 +338,7 @@ def calculate(workbook, formulas):
             results[id(node)] = result
         result = results[id(ast)]
         return CellError("#VALUE!") if isinstance(result, list) else result
-    for target in formula_order(formulas): values[target] = evaluate(formulas[target][1])
+    for target in formula_order(formulas, tick):
+        tick()
+        values[target] = evaluate(formulas[target][1])
     return values

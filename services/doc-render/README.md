@@ -74,6 +74,17 @@ do not add presented pages. Each slide chooses one content layout:
   Labels/names contain at most 60 characters; every series must have one
   finite numeric value per label, between -1e12 and 1e12. Pie charts accept
   exactly one nonnegative series with a positive total.
+- `image:{content_base64,caption?,alt?}`: trusted PNG/JPEG bytes hydrated by the
+  orchestrator from a caller-authorized File Store path or owned approved
+  attachment. Public requests use `{path|item_id,caption?,alt?}`; inline bytes
+  and URLs are not accepted there. Images are aspect-fit pictures in PowerPoint
+  and PDF, with measured captions and native PowerPoint alternative text.
+  At most 12 images, 3 MiB each, 12 MiB combined for source and reconstructed
+  bytes, 16 million pixels per image and per deck, and 8,192 pixels per dimension
+  are allowed. PNG text expansion is capped at 64 KiB per chunk and 256 KiB
+  combined. Pillow fully decodes and re-encodes a single frame, discarding
+  metadata and appended bytes. In-place orientation handling avoids extra
+  full-size rasters; target-container memory acceptance is still required.
 
 Mixed content layouts are rejected. Measured table cells, columns, chart
 labels and legends must fit at their readable font sizes; input ceilings do
@@ -83,10 +94,14 @@ values, preserving their cross-references in the generated OOXML.
 
 **Excel formulas and charts.** Ordinary string cells remain inert text, even
 when they start with `=`. Explicit `formulas:[{cell, expression}]` opt into a
-bounded numeric grammar: arithmetic, A1 references across supplied sheets, and
-`SUM`/`AVERAGE`/`MIN`/`MAX`/`COUNT`/`ROUND`/`ABS`. Formula targets and references
+bounded grammar: arithmetic, comparisons, quoted text, booleans, A1 references
+across supplied sheets, and `SUM`/`AVERAGE`/`MIN`/`MAX`/`COUNT`/`ROUND`/`ABS`/
+`IF`/`COUNTIF`/`SUMIF`. IF evaluates only its selected branch; both branches
+still undergo validation and dependency-cycle checks. Criteria support bounded
+numeric/text matching and case-insensitive `*`, `?`, `~` wildcards. SUMIF ranges
+must have equal shapes. Formula targets and references
 must stay within supplied grids. External links, network functions and DDE
-syntax are refused. A bounded local evaluator supplies cached numeric/error
+syntax are refused. A bounded local evaluator supplies cached numeric/boolean/text/error
 results without replacing formulas. Recalculation is also requested on open;
 cycles across the workbook are refused. Quoted sheet names are supported.
 
@@ -100,6 +115,17 @@ Specs are validated before those features are applied.
 Rows wider than the 256-column service ceiling are rejected instead of losing
 cells. Headers are bold and frozen, columns have bounded readable widths,
 and the populated grid has an autofilter.
+
+Optional `table_name` creates a native styled Excel table over the supplied
+grid. Literal nonblank text headers must be unique and cannot conflict with
+header formulas or date formatting. Names must be valid and unique across
+workbook tables and defined names; Excel cell references and reserved names
+are refused. Structured-reference formulas and pivots are not supported.
+
+**Read-only readiness.** Authenticated `GET /capabilities` returns versioned
+format/Office support metadata without rendering a sample or accessing storage.
+The orchestrator combines this with caller permissions, personal drive state
+and other local service probes for the Creation capabilities panel.
 
 **Existing Office files.** `POST /office` accepts
 `{action:"inspect"|"revise", format:"docx"|"xlsx"|"pptx", content_base64, changes?}`.

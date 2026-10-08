@@ -112,6 +112,7 @@ class CellFormatSpec(BaseModel):
 
 class SheetSpec(BaseModel):
     name: str | None = None
+    table_name: str | None = None
     columns: list[Any] = Field(default_factory=list)
     rows: list[list[Any]] = Field(default_factory=list)
     formulas: list[FormulaSpec] = Field(default_factory=list)
@@ -144,8 +145,15 @@ class SlideChartSpec(BaseModel):
     series: list[SlideSeriesSpec]
 
 
+class SlideImageSpec(BaseModel):
+    model_config = {"extra": "forbid"}
+    content_base64: str = Field(max_length=4_194_304)
+    caption: str = ""
+    alt: str = ""
+
+
 class SlideSpec(BaseModel):
-    """Plain text only: the renderer never interprets slide text as markup."""
+    """Plain text and caller-authorized raster bytes; never remote resources."""
 
     model_config = {"extra": "forbid"}
     title: str
@@ -155,6 +163,7 @@ class SlideSpec(BaseModel):
     table: SlideTableSpec | None = None
     chart: SlideChartSpec | None = None
     notes: str = ""
+    image: SlideImageSpec | None = None
 
 
 class RenderRequest(BaseModel):
@@ -184,6 +193,12 @@ app = FastAPI(
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/capabilities")
+async def capabilities():
+    # Authenticated local metadata only; never render a sample or touch storage.
+    return {"version": 1, "formats": ["pdf", "docx", "xlsx", "pptx"], "office": True}
 
 
 @app.post("/office")
@@ -217,7 +232,12 @@ async def render(req: RenderRequest) -> Response:
                 req.title, [s.model_dump(exclude_none=True) for s in req.slides], req.format, req.theme
             )
         elif req.format == "xlsx":
-            payload = renderers.render_xlsx([s.model_dump() for s in req.sheets])
+            # Absence creates an ordinary worksheet; explicit null still reaches
+            # the named-table validator and is refused. Preserve other defaults.
+            payload = renderers.render_xlsx([
+                s.model_dump(exclude={"table_name"} if "table_name" not in s.model_fields_set else None)
+                for s in req.sheets
+            ])
         elif req.format == "docx":
             payload = renderers.render_docx(req.title, req.body_markdown)
         else:

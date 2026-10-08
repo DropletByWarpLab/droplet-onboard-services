@@ -8,6 +8,7 @@ from typing import Any
 from reportlab.lib import colors
 from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.pdfgen.canvas import Canvas
+from reportlab.lib.utils import ImageReader
 
 from fonts import BOLD, REGULAR
 from renderers import RenderError
@@ -16,6 +17,7 @@ from slides import (MAX_SLIDES, MAX_DECK_TITLE_CHARS, MAX_SLIDE_TITLE_CHARS, MAX
                     TITLE_SIZE, TITLE_LEADING, BODY_SIZE, BODY_LEADING, BULLET_GAP,
                     TEXT_WIDTH, MEASURE_WIDTH, TextBlock, SlideLayout, _wrap, _validate_text)
 from visual_specs import validate_chart, validate_table
+from slide_images import decode_image, MAX_DECK_IMAGES, MAX_DECK_IMAGE_BYTES, MAX_DECK_IMAGE_PIXELS
 
 THEMES = {
     "droplet": {"background": "FFFFFF", "ink": "173042", "accent": "007E87", "muted": "61717D", "panel": "EDF4F5"},
@@ -85,18 +87,18 @@ def layout_deck(title: str, specs: list[dict[str, Any]]) -> list[SlideLayout]:
         raise RenderError("at least one slide is required")
     if len(specs) > MAX_SLIDES:
         raise RenderError(f"too many slides (max {MAX_SLIDES})")
-    total, result = len(title), []
+    total, result, image_count, image_bytes, source_bytes, image_pixels = len(title), [], 0, 0, 0, 0
     for index, spec in enumerate(specs, 1):
-        if not isinstance(spec, dict) or set(spec) - {"title", "bullets", "subtitle", "columns", "table", "chart", "notes"}:
-            raise RenderError(f"slide {index} accepts only title and bullets, subtitle, columns, table, chart and notes")
+        if not isinstance(spec, dict) or set(spec) - {"title", "bullets", "subtitle", "columns", "table", "chart", "notes", "image"}:
+            raise RenderError(f"slide {index} accepts only title, bullets, subtitle, columns, table, chart, image and notes")
         heading = _validate_text(spec.get("title"), MAX_SLIDE_TITLE_CHARS, f"slide {index} title", required=True)
         subtitle = _validate_text(spec.get("subtitle", ""), 300, f"slide {index} subtitle")
         notes = _validate_text(spec.get("notes", ""), 4000, f"slide {index} notes")
         raw, columns = spec.get("bullets", []), spec.get("columns", [])
         if not isinstance(raw, list) or not isinstance(columns, list):
             raise RenderError(f"slide {index} bullets and columns must be an array")
-        if sum([bool(raw), bool(columns), spec.get("table") is not None, spec.get("chart") is not None]) > 1:
-            raise RenderError(f"slide {index} must choose one layout: bullets, columns, table or chart")
+        if sum([bool(raw), bool(columns), spec.get("table") is not None, spec.get("chart") is not None, spec.get("image") is not None]) > 1:
+            raise RenderError(f"slide {index} must choose one layout: bullets, columns, table, chart or image")
         lines = _wrap(heading, MEASURE_WIDTH, TITLE_SIZE, True)
         if len(lines) > 3:
             raise RenderError(f"slide {index} title does not fit; shorten it")
@@ -109,7 +111,7 @@ def layout_deck(title: str, specs: list[dict[str, Any]]) -> list[SlideLayout]:
                 raise RenderError(f"slide {index} subtitle does not fit; shorten it")
             subtitle_block = TextBlock(lines, MARGIN, cursor, 18, 25)
             cursor += len(lines) * 25 + 18
-        blocks, headings, table, chart = [], [], None, None
+        blocks, headings, table, chart, image = [], [], None, None, None
         text_count = len(heading) + len(subtitle) + len(notes)
         if columns:
             if len(columns) != 2:
@@ -129,6 +131,33 @@ def layout_deck(title: str, specs: list[dict[str, Any]]) -> list[SlideLayout]:
                 items = column.get("bullets", [])
                 blocks.extend(_bullet_blocks(items, index, top, x, width, 19, 26))
                 text_count += len(column_title) + sum(map(len, items))
+        elif spec.get("image") is not None:
+            source = spec["image"]
+            image_count += 1
+            if image_count > MAX_DECK_IMAGES:
+                raise RenderError("deck accepts at most 12 image slides")
+            asset = decode_image(source, f"slide {index} image", MAX_DECK_IMAGE_PIXELS - image_pixels)
+            image_pixels += asset.width * asset.height
+            source_bytes += asset.source_bytes
+            image_bytes += len(asset.content)
+            if max(image_bytes, source_bytes) > MAX_DECK_IMAGE_BYTES:
+                raise RenderError("deck source or reconstructed images exceed 12 MiB")
+            caption = _validate_text(source.get("caption", ""), 300, f"slide {index} image caption")
+            alt = _validate_text(source.get("alt", ""), 300, f"slide {index} image alt")
+            caption_lines = _wrap(caption, MEASURE_WIDTH, 16) if caption else []
+            if len(caption_lines) > 2:
+                raise RenderError(f"slide {index} image caption does not fit; shorten it")
+            height = BOTTOM - cursor - (len(caption_lines) * 22 + 16 if caption_lines else 0)
+            if height < 100:
+                raise RenderError(f"slide {index} image does not fit; shorten title or subtitle")
+            scale = min(TEXT_WIDTH / asset.width, height / asset.height)
+            width, display_height = asset.width * scale, asset.height * scale
+            image = {"asset": asset, "left": MARGIN + (TEXT_WIDTH - width) / 2,
+                     "top": cursor + (height - display_height) / 2,
+                     "width": width, "height": display_height, "alt": alt}
+            if caption_lines:
+                headings.append(TextBlock(caption_lines, MARGIN, cursor + height + 16, 16, 22))
+            text_count += len(caption) + len(alt)
         elif spec.get("table") is not None:
             data = validate_table(spec["table"], f"slide {index} table")
             table = _table(data, index, cursor)
@@ -143,7 +172,7 @@ def layout_deck(title: str, specs: list[dict[str, Any]]) -> list[SlideLayout]:
         total += text_count
         if total > MAX_DECK_CHARS:
             raise RenderError(f"deck text is too long (max {MAX_DECK_CHARS} characters)")
-        result.append(SlideLayout(heading_block, blocks, subtitle_block, headings, table, chart, notes))
+        result.append(SlideLayout(heading_block, blocks, subtitle_block, headings, table, chart, notes, image))
     return result
 
 
@@ -255,6 +284,10 @@ def render_pdf(title, layouts, theme):
                 cursor += height
         if layout.chart:
             _pdf_chart(canvas, layout.chart, theme)
+        if layout.image:
+            bounds = layout.image
+            canvas.drawImage(ImageReader(io.BytesIO(bounds["asset"].content)), bounds["left"],
+                             PAGE_HEIGHT - bounds["top"] - bounds["height"], bounds["width"], bounds["height"], mask="auto")
         if layout.notes:
             canvas.textAnnotation(layout.notes, Rect=(MARGIN, 20, MARGIN + 18, 38))
         canvas.setFillColor(_color(theme["muted"]))
@@ -352,6 +385,11 @@ def render_pptx(title, layouts, theme):
                 for n, point in enumerate(chart.series[0].points):
                     point.format.fill.solid()
                     point.format.fill.fore_color.rgb = RGBColor.from_string(palette[n % 4])
+        if layout.image:
+            bounds = layout.image
+            picture = slide.shapes.add_picture(io.BytesIO(bounds["asset"].content), Pt(bounds["left"]),
+                                               Pt(bounds["top"]), Pt(bounds["width"]), Pt(bounds["height"]))
+            picture._element.xpath("./p:nvPicPr/p:cNvPr")[0].set("descr", bounds["alt"])
         if layout.notes:
             slide.notes_slide.notes_text_frame.text = layout.notes
         footer = slide.shapes.add_textbox(Pt(PAGE_WIDTH - MARGIN - 120), Pt(PAGE_HEIGHT - 40), Pt(120), Pt(20))

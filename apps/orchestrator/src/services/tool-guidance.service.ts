@@ -138,7 +138,7 @@ const showFiles: CategoryRenderer = (can) =>
 const createFiles: CategoryRenderer = (can) => {
   const writers = [
     can("create_pdf_report") ? "PDF: create_pdf_report" : null,
-    can("create_slide_deck") ? "PDF/PPTX decks: create_slide_deck" : null,
+    can("create_slide_deck") ? "PDF/PPTX decks: create_slide_deck (both=true saves both)" : null,
     can("create_spreadsheet") ? "Excel/formulas/charts: create_spreadsheet" : null,
   ].filter((n): n is string => n !== null);
   if (writers.length === 0) return null;
@@ -163,7 +163,7 @@ const networkSystem: CategoryRenderer = (can) => {
   const status = [
     can("network_summary") ? "network_summary" : null,
     can("get_network_status") ? "get_network_status" : null,
-    can("get_system_health") ? "get_system_health" : null,
+    can("get_system_health") ? "get_system_health (creation=true for creation readiness)" : null,
     can("get_drive_health") ? "get_drive_health" : null,
   ].filter((n): n is string => n !== null);
   if (status.length === 0) return null;

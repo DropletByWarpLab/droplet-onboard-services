@@ -89,7 +89,7 @@ def test_overflow_is_a_numbered_error_instead_of_clipped_content(format):
         ([{"title": ""}], "must not be empty"),
         ([{"title": "T", "bullets": "wrong"}], "must be an array"),
         ([{"title": "T", "bullets": [5]}], "must be a string"),
-        ([{"title": "T", "image": "/etc/passwd"}], "accepts only title and bullets"),
+        ([{"title": "T", "image": "/etc/passwd"}], "image accepts only trusted content_base64"),
         ([{"title": "T", "bullets": ["emoji \U0001F642"]}], "unsupported by the bundled font"),
         ([{"title": "T", "bullets": ["bad\x00text"]}], "unsupported control"),
     ],

@@ -44,9 +44,10 @@ const inputSchema = {
               required: ["cell", "expression"],
               additionalProperties: false,
             },
-            description: "Existing cell formulas: arithmetic, SUM/AVERAGE/MIN/MAX/COUNT/ROUND/ABS; A1 cells/ranges, including supplied sheets.",
+            description: "In-grid formulas: arithmetic/comparisons; IF/SUM/AVERAGE/MIN/MAX/COUNT/COUNTIF/SUMIF/ROUND/ABS; supplied-sheet A1 refs.",
           },
-          formats: { type: "array", items: { type: "object", properties: { range: { type: "string" }, kind: { type: "string" }, precision: { type: "integer" }, currency: { type: "string" } }, required: ["range", "kind"], additionalProperties: false }, description: "Existing cell ranges; kind number/currency/percent/date, precision 0–8, currency USD/EUR/GBP/JPY/CAD/AUD." },
+          formats: { type: "array", items: { type: "object", properties: { range: { type: "string" }, kind: { type: "string" }, precision: { type: "integer" }, currency: { type: "string" } }, required: ["range", "kind"], additionalProperties: false }, description: "In-grid ranges; kind number/currency/percent/date; precision 0–8; currency USD/EUR/GBP/JPY/CAD/AUD." },
+          table_name: { type: "string", description: "Native named Excel table." },
           chart: {
             type: "object",
             properties: {
@@ -58,7 +59,7 @@ const inputSchema = {
             },
             required: ["kind", "category_column"],
             additionalProperties: false,
-            description: "1-based columns; use value_column or value_columns (1–8 series; pie one).",
+            description: "1-based columns; value_column or value_columns (1–8 series; pie one).",
           },
         },
         required: ["columns", "rows"],
@@ -91,7 +92,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "create_spreadsheet",
   description:
-    "Create Excel with typed cells, cached safe formulas, formats and editable charts; refuses overwrite.",
+    "Create new Excel files: typed cells, cached formulas, formats, tables and charts.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: false,

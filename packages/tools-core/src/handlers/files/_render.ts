@@ -98,6 +98,9 @@ export async function interpretRenderResponse(
     if (res.status === 413) {
       return err("TOO_LARGE", failure.error ?? "the rendered document is too large");
     }
+    if (res.status === 408) {
+      return err("OUTCOME_UNKNOWN", "Creation was interrupted. Check the destination filename before retrying; a save may have completed.");
+    }
     if (res.status === 502) {
       return err("RENDERER_UNAVAILABLE", "the document renderer is not available");
     }
@@ -105,7 +108,9 @@ export async function interpretRenderResponse(
   }
 
   const data = body as Partial<RenderOk>;
-  if (typeof data.path !== "string" || typeof data.filename !== "string" || typeof data.bytes !== "number" || typeof data.mimeType !== "string") {
+  if (typeof data.path !== "string" || !data.path.startsWith("/") || data.path.length > 4096 || /[\u0000-\u001f\\]/.test(data.path) || data.path.split("/").some((part) => part === "." || part === "..") ||
+      typeof data.filename !== "string" || !data.filename || data.filename.length > 255 || /[\u0000-\u001f]/.test(data.filename) ||
+      typeof data.bytes !== "number" || !Number.isSafeInteger(data.bytes) || data.bytes <= 0 || typeof data.mimeType !== "string" || !data.mimeType) {
     return err("RENDER_FAILED", "the renderer returned no saved file metadata");
   }
   return {

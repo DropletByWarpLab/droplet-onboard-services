@@ -18,6 +18,7 @@ import { ThemeToggle } from "@/components/ThemeToggle";
 import { NavLayoutToggle } from "@/components/NavLayoutToggle";
 import { PasskeysSection } from "@/components/settings/PasskeysSection";
 import { FeaturesCard } from "@/components/settings/FeaturesCard";
+import { CreationCapabilitiesCard } from "@/components/settings/CreationCapabilitiesCard";
 import { PersonalityCard } from "@/components/settings/PersonalityCard";
 import { EmailAccountCard } from "@/components/settings/EmailAccountCard";
 import { ConnectedAccounts } from "@/components/settings/ConnectedAccounts";
@@ -224,6 +225,7 @@ export default function SettingsPage() {
             modules (registry: orchestrator module-registry.ts). Self-gates to
             owner/admin like the cards below. */}
         <FeaturesCard />
+        <CreationCapabilitiesCard />
 
         {/* WARP-2967 — the Settings front door.
             ────────────────────────────────────────────────────────────────

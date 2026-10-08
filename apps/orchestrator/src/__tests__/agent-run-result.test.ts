@@ -150,6 +150,16 @@ describe("runArtifacts", () => {
       { kind: "file", ref: "/Docs/pitch.pptx", title: "pitch.pptx" },
     ]);
   });
+
+  it("delivers only acknowledged paired exports, including a retained primary after a companion failure", () => {
+    const trace = [
+      { tool: "create_slide_deck", args: { path: "/requested.pptx", both: true }, text: JSON.stringify({ ok: true, data: { complete: true, artifacts: [{ path: "/actual.pptx" }, { path: "/actual.pdf" }] } }) },
+      { tool: "create_slide_deck", args: { path: "/partial.pptx", both: true }, text: JSON.stringify({ ok: true, data: { complete: false, artifacts: [{ path: "/partial.pptx" }], exportErrors: [{ path: "/unconfirmed.pdf", code: "OUTCOME_UNKNOWN" }] } }) },
+      { tool: "create_slide_deck", args: { path: "/invented.pptx", both: true }, text: '{"ok":true}' },
+      { tool: "create_slide_deck", args: { path: "/renamed.pptx" }, text: JSON.stringify({ ok: true, data: { path: "/canonical.pptx" } }) },
+    ];
+    expect(runArtifacts(trace).map((item) => item.ref)).toEqual(["/actual.pptx", "/actual.pdf", "/partial.pptx", "/canonical.pptx"]);
+  });
 });
 
 describe("deliverRunResults", () => {

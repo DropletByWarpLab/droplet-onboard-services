@@ -108,6 +108,12 @@ async def health():
     return {"status": "ok"}
 
 
+@app.get("/capabilities")
+async def capabilities():
+    # No provider request: a provisioned key is only a local prerequisite.
+    return {"version": 1, "fetch": True, "search": bool(web_content.BRAVE_SEARCH_API_KEY)}
+
+
 @app.get("/weather")
 async def weather(location: str = Query(..., min_length=1, max_length=120)):
     try:
