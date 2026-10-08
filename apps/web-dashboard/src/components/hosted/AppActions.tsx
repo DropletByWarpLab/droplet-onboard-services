@@ -1,21 +1,46 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ExternalLink, Sparkles } from "lucide-react";
+import { useAuth } from "@/lib/auth";
 import { HostedSetupError, hostedErrorCopy, mintHostedAppSession, startHostedAppSetup } from "./api";
 
 export function HostedAppOpen({ slug, disabled = false }: { slug: string; disabled?: boolean }) {
+  const { user } = useAuth();
+  const identity = `${user?.id ?? ""}:${user?.role ?? ""}:${slug}`;
+  const latestIdentity = useRef(identity);
+  latestIdentity.current = identity;
+  const generation = useRef(0);
+  const mounted = useRef(false);
+  const pendingTab = useRef<Window | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    mounted.current = true;
+    generation.current += 1;
+    setBusy(false);
+    setError(null);
+    return () => {
+      mounted.current = false;
+      generation.current += 1;
+      pendingTab.current?.close();
+      pendingTab.current = null;
+    };
+  }, [identity]);
   const open = async () => {
-    if (busy || disabled) return;
+    if (busy || disabled || !user) return;
+    const gen = generation.current;
+    const current = () => mounted.current && generation.current === gen && latestIdentity.current === identity;
     // Reserve the browser tab during the user's click, before the async mint.
     const tab = window.open("", "_blank");
     if (tab) tab.opener = null;
+    pendingTab.current = tab;
     setBusy(true);
     setError(null);
     try {
       const session = await mintHostedAppSession(slug);
+      // A code minted for the previous person must never reach the app tab.
+      if (!current()) { tab?.close(); return; }
       const url = new URL(session.url, window.location.href);
       if (url.protocol !== "https:" || url.port !== "8443" || url.username || url.password ||
           url.pathname !== `/${encodeURIComponent(slug)}/_droplet/session` || !url.searchParams.get("code")) {
@@ -25,8 +50,11 @@ export function HostedAppOpen({ slug, disabled = false }: { slug: string; disabl
       else window.location.assign(url.href);
     } catch (err) {
       tab?.close();
-      setError(hostedErrorCopy(err));
-    } finally { setBusy(false); }
+      if (current()) setError(hostedErrorCopy(err));
+    } finally {
+      if (pendingTab.current === tab) pendingTab.current = null;
+      if (current()) setBusy(false);
+    }
   };
   return <span>
     <button type="button" className="btn sm" disabled={disabled || busy} aria-busy={busy}
