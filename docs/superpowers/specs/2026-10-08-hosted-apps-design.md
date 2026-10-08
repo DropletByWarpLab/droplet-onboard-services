@@ -4,7 +4,7 @@ Decision record: [`docs/ADR-073-hosted-app-extensions.md`](../../ADR-073-hosted-
 Ticket: [WARP-3901](https://warp-lab.atlassian.net/browse/WARP-3901) under the agentic-extensibility epic [WARP-2891](https://warp-lab.atlassian.net/browse/WARP-2891).
 Ground truth: `origin/stage` @ `f8a712655`, read 2026-10-08. Every path below was verified there, not in a local checkout.
 
-**Status: design for sign-off.** Nothing in this file is built. The harness gate applies: no plan and no code until Stefan signs off the open decisions in §9 (each is written with its recommended default, so a silent sign-off means "the defaults").
+**Status: signed off 2026-10-08** — Stefan Cruceru: _"go with the defaults, file the slice tickets and start HA-1."_ Every decision in §9 is closed to its default; the slice tickets are filed under WARP-2891 (§10); HA-1 is in progress on [WARP-3905](https://warp-lab.atlassian.net/browse/WARP-3905). The security-review items (ADR-073 §4) are Romain's, as sub-tasks on HA-2 and HA-3.
 
 ## 0. The ask, and what it means on this box
 
@@ -173,9 +173,9 @@ Grants are explicit rows (`HostedAppGrant { extensionId, role }`, CLAUDE.md "No 
 - **WARP-2898's Jira status**: Done on the board, serializer-only on `stage`. The ticket gets a comment with the evidence and is reopened or re-scoped (a workflow edit if `Done` is terminal — WARP-2913's precedent). This spec's v2 (§4.3) is its remaining scope.
 - **`SANDBOX_PROCESS_SUPERVISION`** must be `1` on a box that hosts apps; the New app dialog shows the box's state and refuses creation with "turned off on this Droplet" when it is `0` (promote already answers 503).
 
-## 9. Open decisions (each with its recommended default)
+## 9. Decisions (closed to their defaults — Stefan Cruceru, 2026-10-08)
 
-| # | Decision | Default |
+| # | Decision | Default — **taken as written, Stefan Cruceru, 2026-10-08** |
 |---|---|---|
 | Q1 | Origin per app: `:8443` with a path (v1) now, or a hostname per app (`<slug>.<box-name>.box.warp-lab.ai`, wildcard SAN through ADR-023's DNS-01) | **`:8443` + path in v1**; hostnames when a box has a public-CA name, as a v2 slice; the code-exchange session (§5.3) is written so both work |
 | Q2 | Base path: the app is told `DROPLET_EXT_BASE_PATH` and must honour it, or the relay rewrites HTML | **The app honours it**; the brief makes that edit; the relay never rewrites bodies |
@@ -191,12 +191,12 @@ Grants are explicit rows (`HostedAppGrant { extensionId, role }`, CLAUDE.md "No 
 
 | Slice | Scope | AC (abridged — each PR carries the full list) | Branch · migration |
 |---|---|---|---|
-| **HA-0** | This spec + ADR-073 | Sign-off on §9; WARP-2898 status corrected; slice tickets filed | `feat/warp-3901-hosted-apps-design` · — |
-| **HA-1** | Manifest `kind: "app"`, `http`, `runtime: "static"`; `deriveReadback`; `workspace_propose` carries `kind`; three templates | One test per rule in §4.1; readback test with a lying `summary`; templates build/test with nothing installed; `catalog.test.ts` unchanged | `feat/warp-<key>-hosted-apps-manifest` · — |
-| **HA-2** | Sandbox: static server, `/extensions/<slug>/http/*` relay, `PORT` + `DROPLET_EXT_BASE_PATH` + `DROPLET_EXT_DATA_DIR`, `app-check` argv, log ring buffer + `/logs`, `extensions-data` volume | Relay refuses without bearer; loopback only; body/timeout caps hit are reported; `app-check` kills its group and is refused for tools; `test-security.sh` 14b updated and green; review sub-task for the volume | `feat/warp-<key>-hosted-apps-sandbox` · — |
-| **HA-3** | Orchestrator: install path for `kind: "app"` (health probe, no MCP attach), `routes/hosted.ts` (list, session mint, logs, relay), `HostedAppGrant`, `Origin` middleware; gateway `:8443` block; compose port; `test-security.sh` nginx assertion | Fixture app echoes headers: no `droplet_session`, identity headers present; relay 404 on `:443`; code single-use + expiry; guest 403; cross-origin `POST /api/*` with foreign `Origin` → 403, Bearer exempt; ship-check green | `feat/warp-<key>-hosted-apps-relay` · `20261009010000` |
-| **HA-4** | Web: New app dialog (kind, source, archive upload), workspace pane app facts + `Open`, `/admin/extensions` readback + grants at promote, `/hosted` page + **Apps** nav row | Empty/loading/error states; keyboard + focus; light/dark; existing tokens only; copy plain; `Open` goes through the session mint; dialog refuses when supervision is off | `feat/warp-<key>-hosted-apps-web` · — |
-| **HA-5** | Assistant: `app-setup` brief, `list_hosted_apps`, `hosted_app_logs`, `start_agent_run` brief argument, dialog → chat-started run | Brief fixture run on the three templates proposes a valid manifest; a Dockerfile-only tree ends with a result, not a proposal; tools have `TOOL_ROUTES` rows; schema size measured before/after | `feat/warp-<key>-hosted-apps-assistant` · — |
+| **HA-0** [WARP-3901](https://warp-lab.atlassian.net/browse/WARP-3901) | This spec + ADR-073 | Sign-off on §9 (done 2026-10-08); WARP-2898 status corrected (commented 2026-10-08); slice tickets filed (done) | `feat/warp-3901-hosted-apps-design` · — |
+| **HA-1** [WARP-3905](https://warp-lab.atlassian.net/browse/WARP-3905) | Manifest `kind: "app"`, `http`, `runtime: "static"`; `deriveReadback`; `workspace_propose` carries `kind`; three templates | One test per rule in §4.1; readback test with a lying `summary`; templates build/test with nothing installed; `catalog.test.ts` unchanged | `feat/warp-3905-hosted-apps-manifest` · — |
+| **HA-2** [WARP-3906](https://warp-lab.atlassian.net/browse/WARP-3906) | Sandbox: static server, `/extensions/<slug>/http/*` relay, `PORT` + `DROPLET_EXT_BASE_PATH` + `DROPLET_EXT_DATA_DIR`, `app-check` argv, log ring buffer + `/logs`, `extensions-data` volume | Relay refuses without bearer; loopback only; body/timeout caps hit are reported; `app-check` kills its group and is refused for tools; `test-security.sh` 14b updated and green; review sub-task for the volume | `feat/warp-3906-hosted-apps-sandbox` · — |
+| **HA-3** [WARP-3907](https://warp-lab.atlassian.net/browse/WARP-3907) | Orchestrator: install path for `kind: "app"` (health probe, no MCP attach), `routes/hosted.ts` (list, session mint, logs, relay), `HostedAppGrant`, `Origin` middleware; gateway `:8443` block; compose port; `test-security.sh` nginx assertion | Fixture app echoes headers: no `droplet_session`, identity headers present; relay 404 on `:443`; code single-use + expiry; guest 403; cross-origin `POST /api/*` with foreign `Origin` → 403, Bearer exempt; ship-check green | `feat/warp-3907-hosted-apps-relay` · `20261009010000` |
+| **HA-4** [WARP-3908](https://warp-lab.atlassian.net/browse/WARP-3908) | Web: New app dialog (kind, source, archive upload), workspace pane app facts + `Open`, `/admin/extensions` readback + grants at promote, `/hosted` page + **Apps** nav row | Empty/loading/error states; keyboard + focus; light/dark; existing tokens only; copy plain; `Open` goes through the session mint; dialog refuses when supervision is off | `feat/warp-3908-hosted-apps-web` · — |
+| **HA-5** [WARP-3909](https://warp-lab.atlassian.net/browse/WARP-3909) | Assistant: `app-setup` brief, `list_hosted_apps`, `hosted_app_logs`, `start_agent_run` brief argument, dialog → chat-started run | Brief fixture run on the three templates proposes a valid manifest; a Dockerfile-only tree ends with a result, not a proposal; tools have `TOOL_ROUTES` rows; schema size measured before/after | `feat/warp-3909-hosted-apps-assistant` · — |
 | **HA-6** (v2) | `runtime: "image"`: builder, registry, apply-path install, direct dial from the relay; Q1 hostnames; Q7 WebSocket | WARP-2898's own AC, unchanged | WARP-2898 · later |
 
 Order: HA-1 → HA-2 → HA-3 → HA-4 and HA-5 in parallel. HA-2 and HA-3 each carry a security-review sub-task for the reviewers of WARP-2922 / WARP-2923 (the relay is a new way into the sandbox, and `:8443` is a new listener on the LAN).
