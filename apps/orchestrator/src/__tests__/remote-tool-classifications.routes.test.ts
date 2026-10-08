@@ -199,7 +199,8 @@ describe("PUT /api/admin/remote-tools/allowlist/:serverId/:toolName", () => {
       .send({ allowlisted: true });
     expect(res.status).toBe(403);
     expect(rows.get("atlassian|getConfluencePage")!.allowlisted).not.toBe(true);
-    expect(recordActivityMock).not.toHaveBeenCalled();
+    // The role guard logs its own `auth` denial; no allowlist (`system`) row.
+    expect(recordActivityMock.mock.calls.filter((c) => c[0].kind === "system")).toEqual([]);
   });
 
   it("a newly discovered tool is NOT allowlisted; an admin allowlists it, the cache is live, an audit row is written; withdrawing closes it", async () => {
