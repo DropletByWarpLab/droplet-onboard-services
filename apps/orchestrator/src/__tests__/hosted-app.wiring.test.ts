@@ -34,9 +34,34 @@ describe("hosted-app security at the real app boundary", () => {
   it("a Bearer exemption still reaches normal authentication", async () => {
     const res = await request(app).post("/api/workspace")
       .set("Host", "droplet.example").set("X-Forwarded-Proto", "https")
-      .set("Origin", "https://droplet.example:8443").set("Authorization", "Bearer invalid-jwt")
+      .set("Origin", "https://native-client.example").set("Authorization", "Bearer invalid-jwt")
       .send({ name: "Unauthorized app" });
     expect(res.status).toBe(401);
+  });
+
+  it.each([
+    ["post", "/api/auth/login"],
+    ["post", "/api/auth/setup"],
+    ["post", "/api/auth/refresh"],
+    ["post", "/api/auth/invites/accept/example"],
+    ["post", "/api/auth/webauthn/authenticate/options"],
+    ["patch", "/api/setup/state"],
+    ["post", "/api/setup/claim"],
+    ["post", "/api/setup/org"],
+  ])("rejects app-origin public writes with an unverified Bearer even if CORS includes the app origin: %s %s", async (method, path) => {
+    const origin = "https://droplet.example:8443";
+    const previous = config.corsAllowedOrigins;
+    try {
+      config.corsAllowedOrigins = [...previous, origin];
+      const call = method === "patch" ? request(app).patch(path) : request(app).post(path);
+      const res = await call.set("Origin", origin).set("Authorization", "Bearer invalid-jwt")
+        .set("Cookie", "droplet_session=ambient-session; droplet_refresh=ambient-refresh")
+        .set("Content-Type", "application/json").send("not-json");
+      // Public auth/setup routers run before authMiddleware. Neither their
+      // handlers nor the global body parser may receive this app-origin write.
+      expect(res.status).toBe(403);
+      expect(res.body).toEqual({ error: "foreign_origin_refused" });
+    } finally { config.corsAllowedOrigins = previous; }
   });
 
   it("rejects direct hosted relay requests before the dashboard JSON parser", async () => {
