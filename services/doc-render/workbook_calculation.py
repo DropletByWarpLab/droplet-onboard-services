@@ -256,7 +256,7 @@ def calculate(workbook, formulas):
         except (ValueError, TypeError): return CellError("#VALUE!")
     def evaluate(ast):
         # Iterative post-order also handles long left-associative expressions.
-        stack, results = [(ast, 0)], {}
+        stack, results, references = [(ast, 0)], {}, set()
         while stack:
             tick()
             node, phase = stack.pop(); kind = node[0]
@@ -273,6 +273,7 @@ def calculate(workbook, formulas):
                     if phase == 1:
                         stack.extend(((node, 2), (selected, 0))); continue
                     result = results[id(selected)]
+                    if id(selected) in references: references.add(id(node))
                     if isinstance(result, list): result = CellError("#VALUE!")
                     elif isinstance(result, (int, float)) and not math.isfinite(result): result = CellError("#NUM!")
                 results[id(node)] = result
@@ -315,7 +316,20 @@ def calculate(workbook, formulas):
                     if isinstance(result, (int, float)) and not math.isfinite(result): result = CellError("#NUM!")
                     results[id(node)] = result
                     continue
-                flat = [value for arg in args for value in (arg if isinstance(arg, list) else [arg])]
+                flat = []
+                for child, arg in zip(children, args):
+                    for value in (arg if isinstance(arg, list) else [arg]):
+                        tick()
+                        # Excel ignores bool/text in cell references, including
+                        # a reference selected by IF. Direct scalar arguments
+                        # instead coerce bools and numeric text; bad text is an
+                        # error (ignored only by COUNT).
+                        if node[1] in ("SUM", "COUNT", "AVERAGE", "MIN", "MAX") and id(child) not in references and isinstance(value, (str, bool)):
+                            try:
+                                value = float(value)
+                                if not math.isfinite(value): value = CellError("#VALUE!")
+                            except ValueError: value = CellError("#VALUE!")
+                        flat.append(value)
                 # COUNT ignores error cells, along with other non-numbers;
                 # the other numeric functions propagate those errors.
                 result = None if node[1] == "COUNT" else next((value for value in flat if isinstance(value, CellError)), None)
@@ -340,6 +354,7 @@ def calculate(workbook, formulas):
                                     except Exception: result = CellError("#NUM!")
             if isinstance(result, complex) or (isinstance(result, (float, int)) and not math.isfinite(result)): result = CellError("#NUM!")
             results[id(node)] = result
+            if kind in ("ref", "range"): references.add(id(node))
         result = results[id(ast)]
         return CellError("#VALUE!") if isinstance(result, list) else result
     for target in formula_order(formulas, tick):

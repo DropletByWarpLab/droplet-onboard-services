@@ -333,6 +333,46 @@ def _formula_result(expression, rows=None):
     return load_workbook(io.BytesIO(data), data_only=True)["Data"]["C2"], data
 
 
+@pytest.mark.parametrize("expression, expected", [
+    ('SUM(TRUE,"2")', 3), ('COUNT(TRUE,"2")', 2),
+    ('MIN(5,TRUE,"2")', 1), ('MAX(1,FALSE,"2")', 2),
+    ('AVERAGE(TRUE,"2")', 1.5), ('MIN(FALSE,2)', 0),
+    ('AVERAGE(FALSE,2)', 1), ('COUNT(1/0,"bad",TRUE)', 1),
+    ('SUM("bad",2)', "#VALUE!"), ('AVERAGE("bad",2)', "#VALUE!"),
+    ('MIN("bad",2)', "#VALUE!"), ('MAX("bad",2)', "#VALUE!"),
+])
+def test_aggregates_coerce_direct_scalar_arguments_like_excel(expression, expected):
+    # COUNT/MIN/MAX distinguish direct literals from referenced cells. SUM's
+    # documented SUM("5",15,TRUE)=21 example follows the same rule. These
+    # cached results were also checked in Excel using an unsaved workbook.
+    result, data = _formula_result(expression)
+    assert result.value == expected
+    assert result.data_type == ("e" if isinstance(expected, str) else "n")
+    assert load_workbook(io.BytesIO(data))["Data"]["C2"].value == "=" + expression
+
+
+@pytest.mark.parametrize("expression, expected", [
+    ('SUM(A2:A4)', 5), ('COUNT(A2:A4)', 1),
+    ('SUM(IF(TRUE,A2,0))', 0), ('SUM(IF(TRUE,A3,0))', 0),
+    ('COUNT(IF(TRUE,A3,0))', 0), ('SUM(IF(FALSE,A2,"2"))', 2),
+    ('COUNT(IF(TRUE,"2",0))', 1),
+    ('SUM(IF(TRUE,IF(FALSE,0,A3),0))', 0),
+    ('SUM(IF(TRUE,A2,0)+0)', 1),
+])
+def test_aggregates_preserve_selected_if_reference_semantics(expression, expected):
+    # Selecting a cell through IF preserves its reference status. Applying
+    # arithmetic to that selection instead produces a direct scalar value.
+    assert _formula_result(expression, [[True, 2, ""], ["2", 4, ""], [5, 6, ""]])[0].value == expected
+
+
+@pytest.mark.parametrize("expression, expected", [
+    ('IF(TRUE,A2,1)', 0), ('A2', 0),
+    ('SUM(IF(TRUE,A2,0))', 0), ('COUNT(IF(TRUE,A2,0))', 0),
+])
+def test_selected_empty_cells_cache_zero_without_becoming_counted_arguments(expression, expected):
+    assert _formula_result(expression, [[None, 2, ""], [5, 4, ""]])[0].value == expected
+
+
 @pytest.mark.parametrize("expression, expected, data_type", [
     ('IF(A2>=10,"Met Target","Below Target")', "Met Target", "s"),
     ('IF(A2<10,"Met Target","Below Target")', "Below Target", "s"),
