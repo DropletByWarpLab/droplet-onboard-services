@@ -433,6 +433,7 @@ export class RemoteToolClassificationCache {
 
   /** Test hook — seed without a database. */
   seed(rows: readonly RemoteToolClassificationRow[]): void {
+    this.#live = new Map(); // a seeded snapshot starts with no live listing
     this.#rows = new Map(rows.map((r) => [key(r.serverId, r.toolName), r]));
   }
 
