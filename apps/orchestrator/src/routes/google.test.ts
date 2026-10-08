@@ -169,7 +169,6 @@ describe("Google browser and mail worker routes", () => {
   it.each([
     ...["connected", "cancelled", "expired", "failed"].map((outcome) => ({ returnTo: "/setup?step=accounts", outcome, location: `/setup?step=accounts&google=${outcome}` })),
     ...["connected", "cancelled", "expired", "failed"].map((outcome) => ({ returnTo: "/chat", outcome, location: `/chat?google=${outcome}` })),
-    ...["connected", "cancelled", "expired", "failed"].map((outcome) => ({ returnTo: "/chat/connect-return", outcome, location: `/chat/connect-return?google=${outcome}` })),
   ])("returns $outcome to the stored $returnTo destination", async ({ returnTo, outcome, location }) => {
     const { app, db } = setup();
     const started = await asUser(request(app).post("/api/google/connect")).send({ returnTo });
@@ -186,7 +185,7 @@ describe("Google browser and mail worker routes", () => {
     expect(callback.text).not.toMatch(/evil.example|PROVIDER_SECRET/);
   });
 
-  it.each(["https://evil.example", "//evil.example", "/setup?step=done", "/settings#x", "/chat?x=1", "/chat#x", "/chat/", "/chat/connect-return?x=1", "/chat/connect-return#x", "/chat/connect-return/", "/other"])("rejects an untrusted Google return destination %s before creating a flow", async (returnTo) => {
+  it.each(["https://evil.example", "//evil.example", "/setup?step=done", "/settings#x", "/chat?x=1", "/chat#x", "/chat/", "/chat/connect-return", "/chat/connect-return?x=1", "/chat/connect-return#x", "/chat/connect-return/", "/other"])("rejects an untrusted Google return destination %s before creating a flow", async (returnTo) => {
     const { app, db } = setup();
     expect((await asUser(request(app).post("/api/google/connect")).send({ returnTo })).status).toBe(400);
     expect(db.connections()).toHaveLength(0);
