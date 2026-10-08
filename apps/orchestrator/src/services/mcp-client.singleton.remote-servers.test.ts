@@ -245,7 +245,13 @@ function fixtureBridge() {
       }
       session.baseline = names;
       session.toolCount = names.size;
-      return json(200, { tools, state: health(id, session) });
+      // WARP-3918 — the real bridge hashes each wire object; dispatch refuses a
+      // tool whose listing carries no hash, so the model must send one.
+      const hashed = tools.map((t) => ({
+        ...t,
+        definitionHash: Buffer.from(`${id}:${t.name}:${t.description}`).toString("hex").padEnd(64, "0").slice(0, 64),
+      }));
+      return json(200, { tools: hashed, state: health(id, session) });
     }
     if (action === "state") return json(200, { state: health(id, session) });
     if (action === "call") {
