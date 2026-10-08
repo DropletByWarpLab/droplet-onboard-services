@@ -36,7 +36,10 @@ Expectation keys (all optional; see evaluate.py, which fails on any key not list
   min_calls          {"a|b": n}                   calls to that tool group, at least
   no_repeat_calls    bool                         no tool called twice with the same arguments
   no_attempt_after_decision [tool]                after approve/deny, never re-issued
-  world              post-state: {work_items_titled: {title: n}, memory_contains: s, runs_status: {run_id: status},
+  max_iterations     int                          loop iterations, at most (soft budget)
+  max_prompt_tokens  int                          largest prompt of any iteration, at most; a char/4 estimate
+                                                  until a provider forwards token usage
+  world             post-state: {work_items_titled: {title: n}, memory_contains: s, runs_status: {run_id: status},
                        events_titled: {title: n}, event_start: {title: ISO prefix}, sent_to: {address: n},
                        sent_text_contains: [s], files_exist: [path], files_absent: [path],
                        reminders_done: [id], devices_blocked: [id]}

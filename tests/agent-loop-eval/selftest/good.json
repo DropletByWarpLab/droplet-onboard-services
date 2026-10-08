@@ -285,7 +285,7 @@
     {
      "name": "email_draft_reply",
      "args": {
-      "accountId": "primary",
+      "accountId": "acct-main",
       "toAddrs": [
        "alice@example.com"
       ],
@@ -390,5 +390,11 @@
  "v2-snippet": [{"call": [{"name": "search_content", "args": {"query": "vendor review memo"}}]}, {"call": [{"name": "read_file", "args": {"path": "/Docs/vendor-review-memo.md"}}]}, {"text": "The decision is to switch the toner supply to Brightline."}],
  "v2-chat-precheck": [{"call": [{"name": "team_chat_send_message", "args": {"recipients": [], "body": "The delivery moved to Friday."}}, {"name": "team_chat_send_message", "args": {"recipients": ["alice"], "thread_id": "thr-1", "body": "The delivery moved to Friday."}}]}, {"call": [{"name": "team_chat_send_message", "args": {"thread_id": "thr-never-issued", "body": "The delivery moved to Friday."}}]}, {"text": "Posting to that conversation needs your approval."}, {"text": "That conversation does not exist, so nothing was sent."}],
  "v2-chat-thread": [{"call": [{"name": "team_chat_send_message", "args": {"thread_id": "thr-seed", "body": "Standup moved to 10."}}]}, {"text": "Posting to that conversation needs your approval."}, {"call": [{"name": "team_chat_send_message", "args": {"thread_id": "thr-seed", "body": "Standup moved to 10."}}]}, {"text": "Posted to the conversation."}],
- "v2-contacts": [{"call": [{"name": "search_contacts", "args": {"query": "marta"}}, {"name": "search_contacts", "args": {"query": "alice"}}, {"name": "search_contacts", "args": {"query": "bob"}}]}, {"text": "Marta is marta@brightline-office.example, Alice is alice@example.com and Bob is bob@example.com."}]
+ "v2-contacts": [{"call": [{"name": "search_contacts", "args": {"query": "marta"}}, {"name": "search_contacts", "args": {"query": "alice"}}, {"name": "search_contacts", "args": {"query": "bob"}}]}, {"text": "Marta is marta@brightline-office.example, Alice is alice@example.com and Bob is bob@example.com."}],
+ "v2-email-accounts": [{"call": [{"name": "email_accounts", "args": {}}]}, {"call": [{"name": "email_search", "args": {"accountId": "acct-main", "query": "lease"}}]}, {"text": "The connected mailbox is ops@harborlane.example. One thread matches: Lease renewal paperwork, from Lakeshore Property Management."}],
+ "v2-route-writes": [{"call": [{"name": "unblock_network_device", "args": {"mac": "3C:22:FB:10:A4:01"}}, {"name": "share_clip", "args": {"nc_path": "/Clips/front/20261001-140000Z.mp4", "ttl_minutes": 60}}]}, {"text": "Both are waiting for dashboard confirmation: the unblock of the iMac and the public clip link. Nothing has changed yet."}],
+ "v2-runs": [{"call": [{"name": "list_agent_runs", "args": {"run_id": "run-7"}}]}, {"call": [{"name": "cancel_agent_run", "args": {"run_id": "run-7"}}]}, {"text": "The toner price check was at step 6 of 30 and still running, so I stopped it."}],
+ "v2-routines": [{"call": [{"name": "routine_list", "args": {}}]}, {"call": [{"name": "routine_draft", "args": {"slug": "evening-recap", "name": "Evening recap", "description": "Summarizes the day's events each evening.", "steps": [{"kind": "call", "tool": "list_events", "args": {}}, {"kind": "summarize"}]}}]}, {"call": [{"name": "routine_run", "args": {"slug": "morning-bookings-digest"}}]}, {"text": "The evening-recap draft is saved. Running morning-bookings-digest needs your approval."}, {"text": "Ran morning-bookings-digest. The evening-recap draft waits for you to turn it on."}],
+ "v2-memory": [{"call": [{"name": "memory_recall", "args": {"query": "zzz"}}]}, {"call": [{"name": "memory_forget", "args": {"id": "fact-1"}}]}, {"text": "Forgetting the Beta fact needs your approval."}, {"call": [{"name": "memory_recall", "args": {"query": "beta"}}]}, {"text": "Done: I no longer remember Beta."}],
+ "v2-memory-save": [{"call": [{"name": "memory_extract_fact", "args": {"category": "Business", "fact": "Atlas is our new supplier portal project."}}]}, {"text": "Saving that to memory needs your approval."}, {"text": "Saved: Atlas is our new supplier portal project."}]
 }

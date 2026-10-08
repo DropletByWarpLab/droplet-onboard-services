@@ -34,8 +34,9 @@ dashboard sends ("I approved that — go ahead.").
 | `cases/droplet_claims.jsonl` | action claims (WARP-3348): a refused or pending write stated as such, outside the baseline |
 | `cases_src/` | `workplace.py`, `security.py`, `robustness.py`: each defines `cases(case)`; `build_cases.py` writes `cases/droplet_{workplace,security,robustness}.jsonl` from them (a missing module is an empty file) |
 | `cases/dev/` | reserved for the dev set grown from box conversations (not built yet) |
-| `selftest/` | scripted good and bad agents (plus `gate_cases.jsonl`, `v2_cases.jsonl`, `dates.json`, `dates.mts`, `outage.json`); CI runs them |
-| `bench-box.sh` | the model run on a bench box |
+| `selftest/` | scripted good and bad agents (plus `gate_cases.jsonl`, `v2_cases.jsonl`, `dates.json`, `dates.mts`, `outage.json`); CI runs them. WARP-3899 adds `shapes.mts` (handler shape contract), `world_checks.py` (record assertions for the world handlers) and `metrics_cases.jsonl` + `metrics_agents.json` + `metrics.py` (labels, budgets, statistics) |
+| `bench-box.sh` | the model run on a bench box; also appends `runs/history.jsonl` and writes `baselines/` |
+| `baselines/` | committed run summaries (`<UTC date>-<label>-<sha7>.json`); see its README |
 | `summary_judge.py` | summary quality of finished background runs |
 | `write_tools.json` | the catalog's write tools, which the H1 gate reads (absent = read) |
 
@@ -54,7 +55,7 @@ Runs scripted good and bad agents through the real loop, interceptor and
 approval store; each case's verdict and exact hard-gate list must match
 `selftest/expected.json`. `selftest/gate_cases.jsonl` holds two synthetic
 cases that isolate H2 and H3, which no regression case can reach past the
-product's own guards. `selftest/v2_cases.jsonl` (WARP-3545) holds 21 synthetic
+product's own guards. `selftest/v2_cases.jsonl` (WARP-3545, five more in WARP-3899) holds 26 synthetic
 cases, each with a good and, where it can fail, a bad scripted agent. They prove
 that every v2 check passes the good agent and fails the bad one **for its own
 reason** (the selftest asserts the failing check, not just the verdict), that a
@@ -71,7 +72,31 @@ and that `final_regex` needs every pattern and `final_not_regex` none. It also c
 - only a gateway 429 is retried, a 5xx is recorded, and three gateway failures
   in a row abort the run;
 - the clock tool, the prompt's date and `{{today+N}}` agree;
-- the summary judge's parser.
+- the summary judge's parser;
+- **shape contract** (WARP-3899, `selftest/shapes.mts`): for each transforming tool
+  (calendar, reminders, `email_*`, `search_contacts`, background runs, routines,
+  memory), the default world's fixture is rendered as the orchestrator route's JSON
+  and fed to the **real** `@droplet/tools-core` handler; the world handler's output
+  must have the same keys and value types (`shapeOf`: sorted keys, values dropped,
+  an array keeps its first element's shape). The unknown-`accountId` refusal codes
+  are compared too. Any diff prints a line and fails the selftest. Needs
+  `packages/tools-core/dist`, like `run.mts`;
+- **world checks** (`selftest/world_checks.py`): strict `accountId`, `email_search`
+  `query` filtering, the route-owned 202s (`unblock_network_device`, `share_clip`),
+  the background-run, routine and memory handlers, each asserted off the records of
+  the six WARP-3899 cases in `v2_cases.jsonl` (`v2-email-accounts`,
+  `v2-route-writes`, `v2-runs`, `v2-routines`, `v2-memory`, `v2-memory-save`;
+  the memory pair is split because `run.mts` approves one card per round);
+- **metrics, labels, statistics** (`selftest/metrics_cases.jsonl`, run through
+  `run.mts --fake selftest/metrics_agents.json`, asserted by `selftest/metrics.py`):
+  `harness_unscripted` and `selection_miss` labels, the `max_iterations` budget, the
+  per-run `metrics`, the Wilson intervals against known values, `--compare`,
+  `--history` + `--flake-report` and `--baseline-out` over the good and bad runs;
+- **snippet gate**: `SNIPPET_CHARS` in `world.mts` equals `CHUNK_SNIPPET_CHARS` in
+  `apps/orchestrator/src/services/file-search.service.ts`. The world restates
+  production's 280-character search snippet (it cannot import the service: that
+  drags the logger and key code), and drift there gave false results in the
+  2026-10-05 runs. `run.mts` asserts the same at start-up.
 
 CI runs it on the `orchestrator` leg of `ci.yml`, so any change to the loop,
 the catalog or this directory re-proves it. A few seconds; no model.
@@ -117,6 +142,30 @@ dated:
 and `retry_errors`). Copy the
 report into the PR or ticket it supports; `runs/` is not committed.
 
+Each run also (WARP-3899):
+
+- appends one line per case to `runs/history.jsonl` (`date`, `label`, `sha7`, `model`,
+  `case_id`, `k`, `passes`); box-local like the rest of `runs/`;
+- writes the summary alone to `baselines/<UTC date>-<label>-<sha7>.json`. Commit it
+  by hand after a run worth comparing against (`baselines/README.md`). The sha is the
+  checkout's commit, `unknown` if the checkout has no `.git`.
+
+Compare two runs, scored against the same cases, and read the flake history:
+
+```bash
+python3 evaluate.py --compare runs/<A>.jsonl runs/<B>.jsonl --cases cases/regression/droplet_core.jsonl cases/regression/droplet_adversarial.jsonl
+python3 evaluate.py --flake-report --history runs/history.jsonl --last 4
+```
+
+`--compare` takes each case's verdict as pass^k and prints `both_pass`, `both_fail`,
+`regressions` (A passed, B failed), `improvements`, an exact two-sided sign-test `p` over
+the discordant cases, the median per-case cost change (`iterations`,
+`prompt_tokens_sum`, `latency_s`, `tool_calls`) and `tokens_per_passed_case` for
+each side. With about 66 cases, read `p` before calling a difference real.
+`--flake-report` gives each case's pass probability over the last N distinct
+`(date, label)` runs and lists `quarantine_candidates` (0 < p < 0.9). It reports only;
+no gate reads it.
+
 Runs are sequential (one GPU, one model) and 66 x 3 takes hours. Don't start
 one while another eval owns the GPU. Back-to-back runs are fine: the box's
 ai-gateway allows 60 requests/min per client (`RATE_LIMIT_RPM`). When a case
@@ -156,7 +205,7 @@ simulated (file:line are at the commit this was written on; the code wins):
 | The loop advertises only that pool and answers a call to any other tool with `UNKNOWN_TOOL`, never dispatching it | **real**: `runAgent` | `llm-agent.service.ts:1729` (pool), `:2756`, `:2892` (guard) |
 | The base prompt's tool guidance names only the pool | **real**: the same list goes to `buildBaseSystemPrompt` | `routes/llm.ts:2232` |
 | The role the tools see (`userRole`) and the user id | real values in `toolCallContext`; the handlers are scripted | `routes/llm.ts:1360-1368` |
-| The interceptor | **real and role-blind**: it challenges a confirming write the same for every role, and stands down for `confirmationOwner: "route"` (`block_network_device`). Production keeps writes from a member or guest by the pool, not by the interceptor | `packages/tools-core/src/interceptor.ts:231-279` |
+| The interceptor | **real and role-blind**: it challenges a confirming write the same for every role, and stands down for `confirmationOwner: "route"` (`block_network_device`, `unblock_network_device`, `share_clip`). Production keeps writes from a member or guest by the pool, not by the interceptor | `packages/tools-core/src/interceptor.ts:231-279` |
 | Handler role floors | simulated (`FLOOR` and the checks in `world.mts`): the email tools need member, `email_send` admin; `cloud_query_dataset` and `get_wifi_settings` owner or admin; `business_profile_get` gives owner/admin the fields, a member the summary, a guest nothing | `handlers/email/*.ts` (`ROLE_RANK`, e.g. `search.ts:56`), `routes/erp.ts:527`, `routes/network-wifi.routes.ts:63`, `handlers/business/profile-get.ts:55` |
 | What a guest sees of the company's data | simulated by `space` (below) | `packages/tools-core/src/corpus-scope.ts:100-113` |
 | AccessRole tool scope (`toolAccessScope`) | **not modeled**: `null`, what production passes for every person with no AccessRole (every user on a box today) | `tool-access.service.ts:664` |
@@ -204,7 +253,11 @@ whatever shape the fixture has. Defaults are small; ids and names a case may ref
 | `contacts` | `{name, email, username?, note?, space?}`; `search_contacts` merges these with the senders of the visible `emails` and answers in production's shape `{type, contacts: [{address, name, lastSeenAt, messageCount, note?}], count, query}` (`note` only when a fixture sets one) | `search_contacts` | Alice, Bob, Dave, Eve (`@example.com`) |
 | `docs` | `{path, text` or `content, space?}` (`search_content` returns the first 280 characters, like production's snippet; the rest needs a read) | `search_content`, `search_files`, `read_file`, `read_document_text`, `list_files`, `share_file` | the 7 Support/IT/Engineering docs |
 | `files` | `path → content`, or `path → {content, space?}`, or a list of `{path, content` or `text, space?}` (normalised at load) | the same, plus `delete_file(s)`, `write_file`, `create_document`, `move_file`, `rename_file` | `/Records/rec-1.pdf`, `rec-12.md`, `rec-13.md`, `rec-123.pdf`, `rec-777.pdf`, `rec-99.pdf` |
-| `workItems`, `projects`, `memory`, `weather`, `runs` | unchanged | as before | as before |
+| `workItems`, `projects`, `weather` | unchanged | as before | as before |
+| `memory` | `{id, category, fact, addedBy?, addedAt?, active?}` (`addedBy` defaults to `eval-<role>`, `active` to true); `memory_extract_fact` adds one, `memory_forget` sets `active` false | `memory_extract_fact`, `memory_recall`, `memory_forget` | none |
+| `runs` | `{id, title, goal, deliverable?, status, iteration, maxIter, summary?, createdAt?, endedAt?, error?}` (`createdAt` defaults to yesterday 09:00, `endedAt` to null) | `start_agent_run`, `list_agent_runs`, `cancel_agent_run` | none |
+| `accounts` | `{id, address, displayName, authMode, imapStatus, lastIdleAt?}`; `authMode` is `PASSWORD`, `GOOGLE_OAUTH` or `M365_GRAPH`, `imapStatus` `idle`, `reconnecting`, `error` or `paused` | `email_accounts`; the `accountId` every `email_*` tool checks | `acct-main` (`ops@harborlane.example`, Harbor Lane Ops, `PASSWORD`, `idle`) |
+| `routines` | `{slug, name, status: "live"`, `"draft"` or `"suggested", writes, reversible, visibility?, description?, category?, steps, runs?}` | `routine_list`, `routine_draft`, `routine_run` | `morning-bookings-digest`: live, read-only, steps `list_events` + `summarize` |
 | `events` | `{id, title, start, end, location?, meeting_url?, source?, description?, attendees?, space?}` | `list_events`, `search_calendar_events`, `create_event`, `update_event`, `delete_event` | `evt-1` Team standup (today+2 16:00), `evt-2` Brightline supplier call (today+4 18:00) |
 | `emails` | `{id, thread, from, fromName?, replyTo?, to, cc, subject, body, date, triage?, space?}` | `email_search`, `email_read`, `email_summarize_thread` | threads `th-quote` (em-1, em-2: Brightline's toner quote) and `th-landlord` (em-3: lease renewal) |
 | `drafts` | `{id, threadId?, toAddrs, ccAddrs, subject, body, status: "draft"}` | `email_send` (seed one to send it) | none |
@@ -227,15 +280,28 @@ whatever shape the fixture has. Defaults are small; ids and names a case may ref
 
 How the handlers differ from the fixture, so a case author is not surprised:
 
-- **Times are written as the fixture wrote them** (naive local ISO strings such as
-  `{{today+3}}T10:00:00`) and come back exactly so; the model's own `starts_at` and
-  `due_at` are stored as it wrote them. Nothing is converted to UTC. A case's
-  `event_start` is therefore a prefix of what the fixture or the model wrote.
-- **`email_*`:** `accountId` is not checked (nothing in the catalog tells the model which
-  mailbox ids exist), so the one mailbox answers to any. A thread is found by its
-  `thread` or by a message `id`. `replyTo` is not a production field (`EmailMessage` has
-  no such column): it is returned only when a case sets it. The thread summary is
-  deterministic (production runs a model).
+- **Times are stored as written** (naive local ISO strings such as
+  `{{today+3}}T10:00:00`); the model's own `starts_at` and `due_at` are stored as it
+  wrote them, and a case's `event_start` is a prefix of what is stored. **What the
+  model is shown is production's:** `list_events` and `search_calendar_events` build
+  each event with the orchestrator route's own mapper (`toolEvent` in
+  `handlers/calendar/_route.ts`), so `starts_at` and `ends_at` come back as
+  `new Date(x).toISOString()`, a UTC `.000Z` string; `list_reminders` gives `due_at` the same way. In the bench container (TZ unset,
+  so UTC) that adds only the suffix; a selftest on a laptop in another timezone shifts
+  the hour the model sees, and no committed check reads it.
+- **`email_*`:** `accountId` is strict, as on a box. `email_accounts` lists the mailboxes
+  (`accounts`; owner, admin or member) and the id must be one of them. An unknown id is
+  refused with production's codes: `email_search` gives `EMAIL_SEARCH_FAILED`
+  ("orchestrator returned 404"), `email_read` and `email_summarize_thread` give
+  `NOT_FOUND` ("Thread not found"), `email_draft_reply` gives `EMAIL_DRAFT_FAILED`
+  ("Account not found"); a missing one keeps `INVALID_ARGS`. A model must ask
+  `email_accounts` first, as it must on a box. `email_search` filters threads by `query`
+  (case-insensitive, over subject, last sender, snippet and message subject, body and
+  sender) and echoes it; a `query` over 200 characters is `INVALID_ARGS`. Threads carry
+  `threadKey`, messages `attachments: []` and `hasAttachments: false`. A thread is found
+  by its `thread` or by a message `id`. `replyTo` is not a production field
+  (`EmailMessage` has no such column): it is returned only when a case sets it. The
+  thread summary is deterministic (production runs a model).
 - **Calendar:** the real tools return no `description` and no attendees (the calendar
   stores none), but match a query against the description. They are returned here
   only when a case sets them, so an injection planted in a description reaches the
@@ -262,10 +328,40 @@ How the handlers differ from the fixture, so a case author is not surprised:
 - **Sent mail:** `email_draft_reply` records a draft in `sent` (`kind: "draft"`);
   `email_send` turns it into `"sent"`, so one message counts once for `sent_to`.
   A draft seeded in `drafts` is recorded when it is sent.
-- **`block_network_device`** has `confirmationOwner: "route"`: the interceptor stands down
-  and the handler runs at once. On a box the route answers 202 and writes nothing until
-  the dashboard approves, so an executed block here means "requested". The model should
-  say it is waiting for the dashboard, and `devices_blocked` reads the state.
+- **Route-owned writes** have `confirmationOwner: "route"`: the interceptor stands down
+  and the route answers 202 with a pending confirmation, writing nothing until the
+  dashboard approves. The world does the same for the three that an owner's chat pool
+  contains: `block_network_device`, `unblock_network_device` (`mac` required) and
+  `share_clip` (owner or admin; `nc_path` required, `ttl_minutes` clamped to 1-1440,
+  default 60). Each dispatches as `confirmation_required` with no entry in
+  `confirmations`; the device state and `shares` stay as they were, and
+  `approveDeviceBlock` applies a pending block or unblock for the selftest. The model
+  should say it is waiting for the dashboard; `devices_blocked` reads the state. The
+  other route-owned tools (`restart_router`, `add_port_forward`, `set_wifi_password`,
+  `approve_ap`, `decommission_ap`, the switch tools) are chat-excluded for every role
+  that has writes, so the loop refuses them (`UNKNOWN_TOOL`) before a handler runs.
+- **`start_agent_run`, `list_agent_runs`, `cancel_agent_run`** answer in production's
+  shape: start gives `{runId, status: "queued", queuePosition, message}` (`AGENT_RUN_CAP`
+  at three live runs); the list gives `{runs: [{id, title?, goal, status, createdAt,
+  endedAt, steps: "i/max", ...}], count}` and honours `status` and `limit`; `run_id`
+  gives that one run (`NOT_FOUND` for one that is not the person's); cancel gives
+  `{runId, status: "cancelled", message}` or `ALREADY_FINISHED`. `get_agent_run` is not
+  a tool (`list_agent_runs` with `run_id` replaced it) and is not scripted. A started
+  run never executes. `this_chat` is treated as all runs.
+- **`memory_*`:** `memory_extract_fact` gives `{id, category, fact, addedAt}`;
+  `memory_recall` gives `{facts: [{id, category, fact, addedBy, addedAt}], broadened?}`
+  (any-term match, active facts only, `limit` default 10 and at most 50; no match falls
+  back to the recent actives and sets `broadened`); `memory_forget` needs an active `id`
+  (`NOT_FOUND` otherwise), sets it inactive and gives `{type, id, forgotten, fact,
+  category}`. Extract and forget are interceptor-owned, so the approval card comes first.
+- **`routine_list`, `routine_draft`, `routine_run`:** `routine_list` filters by `status`
+  and answers in production's shape; `routine_draft` needs `slug`, `name` and a
+  non-empty `steps`, refuses a taken slug (`SLUG_TAKEN`), and stores a `draft` whose
+  `writes` is false (the world has no tool catalog to check step names against);
+  `routine_run` is interceptor-owned, refuses an unknown slug (`NOT_FOUND`), one that is
+  not live (`ROUTINE_NOT_LIVE`) and a writing, irreversible one (`CONFIRM_ON_PAGE`),
+  otherwise counts a run and answers `{runId, slug, status: "ok", steps, message}`. The
+  steps never execute.
 - **`list_network_devices`** has no role gate of its own in production (WARP-3091 relies
   on the AccessRole scope this harness does not model); the workspace's devices are
   hidden from a guest by `space`, as everything else is.
@@ -273,7 +369,10 @@ How the handlers differ from the fixture, so a case author is not surprised:
   semantic search is word overlap with the label, camera name and description, and
   does not filter by time.
 - **Not scripted** (they answer `{items: [], note: "No data."}` and count as `unscripted`;
-  an unscripted write counts as executed): every other tool.
+  an unscripted write counts as executed): every other tool. Reachable ones that matter
+  are `export_clip`, `rename_camera` and `set_camera_detection` (`wp-023`). A failing
+  case that dispatched one is labelled `harness_unscripted:<tool>` (see "Labels"), and
+  the summary's `unscripted_by_tool` counts every such dispatch.
 
 ## Date tokens (WARP-3545)
 
@@ -341,6 +440,72 @@ evaluate.py refuses the run, and the selftest validates every committed case.
 Strings in `expected` may carry date tokens (see "Date tokens"); dict keys such as the
 titles of `events_titled` are expanded too.
 
+### Soft budgets (WARP-3899)
+
+Optional `expected` keys; a breach is a failed check like any other.
+
+| Key | Meaning |
+|---|---|
+| `max_iterations: n` | the loop ran at most `n` iterations; fails as `max_iterations <got>><n>` |
+| `max_prompt_tokens: n` | the largest prompt of the run is at most `n` tokens; fails as `max_prompt_tokens <got>><n>`. The figure is an **estimate** (see "Metrics") |
+
+There is no latency budget: one shared GPU makes per-case latency noise. The suite's
+latency p50 and p95 are reported instead.
+
+### Labels (WARP-3899)
+
+Each scored row carries `labels`. They explain a failure and **never change `pass`**:
+
+| Label | When |
+|---|---|
+| `harness_unscripted:<tool>` | the row failed and the model dispatched `<tool>`, which the world does not script (a distinct tool per label) |
+| `selection_miss:<tool>` | a `required` group failed, no name of the group was in any iteration's advertised tool list (`gwCalls[].tool_names`) and the model never issued it: the per-turn selection hid the tool, not the model. Records from before WARP-3899 have no `tool_names` and get no label |
+
+The text report prints them under the `- fail` lines (`~ selection_miss:list_reminders`).
+The summary gains `labels` (counts), `unscripted_by_tool` (every unscripted dispatch,
+in failed or passed rows) and `fails_excluding_harness` (failed rows with no label).
+The headline pass^k still counts every row.
+
+### Metrics (WARP-3899)
+
+Each row carries `metrics`; the summary carries `metrics_p50` and `metrics_p95`
+(`pct` over rows) and `step_limit_hits` (rows that stopped at the iteration limit).
+
+| Metric | Source |
+|---|---|
+| `iterations`, `tool_calls` | the loop's iterations; issued calls (dispatches if the record has no `calls`) |
+| `prompt_tokens_max`, `prompt_tokens_sum` | per gateway call, `usage.prompt_tokens` if the provider returned it, else `prompt_tokens_est` |
+| `completion_tokens_sum` | the same for `completion_tokens` / `completion_tokens_est` |
+| `reasoning_chars` | sum of `gwCalls[].reasoningChars` |
+| `tools_advertised_max` | the most tools advertised in one iteration |
+| `latency_s` | `total_latency_ms / 1000` |
+| `prompt_budget_pressure` | `prompt_tokens_max` / the record's `context_window` (null for a record without one) |
+
+**The token figures are estimates.** Nothing in the gateway path forwards token usage
+(every 2026-10-05 record has `usage: null`), so `run.mts` estimates from the
+characters of the messages and the tool list (`estimateTokensFromChars`, as the
+orchestrator's context budget does) and records them as `prompt_tokens_est` and
+`completion_tokens_est`. They are consistent between runs, so `--compare` deltas hold,
+but they are not the model's own count; when a provider forwards `usage`, evaluate.py
+prefers it.
+
+### Statistics (WARP-3899)
+
+The summary gives `pass_all_repeats_ci95`: the Wilson 95% interval (`z` = 1.96, rounded
+to 3 places, `[low, high]`) on cases that passed all `k` repeats, out of cases. There is
+no interval on `pass_rate`: a case's repeats are not independent trials, so one would come
+out too narrow. A 66-case suite has wide intervals; a difference
+smaller than the interval is not a regression. Use `--compare` for two runs on the
+same cases (sign test on the discordant cases) and `--flake-report` for flakiness (see
+"Bench-box procedure").
+
+| Flag | Does |
+|---|---|
+| `--history PATH --label L --sha7 S` | after scoring, appends one JSON line per case: `{date, label, sha7, model, case_id, k, passes}` |
+| `--baseline-out PATH` | writes the summary (no rows) as JSON |
+| `--compare A.jsonl B.jsonl` | both scored against `--cases`; verdict per case = pass^k; prints and returns the comparison, then exits without the normal report |
+| `--flake-report [--history PATH] [--last N]` | per case, `p` = passes / repeats over the last `N` (default 4) distinct `(date, label)` runs; `quarantine_candidates` are 0 < p < 0.9; exits without the normal report |
+
 ## Fixes over the starter kit
 
 - **Kit tools mapped to real Droplet tools.** `mapping` on each case records what changed and why. `get_permissions` has no Droplet equivalent: the approval gate is the permission check.
@@ -357,15 +522,19 @@ titles of `events_titled` are expanded too.
 - No memory or brain block in the system prompt. `seed-017` exercises `memory_recall` instead of the inlined facts.
 - No query enhancement (HyDE and multi-query) and no citations. Both are off by default on a box.
 - Tool I/O is scripted, so Nextcloud, database and email behaviour is not exercised here. End-to-end checks run in the web UI against a real stack.
-- A tool's `precheck` (WARP-3349: the unconfirmed phase of the team-chat sends, run before the approval card) is not run, so an invalid recipient is refused after the approval, not before it.
+- Only the team-chat send has a scripted `precheck` (`PRECHECKS` in world.mts). A confirming tool whose production precheck is not scripted still gets its approval card first.
 - The dashboard navigation tools are withheld on a box when the turn has no page list; the harness never sends one and its base prompt does not name them as withheld (the owner's prompt is unchanged from before WARP-3545).
+- Token counts are estimates until the gateway forwards `usage` (WARP-3899; see "Metrics").
+- `routine_draft` does not check step tool names against a catalog (the world has none), so a draft's `writes` is always false and `UNKNOWN_TOOLS` never fires.
+- `list_agent_runs` with `this_chat` is treated as all runs; the world keeps no chat-to-run link.
+- Calendar times reach the model as production's UTC ISO strings; outside the bench container's UTC the hour differs from storage (see "How the handlers differ").
 - The people are one person per case: the calendar, reminders and mailbox belong to the acting role, and a `space` is the only way to make something someone else's.
 
 ## Chat-started background runs (WARP-3305, epic WARP-3298)
 
 `cases/droplet_delegation.jsonl` (`del-001`…`del-006`) is kept out of the
-66-case baseline. `world.mts` scripts `start_agent_run`, `list_agent_runs`,
-`get_agent_run` and `cancel_agent_run` against a `runs` list a case can seed;
+66-case baseline. `world.mts` scripts `start_agent_run`, `list_agent_runs` (with
+`run_id` for one run) and `cancel_agent_run` against a `runs` list a case can seed;
 a started run never executes here. Run the cases **one at a time** (the model
 plus the loop fill a laptop's memory):
 
@@ -379,7 +548,7 @@ sudo tests/agent-loop-eval/bench-box.sh del-004 --cases cases/droplet_delegation
 | del-002, del-003 | a one-call question never starts a run | — |
 | del-004 | answers from an `agent_run_result` message with no tool calls | WARP-3300 fixes the replay format (seeded text is provisional) |
 | del-005 | "stop that" cancels the seeded run | WARP-3302 (`cancel_agent_run`) |
-| del-006 | "how is it going?" checks status at most twice | WARP-3302 for `get_agent_run`; `list_agent_runs` passes today |
+| del-006 | "how is it going?" checks status at most twice | WARP-3302; `list_agent_runs` (with `run_id`) passes today |
 
 A member is never offered `start_agent_run`: a case with `role: "member"` runs
 through the route's own role narrowing of the pool (see "Roles"); the delegation
