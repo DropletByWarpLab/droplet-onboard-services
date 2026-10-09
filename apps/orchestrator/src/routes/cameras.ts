@@ -47,6 +47,7 @@ import {
   deleteFaceImage,
   deleteKnownPlate,
   nameKnownPlate,
+  FrigatePlatesUnsupportedError,
   regenerateEventDescription,
   tagEventAsFace,
   openBirdseyeStream,
@@ -354,11 +355,19 @@ Object.freeze(EMPTY_SYSTEM_STATUS.gpus);
 Object.freeze(EMPTY_SYSTEM_STATUS.storage);
 Object.freeze(EMPTY_SYSTEM_STATUS);
 
-/** Service-to-service auth headers for routing/discovery services. */
+/**
+ * Bearer for the routing service's camera-subnet routes. The routing
+ * service checks `ROUTING_SERVICE_TOKEN` (see `require_bearer` in
+ * services/routing/main.py and the canonical openwrt.client.ts), NOT the
+ * orchestrator's generic `SERVICE_SECRET`; sending the latter — empty on a
+ * provisioned box — made every subnet call 401, which the status route then
+ * reported as "Router not reachable" and the setup/teardown confirms failed.
+ */
 function serviceAuthHeaders(): Record<string, string> {
   const headers: Record<string, string> = {};
-  if (config.SERVICE_SECRET) {
-    headers["Authorization"] = `Bearer ${config.SERVICE_SECRET}`;
+  const token = config.ROUTING_SERVICE_TOKEN || config.SERVICE_SECRET;
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
   }
   return headers;
 }
@@ -1077,6 +1086,9 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       await nameKnownPlate(req.params.plate, name);
       res.status(204).end();
     } catch (err) {
+      if (err instanceof FrigatePlatesUnsupportedError) {
+        return res.status(501).json({ error: err.message, code: "PLATES_UNSUPPORTED" });
+      }
       next(err);
     }
   });
@@ -1089,16 +1101,21 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       await deleteKnownPlate(req.params.plate);
       res.status(204).end();
     } catch (err) {
+      if (err instanceof FrigatePlatesUnsupportedError) {
+        return res.status(501).json({ error: err.message, code: "PLATES_UNSUPPORTED" });
+      }
       next(err);
     }
   });
 
   // --- Birdseye live (Phase 6.2) ---
   //
-  // Frigate's auto-composited multi-camera MJPEG stream. Cameras with
-  // current motion get foregrounded automatically; the operator gets
-  // a single "what's happening anywhere?" feed without paying for
-  // every camera's bandwidth.
+  // Frigate's auto-composited multi-camera view. Cameras with current
+  // motion get foregrounded automatically; the operator gets a single
+  // "what's happening anywhere?" feed without paying for every camera's
+  // bandwidth. Frigate 0.17 has no birdseye MJPEG, so openBirdseyeStream
+  // synthesizes one from /api/birdseye/latest.jpg (needs birdseye.restream);
+  // when Frigate 404s that still, the catch below answers the "not enabled" 404.
   //
   // Fixed path because /cameras/birdseye/live has 3 segments — adding
   // it here keeps it next to the system route which has the same

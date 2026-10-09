@@ -17,6 +17,19 @@ import {
   REMOTE_TOOL_NAME_SEPARATOR,
 } from "./mcp-multiplexer.service.js";
 import type { McpClientPort, McpToolDescriptor } from "./mcp-client.port.js";
+import { createToolCallInterceptor } from "@droplet/tools-core";
+import {
+  createRecordBackedRemoteCallPolicy,
+  RemoteToolClassificationCache,
+  type RemoteToolClassificationRow,
+} from "./remote-tool-classification.service.js";
+
+// WARP-2439 — a refused remote call still writes an audit row.
+const recordActivity = vi.fn(async (_p: Record<string, unknown>) => null);
+vi.mock("./activity.singleton.js", () => ({
+  recordActivity: (p: Record<string, unknown>) => recordActivity(p),
+  getActivitySigner: () => null,
+}));
 
 function tool(name: string): McpToolDescriptor {
   return { name, description: `${name} desc`, inputSchema: { type: "object" } };
@@ -250,6 +263,28 @@ describe("WARP-2321 hook — every remote tool defaults to the deny tier", () =>
     expect(remote.callTool).not.toHaveBeenCalled();
   });
 
+  // WARP-2439. MUTATION: delete the `auditRemoteMcp` call on the deny path → red.
+  it("writes a refused_policy audit row naming the member, with no argument values", async () => {
+    const remote = portDouble([tool("jira_get_issue")]);
+    const mux = new McpToolMultiplexer(portDouble([]), { isServerAllowed: allowAll });
+    mux.attachRemote("atlassian", remote);
+    await mux.listTools();
+    recordActivity.mockClear();
+
+    await mux.callTool("atlassian__jira_get_issue", { password: "hunter2-secret" }, { userId: "alice" });
+
+    expect(recordActivity).toHaveBeenCalledTimes(1);
+    const row = recordActivity.mock.calls[0]![0] as { refs: Record<string, unknown> };
+    expect(row.refs).toMatchObject({
+      serverId: "atlassian",
+      tool: "jira_get_issue",
+      outcome: "refused_policy",
+      reason: "REMOTE_TOOL_NOT_CLASSIFIED",
+      userId: "alice",
+    });
+    expect(JSON.stringify(row)).not.toContain("hunter2");
+  });
+
   it("the deny decision names the tool and tells the model not to retry", () => {
     const decision = DENY_ALL_REMOTE_TOOLS({
       serverId: "atlassian",
@@ -399,6 +434,199 @@ describe("the rejection window is bounded", () => {
     // …oldest dropped: the window starts at 51, so 1-50 are gone.
     expect(kept[0]!.message).toContain("outage 51");
     expect(kept.some((r) => r.message.endsWith("outage 1"))).toBe(false);
+  });
+});
+
+describe("WARP-2437 — a remote write fails closed without an interceptor and routes through one with it", () => {
+  const writePolicy = () => ({ kind: "allow" as const, requiresConfirmation: true });
+  async function setup(opts: ConstructorParameters<typeof McpToolMultiplexer>[1] = {}) {
+    const remote = portDouble([tool("jira_create_issue")]);
+    const mux = new McpToolMultiplexer(portDouble([]), {
+      isServerAllowed: allowAll,
+      remoteCallPolicy: writePolicy,
+      ...opts,
+    });
+    mux.attachRemote("atlassian", remote);
+    await mux.listTools();
+    return { mux, remote };
+  }
+  const parse = (res: { content: { text?: string }[] }) => JSON.parse(res.content[0].text ?? "{}");
+
+  /**
+   * MUTATION: in `#confirmWrite`, replace the `!interceptor` refusal with a
+   * fall-through to dispatch → red (remote.callTool is called).
+   */
+  it("with NO interceptor registered, a write refuses with a distinct code, an audit event, and never dials", async () => {
+    const events: unknown[] = [];
+    const { mux, remote } = await setup({ onConfirmationEvent: (e) => events.push(e) });
+
+    const res = await mux.callTool("atlassian__jira_create_issue", { summary: "x" }, { userId: "alice" });
+
+    expect(res.isError).toBe(true);
+    expect(parse(res).error.code).toBe("REMOTE_WRITE_NO_INTERCEPTOR");
+    expect(parse(res).error.details.interceptor).toMatchObject({ outcome: "denied" });
+    expect(remote.callTool).not.toHaveBeenCalled();
+    expect(events).toEqual([
+      { outcome: "denied", tool: "atlassian__jira_create_issue", reason: "REMOTE_WRITE_NO_INTERCEPTOR" },
+    ]);
+  });
+
+  it("a throwing audit sink does not turn a refusal into a dispatch", async () => {
+    const { mux, remote } = await setup({
+      onConfirmationEvent: () => {
+        throw new Error("sink down");
+      },
+    });
+    const res = await mux.callTool("atlassian__jira_create_issue", {});
+    expect(res.isError).toBe(true);
+    expect(remote.callTool).not.toHaveBeenCalled();
+  });
+
+  it("with the interceptor, the first call is a challenge and executes nothing", async () => {
+    const events: { outcome: string }[] = [];
+    const { mux, remote } = await setup({
+      writeInterceptor: createToolCallInterceptor(),
+      onConfirmationEvent: (e) => events.push(e),
+    });
+
+    const res = await mux.callTool("atlassian__jira_create_issue", { summary: "x" });
+
+    expect(res.isError).toBe(false);
+    const body = parse(res);
+    expect(body.status).toBe("confirmation_required");
+    expect(body.error.details.interceptor.confirmationToken).toEqual(expect.any(String));
+    expect(remote.callTool).not.toHaveBeenCalled();
+    expect(events.map((e) => e.outcome)).toEqual(["confirmation_required"]);
+  });
+
+  /**
+   * MUTATION: skip `interceptor.intercept` and dispatch on `allow` → the
+   * first-call test above and this one go red.
+   */
+  it("executes only after the token comes back for the SAME args, once, and never forwards the token", async () => {
+    const events: { outcome: string }[] = [];
+    const { mux, remote } = await setup({
+      writeInterceptor: createToolCallInterceptor(),
+      onConfirmationEvent: (e) => events.push(e),
+    });
+    const args = { summary: "x" };
+    const challenge = async () =>
+      parse(await mux.callTool("atlassian__jira_create_issue", args)).error.details.interceptor
+        .confirmationToken as string;
+    const token = await challenge();
+
+    // Different args: refused, not run.
+    const other = await mux.callTool("atlassian__jira_create_issue", { summary: "y" }, { confirmationToken: token });
+    expect(parse(other).error.code).toBe("CONFIRMATION_REJECTED");
+    expect(remote.callTool).not.toHaveBeenCalled();
+
+    // Same args: runs once; the wire call carries the arguments and nothing else.
+    const token2 = await challenge();
+    const ok = await mux.callTool("atlassian__jira_create_issue", args, { confirmationToken: token2, userId: "alice" });
+    expect(ok.isError).toBe(false);
+    expect(remote.callTool).toHaveBeenCalledTimes(1);
+    expect(remote.callTool).toHaveBeenCalledWith("jira_create_issue", args);
+    expect(JSON.stringify(remote.callTool.mock.calls)).not.toContain(token2);
+    expect(events.map((e) => e.outcome)).toContain("confirmed");
+
+    // Replay of a spent token: refused.
+    const replay = await mux.callTool("atlassian__jira_create_issue", args, { confirmationToken: token2 });
+    expect(parse(replay).error.code).toBe("CONFIRMATION_REJECTED");
+    expect(remote.callTool).toHaveBeenCalledTimes(1);
+  });
+
+  it("a read (no requiresConfirmation) still runs with no interceptor registered", async () => {
+    const { mux, remote } = await setup({ remoteCallPolicy: () => ({ kind: "allow" }) });
+    await mux.callTool("atlassian__jira_create_issue", {});
+    expect(remote.callTool).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("WARP-2432 — the runtime deny tier runs on every remote callTool", () => {
+  const now = new Date();
+  const row = (toolName: string, over: Partial<RemoteToolClassificationRow> = {}): RemoteToolClassificationRow => ({
+    serverId: "ext-x",
+    toolName,
+    requiresWrite: false,
+    requiresConfirmation: false,
+    denied: false,
+    reviewedBy: "owner",
+    reviewedAt: now,
+    wireDescription: null,
+    firstSeenAt: now,
+    lastSeenAt: now,
+    ...over,
+  });
+  const parse = (res: { content: { text?: string }[] }) => JSON.parse(res.content[0].text ?? "{}");
+
+  async function setup(rows: RemoteToolClassificationRow[], names: string[]) {
+    const cache = new RemoteToolClassificationCache();
+    cache.seed(rows);
+    const remote = portDouble(names.map(tool));
+    const mux = new McpToolMultiplexer(portDouble([]), {
+      isServerAllowed: allowAll,
+      remoteCallPolicy: createRecordBackedRemoteCallPolicy(cache.lookup),
+    });
+    mux.attachRemote("ext-x", remote);
+    return { mux, remote, cache };
+  }
+
+  /**
+   * Hiding is not blocking. MUTATION: apply the policy in `listTools` (drop
+   * unclassified names) and delete it from `callTool` → the model-supplied
+   * call below reaches the wire and this goes red.
+   * MUTATION: default an unknown name to `{ kind: "allow" }` → red.
+   */
+  it("an advertised tool with no classification row is still denied at callTool, fail-closed", async () => {
+    const { mux, remote } = await setup([row("read_a")], ["read_a", "mystery"]);
+
+    const listed = (await mux.listTools()).map((t) => t.name);
+    expect(listed).toContain("ext-x__mystery");
+
+    const res = await mux.callTool("ext-x__mystery", {});
+    expect(res.isError).toBe(true);
+    expect(parse(res)).toMatchObject({ status: "blocked", error: "REMOTE_TOOL_NOT_CLASSIFIED" });
+    expect(remote.callTool).not.toHaveBeenCalled();
+
+    await mux.callTool("ext-x__read_a", {});
+    expect(remote.callTool).toHaveBeenCalledTimes(1);
+  });
+
+  it("is evaluated per call, with no memo: demoting or blocking a tool bites the next call", async () => {
+    const { mux, remote, cache } = await setup([row("read_a")], ["read_a"]);
+    await mux.listTools();
+
+    expect((await mux.callTool("ext-x__read_a", {})).isError).toBe(false);
+
+    cache.seed([row("read_a", { denied: true })]);
+    expect(parse(await mux.callTool("ext-x__read_a", {}))).toMatchObject({ error: "REMOTE_TOOL_DENIED" });
+
+    cache.seed([row("read_a", { requiresWrite: true })]);
+    expect(parse(await mux.callTool("ext-x__read_a", {}))).toMatchObject({ error: "REMOTE_WRITE_NOT_PERMITTED" });
+
+    cache.seed([]);
+    expect(parse(await mux.callTool("ext-x__read_a", {}))).toMatchObject({ error: "REMOTE_TOOL_NOT_CLASSIFIED" });
+    expect(remote.callTool).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * MUTATION: make `errorOutcome` return `{ content: [], isError: false }` →
+   * red. A blocked call is `isError` AND carries `status: "blocked"` with a
+   * code; a legitimately empty remote answer is neither.
+   */
+  it("a blocked call is distinguishable from a successful empty answer", async () => {
+    const { mux, remote } = await setup([row("read_a")], ["read_a", "mystery"]);
+    await mux.listTools();
+    remote.callTool.mockResolvedValueOnce({ content: [], isError: false });
+
+    const empty = await mux.callTool("ext-x__read_a", {});
+    const blocked = await mux.callTool("ext-x__mystery", {});
+
+    expect(empty).toEqual({ content: [], isError: false });
+    expect(blocked.isError).toBe(true);
+    expect(blocked.content.length).toBeGreaterThan(0);
+    expect(parse(blocked).status).toBe("blocked");
+    expect(parse(blocked).message).toEqual(expect.any(String));
   });
 });
 

@@ -392,18 +392,103 @@ export async function openMjpegStream(
   return resp;
 }
 
+/** Gap between birdseye frames in the synthesized MJPEG (~4 fps). */
+export const BIRDSEYE_FRAME_INTERVAL_MS = 250;
+/** Height (px) asked of Frigate's birdseye still; width follows the aspect. */
+export const BIRDSEYE_FRAME_HEIGHT = 720;
+/** Consecutive failed frame polls after which the stream is ended. */
+const BIRDSEYE_MAX_CONSECUTIVE_FAILURES = 5;
+const BIRDSEYE_BOUNDARY = "frame";
+
+async function fetchBirdseyeFrame(signal?: AbortSignal): Promise<Uint8Array> {
+  const resp = await fetch(
+    `${FRIGATE_URL}/api/birdseye/latest.jpg?h=${BIRDSEYE_FRAME_HEIGHT}`,
+    { signal: signal ? AbortSignal.any([signal, timeout()]) : timeout() },
+  );
+  if (!resp.ok) throw new Error(`Birdseye frame: ${resp.status}`);
+  return new Uint8Array(await resp.arrayBuffer());
+}
+
+function birdseyePart(jpeg: Uint8Array): Uint8Array {
+  const head = new TextEncoder().encode(
+    `--${BIRDSEYE_BOUNDARY}\r\nContent-Type: image/jpeg\r\nContent-Length: ${jpeg.byteLength}\r\n\r\n`,
+  );
+  const tail = new TextEncoder().encode("\r\n");
+  const part = new Uint8Array(head.byteLength + jpeg.byteLength + tail.byteLength);
+  part.set(head, 0);
+  part.set(jpeg, head.byteLength);
+  part.set(tail, head.byteLength + jpeg.byteLength);
+  return part;
+}
+
 /**
- * Frigate's auto-composited "birdseye" view — every active camera in
- * one MJPEG stream, with motion-active cameras brought to the front.
- * Same multipart MIME as a single-camera stream, so the browser plays
- * it as a live `<img>`.
+ * Frigate's auto-composited "birdseye" view — every active camera in one
+ * frame, with motion-active cameras brought to the front.
+ *
+ * Frigate 0.17 has no birdseye MJPEG: `GET /api/birdseye` is routed to the
+ * per-camera MJPEG handler, which only serves configured cameras (404 "Camera
+ * not found"). The one HTTP surface that carries birdseye frames is
+ * `GET /api/birdseye/latest.jpg`, and Frigate serves it only when
+ * `birdseye.enabled` AND `birdseye.restream` are both true (frigate/api/media.py).
+ * So this synthesizes the MJPEG: it polls that still at
+ * BIRDSEYE_FRAME_INTERVAL_MS and wraps each frame in a `multipart/x-mixed-replace`
+ * part, which the browser plays as a live `<img>`.
+ *
+ * The first frame is fetched before returning, so birdseye being off (Frigate
+ * 404s the still) rejects here — the route turns that into its "not enabled"
+ * 404 — instead of after headers are sent. Aborting `signal` ends the stream.
  */
 export async function openBirdseyeStream(
   signal?: AbortSignal,
 ): Promise<Response> {
-  const resp = await fetch(`${FRIGATE_URL}/api/birdseye`, { signal });
-  if (!resp.ok) throw new Error(`Birdseye MJPEG: ${resp.status}`);
-  return resp;
+  const first = await fetchBirdseyeFrame(signal);
+  let pending: Uint8Array | null = first;
+  let failures = 0;
+  let cancelled = false;
+  let lastAt = 0;
+
+  const body = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      // Loops until one frame is queued or the stream ends: a pull that
+      // enqueues nothing is never called again, so a skipped (failed) poll
+      // has to retry here rather than return.
+      for (;;) {
+        if (cancelled || signal?.aborted) {
+          controller.close();
+          return;
+        }
+        let frame = pending;
+        pending = null;
+        if (!frame) {
+          const wait = lastAt + BIRDSEYE_FRAME_INTERVAL_MS - Date.now();
+          if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+          if (cancelled || signal?.aborted) continue;
+          try {
+            frame = await fetchBirdseyeFrame(signal);
+            failures = 0;
+          } catch {
+            lastAt = Date.now();
+            if (++failures >= BIRDSEYE_MAX_CONSECUTIVE_FAILURES) {
+              controller.close();
+              return;
+            }
+            continue; // transient failure: skip this tick and poll again
+          }
+        }
+        lastAt = Date.now();
+        controller.enqueue(birdseyePart(frame));
+        return;
+      }
+    },
+    cancel() {
+      cancelled = true;
+    },
+  });
+
+  return new Response(body, {
+    status: 200,
+    headers: { "Content-Type": `multipart/x-mixed-replace;boundary=${BIRDSEYE_BOUNDARY}` },
+  });
 }
 
 /**
@@ -1098,61 +1183,90 @@ export interface KnownPlate {
   eventCount: number;
 }
 
+/**
+ * Frigate 0.17 exposes recognized plates as a plain list of strings
+ * (`GET /api/recognized_license_plates` — the distinct plates read off events,
+ * newest schema: `["ABC1234", ...]`). The 0.13-era `/api/license_plates`
+ * roster (with names + counts) no longer exists and 404s. Names are not part of
+ * this endpoint, so `name` is always null; the per-plate event count is
+ * tallied best-effort from one filtered `GET /api/events` page.
+ */
 export async function fetchKnownPlates(): Promise<KnownPlate[]> {
-  const resp = await fetch(`${FRIGATE_URL}/api/license_plates`, { signal: timeout() });
+  const resp = await fetch(
+    `${FRIGATE_URL}/api/recognized_license_plates?split_joined=1`,
+    { signal: timeout() },
+  );
   if (!resp.ok) {
     if (resp.status === 404 || resp.status === 501) return [];
     throw new Error(`Frigate plates: ${resp.status}`);
   }
   const data = await resp.json();
-  // Frigate returns either an array of {plate, name, count} objects
-  // or {plate: {name, count}} keyed map depending on version.
-  const out: KnownPlate[] = [];
-  if (Array.isArray(data)) {
-    for (const p of data as Array<Record<string, unknown>>) {
-      out.push({
-        plate: String(p.plate ?? p.value ?? ""),
-        name: p.name ? String(p.name) : null,
-        eventCount: Number(p.count ?? p.event_count ?? 0),
-      });
+  const plates = Array.isArray(data)
+    ? [...new Set((data as unknown[]).map((p) => String(p ?? "").trim()).filter((p) => p.length > 0))]
+    : [];
+  if (plates.length === 0) return [];
+  const counts = await tallyPlateEvents(plates);
+  return plates.map((plate) => ({
+    plate,
+    name: null,
+    eventCount: counts.get(plate) ?? 0,
+  }));
+}
+
+/** Events per plate, from the most recent page of plate-bearing events. */
+async function tallyPlateEvents(plates: string[]): Promise<Map<string, number>> {
+  const counts = new Map<string, number>();
+  try {
+    const params = new URLSearchParams({
+      limit: "1000",
+      recognized_license_plate: plates.join(","),
+    });
+    const resp = await fetch(`${FRIGATE_URL}/api/events?${params}`, { signal: timeout() });
+    if (!resp.ok) return counts;
+    const events = (await resp.json()) as Array<{ data?: { recognized_license_plate?: unknown } }>;
+    if (!Array.isArray(events)) return counts;
+    for (const ev of events) {
+      const raw = ev?.data?.recognized_license_plate;
+      if (typeof raw !== "string") continue;
+      for (const part of raw.split(",")) {
+        const plate = part.trim();
+        if (plate) counts.set(plate, (counts.get(plate) ?? 0) + 1);
+      }
     }
-  } else if (data && typeof data === "object") {
-    for (const [plate, raw] of Object.entries(data as Record<string, unknown>)) {
-      const r = raw as Record<string, unknown>;
-      out.push({
-        plate,
-        name: r.name ? String(r.name) : null,
-        eventCount: Number(r.count ?? r.event_count ?? 0),
-      });
-    }
+  } catch {
+    // Counts are decoration; the roster itself stands without them.
   }
-  return out.filter((p) => p.plate.length > 0);
+  return counts;
+}
+
+/**
+ * Frigate 0.17 has no endpoint to name or forget a plate: the only plate
+ * writes are `POST /events/{id}/recognized_license_plate` (correct one
+ * event's plate) and the `lpr.known_plates` config map (needs a config write
+ * and a Frigate restart). Naming and deleting therefore answer 501 rather than
+ * calling the removed `/api/license_plates/<plate>` route.
+ */
+export class FrigatePlatesUnsupportedError extends Error {
+  readonly status = 501;
+  readonly statusCode = 501;
+  constructor(action: string) {
+    super(
+      `${action} license plates is not supported by this camera service version. ` +
+        "Frigate 0.17 only lists the plates it has read.",
+    );
+    this.name = "FrigatePlatesUnsupportedError";
+  }
 }
 
 export async function nameKnownPlate(
-  plate: string,
-  name: string,
+  _plate: string,
+  _name: string,
 ): Promise<void> {
-  const resp = await fetch(
-    `${FRIGATE_URL}/api/license_plates/${encodeURIComponent(plate)}`,
-    {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name }),
-      signal: timeout(),
-    },
-  );
-  if (!resp.ok) throw new Error(`Frigate plate rename: ${resp.status}`);
+  throw new FrigatePlatesUnsupportedError("Naming");
 }
 
-export async function deleteKnownPlate(plate: string): Promise<void> {
-  const resp = await fetch(
-    `${FRIGATE_URL}/api/license_plates/${encodeURIComponent(plate)}`,
-    { method: "DELETE", signal: timeout() },
-  );
-  if (!resp.ok && resp.status !== 404) {
-    throw new Error(`Frigate plate delete: ${resp.status}`);
-  }
+export async function deleteKnownPlate(_plate: string): Promise<void> {
+  throw new FrigatePlatesUnsupportedError("Deleting");
 }
 
 // --- HLS VOD playback (Phase 3.2) ---

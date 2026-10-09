@@ -204,6 +204,39 @@ describe("the settings gear", () => {
   });
 });
 
+describe("the Recordings link on the recording row", () => {
+  it("goes to that camera's recordings", () => {
+    renderCard(cam({ name: "front_door" }));
+    const link = within(screen.getByTestId("recording-meta")).getByRole("link", {
+      name: /recordings for front door/i,
+    });
+    expect(link.getAttribute("href")).toBe("/cameras/front_door/recordings");
+    expect(link.textContent).toContain("Recordings");
+  });
+
+  it("keeps the mode chip, last-saved and size beside it", () => {
+    renderCard(cam());
+    const meta = screen.getByTestId("recording-meta");
+    expect(within(meta).getByTestId("recording-mode-chip")).toBeTruthy();
+    expect(meta.textContent).toContain("Saved 12s ago");
+    expect(meta.textContent).toContain("46.0 GiB");
+  });
+
+  it("does NOT also open the detail view when clicked or activated from the keyboard", () => {
+    const { onClick } = renderCard(cam());
+    const link = screen.getByTestId("recordings-link");
+    link.addEventListener("click", (e) => e.preventDefault()); // jsdom: no navigation
+    fireEvent.click(link);
+    fireEvent.keyDown(link, { key: "Enter" });
+    expect(onClick).not.toHaveBeenCalled();
+  });
+
+  it("is not drawn while the camera service is unreadable (the row is not either)", () => {
+    renderCard(cam({ status: "offline", recording: rec({ degraded: true, mode: null }) }));
+    expect(screen.queryByTestId("recordings-link")).toBeNull();
+  });
+});
+
 describe("the card itself", () => {
   it("still opens the detail view on click", () => {
     const { onClick } = renderCard(cam());
