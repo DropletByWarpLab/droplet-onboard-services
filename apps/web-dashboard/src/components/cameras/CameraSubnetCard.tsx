@@ -5,6 +5,7 @@ import { Shield, ShieldCheck, ShieldOff, Loader2 } from "lucide-react";
 import { authFetch } from "@/lib/auth";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useToast } from "@/components/Toast";
+import { confirmCameraCommand } from "@/lib/api";
 
 interface SubnetConfig {
   enabled: boolean;
@@ -20,12 +21,26 @@ interface CameraSubnetCardProps {
   onRefresh: () => void;
 }
 
+/** Shape of the Tier-2 handshake the orchestrator answers with on a 202. */
+interface ConfirmationRequired {
+  confirmationToken?: string;
+}
+
+// confirmCameraCommand surfaces the server's `reason` as the Error message
+// (no code), so expiry / replay / operation mismatch is matched on its text.
+const TOKEN_REJECTED = /expired|invalid|mismatch/i;
+
 export function CameraSubnetCard({ config, onRefresh }: CameraSubnetCardProps) {
   const [loading, setLoading] = useState(false);
   const [teardownOpen, setTeardownOpen] = useState(false);
+  // Token minted by the setup route (60 s lifetime) while the user decides.
+  const [pendingSetupToken, setPendingSetupToken] = useState<string | null>(null);
   const { toast } = useToast();
 
   const isEnabled = config?.enabled ?? false;
+  // The routing service was unreachable when the config was read: we don't
+  // know the real state, so don't present "not isolated" or offer a change.
+  const routerError = !isEnabled && Boolean(config?.error);
 
   async function handleSetup() {
     setLoading(true);
@@ -35,9 +50,21 @@ export function CameraSubnetCard({ config, onRefresh }: CameraSubnetCardProps) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({}),
       });
-      if (!res.ok) {
+      if (!res.ok && res.status !== 202) {
         const data = await res.json().catch(() => ({}));
         toast(data.error || "Couldn't set up the camera subnet. Try again in a moment.", "error");
+        onRefresh();
+        return;
+      }
+      if (res.status === 202) {
+        // Tier 2: nothing has happened yet. Hold the token and ask the user.
+        const data = (await res.json().catch(() => ({}))) as ConfirmationRequired;
+        if (!data.confirmationToken) {
+          toast("Couldn't set up the camera subnet. Try again in a moment.", "error");
+          return;
+        }
+        setPendingSetupToken(data.confirmationToken);
+        return;
       }
       onRefresh();
     } catch {
@@ -47,14 +74,59 @@ export function CameraSubnetCard({ config, onRefresh }: CameraSubnetCardProps) {
     }
   }
 
+  async function performSetupConfirm() {
+    const token = pendingSetupToken;
+    if (!token) return;
+    try {
+      await confirmCameraCommand(token, "camera_subnet_setup");
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "";
+      if (TOKEN_REJECTED.test(message)) {
+        // The 60 s window closed (or the token was already used): start over.
+        setPendingSetupToken(null);
+        toast("Confirmation expired, try again", "error");
+        return;
+      }
+      toast(message || "Couldn't set up the camera subnet. Try again in a moment.", "error");
+      throw e; // keep the dialog open so the user can retry
+    }
+    setPendingSetupToken(null);
+    onRefresh();
+  }
+
+  function cancelSetup() {
+    setPendingSetupToken(null);
+  }
+
   async function performTeardown() {
     setLoading(true);
     try {
       const res = await authFetch("/api/cameras/subnet", { method: "DELETE" });
-      if (!res.ok) {
+      if (!res.ok && res.status !== 202) {
         const data = await res.json().catch(() => ({}));
         toast(data.error || "Couldn't remove the camera subnet. Try again in a moment.", "error");
         throw new Error(data.error || "Teardown failed");
+      }
+      if (res.status === 202) {
+        // The user already confirmed in the destructive dialog that invoked
+        // us, so complete the Tier-2 handshake without asking a second time.
+        const data = (await res.json().catch(() => ({}))) as ConfirmationRequired;
+        if (!data.confirmationToken) {
+          toast("Couldn't remove the camera subnet. Try again in a moment.", "error");
+          throw new Error("Teardown failed");
+        }
+        try {
+          await confirmCameraCommand(data.confirmationToken, "camera_subnet_teardown");
+        } catch (e) {
+          const message = e instanceof Error ? e.message : "";
+          toast(
+            TOKEN_REJECTED.test(message)
+              ? "Confirmation expired, try again"
+              : message || "Couldn't remove the camera subnet. Try again in a moment.",
+            "error",
+          );
+          throw new Error("Teardown failed");
+        }
       }
       setTeardownOpen(false);
       onRefresh();
@@ -96,7 +168,9 @@ export function CameraSubnetCard({ config, onRefresh }: CameraSubnetCardProps) {
             <p className="type-caption-1" style={{ color: "var(--text-muted)" }}>
               {isEnabled
                 ? `Cameras isolated on ${config?.subnet || "192.168.100.0"}/${config?.netmask === "255.255.255.0" ? "24" : config?.netmask} (VLAN 100)`
-                : "Cameras on main LAN — not isolated"}
+                : routerError
+                  ? "Router not reachable — isolation can't be changed right now"
+                  : "Cameras on main LAN — not isolated"}
             </p>
           </div>
         </div>
@@ -116,7 +190,11 @@ export function CameraSubnetCard({ config, onRefresh }: CameraSubnetCardProps) {
               <span className="type-subheadline">Disable</span>
             </button>
           ) : (
-            <button onClick={handleSetup} className="btn primary">
+            <button
+              onClick={handleSetup}
+              className="btn primary"
+              disabled={routerError}
+            >
               <ShieldCheck size={16} />
               <span className="type-subheadline">Enable Isolation</span>
             </button>
@@ -156,6 +234,16 @@ export function CameraSubnetCard({ config, onRefresh }: CameraSubnetCardProps) {
           only through the Droplet dashboard.
         </p>
       )}
+
+      <ConfirmDialog
+        open={pendingSetupToken !== null}
+        onConfirm={performSetupConfirm}
+        onCancel={cancelSetup}
+        title="Move cameras to an isolated network?"
+        description="Your cameras will move to a separate network (VLAN 100, 192.168.100.0/24). Their feeds will only be reachable through Droplet. This can take up to a minute, and the router rolls back automatically if connectivity is lost."
+        confirmLabel="Enable isolation"
+        variant="neutral"
+      />
 
       <ConfirmDialog
         open={teardownOpen}
