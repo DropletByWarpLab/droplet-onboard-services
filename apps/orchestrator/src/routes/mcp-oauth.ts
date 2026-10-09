@@ -54,7 +54,7 @@ export function createMcpOAuthRouter(prisma: PrismaClient, options: Partial<McpO
         const d = providerDescriptor(id);
         return d?.track === "mcp" && d.signIn;
       });
-      return res.json({ connections: await Promise.all(ids.map((id) => mcpSignInView(prisma, id, req.user!.id, redirectUri))) });
+      return res.json({ providers: await Promise.all(ids.map((id) => mcpSignInView(prisma, id, req.user!.id, redirectUri, req.user!.role))) });
     } catch (err) {
       return fail(res, err);
     }
@@ -94,7 +94,7 @@ export function createMcpOAuthRouter(prisma: PrismaClient, options: Partial<McpO
         browserState: null, caller: { id: req.user.id, role: req.user.role },
       }, deps);
       res.clearCookie(MCP_OAUTH_STATE_COOKIE, { httpOnly: true, secure: true, sameSite: "lax", path: COOKIE_PATH });
-      if (result.outcome === "connected") return res.json({ outcome: "connected", provider: result.provider });
+      if (result.outcome === "connected") return res.json({ outcome: "connected" });
       return res.status(400).json({ error: "sign_in_failed", outcome: result.outcome });
     } catch (err) {
       return fail(res, err);

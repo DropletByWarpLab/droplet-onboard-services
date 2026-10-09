@@ -147,7 +147,8 @@ function signInFor(provider: string): { displayName: string; signIn: McpSignIn }
 function httpsUrl(raw: string): URL | null {
   try {
     const u = new URL(raw);
-    return u.protocol === "https:" && !u.username && !u.password && !u.hash ? u : null;
+    return u.protocol === "https:" && !u.username && !u.password && !u.hash ? u :  member: { id: string; state: McpOAuthStateName; connectedAt: string |  /** `ackBy` is shown to owners and admins only. */
+  workspace: { id: string; state: McpOAuthStateName; ackBy: string | null; connectedAt: string | null } | null; lastRefreshOkAt: string | null } | null;
   } catch {
     return null;
   }
@@ -521,6 +522,7 @@ export async function mcpSignInView(
   provider: string,
   userId: string,
   redirectUri: string,
+  role?: string,
 ): Promise<McpSignInView> {
   signInFor(provider);
   const [member, workspace, apiToken] = await Promise.all([
@@ -534,13 +536,16 @@ export async function mcpSignInView(
   return {
     provider,
     member: member && {
-      id: member.id, state: member.state, connectedAt: member.connectedAt?.toISOString() ?? null, lastError: member.lastError,
+      id: member.id, state: member.state, connectedAt: member.connectedAt?.toISOString() ?? null,
+      lastRefreshOkAt: member.lastRefreshOkAt?.toISOString() ?? null,
     },
     workspace: workspace && {
-      id: workspace.id, state: workspace.state, ackBy: workspace.workspaceAckBy, connectedAt: workspace.connectedAt?.toISOString() ?? null,
+      id: workspace.id, state: workspace.state, ackBy: roleIn(role, ADMIN_ROLES) ? workspace.workspaceAckBy : null, connectedAt: workspace.connectedAt?.toISOString() ?? null,
     },
     redirectUri,
-    // The authorization server decides in the end; paste is the guaranteed path.
+    // True when the box has an https origin to call back to; otherwise clients start with
+    // redirectMode "loopback" and show the paste field first. The authorization server
+    // decides in the end; paste is the guaranteed path.
     callbackSupported: redirectUri.startsWith("https://"),
     apiToken: !!apiToken,
   };
