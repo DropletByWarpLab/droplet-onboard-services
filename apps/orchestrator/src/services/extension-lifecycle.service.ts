@@ -91,6 +91,7 @@ import { runtimeToolRegistry } from "./runtime-tool-registry.service.js";
 import { verifyExtensionStatement, type ExtensionSigner } from "./update-agent/extension-verify.js";
 import { EXTENSION_SERVER_PREFIX, EXTENSION_TOKEN_PREFIX, hashExtensionToken } from "./extension-token.js";
 import { holdWorkspaceAsSource } from "./workspace-source-guard.service.js";
+import { deriveHostedAppRelayKey, encryptColumn, decryptColumn } from "./column-crypto.service.js";
 
 export { EXTENSION_SERVER_PREFIX, EXTENSION_TOKEN_PREFIX, hashExtensionToken };
 
@@ -196,7 +197,7 @@ export interface PreflightInput {
 export function preflightExtension(input: PreflightInput): PreflightResult {
   const blocking: PreflightFinding[] = [];
   const advisory: PreflightFinding[] = [];
-  const requestedMb = input.manifest.resources.memoryMb;
+  const requestedMb = input.manifest.runtime === "static" ? 0 : input.manifest.resources.memoryMb;
   const availableMb = input.budget.availableMb + input.currentMemoryMb;
   if (requestedMb > availableMb) {
     blocking.push({
@@ -260,6 +261,7 @@ export type ExtensionLifecycleErrorCode =
   | "install_failed"
   | "supervision_off"
   | "attach_refused"
+  | "current_owner_required"
   /** WARP-3200 — enable: the workspace it is built from was deleted. */
   | "source_deleted";
 
@@ -459,6 +461,14 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
     return ext;
   }
 
+  async function requireCurrentAppOwner(kind: string, actor: ActivityActor): Promise<void> {
+    if (kind !== "app") return;
+    const current = actor.type === "user" && actor.id ? await prisma.user.findUnique({ where: { id: actor.id }, select: { role: true, directoryStatus: true } }) : null;
+    if (!current || current.role !== "owner" || current.directoryStatus !== "ACTIVE") {
+      throw new ExtensionLifecycleError("current_owner_required", 403, "a current active owner must manage this app");
+    }
+  }
+
   /**
    * `failed` only while the row is still in `from`; false when someone else
    * moved it. A failed extension is never left attached: a re-install of a
@@ -472,7 +482,7 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
     }
     const u = await prisma.extension.updateMany({
       where: { id: slug, status: { in: [...from] } },
-      data: { status: "failed", failureReason: reason.slice(0, 1000), serviceTokenHash: null },
+      data: { status: "failed", failureReason: reason.slice(0, 1000), serviceTokenHash: null, appRelayKeyEnc: null },
     });
     return u.count > 0;
   }
@@ -575,26 +585,36 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
     const signed = check.statement;
 
     // 2. Rotate the bearer BEFORE the start: the child may call back at once.
+    const isApp = manifest.kind === "app";
+    if (op !== "reconcile") await requireCurrentAppOwner(manifest.kind, actor);
     const { token, hash } = mintExtensionToken();
     const claimed = await prisma.extension.updateMany({
       where: { id: slug, status: { in: [...from] } },
-      data: { serviceTokenHash: hash },
+      data: { serviceTokenHash: isApp ? null : hash, appRelayKeyEnc: null },
     });
     if (claimed.count === 0) throw await overtaken(slug);
 
     // 3. Start it.
+    let appRelayKeyEnc: string | null = null;
     try {
-      await sandbox.install(slug, {
+      const started = await sandbox.install(slug, {
         workspaceId: signed.workspaceId,
         version: signed.version,
         commit: signed.commit,
         tree: signed.tree,
         runtime: manifest.runtime,
-        entrypoint: manifest.entrypoint,
+        ...(manifest.entrypoint ? { entrypoint: manifest.entrypoint } : {}),
+        ...(isApp ? { kind: "app" as const } : {}),
+        ...(isApp ? { http: manifest.http } : {}),
         memoryMb: manifest.resources.memoryMb,
-        token,
-        ...(deps.orchestratorUrl ? { orchestratorUrl: deps.orchestratorUrl } : {}),
+        ...(!isApp ? { token, ...(deps.orchestratorUrl ? { orchestratorUrl: deps.orchestratorUrl } : {}) } : {}),
       });
+      if (isApp) {
+        if (!started.running || !started.relayKey || !/^[A-Za-z0-9_-]{32,128}$/.test(started.relayKey)) {
+          throw new Error("the sandbox did not return a running app and its relay key");
+        }
+        appRelayKeyEnc = encryptColumn(deriveHostedAppRelayKey(), started.relayKey, `hosted-app:${slug}`);
+      }
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       // The owner's disable or uninstall landed meanwhile: take down what the
@@ -618,17 +638,19 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
 
     const done = await prisma.extension.updateMany({
       where: { id: slug, status: { in: [...from] } },
-      data: { status: "installed", failureReason: null },
+      data: { status: isApp ? "live" : "installed", failureReason: null, kind: manifest.kind,
+        appRelayKeyEnc, ...(isApp ? { lastHealthAt: new Date() } : {}) },
     });
     if (done.count === 0) return undoOvertakenInstall(slug, actor, op);
     // The owner started it: the reconciler's restart budget is whole again.
     if (op !== "reconcile") reconcileRestartCounts.delete(slug);
-    installedExtensionIds.add(extensionServerId(slug));
+    if (!isApp) installedExtensionIds.add(extensionServerId(slug));
+    else installedExtensionIds.delete(extensionServerId(slug));
     await record(op, slug, actor, {
       what: op === "enable" ? "Extension enabled" : op === "reconcile" ? "Extension restarted" : "Extension installed",
       refs: { version: v.version, runtime: manifest.runtime, memoryMb: manifest.resources.memoryMb },
     });
-    if (attach) await goLive(attach, slug, actor, op);
+    if (!isApp && attach) await goLive(attach, slug, actor, op);
     return load(slug);
   }
 
@@ -698,7 +720,7 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
     slug: string,
     from: readonly ExtensionStatusName[],
     to: ExtensionStatusName,
-    extra: { serviceTokenHash?: null } = {},
+    extra: { serviceTokenHash?: null; appRelayKeyEnc?: null } = {},
     stillToDo?: () => Promise<boolean>,
     db: Prisma.TransactionClient = prisma,
   ): Promise<{ retry: boolean }> {
@@ -727,6 +749,7 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
       // The same preflight a promote runs: while this one was off, another
       // extension may have taken one of its tool names, or the memory.
       const ext = await load(slug);
+      await requireCurrentAppOwner(ext.kind, actor);
       const parsed = ext.currentVersion ? parseExtensionManifest(ext.currentVersion.manifestBytes) : null;
       if (parsed?.ok) {
         const preflight = await preflightAgainstBox(prisma, sandbox, slug, parsed.manifest, 0);
@@ -759,13 +782,14 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
     },
 
     async disable(slug: string, actor: ActivityActor) {
+      await requireCurrentAppOwner((await load(slug)).kind, actor);
       // The row first, so an install in flight loses (it re-checks the row
       // at every write); then the process. A retry acts while it still runs.
       const { retry } = await claim(
         slug,
         ["signed", "installed", "live", "failed"],
         "disabled",
-        { serviceTokenHash: null },
+        { serviceTokenHash: null, appRelayKeyEnc: null },
         async () => (await sandbox.status(slug))?.running === true,
       );
       await stopAndDetach(slug);
@@ -783,17 +807,26 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
       return load(slug);
     },
 
-    async uninstall(slug: string, actor: ActivityActor) {
+    async uninstall(slug: string, actor: ActivityActor, deleteData = false) {
+      const ext = await load(slug);
+      await requireCurrentAppOwner(ext.kind, actor);
+      // A retained data directory can be removed in a later, separately
+      // typed owner action after code was already uninstalled.
+      if (deleteData && ext.status === "uninstalled") {
+        await sandbox.uninstall(slug, true);
+        await record("uninstall", slug, actor, { severity: "warn", what: "Hosted app saved data removed" });
+        return load(slug);
+      }
       const { retry } = await claim(
         slug,
         ["signed", "installed", "live", "failed", "disabled"],
         "uninstalled",
-        { serviceTokenHash: null },
+        { serviceTokenHash: null, appRelayKeyEnc: null },
         async () => (await sandbox.status(slug)) !== null,
       );
       await stopAndDetach(slug);
       try {
-        await sandbox.uninstall(slug);
+        await sandbox.uninstall(slug, deleteData);
       } catch (err) {
         await record("uninstall", slug, actor, {
           severity: "warn",
@@ -813,7 +846,7 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
     /** installedExtensionIds := the rows that should be running. */
     async refreshInstalledIds(): Promise<void> {
       const rows = await prisma.extension.findMany({
-        where: { status: { in: [...RUNNING_EXTENSION_STATUSES] } },
+        where: { status: { in: [...RUNNING_EXTENSION_STATUSES] }, kind: "extension" },
         select: { id: true },
       });
       installedExtensionIds.clear();
@@ -839,7 +872,7 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
      * No Extension rows at all → no sandbox call.
      */
     async reconcile(): Promise<ReconcileReport> {
-      const all = await prisma.extension.findMany({ select: { id: true, status: true } });
+      const all = await prisma.extension.findMany({ select: { id: true, status: true, kind: true, appRelayKeyEnc: true } });
       const shouldRun = (status: string | undefined): boolean =>
         (RUNNING_EXTENSION_STATUSES as readonly string[]).includes(status ?? "");
       const rows = all.filter((r) => shouldRun(r.status));
@@ -877,7 +910,7 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
       }
 
       // ── 2. missing ──
-      for (const { id } of rows) {
+      for (const { id, kind, appRelayKeyEnc } of rows) {
         let st: SandboxExtensionStatus | null = null;
         try {
           st = await sandbox.status(id);
@@ -888,7 +921,19 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
           logger.warn({ err, slug: id }, "extension_reconcile_status_failed");
           continue;
         }
-        if (st?.running === true && st.process?.restarts === 0) {
+        let recoverableAppKey = false;
+        if (kind === "app" && appRelayKeyEnc) {
+          try {
+            recoverableAppKey = /^[A-Za-z0-9_-]{32,128}$/.test(decryptColumn(deriveHostedAppRelayKey(), appRelayKeyEnc, `hosted-app:${id}`));
+          } catch { /* Reinstall below re-verifies the signed source and rotates the key. */ }
+        }
+        if (kind === "app" && recoverableAppKey && st?.running === true
+            && (st.runtime === "static" || st.process?.restarts === 0)) {
+          installedExtensionIds.delete(extensionServerId(id));
+          await prisma.extension.updateMany({ where: { id, status: "live", appRelayKeyEnc }, data: { lastHealthAt: new Date() } });
+          continue; // Durable sealed relay key survives orchestrator restarts.
+        }
+        if (kind !== "app" && st?.running === true && st.process?.restarts === 0) {
           installedExtensionIds.add(extensionServerId(id));
           // Running, but not attached in THIS process: an orchestrator
           // restart, or an attach that did not answer last time. Only the
@@ -913,7 +958,7 @@ export function createExtensionLifecycle(deps: ExtensionLifecycleDeps) {
           // bearer, a fresh export — and attached from there, or failed.
           logger.warn({ slug: id, restarts: st.process?.restarts ?? null }, "extension_reconcile_restarted_in_place");
           installedExtensionIds.delete(extensionServerId(id));
-          if (attach) {
+          if (kind !== "app" && attach) {
             await attach.detach(id).catch((err: unknown) => logger.warn({ err, slug: id }, "extension_detach_before_reinstall_failed"));
           }
         }

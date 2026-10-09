@@ -15,7 +15,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import Ajv from "ajv";
-import { extensionManifestSchema } from "./extension-manifest.js";
+import { extensionManifestSchema, extensionManifestObjectSchema } from "./extension-manifest.js";
 import { REPO_ROOT } from "../__tests__/helpers/test-paths.js";
 
 const SCHEMA_PATH = path.join(REPO_ROOT, "docs", "schemas", "extension-manifest.schema.json");
@@ -54,6 +54,15 @@ const tool0 = (m: Json): Json =>
 
 /** [label, mutate, expected-valid] */
 const CORPUS: Array<[string, (m: Json) => void, boolean]> = [
+  ["node app", (m) => { m.kind = "app"; m.http = { health: "/healthz" }; (m.provides as Json).tools = []; }, true],
+  ["static app", (m) => { m.kind = "app"; m.runtime = "static"; delete m.entrypoint; m.http = { health: "/healthz", dir: ".", spa: true }; (m.provides as Json).tools = []; }, true],
+  ["app without http", (m) => { m.kind = "app"; (m.provides as Json).tools = []; }, false],
+  ["app with tool", (m) => { m.kind = "app"; m.http = { health: "/healthz" }; }, false],
+  ["tool extension with http", (m) => { m.http = { health: "/healthz" }; }, false],
+  ["static tool extension", (m) => { m.runtime = "static"; delete m.entrypoint; }, false],
+  ["static app with entrypoint", (m) => { m.kind = "app"; m.runtime = "static"; m.http = { health: "/healthz", dir: "." }; (m.provides as Json).tools = []; }, false],
+  ["process app with static fields", (m) => { m.kind = "app"; m.http = { health: "/healthz", dir: "." }; (m.provides as Json).tools = []; }, false],
+  ["app declares port", (m) => { m.kind = "app"; m.http = { health: "/healthz", port: 3000 }; (m.provides as Json).tools = []; }, false],
   ["the reference manifest", () => {}, true],
   ["with a summary", (m) => (m.summary = "Counts words."), true],
   ["python runtime", (m) => ((m.runtime = "python312"), (m.entrypoint = "tool.py")), true],
@@ -127,7 +136,7 @@ describe("extension manifest: JSON Schema <-> zod drift (WARP-2900)", () => {
 
   it("names exactly the same top-level keys", () => {
     const jsonKeys = Object.keys((schema as { properties: Json }).properties).sort();
-    const zodKeys = Object.keys(extensionManifestSchema.shape).sort();
+    const zodKeys = Object.keys(extensionManifestObjectSchema.shape).sort();
     expect(jsonKeys).toEqual(zodKeys);
   });
 });

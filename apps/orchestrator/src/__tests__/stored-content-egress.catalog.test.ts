@@ -45,6 +45,7 @@ const EXPECTED_WITHHELD = [
   "email",
   "erp",
   "files",
+  "hosted_apps",
   "memory",
   "money",
   "pm",
@@ -85,6 +86,8 @@ describe("off-LAN tool domains (WARP-3570)", () => {
     "read_file",
     "memory_recall",
     "business_find",
+    "list_hosted_apps",
+    "hosted_app_logs",
   ])("%s is not advertised to a cloud model", (name) => {
     expect(withholdStoredContentTools([name, "get_system_health"])).toEqual(["get_system_health"]);
   });

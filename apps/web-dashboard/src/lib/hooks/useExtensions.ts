@@ -48,18 +48,20 @@ export function useExtensions() {
 
   /** Phase 1: read back what promoting this proposal would sign. Signs nothing. */
   const preparePromotion = useCallback(
-    (workspaceId: string): Promise<ExtensionPromotePhase1> => prepareExtensionPromotion(workspaceId),
+    (workspaceId: string, currentPassword?: string): Promise<ExtensionPromotePhase1> => currentPassword ? prepareExtensionPromotion(workspaceId, currentPassword) : prepareExtensionPromotion(workspaceId),
     [],
   );
 
   /** Phase 2: sign + install exactly what was read back. */
   const confirmPromotion = useCallback(
-    async (phase1: ExtensionPromotePhase1, operatorDomain: string | null): Promise<ExtensionPromoteResult> => {
+    async (phase1: ExtensionPromotePhase1, operatorDomain: string | null, hostedAppRoles?: string[], currentPassword?: string): Promise<ExtensionPromoteResult> => {
       try {
         return await confirmExtensionPromotion(phase1.workspaceId, {
           confirmationToken: phase1.confirmationToken,
           manifestSha256: phase1.manifestSha256,
           ...(operatorDomain ? { operatorDomain } : {}),
+          ...(hostedAppRoles !== undefined ? { hostedAppRoles } : {}),
+          ...(currentPassword ? { currentPassword } : {}),
         });
       } finally {
         await refresh();
@@ -69,9 +71,9 @@ export function useExtensions() {
   );
 
   const setEnabled = useCallback(
-    async (slug: string, enabled: boolean) => {
+    async (slug: string, enabled: boolean, currentPassword?: string) => {
       try {
-        await setExtensionEnabled(slug, enabled);
+        await (currentPassword ? setExtensionEnabled(slug, enabled, currentPassword) : setExtensionEnabled(slug, enabled));
       } finally {
         await refresh();
       }
@@ -80,9 +82,9 @@ export function useExtensions() {
   );
 
   const uninstall = useCallback(
-    async (slug: string) => {
+    async (slug: string, currentPassword?: string) => {
       try {
-        await uninstallExtension(slug);
+        await (currentPassword ? uninstallExtension(slug, undefined, currentPassword) : uninstallExtension(slug));
       } finally {
         await refresh();
       }

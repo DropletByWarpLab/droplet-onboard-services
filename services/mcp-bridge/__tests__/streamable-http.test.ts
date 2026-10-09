@@ -1,105 +1,82 @@
 /**
- * WARP-2300 review follow-up — the transport's redirect policy.
+ * WARP-2300 review follow-up + WARP-3914 — the transport's fetch.
  *
- * `assertSafeMcpUrl` screens the host ONCE, at construction. The SDK sets no
- * `redirect` option, so Node's default (`follow`) let the screened host answer
- * 302 and have the credentialed request delivered to some other authority that
- * nothing re-screens — a one-time exact-host guard turned into a suggestion.
+ * `assertSafeMcpUrl` screens the NAME once, at construction. Two things keep
+ * that true for the life of the session, and both live in the transport's
+ * fetch (`pinned-fetch.ts`): redirects are refused (a 302 would deliver the
+ * credentialed request to an authority nothing re-screens), and the host is
+ * resolved, vetted and dialed at the vetted address (WARP-3914).
  *
- * NOTHING HERE OPENS A SOCKET: `globalThis.fetch` is stubbed for the duration
- * of each test, so the assertions are about the request the transport would
- * have made.
+ * NOTHING HERE OPENS A SOCKET: the guard's resolver and sender are stubbed, so
+ * the assertions are about the request the transport would have made. The
+ * address table itself is covered in `pinned-fetch.test.ts`.
  */
-import { describe, it, expect, vi, afterEach } from "vitest";
-import {
-  createStreamableHttpConnection,
-  noRedirectFetch,
-} from "../src/streamable-http.js";
+import { describe, it, expect, vi } from "vitest";
+import { createStreamableHttpConnection } from "../src/streamable-http.js";
+import { createGuardedFetch } from "../src/pinned-fetch.js";
 
 /** Obviously fake — this is a header shape, not a credential. */
 const FAKE_AUTHORIZATION = "Basic FAKE-000000000000";
+/** A public resolver address. */
+const PUBLIC = [{ address: "8.8.8.8", family: 4 }];
+const noLocal = () => ({ addresses: [], cidrs: [] });
 
-afterEach(() => {
-  vi.unstubAllGlobals();
-});
+type SendCall = [{ url: URL; addresses: { address: string }[] }, RequestInit];
 
-describe("noRedirectFetch", () => {
-  /**
-   * MUTATION: drop `redirect: "error"` from `noRedirectFetch` → this test
-   * goes red.
-   */
-  it("refuses redirects rather than following them", async () => {
-    const seen: RequestInit[] = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (_url: string | URL, init?: RequestInit) => {
-        seen.push(init ?? {});
-        return new Response("{}", { status: 200 });
-      }),
-    );
+describe("the guarded fetch", () => {
+  it("keeps everything the caller set — it adds the pin, not a rewrite of the init", async () => {
+    const send = vi.fn(async () => new Response("{}", { status: 200 }));
+    const f = createGuardedFetch({ resolve: async () => PUBLIC, local: noLocal, send });
 
-    await noRedirectFetch("https://mcp.vendor.example/v1/mcp", {
-      method: "POST",
-      headers: { authorization: FAKE_AUTHORIZATION },
-    });
-
-    expect(seen).toHaveLength(1);
-    expect(seen[0]!.redirect).toBe("error");
-  });
-
-  it("keeps everything the caller set — it overrides one field, not the init", async () => {
-    const seen: RequestInit[] = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (_url: string | URL, init?: RequestInit) => {
-        seen.push(init ?? {});
-        return new Response("{}", { status: 200 });
-      }),
-    );
-
-    await noRedirectFetch("https://mcp.vendor.example/v1/mcp", {
+    await f("https://mcp.vendor.example/v1/mcp", {
       method: "POST",
       body: '{"jsonrpc":"2.0"}',
       headers: { authorization: FAKE_AUTHORIZATION },
     });
 
-    expect(seen[0]!.method).toBe("POST");
-    expect(seen[0]!.body).toBe('{"jsonrpc":"2.0"}');
-    expect(seen[0]!.headers).toMatchObject({ authorization: FAKE_AUTHORIZATION });
+    expect(send).toHaveBeenCalledTimes(1);
+    const [dest, init] = send.mock.calls[0] as unknown as SendCall;
+    expect(dest.url.hostname).toBe("mcp.vendor.example");
+    expect(dest.addresses.map((a) => a.address)).toEqual(["8.8.8.8"]);
+    expect(init.method).toBe("POST");
+    expect(init.body).toBe('{"jsonrpc":"2.0"}');
+    expect(init.headers).toMatchObject({ authorization: FAKE_AUTHORIZATION });
   });
 });
 
 describe("the transport is wired to it", () => {
   /**
-   * The unit test above proves the function; this proves the option reaches
-   * the SDK. Every request the transport makes goes through the stub, and
-   * every one of them must carry the policy.
-   *
-   * MUTATION: remove `fetch: noRedirectFetch` from the
+   * MUTATION: remove `fetch: createObservingFetch(...)` from the
    * `StreamableHTTPClientTransport` options → this test goes red (the SDK
-   * falls back to the bare global fetch and no init carries `redirect`).
+   * falls back to the bare global fetch and `send` is never called).
    */
-  it("every request createStreamableHttpConnection makes carries redirect: error", async () => {
-    const seen: RequestInit[] = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (_url: string | URL, init?: RequestInit) => {
-        seen.push(init ?? {});
-        // A 500 ends the handshake; we are asserting on the request, not
-        // exercising the protocol.
-        return new Response("upstream is down", { status: 500 });
-      }),
-    );
-
+  it("every request createStreamableHttpConnection makes goes through the pinned sender", async () => {
+    const send = vi.fn(async () => new Response("upstream is down", { status: 500 }));
     await expect(
-      createStreamableHttpConnection({
-        serverId: "vendor",
-        url: "https://mcp.vendor.example/v1/mcp",
-        headers: { authorization: FAKE_AUTHORIZATION },
-      }),
+      createStreamableHttpConnection(
+        {
+          serverId: "vendor",
+          url: "https://mcp.vendor.example/v1/mcp",
+          headers: { authorization: FAKE_AUTHORIZATION },
+        },
+        { guard: { resolve: async () => PUBLIC, local: noLocal, send } },
+      ),
     ).rejects.toThrow();
 
-    expect(seen.length).toBeGreaterThan(0);
-    for (const init of seen) expect(init.redirect).toBe("error");
+    expect(send.mock.calls.length).toBeGreaterThan(0);
+    for (const call of send.mock.calls as unknown as SendCall[]) {
+      expect(call[0].addresses.map((a) => a.address)).toEqual(["8.8.8.8"]);
+    }
+  });
+
+  it("a host that resolves to a private address never gets a request", async () => {
+    const send = vi.fn(async () => new Response("{}", { status: 200 }));
+    await expect(
+      createStreamableHttpConnection(
+        { serverId: "vendor", url: "https://mcp.vendor.example/v1/mcp", headers: {} },
+        { guard: { resolve: async () => [{ address: "10.0.0.5", family: 4 }], local: noLocal, send } },
+      ),
+    ).rejects.toThrow();
+    expect(send).not.toHaveBeenCalled();
   });
 });

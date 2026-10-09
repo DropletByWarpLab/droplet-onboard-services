@@ -188,6 +188,8 @@ const IMAGERY_AND_FOOTAGE: Array<[string, string]> = [
   ["get", "/api/cameras/front/live"],
   ["get", "/api/cameras/front/recordings/summary"],
   ["get", "/api/cameras/front/recordings?after=1&before=2"],
+  // WARP-3927: a still from recorded footage at an instant.
+  ["get", "/api/cameras/front/recordings/snapshot?at=1700000000"],
   ["get", "/api/cameras/front/timeline?after=1&before=2"],
   ["get", "/api/cameras/front/playback?after=1&before=2"],
   ["get", "/api/cameras/front/playback.m3u8?after=1&before=2"],

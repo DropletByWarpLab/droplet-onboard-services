@@ -117,6 +117,7 @@ export const SPACES: SpaceDef[] = [
       "/messages",
       "/routines",
       "/workshop",
+      "/hosted",
     ],
   },
   {

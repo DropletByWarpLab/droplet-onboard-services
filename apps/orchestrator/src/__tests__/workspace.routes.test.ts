@@ -15,7 +15,7 @@
  *     behind the row lock, in the transaction that deletes the row, and the
  *     repository removed only after the row is gone;
  *   - propose flips the row to `proposed` with the tag;
- *   - git: the mcp principal is 403, family and guest fetch (push flag off),
+ *   - git: the mcp principal, family and guest are 403,
  *     owner pushes (push flag on), an unknown repo 404;
  *   - WARP-2899: export is a git bundle for an owner/admin PERSON only (the
  *     mcp principal, a run, family and guest are 403), with one audit row
@@ -31,6 +31,7 @@ import express, { type Request, type Response, type NextFunction } from "express
 import http from "node:http";
 import { Readable } from "node:stream";
 import { createHash } from "node:crypto";
+import { readFile, access } from "node:fs/promises";
 
 vi.mock("../config.js", () => ({
   config: {
@@ -153,6 +154,11 @@ async function seedRun(db: ReturnType<typeof createAgentRunPrismaMock>, workspac
 beforeEach(() => recordActivityMock.mockClear());
 
 describe("the run allow-list (refuseRunArgv)", () => {
+  it("allows app-check only as the exact command, with no arguments", () => {
+    expect(refuseRunArgv(["app-check"])).toBeNull();
+    expect(refuseRunArgv(["app-check", "server.js"])).toBe("app-check takes no arguments");
+    expect(refuseRunArgv(["app-check", "--port=80"])).toBe("app-check takes no arguments");
+  });
   it("is closed in shape — mirrors the sandbox's own list", () => {
     // MUTATION: return null from refuseRunArgv and every refusal below is
     // green-for-the-wrong-reason — and the route test further down proves
@@ -174,6 +180,115 @@ describe("the run allow-list (refuseRunArgv)", () => {
     }
     for (const argv of [["pytest", "-q"], ["ruff", "check", "."], ["npm", "test"], ["npm", "run", "build"], ["tsc", "--noEmit", "-p", "."]]) {
       expect(refuseRunArgv(argv), JSON.stringify(argv)).toBeNull();
+    }
+  });
+});
+
+describe("hosted application archive imports", () => {
+  it("refuses uploads before parsing for non-operators and when supervision is disabled", async () => {
+    const old = process.env.SANDBOX_PROCESS_SUPERVISION;
+    try {
+      process.env.SANDBOX_PROCESS_SUPERVISION = "true";
+      for (const user of [family, guest, mcp]) {
+        const { app, sandbox } = buildApp(user);
+        const res = await request(app).post("/api/workspace/import").field("name", "My UI").attach("archive", Buffer.from("zip"), "ui.zip");
+        expect(res.status).toBe(403);
+        expect(sandbox.calls).toEqual([]);
+      }
+      process.env.SANDBOX_PROCESS_SUPERVISION = "false";
+      const { app, sandbox } = buildApp(owner);
+      expect((await request(app).post("/api/workspace/import").send({})).status).toBe(503);
+      expect((await request(app).post("/api/workspace").send({ name: "UI", kind: "app" })).status).toBe(503);
+      expect((await request(app).post("/api/workspace").send({ name: "UI", template: "static-site" })).status).toBe(503);
+      expect(sandbox.calls).toEqual([]);
+    } finally {
+      if (old === undefined) delete process.env.SANDBOX_PROCESS_SUPERVISION;
+      else process.env.SANDBOX_PROCESS_SUPERVISION = old;
+    }
+  });
+
+  it("streams the uploaded file with the operator's attribution, creates one row, then removes the temp file", async () => {
+    const old = process.env.SANDBOX_PROCESS_SUPERVISION;
+    process.env.SANDBOX_PROCESS_SUPERVISION = "true";
+    try {
+      const { app, db, sandbox } = buildApp(admin);
+      let uploaded = "";
+      sandbox.client.importArchive = vi.fn(async (id, format, author, file, bytes) => {
+        uploaded = file;
+        expect({ id, format, author, bytes }).toEqual({ id: "my-ui", format: "tar.gz", author: { name: "Stefan", email: "stefan@droplet.local" }, bytes: 7 });
+        expect(await readFile(file, "utf8")).toBe("archive");
+        return { id, branch: "work", head: HEAD, dirty: false, tags: [] };
+      });
+      const res = await request(app).post("/api/workspace/import").field("name", "My UI").field("id", "my-ui").attach("archive", Buffer.from("archive"), "ui.tar.gz");
+      expect(res.status).toBe(201);
+      expect(res.body.git.head).toBe(HEAD);
+      expect(res.body.kind).toBe("app");
+      expect(await db.prisma.workshopWorkspace.findUnique({ where: { id: "my-ui" } })).toMatchObject({ userId: admin.id, name: "My UI", kind: "app" });
+      // Archive contents need not contain a manifest yet. Reopening must
+      // retain the setup intent independently of a browser query parameter.
+      expect((await request(app).get("/api/workspace/my-ui")).body).toMatchObject({ kind: "app", app: null });
+      expect((await request(app).get("/api/workspace")).body.workspaces).toContainEqual(expect.objectContaining({ id: "my-ui", kind: "app" }));
+      await expect(access(uploaded)).rejects.toThrow();
+      expect(recordActivityMock).toHaveBeenCalledWith(expect.objectContaining({ what: "Application source imported" }));
+    } finally {
+      if (old === undefined) delete process.env.SANDBOX_PROCESS_SUPERVISION;
+      else process.env.SANDBOX_PROCESS_SUPERVISION = old;
+    }
+  });
+
+  it("rejects extra fields, unsupported formats and duplicate IDs without importing", async () => {
+    const old = process.env.SANDBOX_PROCESS_SUPERVISION;
+    process.env.SANDBOX_PROCESS_SUPERVISION = "1";
+    try {
+      const { app, db, sandbox } = buildApp(owner);
+      sandbox.client.importArchive = vi.fn();
+      expect((await request(app).post("/api/workspace/import").field("name", "UI").attach("archive", Buffer.from("x"), "ui.exe")).status).toBe(400);
+      expect((await request(app).post("/api/workspace/import").field("name", "UI").field("onBehalfOf", "kid").attach("archive", Buffer.from("x"), "ui.zip")).status).toBe(400);
+      await seed(db, "ui");
+      expect((await request(app).post("/api/workspace/import").field("name", "UI").field("id", "ui").attach("archive", Buffer.from("x"), "ui.zip")).status).toBe(409);
+      expect(sandbox.client.importArchive).not.toHaveBeenCalled();
+    } finally {
+      if (old === undefined) delete process.env.SANDBOX_PROCESS_SUPERVISION;
+      else process.env.SANDBOX_PROCESS_SUPERVISION = old;
+    }
+  });
+
+  it("cleans up a refused archive and rolls back a repository when the DB write fails", async () => {
+    const old = process.env.SANDBOX_PROCESS_SUPERVISION;
+    process.env.SANDBOX_PROCESS_SUPERVISION = "yes";
+    try {
+      const { app, db, sandbox } = buildApp(owner);
+      let uploaded = "";
+      sandbox.client.importArchive = vi.fn(async (_id, _format, _author, file) => {
+        uploaded = file;
+        throw new WorkspaceSandboxError("unsafe path", 400, "SANDBOX_ERROR");
+      });
+      expect((await request(app).post("/api/workspace/import").field("name", "UI").attach("archive", Buffer.from("x"), "ui.zip")).status).toBe(400);
+      await expect(access(uploaded)).rejects.toThrow();
+      sandbox.client.importArchive = vi.fn(async (id) => ({ id, branch: "work", head: HEAD, dirty: false, tags: [] }));
+      vi.spyOn(db.prisma.workshopWorkspace, "create").mockRejectedValueOnce(new Error("database unavailable"));
+      expect((await request(app).post("/api/workspace/import").field("name", "UI").field("id", "ui").attach("archive", Buffer.from("x"), "ui.zip")).status).toBe(500);
+      expect(sandbox.calls).toContainEqual({ op: "remove", args: ["ui"] });
+    } finally {
+      if (old === undefined) delete process.env.SANDBOX_PROCESS_SUPERVISION;
+      else process.env.SANDBOX_PROCESS_SUPERVISION = old;
+    }
+  });
+});
+
+describe("app workspace creation intent", () => {
+  it.each([{ kind: "app" }, { template: "static-site" }])("retains intent for an empty/template app workspace: %j", async (input) => {
+    const old = process.env.SANDBOX_PROCESS_SUPERVISION;
+    process.env.SANDBOX_PROCESS_SUPERVISION = "1";
+    try {
+      const { app } = buildApp(owner);
+      const created = await request(app).post("/api/workspace").send({ id: "ui", name: "UI", ...input });
+      expect(created.status).toBe(201);
+      expect(created.body.kind).toBe("app");
+      expect((await request(app).get("/api/workspace/ui")).body.kind).toBe("app");
+    } finally {
+      if (old === undefined) delete process.env.SANDBOX_PROCESS_SUPERVISION;
+      else process.env.SANDBOX_PROCESS_SUPERVISION = old;
     }
   });
 });
@@ -559,28 +674,22 @@ describe("git smart HTTP (/api/git)", () => {
     expect(sandbox.calls).toEqual([]);
   });
 
-  it("a guest fetches too (every human role reads), and cannot push", async () => {
+  it("a guest cannot fetch hosted application source or push", async () => {
     const { app, db, sandbox } = buildApp(guest);
     await seed(db);
-    expect((await request(app).get("/api/git/ws-a.git/info/refs?service=git-upload-pack")).status).toBe(200);
-    expect(sandbox.calls[0]).toMatchObject({ op: "git", args: [expect.objectContaining({ user: "guest", allowPush: false })] });
+    expect((await request(app).get("/api/git/ws-a.git/info/refs?service=git-upload-pack")).status).toBe(403);
     expect((await request(app).get("/api/git/ws-a.git/info/refs?service=git-receive-pack")).status).toBe(403);
-    expect(sandbox.calls).toHaveLength(1);
+    expect(sandbox.calls).toHaveLength(0);
   });
 
-  it("family fetches with the push flag OFF; family push is 403 before the sandbox", async () => {
+  it("family cannot fetch source or push before the sandbox", async () => {
     const { app, db, sandbox } = buildApp(family);
     await seed(db);
     const fetch = await request(app).get("/api/git/ws-a.git/info/refs?service=git-upload-pack");
-    expect(fetch.status).toBe(200);
-    expect(fetch.headers["content-type"]).toBe("application/x-git-upload-pack-advertisement");
-    expect(sandbox.calls[0]).toMatchObject({
-      op: "git",
-      args: [expect.objectContaining({ method: "GET", path: "/ws-a.git/info/refs", query: "service=git-upload-pack", user: "kid", allowPush: false })],
-    });
+    expect(fetch.status).toBe(403);
     expect((await request(app).get("/api/git/ws-a.git/info/refs?service=git-receive-pack")).status).toBe(403);
     expect((await request(app).post("/api/git/ws-a.git/git-receive-pack").send(Buffer.from("0000"))).status).toBe(403);
-    expect(sandbox.calls).toHaveLength(1);
+    expect(sandbox.calls).toHaveLength(0);
   });
 
   it("owner pushes with the push flag ON and the raw body forwarded; templates.git is reachable", async () => {

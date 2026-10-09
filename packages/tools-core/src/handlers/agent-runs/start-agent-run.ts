@@ -40,6 +40,7 @@ const inputSchema = {
       description: "Step budget.",
     },
     workspace: { type: "string", description: "Workshop workspace id: build an extension there." },
+    brief: { type: "string", description: "app-setup for hosting." },
   },
   required: ["goal"],
   additionalProperties: false,
@@ -73,6 +74,10 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     ...(refs.length ? [`Start from: ${refs.join(", ")}`] : []),
   ].join("\n\n").slice(0, 4000);
   const body: Record<string, unknown> = { goal: brief, onBehalfOf: ctx.userId };
+  if (args.brief !== undefined) {
+    if (args.brief !== "app-setup" || !args.workspace || !ctx.conversationId) return fail("INVALID_ARGS", "app-setup needs a workspace and this chat.");
+    body.brief = args.brief;
+  }
   const title = typeof args.title === "string" ? args.title.trim().slice(0, 120) : "";
   if (title) body.title = title;
   const deliverable = typeof args.deliverable === "string" ? args.deliverable.trim().slice(0, 1000) : "";
@@ -135,7 +140,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const startAgentRun: Tool = {
   name: "start_agent_run",
   description:
-    "Run a multi-step task unattended (minutes); the result posts in this chat. For jobs too long for one reply, e.g. sweeping files. Call it directly; the person approves on a card, never in text.",
+    "Run a task too long for one reply; result posts here. Call directly: the person approves a card, never text. Workspace brief app-setup configures hosting.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

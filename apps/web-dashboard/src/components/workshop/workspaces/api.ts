@@ -29,7 +29,7 @@ export interface TemplateInfo {
   label: string;
   /** The runtime the sandbox bakes in for it (`extensions/templates/README.md`). */
   runtime?: string;
-  kind: "language" | "other";
+  kind: "language" | "other" | "app";
   /** One line on what it is and when to pick it — `other` templates. */
   blurb?: string;
   /** Where the tool's `run(input)` lives, and how its test runs — `language` templates. */
@@ -45,6 +45,9 @@ export interface TemplateInfo {
  * named by the language a person would code in.
  */
 export const TEMPLATE_INFO: Record<string, TemplateInfo> = {
+  "static-site": { label: "Static site", kind: "app", runtime: "Static", blurb: "A built UI or plain HTML. No app process needed." },
+  "node-app": { label: "Node app", kind: "app", runtime: "Node 20", blurb: "A web server and UI using Node's built-in libraries." },
+  "python-app": { label: "Python app", kind: "app", runtime: "Python 3.12", blurb: "A web server and UI using Python's built-in libraries." },
   "python-tool": {
     label: "Python",
     runtime: "3.12",
@@ -85,6 +88,7 @@ export interface WorkspaceRunRef {
 export interface WorkspaceSummary {
   id: string;
   name: string;
+  kind?: "extension" | "app";
   template: string | null;
   status: WorkspaceStatus;
   proposedTag: string | null;
@@ -127,6 +131,7 @@ export function connectorDraftOf(detail: Pick<WorkspaceDetail, "connectorDraft">
 export interface WorkspaceDetail {
   id: string;
   name: string;
+  kind?: "extension" | "app";
   template: string | null;
   status: WorkspaceStatus;
   proposedTag: string | null;
@@ -134,6 +139,8 @@ export interface WorkspaceDetail {
   createdAt: string;
   updatedAt: string;
   userId: string;
+  app?: { kind: "app"; runtime: "node20" | "python312" | "static";
+    http: { health: string; dir?: string; spa?: boolean }; memoryMb: number; egress: string; lines: string[] } | { error: string; code: string } | null;
   /** The sandbox's answer, or its refusal when the store is unreachable. */
   git: WorkspaceGit | { error: string; code: string };
   /**
@@ -206,11 +213,11 @@ export async function listWorkspaceTemplates(): Promise<string[]> {
   return body.templates ?? [];
 }
 
-export async function createWorkspace(input: { name: string; template?: string }): Promise<{ id: string; name: string }> {
+export async function createWorkspace(input: { name: string; template?: string; kind?: "app" }, signal?: AbortSignal): Promise<{ id: string; name: string }> {
   const res = await authFetch("/api/workspace", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input),
+    body: JSON.stringify(input), ...(signal ? { signal } : {}),
   });
   if (!res?.ok) throw await readError(res, "Couldn't create this workspace");
   return (await res.json()) as { id: string; name: string };
@@ -220,6 +227,16 @@ export async function getWorkspace(id: string): Promise<WorkspaceDetail> {
   const res = await authFetch(`/api/workspace/${encodeURIComponent(id)}`);
   if (!res?.ok) throw await readError(res, "Couldn't load this workspace");
   return (await res.json()) as WorkspaceDetail;
+}
+
+export async function importWorkspaceArchive(input: { name: string; archive: File; id?: string }, signal?: AbortSignal): Promise<{ id: string; name: string }> {
+  const body = new FormData();
+  body.set("name", input.name);
+  body.set("archive", input.archive);
+  if (input.id) body.set("id", input.id);
+  const res = await authFetch("/api/workspace/import", { method: "POST", body, ...(signal ? { signal } : {}) });
+  if (!res.ok) throw await readError(res, "Couldn't import this archive");
+  return res.json() as Promise<{ id: string; name: string }>;
 }
 
 export async function getWorkspaceLog(id: string, limit = 20): Promise<WorkspaceLogEntry[]> {

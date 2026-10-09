@@ -11,7 +11,7 @@ const inputSchema = {
   properties: {
     path: {
       type: "string",
-      description: "File or directory, relative to the workspace root. \".\" lists the root.",
+      description: "Relative path; \".\" lists root.",
     },
   },
   required: ["path"],
@@ -50,7 +50,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const workspaceRead: Tool = {
   name: "workspace_read",
   description:
-    "Read a file, or list a directory, in this run's workspace. Paths are relative to the workspace root; use \".\" to list it.",
+    "Read one file or directory in the run's workspace.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

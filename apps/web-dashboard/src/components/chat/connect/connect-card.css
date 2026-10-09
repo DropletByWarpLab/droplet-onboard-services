@@ -1,0 +1,403 @@
+/* ───────────────────────────────────────────────────────────────────────────
+   WARP-3904 — connect-from-chat cards (connect_card, connections_overview).
+
+   Tokens only: the indigo shell set (components/shell/indigo-tokens.css) for
+   surface, text, brand and status, so light and dark follow the repo's `.dark`
+   class and nothing here is a new color. Every selector hangs off `.cc` plus a
+   class of its own, which is what lets it beat `.chat-markdown p / ul / a / h3`
+   (the cards render inside the assistant bubble) without !important.
+
+   Radii: 14px card, 10px inner panels, 8px inputs and buttons (--radius-input).
+   Touch targets: 40px minimum on every control. No animation or transition.
+   ─────────────────────────────────────────────────────────────────────── */
+
+.cc {
+  margin: 8px 0 0;
+  max-width: 560px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  font-size: 13.5px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.cc.cc-wide { max-width: 640px; }
+
+/* ── Header ─────────────────────────────────────────────────────────── */
+
+.cc .cc-head {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 16px 16px 12px;
+}
+.cc .cc-titles { flex: 1 1 200px; min-width: 0; }
+.cc .cc-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--text);
+}
+.cc .cc-summary {
+  margin: 2px 0 0;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.cc .cc-chip { margin-left: auto; flex: none; }
+
+.cc .cc-logo,
+.cc .cc-tile {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1;
+}
+/* A neutral dark tile with the first letter: no vendor marks. */
+.cc .cc-logo { background: var(--text); color: var(--surface); }
+.dark .cc .cc-logo { background: var(--surface-2); color: var(--text); }
+.cc .cc-logo.is-small { width: 28px; height: 28px; border-radius: 8px; font-size: 13px; }
+.cc .cc-tile.is-ok {
+  background: color-mix(in srgb, var(--success) 16%, var(--surface));
+  color: var(--success);
+}
+.cc .cc-tile.is-info {
+  background: var(--brand-subtle);
+  color: var(--brand);
+}
+
+/* ── Body ───────────────────────────────────────────────────────────── */
+
+.cc .cc-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin: 0;
+  padding: 0 16px 16px;
+}
+
+.cc .cc-fields { display: flex; flex-direction: column; gap: 14px; }
+.cc .cc-fields.is-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px 12px;
+}
+.cc .cc-fields.is-grid .cc-field.is-wide { grid-column: 1 / -1; }
+@media (max-width: 520px) {
+  .cc .cc-fields.is-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+.cc .cc-field { min-width: 0; }
+.cc .cc-label {
+  display: block;
+  margin: 0 0 6px;
+  padding: 0;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text);
+}
+.cc .cc-req { color: var(--text-muted); }
+
+.cc .cc-input {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  min-height: 40px;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-input, 8px);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 13.5px;
+}
+.cc .cc-input::placeholder { color: var(--text-muted); }
+.cc .cc-input:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+.cc .cc-input[aria-invalid="true"] { border-color: var(--danger-ink); }
+
+.cc .cc-help {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.cc .cc-help.is-error { color: var(--danger-ink); }
+
+.cc a.cc-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--brand);
+  text-decoration: none;
+  font-weight: 500;
+}
+.dark .cc a.cc-link { color: var(--brand-soft); }
+.cc a.cc-link:hover { text-decoration: underline; }
+.cc a.cc-link:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+.cc .cc-btn:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+
+/* ── Choice rows (credential variants, OAuth options) ───────────────── */
+
+.cc .cc-variants {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+.cc .cc-choice {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-height: 40px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  cursor: pointer;
+}
+.cc .cc-choice[data-checked="true"] {
+  border-color: var(--brand);
+  background: var(--brand-subtle);
+}
+.cc .cc-choice input { margin: 3px 0 0; flex: none; accent-color: var(--brand); }
+.cc .cc-choice-label { display: block; font-weight: 500; color: var(--text); }
+.cc .cc-choice-help { display: block; margin-top: 2px; font-size: 12px; color: var(--text-muted); }
+
+/* ── Notes ──────────────────────────────────────────────────────────── */
+
+.cc .cc-lock {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--inset);
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+.cc .cc-lock p { margin: 0; }
+.cc .cc-lock-icon { flex: none; margin-top: 2px; color: var(--brand); }
+.dark .cc .cc-lock-icon { color: var(--brand-soft); }
+
+.cc .cc-alert {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--danger-ink) 10%, var(--surface));
+}
+.cc .cc-alert-icon { flex: none; margin-top: 2px; color: var(--danger-ink); }
+.cc .cc-alert-title { margin: 0; font-weight: 600; color: var(--danger-ink); }
+.cc .cc-alert-text { margin: 2px 0 0; color: var(--text); }
+
+/* ── Steps (wizard hand-off) ────────────────────────────────────────── */
+
+.cc .cc-steps {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: cc-step;
+}
+.cc .cc-steps > li {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 0;
+  counter-increment: cc-step;
+}
+.cc .cc-steps > li::before {
+  content: counter(cc-step);
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: var(--inset-strong);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* ── Buttons ────────────────────────────────────────────────────────── */
+
+.cc .cc-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.cc .cc-actions.is-start { justify-content: flex-start; }
+
+.cc .cc-btn {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 40px;
+  padding: 0 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-input, 8px);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13.5px;
+  font-weight: 500;
+  text-decoration: none;
+  cursor: pointer;
+}
+.cc .cc-btn:hover { background: var(--hover); }
+.cc .cc-btn.is-ghost { border-color: transparent; }
+.cc .cc-btn.primary {
+  background: var(--brand-fill);
+  border-color: var(--brand-fill);
+  color: var(--on-brand);
+}
+.cc .cc-btn.primary:hover { background: var(--brand-deep); border-color: var(--brand-deep); }
+.dark .cc .cc-btn.primary:hover { background: var(--brand-soft); border-color: var(--brand-soft); }
+.cc .cc-btn:disabled,
+.cc .cc-btn[aria-disabled="true"] { opacity: 0.5; cursor: not-allowed; }
+
+/* ── Compact row (a card that is not live) ──────────────────────────── */
+
+.cc.cc-compact {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 10px 14px;
+}
+.cc .cc-compact-main { flex: 1 1 180px; min-width: 0; }
+.cc .cc-compact-name { margin: 0; font-weight: 600; color: var(--text); }
+.cc .cc-compact-main .cc-summary { margin: 0; }
+
+/* ── Connections overview ───────────────────────────────────────────── */
+
+.cc .cc-counts { margin: 4px 0 0; font-size: 13px; color: var(--text-muted); }
+
+.cc .cc-section {
+  margin: 0;
+  padding: 12px 16px 6px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+}
+.cc .cc-rows { margin: 0; padding: 0; list-style: none; }
+.cc .cc-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin: 0;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
+}
+.cc .cc-row:first-child { border-top: 0; }
+.cc .cc-row-main { flex: 1 1 200px; min-width: 0; }
+.cc .cc-row-name { margin: 0; font-weight: 500; color: var(--text); }
+.cc a.cc-row-name { text-decoration: none; }
+.cc a.cc-row-name:hover { text-decoration: underline; }
+.cc .cc-row-detail { margin: 1px 0 0; font-size: 12.5px; color: var(--text-muted); }
+.cc .cc-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  font-size: 12.5px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.cc .cc-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--text-faint);
+}
+.cc .cc-dot.is-connected { background: var(--success); }
+.cc .cc-dot.is-needs_attention { background: var(--color-system-orange); }
+
+.cc .cc-empty {
+  margin: 0;
+  padding: 0 16px 12px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.cc .cc-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+  padding: 0 16px 14px;
+}
+.cc .cc-pill {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  min-height: 40px;
+  padding: 0 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill, 999px);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  text-decoration: none;
+  cursor: pointer;
+}
+.cc .cc-pill:hover:not(:disabled) { background: var(--hover); border-color: var(--brand); }
+.cc .cc-pill:disabled { opacity: 0.5; cursor: not-allowed; }
+.cc .cc-pill:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+.cc a.cc-pill { color: var(--text-muted); }
+
+.cc .cc-foot {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px 12px;
+  margin: 0;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+.cc .cc-foot p { margin: 0; flex: 1 1 220px; }
+
+/* ── Disconnected line ──────────────────────────────────────────────── */
+
+.cc.cc-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+}
+.cc.cc-line p { margin: 0; }
+.cc.cc-line .cc-line-icon { flex: none; color: var(--success); }

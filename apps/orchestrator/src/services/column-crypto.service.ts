@@ -95,6 +95,7 @@ export function deriveM365TokenCacheKey(): Buffer { return hkdf(deviceIkm(), "m3
 /** WARP-3788: per-person Google grants and one-time provider setup use separate keys. */
 export function deriveGoogleOAuthKey(): Buffer { return hkdf(deviceIkm(), "google-oauth-token"); }
 export function deriveAccountProviderSetupKey(): Buffer { return hkdf(deviceIkm(), "account-provider-setup"); }
+export function deriveHostedAppRelayKey(): Buffer { return hkdf(deviceIkm(), "hosted-app-relay"); }
 /** WARP-3538 / ADR-041 §4 — column key for the human-readable columns of the
  *  landed cloud-file metadata: `CloudFileItem` (name, URL, last modifier) and
  *  `CloudFileSource` (site name, container name, URL). A file name in a practice

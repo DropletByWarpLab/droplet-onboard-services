@@ -159,6 +159,33 @@ export function cameraLiveMedia(camera: string): CameraLiveMedia | null {
   };
 }
 
+/**
+ * WARP-3927 — one still FROM RECORDED FOOTAGE at an instant (not the current
+ * frame). `at` is epoch seconds. No `liveUrl`: the card must not offer a
+ * refresh or "go live" for a moment in the past, and no `eventId`: the still
+ * belongs to a recording, not to a detection event.
+ */
+export function recordingSnapshotUrl(camera: string, at: number): string {
+  return `/api/cameras/${encodeURIComponent(camera)}/recordings/snapshot?at=${Math.trunc(at)}`;
+}
+export function recordingSnapshotMedia(camera: string, at: number, label?: string): CameraSnapshotMedia | null {
+  if (!CAMERA_NAME_RE.test(camera) || !Number.isFinite(at) || at <= 0) return null;
+  return {
+    kind: "camera_snapshot",
+    camera,
+    snapshotUrl: recordingSnapshotUrl(camera, at),
+    ...(label ? { label } : {}),
+  };
+}
+
+/** Recorded-footage URLs for a window (epoch seconds): progressive MP4 (<= 30 min) and HLS. */
+export function recordingClipUrl(camera: string, after: number, before: number): string {
+  return `/api/cameras/${encodeURIComponent(camera)}/playback?after=${Math.trunc(after)}&before=${Math.trunc(before)}`;
+}
+export function recordingPlaybackUrl(camera: string, after: number, before: number): string {
+  return `/api/cameras/${encodeURIComponent(camera)}/playback.m3u8?after=${Math.trunc(after)}&before=${Math.trunc(before)}`;
+}
+
 function pickStr(o: Record<string, unknown>, ...keys: string[]): string | undefined {
   for (const k of keys) {
     const v = o[k];

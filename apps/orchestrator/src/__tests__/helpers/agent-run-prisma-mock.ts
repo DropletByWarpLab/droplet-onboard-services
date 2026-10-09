@@ -29,6 +29,7 @@ export interface AgentRunRow {
   userId: string;
   sessionId: string | null;
   goal: string;
+  brief: string | null;
   model: string;
   status: string;
   runAfter: Date;
@@ -222,6 +223,7 @@ export function createAgentRunPrismaMock(opts: AgentRunPrismaMockOptions = {}) {
         userId: args.data.userId as string,
         sessionId: (args.data.sessionId as string | null) ?? null,
         goal: args.data.goal as string,
+        brief: (args.data.brief as string | undefined) ?? null,
         model: args.data.model as string,
         status: "queued",
         runAfter: (args.data.runAfter as Date | undefined) ?? now(),

@@ -15,6 +15,7 @@ import type { LucideIcon } from "lucide-react";
 import type { AccessModuleId } from "@/lib/types";
 import {
   Activity,
+  AppWindow,
   Blocks,
   BookOpen,
   Braces,
@@ -326,6 +327,7 @@ export const NAV_GROUPS: NavGroup[] = [
         // WARP-3303 — background runs still going; amber when one needs an OK.
         badgeKey: "agentRunsActive",
       },
+      { href: "/hosted", label: "Apps", icon: AppWindow, roles: ["owner", "admin", "family"] },
 
       /* ── tucked out of Work (WARP-1807 / WARP-2966 / WARP-2967) ────────
          Rendered by no nav surface; Settings owns the way in. Each keeps its
@@ -1172,4 +1174,3 @@ export function moduleForPath(pathname: string): GatedRoute | null {
   }
   return best;
 }
-

@@ -125,6 +125,7 @@ import { redactToolResult } from "../lib/log-redaction.js";
 import type { ChatMessage } from "../types/index.js";
 import { contentToText } from "../types/index.js";
 import { chatRunBrief, deliverRunResults } from "./agent-run-result.service.js";
+import { applyRunBrief, type RunBriefKey } from "./run-brief.service.js";
 import {
   isConfirmationEnvelope,
   runAgent,
@@ -447,6 +448,7 @@ export function initialRunMessages(goal: string, offLan = false): ChatMessage[] 
 export const ACTIVE_AGENT_RUN_STATUSES = ["queued", "running", "awaiting_confirmation"] as const;
 
 export interface EnqueueAgentRunInput {
+  brief?: RunBriefKey | null;
   userId: string;
   goal: string;
   model: string;
@@ -518,6 +520,7 @@ export async function enqueueAgentRun(
   const row = await prisma.agentRun.create({
     data: {
       userId: input.userId,
+      brief: input.brief ?? null,
       goal: input.goal,
       model: input.model,
       sessionId: input.sessionId ?? null,
@@ -1094,6 +1097,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
           id: string;
           userId: string;
           goal: string;
+          brief: string | null;
           model: string;
           status: string;
           claimedBy: string | null;
@@ -1242,7 +1246,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
       : initialRunMessages(
           // WARP-3300 — a chat-started run gets the fixed brief; the others
           // keep their goal verbatim.
-          run.origin === "chat" ? chatRunBrief(run) : run.goal,
+          applyRunBrief(run.brief, run.origin === "chat" ? chatRunBrief(run) : run.goal),
           offLanProvider !== null,
         );
     // A resumed run re-derives its system prompt from THIS claim's verdict,

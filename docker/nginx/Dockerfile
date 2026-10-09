@@ -131,10 +131,10 @@ RUN set -eu; \
     rm -f /tmp/ca.key /tmp/ca.crt /tmp/ca.srl /tmp/l.key /tmp/l.csr /tmp/l.crt /tmp/san.cnf /tmp/ch-on.conf; \
     echo "canonical-host self-test OK — OFF + ON variants render and parse"; \
     # WARP-1686: both document-engine /docs/ variants must parse. They
-    # reference the $connection_upgrade map, so the throwaway config declares
-    # it exactly like nginx.conf does.
+    # reference the websocket-only maps, so the throwaway config declares
+    # them exactly like nginx.conf does.
     for eng in collabora onlyoffice; do \
-      printf 'events{}\nhttp{\n map $http_upgrade $connection_upgrade { default upgrade; "" close; }\n server{\n  listen 8080;\n  include /etc/nginx/docs-engine.%s.conf;\n }\n}\n' "$eng" > /tmp/test-nginx.conf; \
+      printf 'events{}\nhttp{\n map $http_upgrade $websocket_upgrade { default ""; websocket websocket; }\n map $websocket_upgrade $connection_upgrade { default close; websocket upgrade; }\n server{\n  listen 8080;\n  include /etc/nginx/docs-engine.%s.conf;\n }\n}\n' "$eng" > /tmp/test-nginx.conf; \
       nginx -t -c /tmp/test-nginx.conf; \
     done; \
     # WARP-3452: the /llm/ map rendered from a fixture route table carries this

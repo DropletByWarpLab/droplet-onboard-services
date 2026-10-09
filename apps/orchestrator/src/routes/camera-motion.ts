@@ -1,6 +1,6 @@
 import { Router } from "express";
 import type { PrismaClient } from "@prisma/client";
-import { requireRole } from "../middleware/auth.js";
+import { requireRoleOrMcpService } from "../middleware/auth.js";
 import { CAMERA_VIEW_ROLES, cameraScopeOf, narrowCameraFilter, requireCameraAccess } from "../services/camera-access.service.js";
 import { getCameras } from "../services/camera.service.js";
 import { getMotionActivity } from "../services/camera-motion.service.js";
@@ -9,7 +9,9 @@ import { getMotionActivity } from "../services/camera-motion.service.js";
  * unbounded archive scan. Camera scope is resolved before any recording fetch. */
 export function createCameraMotionRouter(prisma: PrismaClient): Router {
   const router = Router();
-  router.get("/cameras/motion", requireRole(...CAMERA_VIEW_ROLES), requireCameraAccess(prisma), async (req, res, next) => {
+  // WARP-3927: MCP-admitted so get_camera_motion / summarize_camera_activity
+  // reach it; requireCameraAccess still scopes to the acting person's cameras.
+  router.get("/cameras/motion", requireRoleOrMcpService(...CAMERA_VIEW_ROLES), requireCameraAccess(prisma), async (req, res, next) => {
     try {
       const q = req.query;
       for (const key of ["cameras", "after", "before", "cursor", "limit", "businessHours"] as const) {

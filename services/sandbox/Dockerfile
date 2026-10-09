@@ -20,7 +20,7 @@
 #
 # Non-root, and the compose entry makes the rootfs read-only with a tmpfs
 # /tmp — the Dockerfile must therefore leave nothing the service needs to
-# write at runtime outside /tmp and the two workspace volumes.
+# write at runtime outside /tmp and the four workspace volumes.
 
 # Node from the official image, copied in rather than apt-installed: Debian
 # bookworm ships Node 18, and the toolchain ceiling is 20 (WARP-2069).
@@ -50,11 +50,12 @@ COPY services/sandbox/ .
 COPY extensions/templates/ /app/templates/
 
 # The git store's two mount points (compose: workspace-git, workspace-checkouts)
-# and the installed-extensions dir (compose: extensions-installed, WARP-2900),
+# the installed-extensions dir (compose: extensions-installed, WARP-2900) and
+# persistent app data (compose: extensions-data, WARP-3906),
 # owned by the service user so a fresh volume is writable without an init hook.
 # The MCP host shims (ext_host/) arrive with `COPY services/sandbox/ .` above.
-RUN mkdir -p /var/lib/workspace-git /var/lib/workspace /var/lib/workspace-ext && \
-    chown -R sandbox:sandbox /var/lib/workspace-git /var/lib/workspace /var/lib/workspace-ext
+RUN mkdir -p /var/lib/workspace-git /var/lib/workspace /var/lib/workspace-ext /var/lib/workspace-ext-data && \
+    chown -R sandbox:sandbox /var/lib/workspace-git /var/lib/workspace /var/lib/workspace-ext /var/lib/workspace-ext-data
 
 # Sibling shape (doc-render / web-fetch): ship the FIPS-provider OpenSSL config
 # + shared helpers. NOT one of the provider-carrying images — compose pins

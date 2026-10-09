@@ -4745,6 +4745,8 @@ enum MediaGenerationStatus {
 }
 
 model AgentRun {
+  /// Validated fixed instructions, persisted for retries/resume; null for ordinary runs.
+  brief              String?
   id                 String                   @id @default(uuid())
   /// Attributed principal (`User.id`). Tool reach is re-resolved from it at
   /// EVERY claim (the WARP-1580 ticker rule), never cached at creation, so a
@@ -4902,6 +4904,8 @@ enum AgentRunStatus {
 /// presence of a tag.
 model WorkshopWorkspace {
   id          String          @id
+  /// Creation intent survives missing/unfinished app manifests and reopening.
+  kind        String          @default("extension")
   /// The owning person (`User.id`). Runs in this workspace are attributed to
   /// them; the dashboard shows an owner their own, an admin everyone's.
   userId      String
@@ -4954,12 +4958,40 @@ model Extension {
   currentVersionId  String?            @unique
   currentVersion    ExtensionVersion?  @relation("ExtensionCurrentVersion", fields: [currentVersionId], references: [id], onDelete: SetNull)
   serviceTokenHash  String?            @unique
+  /// Explicit signed-manifest class; app relays never attach MCP tools.
+  kind              String             @default("extension")
+  /// AES-GCM sealed per-install app relay key, AAD-bound to this slug.
+  appRelayKeyEnc     String?
+  lastHealthAt       DateTime?
+  hostedAppGrants    HostedAppGrant[]
+  hostedSessionCodes HostedAppSessionCode[]
   failureReason     String?
   createdAt         DateTime           @default(now())
   updatedAt         DateTime           @updatedAt
   versions          ExtensionVersion[] @relation("ExtensionVersions")
 
   @@index([status])
+}
+
+model HostedAppGrant {
+  extensionId String
+  role        Role
+  extension   Extension @relation(fields: [extensionId], references: [id], onDelete: Cascade)
+  @@id([extensionId, role])
+}
+
+/// Only a SHA256 of the exchange code is persisted. Redemption deletes it
+/// atomically, so independent orchestrator workers cannot redeem it twice.
+model HostedAppSessionCode {
+  codeHash    String @id
+  extensionId String
+  userId      String
+  /// The existing dashboard sign-in record also governs the app session.
+  sessionId   String
+  expiresAt   DateTime
+  createdAt   DateTime @default(now())
+  extension   Extension @relation(fields: [extensionId], references: [id], onDelete: Cascade)
+  @@index([expiresAt])
 }
 
 /// One signed version of an extension: the statement the box (or Warp Lab's
@@ -5227,6 +5259,10 @@ enum OffLanChannelKey {
   /// destinations never need it (they still pass the SSRF guard). One key, not
   /// one per integration: an owner decides this once.
   work_integrations
+  /// WARP-3912 (ADR-043 §4, ADR-072 §1) — the owner's master switch over every
+  /// outbound MCP session (curated Atlassian today, owner-added servers later).
+  /// Read fail-closed by `remoteMcpGate` on every remote call; off tears down.
+  remote_mcp
 }
 
 /// WARP-473 — Phase G1. File ↔ ChatMessage citations.

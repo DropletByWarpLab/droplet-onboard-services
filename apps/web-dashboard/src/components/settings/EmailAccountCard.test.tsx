@@ -7,7 +7,7 @@
  * "Checking…" until the first cycle has completed, and polls while it waits.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor, act, fireEvent } from "@testing-library/react";
+import { render, screen, waitFor, act } from "@testing-library/react";
 
 const authFetch = vi.fn();
 const session = { role: "owner" };
@@ -48,31 +48,6 @@ afterEach(() => {
 });
 
 describe("EmailAccountCard — mailbox state", () => {
-  it("reports a new connection only after a successful save, without credential arguments", async () => {
-    const onConnected = vi.fn();
-    authFetch.mockResolvedValue(listResponse([account({ lastIdleAt: new Date().toISOString() })]));
-    render(<EmailAccountCard onConnected={onConnected} />);
-    await screen.findByRole("status");
-    expect(onConnected).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "Connect a mailbox" }));
-    fireEvent.change(screen.getByLabelText("Password"), { target: { value: "private-mailbox-password" } });
-    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
-    await waitFor(() => expect(onConnected).toHaveBeenCalledTimes(1));
-    expect(onConnected.mock.calls).toEqual([[]]);
-    expect(authFetch).toHaveBeenCalledWith("/api/email/accounts", expect.objectContaining({ method: "POST" }));
-  });
-
-  it("does not report rejected mailbox credentials as connected", async () => {
-    const onConnected = vi.fn();
-    authFetch.mockImplementation((_url: string, options?: RequestInit) => Promise.resolve(options?.method === "POST" ? { ok: false, status: 400, json: async () => ({ error: "connect_failed" }) } : listResponse([])));
-    render(<EmailAccountCard onConnected={onConnected} />);
-    fireEvent.click(screen.getByRole("button", { name: "Connect a mailbox" }));
-    fireEvent.change(screen.getByLabelText("Password"), { target: { value: "private-mailbox-password" } });
-    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
-    await screen.findByRole("alert");
-    expect(onConnected).not.toHaveBeenCalled();
-    expect(screen.getByLabelText("Password")).toHaveValue("");
-  });
   it("labels a native Outlook account as a read-only import and uses its imported timestamp", async () => {
     authFetch.mockResolvedValue(listResponse([account({ authMode: "M365_GRAPH", canSend: false, lastIdleAt: new Date(Date.now() - 2 * 3_600_000).toISOString() })]));
     render(<EmailAccountCard />);

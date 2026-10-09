@@ -171,6 +171,11 @@ const EXPECTED_TOOL_NAMES = [
   "delete_clip",
   // WARP-1893 — cameras: rename to a household-facing label
   "rename_camera",
+  // WARP-3927 — camera activity for chat (all Tier-1 reads)
+  "summarize_camera_activity",
+  "get_camera_motion",
+  "list_camera_reviews",
+  "get_camera_recording",
   // WARP-1443 — network depth (reads Tier-1; password/schedule Tier-2)
   "get_bandwidth_usage",
   "list_vpn_peers",
@@ -236,6 +241,8 @@ const EXPECTED_TOOL_NAMES = [
   "workspace_commit",
   "workspace_run",
   "workspace_propose",
+  "list_hosted_apps",
+  "hosted_app_logs",
 ];
 
 describe("TOOLS registry", () => {
@@ -403,6 +410,11 @@ describe("TOOLS registry", () => {
     expect(TOOLS.get("search_camera_events")?.requiresConfirmation).toBe(false);
     expect(TOOLS.get("get_camera_health")?.requiresWrite).toBe(false);
     expect(TOOLS.get("get_camera_health")?.requiresConfirmation).toBe(false);
+    // WARP-3927 — camera activity tools only read recordings and review items.
+    for (const name of ["summarize_camera_activity", "get_camera_motion", "list_camera_reviews", "get_camera_recording"]) {
+      expect(TOOLS.get(name)?.requiresWrite, `${name} requiresWrite`).toBe(false);
+      expect(TOOLS.get(name)?.requiresConfirmation, `${name} requiresConfirmation`).toBe(false);
+    }
     // WARP-1850 — read-only storage reporting; never mutates retention.
     expect(TOOLS.get("get_camera_storage")?.requiresWrite).toBe(false);
     expect(TOOLS.get("get_camera_storage")?.requiresConfirmation).toBe(false);

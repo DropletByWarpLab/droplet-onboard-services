@@ -23,7 +23,9 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { FetchLike } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { pickRateLimitHeaders } from "./call-scheduler.js";
+import { connectModern } from "./modern-connection.js";
 import { pinTransportProtocolVersion } from "./protocol-pin.js";
+import { createGuardedFetch, guardedFetch, type GuardDeps } from "./pinned-fetch.js";
 import type {
   RemoteMcpConnection,
   RemoteMcpConnectInput,
@@ -49,12 +51,28 @@ export const MCP_BRIDGE_CLIENT_INFO = {
  */
 export interface StreamableHttpConnectionOptions {
   clientInfo?: { name: string; version: string };
+  /** TEST SEAM for the DNS-pinning guard (resolver, own addresses, sender).
+   *  Nothing in production passes it. */
+  guard?: GuardDeps;
   /**
    * Refuse the session unless the negotiated protocol version is exactly this,
    * then keep sending exactly this. Omitted means the SDK's default: accept
    * and adopt any of its five supported versions.
    */
   pinnedProtocolVersion?: string;
+  /**
+   * WARP-3921 — how the MCP revision is negotiated. Per profile.
+   *
+   *   - `"legacy"` (default): `initialize` only, exactly as before. The curated
+   *     Atlassian profile stays here, with its pin.
+   *   - `"probe"`: try revision 2026-07-28 first (`server/discover`), and fall
+   *     back to `initialize` ONLY on the spec's documented signal: a `400` whose
+   *     body is not a recognized modern JSON-RPC error. See
+   *     `modern-connection.ts` for the quoted wording and spec URLs.
+   *
+   * Incompatible with `pinnedProtocolVersion` (a pin names one legacy version).
+   */
+  protocolNegotiation?: "legacy" | "probe";
   /**
    * Called with a response's rate-limit headers, and ONLY those
    * ({@link pickRateLimitHeaders}), for every response the transport receives.
@@ -106,8 +124,7 @@ const TRANSPORT_RECONNECTION = {
  * Exported so the option can be tested without opening a socket: nothing in
  * this workspace dials in CI.
  */
-export const noRedirectFetch: FetchLike = (url, init) =>
-  fetch(url, { ...init, redirect: "error" });
+export const noRedirectFetch: FetchLike = guardedFetch;
 
 /**
  * {@link noRedirectFetch}, plus the one thing only this layer can see.
@@ -129,10 +146,12 @@ export const noRedirectFetch: FetchLike = (url, init) =>
  */
 export function createObservingFetch(
   onRateLimitHeaders?: (headers: Record<string, string>) => void,
+  guard?: GuardDeps,
 ): FetchLike {
-  if (!onRateLimitHeaders) return noRedirectFetch;
+  const guarded = guard ? createGuardedFetch(guard) : guardedFetch;
+  if (!onRateLimitHeaders) return guarded;
   return async (url, init) => {
-    const response = await fetch(url, { ...init, redirect: "error" });
+    const response = await guarded(url, init);
     const picked = pickRateLimitHeaders((name) => response.headers.get(name));
     if (picked) {
       try {
@@ -156,6 +175,18 @@ export const createStreamableHttpConnection = async (
   input: RemoteMcpConnectInput,
   opts: StreamableHttpConnectionOptions = {},
 ): Promise<RemoteMcpConnection> => {
+  if (opts.protocolNegotiation === "probe") {
+    if (opts.pinnedProtocolVersion !== undefined) {
+      throw new Error("protocolNegotiation \"probe\" cannot be combined with pinnedProtocolVersion");
+    }
+    const modern = await connectModern(
+      input,
+      createObservingFetch(opts.onRateLimitHeaders),
+      opts.clientInfo ?? MCP_BRIDGE_CLIENT_INFO,
+    );
+    if (modern !== "legacy") return modern;
+    // Documented legacy signal: carry on with the `initialize` handshake below.
+  }
   const transport = new StreamableHTTPClientTransport(new URL(input.url), {
     // The credential rides here and nowhere else. `headers` is built fresh by
     // the credential closure per connect (see `credentials.ts`), so nothing
@@ -165,7 +196,7 @@ export const createStreamableHttpConnection = async (
     // keeps it true for the life of the session. See `noRedirectFetch`. The
     // same wrapper is where the rate-limit headers are read, because it is the
     // last place the `Response` exists — see `onRateLimitHeaders`.
-    fetch: createObservingFetch(opts.onRateLimitHeaders),
+    fetch: createObservingFetch(opts.onRateLimitHeaders, opts.guard),
     reconnectionOptions: { ...TRANSPORT_RECONNECTION },
     ...(input.sessionId ? { sessionId: input.sessionId } : {}),
   });

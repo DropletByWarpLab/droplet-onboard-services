@@ -3475,6 +3475,38 @@ export async function setWorkIntegrationsChannel(enabled: boolean): Promise<void
   }
 }
 
+/**
+ * WARP-3912 — the `remote_mcp` off-LAN channel: whether the assistant may use
+ * the outside services an owner or admin connected. Default off on new boxes;
+ * owner or admin may change it. `null` = unreadable; don't guess.
+ */
+export async function fetchRemoteMcpChannel(): Promise<{ enabled: boolean } | null> {
+  const res = await authFetch(`${BASE}/api/settings/off-lan`);
+  if (!res.ok) return null;
+  const body = (await res.json()) as { channels?: Array<{ key: string; enabled: boolean }> };
+  const row = body.channels?.find((c) => c.key === "remote_mcp");
+  return row ? { enabled: row.enabled === true } : null;
+}
+
+/** WARP-3912 — flip `remote_mcp`. Turning it off disconnects sessions on the box. */
+export async function setRemoteMcpChannel(enabled: boolean): Promise<void> {
+  const res = await authFetch(`${BASE}/api/settings/off-lan/remote_mcp`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      enabled,
+      reason: enabled
+        ? "Turned on from Connector credentials"
+        : "Turned off from Connector credentials",
+    }),
+  });
+  if (!res.ok) {
+    throw Object.assign(new Error(`Failed to change connected MCP servers: ${res.status}`), {
+      status: res.status,
+    });
+  }
+}
+
 /** `refused` is set when the `web_push` off-LAN channel is off (WARP-2904). */
 export async function sendTestPush(): Promise<{
   sent: number;
@@ -9628,7 +9660,7 @@ async function extensionRequest<T>(path: string, init?: RequestInit): Promise<T>
   const res = await authFetch(`${BASE}${path}`, init);
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-    const code = typeof body.error === "string" ? body.error : null;
+    const code = typeof body.code === "string" ? body.code : typeof body.error === "string" ? body.error : null;
     const message =
       typeof body.message === "string" ? body.message : code ?? `Request failed: ${res.status}`;
     throw new ExtensionRequestError(message, res.status, code, body);
@@ -9647,17 +9679,17 @@ export function fetchExtensionProposals(): Promise<{ proposals: ExtensionProposa
 }
 
 /** Phase 1: the readback + preflight the owner confirms. Signs nothing. */
-export function prepareExtensionPromotion(workspaceId: string): Promise<ExtensionPromotePhase1> {
+export function prepareExtensionPromotion(workspaceId: string, currentPassword?: string): Promise<ExtensionPromotePhase1> {
   return extensionRequest(`/api/extensions/${encodeURIComponent(workspaceId)}/promote`, {
     ...JSON_POST,
-    body: JSON.stringify({}),
+    body: JSON.stringify(currentPassword ? { currentPassword } : {}),
   });
 }
 
 /** Phase 2: echoes the token and the digest that was read back; 409 if the bytes moved. */
 export function confirmExtensionPromotion(
   workspaceId: string,
-  input: { confirmationToken: string; manifestSha256: string; operatorDomain?: string | null },
+  input: { confirmationToken: string; manifestSha256: string; operatorDomain?: string | null; hostedAppRoles?: string[]; currentPassword?: string },
 ): Promise<ExtensionPromoteResult> {
   return extensionRequest(`/api/extensions/${encodeURIComponent(workspaceId)}/promote`, {
     ...JSON_POST,
@@ -9668,15 +9700,20 @@ export function confirmExtensionPromotion(
 export function setExtensionEnabled(
   slug: string,
   enabled: boolean,
+  currentPassword?: string,
 ): Promise<{ id: string; status: string }> {
   return extensionRequest(
     `/api/extensions/${encodeURIComponent(slug)}/${enabled ? "enable" : "disable"}`,
-    { ...JSON_POST, body: JSON.stringify({}) },
+    { ...JSON_POST, body: JSON.stringify(currentPassword ? { currentPassword } : {}) },
   );
 }
 
-export function uninstallExtension(slug: string): Promise<{ id: string; status: string }> {
-  return extensionRequest(`/api/extensions/${encodeURIComponent(slug)}`, { method: "DELETE" });
+export function uninstallExtension(slug: string, data?: { deleteData: true; confirmSlug: string }, currentPassword?: string, signal?: AbortSignal): Promise<{ id: string; status: string }> {
+  return extensionRequest(`/api/extensions/${encodeURIComponent(slug)}`, {
+    method: "DELETE",
+    ...(signal ? { signal } : {}),
+    ...(data || currentPassword ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...data, ...(currentPassword ? { currentPassword } : {}) }) } : {}),
+  });
 }
 
 /**

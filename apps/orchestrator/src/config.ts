@@ -1216,6 +1216,9 @@ const envSchema = z.object({
   // Extension rows dials nothing. Ships dark with the sandbox's
   // SANDBOX_PROCESS_SUPERVISION=0: no extension can be promoted then.
   EXTENSION_RECONCILE_INTERVAL_MS: z.coerce.number().int().min(5_000).max(3_600_000).default(60_000),
+  // Match the sandbox's existing, case-sensitive enable aliases; every other
+  // value is off. Parsing must not enable supervision or reject a disabled box.
+  SANDBOX_PROCESS_SUPERVISION: z.string().default("0").transform((v) => ["1", "true", "yes"].includes(v.trim())),
   // WARP-2900 (ADR-056 slice H3) — the orchestrator URL an extension calls
   // back on (handed to the child as DROPLET_ORCHESTRATOR_URL, next to its own
   // dxt_ bearer). The orchestrator's name on `droplet-internal`: the only
@@ -1381,8 +1384,8 @@ const envSchema = z.object({
   // exceeds the shipping context window, so an unopted-in remote catalog
   // would degrade every turn (per-turn selection, WARP-2348, is what gates
   // that). It is also NOT the owner's kill switch — that is the `remote_mcp`
-  // OffLanChannelKey in ADR-043 §4, which is a schema change and a separate
-  // ticket. This variable says which servers MAY exist; the channel says
+  // OffLanChannelKey (ADR-043 §4, WARP-3912), read by `remoteMcpGate` on every
+  // remote call. This variable says which servers MAY exist; the channel says
   // whether any session may run.
   REMOTE_MCP_SERVER_ALLOWLIST: z.string().default(""),
 

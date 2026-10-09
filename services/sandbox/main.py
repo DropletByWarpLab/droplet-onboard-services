@@ -67,15 +67,18 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 from starlette.types import Receive, Scope, Send
 
+import archive_import
 import connector_draft
 import extensions
 import gitstore
+import hosted_http
 import supervisor
 import workspace
 from analysis_artifacts import validate_artifacts
@@ -442,11 +445,22 @@ class InstallExtensionRequest(BaseModel):
     version: str = Field(pattern=extensions.SEMVER.pattern, max_length=64)
     commit: str = Field(pattern=r"^[0-9a-f]{40}$")
     tree: str = Field(pattern=r"^[0-9a-f]{40}$")
-    runtime: str = Field(pattern=r"^(node20|python312)$")
-    entrypoint: str = Field(min_length=1, max_length=256)
+    kind: str = Field(default="extension", pattern=r"^(extension|app)$")
+    runtime: str = Field(pattern=r"^(node20|python312|static)$")
+    entrypoint: str | None = Field(default=None, min_length=1, max_length=256)
+    http: dict[str, Any] | None = None
     memoryMb: int = Field(ge=extensions.MEMORY_MB_MIN, le=extensions.MEMORY_MB_MAX)
-    token: str = Field(pattern=extensions.EXT_TOKEN.pattern)
+    token: str | None = Field(default=None, pattern=extensions.EXT_TOKEN.pattern)
     orchestratorUrl: str | None = Field(default=None, pattern=r"^https?://[A-Za-z0-9.-]+(:\d{1,5})?$", max_length=256)
+
+    @model_validator(mode="after")
+    def validate_kind(self):
+        if self.kind == "extension":
+            if not self.entrypoint or not self.token or self.runtime == "static" or self.http is not None:
+                raise ValueError("tool extensions require entrypoint/token and must not have http or static runtime")
+        elif self.token is not None or self.orchestratorUrl is not None:
+            raise ValueError("apps must not receive a callback bearer or URL")
+        return self
 
 
 def _ext(fn, *args, **kwargs):
@@ -518,6 +532,8 @@ async def install_extension(slug: str, req: InstallExtensionRequest):
         token=req.token,
         base_env=CHILD_ENV,
         orchestrator_url=req.orchestratorUrl,
+        kind=req.kind,
+        http=req.http,
     )
 
 
@@ -537,6 +553,59 @@ async def relay_extension(slug: str, request: Request, timeoutMs: int | None = N
     )
 
 
+class _AppResponse(StreamingResponse):
+    """Close upstream even if a client disconnects before iteration starts."""
+    def __init__(self, response: hosted_http.RelayResponse):
+        super().__init__(response.chunks(), status_code=response.status, headers=response.headers)
+        self.upstream = response
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self.upstream.close()
+
+
+@app.api_route("/extensions/{slug}/http/{path:path}", methods=sorted(hosted_http.METHODS),
+               dependencies=[Depends(_processes_enabled)])
+async def relay_app(slug: str, path: str, request: Request):
+    import anyio
+
+    # Spool with a cap WHILE reading: Content-Length is not trustworthy, and
+    # request.body() would allocate an unbounded body before checking it.
+    length = request.headers.get("content-length")
+    if length and (not length.isdigit() or int(length) > hosted_http.MAX_REQUEST_BYTES):
+        raise HTTPException(status_code=413, detail="app request body exceeds 32 MiB")
+    deadline = time.monotonic() + hosted_http.MAX_TIMEOUT_S
+    with tempfile.SpooledTemporaryFile(max_size=256 * 1024, dir=SCRATCH_DIR) as body:
+        size = 0
+        try:
+            with anyio.fail_after(hosted_http.MAX_TIMEOUT_S):
+                async for chunk in request.stream():
+                    size += len(chunk)
+                    if size > hosted_http.MAX_REQUEST_BYTES:
+                        raise HTTPException(status_code=413, detail="app request body exceeds 32 MiB")
+                    body.write(chunk)
+        except TimeoutError as exc:
+            raise HTTPException(status_code=504, detail="app request body timed out") from exc
+        body.seek(0)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise HTTPException(status_code=504, detail="app request timed out")
+        response = await _ext_thread(
+            extensions.app_request, slug, request.headers.get("x-droplet-relay-key", ""),
+            request.method, path, request.url.query, dict(request.headers), body, size, remaining,
+        )
+    return _AppResponse(response)
+
+
+@app.get("/extensions/{slug}/logs", dependencies=[Depends(_processes_enabled)])
+async def app_logs(slug: str, limit: int = 200, since: int | None = None):
+    if not 1 <= limit <= 2000 or (since is not None and since < 0):
+        raise HTTPException(status_code=400, detail="invalid log limit or cursor")
+    return await _ext_thread(extensions.app_logs, slug, limit, since)
+
+
 @app.delete("/extensions/{slug}/process", dependencies=[Depends(_processes_enabled)])
 async def stop_extension(slug: str):
     snap = await _ext_thread(extensions.stop, slug)
@@ -546,8 +615,8 @@ async def stop_extension(slug: str):
 
 
 @app.delete("/extensions/{slug}", dependencies=[Depends(_processes_enabled)])
-async def uninstall_extension(slug: str):
-    return await _ext_thread(extensions.uninstall, slug)
+async def uninstall_extension(slug: str, deleteData: bool = False):
+    return await _ext_thread(extensions.uninstall, slug, delete_data=deleteData)
 
 
 # ── Slice G (WARP-2896): workspaces + the git store ────────────────────────
@@ -634,6 +703,34 @@ async def list_templates():
 @app.post("/workspaces")
 async def create_workspace(req: CreateWorkspaceRequest):
     return await _in_thread(gitstore.create_workspace, req.id, req.template, req.author.pair())
+
+
+@app.post("/workspaces/{workspace_id}/import", dependencies=[Depends(_processes_enabled)])
+async def import_workspace(workspace_id: str, request: Request, format: str):
+    import anyio
+
+    if format not in {"zip", "tar.gz"}:
+        raise HTTPException(status_code=400, detail="archive format must be zip or tar.gz")
+    _store(gitstore.check_id, workspace_id)
+    try:
+        author = WorkspaceAuthor(name=unquote(request.headers.get("x-droplet-author-name", "")),
+                                 email=unquote(request.headers.get("x-droplet-author-email", "")))
+    except ValidationError as exc:
+        raise HTTPException(status_code=400, detail="archive author is invalid") from exc
+    gitstore.ensure_dirs()
+    with tempfile.SpooledTemporaryFile(max_size=1024 * 1024, dir=gitstore.WORK_DIR) as spool:
+        size = 0
+        try:
+            with anyio.fail_after(archive_import.IMPORT_TIMEOUT_S):
+                async for chunk in request.stream():
+                    size += len(chunk)
+                    if size > archive_import.MAX_ARCHIVE_BYTES:
+                        raise HTTPException(status_code=413, detail="archive exceeds 256 MiB")
+                    spool.write(chunk)
+        except TimeoutError as exc:
+            raise HTTPException(status_code=504, detail="archive upload timed out") from exc
+        spool.seek(0)
+        return await _in_thread(archive_import.import_workspace, workspace_id, format, spool, author.pair())
 
 
 @app.get("/workspaces/{workspace_id}")
