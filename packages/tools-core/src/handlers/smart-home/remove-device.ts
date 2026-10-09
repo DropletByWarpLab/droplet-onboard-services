@@ -190,7 +190,7 @@ async function handler(
 const tool: Tool = {
   name: "remove_device",
   description:
-    "Unpair (remove) a Matter device from the home — factory-unlinks it from the Droplet fabric, after which it stops responding until it is commissioned again (use commission_device to re-add it later). Accepts the device's name or node id. Two-step: the first call returns confirmation_required naming the device — relay it to the user, and only after they explicitly approve, re-issue the SAME call with confirmed: true.",
+    "Unpair Matter device by known name/nodeId; stops responding until commission_device re-adds it. Relay confirmation_required device; only after explicit approval repeat SAME call with confirmed: true.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

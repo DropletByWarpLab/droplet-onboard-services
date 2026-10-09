@@ -54,6 +54,12 @@
  * §5, are backed by `services/mcp-bridge` out of process — never by a
  * `StreamableHTTPClientTransport` constructed here.
  */
+import {
+  interceptOutcomeToToolResult,
+  interceptorAuditEvent,
+  type InterceptorAuditEvent,
+  type ToolCallInterceptor,
+} from "@droplet/tools-core";
 import { createLogger } from "../lib/logger.js";
 import type {
   McpCallContext,
@@ -62,6 +68,7 @@ import type {
   McpToolDescriptor,
 } from "./mcp-client.port.js";
 import { withRemoteCallAttribution } from "./remote-call-attribution.js";
+import { auditRemoteMcp } from "./remote-mcp-gateway.service.js";
 
 const logger = createLogger("mcp-multiplexer");
 
@@ -139,7 +146,18 @@ export interface RemoteRejection {
 
 /** The dispatch-time verdict on one remote call. */
 export type RemoteCallDecision =
-  | { kind: "allow" }
+  | {
+      kind: "allow";
+      /**
+       * WARP-2437 — the policy classed this call a WRITE. It is then routed
+       * through the confirmation interceptor, and refused outright when none
+       * is registered, instead of dispatched. Absent = a read, which runs.
+       * No shipping policy sets it yet: remote writes stay
+       * REMOTE_WRITE_NOT_PERMITTED. This is the seat for lifting that, so the
+       * lift cannot skip the thumbs-up.
+       */
+      requiresConfirmation?: boolean;
+    }
   | { kind: "deny"; code: string; message: string };
 
 /**
@@ -180,6 +198,22 @@ export const DENY_ALL_REMOTE_TOOLS: RemoteCallPolicy = ({ namespacedName }) => (
  */
 export const MAX_RETAINED_REJECTIONS = 100;
 
+/** WARP-3919 — longest remote tool description sent to the model. */
+export const MAX_REMOTE_DESCRIPTION_CHARS = 800;
+const TRUNCATION_MARKER = "… [truncated]";
+
+/** Cap at {@link MAX_REMOTE_DESCRIPTION_CHARS} including the marker, never splitting a surrogate pair. */
+export function capRemoteDescription(description: string): string {
+  // `typeof`: the wire is untrusted, a missing description must not throw.
+  if (typeof description !== "string" || description.length <= MAX_REMOTE_DESCRIPTION_CHARS) {
+    return description;
+  }
+  let end = MAX_REMOTE_DESCRIPTION_CHARS - TRUNCATION_MARKER.length;
+  const last = description.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1; // would orphan a high surrogate
+  return description.slice(0, end) + TRUNCATION_MARKER;
+}
+
 export interface McpToolMultiplexerOptions {
   /**
    * WARP-2418 — the operator allowlist. Returns `true` only for a server the
@@ -189,6 +223,20 @@ export interface McpToolMultiplexerOptions {
   isServerAllowed?: (serverId: string) => boolean;
   /** WARP-2321's hook. Defaults to {@link DENY_ALL_REMOTE_TOOLS}. */
   remoteCallPolicy?: RemoteCallPolicy;
+  /**
+   * WARP-2437 — the write-confirmation interceptor (WARP-2305) a remote WRITE
+   * is routed through. ABSENT MEANS A REMOTE WRITE REFUSES
+   * (REMOTE_WRITE_NO_INTERCEPTOR), never proceeds: a merge-order accident
+   * must not ship unconfirmed writes.
+   *
+   * WARP-2214 DEPENDENCY: the generic interceptor is being built under that
+   * ticket. Until it lands and the singleton registers it, this refusal is
+   * the stub. Remove it deliberately when 2214 wires the real one.
+   */
+  writeInterceptor?: ToolCallInterceptor;
+  /** Audit sink for the interceptor's decisions (denied / challenged /
+   *  refused / confirmed). Scalars only: never arguments (rule 19, PHI). */
+  onConfirmationEvent?: (event: InterceptorAuditEvent, ctx: { userId?: string }) => void;
   /**
    * WARP-2434 — offer-time half of the per-server allowlist: a remote tool for
    * which this returns false stays in the vetted catalog but is not listed to
@@ -210,10 +258,16 @@ interface AttachedRemote {
   catalogLoaded: boolean;
 }
 
+/**
+ * A call the multiplexer REFUSED. `status: "blocked"` (WARP-2432) is the
+ * distinguishable state: a remote server's own failure never carries it, and
+ * a successful empty answer is not `isError` at all, so a blocked call can
+ * never be mistaken for "the tool ran and found nothing".
+ */
 function errorOutcome(code: string, tool: string, message: string): McpToolCallOutcome {
   return {
     isError: true,
-    content: [{ type: "text", text: JSON.stringify({ error: code, tool, message }) }],
+    content: [{ type: "text", text: JSON.stringify({ status: "blocked", error: code, tool, message }) }],
   };
 }
 
@@ -239,8 +293,13 @@ export class McpToolMultiplexer implements McpClientPort {
   readonly #remoteCallPolicy: RemoteCallPolicy;
   readonly #isRemoteToolOffered: (serverId: string, wireName: string) => boolean;
 
+  readonly #writeInterceptor: ToolCallInterceptor | undefined;
+  readonly #onConfirmationEvent: McpToolMultiplexerOptions["onConfirmationEvent"];
+
   constructor(local: McpClientPort, opts: McpToolMultiplexerOptions = {}) {
     this.#local = local;
+    this.#writeInterceptor = opts.writeInterceptor;
+    this.#onConfirmationEvent = opts.onConfirmationEvent;
     this.#isRemoteToolOffered = opts.isRemoteToolOffered ?? (() => true);
     this.#isServerAllowed = opts.isServerAllowed ?? (() => false);
     this.#remoteCallPolicy = opts.remoteCallPolicy ?? DENY_ALL_REMOTE_TOOLS;
@@ -360,7 +419,11 @@ export class McpToolMultiplexer implements McpClientPort {
         if (!vetted) continue;
         remote.catalog.set(tool.name, vetted);
         taken.add(vetted.name);
-        if (this.#isRemoteToolOffered(serverId, tool.name)) out.push(vetted);
+        // WARP-3919 — the cap applies to the copy the MODEL sees; `catalog`
+        // (classification, review) keeps the full text.
+        if (this.#isRemoteToolOffered(serverId, tool.name)) {
+          out.push({ ...vetted, description: capRemoteDescription(vetted.description) });
+        }
       }
     }
     return out;
@@ -403,6 +466,15 @@ export class McpToolMultiplexer implements McpClientPort {
         { serverId: parsed.serverId, tool: name, catalogLoaded: remote.catalogLoaded },
         "remote_tool_not_registered",
       );
+      // WARP-2439 — a refused attempt is still a row. No `tool`: this name is
+      // model-produced and not in the vetted catalog, so it is unbounded input.
+      auditRemoteMcp({
+        serverId: parsed.serverId,
+        op: "call_tool",
+        outcome: "refused_policy",
+        reason: "REMOTE_TOOL_NOT_REGISTERED",
+        who: { userId: context?.userId, agentRunId: context?.agentRunId },
+      });
       return errorOutcome(
         "REMOTE_TOOL_NOT_REGISTERED",
         name,
@@ -423,7 +495,23 @@ export class McpToolMultiplexer implements McpClientPort {
         { serverId: parsed.serverId, tool: name, code: decision.code },
         "remote_tool_denied",
       );
+      auditRemoteMcp({
+        serverId: parsed.serverId,
+        op: "call_tool",
+        outcome: "refused_policy",
+        tool: parsed.wireName,
+        reason: decision.code,
+        who: { userId: context?.userId, agentRunId: context?.agentRunId },
+      });
       return errorOutcome(decision.code, name, decision.message);
+    }
+
+    // WARP-2437 — a write never dispatches on the policy's say-so alone.
+    let callArgs = args;
+    if (decision.requiresConfirmation === true) {
+      const gated = this.#confirmWrite(name, args, context);
+      if (gated.refusal) return gated.refusal;
+      callArgs = gated.args;
     }
 
     // `context` is deliberately dropped: see the module header. The remote
@@ -431,8 +519,84 @@ export class McpToolMultiplexer implements McpClientPort {
     // in-process only, for the orchestrator's own audit row.
     return withRemoteCallAttribution(
       { userId: context?.userId, agentRunId: context?.agentRunId },
-      () => remote.client.callTool(parsed.wireName, args),
+      () => remote.client.callTool(parsed.wireName, callArgs),
     );
+  }
+
+  /**
+   * WARP-2437 — route one remote WRITE through the interceptor, fail-closed.
+   *
+   * No interceptor registered → refuse with a distinct code and an audit
+   * event. Registered → it decides: a challenge or a refused token comes back
+   * as the interceptor's own `details.interceptor` block (so the approval chip
+   * and the confirmation audit read it unchanged), and only a verified token
+   * proceeds. The tool is described by name and flags alone: no inputSchema,
+   * so the interceptor never injects `confirmed: true` into a remote
+   * server's arguments.
+   */
+  #confirmWrite(
+    name: string,
+    args: Record<string, unknown>,
+    context: McpCallContext | undefined,
+  ): { refusal: McpToolCallOutcome; args?: undefined } | { refusal?: undefined; args: Record<string, unknown> } {
+    const audit = (event: InterceptorAuditEvent) => {
+      try {
+        this.#onConfirmationEvent?.(event, { userId: context?.userId });
+      } catch (err) {
+        logger.error({ err, tool: name }, "remote_confirmation_audit_failed");
+      }
+    };
+    const interceptor = this.#writeInterceptor;
+    if (!interceptor) {
+      const reason = "REMOTE_WRITE_NO_INTERCEPTOR";
+      logger.warn({ tool: name, code: reason }, "remote_write_refused_no_interceptor");
+      audit({ outcome: "denied", tool: name, reason });
+      return {
+        refusal: {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                status: "error",
+                error: {
+                  code: reason,
+                  message:
+                    `'${name}' writes, and no write-confirmation interceptor is registered, so it was not run. ` +
+                    "Do not retry; answer without it.",
+                  details: { interceptor: { outcome: "denied", tool: name, reason } },
+                },
+              }),
+            },
+          ],
+        },
+      };
+    }
+    const tool = { name, requiresConfirmation: true, requiresWrite: true };
+    const outcome = interceptor.intercept(tool, args, {
+      confirmationToken: context?.confirmationToken,
+    });
+    const event = interceptorAuditEvent(tool, outcome);
+    if (event) audit(event);
+    const refusal = interceptOutcomeToToolResult(tool, outcome);
+    if (refusal && !refusal.ok) {
+      return {
+        refusal: {
+          // Same shape the mcp-server writes (toolResultToContent): a
+          // challenge is not a hard error, a denial is.
+          isError: refusal.status === "error",
+          content: [
+            { type: "text", text: JSON.stringify({ status: refusal.status, error: refusal.error }) },
+          ],
+        },
+      };
+    }
+    // Fail closed: only an explicit `proceed` runs; anything else that
+    // slipped past the refusal mapping is refused, not dispatched.
+    if (outcome.kind !== "proceed") {
+      return { refusal: errorOutcome("REMOTE_WRITE_NOT_CONFIRMED", name, "The write was not confirmed.") };
+    }
+    return { args: outcome.args };
   }
 
   #vetRemoteTool(

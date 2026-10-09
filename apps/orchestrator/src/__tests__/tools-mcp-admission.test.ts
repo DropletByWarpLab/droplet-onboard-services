@@ -51,6 +51,8 @@ vi.mock("../config.js", () => ({
   config: {
     AUTH_ENABLED: true,
     NEXTCLOUD_URL: "http://nextcloud.test",
+    DROPLET_LAN_HOSTNAME: "droplet-ai.lan",
+    corsAllowedOrigins: ["https://droplet-ai.lan"],
     SERVICE_TOKEN_MCP: "test-mcp-token-32chars-padding-1234a",
     JWT_SECRET: "test-secret-32-bytes-long-aaaaaaaa",
     DROPLET_OTA_RELEASES_URL: "https://releases.test/latest",
@@ -100,6 +102,7 @@ vi.mock("../services/activity.singleton.js", () => ({
 }));
 
 import { createSwitchRouter } from "../routes/switch.js";
+import { createHostedManagementRouter } from "../routes/hosted.js";
 import { createUpdatesRouter, type UpdatesRouterDeps } from "../routes/updates.js";
 import { DEFAULT_UPDATE_AGENT_SETTINGS } from "../services/update-agent/settings.js";
 import { evaluateNetworkCommand } from "../services/network-safety.service.js";
@@ -118,8 +121,29 @@ const ADMIT_HOPS = ALL_HOPS.filter((h) => h.kind === "admit");
 const DASHBOARD_ONLY_HOPS = ALL_HOPS.filter((h) => h.kind === "dashboard-only");
 
 /** Prefixes whose routers this suite mounts and drives live. */
-const LIVE_PREFIXES = ["/api/switch/", "/api/updates/"];
+const LIVE_PREFIXES = ["/api/switch/", "/api/updates/", "/api/hosted"];
 const isLive = (path: string) => LIVE_PREFIXES.some((p) => path.startsWith(p));
+
+describe("LIVE: hosted management router admits the attributed MCP principal", () => {
+  for (const h of ADMIT_HOPS.filter((hop) => hop.path.startsWith("/api/hosted"))) {
+    it(`${h.tool}: ${h.method.toUpperCase()} ${h.path} returns its read result`, async () => {
+      const user = { id: "owner-id", username: "alice", displayName: "Alice", role: "owner", directoryStatus: "ACTIVE", email: null };
+      const manifestBytes = Buffer.from(JSON.stringify({ schemaVersion: 1, id: "1", name: "App", version: "0.1.0",
+        kind: "app", runtime: "static", provides: { tools: [], routineDrafts: [], proposedGrants: [] }, resources: { memoryMb: 16, processes: 1 },
+        egress: "none", http: { health: "/healthz", dir: "." } }));
+      const prisma = { user: { findMany: vi.fn(async () => [user]), findUnique: vi.fn(async () => user) },
+        extension: { findMany: vi.fn(async () => []), findUnique: vi.fn(async () => ({ id: "1", kind: "app", status: "live", currentVersion: { manifestBytes }, hostedAppGrants: [] })) } } as unknown as PrismaClient;
+      const app = shim(mcpPrincipal, (a) => a.use("/api/hosted", createHostedManagementRouter(prisma, {
+        enabled: () => true, sandbox: { logs: vi.fn(async () => ({ output: "bounded app log" })) } as never,
+      })));
+      const res = await (request(app) as any)[h.method](fillParams(h.path))
+        .set("Host", "droplet-ai.lan").set("X-Nextcloud-User", "alice");
+      expect(res.status).toBe(200);
+      if (h.tool === "list_hosted_apps") expect(res.body.apps).toEqual([]);
+      else expect(res.body.output).toBe("bounded app log");
+    });
+  }
+});
 
 // ────────────────────────────────────────────────────────────────────────
 // LIVE mode — mount the real switch + updates routers, drive as _service:mcp

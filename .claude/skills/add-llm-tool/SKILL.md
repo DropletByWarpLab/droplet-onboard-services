@@ -127,6 +127,7 @@ your handler is wrong; they only tell you it is wired.
 | File | Why it is in your blast radius |
 |---|---|
 | `apps/orchestrator/src/services/tool-access.service.ts` | `WRITE_TOOLS` is **derived** from `requiresWrite` here (it is no longer in `apps/orchestrator/src/routes/llm.ts`). RBAC picks your tool up with no manual sync — adding a literal list is the thing the guard test exists to reject. |
+| `apps/orchestrator/src/services/remote-tool-classification.service.ts` | `WRITE_TOOLS` also unions the remote tools whose classification row says write, read live from this cache (WARP-2436). A compiled tool never appears here; the write-tools guard reads it to prove there is still no second, hand-kept list. |
 | `packages/tools-core/src/interceptor.ts` | Enforces `requiresConfirmation` generically at dispatch. Setting the flag is the whole integration; do not hand-roll a prompt. |
 | `apps/orchestrator/src/services/confirmation-audit.ts` | Builds the signed approval audit rows from tool name and outcome only. The approval-values gate asserts these rows never carry an argument value; do not add a field an argument could be put in. |
 | `apps/orchestrator/src/services/tool-selection.service.ts` | `CORE_TOOL_NAMES` (the always-advertised floor). Read-only for a tool in an EXISTING domain — but see **site 10** if your tool opens a new one. |
@@ -188,6 +189,12 @@ must never touch (runtime tools live outside `TOOLS`, ADR-043).
 - Module gating follows the tool's DOMAIN (WARP-2972): a tool in a module-claimed domain leaves the chat pool, `/api/llm/tools` and MCP when its module is off. `apps/orchestrator/src/__tests__/setup.ts` installs a PERMISSIVE verdict, so a pool or route test only sees gating if it calls `_setToolModuleVerdictForTests` (`services/tool-module-verdict.service.ts`); a NEW domain a module claims must also join `MODULE_OWNED_TOOL_DOMAINS` in `packages/tools-core/src/module-gate.ts` or `tool-module-verdict.service.test.ts` fails.
 
 ## Running the gates
+
+When the write-tool registry changes, regenerate the evaluation harness's
+`tests/agent-loop-eval/write_tools.json` with
+`npx tsx tests/agent-loop-eval/run.mts --write-tools` from the repository root,
+and run the offline harness self-test. This snapshot drives its write-action
+checks; a stale snapshot fails the orchestrator CI after Vitest completes.
 
 ```bash
 cd packages/tools-core && npx vitest run                 # sites 1-6, 9

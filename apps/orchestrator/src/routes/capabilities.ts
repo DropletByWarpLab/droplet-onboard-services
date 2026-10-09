@@ -33,6 +33,7 @@ import type { PrismaClient } from "@prisma/client";
 import { getEffectiveModuleIds } from "../services/modules.service.js";
 import type { AvailabilityConfig } from "../modules/module-registry.js";
 import { createLogger } from "../lib/logger.js";
+import { createCreationCapabilitiesRouter } from "./creation-capabilities.js";
 
 const logger = createLogger("capabilities-route");
 
@@ -78,6 +79,7 @@ export function createCapabilitiesRouter(
   cfg: AvailabilityConfig,
 ): Router {
   const router = Router();
+  router.use(createCreationCapabilitiesRouter(prisma, cfg));
 
   router.get("/capabilities", async (req: Request, res: Response) => {
     // Mounted after authMiddleware, so an unauthenticated request never gets

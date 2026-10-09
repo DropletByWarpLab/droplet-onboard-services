@@ -1748,6 +1748,9 @@ export type RouterErrorCode =
   | "UNREACHABLE"
   | "TIMEOUT"
   | "AUTH"
+  // ADR-071: the router is enrolled to a DIFFERENT box. Re-pairing needs the
+  // router's button, so this is never folded into AUTH.
+  | "PAIRED_ELSEWHERE"
   | "ROLLED_BACK"
   | "DISABLED"
   // WARP-816: the radio is broadcasting the Droplet's own Wi-Fi on its only
@@ -2188,6 +2191,119 @@ export async function fetchSshAccess(): Promise<SshAccessStatus> {
   const res = await authFetch(`${BASE}/api/network/ssh`);
   if (!res.ok) throw new Error(`Failed to fetch SSH access status: ${res.status}`);
   return res.json();
+}
+
+// --- Device pairing (ADR-071 slices B + C) ---
+
+/** Which device a pairing card is for. */
+export type DevicePairingRole = "router" | "switch" | "ap";
+
+/** What a pairing card reads. `available:false` = this build's owning service
+ *  has no pairing surface, so no card is shown. The same shape for the router,
+ *  the managed switch and each access point. */
+export interface DevicePairingView {
+  available: boolean;
+  state: "open" | "closed" | "paired" | "unknown" | null;
+  windowEndsAt: string | null;
+  /** 64 lowercase hex of the box the device is enrolled to, or null. */
+  pairedBox: string | null;
+  pairedElsewhere: boolean;
+  /** Paired and live, but the password is only in the service's memory. */
+  pendingPersist: boolean;
+  /** The device's typed error right now (AUTH, PAIRED_ELSEWHERE, ...). Named for
+   *  the router because slice B's card reads it; the switch and AP views carry
+   *  their own device's state in the same field. */
+  routerErrorCode: RouterErrorCode | null;
+  host: string | null;
+  model: string | null;
+}
+
+/** Slice B's name for the same shape. */
+export type RouterPairingView = DevicePairingView;
+
+export interface DevicePairResult {
+  ok: boolean;
+  /** Only meaningful when `ok`: false = live now, lost on the next restart. */
+  persisted: boolean;
+  host?: string;
+  model?: string;
+  paired_at?: string;
+  error?: string;
+  code?: string;
+}
+
+/** Slice B's name for the same shape. */
+export type RouterPairResult = DevicePairResult;
+
+/** `/api/network/router`, `/api/network/switch`, `/api/network/aps/:mac`. */
+function pairingBase(role: DevicePairingRole, mac?: string): string {
+  if (role === "ap") return `/api/network/aps/${encodeURIComponent(mac ?? "")}`;
+  return `/api/network/${role}`;
+}
+
+async function fetchDevicePairing(role: DevicePairingRole, mac?: string): Promise<DevicePairingView> {
+  const res = await authFetch(`${BASE}${pairingBase(role, mac)}/pairing`);
+  if (!res.ok) throw new Error(`Failed to fetch ${role} pairing state: ${res.status}`);
+  return res.json();
+}
+
+/** The pairing POSTs answer a structured `{ok:false, error, code}` on a refusal
+ *  (window closed, paired elsewhere...), which the card renders as-is. Only a
+ *  response that is not that shape throws. */
+async function postDevicePairing(path: string, fallback: string): Promise<DevicePairResult> {
+  const res = await authFetch(`${BASE}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+  const data = await res.json().catch(() => ({}));
+  if (typeof data?.ok === "boolean") return data as DevicePairResult;
+  throw new Error(
+    (typeof data?.message === "string" && data.message) ||
+      (typeof data?.error === "string" && data.error) ||
+      `${fallback}: ${res.status}`,
+  );
+}
+
+// Router (slice B).
+export function fetchRouterPairing(): Promise<DevicePairingView> {
+  return fetchDevicePairing("router");
+}
+
+/** Owner/admin, after the confirmation dialog: claim the router and save the credential. */
+export function pairRouter(): Promise<DevicePairResult> {
+  return postDevicePairing("/api/network/router/pair", "Failed to pair the router");
+}
+
+/** Retry only the "save the password" leg after a pairing that was not persisted. */
+export function persistRouterPairing(): Promise<DevicePairResult> {
+  return postDevicePairing("/api/network/router/pair/persist", "Failed to save the router password");
+}
+
+// Managed switch (slice C).
+export function fetchSwitchPairing(): Promise<DevicePairingView> {
+  return fetchDevicePairing("switch");
+}
+
+export function pairSwitch(): Promise<DevicePairResult> {
+  return postDevicePairing("/api/network/switch/pair", "Failed to pair the switch");
+}
+
+export function persistSwitchPairing(): Promise<DevicePairResult> {
+  return postDevicePairing("/api/network/switch/pair/persist", "Failed to save the switch password");
+}
+
+// Access points (slice C), per MAC. One shared AP secret on the box (ADR-071 §2.3).
+export function fetchApPairing(mac: string): Promise<DevicePairingView> {
+  return fetchDevicePairing("ap", mac);
+}
+
+export function pairAp(mac: string): Promise<DevicePairResult> {
+  return postDevicePairing(`${pairingBase("ap", mac)}/pair`, "Failed to pair the access point");
+}
+
+export function persistApPairing(mac: string): Promise<DevicePairResult> {
+  return postDevicePairing(`${pairingBase("ap", mac)}/pair/persist`, "Failed to save the access point password");
 }
 
 /** Allow / disallow SSH. Tier 3 — answers 202 `confirmation_required`. */
@@ -3155,6 +3271,9 @@ export async function fetchCameraSettings(
 export async function fetchCameraSystemStatus(): Promise<CameraSystemStatus> {
   const res = await authFetch(`${BASE}/api/cameras/system`);
   if (!res.ok) throw new Error(`Failed to fetch system status: ${res.status}`);
+  // A Frigate outage is a degraded 200 carrying an all-zero status, which
+  // renders as "0 / 0 cameras, 0% CPU" — a healthy-looking page about nothing.
+  if (res.headers?.get("X-Droplet-Degraded")) throw new CamerasUnavailableError();
   const body = (await res.json()) as { status: CameraSystemStatus };
   return body.status;
 }
@@ -3470,6 +3589,38 @@ export async function setWorkIntegrationsChannel(enabled: boolean): Promise<void
   });
   if (!res.ok) {
     throw Object.assign(new Error(`Failed to change work notifications egress: ${res.status}`), {
+      status: res.status,
+    });
+  }
+}
+
+/**
+ * WARP-3912 — the `remote_mcp` off-LAN channel: whether the assistant may use
+ * the outside services an owner or admin connected. Default off on new boxes;
+ * owner or admin may change it. `null` = unreadable; don't guess.
+ */
+export async function fetchRemoteMcpChannel(): Promise<{ enabled: boolean } | null> {
+  const res = await authFetch(`${BASE}/api/settings/off-lan`);
+  if (!res.ok) return null;
+  const body = (await res.json()) as { channels?: Array<{ key: string; enabled: boolean }> };
+  const row = body.channels?.find((c) => c.key === "remote_mcp");
+  return row ? { enabled: row.enabled === true } : null;
+}
+
+/** WARP-3912 — flip `remote_mcp`. Turning it off disconnects sessions on the box. */
+export async function setRemoteMcpChannel(enabled: boolean): Promise<void> {
+  const res = await authFetch(`${BASE}/api/settings/off-lan/remote_mcp`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      enabled,
+      reason: enabled
+        ? "Turned on from Connector credentials"
+        : "Turned off from Connector credentials",
+    }),
+  });
+  if (!res.ok) {
+    throw Object.assign(new Error(`Failed to change connected MCP servers: ${res.status}`), {
       status: res.status,
     });
   }
@@ -9628,7 +9779,7 @@ async function extensionRequest<T>(path: string, init?: RequestInit): Promise<T>
   const res = await authFetch(`${BASE}${path}`, init);
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-    const code = typeof body.error === "string" ? body.error : null;
+    const code = typeof body.code === "string" ? body.code : typeof body.error === "string" ? body.error : null;
     const message =
       typeof body.message === "string" ? body.message : code ?? `Request failed: ${res.status}`;
     throw new ExtensionRequestError(message, res.status, code, body);
@@ -9647,17 +9798,17 @@ export function fetchExtensionProposals(): Promise<{ proposals: ExtensionProposa
 }
 
 /** Phase 1: the readback + preflight the owner confirms. Signs nothing. */
-export function prepareExtensionPromotion(workspaceId: string): Promise<ExtensionPromotePhase1> {
+export function prepareExtensionPromotion(workspaceId: string, currentPassword?: string): Promise<ExtensionPromotePhase1> {
   return extensionRequest(`/api/extensions/${encodeURIComponent(workspaceId)}/promote`, {
     ...JSON_POST,
-    body: JSON.stringify({}),
+    body: JSON.stringify(currentPassword ? { currentPassword } : {}),
   });
 }
 
 /** Phase 2: echoes the token and the digest that was read back; 409 if the bytes moved. */
 export function confirmExtensionPromotion(
   workspaceId: string,
-  input: { confirmationToken: string; manifestSha256: string; operatorDomain?: string | null },
+  input: { confirmationToken: string; manifestSha256: string; operatorDomain?: string | null; hostedAppRoles?: string[]; currentPassword?: string },
 ): Promise<ExtensionPromoteResult> {
   return extensionRequest(`/api/extensions/${encodeURIComponent(workspaceId)}/promote`, {
     ...JSON_POST,
@@ -9668,15 +9819,20 @@ export function confirmExtensionPromotion(
 export function setExtensionEnabled(
   slug: string,
   enabled: boolean,
+  currentPassword?: string,
 ): Promise<{ id: string; status: string }> {
   return extensionRequest(
     `/api/extensions/${encodeURIComponent(slug)}/${enabled ? "enable" : "disable"}`,
-    { ...JSON_POST, body: JSON.stringify({}) },
+    { ...JSON_POST, body: JSON.stringify(currentPassword ? { currentPassword } : {}) },
   );
 }
 
-export function uninstallExtension(slug: string): Promise<{ id: string; status: string }> {
-  return extensionRequest(`/api/extensions/${encodeURIComponent(slug)}`, { method: "DELETE" });
+export function uninstallExtension(slug: string, data?: { deleteData: true; confirmSlug: string }, currentPassword?: string, signal?: AbortSignal): Promise<{ id: string; status: string }> {
+  return extensionRequest(`/api/extensions/${encodeURIComponent(slug)}`, {
+    method: "DELETE",
+    ...(signal ? { signal } : {}),
+    ...(data || currentPassword ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...data, ...(currentPassword ? { currentPassword } : {}) }) } : {}),
+  });
 }
 
 /**

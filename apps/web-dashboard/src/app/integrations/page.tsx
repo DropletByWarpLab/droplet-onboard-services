@@ -13,7 +13,7 @@
  * id appears in this file at all any more, and a test asserts that.
  */
 
-import { Fragment, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { Blocks, ShieldCheck, ChevronRight, AlertTriangle } from "lucide-react";
@@ -22,6 +22,7 @@ import { Sect } from "@/components/shell/primitives";
 import { useIntegrations, type HubEntry } from "@/lib/hooks/useIntegrations";
 import { ConnectorCard } from "@/components/integrations/ConnectorCard";
 import { ConnectWizard } from "@/components/integrations/ConnectWizard";
+import { LanApiSetupDialog, isLanApiProvider } from "@/components/integrations/LanApiConnectionSetup";
 import { connectorIcon } from "@/components/integrations/connector-visuals";
 import {
   REPORTED_CATEGORY,
@@ -63,6 +64,9 @@ export default function IntegrationsPage() {
   // one layer down from the dispatch WARP-2291 fixed.
   const [wizardFor, setWizardFor] = useState<string | null>(null);
   const [blocked, setBlocked] = useState<{ name: string; reason: string } | null>(null);
+  // WARP-3904 - the Patterson API track has its own form (the generic wizard for
+  // its tile is the direct-SQL one), opened by the hand-off below.
+  const [lanApiOpen, setLanApiOpen] = useState(false);
 
   /**
    * The whole dispatch. Exhaustive over `ConnectAction`, so a tile can only
@@ -87,6 +91,31 @@ export default function IntegrationsPage() {
 
   const openConnector = (e: HubEntry) => run(e, e.open);
   const connectConnector = (e: HubEntry) => run(e, e.connect);
+
+  // WARP-3904 - `?connect=<provider>` is the hand-off from Ask AI ("Open the
+  // wizard", "Manage in Integrations"): do what that tile's Connect does, then
+  // strip the parameter so a refresh or a back-navigation does not reopen it.
+  // The one provider whose setup is not its tile's wizard opens its own form
+  // instead. Read from `window.location` rather than `useSearchParams`, which
+  // would force a Suspense boundary onto the whole hub. A provider the catalog
+  // does not know is stripped too and opens nothing: the page never guesses.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const url = new URL(window.location.href);
+    const wanted = url.searchParams.get("connect");
+    if (wanted === null) return;
+    url.searchParams.delete("connect");
+    window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+    if (isLanApiProvider(wanted)) {
+      setLanApiOpen(true);
+      return;
+    }
+    const entry = entries.find((e) => e.meta.id === wanted || e.providerKeys.includes(wanted));
+    if (entry) run(entry, entry.connect);
+    // Once per mount: `entries` is the static catalog merged with the status
+    // read, and the catalog half is complete on the first render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const nothingConnected = connected.length === 0;
 
@@ -229,6 +258,7 @@ export default function IntegrationsPage() {
         onClose={() => setWizardFor(null)}
         onConnected={() => refresh()}
       />
+      <LanApiSetupDialog open={lanApiOpen} onClose={() => setLanApiOpen(false)} onConnected={() => refresh()} />
     </ShellPage>
   );
 }

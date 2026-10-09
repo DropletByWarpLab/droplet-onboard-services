@@ -20,7 +20,7 @@
 #
 # Non-root, and the compose entry makes the rootfs read-only with a tmpfs
 # /tmp — the Dockerfile must therefore leave nothing the service needs to
-# write at runtime outside /tmp and the two workspace volumes.
+# write at runtime outside /tmp and the four workspace volumes.
 
 # Node from the official image, copied in rather than apt-installed: Debian
 # bookworm ships Node 18, and the toolchain ceiling is 20 (WARP-2069).
@@ -30,7 +30,7 @@ FROM python:3.12-slim@sha256:02108f5d322dd89f1c9e552442c25acb0543dfdbc455693a559
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-      git openssl ca-certificates && \
+      git openssl ca-certificates util-linux && \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
@@ -50,11 +50,12 @@ COPY services/sandbox/ .
 COPY extensions/templates/ /app/templates/
 
 # The git store's two mount points (compose: workspace-git, workspace-checkouts)
-# and the installed-extensions dir (compose: extensions-installed, WARP-2900),
+# the installed-extensions dir (compose: extensions-installed, WARP-2900) and
+# persistent app data (compose: extensions-data, WARP-3906),
 # owned by the service user so a fresh volume is writable without an init hook.
 # The MCP host shims (ext_host/) arrive with `COPY services/sandbox/ .` above.
-RUN mkdir -p /var/lib/workspace-git /var/lib/workspace /var/lib/workspace-ext && \
-    chown -R sandbox:sandbox /var/lib/workspace-git /var/lib/workspace /var/lib/workspace-ext
+RUN mkdir -p /var/lib/workspace-git /var/lib/workspace /var/lib/workspace-ext /var/lib/workspace-ext-data && \
+    chown -R sandbox:sandbox /var/lib/workspace-git /var/lib/workspace /var/lib/workspace-ext /var/lib/workspace-ext-data
 
 # Sibling shape (doc-render / web-fetch): ship the FIPS-provider OpenSSL config
 # + shared helpers. NOT one of the provider-carrying images — compose pins
@@ -65,12 +66,17 @@ COPY services/_shared/__init__.py /app/_shared/__init__.py
 COPY services/_shared/fips_selftest.py /app/_shared/fips_selftest.py
 COPY services/_shared/internal_tls.py /app/_shared/internal_tls.py
 COPY services/_shared/serve.py /app/_shared/serve.py
+COPY services/_shared/sandbox_serve.py /app/_shared/sandbox_serve.py
+COPY services/_shared/sandbox_isolation.py /app/_shared/sandbox_isolation.py
 COPY services/_shared/healthcheck.py /app/_shared/healthcheck.py
+COPY services/_shared/privilege_drop.sh /app/_shared/privilege_drop.sh
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-USER sandbox
+# Compose bootstraps as root to stage TLS, then immediately drops to this uid.
+USER 1000
+ENTRYPOINT ["sh", "/app/_shared/privilege_drop.sh"]
 
 EXPOSE 8030
-CMD ["python", "-m", "_shared.serve", "main:app", "--host", "0.0.0.0", "--port", "8030"]
+CMD ["python", "-m", "_shared.sandbox_serve", "main:app", "--host", "0.0.0.0", "--port", "8030"]

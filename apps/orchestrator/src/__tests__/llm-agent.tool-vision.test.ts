@@ -85,6 +85,7 @@ function visionPorts(over: Partial<ToolVisionPorts> = {}): ToolVisionPorts {
     fetchFrame: vi.fn().mockImplementation(async () => jpeg()),
     fetchEventSnapshot: vi.fn().mockImplementation(async () => jpeg()),
     fetchEventThumbnail: vi.fn().mockImplementation(async () => jpeg()),
+    fetchRecordingFrame: vi.fn().mockImplementation(async () => jpeg()),
     fileId: vi.fn().mockResolvedValue(null),
     fileThumbnail: vi.fn().mockResolvedValue(null),
     brainImage: vi.fn().mockResolvedValue(null),

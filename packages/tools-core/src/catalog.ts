@@ -86,7 +86,8 @@ export type ToolDomain =
   // WARP-2896 (ADR-056 §6.2) — the workshop's workspace tools. Its own
   // domain: they are reachable inside a workshop run only, and the run
   // worker admits them structurally (agent-run-worker WORKSPACE_TOOLS).
-  | "workspace";
+  | "workspace"
+  | "hosted_apps";
 
 export interface ToolCatalogEntry {
   name: string;
@@ -165,6 +166,11 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "create_word_document",
     "create_spreadsheet",
     "create_slide_deck",
+    "create_artifact",
+    "create_audio",
+    "generate_media",
+    "office_file",
+    "analyze_data", // Reads stored customer files: files-domain cloud withholding applies.
     // WARP-2664 — cleanup: the read-only report and the two writes it feeds.
     "analyze_file_cleanup",
     "organize_files",
@@ -207,6 +213,11 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "set_detection_zones",
     "delete_clip",
     "rename_camera",
+    // WARP-3927: camera activity for chat (Tier-1 reads)
+    "summarize_camera_activity",
+    "get_camera_motion",
+    "list_camera_reviews",
+    "get_camera_recording",
   ],
   switch: [
     "get_switch_ports",
@@ -285,6 +296,7 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
   team_chat: ["team_chat_send_message", "team_chat_send_meeting_invite"],
   // WARP-2180 — durable background runs.
   agent_runs: ["start_agent_run", "list_agent_runs", "cancel_agent_run"],
+  hosted_apps: ["list_hosted_apps", "hosted_app_logs"],
   routines: ["routine_draft", "routine_list", "routine_run"],
   workspace: [
     "workspace_read",
@@ -316,6 +328,8 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "uuid_generate",
     "regex_test",
     "calculate",
+    "web_search",
+    "web_fetch",
     "unit_convert",
     "get_current_datetime",
     "date_math",
@@ -402,6 +416,13 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   create_word_document: "Write a Word document you can keep editing",
   create_spreadsheet: "Build a spreadsheet from a table of data",
   create_slide_deck: "Create a PDF or editable PowerPoint slide deck",
+  create_audio: "Create a downloadable speech recording",
+  generate_media: "Create or edit images and videos on your Droplet",
+  office_file: "Inspect and revise an Office file while preserving its formatting",
+  create_artifact: "Create an interactive app, chart or simulation in chat",
+  analyze_data: "Analyze your data with Python and save charts or result tables",
+  web_search: "Research a question using public web sources",
+  web_fetch: "Read a public webpage and cite its source",
   analyze_file_cleanup: "See what is cluttering a folder before anything is touched",
   organize_files: "Sort a folder's files into tidy subfolders",
   delete_files: "Clear out a list of files you have agreed to delete",
@@ -438,6 +459,10 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   set_detection_zones: "Choose the areas of a camera view that trigger motion alerts",
   rename_camera: "Give a camera a name you'll recognise, like \"Driveway\"",
   delete_clip: "Permanently delete a saved camera clip",
+  summarize_camera_activity: "Ask what your cameras saw over a night or a day, like 'what happened at the front door?'",
+  get_camera_motion: "See when there was motion on a camera, and whether it was recording at the time",
+  list_camera_reviews: "See the alerts and activity your cameras flagged, most important first",
+  get_camera_recording: "Play back a moment from a camera's recordings, like 'the front door at 6:40 last night'",
   // Switch
   get_switch_ports: "See what's plugged into each network port",
   get_switch_vlans: "See how your network ports are grouped",
@@ -561,6 +586,8 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   workspace_commit: "Save a version of the extension being built",
   workspace_run: "Run the extension's tests, build or checks",
   workspace_propose: "Hand the finished extension to you for review",
+  list_hosted_apps: "Show the web apps hosted on your Droplet",
+  hosted_app_logs: "Check why a hosted app is having trouble",
 };
 
 /** Humanized fallback for a tool with no home description yet — turns

@@ -53,6 +53,7 @@ import { createLogger } from "../lib/logger.js";
 import type { McpToolDescriptor } from "./mcp-client.port.js";
 import {
   recordDiscoveredRemoteTools,
+  remoteToolReviewHash,
   type ClassificationPrisma,
 } from "./remote-tool-classification.service.js";
 import {
@@ -364,6 +365,7 @@ export interface AttachRemoteDeps {
     integrationConnection: {
       findFirst(args: unknown): Promise<RemoteMcpConnectionRow | null>;
     };
+    offLanAllowlistChannel: RemoteMcpGatePrisma["offLanAllowlistChannel"];
   };
   allowlist: ReadonlySet<string>;
   /** Builds the bridge-backed port. Injected so a test supplies a fixture
@@ -382,6 +384,22 @@ export interface AttachRemoteDeps {
   recordClassifications?: (serverId: string, tools: McpToolDescriptor[]) => Promise<unknown>;
   /** The Prisma surface the default `recordClassifications` writes through. */
   classificationPrisma?: ClassificationPrisma;
+  /**
+   * WARP-3918 — tells every owner and admin a tool was switched off because its
+   * definition changed. Absent in narrow tests; production wires
+   * `notifyOwnersAndAdmins`.
+   */
+  notifyOwners?: (title: string, body: string) => Promise<unknown>;
+  /**
+   * WARP-3918 — publishes the latest listing's per-tool review hashes (wire
+   * name → hash) to dispatch, which compares them with the reviewed hash and
+   * refuses a mismatch. Called BEFORE any database write, on every listing, so
+   * a failed write cannot leave a changed tool callable.
+   */
+  setLiveDefinitions?: (serverId: string, hashes: ReadonlyMap<string, string>) => void;
+  /** WARP-3918 — re-reads the classification cache after a reset, so dispatch
+   *  refuses the tool before the notice goes out. */
+  refreshClassifications?: () => Promise<unknown>;
   /**
    * WARP-2651 — the catalog a previous attach vetted, handed to the bridge so
    * a RE-open still detects a surface that moved while we were apart.
@@ -607,29 +625,91 @@ export async function attachRemoteServer(
   // the record write does: a tool with no row is refused at dispatch as
   // unclassified, so the failure costs capability, never safety — and it is
   // logged at error so it costs it loudly.
-  const advertised = deps.mux.remoteCatalog(serverId).map((t) => ({
-    ...t,
-    name: parseNamespacedToolName(t.name)?.wireName ?? t.name,
-  }));
+  const hashes = client.lastDefinitionHashes();
+  // A tool the listing carried no hash for is simply absent here, and dispatch
+  // refuses an absent live hash: not pinned never means callable.
+  const publishLive = (tools: readonly (McpToolDescriptor & { definitionHash?: string })[]): void =>
+    deps.setLiveDefinitions?.(
+      serverId,
+      new Map(
+        tools.flatMap((t) =>
+          t.definitionHash ? [[t.name, remoteToolReviewHash(t.description, t.definitionHash)] as const] : [],
+        ),
+      ),
+    );
+  publishLive(client.lastListedTools());
+  const advertised = deps.mux.remoteCatalog(serverId).map((t) => {
+    const name = parseNamespacedToolName(t.name)?.wireName ?? t.name;
+    const definitionHash = hashes.get(name);
+    return { ...t, name, ...(definitionHash ? { definitionHash } : {}) };
+  });
+  // WARP-3918 — the definition pin. `definitionHash` is the bridge's sha256 of
+  // each tool's whole wire object (annotations included); it rides the
+  // existing review-hash path (`inputSchemaHash` → `remoteToolReviewHash`), so
+  // a changed definition resets the tool exactly as an `ext-*` one does.
+  // `baselineUnpinned`: rows from before the pin adopt their first hash rather
+  // than all going dark on upgrade (see the PR description for the choice).
   const record =
     deps.recordClassifications ??
     (deps.classificationPrisma
-      ? (id: string, tools: McpToolDescriptor[]) =>
+      ? (id: string, tools: (McpToolDescriptor & { definitionHash?: string })[]) =>
           recordDiscoveredRemoteTools(
             deps.classificationPrisma as ClassificationPrisma,
             id,
-            tools.map((t) => ({ wireName: t.name, description: t.description })),
+            tools.map((t) => ({
+              wireName: t.name,
+              description: t.description,
+              ...(t.definitionHash ? { inputSchemaHash: t.definitionHash } : {}),
+            })),
+            new Date(),
+            { baselineUnpinned: true },
           )
       : undefined);
+  /** Record, tell the owners about any tool just switched off, refresh dispatch. */
+  const recordAndNotify = async (tools: (McpToolDescriptor & { definitionHash?: string })[]): Promise<void> => {
+    if (!record) return;
+    const out = (await record(serverId, tools)) as { changes?: { toolName: string; descriptionChanged: boolean }[] } | undefined;
+    const changes = out?.changes ?? [];
+    if (changes.length === 0) return;
+    // Cache first: the tool must be uncallable before anyone is told.
+    await deps.refreshClassifications?.();
+    await notifyDefinitionChanged(serverId, changes, deps.notifyOwners);
+  };
+  const seen = new Map<string, string>(hashes);
   if (record) {
     try {
-      await record(serverId, advertised);
+      await recordAndNotify(advertised);
     } catch (err) {
+      // The next listing re-records (the live pin already refuses meanwhile).
+      seen.clear();
       logger.error({ err, serverId, tools: advertised.length }, "remote_tool_classification_record_failed");
     }
   } else {
     logger.error({ serverId, tools: advertised.length }, "remote_tool_classification_recorder_missing");
   }
+  // The bridge listing runs per agent turn. The live hashes are republished on
+  // EVERY one (that is the control: dispatch compares them with the reviewed
+  // hash, so the pin holds even if everything below fails). A definition that
+  // changes mid-session is also recorded and announced on that turn. Cheap
+  // when nothing moved: only a differing hash reaches the database.
+  let chain: Promise<void> = Promise.resolve();
+  // Awaited by the client's listTools, so the cache refresh lands before the
+  // listing returns: no turn lists the changed tool and calls it first.
+  client.onListed((tools) => {
+    publishLive(tools);
+    const moved = tools.some((t) => t.definitionHash !== undefined && seen.get(t.name) !== t.definitionHash);
+    if (!moved || !record) return chain;
+    for (const t of tools) if (t.definitionHash) seen.set(t.name, t.definitionHash);
+    chain = chain
+      .then(() => recordAndNotify([...tools]))
+      .catch((err) => {
+        // Forget what was "seen" so the next listing tries again: a failed
+        // write must not leave a changed tool looking already handled.
+        seen.clear();
+        logger.error({ err, serverId }, "remote_tool_definition_recheck_failed");
+      });
+    return chain;
+  });
   const vettedTools = client.lastAdvertisedToolNames();
   // An EMPTY list here is not a vetted surface. `lastAdvertisedToolNames()` is
   // set only by a listing that succeeded, and the multiplexer swallows a
@@ -646,6 +726,32 @@ export async function attachRemoteServer(
     bridgeHop: "succeeded",
   });
   return { attached: true, serverId, sync, client, vettedTools };
+}
+
+/**
+ * WARP-3918 — the owners' and admins' notice that tools were switched off
+ * because the server changed their definition. Names the tool and the kind of
+ * change; never quotes the new description (server-supplied text, and the thing
+ * the review is for). Tool names are server-supplied too: bounded.
+ */
+export async function notifyDefinitionChanged(
+  serverId: string,
+  changes: readonly { toolName: string; descriptionChanged: boolean }[],
+  notifyOwners?: (title: string, body: string) => Promise<unknown>,
+): Promise<void> {
+  logger.warn({ serverId, tools: changes.map((c) => c.toolName) }, "remote_tool_definition_changed");
+  if (!notifyOwners) return;
+  const shown = changes.slice(0, 5).map((c) => `${c.toolName.slice(0, 64)} (${c.descriptionChanged ? "description" : "arguments or hints"} changed)`);
+  const more = changes.length > shown.length ? ` and ${changes.length - shown.length} more` : "";
+  try {
+    await notifyOwners(
+      "A connected tool changed and was switched off",
+      `${serverId} changed ${shown.join(", ")}${more} since an owner last reviewed it. ` +
+        "The tool is switched off until it is reviewed again.",
+    );
+  } catch (err) {
+    logger.error({ err, serverId }, "remote_tool_definition_notice_failed");
+  }
 }
 
 /**

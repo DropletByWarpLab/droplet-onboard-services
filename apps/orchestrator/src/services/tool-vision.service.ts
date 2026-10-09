@@ -57,6 +57,7 @@ import {
   fetchEventCamera,
   fetchEventSnapshot,
   fetchEventThumbnail,
+  fetchRecordingSnapshot,
   fetchSnapshot,
 } from "./frigate.client.js";
 import { ncFetchThumbnail, ncGetFileId } from "./nextcloud.client.js";
@@ -107,8 +108,18 @@ export type ToolImageRef =
   | { kind: "camera_frame"; camera: string }
   | { kind: "event_snapshot"; eventId: string; camera?: string }
   | { kind: "event_thumbnail"; eventId: string; camera?: string }
+  // WARP-3927: a still from RECORDED footage at `at` (epoch seconds) — never the live frame.
+  | { kind: "recording_frame"; camera: string; at: number }
   | { kind: "file_path"; path: string; name: string }
   | { kind: "brain_item"; itemId: string; name: string };
+
+/**
+ * `/api/cameras/<camera>/recordings/snapshot?at=<epoch seconds>` — what
+ * get_camera_recording attaches for "show me the front door at 6:40". It has
+ * no `eventId`, so without this the descriptor would read as a current-frame
+ * snapshot and the model would be shown NOW labelled as then.
+ */
+const RECORDING_SNAPSHOT_RE = /^\/api\/cameras\/([A-Za-z0-9_-]{1,64})\/recordings\/snapshot\?(?:[^#]*&)?at=(\d{9,11})(?:&|$)/;
 
 const VIEWABLE_FILE_MIME = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
 
@@ -123,13 +134,20 @@ export function selectImageRefs(payload: unknown): ToolImageRef[] {
   const refs: ToolImageRef[] = [];
   for (const m of parseChatMedia(payload) as ChatMedia[]) {
     switch (m.kind) {
-      case "camera_snapshot":
-        refs.push(
-          m.eventId
-            ? { kind: "event_snapshot", eventId: m.eventId, camera: m.camera }
-            : { kind: "camera_frame", camera: m.camera },
-        );
+      case "camera_snapshot": {
+        if (m.eventId) {
+          refs.push({ kind: "event_snapshot", eventId: m.eventId, camera: m.camera });
+          break;
+        }
+        const rec = RECORDING_SNAPSHOT_RE.exec(m.snapshotUrl);
+        if (rec) {
+          // The URL, not the descriptor's `camera`, names what is fetched.
+          refs.push({ kind: "recording_frame", camera: rec[1], at: Number(rec[2]) });
+          break;
+        }
+        refs.push({ kind: "camera_frame", camera: m.camera });
         break;
+      }
       case "camera_clip":
         if (m.eventId && m.thumbnailUrl) {
           refs.push({ kind: "event_thumbnail", eventId: m.eventId, camera: m.camera });
@@ -173,6 +191,7 @@ export interface ToolVisionPorts {
   fetchFrame(camera: string, height: number): Promise<Response>;
   fetchEventSnapshot(eventId: string, height: number): Promise<Response>;
   fetchEventThumbnail(eventId: string): Promise<Response>;
+  fetchRecordingFrame(camera: string, at: number, height: number): Promise<Response>;
   fileId(path: string): Promise<number | null>;
   fileThumbnail(
     fileId: number,
@@ -294,6 +313,13 @@ async function fetchRef(ref: ToolImageRef, p: ToolVisionPorts): Promise<FetchedI
       if (!url) return null;
       await auditQuiet(p, ref.camera);
       return { dataUrl: url, label: { subject: ref.camera } };
+    }
+    case "recording_frame": {
+      if (!(await p.canAccessCamera(ref.camera))) return null;
+      const url = toDataUrl(await readCapped(await p.fetchRecordingFrame(ref.camera, ref.at, TOOL_IMAGE_FRAME_HEIGHT)));
+      if (!url) return null;
+      await auditQuiet(p, ref.camera);
+      return { dataUrl: url, label: { subject: ref.camera, capturedAt: new Date(ref.at * 1000) } };
     }
     case "event_snapshot":
     case "event_thumbnail": {
@@ -428,6 +454,7 @@ export function userToolVisionPorts(args: {
     fetchFrame: (camera, height) => fetchSnapshot(camera, height),
     fetchEventSnapshot: (eventId, height) => fetchEventSnapshot(eventId, height),
     fetchEventThumbnail: (eventId) => fetchEventThumbnail(eventId),
+    fetchRecordingFrame: (camera, at, height) => fetchRecordingSnapshot(camera, at, height),
     async fileId(path) {
       if (!ncToken) return null;
       return ncGetFileId(ncToken, user.username, path);

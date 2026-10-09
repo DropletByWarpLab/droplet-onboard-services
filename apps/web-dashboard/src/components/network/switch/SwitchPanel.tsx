@@ -13,6 +13,8 @@ import { Faceplate } from "./Faceplate";
 import { PortTable } from "./PortTable";
 import { VlanView } from "./VlanView";
 import { SwitchPortDrawer } from "./SwitchPortDrawer";
+// ADR-071 slice C — Pair / paired-elsewhere / "paired but not saved" for the switch.
+import { DevicePairingCard } from "../DevicePairingCard";
 import type { SwitchAction } from "./helpers";
 
 type Layout = "face" | "table";
@@ -92,6 +94,10 @@ export function SwitchPanel() {
             connection.
           </p>
         </div>
+        {/* A switch that answers but refuses our credential (reflashed) reads as
+            unreachable here; its pairing card, when it has anything to offer,
+            is the way back. Renders nothing otherwise. */}
+        <DevicePairingCard role="switch" variant="inline" />
       </Shell>
     );
   }
@@ -103,6 +109,7 @@ export function SwitchPanel() {
         <p className="text-center py-7 type-footnote text-[color:var(--text-muted)]">
           No managed switch detected. Ports appear here when a Droplet-managed switch is connected.
         </p>
+        <DevicePairingCard role="switch" variant="inline" />
       </Shell>
     );
   }
@@ -129,6 +136,10 @@ export function SwitchPanel() {
 
   return (
     <Shell>
+      {/* ADR-071: only ever renders here for "paired, but the password was not
+          saved" — the switch is live, so the AUTH / elsewhere states are the
+          error / empty branches'. */}
+      <DevicePairingCard role="switch" variant="inline" />
       {/* Header */}
       <div className="flex items-center gap-3.5 flex-wrap">
         <span className="w-[38px] h-[38px] rounded-[10px] bg-[var(--brand-subtle)] text-[color:var(--brand)] flex items-center justify-center flex-none">

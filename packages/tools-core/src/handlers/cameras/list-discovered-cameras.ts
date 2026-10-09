@@ -66,7 +66,7 @@ async function handler(_args: Record<string, unknown>, ctx: ToolContext): Promis
 const tool: Tool = {
   name: "list_discovered_cameras",
   description:
-    "List IP cameras the camera-discovery service has found on the network but that have NOT yet been added to Frigate. Each entry has a status: 'ready' (can be added now), 'needs_credentials' (found, but the stream needs a username/password or a corrected RTSP path), or 'unverified' (something answered on a camera port but no stream is confirmed). Use accept_discovered_camera to add a 'ready' one.",
+    "List discovered IP cameras not in Frigate: ready=add now; needs_credentials=missing username/password or corrected RTSP path; unverified=camera-port response without verified stream. Add ready cameras with accept_discovered_camera.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

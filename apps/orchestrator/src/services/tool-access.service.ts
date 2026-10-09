@@ -189,6 +189,10 @@ import {
   type RuntimeToolFacts,
   type RuntimeToolLookup,
 } from "./tool-layers.service.js";
+import {
+  remoteToolClassificationCache,
+  type RemoteToolClassificationCache,
+} from "./remote-tool-classification.service.js";
 import { createLogger } from "../lib/logger.js";
 import { EXTENSION_SERVER_PREFIX } from "./extension-token.js";
 
@@ -256,11 +260,42 @@ function tierKeepsWriteTools(tier: Role | string | undefined): boolean {
  * Moved here from routes/llm.ts by WARP-1621: it was unreachable from the
  * ToolSpec surfaces while it lived inside a route module.
  */
-export const WRITE_TOOLS: ReadonlySet<string> = new Set(
-  Array.from(TOOLS.values())
-    .filter((t) => t.requiresWrite)
-    .map((t) => t.name),
+export const WRITE_TOOLS: ReadonlySet<string> = derivedWriteTools(
+  new Set(
+    Array.from(TOOLS.values())
+      .filter((t) => t.requiresWrite)
+      .map((t) => t.name),
+  ),
+  remoteToolClassificationCache,
 );
+
+/**
+ * WARP-2436 — the compiled derivation UNIONED with the operator's remote
+ * classifications, computed on every query rather than copied.
+ *
+ * A remote tool the classification record marks a write is a member the
+ * moment its row says so (no registration step), and leaves the moment it is
+ * demoted (the owner route refreshes the same snapshot this reads, so there
+ * is no second cache to invalidate). There is no remote list here: the only
+ * remote state is the classification record's own `requiresWrite`.
+ */
+function derivedWriteTools(
+  compiled: ReadonlySet<string>,
+  remote: Pick<RemoteToolClassificationCache, "isWrite" | "writeNames">,
+): ReadonlySet<string> {
+  const all = (): Set<string> => new Set([...compiled, ...remote.writeNames()]);
+  return {
+    has: (name) => compiled.has(name) || remote.isWrite(name),
+    get size() {
+      return all().size;
+    },
+    forEach: (cb, thisArg) => all().forEach((v) => cb.call(thisArg, v, v, WRITE_TOOLS)),
+    entries: () => all().entries(),
+    keys: () => all().keys(),
+    values: () => all().values(),
+    [Symbol.iterator]: () => all().values(),
+  };
+}
 
 /**
  * WARP-2665 — the one place a tool list is classified as writing.
@@ -364,6 +399,12 @@ export function toolAllowedForTier(
   isVoice = false,
 ): boolean {
   if (isPrivilegedRole(tier)) return true;
+  // WARP-3916 (ADR-072 section 3) — guests are external: first-party tools only. A
+  // POSITIVE allowlist (compiled catalog), not a denylist on live registry state, so a
+  // remote/extension/unknown name is refused whether or not its server is attached at
+  // the moment this runs (offer-time and execute-time can never skew). Axis A, so every
+  // caller of the shared predicate inherits it.
+  if (tier === "guest" && !CATALOG_BY_NAME.has(name)) return false;
   // Connection handlers and their browser routes serve members and admins;
   // even their read-only setup descriptors are not offered to external guests.
   if (CATALOG_BY_NAME.get(name)?.domain === "connections" && tier !== "family") return false;

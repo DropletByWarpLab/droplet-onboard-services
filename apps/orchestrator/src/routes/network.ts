@@ -29,6 +29,12 @@ import { registerPhoneHomeRoutes } from "./network-phone-home.routes.js";
 import { registerFabricRoutes } from "./network-fabric.routes.js";
 // WARP-1984 — Network → System's "Allow SSH" toggle.
 import { registerSshRoutes } from "./network-ssh.routes.js";
+// ADR-071 slice B — dashboard Pair card: state read + claim/persist writes.
+import { registerRouterPairingRoutes } from "./network-router-pairing.routes.js";
+import { getRouterPairingService } from "../services/router-pairing.singleton.js";
+// ADR-071 slice C — the same card for the managed switch and for each AP.
+import { registerApPairingRoutes, registerSwitchPairingRoutes } from "./network-device-pairing.routes.js";
+import { getApPairingService, getSwitchPairingService } from "../services/device-pairing.singleton.js";
 
 export function createNetworkRouter(prisma: PrismaClient): Router {
   const router = Router();
@@ -117,6 +123,9 @@ export function createNetworkRouter(prisma: PrismaClient): Router {
   // rows straight from Postgres — no routing-service call, no device write.
   registerFabricRoutes(router, { prisma });
   registerSshRoutes(router, { prisma });
+  registerRouterPairingRoutes(router, { prisma, service: getRouterPairingService(prisma) });
+  registerSwitchPairingRoutes(router, { prisma, service: getSwitchPairingService(prisma) });
+  registerApPairingRoutes(router, { prisma, service: getApPairingService(prisma) });
 
   return router;
 }

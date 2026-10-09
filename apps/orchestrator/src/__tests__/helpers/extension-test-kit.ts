@@ -298,7 +298,7 @@ export function extensionPrisma(
   const workspaceLocks: Array<{ id: string; mode: string }> = [];
   let onWorkspaceLock: ((id: string) => void) | null = null;
   const withVersion = (e: Row | undefined) =>
-    e ? { ...e, currentVersion: e.currentVersionId ? (versions.get(e.currentVersionId as string) ?? null) : null } : null;
+    e ? { kind: "extension", ...e, currentVersion: e.currentVersionId ? (versions.get(e.currentVersionId as string) ?? null) : null } : null;
 
   const prisma = {
     extension: {
@@ -312,7 +312,7 @@ export function extensionPrisma(
         return withVersion(extensions.get(where.id));
       }),
       findMany: vi.fn(async ({ where }: { where?: Row } = {}) =>
-        [...extensions.values()].filter((e) => matches(e, where)).map((e) => withVersion(e) as Row),
+        [...extensions.values()].map((e) => ({ kind: "extension", ...e })).filter((e) => matches(e, where)).map((e) => withVersion(e) as Row),
       ),
       update: vi.fn(async ({ where, data }: { where: { id: string }; data: Row }) => {
         const e = extensions.get(where.id);

@@ -403,7 +403,7 @@ export interface EmailGate {
  * rejects a private answer, which is the check that actually matters and the
  * one a pattern cannot make.
  */
-const connectAccountBody = z
+export const connectAccountBody = z
   .object({
     displayName: z.string().trim().min(1).max(200),
     address: z.string().trim().email().max(320),

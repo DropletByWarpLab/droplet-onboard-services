@@ -287,10 +287,10 @@ const WIZARD_STEPS: readonly string[] = [
   "Confirm and connect",
 ];
 
-const GOOGLE_SETUP_MESSAGE = "An owner needs to set up the Google app first using the setup popup here.";
+const GOOGLE_SETUP_MESSAGE = "An owner needs to set up the Google app first, in Settings under Account connection setup.";
 const GOOGLE_CALLBACK_MESSAGE =
-  "Google needs an HTTPS address on this Droplet's own domain before it can connect. An owner can review account setup in the setup popup here.";
-const M365_SETUP_MESSAGE = "An owner needs to set up the Microsoft app first using the setup popup here.";
+  "Google needs an HTTPS address on this Droplet's own domain before it can connect. An owner can finish that in Settings under Account connection setup.";
+const M365_SETUP_MESSAGE = "An owner needs to set up the Microsoft app first, in Settings under Account connection setup.";
 
 function boxRoleBlock(displayName: string): ConnectCardBlocked {
   return {
@@ -378,7 +378,7 @@ async function googleCard(prisma: PrismaClient, actor: ConnectionsActor, deps: C
   const view = await getGoogleConnectionView(prisma, actor.id);
   if (view.state === "CONNECTED") {
     const who = view.accountAddress ? ` as ${view.accountAddress}` : "";
-    return { ...card, blocked: { reason: "already_connected", message: `Google is already connected${who}. Review it in the setup popup here.` } };
+    return { ...card, blocked: { reason: "already_connected", message: `Google is already connected${who}. Manage it in Settings under Connected accounts.` } };
   }
   if (!(await deps.getGoogleApp(prisma))) {
     return { ...card, blocked: { reason: "setup_required", message: GOOGLE_SETUP_MESSAGE, requiredRole: "owner" } };
@@ -409,7 +409,7 @@ async function m365Card(prisma: PrismaClient, actor: ConnectionsActor, deps: Con
   const view = await getM365ConnectionView(prisma, actor.id);
   if (view.state === "CONNECTED") {
     const who = view.accountUpn ? ` as ${view.accountUpn}` : "";
-    return { ...card, blocked: { reason: "already_connected", message: `Microsoft 365 is already connected${who}. Review it in the setup popup here.` } };
+    return { ...card, blocked: { reason: "already_connected", message: `Microsoft 365 is already connected${who}. Manage it in Settings under Connected accounts.` } };
   }
   // The person's own stored app wins; otherwise the box-wide one. Neither: the owner has not set it up.
   if (!parseAppRegistration(view.app ?? {}).ok && !(await deps.getMicrosoftApp(prisma))) {
@@ -530,8 +530,8 @@ async function integrationCard(prisma: PrismaClient, actor: ConnectionsActor, pr
   if (row && STANDING_INTEGRATION_STATUSES.has(row.status)) {
     const message =
       row.status === "PROVISIONING"
-        ? `A ${descriptor.displayName} connection is already being set up. Review its status in the setup popup here.`
-        : `${descriptor.displayName} is already connected. Review it in the setup popup here.`;
+        ? `A ${descriptor.displayName} connection is already being set up. Check its status in Integrations.`
+        : `${descriptor.displayName} is already connected. Manage it in Integrations.`;
     return { ...card, blocked: { reason: "already_connected", message } };
   }
   return card;

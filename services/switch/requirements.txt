@@ -2,6 +2,10 @@ fastapi==0.142.2
 uvicorn[standard]==0.54.0
 pydantic==2.13.5
 httpx==0.28.1
+# ADR-071 slice C: the pairing probe (switch refused our credential -> watch for
+# a `droplet.pair` window) is one apscheduler job, never a `while True`. Same pin
+# as routing / file-indexer (3.x and 4.x have incompatible APIs).
+APScheduler==3.11.3
 # WARP-1023 — FIPS boot self-test. services/_shared/fips_selftest.py is
 # COPY'd into this image and its is_fips_enabled() probe reads
 # cryptography's backend `_fips_enabled` flag. Nothing above pulls

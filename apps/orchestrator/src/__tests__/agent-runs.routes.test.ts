@@ -22,6 +22,7 @@ import express, { type Request, type Response, type NextFunction } from "express
 vi.mock("../config.js", () => ({
   config: {
     AUTH_ENABLED: true,
+    SANDBOX_PROCESS_SUPERVISION: true,
     AGENT_BLANK_TURN_DEBUG: false,
     OLLAMA_CONTEXT_LENGTH: 16384,
     TOOL_SELECTION_MODE: "off",
@@ -66,6 +67,7 @@ vi.mock("../services/active-model.service.js", async (importOriginal) => ({
 
 import { createAgentRunsRouter } from "../routes/agent-runs.js";
 import { enqueueAgentRun } from "../services/agent-run-worker.service.js";
+import { config } from "../config.js";
 import { createAgentRunPrismaMock } from "./helpers/agent-run-prisma-mock.js";
 import type { AuthUser } from "../middleware/auth.js";
 
@@ -92,6 +94,7 @@ function buildApp(user: AuthUser, db = createAgentRunPrismaMock({ users: [owner,
 }
 
 beforeEach(() => {
+  config.SANDBOX_PROCESS_SUPERVISION = true;
   recordActivityMock.mockClear();
   process.env.LLM_MODEL = "gpt-oss:20b";
   resolveActiveModelMock.mockReset();
@@ -150,6 +153,36 @@ describe("agent-runs routes — roles (WARP-2180)", () => {
 });
 
 describe("agent-runs routes — a workshop run is bound to one workspace (WARP-2896)", () => {
+  it("fails closed with supervision disabled or another person's workspace", async () => {
+    const { app, db } = buildApp(owner);
+    Object.assign(db.prisma, { chatSession: { findFirst: vi.fn().mockResolvedValue({ id: "chat-1" }) } });
+    const body = { goal: "g", brief: "app-setup", sessionId: "chat-1", workspaceId: "other" };
+    config.SANDBOX_PROCESS_SUPERVISION = false;
+    expect((await request(app).post("/api/agent-runs").send(body)).status).toBe(503);
+    config.SANDBOX_PROCESS_SUPERVISION = true;
+    await db.prisma.workshopWorkspace.create({ data: { id: "other", userId: admin.id, name: "Other", status: "active" } });
+    expect((await request(app).post("/api/agent-runs").send(body)).status).toBe(404);
+    expect(db.rows).toHaveLength(0);
+  });
+  it("supports a dashboard app-setup run in its owned chat without accepting fabricated turn ids", async () => {
+    const { app, db } = buildApp(owner);
+    Object.assign(db.prisma, { chatSession: { findFirst: vi.fn().mockResolvedValue({ id: "chat-1" }) } });
+    await db.prisma.workshopWorkspace.create({ data: { id: "ws-app", userId: owner.id, name: "App", status: "active" } });
+    const res = await request(app).post("/api/agent-runs").send({ goal: "host my ui", brief: "app-setup", workspaceId: "ws-app", sessionId: "chat-1", origin: "chat", originMessageId: "forged", originToolCallId: "forged" });
+    expect(res.status).toBe(201);
+    expect(db.row(res.body.id)).toMatchObject({ brief: "app-setup", origin: "chat", sessionId: "chat-1", workspaceId: "ws-app", resultDelivery: "pending", originMessageId: null, originToolCallId: null });
+    expect(db.prisma.chatSession.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: { id: "chat-1", userId: { in: [owner.id, owner.username] } } }));
+  });
+  it("refuses unowned conversations, incomplete and unknown briefs before writing a run", async () => {
+    const { app, db } = buildApp(owner);
+    Object.assign(db.prisma, { chatSession: { findFirst: vi.fn().mockResolvedValue(null) } });
+    for (const [body, status] of [
+      [{ goal: "g", brief: "app-setup" }, 400],
+      [{ goal: "g", brief: "arbitrary", sessionId: "chat-1", workspaceId: "ws-app" }, 400],
+      [{ goal: "g", brief: "app-setup", sessionId: "not-owned", workspaceId: "ws-app" }, 404],
+    ] as const) expect((await request(app).post("/api/agent-runs").send(body)).status).toBe(status);
+    expect(db.rows).toHaveLength(0);
+  });
   async function seedWorkspace(db: ReturnType<typeof createAgentRunPrismaMock>, id: string, status = "active") {
     await db.prisma.workshopWorkspace.create({ data: { id, userId: "u-owner", name: id, status } });
   }

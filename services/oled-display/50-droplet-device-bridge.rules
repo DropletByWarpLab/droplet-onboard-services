@@ -51,13 +51,20 @@
 // droplet-nvr-guard-release.service/.timer): they are never driven on demand,
 // and the bridge must not be able to disarm the "Frigate never records onto the
 // OS disk" guard. Reading a unit's state (systemctl is-active) needs no grant.
+//
+// ADR-071 slice B (WARP-3739) adds the FIFTH narrow grant, same shape:
+//   droplet-pair-apply.service  consumes the bridge's spooled {target, password}
+//     (/run/droplet-bridge-pair-spool/request.json, tmpfs, 0600), re-validates it
+//     as root, writes docker/secrets/<role>_password and recreates the container
+//     that reads it. Start verb ONLY; the unit has no [Install] section.
 polkit.addRule(function (action, subject) {
   if (
     action.id === "org.freedesktop.systemd1.manage-units" &&
     (action.lookup("unit") === "droplet-storage-pool-apply.service" ||
       action.lookup("unit") === "droplet-panel-console.service" ||
       action.lookup("unit") === "droplet-nvr-storage-apply.service" ||
-      action.lookup("unit") === "droplet-nvr-migrate.service") &&
+      action.lookup("unit") === "droplet-nvr-migrate.service" ||
+      action.lookup("unit") === "droplet-pair-apply.service") &&
     action.lookup("verb") === "start" &&
     subject.user === "droplet"
   ) {

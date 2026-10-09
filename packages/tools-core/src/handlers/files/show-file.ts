@@ -158,7 +158,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "show_file",
   description:
-    "Show a file to the user inline in the chat — a picture, PDF, video, document or any file. Use this when the user asks to see, open, show or look at a file or image (find the path with list_files or search_files first). Images display directly; other files show as a card the user can open or download. The user sees the result, so do not paste links. This does NOT read the file's contents for you — use read_file or read_document_text to read text. Takes `path` (Droplet storage) or `itemId` (a file attached in chat).",
+    "Show File Store path or chat-attachment itemId inline (picture/PDF/video/document/file). Find path with list_files/search_files. User sees card/preview: do not paste links. To read text use read_file/read_document_text.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

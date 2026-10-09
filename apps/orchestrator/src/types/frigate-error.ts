@@ -22,6 +22,8 @@ export const FRIGATE_NOT_FOUND_CODES = [
   // WARP-3509 — the review media routes: no such review row, no preview clip.
   "review_not_found",
   "preview_not_found",
+  // WARP-3927 — no recording covers the requested instant.
+  "recording_snapshot_not_found",
 ] as const;
 
 export type FrigateNotFoundCode = (typeof FRIGATE_NOT_FOUND_CODES)[number];

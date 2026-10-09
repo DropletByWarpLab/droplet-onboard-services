@@ -33,6 +33,7 @@ import {
 } from "../services/camera.service.js";
 import {
   fetchSnapshot,
+  fetchRecordingSnapshot,
   fetchEventCamera,
   fetchEventPlaybackSpan,
   fetchEventThumbnail,
@@ -46,6 +47,7 @@ import {
   deleteFaceImage,
   deleteKnownPlate,
   nameKnownPlate,
+  FrigatePlatesUnsupportedError,
   regenerateEventDescription,
   tagEventAsFace,
   openBirdseyeStream,
@@ -353,11 +355,19 @@ Object.freeze(EMPTY_SYSTEM_STATUS.gpus);
 Object.freeze(EMPTY_SYSTEM_STATUS.storage);
 Object.freeze(EMPTY_SYSTEM_STATUS);
 
-/** Service-to-service auth headers for routing/discovery services. */
+/**
+ * Bearer for the routing service's camera-subnet routes. The routing
+ * service checks `ROUTING_SERVICE_TOKEN` (see `require_bearer` in
+ * services/routing/main.py and the canonical openwrt.client.ts), NOT the
+ * orchestrator's generic `SERVICE_SECRET`; sending the latter — empty on a
+ * provisioned box — made every subnet call 401, which the status route then
+ * reported as "Router not reachable" and the setup/teardown confirms failed.
+ */
 function serviceAuthHeaders(): Record<string, string> {
   const headers: Record<string, string> = {};
-  if (config.SERVICE_SECRET) {
-    headers["Authorization"] = `Bearer ${config.SERVICE_SECRET}`;
+  const token = config.ROUTING_SERVICE_TOKEN || config.SERVICE_SECRET;
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
   }
   return headers;
 }
@@ -1076,6 +1086,9 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       await nameKnownPlate(req.params.plate, name);
       res.status(204).end();
     } catch (err) {
+      if (err instanceof FrigatePlatesUnsupportedError) {
+        return res.status(501).json({ error: err.message, code: "PLATES_UNSUPPORTED" });
+      }
       next(err);
     }
   });
@@ -1088,16 +1101,21 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       await deleteKnownPlate(req.params.plate);
       res.status(204).end();
     } catch (err) {
+      if (err instanceof FrigatePlatesUnsupportedError) {
+        return res.status(501).json({ error: err.message, code: "PLATES_UNSUPPORTED" });
+      }
       next(err);
     }
   });
 
   // --- Birdseye live (Phase 6.2) ---
   //
-  // Frigate's auto-composited multi-camera MJPEG stream. Cameras with
-  // current motion get foregrounded automatically; the operator gets
-  // a single "what's happening anywhere?" feed without paying for
-  // every camera's bandwidth.
+  // Frigate's auto-composited multi-camera view. Cameras with current
+  // motion get foregrounded automatically; the operator gets a single
+  // "what's happening anywhere?" feed without paying for every camera's
+  // bandwidth. Frigate 0.17 has no birdseye MJPEG, so openBirdseyeStream
+  // synthesizes one from /api/birdseye/latest.jpg (needs birdseye.restream);
+  // when Frigate 404s that still, the catch below answers the "not enabled" 404.
   //
   // Fixed path because /cameras/birdseye/live has 3 segments — adding
   // it here keeps it next to the system route which has the same
@@ -1833,7 +1851,9 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   //
   // Cursor pagination is identical to the events route (`before` =
   // smallest start_time of the previous page).
-  router.get("/cameras/reviews", requireRole(...CAMERA_VIEW_ROLES), cameraAccess, async (req, res, next) => {
+  // WARP-3927: MCP-admitted so the list_camera_reviews / summarize_camera_activity
+  // chat tools reach it; cameraAccess then scopes to the asking person's cameras.
+  router.get("/cameras/reviews", requireRoleOrMcpService(...CAMERA_VIEW_ROLES), cameraAccess, async (req, res, next) => {
     try {
       const q = req.query as Record<string, string | undefined>;
 
@@ -1903,6 +1923,11 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     review_not_found: "That review item no longer exists.",
     thumbnail_not_found: "This review item has no thumbnail.",
     preview_not_found: "No preview clip is available for this review item yet.",
+  };
+
+  // WARP-3927: the recording-snapshot route's one not-found code.
+  const RECORDING_SNAPSHOT_NOT_FOUND_MESSAGES: Partial<Record<FrigateNotFoundCode, string>> = {
+    recording_snapshot_not_found: "No recording covers that moment.",
   };
 
   /** Frigate review IDs are UUID-ish — looser than event IDs but bound
@@ -3075,7 +3100,9 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.get("/cameras/:name/recordings", requireRole(...CAMERA_VIEW_ROLES), cameraAccess, async (req, res, next) => {
+  // WARP-3927: MCP-admitted so get_camera_recording can check what footage
+  // exists before it offers a clip; cameraAccess scopes to the asking person.
+  router.get("/cameras/:name/recordings", requireRoleOrMcpService(...CAMERA_VIEW_ROLES), cameraAccess, async (req, res, next) => {
     try {
       if (!isValidCameraName(req.params.name)) {
         return res.status(400).json({ error: "Invalid camera name" });
@@ -3091,6 +3118,50 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       );
       res.json({ segments });
     } catch (err) {
+      next(err);
+    }
+  });
+
+  // WARP-3927 — one still FROM RECORDED FOOTAGE at an instant, for the chat's
+  // "show me the front door at 6:40" (get_camera_recording) and for the
+  // assistant's own look at it (tool-vision.service.ts). Same guards as the live
+  // /snapshot above — role set, MCP admission, per-camera ACL, `h` clamped to
+  // 100..1080, never cached — plus: `at` is epoch seconds and must be a real
+  // past instant, and a moment no recording covers answers 404
+  // `recording_snapshot_not_found` instead of a generic upstream error.
+  // Registered before /:name/timeline only for readability: the literal
+  // `recordings/snapshot` cannot collide with `recordings/summary`.
+  router.get("/cameras/:name/recordings/snapshot", requireRoleOrMcpService(...CAMERA_VIEW_ROLES), cameraAccess, async (req, res, next) => {
+    try {
+      if (!isValidCameraName(req.params.name)) {
+        return res.status(400).json({ error: "Invalid camera name" });
+      }
+      const at = Number(req.query.at);
+      const nowSec = Math.floor(Date.now() / 1000);
+      if (typeof req.query.at !== "string" || !Number.isFinite(at) || at <= 0) {
+        return res.status(400).json({ error: "at must be a Unix-second timestamp" });
+      }
+      if (at > nowSec + FUTURE_RANGE_SKEW_SEC) {
+        return res.status(400).json({ error: "at is in the future" });
+      }
+      const height = Math.min(Math.max(parseInt(req.query.h as string) || 480, 100), 1080);
+      const upstream = await fetchRecordingSnapshot(req.params.name, at, height);
+      // An image type from Frigate is passed through; anything else (an HTML error page
+      // from a proxy in front of it, say) is served as the JPEG this route promises.
+      const upstreamType = upstream.headers.get("content-type") ?? "";
+      res.setHeader("Content-Type", /^image\/(jpeg|png|webp)\b/i.test(upstreamType) ? upstreamType : "image/jpeg");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader("Cache-Control", "private, no-store"); // WARP-3103: footage never lands in a cache
+      const buffer = Buffer.from(await upstream.arrayBuffer());
+      // Past footage, so audited like a recording view (one row per actor +
+      // camera per dedupe window), unlike the live frame above.
+      void auditCameraWatch(req, req.params.name, "recording");
+      // Binary Buffer of Frigate's JPEG with an explicit image Content-Type and nosniff;
+      // no HTML is built from user input.
+      // nosemgrep: javascript.express.security.audit.xss.direct-response-write.direct-response-write
+      res.send(buffer);
+    } catch (err) {
+      if (answerFrigateFailure(res, err, { camera: req.params.name }, RECORDING_SNAPSHOT_NOT_FOUND_MESSAGES)) return;
       next(err);
     }
   });

@@ -59,9 +59,13 @@ detect:
 # an active detection, which reads as a broken grid. Boxes provisioned
 # before this section existed converge at camera-discovery startup
 # (FrigateClient.ensure_birdseye), which deep-merges the same section.
+# ``restream: true`` is required: Frigate 0.17 only serves birdseye frames
+# over HTTP (/api/birdseye/latest.jpg, polled by the orchestrator to build the
+# dashboard stream) when restream is on; with it off the page shows nothing.
 birdseye:
   enabled: true
   mode: continuous
+  restream: true
 
 # ``package`` is intentionally absent — the default yolov9 model shipped
 # with the JP6 image doesn't know that class and Frigate warns about

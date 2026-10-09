@@ -69,8 +69,14 @@ def _load_switch_password() -> str:
     return env_value
 
 
-def create_driver() -> SwitchDriver:
-    """Create and return a switch driver instance based on SWITCH_DRIVER env var."""
+def create_driver(password_source=None) -> SwitchDriver:
+    """Create and return a switch driver instance based on SWITCH_DRIVER env var.
+
+    ``password_source`` (ADR-071): a zero-arg callable returning the credential,
+    resolved at every login so a runtime rotation (the pairing claim) takes
+    effect without rebuilding the driver. Omitted = the value resolved once now
+    by ``_load_switch_password()`` (the historical behaviour).
+    """
 
     driver_type = os.environ.get("SWITCH_DRIVER", "openwrt").lower()
 
@@ -132,7 +138,7 @@ def create_driver() -> SwitchDriver:
             host=host,
             port=port,
             username=username,
-            password=password,
+            password=password_source if password_source is not None else password,
             plan_only=plan_only,
             protected_port=protected_port,
         )

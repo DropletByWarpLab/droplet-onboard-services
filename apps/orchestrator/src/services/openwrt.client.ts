@@ -12,6 +12,7 @@ import { internalBaseUrl, internalFetch } from "../lib/internal-tls.js";
 import {
   RouterError,
   routerErrorFromResponse,
+  routerErrorFromResponseBody,
   routerErrorFromThrown,
 } from "../types/router-error.js";
 import type { PortWriteGuardDetail } from "../types/router-error.js";
@@ -232,12 +233,17 @@ async function singleAttempt(
     if (passthroughStatuses.includes(res.status)) {
       return { kind: "success", res };
     }
-    const err = routerErrorFromResponse(res, label);
+    // ADR-071: body-aware so a 502 ROUTER_PAIRED_ELSEWHERE is not flattened to AUTH.
+    const err = await routerErrorFromResponseBody(res, label);
     // WARP-39 classification:
     //  - AUTH (401/403) → abort; retrying won't change the token outcome
     //  - 4xx → abort; caller error
     //  - 5xx → retry; transient
-    if (err.code === "AUTH" || (res.status >= 400 && res.status < 500)) {
+    if (
+      err.code === "AUTH" ||
+      err.code === "PAIRED_ELSEWHERE" ||
+      (res.status >= 400 && res.status < 500)
+    ) {
       return { kind: "abort", err };
     }
     return { kind: "retry", err };

@@ -23,6 +23,31 @@ class HealthResponse(BaseModel):
     # health check warn that auth is unconfigured. Defaults True (assume
     # configured) for the SWITCH_ALLOW_NO_AUTH dev path, where it is irrelevant.
     auth_configured: bool = True
+    # ADR-071: the wire code behind `error` when the failure is one of the typed
+    # switch-credential states ("SWITCH_AUTH" | "SWITCH_PAIRED_ELSEWHERE").
+    error_code: Optional[str] = None
+    # ADR-071 section 2.2 step 1: pairing state, served from the scheduler's
+    # probe cache - /health never blocks on the network for it.
+    pairing: Optional["HealthPairing"] = None
+
+
+class HealthPairing(BaseModel):
+    state: str  # "open" | "closed" | "paired" | "unknown"
+    window_ends_at: Optional[str] = None
+    paired_box: Optional[str] = None
+    paired_elsewhere: bool = False
+    pending_persist: bool = False
+
+
+HealthResponse.model_rebuild()
+
+
+class PairingFingerprintRequest(BaseModel):
+    """ADR-071: the box's identity (SHA-256 of the DER SPKI, lowercase hex),
+    supplied by the orchestrator. Validated in the route so a malformed value is
+    a 400 with a `code`, not FastAPI's generic 422."""
+
+    box_fingerprint: Optional[str] = None
 
 
 class PortStatus(BaseModel):

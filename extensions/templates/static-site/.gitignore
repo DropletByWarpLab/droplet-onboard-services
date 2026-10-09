@@ -1,0 +1,4 @@
+.workspace/
+_droplet/
+__pycache__/
+*.pyc

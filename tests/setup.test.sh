@@ -237,6 +237,66 @@ else
   fail "sync_openwrt_password_secret no longer fills an empty file for a loopback host"
 fi
 
+# --- switch / AP secrets keep a credential the dashboard's Pair button wrote (ADR-071 slice C) ---
+# A paired switch/AP password lives only in docker/secrets/<role>_password. The
+# .env line is blank (the operator never pasted anything), and a blank line used
+# to TRUNCATE the file on every --sync-secrets: the WARP-3738 outage, for these
+# two. Blank .env + non-empty file = keep; non-empty .env still wins (the
+# documented rotation path) but warns, never printing either value.
+PAIRED_PW="paired0123456789abcdef0123456789"
+ENV_PW="fromenv0123456789abcdef012345"
+PAIR_SYNC_LOG="$TMP_ROOT/.data/sync-paired.log"
+pair_sync_case() { # <function> <var> <file> <env value> <initial file content or NONE>
+  rm -f "$SYNC_DIR/$3"
+  [ "$5" = "NONE" ] || printf '%s' "$5" > "$SYNC_DIR/$3"
+  ( export "$2=$4"; "$1" ) >"$PAIR_SYNC_LOG" 2>&1
+}
+# The sync functions also fall back to reading $REPO_ROOT/.env, which an earlier
+# phase left holding a generated file: neutralise the two lines for these cases.
+sed -i.bak -E '/^(SWITCH_PASSWORD|AP_OPENWRT_PASSWORD)=/d' "$TMP_ROOT/.env" && rm -f "$TMP_ROOT/.env.bak"
+
+for pair_fn in "sync_switch_password_secret SWITCH_PASSWORD switch_password" \
+               "sync_ap_password_secret AP_OPENWRT_PASSWORD ap_openwrt_password"; do
+  set -- $pair_fn
+  p_fn="$1"; p_var="$2"; p_file="$3"
+
+  pair_sync_case "$p_fn" "$p_var" "$p_file" "" "$PAIRED_PW"
+  if [ "$(cat "$SYNC_DIR/$p_file")" = "$PAIRED_PW" ]; then
+    pass "$p_fn keeps a non-empty credential when $p_var is blank in .env"
+  else
+    fail "$p_fn erased the credential in $p_file (blank $p_var)"
+  fi
+  if grep -qF "$PAIRED_PW" "$PAIR_SYNC_LOG"; then
+    fail "$p_fn logged the credential"
+  else
+    pass "$p_fn log never contains the credential"
+  fi
+
+  for p_init in "" NONE; do
+    pair_sync_case "$p_fn" "$p_var" "$p_file" "" "$p_init"
+    if [ -f "$SYNC_DIR/$p_file" ] && [ ! -s "$SYNC_DIR/$p_file" ]; then
+      pass "$p_fn still writes the empty placeholder when nothing is configured (initial: ${p_init:-empty file})"
+    else
+      fail "$p_fn no longer writes the empty placeholder (initial: ${p_init:-empty file})"
+    fi
+  done
+
+  pair_sync_case "$p_fn" "$p_var" "$p_file" "$ENV_PW" "$PAIRED_PW"
+  if [ "$(cat "$SYNC_DIR/$p_file")" = "$ENV_PW" ] && grep -q "replaces the different credential" "$PAIR_SYNC_LOG" \
+     && ! grep -qF "$PAIRED_PW" "$PAIR_SYNC_LOG" && ! grep -qF "$ENV_PW" "$PAIR_SYNC_LOG"; then
+    pass "$p_fn lets an operator-supplied $p_var replace the file, with a warning and no secret in the log"
+  else
+    fail "$p_fn mishandled an operator-supplied $p_var over an existing credential"
+  fi
+
+  pair_sync_case "$p_fn" "$p_var" "$p_file" "$ENV_PW" "$ENV_PW"
+  if [ "$(cat "$SYNC_DIR/$p_file")" = "$ENV_PW" ] && ! grep -q "replaces the different credential" "$PAIR_SYNC_LOG"; then
+    pass "$p_fn is quiet when .env and the file already agree"
+  else
+    fail "$p_fn warned or changed the file although .env and the file agree"
+  fi
+done
+
 # --- DROPLET_TPM_BACKEND scaffold guard (IDX-002) -------------------------
 # The 'real' (tpm2-pytss) device-identity backend is an UNFINISHED scaffold:
 # device-identity-svc (services/device-identity-svc/backends/__init__.py)
@@ -2035,7 +2095,7 @@ echo "--- Phase 12: prepare_and_build build-list parity with docker-compose.yml 
 # WARP-2131's model-catalog sidecar, built only on a box running that runtime.
 # mcp-bridge (remote-mcp) is appended the same way — WARP-2627's outbound MCP
 # session component, built only on a box that has connected a remote MCP vendor.
-BUILD_LIST_EXCLUSIONS="rag-eval,web-fetch,erp-sql-bridge,openwrt,ops-console,fleet-agent,inference-manager,mcp-bridge"
+BUILD_LIST_EXCLUSIONS="rag-eval,web-fetch,media-gen,erp-sql-bridge,openwrt,ops-console,fleet-agent,inference-manager,mcp-bridge"
 
 # (1) Daemon-free enumeration of every compose service with a build: section
 # (2-space service keys, 4-space build: — the file's committed style).

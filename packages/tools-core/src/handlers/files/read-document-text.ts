@@ -207,7 +207,7 @@ async function handler(
 const tool: Tool = {
   name: "read_document_text",
   description:
-    "Read extracted document text in order, including PDFs, Word docs, scans and chat attachments. For the whole document, resume with start_chunk=next_chunk until next_chunk is null. Use search_content for matching passages. NOT_INDEXED means extracted text is unavailable.",
+    "Read extracted PDF/Word/scan/attachment text in document order. Whole-document extraction: this tool; matching passages: search_content. Follow next_chunk with start_chunk until null. NOT_INDEXED means no extracted text, not an empty document.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

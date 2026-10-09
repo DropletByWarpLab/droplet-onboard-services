@@ -10,6 +10,9 @@
  *   - UNREACHABLE  — network error, connection refused, DNS failure, retries exhausted
  *   - TIMEOUT      — AbortController fired (deliberate timeout or user cancel)
  *   - AUTH         — routing service returned 401 or 403
+ *   - PAIRED_ELSEWHERE — the router is enrolled to a DIFFERENT box fingerprint
+ *                    (ADR-071 §2.2 step 1; routing 502 `ROUTER_PAIRED_ELSEWHERE`).
+ *                    Distinct from AUTH: re-pairing needs the router's button.
  *   - ROLLED_BACK  — safe-apply rolled the change back (WARP-40 surfaces this separately;
  *                    included here so callers of write endpoints can handle it uniformly)
  *   - UNKNOWN      — anything else (5xx that isn't a rollback, unexpected response shape)
@@ -22,6 +25,10 @@ export type RouterErrorCode =
   | "UNREACHABLE"
   | "TIMEOUT"
   | "AUTH"
+  // ADR-071 — routing 502 `ROUTER_PAIRED_ELSEWHERE`. Minted only by
+  // `routerErrorFromResponseBody`, which reads the body: the status-only
+  // `routerErrorFromResponse` below maps every 502 to AUTH (WARP-1673).
+  | "PAIRED_ELSEWHERE"
   | "ROLLED_BACK"
   | "DISABLED"
   | "SCAN_UNSUPPORTED"
@@ -65,6 +72,12 @@ export class RouterError extends Error {
    * on exactly the same terms.
    */
   readonly detail?: PortWriteGuardDetail;
+  /**
+   * ADR-071 — the fingerprint (64 lowercase hex) the router is enrolled to, on a
+   * `PAIRED_ELSEWHERE`. A public key digest, not a secret; the dashboard shows
+   * the first 16 hex and the audit row records it.
+   */
+  readonly pairedBox?: string;
 
   constructor(
     code: RouterErrorCode,
@@ -74,6 +87,7 @@ export class RouterError extends Error {
       label?: string;
       cause?: unknown;
       detail?: PortWriteGuardDetail;
+      pairedBox?: string;
     },
   ) {
     super(message, options?.cause ? { cause: options.cause } : undefined);
@@ -82,6 +96,7 @@ export class RouterError extends Error {
     this.status = options?.status;
     this.label = options?.label;
     this.detail = options?.detail;
+    this.pairedBox = options?.pairedBox;
   }
 
   static unreachable(message: string, opts?: { label?: string; cause?: unknown }): RouterError {
@@ -98,6 +113,16 @@ export class RouterError extends Error {
   }
   static auth(message: string, opts?: { label?: string; status?: number }): RouterError {
     return new RouterError("AUTH", message, opts);
+  }
+  /**
+   * ADR-071 — routing 502 `ROUTER_PAIRED_ELSEWHERE`. 502 kept (the router, not
+   * this box, is the party that refused); the dashboard branches on the code.
+   */
+  static pairedElsewhere(
+    message = "This router is paired to another device.",
+    opts?: { label?: string; pairedBox?: string },
+  ): RouterError {
+    return new RouterError("PAIRED_ELSEWHERE", message, { ...opts, status: 502 });
   }
   static rolledBack(message: string, opts?: { label?: string; status?: number }): RouterError {
     return new RouterError("ROLLED_BACK", message, opts);
@@ -206,6 +231,7 @@ export class RouterError extends Error {
     status?: number;
     label?: string;
     detail?: PortWriteGuardDetail;
+    pairedBox?: string;
   } {
     return {
       code: this.code,
@@ -213,6 +239,7 @@ export class RouterError extends Error {
       status: this.status,
       label: this.label,
       detail: this.detail,
+      ...(this.pairedBox ? { pairedBox: this.pairedBox } : {}),
     };
   }
 }
@@ -247,6 +274,42 @@ export function routerErrorFromResponse(res: Response, label: string): RouterErr
     return RouterError.unreachable(base, { label });
   }
   return RouterError.unknown(base, { label, status: res.status });
+}
+
+/**
+ * ADR-071 — body-aware sibling of `routerErrorFromResponse`. The sync classifier
+ * deliberately looks at the status alone (a credential rejection and every other
+ * 502 are AUTH), so the one 502 that means something else has to be read from the
+ * body: `{detail: {code: "ROUTER_PAIRED_ELSEWHERE", paired_box}}` (FastAPI) or the
+ * same keys at the top level. Anything else, an unreadable body included, falls
+ * through to the status-only rule, so AUTH stays AUTH.
+ *
+ * Reads a CLONE: the caller's Response is untouched.
+ */
+export async function routerErrorFromResponseBody(res: Response, label: string): Promise<RouterError> {
+  if (res.status === 502) {
+    try {
+      const body = (await res.clone().json()) as Record<string, unknown> | null;
+      const inner = (body && typeof body.detail === "object" && body.detail
+        ? (body.detail as Record<string, unknown>)
+        : body) as Record<string, unknown> | null;
+      if (inner && inner.code === "ROUTER_PAIRED_ELSEWHERE") {
+        const box = inner.paired_box;
+        return RouterError.pairedElsewhere(
+          typeof inner.message === "string" && inner.message
+            ? inner.message
+            : "This router is paired to another device.",
+          {
+            label,
+            pairedBox: typeof box === "string" && /^[0-9a-f]{64}$/.test(box) ? box : undefined,
+          },
+        );
+      }
+    } catch {
+      /* not JSON / no clone: status-only rule below */
+    }
+  }
+  return routerErrorFromResponse(res, label);
 }
 
 /**

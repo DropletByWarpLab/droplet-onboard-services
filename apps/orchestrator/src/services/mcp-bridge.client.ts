@@ -213,6 +213,9 @@ export class McpBridgeClient implements McpClientPort {
    * for good.
    */
   #lastAdvertised: readonly string[] = [];
+  #lastDefinitionHashes: ReadonlyMap<string, string> = new Map();
+  #lastListed: readonly (McpToolDescriptor & { definitionHash?: string })[] = [];
+  #onListed: ((tools: readonly (McpToolDescriptor & { definitionHash?: string })[]) => void | Promise<void>) | null = null;
 
   constructor(opts: McpBridgeClientOptions) {
     if (!SERVER_ID_PATTERN.test(opts.serverId)) {
@@ -246,12 +249,42 @@ export class McpBridgeClient implements McpClientPort {
   }
 
   async listTools(): Promise<McpToolDescriptor[]> {
-    const body = await this.#send<{ tools: McpToolDescriptor[] }>(
+    const body = await this.#send<{ tools: (McpToolDescriptor & { definitionHash?: string })[] }>(
       "GET",
       `/sessions/${this.serverId}/tools`,
     );
     this.#lastAdvertised = body.tools.map((t) => t.name);
+    this.#lastListed = body.tools;
+    // WARP-3918 — the bridge hashes the whole wire object (annotations
+    // included, which never reach this process). Kept by wire name.
+    this.#lastDefinitionHashes = new Map(
+      body.tools.flatMap((t) => (typeof t.definitionHash === "string" ? [[t.name, t.definitionHash] as const] : [])),
+    );
+    if (this.#onListed) {
+      try {
+        await this.#onListed(body.tools);
+      } catch (err) {
+        logger.error({ err, serverId: this.serverId }, "mcp_bridge_on_listed_failed");
+      }
+    }
     return body.tools;
+  }
+
+  /** WARP-3918 — the last listing as the bridge sent it (descriptions and hashes). */
+  lastListedTools(): readonly (McpToolDescriptor & { definitionHash?: string })[] {
+    return this.#lastListed;
+  }
+
+  /** WARP-3918 — wire name → the bridge's definition hash, from the last listing. */
+  lastDefinitionHashes(): ReadonlyMap<string, string> {
+    return this.#lastDefinitionHashes;
+  }
+
+  /** WARP-3918 — called after every successful listing (it runs per agent
+   *  turn), so a definition that changes mid-session is seen, not only one
+   *  that changed before a re-attach. Must not throw; a throw is logged. */
+  onListed(handler: (tools: readonly (McpToolDescriptor & { definitionHash?: string })[]) => void | Promise<void>): void {
+    this.#onListed = handler;
   }
 
   /** {@link #lastAdvertised}. Empty until a listing has succeeded — never a

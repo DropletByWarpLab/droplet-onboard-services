@@ -67,17 +67,21 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 from starlette.types import Receive, Scope, Send
 
+import archive_import
 import connector_draft
 import extensions
 import gitstore
+import hosted_http
 import supervisor
 import workspace
+from analysis_artifacts import validate_artifacts
 
 SANDBOX_SERVICE_TOKEN = os.getenv("SANDBOX_SERVICE_TOKEN", "").strip()
 
@@ -120,6 +124,8 @@ SERVER_UNDUMPABLE = _make_undumpable()
 AUTH_EXEMPT_PATHS = frozenset({"/health"})
 
 RUNNER = Path(__file__).resolve().parent / "runner.py"
+ANALYSIS_RUNNER = Path(__file__).resolve().parent / "analysis_runner.py"
+ANALYSIS_LOCK = threading.Lock()
 
 # Ceilings the request may ask for, never exceed. The orchestrator passes its
 # own (config SANDBOX_TRANSFORM_TIMEOUT_MS / SANDBOX_OUTPUT_CAP_BYTES); these
@@ -172,6 +178,19 @@ class TransformRequest(BaseModel):
     outputCapBytes: int = Field(default=256_000, ge=1_024, le=MAX_OUTPUT_CAP_BYTES)
 
 
+class AnalysisSource(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=255)
+    format: str = Field(pattern=r"^(csv|xlsx)$")
+    contentBase64: str = Field(max_length=4 * 1024 * 1024)
+
+
+class AnalysisRequest(TransformRequest):
+    model_config = ConfigDict(extra="forbid")
+    sources: list[AnalysisSource] = Field(default_factory=list, max_length=4)
+    outputCapBytes: int = Field(default=1_048_576, ge=1_024, le=MAX_OUTPUT_CAP_BYTES)
+
+
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     # The git store's one boot-time job: templates.git exists after the
@@ -206,6 +225,13 @@ async def health():
     return {"status": "ok", "processes": supervisor.SUPERVISION_ENABLED, "workspaces": gitstore.REPOS_DIR.is_dir()}
 
 
+@app.get("/capabilities")
+async def creation_capabilities():
+    # Query kernel support without sealing this API or executing user/sample code.
+    from analysis_readiness import kernel_eligible
+    return {"version": 1, "analysisEligible": kernel_eligible(), "busy": ANALYSIS_LOCK.locked()}
+
+
 def _read_capped(stream, cap: int) -> tuple[bytes, bool]:
     """Read at most ``cap + 1`` bytes so the excess is DETECTED, not buffered."""
     chunks: list[bytes] = []
@@ -220,28 +246,40 @@ def _read_capped(stream, cap: int) -> tuple[bytes, bool]:
             return b"".join(chunks), True
 
 
-def run_transform(req: TransformRequest) -> dict[str, Any]:
+def run_transform(req: TransformRequest, analysis: bool = False) -> dict[str, Any]:
     """One child process, one deadline, one output cap. Pure function of the
     request so the tests can call it without the HTTP layer."""
     inputs_json = json.dumps(req.inputs)
     if len(inputs_json.encode("utf-8")) > MAX_INPUTS_BYTES:
         return {"error": f"inputs exceed {MAX_INPUTS_BYTES} bytes"}
-    payload = json.dumps(
-        {"code": req.code, "inputs": req.inputs, "maxMemoryBytes": CHILD_MAX_MEMORY_BYTES},
-    ).encode("utf-8")
+    scratch = tempfile.TemporaryDirectory(prefix="analysis-", dir=SCRATCH_DIR) if analysis else None
+    child_cwd = scratch.name if scratch is not None else SCRATCH_DIR
+    request_data = {"code": req.code, "inputs": req.inputs, "maxMemoryBytes": CHILD_MAX_MEMORY_BYTES}
+    if analysis and isinstance(req, AnalysisRequest):
+        request_data["sources"] = [s.model_dump() for s in req.sources]
+        request_data["scratchDir"] = child_cwd
+    payload = json.dumps(request_data).encode("utf-8")
+    if len(payload) > MAX_INPUTS_BYTES:
+        if scratch is not None:
+            scratch.cleanup()
+        return {"error": f"analysis request exceeds {MAX_INPUTS_BYTES} bytes"}
 
     deadline = time.monotonic() + req.timeoutMs / 1000
     try:
         proc = subprocess.Popen(
-            [sys.executable, "-I", "-S", "-B", str(RUNNER)],
+            # Analysis's trusted XLSX loader needs installed openpyxl. User
+            # imports still go through runner.py's stdlib-only guard.
+            [sys.executable, "-I", *([] if analysis else ["-S"]), "-B", str(ANALYSIS_RUNNER if analysis else RUNNER)],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            cwd=SCRATCH_DIR,
-            env=CHILD_ENV,
+            cwd=child_cwd,
+            env={**CHILD_ENV, "HOME": child_cwd},
             close_fds=True,
         )
     except OSError as exc:
+        if scratch is not None:
+            scratch.cleanup()
         return {"error": f"could not start the transform process: {exc}"}
 
     stdout_data = b""
@@ -288,6 +326,8 @@ def run_transform(req: TransformRequest) -> dict[str, Any]:
         proc.wait(timeout=5)
     reader.join(timeout=1)
     drainer.join(timeout=1)
+    if scratch is not None:
+        scratch.cleanup()
 
     if timed_out:
         return {"error": f"transform exceeded {req.timeoutMs} ms"}
@@ -303,7 +343,16 @@ def run_transform(req: TransformRequest) -> dict[str, Any]:
     if isinstance(result, dict) and ("output" in result or "error" in result):
         if "error" in result:
             return {"error": str(result["error"])}
-        return {"output": result["output"]}
+        if analysis:
+            try:
+                # The child can introspect/replace its helpers and globals.
+                # Validate bytes here, after it exits, in the trusted parent.
+                result["artifacts"] = validate_artifacts(result.get("artifacts"))
+                if len(json.dumps(result, separators=(",", ":"), allow_nan=False).encode("utf-8")) > req.outputCapBytes:
+                    return {"error": f"output exceeded {req.outputCapBytes} bytes after artifact validation"}
+            except (ValueError, TypeError) as exc:
+                return {"error": f"invalid analysis artifacts: {exc}"}
+        return result if analysis else {"output": result["output"]}
 
     # The child died without answering — a MemoryError past what runner.py
     # could catch, a kill by the pid ceiling, a segfault. Say what we know.
@@ -318,6 +367,19 @@ async def transform(req: TransformRequest):
     import anyio
 
     return await anyio.to_thread.run_sync(run_transform, req)
+
+
+@app.post("/analysis")
+async def data_analysis(req: AnalysisRequest):
+    import anyio
+
+    # Same bearer, environment, process/memory/time/output limits as transforms.
+    if not ANALYSIS_LOCK.acquire(blocking=False):
+        return {"error": "data analysis sandbox is busy; try again after the running analysis finishes"}
+    try:
+        return await anyio.to_thread.run_sync(run_transform, req, True)
+    finally:
+        ANALYSIS_LOCK.release()
 
 
 # ── Slice H's seam: long-lived, supervised processes ───────────────────────
@@ -383,11 +445,22 @@ class InstallExtensionRequest(BaseModel):
     version: str = Field(pattern=extensions.SEMVER.pattern, max_length=64)
     commit: str = Field(pattern=r"^[0-9a-f]{40}$")
     tree: str = Field(pattern=r"^[0-9a-f]{40}$")
-    runtime: str = Field(pattern=r"^(node20|python312)$")
-    entrypoint: str = Field(min_length=1, max_length=256)
+    kind: str = Field(default="extension", pattern=r"^(extension|app)$")
+    runtime: str = Field(pattern=r"^(node20|python312|static)$")
+    entrypoint: str | None = Field(default=None, min_length=1, max_length=256)
+    http: dict[str, Any] | None = None
     memoryMb: int = Field(ge=extensions.MEMORY_MB_MIN, le=extensions.MEMORY_MB_MAX)
-    token: str = Field(pattern=extensions.EXT_TOKEN.pattern)
+    token: str | None = Field(default=None, pattern=extensions.EXT_TOKEN.pattern)
     orchestratorUrl: str | None = Field(default=None, pattern=r"^https?://[A-Za-z0-9.-]+(:\d{1,5})?$", max_length=256)
+
+    @model_validator(mode="after")
+    def validate_kind(self):
+        if self.kind == "extension":
+            if not self.entrypoint or not self.token or self.runtime == "static" or self.http is not None:
+                raise ValueError("tool extensions require entrypoint/token and must not have http or static runtime")
+        elif self.token is not None or self.orchestratorUrl is not None:
+            raise ValueError("apps must not receive a callback bearer or URL")
+        return self
 
 
 def _ext(fn, *args, **kwargs):
@@ -459,6 +532,8 @@ async def install_extension(slug: str, req: InstallExtensionRequest):
         token=req.token,
         base_env=CHILD_ENV,
         orchestrator_url=req.orchestratorUrl,
+        kind=req.kind,
+        http=req.http,
     )
 
 
@@ -478,6 +553,59 @@ async def relay_extension(slug: str, request: Request, timeoutMs: int | None = N
     )
 
 
+class _AppResponse(StreamingResponse):
+    """Close upstream even if a client disconnects before iteration starts."""
+    def __init__(self, response: hosted_http.RelayResponse):
+        super().__init__(response.chunks(), status_code=response.status, headers=response.headers)
+        self.upstream = response
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self.upstream.close()
+
+
+@app.api_route("/extensions/{slug}/http/{path:path}", methods=sorted(hosted_http.METHODS),
+               dependencies=[Depends(_processes_enabled)])
+async def relay_app(slug: str, path: str, request: Request):
+    import anyio
+
+    # Spool with a cap WHILE reading: Content-Length is not trustworthy, and
+    # request.body() would allocate an unbounded body before checking it.
+    length = request.headers.get("content-length")
+    if length and (not length.isdigit() or int(length) > hosted_http.MAX_REQUEST_BYTES):
+        raise HTTPException(status_code=413, detail="app request body exceeds 32 MiB")
+    deadline = time.monotonic() + hosted_http.MAX_TIMEOUT_S
+    with tempfile.SpooledTemporaryFile(max_size=256 * 1024, dir=SCRATCH_DIR) as body:
+        size = 0
+        try:
+            with anyio.fail_after(hosted_http.MAX_TIMEOUT_S):
+                async for chunk in request.stream():
+                    size += len(chunk)
+                    if size > hosted_http.MAX_REQUEST_BYTES:
+                        raise HTTPException(status_code=413, detail="app request body exceeds 32 MiB")
+                    body.write(chunk)
+        except TimeoutError as exc:
+            raise HTTPException(status_code=504, detail="app request body timed out") from exc
+        body.seek(0)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise HTTPException(status_code=504, detail="app request timed out")
+        response = await _ext_thread(
+            extensions.app_request, slug, request.headers.get("x-droplet-relay-key", ""),
+            request.method, path, request.url.query, dict(request.headers), body, size, remaining,
+        )
+    return _AppResponse(response)
+
+
+@app.get("/extensions/{slug}/logs", dependencies=[Depends(_processes_enabled)])
+async def app_logs(slug: str, limit: int = 200, since: int | None = None):
+    if not 1 <= limit <= 2000 or (since is not None and since < 0):
+        raise HTTPException(status_code=400, detail="invalid log limit or cursor")
+    return await _ext_thread(extensions.app_logs, slug, limit, since)
+
+
 @app.delete("/extensions/{slug}/process", dependencies=[Depends(_processes_enabled)])
 async def stop_extension(slug: str):
     snap = await _ext_thread(extensions.stop, slug)
@@ -487,8 +615,8 @@ async def stop_extension(slug: str):
 
 
 @app.delete("/extensions/{slug}", dependencies=[Depends(_processes_enabled)])
-async def uninstall_extension(slug: str):
-    return await _ext_thread(extensions.uninstall, slug)
+async def uninstall_extension(slug: str, deleteData: bool = False):
+    return await _ext_thread(extensions.uninstall, slug, delete_data=deleteData)
 
 
 # ── Slice G (WARP-2896): workspaces + the git store ────────────────────────
@@ -575,6 +703,34 @@ async def list_templates():
 @app.post("/workspaces")
 async def create_workspace(req: CreateWorkspaceRequest):
     return await _in_thread(gitstore.create_workspace, req.id, req.template, req.author.pair())
+
+
+@app.post("/workspaces/{workspace_id}/import", dependencies=[Depends(_processes_enabled)])
+async def import_workspace(workspace_id: str, request: Request, format: str):
+    import anyio
+
+    if format not in {"zip", "tar.gz"}:
+        raise HTTPException(status_code=400, detail="archive format must be zip or tar.gz")
+    _store(gitstore.check_id, workspace_id)
+    try:
+        author = WorkspaceAuthor(name=unquote(request.headers.get("x-droplet-author-name", "")),
+                                 email=unquote(request.headers.get("x-droplet-author-email", "")))
+    except ValidationError as exc:
+        raise HTTPException(status_code=400, detail="archive author is invalid") from exc
+    gitstore.ensure_dirs()
+    with tempfile.SpooledTemporaryFile(max_size=1024 * 1024, dir=gitstore.WORK_DIR) as spool:
+        size = 0
+        try:
+            with anyio.fail_after(archive_import.IMPORT_TIMEOUT_S):
+                async for chunk in request.stream():
+                    size += len(chunk)
+                    if size > archive_import.MAX_ARCHIVE_BYTES:
+                        raise HTTPException(status_code=413, detail="archive exceeds 256 MiB")
+                    spool.write(chunk)
+        except TimeoutError as exc:
+            raise HTTPException(status_code=504, detail="archive upload timed out") from exc
+        spool.seek(0)
+        return await _in_thread(archive_import.import_workspace, workspace_id, format, spool, author.pair())
 
 
 @app.get("/workspaces/{workspace_id}")

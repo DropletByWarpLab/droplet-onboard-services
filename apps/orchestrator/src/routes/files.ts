@@ -69,6 +69,7 @@ import {
 } from "../services/cache.service.js";
 import { readUserEmail } from "../services/user-directory.service.js";
 import { resolveAssertedUser } from "../services/asserted-user.service.js";
+import { internalBaseUrl, internalFetch } from "../lib/internal-tls.js";
 import {
   defaultPublicLinkExpiry,
   exposesOutside,
@@ -94,7 +95,10 @@ import {
   docServerHealthy,
   DocServerUnavailableError,
 } from "../services/docserver.client.js";
-import { resolveNcToken } from "../services/nextcloud-session.service.js";
+import { getNcToken, resolveNcToken } from "../services/nextcloud-session.service.js";
+import { checkSession } from "../services/session.service.js";
+import { hydrateSlideImages, SlideAssetError, withSlideDeadline } from "../services/slide-assets.service.js";
+import { readOfficeBytes, OfficeFileError } from "../services/office-file.client.js";
 import { publish } from "../services/mqtt.service.js";
 import { config } from "../config.js";
 import type { FileEntryInfo } from "../types/index.js";
@@ -2814,9 +2818,25 @@ export function createFilesRouter(
   router.post(
     "/files/render",
     requireRoleOrMcpService("owner", "admin", "family"),
-    requireSpaceAccess(prisma, "contributor", { resolveSpace: resolveSpaceGuardToken }),
     async (req: Request, res: Response, next: NextFunction) => {
+      let imageDeadline: { signal: AbortSignal; cleanup: () => void } | undefined;
+      let imageSaveStarted = false;
+      const rawSlides = Array.isArray(req.body?.slides) ? req.body.slides : [];
+      const hasImages = rawSlides.some((slide: unknown) => slide && typeof slide === "object" && "image" in slide && slide.image != null);
+      if (hasImages) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 55_000);
+        const cancelled = () => { if (!res.writableEnded) controller.abort(); };
+        res.once("close", cancelled);
+        imageDeadline = { signal: controller.signal, cleanup: () => { clearTimeout(timer); res.removeListener("close", cancelled); } };
+      }
+      const bounded = <T>(work: Promise<T>): Promise<T> => imageDeadline ? withSlideDeadline(work, imageDeadline.signal) : work;
       try {
+        // Include the destination grant and every storage/auth preflight in
+        // the same image operation deadline, before any asynchronous lookup.
+        let spaceAllowed = false;
+        await bounded(requireSpaceAccess(prisma, "contributor", { resolveSpace: resolveSpaceGuardToken })(req, res, () => { spaceAllowed = true; }));
+        if (!spaceAllowed) return;
         const body = (req.body ?? {}) as {
           path?: unknown;
           format?: unknown;
@@ -2824,6 +2844,7 @@ export function createFilesRouter(
           body_markdown?: unknown;
           sheets?: unknown;
           slides?: unknown;
+          theme?: unknown;
         };
 
         const format = body.format;
@@ -2863,9 +2884,16 @@ export function createFilesRouter(
 
         const space = resolveSpace(req.query.space);
         const dir = path.posix.dirname(rawPath) || "/";
-        const targetPath = await rootForSpace(prisma, space, dir);
-        const token = await getToken(req);
-        const user = await getUser(req, prisma);
+        const targetPath = await bounded(rootForSpace(prisma, space, dir));
+        const token = await bounded(getToken(req));
+        const user = await bounded(getUser(req, prisma));
+        const mcp = req.user?.id === "_service:mcp" && req.user.role === "service";
+        const resolvedActor = mcp ? await bounded(resolveAssertedUser(prisma, req.header("x-nextcloud-user") ?? "")) : null;
+        const actor = resolvedActor?.ok ? resolvedActor.user : !mcp ? req.user : null;
+        if (!actor || !["owner", "admin", "family"].includes(actor.role)) {
+          res.status(403).json({ error: "The acting person is not allowed to create documents." });
+          return;
+        }
         const uploadedPath =
           targetPath === "/" ? `/${filename}` : `${targetPath}/${filename}`;
 
@@ -2880,7 +2908,7 @@ export function createFilesRouter(
         // loser would clobber the winner — WARP-2096 reopened. The
         // authoritative guard is `If-None-Match: *` on the PUT below, which
         // the server enforces atomically.
-        const existing = await ncGetFileId(token, user, uploadedPath);
+        const existing = await bounded(imageDeadline ? ncGetFileId(token, user, uploadedPath, imageDeadline.signal) : ncGetFileId(token, user, uploadedPath));
         if (existing !== null) {
           res.status(409).json({ error: "file already exists", path: uploadedPath });
           return;
@@ -2893,9 +2921,15 @@ export function createFilesRouter(
           return;
         }
 
+        let renderedSlides = Array.isArray(body.slides) ? body.slides : [];
+        if (hasImages) {
+          if (format !== "pdf" && format !== "pptx") throw new SlideAssetError(400, "Image slides require PDF or PPTX.");
+          renderedSlides = await hydrateSlideImages(renderedSlides, { prisma, req, actor, token, login: user, signal: imageDeadline!.signal });
+        }
+
         let upstream: globalThis.Response;
         try {
-          upstream = await fetch(`${config.DOC_RENDER_URL}/render`, {
+          const rendering = internalFetch(`${internalBaseUrl(config.DOC_RENDER_URL)}/render`, {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
@@ -2907,11 +2941,15 @@ export function createFilesRouter(
               body_markdown:
                 typeof body.body_markdown === "string" ? body.body_markdown : "",
               sheets: Array.isArray(body.sheets) ? body.sheets : [],
-              slides: Array.isArray(body.slides) ? body.slides : [],
+              slides: renderedSlides,
+              ...(body.theme !== undefined ? { theme: body.theme } : {}),
             }),
-            signal: AbortSignal.timeout(DOC_RENDER_TIMEOUT_MS),
+            signal: imageDeadline?.signal ?? AbortSignal.timeout(DOC_RENDER_TIMEOUT_MS),
+            redirect: "error",
           });
+          upstream = await (imageDeadline ? withSlideDeadline(rendering, imageDeadline.signal) : rendering);
         } catch (err) {
+          if (err instanceof SlideAssetError) throw err;
           logger.error({ err }, "files/render: doc-render unreachable");
           res.status(502).json({ error: "doc_render_unavailable" });
           return;
@@ -2921,10 +2959,10 @@ export function createFilesRouter(
           // 400 from the renderer is the CALLER's bad spec — pass the reason
           // through so the tool can tell the model what to fix, instead of
           // collapsing every refusal into one opaque failure.
-          const detail = await upstream
-            .json()
+          const errorBody = upstream.json();
+          const detail = await (imageDeadline ? withSlideDeadline(errorBody, imageDeadline.signal) : errorBody)
             .then((j) => (j as { detail?: string }).detail)
-            .catch(() => undefined);
+            .catch((error) => { if (error instanceof SlideAssetError) throw error; return undefined; });
           if (upstream.status === 422) {
             res.status(400).json({ error: "invalid document spec" });
             return;
@@ -2938,19 +2976,58 @@ export function createFilesRouter(
           return;
         }
 
-        const buffer = Buffer.from(await upstream.arrayBuffer());
         const MAX_RENDER_BYTES = 10 * 1024 * 1024;
+        let buffer: Buffer;
+        if (imageDeadline) {
+          try { buffer = await readOfficeBytes(upstream.body, MAX_RENDER_BYTES, imageDeadline.signal); }
+          catch (error) {
+            if (error instanceof OfficeFileError) throw new SlideAssetError(error.code === "TOO_LARGE" ? 413 : error.code === "TIMEOUT" ? 408 : 502, "Slide renderer returned invalid or oversized output, or exceeded its deadline.");
+            throw error;
+          }
+        } else buffer = Buffer.from(await upstream.arrayBuffer());
         if (buffer.byteLength > MAX_RENDER_BYTES) {
           res.status(413).json({ error: "rendered document too large" });
           return;
         }
 
+        let writeToken = token;
+        if (imageDeadline) {
+          // Image reads and rendering can outlive an account/session change.
+          // Resolve the pinned person and storage identity again before saving.
+          if (config.AUTH_ENABLED || actor.id !== "dev") {
+            const current = await withSlideDeadline(resolveAssertedUser(prisma, actor.id), imageDeadline.signal);
+            if (!current.ok || current.user.id !== actor.id || !["owner", "admin", "family"].includes(current.user.role)) throw new SlideAssetError(403, "The acting person's document access was revoked before saving.");
+            const destination = await withSlideDeadline(checkSpaceAccess(prisma, req, { id: current.user.id, role: current.user.role }, req.spaceDepartmentId ?? null, "contributor"), imageDeadline.signal);
+            if (!destination.allowed) throw new SlideAssetError(destination.status, destination.error);
+            if (mcp) {
+              const mapping = await withSlideDeadline(resolveAssertedNextcloudLogin(prisma, actor.id), imageDeadline.signal);
+              if (!mapping.ok || mapping.userId !== actor.id || mapping.login !== user) throw new SlideAssetError(403, "The acting person's File Store account changed before saving.");
+            }
+          }
+          const liveToken = await withSlideDeadline(mcp ? getNcToken(actor.id) : resolveNcToken(req), imageDeadline.signal);
+          if (!liveToken) throw new SlideAssetError(401, "File access disconnected before the slide deck could be saved.");
+          // The storage credential is shared by this person's devices. A
+          // logout can retire this sign-in while another still needs that
+          // credential. Recheck the signed sid without extending its lifetime;
+          // legacy callers and MCP have no sid. Keep auth's Redis-error policy.
+          if (!mcp && req.user?.sid) {
+            const session = await withSlideDeadline(checkSession(req.user.sid, { touch: false }), imageDeadline.signal);
+            if (session.kind === "missing" || session.kind === "expired" || (session.kind === "ok" && session.record.userId !== actor.id)) {
+              throw new SlideAssetError(401, "This sign-in expired before the slide deck could be saved.");
+            }
+          }
+          writeToken = liveToken;
+        }
+
         try {
           // WARP-2523 — create-new-only PUT: the server refuses atomically
           // (412) when the target exists, closing the pre-check's race.
-          await ncUploadFile(token, user, targetPath, filename, buffer, {
+          imageSaveStarted = Boolean(imageDeadline);
+          const saving = ncUploadFile(writeToken, user, targetPath, filename, buffer, {
             ifNoneMatch: true,
+            ...(imageDeadline ? { signal: imageDeadline.signal } : {}),
           });
+          await (imageDeadline ? withSlideDeadline(saving, imageDeadline.signal) : saving);
         } catch (uploadErr) {
           if (uploadErr instanceof NcPreconditionFailedError) {
             // A concurrent writer won between the pre-check and the PUT —
@@ -2961,19 +3038,32 @@ export function createFilesRouter(
           throw uploadErr;
         }
 
-        const ownerUserId = (req as { user?: { id?: string } }).user?.id ?? null;
+        if (imageDeadline) {
+          // Return the proven storage result before best-effort bookkeeping.
+          // The paired export tool can start its companion without losing an
+          // acknowledged deck to metadata/cache latency or its own deadline.
+          res.json({ path: uploadedPath, filename, bytes: buffer.byteLength, mimeType: DOC_RENDER_MIME[format] });
+          buffer = Buffer.alloc(0);
+          renderedSlides = [];
+        }
+        const bookkeepingSignal = imageDeadline ? AbortSignal.timeout(3000) : undefined;
+        const ownerUserId = actor.id;
         if (ownerUserId) {
           // Best-effort, exactly as in /files/upload: a registry failure must
           // not fail a write that already landed.
           try {
-            const ncFileId = await ncGetFileId(token, user, uploadedPath);
+            // A confirmed PUT is a saved deck. Metadata and cache/audit
+            // latency receive their own short budget and cannot erase it.
+            const lookup = bookkeepingSignal ? ncGetFileId(writeToken, user, uploadedPath, bookkeepingSignal) : ncGetFileId(writeToken, user, uploadedPath);
+            const ncFileId = await (bookkeepingSignal ? withSlideDeadline(lookup, bookkeepingSignal) : lookup);
             if (ncFileId !== null) {
-              await upsertFileRegistryEntry(prisma, {
+              const registering = upsertFileRegistryEntry(prisma, {
                 ncFileId,
                 ownerUserId,
                 path: uploadedPath,
                 departmentId: req.spaceDepartmentId ?? null,
               });
+              await (bookkeepingSignal ? withSlideDeadline(registering, bookkeepingSignal) : registering);
             }
           } catch (registryErr) {
             logger.warn(
@@ -2983,24 +3073,36 @@ export function createFilesRouter(
           }
         }
 
-        await invalidateListing(req, user, { space, path: targetPath });
-        await auditFileChange(
+        const invalidating = invalidateListing(req, user, { space, path: targetPath });
+        if (bookkeepingSignal) await withSlideDeadline(invalidating, bookkeepingSignal).catch(() => {});
+        else await invalidating;
+        const auditing = auditFileChange(
           req, prisma, "File uploaded", uploadedPath, { paths: [uploadedPath], space, count: 1 }, "upload",
         );
+        if (bookkeepingSignal) await withSlideDeadline(auditing, bookkeepingSignal).catch(() => {});
+        else await auditing;
         safePublish(`droplet/files/${user}/uploaded`, {
           path: targetPath,
           files: [filename],
           count: 1,
         });
 
-        res.json({
+        if (!res.headersSent) res.json({
           path: uploadedPath,
           filename,
           bytes: buffer.byteLength,
           mimeType: DOC_RENDER_MIME[format],
         });
       } catch (err) {
+        if (res.headersSent) { logger.warn({ err }, "files/render: saved slide bookkeeping failed"); return; }
+        if (imageDeadline?.signal.aborted) {
+          res.status(408).json({ error: imageSaveStarted ? "Slide creation timed out while saving. The storage outcome is unknown; check Files before retrying." : "Slide creation was cancelled or exceeded its deadline." });
+          return;
+        }
+        if (err instanceof SlideAssetError) { res.status(err.status).json({ error: err.message }); return; }
         handleFileError(err, res, next);
+      } finally {
+        imageDeadline?.cleanup();
       }
     },
   );

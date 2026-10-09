@@ -202,7 +202,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "share_file",
   description:
-    "Create a PUBLIC link to a file on the Droplet's File Store — anyone with the link can open it (view-only unless allow_edit). The link always expires (expires_days 1-90, default 7) and can be password-protected (password 8-64 chars). Two-step: the first call returns confirmation_required stating the link is public, its expiry, and whether it has a password — relay it to the user, and only after they explicitly approve, re-issue the SAME call with confirmed: true.",
+    "Create PUBLIC File Store link: anyone holding it can open. View-only unless allow_edit; expiry1-90 days(default7), optional8-64-character password. Relay confirmation_required access/expiry/password status; only after explicit approval repeat SAME call with confirmed: true.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

@@ -1375,3 +1375,65 @@ describe("the catalog is grouped under category headings (WARP-2968)", () => {
     expect(last?.names).toEqual(["M365"]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// WARP-3904 — `?connect=<provider>`, the hand-off from Ask AI
+// ---------------------------------------------------------------------------
+
+describe("?connect=<provider> hand-off from chat", () => {
+  afterEach(() => {
+    window.history.replaceState(null, "", "/");
+  });
+
+  it("does what that tile's Connect does, then strips the parameter", async () => {
+    window.history.replaceState(null, "", "/integrations?connect=eaglesoft");
+    vi.mocked(fetchIntegrations).mockResolvedValue([]);
+    renderHub();
+
+    expect((await screen.findByTestId("connect-wizard")).dataset.provider).toBe("eaglesoft");
+    expect(window.location.search).toBe("");
+  });
+
+  it("keeps every other query parameter and the hash", async () => {
+    window.history.replaceState(null, "", "/integrations?from=chat&connect=eaglesoft#top");
+    vi.mocked(fetchIntegrations).mockResolvedValue([]);
+    renderHub();
+
+    await screen.findByTestId("connect-wizard");
+    expect(window.location.search).toBe("?from=chat");
+    expect(window.location.hash).toBe("#top");
+  });
+
+  it("opens nothing for a provider the catalog does not know, and still strips it", async () => {
+    window.history.replaceState(null, "", "/integrations?connect=not-a-provider");
+    vi.mocked(fetchIntegrations).mockResolvedValue([]);
+    const { container } = renderHub();
+
+    await waitFor(() => expect(renderedNames(container)).toContain("Eaglesoft"));
+    expect(screen.queryByTestId("connect-wizard")).toBeNull();
+    expect(push).not.toHaveBeenCalled();
+    expect(window.location.search).toBe("");
+  });
+
+  it("opens the Patterson API form for that provider key, never the direct-SQL wizard", async () => {
+    window.history.replaceState(null, "", "/integrations?connect=eaglesoft-api");
+    vi.mocked(fetchIntegrations).mockResolvedValue([]);
+    renderHub();
+
+    expect(await screen.findByRole("dialog", { name: /Patterson API/ })).toBeInTheDocument();
+    expect(screen.getByRole("form", { name: "Patterson API setup" })).toBeInTheDocument();
+    expect(screen.queryByTestId("connect-wizard")).toBeNull();
+    expect(push).not.toHaveBeenCalled();
+    expect(window.location.search).toBe("");
+  });
+
+  it("does nothing at all without the parameter", async () => {
+    window.history.replaceState(null, "", "/integrations");
+    vi.mocked(fetchIntegrations).mockResolvedValue([]);
+    const { container } = renderHub();
+
+    await waitFor(() => expect(renderedNames(container)).toContain("Eaglesoft"));
+    expect(screen.queryByTestId("connect-wizard")).toBeNull();
+    expect(push).not.toHaveBeenCalled();
+  });
+});

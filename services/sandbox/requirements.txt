@@ -13,5 +13,8 @@ uvicorn[standard]==0.52.1
 pytest==9.1.1
 ruff==0.16.8
 
+# Trusted analysis loader only. User Python keeps the stdlib import allowlist.
+openpyxl==3.1.5
+
 # OSV floor (same idiom as web-fetch / doc-render).
 idna>=3.15

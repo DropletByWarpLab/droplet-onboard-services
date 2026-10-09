@@ -39,6 +39,8 @@
 #                                     travel with that dump, or a restore pairs
 #                                     READY rows with files that are gone and every
 #                                     download answers 404.
+#   staging/volumes/extensions-data.tar persistent hosted-app state (WARP-3906),
+#                                     which is not rebuilt from signed code
 #   <repo>/.env                       device secrets (the repo copy is chmod
 #                                     600; the restic repo itself is encrypted)
 #   config dirs (existence-guarded):  docker/certs, docker/secrets,
@@ -295,6 +297,10 @@ stage_volume nextcloud-data
 # row for every attachment and the file behind none of them. Absent on a box that
 # predates the volume: stage_volume skips it with a warning.
 stage_volume pm-attachments
+
+# WARP-3906: mutable app state persists across signed-code upgrades and cannot
+# be re-exported from the workspace git store.
+stage_volume extensions-data
 
 # Camera footage: EXCLUDED by default (size — see header). The stale-staging
 # rm matters: without it, a box that once opted in would keep re-snapshotting

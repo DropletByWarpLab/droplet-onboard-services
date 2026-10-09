@@ -96,6 +96,7 @@ is deliberately **no separate API gateway service** in front of the orchestrator
 | **automount** | `services/automount/` | Bash + udev | USB/NVMe auto-mount → Nextcloud |
 | **_shared** | `services/_shared/` | Python | FIPS self-test helper (Python services) |
 | **doc-render** | `services/doc-render/` | Python + FastAPI | Document spec → `.pdf` / `.docx` / `.xlsx` / `.pptx` bytes |
+| **media-gen** | `services/media-gen/` | Python + FastAPI | Offline image/edit/video worker; default-off media profile, provisioned models required |
 | **egress-audit** | `services/egress-audit/` | Python (host systemd unit) | Runtime egress auditor (conntrack + DNS) |
 | **erp-connector** | `services/erp-connector/` | TypeScript | `@droplet/erp-connector` — ERP/SaaS connector framework (in-process library) |
 | **fleet-agent** | `services/fleet-agent/` | Python | Opt-in fleet telemetry to the analytics portal (profile `telemetry`) |
@@ -139,6 +140,7 @@ network. Host-published ports and host-network services are called out.
 | web-fetch | 8010 | HTTP | internal (profile `web`) |
 | doc-render | 8020 | HTTP | internal |
 | sandbox | 8030 | HTTP | internal-only network (`droplet-internal`), no egress |
+| media-gen | 8040 | HTTP | internal-only `droplet-media` network (profile `media`), no egress |
 | frigate | 5000 | HTTP/RTSP | NVR (profile `linux`/`full`) |
 | db / cache / broker | 5432 / 6379 / 1883 | Postgres / Redis / MQTT | internal |
 
@@ -642,7 +644,8 @@ network. Host-published ports and host-network services are called out.
 - **Purpose:** turns a document spec into `.pdf` / `.docx` / `.xlsx` / `.pptx` bytes
   (WARP-2211) — the model emits a spec, this renders it. `POST /render`, open
   `GET /health`; everything else needs `DOC_RENDER_SERVICE_TOKEN` (fails closed).
-  Supports 16:9 PDF/editable PowerPoint decks and Excel local formulas/charts;
+  Supports rich 16:9 PDF/editable PowerPoint decks, cached Excel formulas/charts
+  and bounded Office inspection/revision through `POST /office`;
   see [creation capabilities](chat-creation.md) for the specifications and limits.
 - **Talks to:** nothing. Stateless, no storage, no egress; the orchestrator's
   `POST /api/files/render` owns auth, paths and the upload. Port 8020, internal.
@@ -696,17 +699,53 @@ network. Host-published ports and host-network services are called out.
 
 - **Purpose:** the one hardened execution service (WARP-2895, ADR-056): routine
   `transform` / `when` steps, workshop runs (versioned workspaces) and extension
-  processes. A thin HTTP front over `subprocess`, port 8030.
+  processes, plus private CSV/XLSX/Python analysis through `POST /analysis`.
+  A thin HTTP front over `subprocess`, port 8030. Analysis children use Linux
+  Landlock/seccomp and fail closed when this boundary is unavailable.
 - **Gotchas:** sits only on the `internal: true` `droplet-internal` network — its
   registered egress is **none**, which is what makes running customer-written code
   there acceptable. Holds no credential but its own bearer.
+- **Persistence (hosted apps):** four named volumes: `workspace-git` (bare
+  repositories), `workspace-checkouts` (rebuildable worktrees),
+  `extensions-installed` (rebuildable signed code exports), and `extensions-data`
+  (app state at `/var/lib/workspace-ext-data`, owned by uid 1000). The last is
+  included in device and restic backups and the factory-reset wipe. It has no
+  enforced per-app filesystem quota; the requested default is 1 GiB. Hosted-app
+  runtime changes require security review before enablement; see
+  [`security/extension-trust.md`](security/extension-trust.md).
+- **Hosted apps (implemented, unreleased):** `kind: app` installs either a
+  static public tree or a Node/Python HTTP server on an assigned loopback port.
+  `/extensions/<slug>/http/*` requires the service bearer and per-start app
+  relay key; `/extensions/<slug>/logs` exposes capped process output internally.
+  Both routes retain the default-off process-supervision gate. Workspace
+  `app-check` probes health/root within 30 seconds and cleans up its child.
+  The gateway's separate TLS listener on **8443** relays through the orchestrator
+  with app-scoped sessions and current role grants. App processes have no
+  published host port. The dashboard's Apps page opens authorized apps; Workshop
+  accepts templates, bounded archives and operator Git pushes. “Set up with
+  assistant” creates a real Chat conversation and a durable workspace-bound
+  `app-setup` run that can check and propose the app. Owner MFA promotion remains
+  the installation boundary. See [`hosted-apps.md`](hosted-apps.md).
 
 ## services/web-fetch
 
 - **Purpose:** the **only** component allowed outbound HTTP for the ambient-data
   tools (WARP-1436): `GET /weather`, `GET /rates` against fixed keyless
   destinations registered in `docs/security/allowed-egress.yaml`. Port 8010,
-  profile `web`; `WEB_FETCH_SERVICE_TOKEN` required (fails closed).
+  profile `web`; `WEB_FETCH_SERVICE_TOKEN` required (fails closed). Public-web
+  search/fetch use screened public HTTPS with signed audit and default-off
+  `web_fetch` off-LAN permission; Brave search needs a provisioned key.
+
+## services/media-gen
+
+- **Purpose:** fixed offline SDXL images/edits and Wan short video, optional
+  operator-selected LTX image-to-video. Port 8040, profile `media` default-off.
+  No weights shipped or downloaded; GPU/model inference remains unverified.
+- **Talks to:** orchestrator only, on dedicated internal `droplet-media` network.
+  Stateless worker returns bytes; durable owner-scoped jobs and file writes
+  belong to the orchestrator. No storage credential, host port or egress.
+- **Reference:** [worker API/deployment](../services/media-gen/README.md),
+  [capability status](chat-creation.md).
 
 ---
 

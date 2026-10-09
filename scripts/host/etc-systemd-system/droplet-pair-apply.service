@@ -1,0 +1,36 @@
+[Unit]
+Description=Droplet pair apply (root executor: persist a router/AP/switch pairing secret, ADR-071)
+Documentation=https://warp-lab.atlassian.net/browse/WARP-3739
+
+# ADR-071 slice B: the device-bridge sandbox (User=droplet + ProtectSystem=strict
+# + NoNewPrivileges) cannot write docker/secrets or recreate a compose service,
+# so the bridge spools the owner-confirmed {target, password} into its
+# RuntimeDirectory (/run/droplet-bridge-pair-spool/request.json, tmpfs) and starts
+# THIS unit via polkit (services/oled-display/50-droplet-device-bridge.rules:
+# start verb, this unit only, user droplet only). ExecStart consumes the one
+# request as root.
+#
+# Deliberately NO install section: never enabled, never runs at boot, only on
+# demand, one request at a time (systemd serializes starts of the same unit).
+# The script finds the checkout from droplet.service itself, so this file carries
+# no per-box path and `droplet-host-units audit` can compare it byte for byte.
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/droplet-pair-apply.sh
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# One `docker compose up --force-recreate` of routing/switch.
+TimeoutStartSec=120
+StandardInput=null
+
+# The docker CLI talks to the daemon over its unix socket; nothing here needs the
+# network, kernel tunables or modules. ProtectHome is deliberately NOT set: the
+# checkout and docker/secrets live under the droplet user home.
+PrivateNetwork=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=true
+RestrictRealtime=true

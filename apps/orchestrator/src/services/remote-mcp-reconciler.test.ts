@@ -224,6 +224,7 @@ function harness(over: { allowlist?: string[]; row?: RemoteMcpConnectionRow | nu
   const lifecycle = new RemoteMcpLifecycleRegistry(() => clock.now);
   const prismaState = { row: over.row === undefined ? connectedRow : over.row };
   const prisma = {
+    offLanAllowlistChannel: { findUnique: async () => ({ enabled: true }) },
     integrationConnection: { findFirst: vi.fn(async () => prismaState.row) },
   };
   const audit = vi.fn();

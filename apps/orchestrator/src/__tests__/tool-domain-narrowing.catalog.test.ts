@@ -10,7 +10,12 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { TOOL_CATALOG, type ToolDomain } from "@droplet/tools-core";
-import type { ToolAccessScope } from "../services/tool-access.service.js";
+import {
+  firstToolDeniedForPrincipal,
+  toolAllowedForPrincipal,
+  type ToolAccessScope,
+} from "../services/tool-access.service.js";
+import { currentRuntimeToolLookup } from "../services/tool-layers.service.js";
 import { runtimeToolRegistry } from "../services/runtime-tool-registry.service.js";
 import { remoteToolClassificationCache } from "../services/remote-tool-classification.service.js";
 
@@ -274,5 +279,100 @@ describe("narrowAllowedToolsForRole — no scope = pre-T5 behavior, bit-for-bit"
     expect(await narrowAllowedToolsForRole("family", [], false, scope(["files"]))).toEqual(
       [],
     );
+  });
+});
+
+// ── WARP-3916 — a guest never reaches a remote MCP tool (ADR-072 section 3) ──
+//
+// Keyed off the runtime registry (the marker every remote server's tools carry),
+// not a server name, so owner-added servers (WARP-3913) are covered by the same
+// spec. Uses the REAL registry. "Offered" = the catalog build
+// (`narrowAllowedToolsForRole`, which becomes the agent loop's pool);
+// "callable" = the shared predicate every executor asks
+// (`toolAllowedForPrincipal` / `firstToolDeniedForPrincipal`). The loop's
+// dispatch gate is pool membership, so a tool dropped here is refused even if
+// the model names it.
+describe("guest never reaches a remote MCP tool (WARP-3916)", () => {
+  const REMOTE_READ = "remotesrv__search_issues";
+  const remote = (name: string) => ({
+    name,
+    serverId: "remotesrv",
+    domain: "ext-remote" as ToolDomain,
+    domainSource: "operator" as const,
+    description: "fixture",
+    inputSchema: {},
+  });
+
+  beforeEach(() => {
+    listTools.mockReset();
+    listTools.mockResolvedValue(
+      [FILES_READ, REMOTE_READ].map((name) => ({ name, description: "d", inputSchema: {} })),
+    );
+    runtimeToolRegistry.registerServerTools("remotesrv", [remote("search_issues")]);
+    remoteToolClassificationCache.seed([
+      {
+        serverId: "remotesrv",
+        toolName: "search_issues",
+        requiresWrite: false,
+        requiresConfirmation: false,
+        denied: false,
+        reviewedBy: "owner",
+        reviewedAt: new Date("2026-10-08T00:00:00Z"),
+        wireDescription: null,
+        firstSeenAt: new Date("2026-10-08T00:00:00Z"),
+        lastSeenAt: new Date("2026-10-08T00:00:00Z"),
+      },
+    ]);
+  });
+
+  afterEach(() => {
+    runtimeToolRegistry.clear();
+    remoteToolClassificationCache.seed([]);
+  });
+
+  /** MUTATION: drop the guest/registry check from `toolAllowedForTier` -> every case goes red. */
+  it("is not offered: default list, no AccessRole (scope null)", async () => {
+    expect(await narrowAllowedToolsForRole("guest", undefined, false, null)).toEqual([FILES_READ]);
+  });
+
+  it("is not offered: explicit allowed_tools naming it", async () => {
+    expect(
+      await narrowAllowedToolsForRole("guest", [FILES_READ, REMOTE_READ], false, null),
+    ).toEqual([FILES_READ]);
+  });
+
+  it("is not offered: even when the guest's AccessRole grants the remote domain", async () => {
+    expect(
+      await narrowAllowedToolsForRole("guest", undefined, false, scope(["files", "ext-remote"])),
+    ).toEqual([FILES_READ]);
+  });
+
+  it("is not callable: the shared predicate refuses it for every executor", () => {
+    expect(toolAllowedForPrincipal(REMOTE_READ, "guest", null)).toBe(false);
+    expect(
+      toolAllowedForPrincipal(REMOTE_READ, "guest", scope(["ext-remote"]), false, currentRuntimeToolLookup()),
+    ).toBe(false);
+    expect(firstToolDeniedForPrincipal([FILES_READ, REMOTE_READ], "guest", null)).toEqual({
+      tool: REMOTE_READ,
+      axis: "write_tier",
+    });
+  });
+
+  /** MUTATION: key the guest rule on live registry membership (denylist) -> the first expect goes red. */
+  it("fail-closed: refused whether or not the server is attached when the predicate runs", async () => {
+    runtimeToolRegistry.clear(); // not attached yet (reconciler tick, re-attach)
+    expect(toolAllowedForPrincipal(REMOTE_READ, "guest", null)).toBe(false);
+    expect(await narrowAllowedToolsForRole("guest", [FILES_READ, REMOTE_READ], false, null)).toEqual([FILES_READ]);
+    runtimeToolRegistry.registerServerTools("remotesrv", [remote("search_issues")]); // attached at execution
+    expect(toolAllowedForPrincipal(REMOTE_READ, "guest", null)).toBe(false);
+    expect(firstToolDeniedForPrincipal([REMOTE_READ], "guest", null)).not.toBeNull();
+  });
+
+  it("control: a member (family) still gets the remote read", async () => {
+    expect(await narrowAllowedToolsForRole("family", undefined, false, null)).toEqual([
+      FILES_READ,
+      REMOTE_READ,
+    ]);
+    expect(toolAllowedForPrincipal(REMOTE_READ, "family", null)).toBe(true);
   });
 });

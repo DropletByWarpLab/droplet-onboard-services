@@ -427,7 +427,7 @@ describe("classification", () => {
     expect(k.db.classifications.get("ext-wc|word_count")).toMatchObject({ requiresWrite: true, reviewedBy: null });
     await k.mux.listTools();
     const out = await k.mux.callTool("ext-wc__word_count", { path: "/" });
-    expect(out.content[0].text).toContain("REMOTE_WRITE_NOT_PERMITTED");
+    expect(out.content[0].text).toContain("REMOTE_TOOL_DEFINITION_CHANGED");
   });
 
   it("a version bump that only rewrites a tool's description resets the owner's review (review #2325)", async () => {
@@ -452,7 +452,7 @@ describe("classification", () => {
     expect(k.db.classifications.get("ext-wc|word_count")).toMatchObject({ requiresWrite: true, reviewedBy: null });
     await k.mux.listTools();
     const out = await k.mux.callTool("ext-wc__word_count", { text: "a b" });
-    expect(out.content[0].text).toContain("REMOTE_WRITE_NOT_PERMITTED");
+    expect(out.content[0].text).toContain("REMOTE_TOOL_DEFINITION_CHANGED");
   });
 
   /** v1 attached and reviewed as a read by the owner; v2 changes the tool's input schema. */
@@ -494,7 +494,7 @@ describe("classification", () => {
     await k.attacher.attach("wc");
     expect(k.db.classifications.get("ext-wc|word_count")).toMatchObject({ requiresWrite: true, reviewedBy: null });
     await k.mux.listTools();
-    expect((await k.mux.callTool("ext-wc__word_count", { path: "/" })).content[0].text).toContain("REMOTE_WRITE_NOT_PERMITTED");
+    expect((await k.mux.callTool("ext-wc__word_count", { path: "/" })).content[0].text).toContain("REMOTE_TOOL_DEFINITION_CHANGED");
   });
 
   it("a failed cache refresh is a failed attach too", async () => {

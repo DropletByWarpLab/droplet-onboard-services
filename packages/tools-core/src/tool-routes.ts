@@ -246,6 +246,8 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   { tool: "list_camera_events", client: "orchestrator", hops: [
     admit("get", "/api/cameras/:name/events"),
     admit("get", "/api/cameras/events/recent"),
+    // WARP-3747: the filtered route, used when after/before/labels/min_score are given.
+    admit("get", "/api/cameras/events"),
   ] },
   { tool: "scan_for_cameras", client: "orchestrator", hops: [admit("post", "/api/cameras/scan")] },
   // WARP-1847: was `none` (ctx.prisma). A live candidate's id is `mac:<MAC>`,
@@ -260,6 +262,17 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   none("get_camera_live_url"), // returns a URL string (no ctx.http hop)
   { tool: "share_clip", client: "orchestrator", hops: [admit("post", "/api/cameras/clips/share")] },
   { tool: "search_camera_events", client: "orchestrator", hops: [admit("get", "/api/cameras/events/search")] },
+  // WARP-3927: camera activity for chat. Every hop is MCP-admitted
+  // (requireRoleOrMcpService + the per-camera ACL, which resolves the acting
+  // person from X-Nextcloud-User); the admission suite proves it.
+  { tool: "summarize_camera_activity", client: "orchestrator", hops: [
+    admit("get", "/api/cameras/events"),
+    admit("get", "/api/cameras/reviews"),
+    admit("get", "/api/cameras/motion"),
+  ] },
+  { tool: "get_camera_motion", client: "orchestrator", hops: [admit("get", "/api/cameras/motion")] },
+  { tool: "list_camera_reviews", client: "orchestrator", hops: [admit("get", "/api/cameras/reviews")] },
+  { tool: "get_camera_recording", client: "orchestrator", hops: [admit("get", "/api/cameras/:name/recordings")] },
   { tool: "get_camera_health", client: "orchestrator", hops: [admit("get", "/api/cameras/system")] },
   { tool: "get_camera_storage", client: "orchestrator", hops: [admit("get", "/api/cameras/storage")] },
   { tool: "set_camera_detection", client: "orchestrator", hops: [
@@ -317,7 +330,7 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   { tool: "list_notifications", client: "orchestrator", hops: [admit("get", "/api/notifications")] },
 
   // ── system ──────────────────────────────────────────────────────────────
-  { tool: "get_system_health", client: "orchestrator", hops: [admit("get", "/api/orchestrator/health")] },
+  { tool: "get_system_health", client: "orchestrator", hops: [admit("get", "/api/orchestrator/health"), admit("get", "/api/capabilities/creation")] },
   { tool: "get_gpu_status", client: "orchestrator", hops: [admit("get", "/api/hardware/gpu")] },
   { tool: "list_drives", client: "orchestrator", hops: [admit("get", "/api/storage/drives")] },
   { tool: "list_storage_pools", client: "orchestrator", hops: [admit("get", "/api/storage/pools")] },
@@ -512,6 +525,13 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   { tool: "translate_text", client: "orchestrator", hops: [admit("post", "/api/llm/complete")] },
   { tool: "get_weather", client: "orchestrator", hops: [admit("get", "/api/web/weather")] },
   { tool: "currency_convert", client: "orchestrator", hops: [admit("get", "/api/web/rates")] },
+  { tool: "web_search", client: "orchestrator", hops: [admit("post", "/api/web/search")] },
+  { tool: "web_fetch", client: "orchestrator", hops: [admit("post", "/api/web/fetch")] },
+  { tool: "analyze_data", client: "nextcloud", hops: [admit("post", "/api/files/analyze")] },
+  { tool: "create_audio", client: "nextcloud", hops: [admit("post", "/api/files/audio")] },
+  { tool: "generate_media", client: "nextcloud", hops: [admit("post", "/api/files/media"), admit("get", "/api/files/media"), admit("get", "/api/files/media/:id"), admit("post", "/api/files/media/:id/cancel")] },
+  { tool: "office_file", client: "nextcloud", hops: [admit("post", "/api/files/office")] },
+  { tool: "create_artifact", client: "nextcloud", hops: [admit("post", "/api/files/upload")] },
   // WARP-3074 — one hop per item; the route admits service principals only.
   { tool: "classify_items", client: "orchestrator", hops: [admit("post", "/api/llm/decide")] },
   // WARP-3116 — pure lookups over the page list carried on the call's _meta.
@@ -520,6 +540,8 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   // WARP-2180 — background runs. The route admits the mcp principal on
   // behalf of the named chat user (requireRoleOrMcpService).
   { tool: "start_agent_run", client: "orchestrator", hops: [admit("post", "/api/agent-runs")] },
+  { tool: "list_hosted_apps", client: "orchestrator", hops: [admit("get", "/api/hosted")] },
+  { tool: "hosted_app_logs", client: "orchestrator", hops: [admit("get", "/api/hosted/:slug/logs")] },
   // WARP-3302 — `run_id` reads one run; cancel stops one. Owner-scoped by the route guard.
   { tool: "list_agent_runs", client: "orchestrator", hops: [admit("get", "/api/agent-runs"), admit("get", "/api/agent-runs/:id")] },
   { tool: "cancel_agent_run", client: "orchestrator", hops: [admit("post", "/api/agent-runs/:id/cancel")] },

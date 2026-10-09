@@ -45,14 +45,14 @@ const inputSchema = {
     device: {
       type: "string",
       description:
-        "The device to assign — its given name (e.g. 'lobby strip'), product name, or Matter node id.",
+        "Given/product name or Matter nodeId, e.g. lobby strip.",
     },
     room: {
       type: "string",
       minLength: 1,
       maxLength: 60,
       description:
-        "Room name (e.g. 'Den'). Matched case-insensitively against existing rooms; auto-created if no room matches.",
+        "Room name; case-insensitive match, auto-created when absent.",
     },
   },
   required: ["device", "room"],
@@ -208,7 +208,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "assign_device_room",
   description:
-    "Put a device in a room ('move the lamp to reception', 'the heater is in the office') so room-based control and the dashboard's room map work. Accepts the device's given or product name, or its Matter node id, plus a room name — the room is matched case-insensitively and created automatically if it doesn't exist yet. Never changes the device's display name, and is freely reversible by reassigning.",
+    "Assign a device's given/product name or Matter nodeId to a room for room control and the dashboard map. Room lookup is case-insensitive; missing rooms are created. Preserves the device name; reassign to undo.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: false,

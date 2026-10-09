@@ -794,6 +794,57 @@ run_hu -- bogus >/dev/null 2>&1
 if [ $? -eq 2 ]; then pass "an unknown subcommand exits 2"; else fail "unknown subcommand did not exit 2"; fi
 
 # =============================================================================
+# Phase 9: the pairing root executor is wired (ADR-071 slice B, WARP-3739)
+# =============================================================================
+# Static checks over the repo: the on-demand unit, its script, the polkit grant
+# the bridge needs to start it, and both installers.
+echo "--- Phase 9: droplet-pair-apply wiring ---"
+
+PAIR_UNIT="$REPO_ROOT_REAL/scripts/host/etc-systemd-system/droplet-pair-apply.service"
+PAIR_SCRIPT="$REPO_ROOT_REAL/scripts/host/droplet-pair-apply.sh"
+PAIR_RULES="$REPO_ROOT_REAL/services/oled-display/50-droplet-device-bridge.rules"
+
+if [ -f "$PAIR_UNIT" ] && grep -q '^ExecStart=/usr/local/sbin/droplet-pair-apply.sh$' "$PAIR_UNIT" \
+   && grep -q '^Type=oneshot$' "$PAIR_UNIT"; then
+  pass "droplet-pair-apply.service exists and is a oneshot running the pair-apply script"
+else
+  fail "droplet-pair-apply.service missing or not a oneshot ExecStart of droplet-pair-apply.sh"
+fi
+if [ -f "$PAIR_UNIT" ] && ! grep -q '^\[Install\]' "$PAIR_UNIT"; then
+  pass "droplet-pair-apply.service has no [Install] section (on-demand only)"
+else
+  fail "droplet-pair-apply.service must not have an [Install] section"
+fi
+if [ -f "$PAIR_SCRIPT" ] && [ -x "$PAIR_SCRIPT" ] || [ "$(git -C "$REPO_ROOT_REAL" ls-files -s -- scripts/host/droplet-pair-apply.sh 2>/dev/null | cut -c1-6)" = "100755" ]; then
+  pass "droplet-pair-apply.sh is executable"
+else
+  fail "droplet-pair-apply.sh is not executable"
+fi
+if grep -q 'droplet-pair-apply.service' "$PAIR_RULES" \
+   && grep -q 'action.lookup("verb") === "start"' "$PAIR_RULES"; then
+  pass "polkit rule grants the start verb on droplet-pair-apply.service"
+else
+  fail "50-droplet-device-bridge.rules does not grant start on droplet-pair-apply.service"
+fi
+if grep -Ev '^[[:space:]]*(//|#)' "$PAIR_RULES" | grep -Eq 'verb"\) === "(stop|restart|reload)'; then
+  fail "polkit rules grant a verb other than start"
+else
+  pass "polkit rules never grant stop/restart/reload"
+fi
+if grep -q 'droplet-pair-apply' "$REPO_ROOT_REAL/scripts/install-device-bridge.sh" \
+   && grep -q 'droplet-pair-apply' "$REPO_ROOT_REAL/scripts/lib/single-box.sh" \
+   && grep -q 'droplet-pair-apply' "$REPO_ROOT_REAL/scripts/host/MANIFEST"; then
+  pass "droplet-pair-apply is registered in install-device-bridge.sh, single-box.sh and MANIFEST"
+else
+  fail "droplet-pair-apply is missing from an installer or the MANIFEST"
+fi
+if grep -q 'droplet-bridge-pair-spool' "$REPO_ROOT_REAL/services/oled-display/droplet-device-bridge.service"; then
+  pass "the bridge unit provisions the pair spool RuntimeDirectory"
+else
+  fail "droplet-device-bridge.service has no droplet-bridge-pair-spool RuntimeDirectory"
+fi
+
+# =============================================================================
 echo ""
 if [ "$FAILURES" -eq 0 ]; then
   printf "  \033[32mAll %d tests passed\033[0m\n\n" "$TESTS"

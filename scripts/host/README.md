@@ -54,6 +54,25 @@ sudo journalctl -u droplet-watchdog --no-pager -n 50
 bash tests/droplet-watchdog.test.sh
 ```
 
+## Router pairing executor (ADR-071, WARP-3739)
+
+`droplet-pair-apply.sh` is the `ExecStart` of `etc-systemd-system/droplet-pair-apply.service`,
+the on-demand root oneshot behind the dashboard's **Pair** button. The routing service
+claims a freshly-flashed router and hands the new `droplet-ai` password to the
+orchestrator, which POSTs it to the device-bridge (`POST /host/router-pairing`). The
+bridge is an unprivileged sandbox, so it spools `{target, password}` to
+`/run/droplet-bridge-pair-spool/request.json` (tmpfs, 0600) and starts this unit through
+polkit (`services/oled-display/50-droplet-device-bridge.rules`, start verb only). The
+script re-validates the spool (`target` in `router|ap|switch`, password exactly 32
+lowercase hex), writes `docker/secrets/{openwrt_password|ap_openwrt_password|switch_password}`
+(0600, owner `droplet`, temp file + atomic rename, no trailing newline), zeroes and
+unlinks the spool, then runs `docker compose -p droplet -f <checkout>/docker/docker-compose.yml
+up -d --no-deps --force-recreate routing|switch`. The password is never logged, never in
+argv. There is no `[Install]` section: it only runs when the bridge starts it. The
+checkout is found from `droplet.service`, so the unit file carries no per-box path and the
+audit can compare it byte for byte. Installed by `install-device-bridge.sh` and by
+`install_single_box_host_integration`; both files have `scripts/host/MANIFEST` rows.
+
 ## Power-loss auto-restart (WARP-2190)
 
 `usr-local-sbin/droplet-power-restore` makes the box power itself back on after

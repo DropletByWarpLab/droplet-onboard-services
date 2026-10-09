@@ -4,6 +4,8 @@
 # =============================================================================
 #
 # Installs (or re-installs) the host-side device-bridge:
+#   /etc/systemd/system/droplet-pair-apply.service   (on-demand root unit that
+#                                              persists a pairing secret — ADR-071)
 #   /etc/systemd/system/droplet-device-bridge.service
 #   /etc/systemd/system/droplet-wifi-rotate.service
 #   /etc/systemd/system/droplet-wifi-rotate.timer
@@ -171,6 +173,29 @@ fi
 install -m 0755 "$POOL_APPLY_SRC" "$POOL_APPLY_DST"
 log "installed $POOL_APPLY_DST"
 
+# --- 1c-ter) Install the pairing ROOT executor + its unit (ADR-071 slice B) ---
+# POST /host/router-pairing spools {target, password} into the bridge RuntimeDirectory
+# and polkit-starts droplet-pair-apply.service (grant in 1d-bis), whose ExecStart is
+# this script: it re-validates the spool as root, writes docker/secrets/<role>_password
+# and recreates the routing/switch container. The unit lives with the other host
+# units in scripts/host/etc-systemd-system (also installed by
+# install_single_box_host_integration so the heal path reaches existing boxes) and
+# is deliberately never enabled: on-demand only, no [Install] section.
+PAIR_APPLY_SRC="$REPO_ROOT/scripts/host/droplet-pair-apply.sh"
+PAIR_APPLY_DST="/usr/local/sbin/droplet-pair-apply.sh"
+PAIR_UNIT_SRC="$REPO_ROOT/scripts/host/etc-systemd-system/droplet-pair-apply.service"
+PAIR_UNIT_DST="$UNIT_DIR/droplet-pair-apply.service"
+for src in "$PAIR_APPLY_SRC" "$PAIR_UNIT_SRC"; do
+  if [[ ! -f "$src" ]]; then
+    log "missing source: $src"
+    exit 1
+  fi
+done
+install -m 0755 "$PAIR_APPLY_SRC" "$PAIR_APPLY_DST"
+log "installed $PAIR_APPLY_DST"
+install -m 0644 "$PAIR_UNIT_SRC" "$PAIR_UNIT_DST"
+log "installed $PAIR_UNIT_DST"
+
 # --- 1d) Install the single-box hostapd Wi-Fi-write host script (WARP-808) ---
 # The device-bridge's POST /openwrt/wifi/hostapd shells this to write the
 # customer's Wi-Fi SSID/PSK on the single-box shape — the sandboxed bridge
@@ -231,6 +256,8 @@ log "installed $WIFI_WD_DST"
 # droplet user (a D-Bus ask to PID 1, no escalation), all START verb only:
 #   - start droplet-storage-pool-apply.service (ADR-019 follow-up — the root
 #     oneshot that consumes the spooled pool request).
+#   - start droplet-pair-apply.service (ADR-071 slice B — the root oneshot that
+#     persists a router/AP/switch pairing secret and recreates its container).
 #   - start droplet-nvr-storage-apply.service and droplet-nvr-migrate.service
 #     (WARP-3514 — the two on-demand root oneshots behind the camera-recordings
 #     allocation; installed in step 1 + 1f, deliberately never enabled). The

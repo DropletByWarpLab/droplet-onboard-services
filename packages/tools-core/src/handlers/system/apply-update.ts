@@ -229,7 +229,7 @@ async function handler(
 const tool: Tool = {
   name: "apply_update",
   description:
-    "Apply the pending verified software update to the Droplet appliance (the server applies the single pending update — no version argument). HIGH IMPACT: services restart during the apply, and the assistant may go quiet for several minutes mid-apply — that is expected; follow progress with get_update_status. The update system verifies release signatures before applying and automatically rolls back to the previous version if the update fails its health checks. Two-step: the first call returns confirmation_required naming the pending version — relay it to the user, and only after they explicitly approve, re-issue the SAME call with confirmed: true. Owner/admin only.",
+    "Owner/admin: apply single pending signature-verified update. Services restart; chat may go quiet for minutes. Monitor get_update_status; failed health checks roll back. Relay confirmation_required version; only after explicit approval repeat SAME call with confirmed: true.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

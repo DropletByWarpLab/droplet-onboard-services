@@ -111,11 +111,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
 
     // If not authenticated and not on a public page, redirect to login
     if (!user && !isPublicPage && !applianceUnclaimed) {
-      // Account approval can require signing in on the box's registered
-      // hostname. Preserve only this fixed popup's setup context.
-      router.replace(pathname === "/chat/connect"
-        ? `/login?next=${encodeURIComponent(pathname + window.location.search)}`
-        : "/login");
+      router.replace("/login");
       return;
     }
 

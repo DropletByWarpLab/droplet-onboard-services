@@ -55,6 +55,7 @@ import type {
   McpToolDescriptor,
 } from "./mcp-client.port.js";
 import { McpBridgeError } from "./mcp-bridge.client.js";
+import { remoteCallAttribution, type RemoteCallAttribution } from "./remote-call-attribution.js";
 
 const logger = createLogger("remote-mcp-gateway");
 
@@ -62,7 +63,14 @@ const logger = createLogger("remote-mcp-gateway");
 export type RemoteMcpOp = "list_tools" | "call_tool";
 
 /** What lands in `refs.outcome`. A fixed set, like `routes/web.ts`'s. */
-export type RemoteMcpOutcome = "allowed" | "refused_gate" | "provider_error";
+export type RemoteMcpOutcome =
+  | "allowed"
+  | "refused_gate"
+  // WARP-2439 — refused by the multiplexer before the gate (not in the vetted
+  // catalog, or the call policy denied it). Still a call attempt worth a row.
+  | "refused_policy"
+  | "provider_error"
+  | "aborted";
 
 /**
  * Why the gate refused.
@@ -74,6 +82,7 @@ export type RemoteMcpOutcome = "allowed" | "refused_gate" | "provider_error";
 export type RemoteMcpGateReason =
   | "server_not_allowlisted"
   | "no_connection_row"
+  | "channel_disabled"
   | "connection_not_connected"
   | "no_credential"
   | "gate_unavailable";
@@ -84,6 +93,10 @@ export type RemoteMcpGateDecision =
 
 /** The minimal Prisma surface the gate needs, so a test passes a literal. */
 export interface RemoteMcpGatePrisma {
+  /** WARP-3912 — the `remote_mcp` off-LAN channel row. */
+  offLanAllowlistChannel: {
+    findUnique(args: unknown): Promise<{ enabled: boolean } | null>;
+  };
   integrationConnection: {
     findFirst(args: unknown): Promise<{
       id: string;
@@ -114,6 +127,28 @@ export async function remoteMcpGate(
       message:
         `"${serverId}" is not in REMOTE_MCP_SERVER_ALLOWLIST. No session is opened and ` +
         "nothing from it is callable.",
+    };
+  }
+  // WARP-3912 — the owner's master switch, after the allowlist (an unconfigured box
+  // still reads nothing) and before the connection row. Explicit `enabled`, never
+  // "a row exists"; a missing row or a failed read both refuse.
+  try {
+    const channel = await prisma.offLanAllowlistChannel.findUnique({ where: { key: "remote_mcp" } });
+    if (channel?.enabled !== true) {
+      return {
+        allowed: false,
+        reason: "channel_disabled",
+        message:
+          "Remote MCP servers are switched off by the workspace owner (off-LAN channel remote_mcp). " +
+          "Nothing was sent; ask the owner or an admin to turn it on in Settings.",
+      };
+    }
+  } catch (err) {
+    logger.warn({ err, serverId }, "remote_mcp channel read failed — failing closed (no egress)");
+    return {
+      allowed: false,
+      reason: "gate_unavailable",
+      message: "The remote MCP gate could not be read. Refusing egress.",
     };
   }
   let row: { id: string; status: string; providerTokensEnc: string | null } | null;
@@ -162,13 +197,21 @@ export function auditRemoteMcp(input: {
   outcome: RemoteMcpOutcome;
   tool?: string;
   reason?: string;
+  /** Who the call ran for. Defaults to the multiplexer's in-process scope
+   *  (remote-call-attribution.ts); a caller outside that scope passes it. */
+  who?: RemoteCallAttribution;
 }): void {
+  // WARP-2439 — the requesting member, the way the stdio `tool_call` row names
+  // them: the Nextcloud USERNAME in `refs.userId`, not a UUID, so the actor
+  // stays `ai` (WARP-181: `user` requires a canonical UUID). Ids and names
+  // only — never argument values or result content (rule 19).
+  const who = input.who ?? remoteCallAttribution();
   void recordActivity({
     kind: "network",
     severity: input.outcome === "allowed" ? "info" : "warn",
     sourceIcon: "globe",
     what: `Remote MCP: ${input.serverId}`,
-    sub: "remote_mcp",
+    sub: who?.userId ? `remote_mcp for ${who.userId}` : "remote_mcp",
     refs: {
       channel: "remote_mcp",
       serverId: input.serverId,
@@ -176,11 +219,63 @@ export function auditRemoteMcp(input: {
       outcome: input.outcome,
       ...(input.tool ? { tool: input.tool } : {}),
       ...(input.reason ? { reason: input.reason } : {}),
+      ...(who?.userId ? { userId: who.userId } : {}),
+      ...(who?.agentRunId ? { agentRunId: who.agentRunId } : {}),
     },
     // The agent loop is what drives a remote tool call, so `ai` — the same
     // mapping `network-safety.service.ts` applies to MCP-channel network ops.
     actor: { type: "ai", id: null },
   });
+}
+
+/**
+ * WARP-3912 — every in-flight remote call, by server id. Turning `remote_mcp` off
+ * aborts them all (ADR-043 §4: tear down, do not merely decline to re-establish).
+ * Process-wide because the switch is: the one chokepoint below registers every
+ * call, so a future owner-added server is covered without wiring of its own.
+ */
+const inFlight = new Map<string, Set<AbortController>>();
+
+/** Abort every in-flight remote call (one server, or all). Returns how many. */
+export function abortRemoteMcpInFlight(serverId?: string): number {
+  let n = 0;
+  for (const [id, set] of inFlight) {
+    if (serverId !== undefined && id !== serverId) continue;
+    for (const ac of set) {
+      ac.abort();
+      n++;
+    }
+  }
+  return n;
+}
+
+/** Run `fn`, rejecting as soon as the switch aborts it. The bridge session close
+ *  that follows ({@link detachRemoteServer}) is what stops the upstream work. */
+async function abortable<T>(serverId: string, fn: () => Promise<T>): Promise<T> {
+  const ac = new AbortController();
+  let set = inFlight.get(serverId);
+  if (!set) inFlight.set(serverId, (set = new Set()));
+  set.add(ac);
+  try {
+    return await new Promise<T>((resolve, reject) => {
+      ac.signal.addEventListener(
+        "abort",
+        () =>
+          reject(
+            new McpBridgeError(
+              "REMOTE_MCP_GATE_REFUSED",
+              "Remote MCP was switched off by the workspace owner while this call was running. It was aborted.",
+              451,
+            ),
+          ),
+        { once: true },
+      );
+      fn().then(resolve, reject);
+    });
+  } finally {
+    set.delete(ac);
+    if (set.size === 0) inFlight.delete(serverId);
+  }
 }
 
 export interface GatedRemoteMcpPortOptions {
@@ -222,15 +317,15 @@ export function createGatedRemoteMcpPort(opts: GatedRemoteMcpPortOptions): McpCl
         throw new McpBridgeError("REMOTE_MCP_GATE_REFUSED", decision.message, 451);
       }
       try {
-        const tools = await upstream.listTools();
+        const tools = await abortable(serverId, () => upstream.listTools());
         audit({ serverId, op: "list_tools", outcome: "allowed" });
         return tools;
       } catch (err) {
         audit({
           serverId,
           op: "list_tools",
-          outcome: "provider_error",
-          reason: err instanceof McpBridgeError ? err.code : "unknown",
+          outcome: aborted(err) ? "refused_gate" : isAbort(err) ? "aborted" : "provider_error",
+          reason: isAbort(err) ? "aborted" : err instanceof McpBridgeError ? err.code : "unknown",
         });
         throw err;
       }
@@ -252,7 +347,7 @@ export function createGatedRemoteMcpPort(opts: GatedRemoteMcpPortOptions): McpCl
         return errorOutcome("REMOTE_MCP_GATE_REFUSED", name, decision.message);
       }
       try {
-        const result = await upstream.callTool(name, args);
+        const result = await abortable(serverId, () => upstream.callTool(name, args));
         audit({ serverId, op: "call_tool", outcome: "allowed", tool: name });
         return result;
       } catch (err) {
@@ -260,9 +355,9 @@ export function createGatedRemoteMcpPort(opts: GatedRemoteMcpPortOptions): McpCl
         audit({
           serverId,
           op: "call_tool",
-          outcome: "provider_error",
+          outcome: aborted(err) ? "refused_gate" : isAbort(err) ? "aborted" : "provider_error",
           tool: name,
-          reason: code,
+          reason: isAbort(err) ? "aborted" : code,
         });
         return errorOutcome(
           code,
@@ -273,6 +368,15 @@ export function createGatedRemoteMcpPort(opts: GatedRemoteMcpPortOptions): McpCl
     },
   };
 }
+
+/** WARP-2439 — a caller-side abort is its own outcome, not a provider fault. */
+function isAbort(err: unknown): boolean {
+  return err instanceof Error && err.name === "AbortError";
+}
+
+/** The switch aborted this call (see {@link abortable}) - a refusal, not a vendor failure. */
+const aborted = (err: unknown): boolean =>
+  err instanceof McpBridgeError && err.code === "REMOTE_MCP_GATE_REFUSED";
 
 /** Same envelope `mcp-multiplexer.service.ts` uses for a refusal, so the model
  *  sees one shape whichever layer refused. */

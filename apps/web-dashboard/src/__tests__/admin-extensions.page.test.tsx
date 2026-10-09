@@ -169,6 +169,39 @@ beforeEach(() => {
 });
 
 describe("/admin/extensions — the promote readback", () => {
+  it("promotes an app with an explicit owner-approved member grant and no tool area", async () => {
+    const readback = { ...READBACK, kind: "app", runtime: "node20", http: { health: "/health" }, proposedGrantRoles: ["family"], tools: { total: 0, startsAsWriteWithConfirmation: 0, proposedReadOnly: 0 }, lines: ["Hosted app · Node 20", "memory budget 128 MB", "member access proposed"] };
+    api.prepareExtensionPromotion.mockResolvedValue({ ...PHASE1, readback });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Review wc 0.1.0" }));
+    const grant = await screen.findByLabelText("Allow members to open this app");
+    expect(grant).not.toBeChecked();
+    expect(screen.queryByLabelText("Area")).toBeNull();
+    fireEvent.click(grant);
+    fireEvent.click(screen.getByRole("button", { name: "Sign and install" }));
+    await waitFor(() => expect(api.confirmExtensionPromotion).toHaveBeenCalledWith("wc", {
+      confirmationToken: "tok-1", manifestSha256: "f".repeat(64), hostedAppRoles: ["family"],
+    }));
+  });
+  it("keeps app access owner/admin only unless the owner approves sharing", async () => {
+    api.prepareExtensionPromotion.mockResolvedValue({ ...PHASE1, readback: { ...READBACK, kind: "app", proposedGrantRoles: ["family"] } });
+    renderPage(); fireEvent.click(await screen.findByRole("button", { name: "Review wc 0.1.0" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Sign and install" }));
+    await waitFor(() => expect(api.confirmExtensionPromotion).toHaveBeenCalledWith("wc", {
+      confirmationToken: "tok-1", manifestSha256: "f".repeat(64), hostedAppRoles: [],
+    }));
+  });
+  it("asks for fresh grant approval on each new app readback", async () => {
+    const readback = { ...READBACK, kind: "app", proposedGrantRoles: ["family"] };
+    api.prepareExtensionPromotion.mockResolvedValue({ ...PHASE1, readback });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Review wc 0.1.0" }));
+    fireEvent.click(await screen.findByLabelText("Allow members to open this app"));
+    expect(screen.getByLabelText("Allow members to open this app")).toBeChecked();
+    api.prepareExtensionPromotion.mockResolvedValue({ ...PHASE1, confirmationToken: "new-review", readback });
+    fireEvent.click(screen.getByRole("button", { name: "Review wc 0.1.0" }));
+    await waitFor(() => expect(screen.getByLabelText("Allow members to open this app")).not.toBeChecked());
+  });
   it("🔴 renders the readback from the readback object only — the author's words never reach the DOM", async () => {
     renderPage();
     fireEvent.click(await screen.findByRole("button", { name: "Review wc 0.1.0" }));
@@ -265,6 +298,15 @@ describe("/admin/extensions — proposals", () => {
 });
 
 describe("/admin/extensions — installed", () => {
+  it("lets an admin open installed apps without offering owner access or lifecycle controls", async () => {
+    auth.role = "admin";
+    api.fetchExtensions.mockResolvedValue({ extensions: [{ ...INSTALLED, readback: { ...READBACK, kind: "app" } }] });
+    renderPage();
+    expect(await screen.findByRole("button", { name: "Open wc in browser" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Access for wc" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Disable wc" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Uninstall wc" })).toBeNull();
+  });
   it("names an extension by its id and readback, not by the author's name for it", async () => {
     api.fetchExtensions.mockResolvedValue({ extensions: [INSTALLED] });
     // No proposal row, so the one "wc" on the page is the installed row's title.

@@ -63,6 +63,13 @@ import createPdfReport from "./handlers/files/create-pdf-report.js";
 import createWordDocument from "./handlers/files/create-word-document.js";
 import createSpreadsheet from "./handlers/files/create-spreadsheet.js";
 import createSlideDeck from "./handlers/files/create-slide-deck.js";
+import createArtifact from "./handlers/files/create-artifact.js";
+import createAudio from "./handlers/files/create-audio.js";
+import generateMedia from "./handlers/files/generate-media.js";
+import officeFile from "./handlers/files/office-file.js";
+import analyzeData from "./handlers/data/analyze-data.js";
+import webSearch from "./handlers/data/web-search.js";
+import webFetch from "./handlers/data/web-fetch.js";
 // WARP-2664 — file cleanup: a read-only report (what could go, what an
 // organize would do), then the two approved writes it feeds. Bulk delete is
 // its own tool rather than a loop over delete_file so ONE confirmation is
@@ -115,6 +122,11 @@ import deleteClip from "./handlers/cameras/delete-clip.js";
 // WARP-1893: rename a camera's household-facing label (displayName only —
 // never the Frigate config key, which owns the recordings).
 import renameCamera from "./handlers/cameras/rename-camera.js";
+// WARP-3927: camera activity for chat (motion, reviews, recorded footage, one-call summary)
+import getCameraMotion from "./handlers/cameras/get-camera-motion.js";
+import listCameraReviews from "./handlers/cameras/list-camera-reviews.js";
+import getCameraRecording from "./handlers/cameras/get-camera-recording.js";
+import summarizeCameraActivity from "./handlers/cameras/summarize-camera-activity.js";
 
 // switch
 import getSwitchPorts from "./handlers/switch/get-switch-ports.js";
@@ -252,6 +264,8 @@ import findDashboardPage from "./handlers/dashboard/find-dashboard-page.js";
 import openDashboardPage from "./handlers/dashboard/open-dashboard-page.js";
 // WARP-2180: durable background runs (epic WARP-2176)
 import startAgentRun from "./handlers/agent-runs/start-agent-run.js";
+import listHostedApps from "./handlers/hosted-apps/list-hosted-apps.js";
+import hostedAppLogs from "./handlers/hosted-apps/hosted-app-logs.js";
 import listAgentRuns from "./handlers/agent-runs/list-agent-runs.js";
 import cancelAgentRun from "./handlers/agent-runs/cancel-agent-run.js";
 import routineDraft from "./handlers/routines/routine-draft.js";
@@ -326,6 +340,10 @@ const allTools: Tool[] = [
   createWordDocument,
   createSpreadsheet,
   createSlideDeck,
+  createArtifact,
+  createAudio,
+  generateMedia,
+  officeFile,
   analyzeFileCleanup,
   organizeFiles,
   deleteFiles,
@@ -367,6 +385,11 @@ const allTools: Tool[] = [
   setDetectionZones,
   deleteClip,
   renameCamera,
+  // WARP-3927: camera activity for chat (all Tier-1 reads)
+  summarizeCameraActivity,
+  getCameraMotion,
+  listCameraReviews,
+  getCameraRecording,
   // switch
   getSwitchPorts,
   getSwitchVlans,
@@ -452,6 +475,9 @@ const allTools: Tool[] = [
   regexTest,
   // WARP-1424: everyday utility tools (all Tier-1 read/pure-computation)
   calculate,
+  analyzeData,
+  webSearch,
+  webFetch,
   unitConvert,
   getCurrentDatetime,
   dateMath,
@@ -469,6 +495,8 @@ const allTools: Tool[] = [
   // WARP-2180: background agent runs — start is Tier-2 (unattended compute),
   // list is Tier-1. The worker keeps start_agent_run OUT of a run's pool.
   startAgentRun,
+  listHostedApps,
+  hostedAppLogs,
   listAgentRuns,
   // WARP-3302: stop one run (write, no prompt: it only stops work). Checking
   // one run is list_agent_runs({run_id}). The worker keeps cancel out of runs.

@@ -48,7 +48,7 @@ OUTPUT_DIR=""
 
 # Data volumes device-backup must capture. These are the REAL top-level volume
 # names from docker/docker-compose.yml — a static check below asserts that.
-VOLUMES=(nextcloud-data aikeys matter-data brain-memory-data nvrdata ops-audit pm-attachments)
+VOLUMES=(nextcloud-data aikeys matter-data brain-memory-data nvrdata ops-audit pm-attachments extensions-data)
 
 # WARP-1571 / WARP-1575 — readiness probe for the disposable drill Postgres.
 # MUST stay TCP-gated; see the guard in the static-checks section below for
@@ -130,6 +130,11 @@ if [ -f "$BACKUP_SCRIPT" ] && [ -f "$RESTORE_SCRIPT" ]; then
       pass "DATA_VOLUMES captures customer-data volume pm-attachments (WARP-1505)"
     else
       fail "DATA_VOLUMES OMITS pm-attachments — work-item files would be missing from every backup"
+    fi
+    if grep -qxF "extensions-data" <<< "$script_volumes"; then
+      pass "DATA_VOLUMES captures persistent hosted-app state (WARP-3906)"
+    else
+      fail "DATA_VOLUMES OMITS extensions-data — app state cannot be rebuilt from signed code"
     fi
   else
     fail "docker-compose.yml not found for volume-name cross-check"
@@ -311,6 +316,7 @@ services:
       - nvrdata:/data/nvr
       - ops-audit:/data/audit
       - pm-attachments:/data/pm-attachments
+      - extensions-data:/data/extensions-data
     healthcheck:
       # WARP-1571: TCP-gated on purpose — see the cold-volume readiness
       # guard above. Never inline a socket probe here.
@@ -326,6 +332,7 @@ volumes:
   nvrdata:
   ops-audit:
   pm-attachments:
+  extensions-data:
 YAML
 }
 
@@ -352,6 +359,7 @@ seed_volume_markers() {
     echo NVR-MARKER > /data/nvr/marker.txt
     echo AUDIT-MARKER > /data/audit/marker.txt
     echo PM-ATTACH-MARKER > /data/pm-attachments/marker.txt
+    echo APP-DATA-MARKER > /data/extensions-data/marker.txt
   '
 }
 
@@ -418,6 +426,7 @@ else
       # --- Mutate ---------------------------------------------------------
       dc exec -T db sh -c 'psql -U droplet -d droplet -c "DELETE FROM t;"' >/dev/null 2>&1
       dc exec -T db sh -c 'rm -f /keys/marker.txt /data/matter/marker.txt /data/brain/marker.txt /var/www/html/marker.txt /data/nvr/marker.txt /data/audit/marker.txt /data/pm-attachments/marker.txt' >/dev/null 2>&1
+      dc exec -T db sh -c 'rm -f /data/extensions-data/marker.txt' >/dev/null 2>&1
       [ "$(db_count_main)" = "0" ] && pass "data mutated (rows dropped)" || fail "mutation did not take"
 
       # --- Restore --------------------------------------------------------
@@ -441,6 +450,8 @@ else
       [ "$(marker_present db /data/nvr/marker.txt)" = "yes" ]    && pass "nvrdata volume restored"      || fail "nvrdata volume NOT restored"
       [ "$(marker_present db /data/audit/marker.txt)" = "yes" ]  && pass "ops-audit volume restored"    || fail "ops-audit volume NOT restored"
       [ "$(marker_present db /data/pm-attachments/marker.txt)" = "yes" ] && pass "pm-attachments volume restored" || fail "pm-attachments volume NOT restored"
+      app_marker="$(dc exec -T db cat /data/extensions-data/marker.txt 2>/dev/null | tr -d '[:space:]' || true)"
+      [ "$app_marker" = "APP-DATA-MARKER" ] && pass "persistent app state restored (WARP-3906)" || fail "extensions-data NOT restored"
 
       # --- Rotation -------------------------------------------------------
       info "testing rotation (BACKUP_KEEP=2)"

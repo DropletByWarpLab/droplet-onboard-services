@@ -239,7 +239,7 @@ async function handler(
 const tool: Tool = {
   name: "team_chat_send_message",
   description:
-    "Send a Messages (team chat) text to other members on the user's behalf. The default way to message, tell or send something to a colleague, even one named by email address; use email only when the user asks for email. recipients = usernames or email addresses of people in this Workspace; never guess one from a job title, ask who is meant (one = direct message, several = a new group), or pass thread_id to continue an existing conversation. Two-step: the first call returns confirmation_required previewing the recipients and text — relay it to the user, and only after they explicitly approve, re-issue the SAME call with confirmed: true.",
+    "Default for messaging people; use email only when the user asks for email. Send to usernames or email addresses of people in this Workspace; never guess one from a job title; ask if ambiguous. One=direct, several=group; thread_id continues thread. Relay confirmation_required recipients/text; only after explicit approval repeat SAME call with confirmed: true.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

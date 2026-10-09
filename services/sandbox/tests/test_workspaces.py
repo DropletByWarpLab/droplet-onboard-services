@@ -38,7 +38,7 @@ AUTHOR = {"name": ALICE[0], "email": ALICE[1]}
 def test_templates_seed_once_and_never_overwrite(store):
     # The fixture seeded. A second start finds the repo and leaves it alone.
     assert store.seed_templates() is False
-    assert store.list_templates() == ["python-tool", "rest-profile", "typescript-tool"]
+    assert store.list_templates() == ["node-app", "python-app", "python-tool", "rest-profile", "static-site", "typescript-tool"]
 
 
 def _templates_without(tmp_path, *names: str) -> Path:
@@ -59,7 +59,7 @@ def test_sync_adds_a_template_the_image_has_and_never_touches_an_existing_one(tm
 
     monkeypatch.setattr(gitstore, "REPOS_DIR", tmp_path / "git")
     monkeypatch.setattr(gitstore, "WORK_DIR", tmp_path / "work")
-    monkeypatch.setattr(gitstore, "TEMPLATES_SRC", _templates_without(tmp_path, "rest-profile"))
+    monkeypatch.setattr(gitstore, "TEMPLATES_SRC", _templates_without(tmp_path, "rest-profile", "static-site", "node-app", "python-app"))
     assert gitstore.seed_templates() is True
     assert gitstore.list_templates() == ["python-tool", "typescript-tool"]
     bare = gitstore.REPOS_DIR / "templates.git"
@@ -74,12 +74,12 @@ def test_sync_adds_a_template_the_image_has_and_never_touches_an_existing_one(tm
 
     monkeypatch.setattr(gitstore, "TEMPLATES_SRC", TEMPLATES_SRC)
     assert gitstore.seed_templates() is False  # present: never re-seeded
-    assert gitstore.sync_templates() == ["rest-profile"]
-    assert gitstore.list_templates() == ["python-tool", "rest-profile", "typescript-tool"]
+    assert gitstore.sync_templates() == ["node-app", "python-app", "rest-profile", "static-site"]
+    assert gitstore.list_templates() == ["node-app", "python-app", "python-tool", "rest-profile", "static-site", "typescript-tool"]
     assert gitstore.git(["rev-parse", "main:typescript-tool"], bare).stdout.strip() == before
     subjects = gitstore.git(["log", "--format=%s", "main"], bare).stdout.splitlines()
-    assert subjects[0] == "templates: add rest-profile from the image"
-    assert subjects[1] == "operator: our readme"
+    assert subjects[:4] == [f"templates: add {name} from the image" for name in ("static-site", "rest-profile", "python-app", "node-app")]
+    assert subjects[4] == "operator: our readme"
     # Idempotent: nothing missing, nothing committed.
     assert gitstore.sync_templates() == []
     assert gitstore.git(["log", "--format=%s", "main"], bare).stdout.splitlines() == subjects
@@ -104,7 +104,7 @@ def test_a_sync_that_cannot_copy_is_a_store_error_and_leaves_no_staging(tmp_path
 
     monkeypatch.setattr(gitstore, "REPOS_DIR", tmp_path / "git")
     monkeypatch.setattr(gitstore, "WORK_DIR", tmp_path / "work")
-    monkeypatch.setattr(gitstore, "TEMPLATES_SRC", _templates_without(tmp_path, "rest-profile"))
+    monkeypatch.setattr(gitstore, "TEMPLATES_SRC", _templates_without(tmp_path, "rest-profile", "static-site", "node-app", "python-app"))
     assert gitstore.seed_templates() is True
     monkeypatch.setattr(gitstore, "TEMPLATES_SRC", TEMPLATES_SRC)
 
@@ -619,7 +619,7 @@ def test_http_backend_refuses_paths_outside_the_store(store):
 
 def test_routes_round_trip_through_the_service(client, auth, store):
     assert client.get("/workspaces/templates", headers=auth).json() == {
-        "templates": ["python-tool", "rest-profile", "typescript-tool"]
+        "templates": ["node-app", "python-app", "python-tool", "rest-profile", "static-site", "typescript-tool"]
     }
     r = client.post("/workspaces", json={"id": "ws-p", "template": "python-tool", "author": AUTHOR}, headers=auth)
     assert r.status_code == 200, r.text

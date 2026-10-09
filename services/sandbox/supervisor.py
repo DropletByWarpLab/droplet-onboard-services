@@ -127,6 +127,9 @@ EXTRA_ENV_KEYS = frozenset(
         "DROPLET_EXT_TOKEN",
         "DROPLET_EXT_RELAY_KEY",
         "DROPLET_ORCHESTRATOR_URL",
+        "PORT",
+        "DROPLET_EXT_BASE_PATH",
+        "DROPLET_EXT_DATA_DIR",
     }
 )
 _ENV_VALUE = re.compile(r"^[A-Za-z0-9_./:=@+-]{0,512}$")
@@ -222,6 +225,103 @@ def limited_command(
     return with_limits(resolved, posix=posix)
 
 
+LOG_CAP_BYTES = 64 * 1024
+LOG_READ_BYTES = 16 * 1024
+LOG_DRAIN_GRACE_S = 0.25
+
+
+class _LogBuffer:
+    """One combined byte ring across an entry's automatic restarts.
+
+    Cursors count bytes read, not lines: a read never consumes the buffer,
+    and an evicted cursor can be reported rather than silently losing logs.
+    The cap applies before UTF-8 decoding, including binary/no-newline output.
+    """
+
+    def __init__(self) -> None:
+        self._data = bytearray()
+        self._sequence = 0
+        self._incomplete = False
+        self._lock = threading.Lock()
+
+    def append(self, data: bytes) -> None:
+        with self._lock:
+            self._sequence += len(data)
+            self._data.extend(data)
+            if len(self._data) > LOG_CAP_BYTES:
+                del self._data[:len(self._data) - LOG_CAP_BYTES]
+
+    def incomplete(self) -> None:
+        with self._lock:
+            self._incomplete = True
+
+    def snapshot(self, proc_id: str, limit: int, since: int | None) -> dict[str, Any]:
+        with self._lock:
+            sequence = self._sequence
+            retained = len(self._data)
+            first = sequence - retained
+            start = first if since is None else min(sequence, max(first, since))
+            data = bytes(self._data[start - first:])
+            truncated = self._incomplete or (first > (since or 0))
+        lines = data.splitlines(keepends=True)
+        if len(lines) > limit:
+            tail = b"".join(lines[-limit:])
+            start += len(data) - len(tail)
+            data = tail
+            truncated = True
+        return {
+            "id": proc_id,
+            "output": data.decode("utf-8", "replace"),
+            "startSequence": start,
+            "nextSequence": sequence,
+            "retainedBytes": retained,
+            "droppedBytes": first,
+            "truncated": truncated,
+        }
+
+
+class _Capture:
+    """Drain without waiting for a newline, or an escaped fork's pipe EOF.
+
+    Both deployed Python and Windows development use Python 3.12, whose
+    nonblocking pipe reads let the watcher end this thread after the child's
+    group is killed, even if a fork left that group holding the write end.
+    The reader owns and closes its pipe; no blocked read holds up close().
+    """
+
+    def __init__(self, proc_id: str, pipe: Any, logs: _LogBuffer) -> None:
+        self.pipe = pipe
+        self.logs = logs
+        self._stop = threading.Event()
+        os.set_blocking(pipe.fileno(), False)
+        self.thread = threading.Thread(target=self._drain, name=f"sandbox-output-{proc_id}", daemon=True)
+        self.thread.start()
+
+    def _drain(self) -> None:
+        try:
+            while not self._stop.is_set():
+                data = self.pipe.read(LOG_READ_BYTES)
+                if data is None:
+                    self._stop.wait(0.01)
+                elif not data:
+                    return
+                else:
+                    self.logs.append(data)
+        except (OSError, ValueError):
+            self.logs.incomplete()
+        finally:
+            self.pipe.close()
+
+    def finish(self) -> None:
+        # Normal exits drain to EOF. A fork which escaped the process group
+        # cannot keep the watcher, pipe or drain thread alive indefinitely.
+        self.thread.join(LOG_DRAIN_GRACE_S)
+        if self.thread.is_alive():
+            self.logs.incomplete()
+            self._stop.set()
+            self.thread.join(LOG_DRAIN_GRACE_S)
+
+
 class _Entry:
     def __init__(self, proc_id: str, argv: list[str], cwd: str | None, restart: RestartPolicy, max_restarts: int, env: dict):
         self.id = proc_id
@@ -236,6 +336,8 @@ class _Entry:
         self.started_at = time.time()
         self.exit_code: int | None = None
         self.stop_requested = False
+        self.logs = _LogBuffer()
+        self.capture: _Capture | None = None
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -273,25 +375,41 @@ class Supervisor:
         # No preexec_fn: the limits are the wrapper's job (limited_command).
         # A new session: the child leads its own process group, so a stop can
         # take everything it forks (the module docstring).
-        entry.proc = subprocess.Popen(
+        proc = subprocess.Popen(
             entry.argv,
             cwd=entry.cwd,
             env=entry.env,
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            bufsize=0,
             close_fds=True,
             start_new_session=True,
         )
-        entry.state = "running"
-        entry.started_at = time.time()
-        threading.Thread(target=self._watch, args=(entry,), daemon=True).start()
+        assert proc.stdout is not None
+        capture = None
+        try:
+            capture = _Capture(entry.id, proc.stdout, entry.logs)
+            entry.proc = proc
+            entry.capture = capture
+            entry.state = "running"
+            entry.started_at = time.time()
+            threading.Thread(target=self._watch, args=(entry, proc, capture), daemon=True).start()
+        except (OSError, RuntimeError):
+            _signal_group(proc, kill=True)
+            proc.wait()
+            if capture:
+                capture.finish()
+            else:
+                proc.stdout.close()
+            entry.state = "failed"
+            raise
 
-    def _watch(self, entry: _Entry) -> None:
-        assert entry.proc is not None
-        code = entry.proc.wait()
+    def _watch(self, entry: _Entry, proc: subprocess.Popen, capture: _Capture) -> None:
+        code = proc.wait()
         # Whatever the child forked dies with it, before any restart.
-        _signal_group(entry.proc, kill=True)
+        _signal_group(proc, kill=True)
+        capture.finish()
         with self._lock:
             entry.exit_code = code
             if entry.stop_requested:
@@ -303,7 +421,7 @@ class Supervisor:
                 try:
                     self._spawn(entry)
                     return
-                except OSError:
+                except (OSError, RuntimeError):
                     entry.state = "failed"
                     return
             entry.state = "exited" if code == 0 else "failed"
@@ -330,7 +448,7 @@ class Supervisor:
             entry = _Entry(proc_id, command, resolved_cwd, restart, max_restarts, child_env)
             try:
                 self._spawn(entry)
-            except OSError as exc:
+            except (OSError, RuntimeError) as exc:
                 raise SupervisorError(400, f"could not start {proc_id}: {exc}") from exc
             self._entries[proc_id] = entry
             return entry.snapshot()
@@ -339,6 +457,22 @@ class Supervisor:
         with self._lock:
             entry = self._entries.get(proc_id)
             return entry.snapshot() if entry else None
+
+    def logs(self, proc_id: str, limit: int = 200, since: int | None = None) -> dict[str, Any] | None:
+        """Last ``limit`` lines, optionally after a byte cursor (exclusive).
+
+        ``nextSequence`` is the cursor for a later request. ``truncated``
+        reports ring eviction, the line limit, or an incomplete final drain;
+        ``droppedBytes`` counts bytes evicted from the ring since this start.
+        stdout and stderr share the same pipe and the same 64 KiB budget.
+        """
+        if type(limit) is not int or not 1 <= limit <= 2000:
+            raise SupervisorError(400, "log limit must be an integer from 1 to 2000")
+        if since is not None and (type(since) is not int or since < 0):
+            raise SupervisorError(400, "log since must be a non-negative byte cursor")
+        with self._lock:
+            entry = self._entries.get(proc_id)
+        return entry.logs.snapshot(proc_id, limit, since) if entry else None
 
     def forget(self, proc_id: str) -> None:
         """Drop a non-running entry (uninstall)."""

@@ -1,0 +1,6 @@
+# Optional NVIDIA allocation for the media profile. Requires the operator's
+# compatible NVIDIA driver + NVIDIA Container Toolkit. Never enables a profile
+# or provisions/downloads models on its own. See services/media-gen/README.md.
+services:
+  media-gen:
+    gpus: all

@@ -148,7 +148,9 @@ describe("runAgent — malformed tool output (WARP-3284)", () => {
     ] as const) {
       const { toolMsg, evt, checkpointed } = await run(text, tool);
       expect(evt.ok).toBe(true);
-      expect(toolMsg).toBe(text);
+      // WARP-3920 — the model gets it inside the untrusted-data block.
+      expect(toolMsg).toContain("<<<UNTRUSTED REMOTE TOOL RESULT");
+      expect(toolMsg).toContain(text);
       expect(checkpointed[0]!.isError).toBe(false);
     }
   });

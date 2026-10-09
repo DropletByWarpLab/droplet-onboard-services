@@ -42,11 +42,13 @@ def test_baseline_frigate_config_enables_birdseye():
     assert birdseye is not None, "docker/frigate/config.yml lost its birdseye section"
     assert birdseye.get("enabled") is True
     assert birdseye.get("mode") == "continuous"
+    # Frigate 0.17 serves birdseye frames over HTTP only with restream on.
+    assert birdseye.get("restream") is True
 
 
-def test_managed_birdseye_payload_is_enabled_continuous():
+def test_managed_birdseye_payload_is_enabled_continuous_restream():
     """The runtime-convergence payload matches what the dashboard expects."""
-    assert BIRDSEYE_CONFIG == {"enabled": True, "mode": "continuous"}
+    assert BIRDSEYE_CONFIG == {"enabled": True, "mode": "continuous", "restream": True}
 
 
 def test_ci_path_filter_wires_frigate_config_to_this_suite():
@@ -117,7 +119,9 @@ async def test_ensure_birdseye_patches_a_disabled_box():
         await client.close()
 
     assert len(puts) == 1
-    assert puts[0]["config_data"] == {"birdseye": {"enabled": True, "mode": "continuous"}}
+    assert puts[0]["config_data"] == {
+        "birdseye": {"enabled": True, "mode": "continuous", "restream": True}
+    }
     # Persist to disk + reload so the running box actually serves the stream.
     assert puts[0]["requires_restart"] == 1
 
@@ -146,6 +150,35 @@ async def test_ensure_birdseye_converges_wrong_mode():
 
 
 @pytest.mark.asyncio
+async def test_ensure_birdseye_converges_restream_off():
+    """Enabled + continuous but restream off (every box converged before the
+    restream key existed) still converges: Frigate 0.17 serves no birdseye
+    frame over HTTP without it, so the dashboard page stays empty."""
+    puts: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/config" and request.method == "GET":
+            return httpx.Response(
+                200,
+                json=_resolved_config(
+                    {"enabled": True, "mode": "continuous", "restream": False}
+                ),
+            )
+        if request.url.path == "/api/config/set" and request.method == "PUT":
+            puts.append(json.loads(request.content))
+            return httpx.Response(200, json={"success": True})
+        return httpx.Response(404)
+
+    client = _client_with(handler)
+    try:
+        assert await client.ensure_birdseye() is True
+    finally:
+        await client.close()
+    assert len(puts) == 1
+    assert puts[0]["config_data"]["birdseye"]["restream"] is True
+
+
+@pytest.mark.asyncio
 async def test_ensure_birdseye_noop_when_already_converged():
     """An already-converged box must NOT be rewritten: config/set with
     requires_restart=1 bounces Frigate and takes every camera dark for
@@ -157,7 +190,12 @@ async def test_ensure_birdseye_noop_when_already_converged():
             return httpx.Response(
                 200,
                 json=_resolved_config(
-                    {"enabled": True, "mode": "continuous", "width": 1280}
+                    {
+                        "enabled": True,
+                        "mode": "continuous",
+                        "restream": True,
+                        "width": 1280,
+                    }
                 ),
             )
         if request.url.path == "/api/config/set" and request.method == "PUT":

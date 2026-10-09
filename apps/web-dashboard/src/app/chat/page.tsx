@@ -21,6 +21,7 @@ import { SessionHeader } from "@/components/chat/SessionHeader";
 import { ChatHistoryPanel, type ChatHistoryPanelHandle } from "@/components/chat/ChatHistoryPanel";
 import { ContextPinsPopover } from "@/components/chat/ContextPinsPopover";
 import { CloudModelsPill } from "@/components/chat/CloudModelsPill";
+import { CreationCapabilitiesPopover } from "@/components/chat/CreationCapabilities";
 import { ChatFileRail } from "@/components/chat/ChatFileRail";
 import { MemoryPanel } from "@/components/chat/MemoryPanel";
 import {
@@ -47,6 +48,14 @@ import {
   type BusinessProfileView,
 } from "@/lib/api";
 import { Dialog } from "@/components/Dialog";
+import { useToast } from "@/components/Toast";
+import {
+  CONNECT_RETURN_PROVIDERS,
+  safeSessionStorage,
+  takeConnectReturn,
+  type ConnectReturnProvider,
+} from "@/components/chat/connect/connect-return";
+import { connectTurnStep } from "@/components/chat/connect/connect-turn";
 import { useChat } from "@/lib/hooks/useChat";
 import { useAssistantPages } from "@/lib/hooks/useAssistantPages";
 import { useModels } from "@/lib/hooks/useModels";
@@ -627,6 +636,88 @@ export default function ChatPage() {
     [selectedModel, selectedProvider, sendMessage, systemPrompt]
   );
 
+  // WARP-3904 — connect from chat. A connect card resolves with ONE short
+  // follow-up user turn ("<name> is connected now."), sent through the same
+  // `sendMessage` path as anything the person types, so it is an ordinary turn
+  // in the transcript and the model continues from it. Files staged in the
+  // composer stay staged: they belong to the message the person is writing, not
+  // to this one. The turn is held in state until the stream is idle and (for an
+  // OAuth return) the target conversation has loaded, then sent exactly once;
+  // `connectTurnStep` decides when, and drops it after two minutes so a turn
+  // that has outlived its moment never surfaces in a conversation opened later.
+  // Nothing typed into a card ever reaches this path.
+  const { toast } = useToast();
+  const [pendingConnectTurn, setPendingConnectTurn] = useState<{
+    turn: string;
+    conversationId: string | null;
+    at: number;
+  } | null>(null);
+  const handleConnectOutcome = useCallback(
+    (turn: string) => setPendingConnectTurn({ turn, conversationId, at: Date.now() }),
+    [conversationId],
+  );
+  useEffect(() => {
+    const pending = pendingConnectTurn;
+    if (!pending || isStreaming || !selectedModel) return;
+    const step = connectTurnStep(pending, conversationId, Date.now());
+    if (step === "wait") return;
+    setPendingConnectTurn(null);
+    if (step === "send") {
+      void sendMessage(pending.turn, selectedModel, systemPrompt || undefined, selectedProvider, { preserveComposerAttachments: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingConnectTurn, isStreaming, selectedModel, conversationId]);
+
+  // WARP-3904 — the OAuth return. The box's callback redirects to
+  // `/chat?google=<outcome>` or `/chat?m365=<outcome>`. Read and clear the
+  // record the card wrote before leaving, strip the parameter, reopen the
+  // conversation the card was in, and send the connected turn only when the
+  // outcome is the success value AND this tab wrote a matching, fresh record.
+  // A failure or cancellation sends nothing and says so in a toast.
+  const returnProvider: ConnectReturnProvider | null =
+    CONNECT_RETURN_PROVIDERS.find((p) => searchParams?.get(p) != null) ?? null;
+  const returnOutcome = returnProvider ? (searchParams?.get(returnProvider) ?? "") : null;
+  const handledReturnRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!returnProvider || returnOutcome === null || typeof window === "undefined") return;
+    const key = `${returnProvider}=${returnOutcome}`;
+    if (handledReturnRef.current === key) return;
+    handledReturnRef.current = key;
+    const result = takeConnectReturn({
+      provider: returnProvider,
+      outcome: returnOutcome,
+      storage: safeSessionStorage(),
+      now: Date.now(),
+    });
+    const next = new URL(window.location.href);
+    for (const p of CONNECT_RETURN_PROVIDERS) next.searchParams.delete(p);
+    window.history.replaceState(null, "", next.toString());
+    if (result.kind === "none") return;
+    if (result.conversationId) {
+      router.push(`/chat?c=${encodeURIComponent(result.conversationId)}`);
+    }
+    if (result.kind === "connected") {
+      if (result.conversationId) {
+        setPendingConnectTurn({ turn: result.turn, conversationId: result.conversationId, at: Date.now() });
+      } else {
+        // No conversation to continue: say it plainly rather than start a new one.
+        toast(`${result.displayName} is connected.`, "success");
+      }
+    } else {
+      toast(result.message, "error");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [returnProvider, returnOutcome]);
+
+  // WARP-3904 — messages that arrived with a LOADED transcript (a reload, a
+  // history click) never offer a live connect form: the first `messagesEpoch`
+  // bump after a load fixes how many messages are history. Adjusted during
+  // render, not in an effect, so the first painted frame is already right.
+  const [loadedMarker, setLoadedMarker] = useState({ epoch: messagesEpoch, count: messages.length });
+  if (loadedMarker.epoch !== messagesEpoch) {
+    setLoadedMarker({ epoch: messagesEpoch, count: messages.length });
+  }
+
   // WARP-1121 — "Skip the rest" = the canonical wrap-up turn, everywhere it
   // appears (design §4.3). It never abandons the interview.
   const handleWrapUp = useCallback(() => {
@@ -858,34 +949,6 @@ export default function ChatPage() {
     return -1;
   }, [messages]);
 
-  // Rehydrated conversations describe past setup; only tool results produced
-  // in this mounted chat can open a new setup popup.
-  const canSetupConnections = user?.role === "owner" || user?.role === "admin" || user?.role === "family";
-  const connectionPrincipal = `${user?.id}:${user?.role}`;
-  const connectionHistory = useRef({ epoch: messagesEpoch, principal: connectionPrincipal, ids: new Set(messages.map((message) => message.id)), callIds: new Set(messages.flatMap((message) => message.toolCalls?.map((call) => call.id) ?? [])), seenCallIds: new Set<string>() });
-  if (connectionHistory.current.epoch !== messagesEpoch || connectionHistory.current.principal !== connectionPrincipal) {
-    // A role or account change closes setup built from the previous person's
-    // grants. Only a fresh tool result for the current principal can reopen it.
-    connectionHistory.current = { epoch: messagesEpoch, principal: connectionPrincipal, ids: new Set(messages.map((message) => message.id)), callIds: new Set(messages.flatMap((message) => message.toolCalls?.map((call) => call.id) ?? [])), seenCallIds: new Set<string>() };
-  }
-  const [pendingConnectionOutcome, setPendingConnectionOutcome] = useState<{
-    turn: string; conversationId: string | null; epoch: number; userId: string; role: string;
-  } | null>(null);
-  const handleConnectionOutcome = useCallback((turn: string) => {
-    if (!user?.role || !canSetupConnections) return;
-    setPendingConnectionOutcome({ turn, conversationId, epoch: messagesEpoch, userId: user.id, role: user.role });
-  }, [conversationId, messagesEpoch, user, canSetupConnections]);
-  useEffect(() => {
-    if (!pendingConnectionOutcome) return;
-    if (!canSetupConnections || pendingConnectionOutcome.conversationId !== conversationId || pendingConnectionOutcome.epoch !== messagesEpoch || pendingConnectionOutcome.userId !== user?.id || pendingConnectionOutcome.role !== user?.role) {
-      setPendingConnectionOutcome(null);
-      return;
-    }
-    if (isStreaming || !selectedModel) return;
-    setPendingConnectionOutcome(null);
-    void sendMessage(pendingConnectionOutcome.turn, selectedModel, systemPrompt || undefined, selectedProvider, { preserveComposerAttachments: true });
-  }, [pendingConnectionOutcome, conversationId, messagesEpoch, user?.id, user?.role, canSetupConnections, isStreaming, selectedModel, selectedProvider, systemPrompt, sendMessage]);
-
   // WARP-855 — the header's conversation title: the first user message,
   // clamped, or "New chat".
   const headerTitle = useMemo(() => {
@@ -978,6 +1041,7 @@ export default function ChatPage() {
           </div>
           {/* WARP-461: workspace-global memory — always available. */}
           <MemoryPanel />
+          <CreationCapabilitiesPopover />
           {/* WARP-460: pins are per-session — the popover appears once
               the first turn has minted a conversationId. */}
           {conversationId && <ContextPinsPopover sessionId={conversationId} />}
@@ -1175,10 +1239,6 @@ export default function ChatPage() {
           )}
           <div className="chat-wrap">
             {messages.map((msg, idx) => {
-              // The stream replaces the temporary message id with its persisted
-              // id. Keep a setup form mounted across that replacement.
-              const connectionCall = msg.toolCalls?.find((call) => ["list_connections", "start_connection", "disconnect_connection"].includes(call.name));
-              const messageKey = connectionCall ? `connection-${messagesEpoch}-${idx}-${connectionCall.id}` : msg.id;
               // WARP-1121 §9.3 — interview turn shaping: markers are
               // stripped before render; a proposal fence suppresses raw
               // token paint (ChatMessage's own thinking indicator shows via
@@ -1199,7 +1259,7 @@ export default function ChatPage() {
                   if (streamingThis) {
                     return (
                       <ChatMessage
-                        key={messageKey}
+                        key={msg.id}
                         message={{ ...msg, content: "" }}
                         isStreaming
                         isLastAssistant={idx === lastAssistantIdx}
@@ -1260,15 +1320,12 @@ export default function ChatPage() {
               }
               return (
               <ChatMessage
-                key={messageKey}
+                key={msg.id}
                 message={msg}
                 isStreaming={
                   isStreaming && idx === messages.length - 1 && msg.role === "assistant"
                 }
                 isLastAssistant={idx === lastAssistantIdx}
-                connectionSetupInteractive={canSetupConnections && msg.role === "assistant" && idx === messages.length - 1 && !connectionHistory.current.ids.has(msg.id) && (!connectionCall || !connectionHistory.current.callIds.has(connectionCall.id))}
-                connectionSetupSeenIds={connectionHistory.current.seenCallIds}
-                onConnectionOutcome={handleConnectionOutcome}
                 onRetry={handleRetry}
                 onCopy={handleCopy}
                 onQuote={handleQuote}
@@ -1278,6 +1335,9 @@ export default function ChatPage() {
                 onRerequestApproval={handleRerequestApproval}
                 onEdit={isStreaming ? undefined : handleEdit}
                 onFeedback={(id, fb) => void rateMessage(id, fb)}
+                onConnectOutcome={handleConnectOutcome}
+                conversationId={conversationId}
+                fromHistory={idx < loadedMarker.count}
               />
               );
             })}

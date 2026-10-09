@@ -4,10 +4,7 @@ name: web-fetch-tests
 # Path-filtered.
 
 on:
-  pull_request:
-    paths:
-      - "services/web-fetch/**"
-      - ".github/workflows/web-fetch-tests.yml"
+  # PR coverage lives in ci.yml's path-aware leg; no duplicate PR job.
   push:
     branches: [main]
     paths:

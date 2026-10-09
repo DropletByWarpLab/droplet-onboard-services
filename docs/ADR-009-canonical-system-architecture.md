@@ -125,6 +125,19 @@ signal it's the mandatory transport for off-LAN clients, and the
 > with a Bearer token, and no WebView. The Tauri shell never shipped a
 > release.
 
+#### Local media worker (2026-10 extension)
+
+`services/media-gen/` is an optional local inference worker coordinated by
+Orch, following this ADR's service boundary. The `media` compose profile is
+disabled by default; it requires operator-provisioned read-only SDXL/Wan (or
+optional LTX) snapshots and compatible compute. It shares a dedicated internal
+network only with Orch and has no provider credential, storage authority, host
+port, LAN/WAN route or runtime downloads. Disposable workers receive prompts
+and bounded image bytes, return PNG/MP4 bytes, and are killed/reaped on deadline
+or cancellation. Orch owns authenticated jobs, access checks, audits and saving
+to customer storage. Model/device inference acceptance remains pending; see
+[media-gen deployment contract](../services/media-gen/README.md).
+
 #### VPN
 
 The red **VPN** box represents the mandatory transport for off-LAN

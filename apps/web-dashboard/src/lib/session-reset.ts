@@ -43,7 +43,7 @@
  */
 import { CHAT_DRAFT_KEY, PENDING_COMPOSER_KEY, PENDING_PROMPT_KEY } from "./types";
 import { SIDE_STORAGE_KEYS } from "./assistant-side";
-import { CHAT_CONNECTION_POPUP_KEY } from "./chat-connection-popup";
+import { CONNECT_RETURN_KEY } from "@/components/chat/connect/connect-return";
 
 /** Drop the chat hand-offs, the unsent draft and the assistant layout's
  *  remembered places (see the module note). */
@@ -52,7 +52,9 @@ export function clearChatHandoffs(): void {
     PENDING_PROMPT_KEY,
     PENDING_COMPOSER_KEY,
     CHAT_DRAFT_KEY,
-    CHAT_CONNECTION_POPUP_KEY,
+    // WARP-3904 - the connect card's OAuth round-trip record names the
+    // conversation a sign-in was started from; the next person must not inherit it.
+    CONNECT_RETURN_KEY,
     SIDE_STORAGE_KEYS.ask,
     SIDE_STORAGE_KEYS.business,
   ]) {
