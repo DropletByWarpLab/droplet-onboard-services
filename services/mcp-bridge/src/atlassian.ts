@@ -46,7 +46,7 @@
  * and never appears in an error message — {@link AtlassianStructuredContentUnavailableError}
  * and friends carry a tool name and nothing from the request.
  */
-import { basicCredential } from "./credentials.js";
+import { basicCredential, type RemoteMcpCredential } from "./credentials.js";
 import { pinTransportProtocolVersion } from "./protocol-pin.js";
 import {
   RemoteMcpSession,
@@ -154,6 +154,18 @@ export const ATLASSIAN_REQUIRED_FIELDS: readonly string[] = Object.freeze([
   "cloudId",
 ]);
 
+/** WARP-2409 — the OAuth endpoint (the one the reviewed tool catalog was
+ *  recorded from). A member's bearer is presented here, never on
+ *  {@link ATLASSIAN_MCP_URL}. Same host, so the egress registry is unchanged. */
+export const ATLASSIAN_MCP_OAUTH_URL = "https://mcp.atlassian.com/v1/mcp/authv2";
+
+/** WARP-2409 — the accepted open bodies: the API-token set, or a member's
+ *  bearer plus the site. Exactly one set; fields of the other are refused. */
+export const ATLASSIAN_REQUIRED_FIELD_SETS: readonly (readonly string[])[] = Object.freeze([
+  ATLASSIAN_REQUIRED_FIELDS,
+  Object.freeze(["accessToken", "cloudId"]),
+]);
+
 /**
  * The argument every Atlassian tool call carries.
  *
@@ -207,10 +219,14 @@ export const ATLASSIAN_STRUCTURED_CONTENT_TOOLS: ReadonlySet<string> = new Set([
 ]);
 
 export interface AtlassianMcpSessionOptions {
-  /** The Atlassian account the customer minted the token on. */
-  email: string;
+  /** The Atlassian account the customer minted the token on. With
+   *  {@link apiToken}, the default Basic credential. */
+  email?: string;
   /** The customer's API token. Reaches {@link basicCredential} only. */
-  apiToken: string;
+  apiToken?: string;
+  /** WARP-2409 — a ready credential (a member's OAuth bearer), used instead of
+   *  email + apiToken. The default stays Basic. */
+  credential?: RemoteMcpCredential;
   /** The site the operator connected. Forced onto every call. */
   cloudId: string;
   /** The transport factory. Injected in every test; production supplies
@@ -232,6 +248,14 @@ export interface AtlassianMcpSessionOptions {
   knownToolNames?: readonly string[];
 }
 
+function credentialOf(opts: AtlassianMcpSessionOptions): RemoteMcpCredential {
+  if (opts.credential) return opts.credential;
+  if (opts.email === undefined || opts.apiToken === undefined) {
+    throw new Error("an Atlassian session needs a credential, or an email and an API token");
+  }
+  return basicCredential(opts.email, opts.apiToken);
+}
+
 /**
  * Build the Atlassian session.
  *
@@ -248,7 +272,7 @@ export function createAtlassianMcpSession(
   return new RemoteMcpSession({
     serverId: ATLASSIAN_SERVER_ID,
     url,
-    credential: basicCredential(opts.email, opts.apiToken),
+    credential: credentialOf(opts),
     connect: withAtlassianGuards(opts.connect, opts.cloudId, scheduler),
     ...(opts.maxReconnectAttempts !== undefined
       ? { maxReconnectAttempts: opts.maxReconnectAttempts }

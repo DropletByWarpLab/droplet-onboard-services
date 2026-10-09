@@ -90,6 +90,7 @@ export type BridgeErrorCode =
   | "INVALID_REQUEST"
   | "UNKNOWN_SERVER_ID"
   | "SESSION_NOT_OPEN"
+  | "NO_SESSION"
   | "SESSION_NOT_READY"
   | "REMOTE_CALL_FAILED";
 
@@ -127,10 +128,37 @@ export interface BridgeStateBody {
 export interface BridgeSessionsBody {
   knownServers: string[];
   sessions: RemoteMcpSessionHealth[];
+  /** WARP-2409 — member-connection sessions held per server: a count, never an id or a member. */
+  connectionSessions: Record<string, number>;
+}
+
+/** WARP-2409 — a member connection id is a UUID (McpOAuthConnection.id). */
+const CONNECTION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export function isConnectionId(v: unknown): v is string {
+  return typeof v === "string" && CONNECTION_ID_PATTERN.test(v);
+}
+/** Member sessions one server may hold at once (fail closed past it). */
+export const MAX_CONNECTION_SESSIONS = 256;
+const CONNECTION_IDLE_MS = 30 * 60_000;
+const SWEEP_INTERVAL_MS = 60_000;
+
+/** The body's optional `connectionId`: undefined when absent, null when present
+ *  and not a UUID (the caller refuses), else the id. */
+function connectionIdOf(body: unknown): string | undefined | null {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return undefined;
+  const v = (body as Record<string, unknown>).connectionId;
+  if (v === undefined) return undefined;
+  return isConnectionId(v) ? v : null;
+}
+
+/** `<serverId>#<connectionId>` for a member session, else the bare server id. */
+function keyOf(serverId: string, connectionId?: string): string {
+  return connectionId ? `${serverId}#${connectionId}` : serverId;
 }
 
 /**
- * The live sessions, keyed by server id.
+ * The live sessions, keyed by server id (or `server#connection` for a member's
+ * own OAuth session, WARP-2409).
  *
  * In memory and nowhere else. There is no store, no cache and no file: a
  * restart of this container is a full teardown of every outbound session, which
@@ -149,7 +177,10 @@ export class BridgeSessionStore {
    */
   constructor(
     registry: Readonly<Record<string, SessionProfile | SessionFactory>> = SESSION_PROFILES,
+    options: { idleMs?: number; now?: () => number } = {},
   ) {
+    this.#idleMs = options.idleMs ?? CONNECTION_IDLE_MS;
+    this.#now = options.now ?? Date.now;
     this.#profiles = new Map(
       Object.entries(registry).map(
         ([id, entry]): [string, SessionProfile] => [id, toSessionProfile(entry)],
@@ -180,8 +211,31 @@ export class BridgeSessionStore {
     return profile.requiredFields;
   }
 
-  get(serverId: string): RemoteMcpSession | undefined {
-    return this.#sessions.get(serverId);
+  /** WARP-2409 — the alternative field sets `open` accepts (one for a profile
+   *  that declares none). */
+  fieldSetsOf(serverId: string): readonly (readonly string[])[] {
+    const profile = this.#profiles.get(serverId);
+    if (!profile) throw new Error(`no session factory for "${serverId}"`);
+    return profile.requiredFieldSets ?? [profile.requiredFields];
+  }
+
+  /** The session for a server, or for one member connection of it. */
+  get(serverId: string, connectionId?: string): RemoteMcpSession | undefined {
+    const key = keyOf(serverId, connectionId);
+    const session = this.#sessions.get(key);
+    if (session && connectionId) this.#lastUsed.set(key, this.#now());
+    return session;
+  }
+
+  /** How many member-connection sessions each server holds. Counts only: no
+   *  connection id, no member ever leaves this process. */
+  connectionSessionCounts(): Record<string, number> {
+    const out: Record<string, number> = {};
+    for (const key of this.#sessions.keys()) {
+      const at = key.indexOf("#");
+      if (at !== -1) out[key.slice(0, at)] = (out[key.slice(0, at)] ?? 0) + 1;
+    }
+    return out;
   }
 
   /**
@@ -197,19 +251,84 @@ export class BridgeSessionStore {
    * coalescing into it — see {@link BridgeSessionStore.#serialize} for the race,
    * and the paragraph above for why the last caller's credential has to win.
    */
-  async open(serverId: string, input: OpenSessionInput): Promise<RemoteMcpSessionHealth> {
-    return this.#serialize(serverId, async () => {
+  async open(
+    serverId: string,
+    input: OpenSessionInput,
+    connectionId?: string,
+  ): Promise<RemoteMcpSessionHealth> {
+    const key = keyOf(serverId, connectionId);
+    return this.#serialize(key, async () => {
       const profile = this.#profiles.get(serverId);
       if (!profile) throw new Error(`no session factory for "${serverId}"`);
-      await this.#closeNow(serverId);
+      await this.#closeNow(key);
+      if (connectionId) {
+        // Bounded: a replacement frees its own slot first (above), so only a
+        // genuinely new connection can hit the cap.
+        const held = this.connectionSessionCounts()[serverId] ?? 0;
+        if (held >= MAX_CONNECTION_SESSIONS) {
+          throw Object.assign(new Error("too many member sessions are open for this server."), {
+            code: "TOO_MANY_SESSIONS",
+          });
+        }
+      }
       const session = profile.factory(input);
-      this.#sessions.set(serverId, session);
+      this.#sessions.set(key, session);
+      if (connectionId) {
+        this.#lastUsed.set(key, this.#now());
+        this.#armSweep();
+      }
       return session.connect();
     });
   }
 
-  async close(serverId: string): Promise<boolean> {
-    return this.#serialize(serverId, () => this.#closeNow(serverId));
+  async close(serverId: string, connectionId?: string): Promise<boolean> {
+    const key = keyOf(serverId, connectionId);
+    return this.#serialize(key, () => this.#closeNow(key));
+  }
+
+  /**
+   * The kill switch (ADR-043 section 4): the server's base session AND every
+   * member-connection session of it. Includes opens still in flight (their
+   * chain is queued behind), so a session mid-connect cannot survive.
+   */
+  async closeAll(serverId: string): Promise<boolean> {
+    const ours = (k: string) => k === serverId || k.startsWith(`${serverId}#`);
+    const keys = new Set([...this.#sessions.keys(), ...this.#chains.keys()].filter(ours));
+    const results = await Promise.all([...keys].map((k) => this.#serialize(k, () => this.#closeNow(k))));
+    return results.some(Boolean);
+  }
+
+  readonly #lastUsed = new Map<string, number>();
+  readonly #now: () => number;
+  readonly #idleMs: number;
+  #sweepTimer: ReturnType<typeof setTimeout> | undefined;
+
+  // ponytail: one self-rearming timer for all connection sessions, scanning a
+  // map; fine for a few hundred members. Upgrade to an LRU if the cap rises.
+  #armSweep(): void {
+    if (this.#sweepTimer) return;
+    this.#sweepTimer = setTimeout(() => {
+      this.#sweepTimer = undefined;
+      void this.#evictIdle();
+    }, SWEEP_INTERVAL_MS);
+    this.#sweepTimer.unref?.();
+  }
+
+  async #evictIdle(): Promise<void> {
+    try {
+      const cutoff = this.#now() - this.#idleMs;
+      for (const [key, used] of [...this.#lastUsed]) {
+        if (used > cutoff) continue;
+        // Re-checked under the key's lock: a call that touched it meanwhile wins.
+        await this.#serialize(key, async () => {
+          if ((this.#lastUsed.get(key) ?? 0) <= cutoff) await this.#closeNow(key);
+        });
+      }
+    } catch {
+      /* a close that threw has already dropped the session from the map */
+    } finally {
+      if (this.#lastUsed.size > 0) this.#armSweep();
+    }
   }
 
   /**
@@ -221,6 +340,7 @@ export class BridgeSessionStore {
    */
   async #closeNow(serverId: string): Promise<boolean> {
     const session = this.#sessions.get(serverId);
+    this.#lastUsed.delete(serverId);
     if (!session) return false;
     this.#sessions.delete(serverId);
     await session.close();
@@ -276,9 +396,13 @@ export class BridgeSessionStore {
     return run;
   }
 
-  /** Every open session's health, sorted by id. Served by `/health`. */
+  /** Every server-level session's health, sorted by id. Member-connection
+   *  sessions are counted by {@link connectionSessionCounts}, not listed. */
   healthAll(): RemoteMcpSessionHealth[] {
-    return [...this.#sessions.keys()].sort().map((id) => this.#sessions.get(id)!.health());
+    return [...this.#sessions.keys()]
+      .filter((k) => !k.includes("#"))
+      .sort()
+      .map((id) => this.#sessions.get(id)!.health());
   }
 }
 
@@ -402,6 +526,7 @@ async function route(
       body: {
         knownServers: opts.store.knownServerIds(),
         sessions: opts.store.healthAll(),
+        connectionSessions: opts.store.connectionSessionCounts(),
       } satisfies BridgeSessionsBody,
     };
   }
@@ -424,7 +549,7 @@ async function route(
     if (req.method !== "DELETE") {
       return err(405, "METHOD_NOT_ALLOWED", `${req.method} is not allowed on ${req.path}.`);
     }
-    const closed = await opts.store.close(serverId);
+    const closed = await opts.store.closeAll(serverId);
     return { status: 200, body: { closed } };
   }
 
@@ -440,6 +565,10 @@ async function route(
     case "call":
       return req.method === "POST"
         ? callTool(serverId, req.body, opts)
+        : err(405, "METHOD_NOT_ALLOWED", `${req.method} is not allowed on ${req.path}.`);
+    case "close":
+      return req.method === "POST"
+        ? closeConnection(serverId, req.body, opts)
         : err(405, "METHOD_NOT_ALLOWED", `${req.method} is not allowed on ${req.path}.`);
     case "state":
       return req.method === "GET"
@@ -468,18 +597,32 @@ async function openSession(
   // the fields the profile names are read, and only those are forwarded, so an
   // Atlassian-shaped body sent to a bearer-only vendor hands its factory
   // nothing it did not ask for.
-  const fields: Record<string, string> = {};
-  const missing: string[] = [];
-  for (const name of opts.store.requiredFieldsOf(serverId)) {
-    const value = requiredString(body, name);
-    if (value === null) missing.push(name);
-    else fields[name] = value;
-  }
+  // WARP-2409 — a profile may accept alternative field sets (API token, or a
+  // member's bearer). The body must complete exactly one and carry nothing of
+  // the others; a partial or mixed body is refused, naming the FIELD.
+  const sets = opts.store.fieldSetsOf(serverId);
+  const present = (n: string) => requiredString(body, n) !== null;
+  const chosen =
+    sets.find((s) => s.every(present)) ??
+    // None complete: report against the set the caller came closest to
+    // (first on a tie), so the message names what to add.
+    sets.reduce((best, s) => (s.filter(present).length > best.filter(present).length ? s : best));
+  const missing = chosen.filter((n) => !present(n));
   if (missing.length > 0) {
     // Names the MISSING FIELD, never a value — a message that echoed the body
     // back would put the credential in the orchestrator's log the first time
     // somebody mistyped a key.
     return err(400, "INVALID_REQUEST", `Missing or empty: ${missing.join(", ")}.`);
+  }
+  const foreign = sets.flat().filter((n) => !chosen.includes(n) && body[n] !== undefined);
+  if (foreign.length > 0) {
+    return err(400, "INVALID_REQUEST", `Not allowed with this credential: ${[...new Set(foreign)].join(", ")}.`);
+  }
+  const fields: Record<string, string> = {};
+  for (const name of chosen) fields[name] = requiredString(body, name)!;
+  const connectionId = connectionIdOf(body);
+  if (connectionId === null) {
+    return err(400, "INVALID_REQUEST", "connectionId must be a UUID.");
   }
   const url = requiredString(body, "url");
   // WARP-2651 — the caller's vetted catalog, carried across a restart of THIS
@@ -494,11 +637,15 @@ async function openSession(
     return err(400, "INVALID_REQUEST", "knownTools must be an array of strings.");
   }
   try {
-    const state = await opts.store.open(serverId, {
-      ...fields,
-      ...(url ? { url } : {}),
-      ...(knownTools !== undefined ? { knownTools } : {}),
-    });
+    const state = await opts.store.open(
+      serverId,
+      {
+        ...fields,
+        ...(url ? { url } : {}),
+        ...(knownTools !== undefined ? { knownTools } : {}),
+      },
+      connectionId,
+    );
     return { status: 200, body: { state } satisfies BridgeStateBody };
   } catch (e) {
     // `connect()` classifies its own failures into the session state and does
@@ -528,8 +675,19 @@ async function callTool(
   rawBody: unknown,
   opts: BridgeApiOptions,
 ): Promise<BridgeResponse> {
-  const session = opts.store.get(serverId);
-  if (!session) return notOpen(serverId);
+  // WARP-2409 — a member's own session, when the body names one. A malformed id
+  // is refused; an id with no session is NO_SESSION, never a fall back to the
+  // server-level session (that would run the call as a different principal).
+  const rawConnection = connectionIdOf(rawBody);
+  if (rawConnection === null) {
+    return err(400, "INVALID_REQUEST", "connectionId must be a UUID.");
+  }
+  const session = opts.store.get(serverId, rawConnection);
+  if (!session) {
+    return rawConnection
+      ? err(409, "NO_SESSION", `No session is open for that connection. POST /sessions/${serverId}/open with it first.`)
+      : notOpen(serverId);
+  }
   if (typeof rawBody !== "object" || rawBody === null || Array.isArray(rawBody)) {
     return err(400, "INVALID_REQUEST", "Body must be a JSON object.", session.health());
   }
@@ -552,6 +710,21 @@ async function callTool(
   } catch (e) {
     return fromSessionError(e, session);
   }
+}
+
+/** `POST /sessions/:id/close { connectionId }` — one member's session only. The
+ *  id is required, so this can never be mistaken for the kill switch. */
+async function closeConnection(
+  serverId: string,
+  rawBody: unknown,
+  opts: BridgeApiOptions,
+): Promise<BridgeResponse> {
+  const id =
+    typeof rawBody === "object" && rawBody !== null && !Array.isArray(rawBody)
+      ? (rawBody as Record<string, unknown>).connectionId
+      : undefined;
+  if (!isConnectionId(id)) return err(400, "INVALID_REQUEST", "connectionId must be a UUID.");
+  return { status: 200, body: { closed: await opts.store.close(serverId, id) } };
 }
 
 function sessionState(serverId: string, opts: BridgeApiOptions): BridgeResponse {

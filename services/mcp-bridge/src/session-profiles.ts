@@ -27,11 +27,14 @@
 import {
   ATLASSIAN_MCP_CLIENT_INFO,
   ATLASSIAN_MCP_PROTOCOL_VERSION,
+  ATLASSIAN_MCP_OAUTH_URL,
   ATLASSIAN_REQUIRED_FIELDS,
+  ATLASSIAN_REQUIRED_FIELD_SETS,
   ATLASSIAN_SERVER_ID,
   createAtlassianMcpSession,
 } from "./atlassian.js";
 import { RemoteCallScheduler } from "./call-scheduler.js";
+import { bearerCredential } from "./credentials.js";
 import type { RemoteMcpSession } from "./remote-session.js";
 import { createStreamableHttpConnection } from "./streamable-http.js";
 
@@ -83,6 +86,12 @@ export type SessionFactory = (input: OpenSessionInput) => RemoteMcpSession;
  */
 export interface SessionProfile {
   readonly requiredFields: readonly string[];
+  /**
+   * WARP-2409 — alternative field sets the open body may carry (API token, or a
+   * member's OAuth bearer). Absent means `[requiredFields]`. `requiredFields`
+   * stays the API-token set so the orchestrator's descriptor gate is unchanged.
+   */
+  readonly requiredFieldSets?: readonly (readonly string[])[];
   readonly factory: SessionFactory;
 }
 
@@ -155,9 +164,20 @@ export function createAtlassianSessionFactory(
 ): SessionFactory {
   return (input: OpenSessionInput) => {
     const scheduler = makeScheduler();
+    // WARP-2409 — a member's OAuth bearer dials the OAuth endpoint; the route
+    // has already refused a body that mixes it with the API-token fields.
+    const bearer = typeof input.accessToken === "string" && input.accessToken.length > 0;
     return createAtlassianMcpSession({
-      email: requireField(input, "email"),
-      apiToken: requireField(input, "apiToken"),
+      ...(bearer
+        ? {
+            credential: bearerCredential(requireField(input, "accessToken")),
+            url: input.url ?? ATLASSIAN_MCP_OAUTH_URL,
+          }
+        : {
+            email: requireField(input, "email"),
+            apiToken: requireField(input, "apiToken"),
+            ...(input.url !== undefined ? { url: input.url } : {}),
+          }),
       cloudId: requireField(input, "cloudId"),
       scheduler,
       connect: (connectInput) =>
@@ -166,7 +186,6 @@ export function createAtlassianSessionFactory(
           pinnedProtocolVersion: ATLASSIAN_MCP_PROTOCOL_VERSION,
           onRateLimitHeaders: (headers) => scheduler.noteRateLimitHeaders(headers),
         }),
-      ...(input.url !== undefined ? { url: input.url } : {}),
       // WARP-2651 — the caller's vetted catalog, carried across a restart of
       // this container. It has to be handed over HERE, inside the production
       // builder: `http-api.ts` validates the wire field and `BridgeSessionStore`
@@ -193,6 +212,7 @@ export const SESSION_PROFILES: Readonly<Record<string, SessionProfile>> =
   Object.freeze({
     [ATLASSIAN_SERVER_ID]: Object.freeze({
       requiredFields: ATLASSIAN_REQUIRED_FIELDS,
+      requiredFieldSets: ATLASSIAN_REQUIRED_FIELD_SETS,
       factory: createAtlassianSessionFactory(),
     }),
   });
