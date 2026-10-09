@@ -11280,11 +11280,16 @@ model McpOAuthConnection {
 
   connectedAt     DateTime?
   lastRefreshOkAt DateTime?
+  /// WARP-2405 — when the held access token stops working, from the token
+  /// response's `expires_in`. The refresh job (WARP-2416) selects on it, so a
+  /// token is renewed before a call pays a 401. Cleared with the tokens.
+  tokenExpiresAt  DateTime?
   lastError       String?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
   @@unique([provider, memberId])
+  @@index([state, tokenExpiresAt])
   /// Offboarding: find every row a departing member owns (WARP-3924).
   @@index([memberId])
 }

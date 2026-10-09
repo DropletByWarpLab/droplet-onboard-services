@@ -357,57 +357,221 @@ export class McpBridgeClient implements McpClientPort {
   }
 
   async #send<T>(method: string, path: string, body?: unknown): Promise<T> {
-    if (this.#serviceToken.length === 0) {
-      // No dial. `routes/web.ts`'s rule, and the log line is the operator's
-      // only signal that a secret was never provisioned.
-      logger.error(
-        "MCP_BRIDGE_SERVICE_TOKEN is unset — refusing %s %s (fail-closed, no upstream call)",
-        method,
-        path,
-      );
-      throw new McpBridgeError(
-        "AUTH_NOT_CONFIGURED",
-        "MCP_BRIDGE_SERVICE_TOKEN is not configured on the orchestrator.",
-        0,
-      );
-    }
-    let res: Response;
-    try {
-      res = await this.#fetch(`${this.#baseUrl}${path}`, {
-        method,
-        headers: {
-          Authorization: `Bearer ${this.#serviceToken}`,
-          ...(body !== undefined ? { "content-type": "application/json" } : {}),
-        },
-        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-        signal: AbortSignal.timeout(this.#timeoutMs),
-      });
-    } catch (e) {
-      // The bridge container itself is unreachable — a compose/health problem,
-      // distinct from the VENDOR being unreachable (which arrives as a 502 with
-      // a classified session state). Different remedies, so different codes.
-      throw new McpBridgeError(
-        "BRIDGE_UNREACHABLE",
-        `mcp-bridge did not answer ${method} ${path}.`,
-        0,
-      );
-    }
+    return bridgeRequest<T>(
+      { baseUrl: this.#baseUrl, serviceToken: this.#serviceToken, fetchImpl: this.#fetch, timeoutMs: this.#timeoutMs },
+      method,
+      path,
+      body,
+    );
+  }
+}
 
-    const parsed = (await res.json().catch(() => null)) as
-      | (Record<string, unknown> & { error?: { code?: string; message?: string }; state?: RemoteMcpSessionHealth })
-      | null;
+interface BridgeTransport {
+  baseUrl: string;
+  serviceToken: string;
+  fetchImpl: typeof fetch;
+  timeoutMs: number;
+}
 
-    if (!res.ok) {
-      throw new McpBridgeError(
-        parsed?.error?.code ?? "REMOTE_CALL_FAILED",
-        parsed?.error?.message ?? `mcp-bridge answered ${res.status}.`,
-        res.status,
-        parsed?.state,
-      );
+/** One bearer-gated call to the bridge. Shared by the per-server client above
+ *  and {@link McpBridgeOAuthClient}, so both fail closed identically. */
+async function bridgeRequest<T>(t: BridgeTransport, method: string, path: string, body?: unknown): Promise<T> {
+  if (t.serviceToken.length === 0) {
+    // No dial. `routes/web.ts`'s rule, and the log line is the operator's
+    // only signal that a secret was never provisioned.
+    logger.error(
+      "MCP_BRIDGE_SERVICE_TOKEN is unset — refusing %s %s (fail-closed, no upstream call)",
+      method,
+      path,
+    );
+    throw new McpBridgeError(
+      "AUTH_NOT_CONFIGURED",
+      "MCP_BRIDGE_SERVICE_TOKEN is not configured on the orchestrator.",
+      0,
+    );
+  }
+  let res: Response;
+  try {
+    res = await t.fetchImpl(`${t.baseUrl}${path}`, {
+      method,
+      headers: {
+        Authorization: `Bearer ${t.serviceToken}`,
+        ...(body !== undefined ? { "content-type": "application/json" } : {}),
+      },
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+      signal: AbortSignal.timeout(t.timeoutMs),
+    });
+  } catch (e) {
+    // The bridge container itself is unreachable — a compose/health problem,
+    // distinct from the VENDOR being unreachable (which arrives as a 502 with
+    // a classified session state). Different remedies, so different codes.
+    throw new McpBridgeError(
+      "BRIDGE_UNREACHABLE",
+      `mcp-bridge did not answer ${method} ${path}.`,
+      0,
+    );
+  }
+
+  const parsed = (await res.json().catch(() => null)) as
+    | (Record<string, unknown> & { error?: { code?: string; message?: string }; state?: RemoteMcpSessionHealth })
+    | null;
+
+  if (!res.ok) {
+    // A host outside the bridge's curated set: a typed refusal, never retried.
+    if (res.status === 422 && (parsed?.reason === OAUTH_HOST_NOT_ALLOWED || parsed?.error?.code === OAUTH_HOST_NOT_ALLOWED)) {
+      throw new McpBridgeError(OAUTH_HOST_NOT_ALLOWED, "The bridge refused a host outside its curated set.", 422);
     }
-    if (parsed === null) {
-      throw new McpBridgeError("REMOTE_CALL_FAILED", "mcp-bridge answered with no JSON body.", res.status);
+    throw new McpBridgeError(
+      parsed?.error?.code ?? "REMOTE_CALL_FAILED",
+      parsed?.error?.message ?? `mcp-bridge answered ${res.status}.`,
+      res.status,
+      parsed?.state,
+    );
+  }
+  if (parsed === null) {
+    throw new McpBridgeError("REMOTE_CALL_FAILED", "mcp-bridge answered with no JSON body.", res.status);
+  }
+  return parsed as T;
+}
+
+// ─── WARP-2401 / WARP-2405 — the OAuth hops, made by the bridge ──────────────
+//
+// ADR-043 §5: every outbound hop to a vendor (discovery, client registration,
+// code exchange, refresh, revoke) is the bridge's, through its DNS-pinned
+// `guardedFetch`. The orchestrator never dials an authorization server. These
+// bodies are the plan's contract with `services/mcp-bridge/src/oauth/`.
+
+/** The bridge's refusal when the authorization server does not advertise PKCE S256. */
+export const OAUTH_PKCE_UNSUPPORTED = "PKCE_UNSUPPORTED";
+
+/** 422 from `/oauth/*`: an endpoint host the bridge's curated registry does not allow. */
+export const OAUTH_HOST_NOT_ALLOWED = "HOST_NOT_ALLOWED";
+
+/** What `POST /oauth/discover` answers: the vetted metadata of the server's authorization server. */
+export interface McpOAuthDiscovery {
+  /** The RFC 9728 `resource`; the bridge has checked it equals the MCP URL. */
+  resource: string;
+  /** The authorization server's `issuer`, string-equal to its own metadata. */
+  issuer: string;
+  authorizationEndpoint: string;
+  tokenEndpoint: string;
+  registrationEndpoint?: string;
+  revocationEndpoint?: string;
+  /** RFC 9207 `authorization_response_iss_parameter_supported`. When true the
+   *  callback MUST carry `iss`. */
+  issParameterSupported: boolean;
+}
+
+/** The only fields kept from a token response. */
+export interface McpOAuthTokenResult {
+  accessToken: string;
+  refreshToken?: string;
+  /** Seconds. */
+  expiresIn?: number;
+  scope?: string;
+}
+
+export interface McpOAuthExchangeInput {
+  tokenEndpoint: string;
+  clientId: string;
+  clientSecret?: string;
+  code: string;
+  codeVerifier: string;
+  redirectUri: string;
+  /** RFC 8707, sent on the token request as well as the authorize URL. */
+  resource: string;
+}
+
+export interface McpOAuthRefreshInput {
+  tokenEndpoint: string;
+  clientId: string;
+  clientSecret?: string;
+  refreshToken: string;
+  resource: string;
+  scope?: string;
+}
+
+export interface McpOAuthRevokeInput {
+  revocationEndpoint: string;
+  clientId: string;
+  token: string;
+}
+
+export interface McpBridgeOAuthClientOptions {
+  baseUrl: string;
+  serviceToken: string;
+  fetchImpl?: typeof fetch;
+  timeoutMs?: number;
+}
+
+const isStr = (v: unknown): v is string => typeof v === "string" && v.length > 0;
+
+function tokenResult(raw: unknown): McpOAuthTokenResult {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  // Fail closed on a malformed answer; keep nothing beyond the four fields.
+  if (!isStr(r.accessToken)) {
+    throw new McpBridgeError("REMOTE_CALL_FAILED", "mcp-bridge answered a token request without an access token.", 502);
+  }
+  return {
+    accessToken: r.accessToken,
+    ...(isStr(r.refreshToken) ? { refreshToken: r.refreshToken } : {}),
+    ...(typeof r.expiresIn === "number" && Number.isFinite(r.expiresIn) ? { expiresIn: r.expiresIn } : {}),
+    ...(isStr(r.scope) ? { scope: r.scope } : {}),
+  };
+}
+
+/** The orchestrator's side of the bridge's `/oauth/*` routes. */
+export class McpBridgeOAuthClient {
+  readonly #t: BridgeTransport;
+
+  constructor(opts: McpBridgeOAuthClientOptions) {
+    this.#t = {
+      baseUrl: opts.baseUrl.replace(/\/+$/, ""),
+      serviceToken: opts.serviceToken,
+      fetchImpl: opts.fetchImpl ?? fetch,
+      timeoutMs: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    };
+  }
+
+  /** The bridge decides which hosts are allowed from its own curated registry;
+   *  the box never sends a host list. */
+  async discover(mcpUrl: string): Promise<McpOAuthDiscovery> {
+    const d = await bridgeRequest<Partial<McpOAuthDiscovery>>(this.#t, "POST", "/oauth/discover", { mcpUrl });
+    if (!isStr(d.resource) || !isStr(d.issuer) || !isStr(d.authorizationEndpoint) || !isStr(d.tokenEndpoint)) {
+      throw new McpBridgeError("REMOTE_CALL_FAILED", "mcp-bridge answered discovery with incomplete metadata.", 502);
     }
-    return parsed as T;
+    return {
+      resource: d.resource,
+      issuer: d.issuer,
+      authorizationEndpoint: d.authorizationEndpoint,
+      tokenEndpoint: d.tokenEndpoint,
+      ...(isStr(d.registrationEndpoint) ? { registrationEndpoint: d.registrationEndpoint } : {}),
+      ...(isStr(d.revocationEndpoint) ? { revocationEndpoint: d.revocationEndpoint } : {}),
+      // Explicit true or false, never absence read as false by a caller.
+      issParameterSupported: d.issParameterSupported === true,
+    };
+  }
+
+  async register(registrationEndpoint: string, redirectUris: readonly string[]): Promise<{ clientId: string; clientSecret?: string }> {
+    const r = await bridgeRequest<{ clientId?: unknown; clientSecret?: unknown }>(this.#t, "POST", "/oauth/register", {
+      registrationEndpoint,
+      redirectUris,
+    });
+    if (!isStr(r.clientId)) {
+      throw new McpBridgeError("REMOTE_CALL_FAILED", "mcp-bridge answered registration without a client id.", 502);
+    }
+    return { clientId: r.clientId, ...(isStr(r.clientSecret) ? { clientSecret: r.clientSecret } : {}) };
+  }
+
+  async exchange(input: McpOAuthExchangeInput): Promise<McpOAuthTokenResult> {
+    return tokenResult(await bridgeRequest(this.#t, "POST", "/oauth/exchange", input));
+  }
+
+  async refresh(input: McpOAuthRefreshInput): Promise<McpOAuthTokenResult> {
+    return tokenResult(await bridgeRequest(this.#t, "POST", "/oauth/refresh", input));
+  }
+
+  async revoke(input: McpOAuthRevokeInput): Promise<void> {
+    await bridgeRequest(this.#t, "POST", "/oauth/revoke", input);
   }
 }

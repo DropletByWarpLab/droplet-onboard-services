@@ -675,6 +675,34 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
     // The bridge's `SESSION_FACTORIES` key. Gated against the bridge's own
     // source by `adr-043-boundary.test.ts`, which now checks four declarations.
     mcpServerId: "atlassian",
+    // WARP-2405 — web sign-in beside the API token. The OAuth endpoint is
+    // `/v1/mcp/authv2` (the `/v1/mcp` path takes the Basic credential only);
+    // it keeps the reviewed tool catalog. Jira and Confluence, read and write
+    // (the box's interceptor still asks for a thumbs-up on every write), plus
+    // `offline_access` so the sign-in can refresh. No Compass or TWG scopes.
+    // `email` and `apiToken` stay required for now: the bridge's open contract
+    // still demands them until the bearer profile lands (WARP-2409 bridge half),
+    // and `adr-043-boundary.test.ts` gates the two agreeing.
+    signIn: {
+      kind: "oauth",
+      mcpUrl: "https://mcp.atlassian.com/v1/mcp/authv2",
+      scopes: [
+        "read:me",
+        "read:account",
+        "offline_access",
+        "email",
+        "read:jira-work",
+        "search:confluence",
+        "read:confluence-user",
+        "read:page:confluence",
+        "read:comment:confluence",
+        "read:space:confluence",
+        "read:hierarchical-content:confluence",
+        "write:jira-work",
+        "write:page:confluence",
+        "write:comment:confluence",
+      ],
+    },
     credentialFields: [
       {
         // `readAtlassianCredential` (`remote-mcp-servers.ts`) reads exactly

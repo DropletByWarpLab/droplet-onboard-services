@@ -10,6 +10,15 @@ export const REQUEST_LOG_REDACT_PATHS: readonly string[] = [
   "res.body.recovery_key",
   "req.body.recoveryKey",
   "req.body.recovery_key",
+  // WARP-2405: an MCP sign-in's authorization code, CSRF state and issuer ride the
+  // callback query, and a pasted redirect address carries all three. The req
+  // serializer already drops the query; these keep them out of any body or
+  // query a future serializer or explicit log emits (rule 19).
+  "req.query.code",
+  "req.query.state",
+  "req.query.iss",
+  "req.body.redirectUrl",
+  "req.body.clientSecret",
 ];
 
 /** pino-http req serializer (receives the std-serialized req). */
