@@ -34,6 +34,12 @@ const { disconnectProviderMock, connectCloudProviderMock } = vi.hoisted(() => ({
   // WARP-2842 — the probe the page fires after a save on a cloud / REST track.
   connectCloudProviderMock: vi.fn(),
 }));
+// WARP-3951: the card has its own tests; here only its mounting is asserted.
+vi.mock("@/components/integrations/McpSignInCard", () => ({
+  McpSignInCard: (p: { provider: string; admin?: boolean }) => (
+    <div data-testid={`mcp-sign-in-${p.provider}`} data-admin={String(Boolean(p.admin))} />
+  ),
+}));
 vi.mock("@/lib/api.erp", () => ({
   disconnectProvider: disconnectProviderMock,
   connectCloudProvider: connectCloudProviderMock,
@@ -1294,5 +1300,30 @@ describe("disconnecting a configured provider", () => {
     expect(alert.textContent).toContain("Couldn't disconnect Fixture Billing (CONFLICT)");
     expect(document.body.textContent).not.toContain("rk_live_should_never_render");
     expect(document.body.textContent).not.toContain("rk_live_leaky_message");
+  });
+});
+
+// WARP-3951 — the web sign-in leads only when the box's credential view says so.
+describe("web sign-in card (WARP-3951)", () => {
+  beforeEach(() => {
+    useAuthMock.mockReturnValue({ user: { role: "admin" } });
+  });
+
+  it("shows no sign-in card or token-fallback heading when the view has no signIn", async () => {
+    fetchSaasCredentialsMock.mockResolvedValue([BILLING]);
+    render(<SaasCredentialsSection />);
+    await screen.findByTestId("provider-fixture-billing");
+    expect(screen.queryByTestId("mcp-sign-in-fixture-billing")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Or paste an API token/)).not.toBeInTheDocument();
+  });
+
+  it("leads with the card in admin mode and moves the token form under the fallback heading", async () => {
+    fetchSaasCredentialsMock.mockResolvedValue([{ ...BILLING, signIn: { kind: "oauth" } }]);
+    render(<SaasCredentialsSection />);
+    const card = await screen.findByTestId("mcp-sign-in-fixture-billing");
+    expect(card).toHaveAttribute("data-admin", "true");
+    const heading = screen.getByText("Or paste an API token (shared account)");
+    expect(card.compareDocumentPosition(heading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(heading.compareDocumentPosition(screen.getByLabelText(/Account id/)) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 });

@@ -14,6 +14,12 @@ This is the connector where a setup most often fails for a reason the person doi
 
 If either is missing, you can still create the token in step 1 below and it will look perfectly valid — it just will not be able to reach anything. That is the failure this section exists to prevent.
 
+## Signing in with Atlassian instead of pasting a token
+
+Where Droplet offers it, **Sign in with Atlassian** lets each member approve access with their own Atlassian account, so Droplet acts as that person and sees only what they can see. An owner or admin can also create a **Workspace connection**, which makes everyone allowed to use the server act as one shared account; Droplet asks you to acknowledge that first. The API token below stays available as the shared-account fallback.
+
+One step needs an Atlassian org admin. In **Atlassian Administration → Rovo → Rovo MCP server → Domain settings**, add your Droplet's callback address (for example `https://droplet-ai.lan/**`, or your box's own name) and `http://localhost:*/**`. Until that is done Atlassian refuses the sign-in with "Your organization admin must authorize access from this redirect URL". If the browser ends on a page that does not load, copy the full address from its address bar and paste it into the box on the card.
+
 ## Plan prerequisite
 
 **A paid Atlassian cloud plan.** Standard, Premium or Enterprise. The **Free plan** does not include Rovo, and without Rovo there is no MCP server for Droplet to connect to.
