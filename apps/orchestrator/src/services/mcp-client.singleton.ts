@@ -317,6 +317,14 @@ export async function ensureRemoteMcpAttached(
 }
 
 /**
+ * WARP-2416 — a sign-out or a dead refresh: end that connection's bridge session
+ * (not the server's). Nothing attached means nothing to close.
+ */
+export async function closeRemoteConnectionSession(serverId: string, connectionId: string): Promise<void> {
+  await attachedClients.get(serverId)?.closeConnection(connectionId);
+}
+
+/**
  * WARP-2659 — tear down one remote server: the disconnect path.
  *
  * Handed to `createIntegrationsRouter` from `app.ts` rather than imported by

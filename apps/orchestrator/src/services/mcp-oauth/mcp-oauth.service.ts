@@ -101,6 +101,7 @@ interface PendingFlow {
   /** RFC 9207: the callback MUST carry `iss` when the server advertised it. */
   issRequired: boolean;
   tokenEndpoint: string;
+  revocationEndpoint?: string;
   scopes: string;
   /** What the row was before consent began, restored if consent fails. */
   priorState: McpOAuthStateName;
@@ -108,8 +109,10 @@ interface PendingFlow {
 }
 
 export interface McpOAuthDependencies {
-  oauth: Pick<McpBridgeOAuthClient, "discover" | "register" | "exchange">;
+  oauth: Pick<McpBridgeOAuthClient, "discover" | "register" | "exchange" | "revoke">;
   now: () => Date;
+  /** Closes a connection's live bridge session (sign-out). Best effort. */
+  closeSession: (provider: string, connectionId: string) => Promise<void>;
   /**
    * In-flight sign-ins, keyed by sha256(state).
    * ponytail: in memory; a restart mid-consent means the person tries again.
@@ -122,6 +125,11 @@ export function mcpOAuthDependencies(overrides: Partial<McpOAuthDependencies> = 
   return {
     now: () => new Date(),
     pending: new Map(),
+    // Lazy: the singleton pulls the whole MCP stack, which this module must not load with it.
+    closeSession: async (provider, connectionId) => {
+      const { closeRemoteConnectionSession } = await import("../mcp-client.singleton.js");
+      await closeRemoteConnectionSession(provider, connectionId);
+    },
     ...overrides,
     oauth: overrides.oauth ?? new McpBridgeOAuthClient({ baseUrl: config.MCP_BRIDGE_URL, serviceToken: config.MCP_BRIDGE_SERVICE_TOKEN }),
   };
@@ -162,6 +170,8 @@ export interface McpOAuthTokenBlob {
   expiresAt: string;
   scope: string;
   tokenEndpoint: string;
+  /** The server's RFC 7009 endpoint when its metadata advertised one. */
+  revocationEndpoint?: string;
   resource: string;
   mcpUrl: string;
 }
@@ -331,6 +341,7 @@ export async function beginMcpSignIn(
   deps.pending.set(sha256hex(state), {
     connectionId: id, provider: input.provider, userId: input.userId, scope: input.scope, codeVerifier, redirectUri,
     resource: signIn.mcpUrl, issuer: disc.issuer, issRequired: disc.issParameterSupported, tokenEndpoint: disc.tokenEndpoint,
+    ...(disc.revocationEndpoint ? { revocationEndpoint: disc.revocationEndpoint } : {}),
     scopes, priorState, expiresAt,
   });
 
@@ -430,9 +441,7 @@ export async function completeMcpSignIn(
       redirectUri: flow.redirectUri,
       resource: flow.resource,
     });
-    // ponytail: a missing or absurd `expires_in` is refreshed in an hour at the latest.
-    const ttlS = tokens.expiresIn && tokens.expiresIn >= 60 && tokens.expiresIn <= 30 * 86_400 ? tokens.expiresIn : 3600;
-    const expiresAt = new Date(now.getTime() + ttlS * 1000);
+    const expiresAt = new Date(now.getTime() + tokenTtlSeconds(tokens.expiresIn) * 1000);
     const tokensEnc = sealTokens(row, {
       accessToken: tokens.accessToken,
       refreshToken: tokens.refreshToken ?? null,
@@ -440,6 +449,7 @@ export async function completeMcpSignIn(
       // Stored as granted. The box never asked for more than the descriptor's set.
       scope: tokens.scope ?? flow.scopes,
       tokenEndpoint: flow.tokenEndpoint,
+      ...(flow.revocationEndpoint ? { revocationEndpoint: flow.revocationEndpoint } : {}),
       resource: flow.resource,
       mcpUrl: flow.resource,
     });
@@ -456,6 +466,18 @@ export async function completeMcpSignIn(
   await audit(flow, "connected");
   return result("connected");
 }
+
+/**
+ * Seconds an access token is good for, from the token response's `expires_in`.
+ * ponytail: a missing or absurd value is refreshed within an hour at the latest.
+ */
+export function tokenTtlSeconds(expiresIn: number | undefined): number {
+  return expiresIn && expiresIn >= 60 && expiresIn <= 30 * 86_400 ? expiresIn : 3600;
+}
+
+/** The client secret sealed on a row, if any. Throws if it does not open under that row. */
+export const openClientSecret = (row: McpOAuthOwnerRow & { clientSecretEnc: string | null }): string | undefined =>
+  openSecret(row);
 
 async function audit(flow: PendingFlow, state: McpOAuthStateName): Promise<void> {
   try {
@@ -553,21 +575,40 @@ export async function mcpSignInView(
 
 // ─── disconnect / client ─────────────────────────────────────────────────────
 
-/** Deletes the tokens and marks the row DISCONNECTED. Returns false when the
- *  caller may not (or the row is absent): both read as "not found". */
+/** Revokes at the vendor when its metadata advertised an endpoint (best effort,
+ *  never blocks the local disconnect), deletes the tokens, closes the live
+ *  session and marks the row DISCONNECTED. Returns false when the caller may
+ *  not (or the row is absent): both read as "not found". */
 export async function disconnectMcpOAuth(
   prisma: PrismaClient,
   id: string,
   caller: { id: string; role: string | undefined },
+  deps?: Pick<McpOAuthDependencies, "oauth" | "closeSession">,
 ): Promise<boolean> {
   const row = await prisma.mcpOAuthConnection.findUnique({ where: { id } });
   if (!row) return false;
   const allowed = row.scope === "MEMBER" ? row.memberId === caller.id : roleIn(caller.role, ADMIN_ROLES);
   if (!allowed) return false;
+  if (deps && row.tokensEnc && row.clientId) {
+    try {
+      const blob = openTokens(row);
+      if (blob.revocationEndpoint) {
+        // The refresh token is the long-lived grant; revoking it ends the sign-in.
+        await deps.oauth.revoke({
+          revocationEndpoint: blob.revocationEndpoint,
+          clientId: row.clientId,
+          token: blob.refreshToken ?? blob.accessToken,
+        });
+      }
+    } catch {
+      logger.warn({ provider: row.provider }, "mcp_oauth_revoke_failed");
+    }
+  }
   await prisma.mcpOAuthConnection.update({
     where: { id },
     data: { state: "DISCONNECTED", tokensEnc: null, tokenExpiresAt: null, connectedAt: null, lastError: null },
   });
+  await deps?.closeSession(row.provider, row.id).catch(() => undefined);
   return true;
 }
 

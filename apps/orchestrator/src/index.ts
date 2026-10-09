@@ -29,12 +29,15 @@ import {
   onHealthSnapshot,
 } from "./services/health-monitor.service.js";
 import {
+  closeRemoteConnectionSession,
   ensureMcpStarted,
   ensureRemoteMcpAttached,
   remoteMcpReconcilerDeps,
   stopMcp,
 } from "./services/mcp-client.singleton.js";
 import { mountRemoteMcpReconciler } from "./services/remote-mcp-reconciler.service.js";
+import { mountMcpOAuthRefresh } from "./services/mcp-oauth/mcp-oauth-refresh.service.js";
+import { mcpOAuthDependencies } from "./services/mcp-oauth/mcp-oauth.service.js";
 import {
   createExtensionLifecycle,
   EXTENSION_RECONCILE_LOCK_KEY,
@@ -561,6 +564,15 @@ async function main() {
   // (REMOTE_MCP_SERVER_ALLOWLIST empty) the registry is empty, so a tick returns
   // without dialling anything at all.
   mountRemoteMcpReconciler(cronRuntime, remoteMcpReconcilerDeps(prisma));
+
+  // WARP-2416 - renew remote-MCP web sign-ins before they expire, so a call never
+  // pays a 401 first. Same clock, its own lock key, never a loop of its own; with
+  // no signed-in rows a tick reads one empty query and dials nothing.
+  mountMcpOAuthRefresh(cronRuntime, {
+    prisma,
+    oauth: mcpOAuthDependencies().oauth,
+    closeSession: closeRemoteConnectionSession,
+  });
 
   // WARP-2900 (ADR-056 slice H2) — the extension reconciler, both ways. A
   // sandbox restart forgets every extension process and a dead one is never

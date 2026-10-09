@@ -108,7 +108,7 @@ export function createMcpOAuthRouter(prisma: PrismaClient, options: Partial<McpO
     if (!id.success) return res.status(404).json({ error: "not_found" });
     try {
       // A row the caller may not touch reads as absent.
-      if (!await disconnectMcpOAuth(prisma, id.data, { id: req.user.id, role: req.user.role })) {
+      if (!await disconnectMcpOAuth(prisma, id.data, { id: req.user.id, role: req.user.role }, deps)) {
         return res.status(404).json({ error: "not_found" });
       }
       return res.status(204).send();

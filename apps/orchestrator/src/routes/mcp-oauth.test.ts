@@ -28,8 +28,10 @@ function setup(logDest?: { write(s: string): void }) {
     })),
     register: vi.fn(async (_e: string, _r: readonly string[]) => ({ clientId: "client-1" })),
     exchange: vi.fn(async (_i: unknown) => ({ accessToken: "ACCESS-SECRET", refreshToken: "REFRESH-SECRET", expiresIn: 3600 })),
+    revoke: vi.fn(async (_i: unknown): Promise<void> => {}),
   };
-  const deps: McpOAuthDependencies = mcpOAuthDependencies({ oauth });
+  const closeSession = vi.fn(async (_p: string, _c: string): Promise<void> => {});
+  const deps: McpOAuthDependencies = mcpOAuthDependencies({ oauth, closeSession });
   const app = express();
   app.use(express.json());
   app.use(cookieParser());
@@ -42,7 +44,7 @@ function setup(logDest?: { write(s: string): void }) {
     next();
   });
   app.use("/api", createMcpOAuthRouter(db.prisma, deps));
-  return { app, db, oauth };
+  return { app, db, oauth, closeSession };
 }
 const asUser = (call: Test, role = "family", id = "u1") => call.set("x-test-role", role).set("x-test-id", id);
 const start = (app: express.Express, body: object = { provider: "atlassian", scope: "MEMBER" }, role = "family") =>

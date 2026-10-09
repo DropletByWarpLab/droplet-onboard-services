@@ -4,8 +4,11 @@ import { randomUUID } from "node:crypto";
 
 type Row = any;
 const matches = (r: Row, where: Row = {}): boolean =>
-  Object.entries(where).every(([k, v]) =>
-    v !== null && typeof v === "object" && "not" in v ? r[k] !== v.not : r[k] === v);
+  Object.entries(where).every(([k, v]) => {
+    if (v !== null && typeof v === "object" && "not" in v) return r[k] !== v.not;
+    if (v !== null && typeof v === "object" && "lt" in v) return r[k] instanceof Date && r[k] < v.lt;
+    return r[k] === v;
+  });
 
 export function fakeMcpOAuthDb(integration: Row | null = null) {
   const rows: Row[] = [];
