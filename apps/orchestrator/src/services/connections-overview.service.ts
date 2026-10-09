@@ -80,13 +80,16 @@ const STATUS_LINE = {
   integrationError: "Droplet cannot connect — check the setup in Integrations",
 } as const;
 
-const EMPTY_OVERVIEW: ConnectionsOverview = {
-  kind: "connections_overview",
-  connected: [],
-  available: [],
-  counts: { connected: 0, needsAttention: 0, available: 0 },
-  boxWideVisible: false,
-};
+/** A fresh object per call: a spread copies the top level only, so a caller that appended to one guest's arrays would change the next guest's. */
+function emptyOverview(): ConnectionsOverview {
+  return {
+    kind: "connections_overview",
+    connected: [],
+    available: [],
+    counts: { connected: 0, needsAttention: 0, available: 0 },
+    boxWideVisible: false,
+  };
+}
 
 function clamp(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
@@ -195,24 +198,31 @@ async function m365Row(prisma: PrismaClient, actor: ConnectionsActor): Promise<C
   switch (view.state) {
     case "CONNECTED": {
       status = "connected";
-      // A workload that backs off, must re-read, or has failed is paused even
-      // though the sign-in itself is fine. Say which one (WARP-2462).
-      const paused = new Set<string>();
-      if (view.mail.enabled && (view.mail.state === "NEEDS_RECONNECT" || view.mail.state === "ERROR")) paused.add("Mail");
-      if (view.calendar.enabled && (view.calendar.state === "NEEDS_RECONNECT" || view.calendar.state === "ERROR")) paused.add("Calendar");
+      // Two kinds of paused workload, two different fixes (WARP-2462). A
+      // workload whose grant stopped working needs the person to sign in
+      // again, so the row offers Reconnect; one that backs off, must re-read,
+      // or has failed mends itself, so the row only says so.
+      const signIn = new Set<string>();
+      if (view.mail.enabled && (view.mail.state === "NEEDS_RECONNECT" || view.mail.state === "ERROR")) signIn.add("Mail");
+      if (view.calendar.enabled && (view.calendar.state === "NEEDS_RECONNECT" || view.calendar.state === "ERROR")) signIn.add("Calendar");
       const cursors = await prisma.m365DeltaCursor.findMany({
         where: { userId: actor.id, state: { in: ["BACKOFF", "RESYNC_REQUIRED", "FAILED"] } },
         select: { workload: true },
       });
+      const retry = new Set<string>();
       for (const cursor of cursors) {
         const label = M365_WORKLOAD_LABEL[cursor.workload];
-        if (label) paused.add(label);
+        if (label && !signIn.has(label)) retry.add(label);
       }
-      if (paused.size > 0) {
+      const joinNames = (names: string[]) =>
+        names.length === 1 ? names[0] : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1].toLowerCase()}`;
+      if (signIn.size > 0) {
         status = "needs_attention";
-        const names = [...paused];
-        const list = names.length === 1 ? names[0] : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1].toLowerCase()}`;
-        statusDetail = `${list} sync is paused — Droplet will retry`;
+        statusDetail = `${joinNames([...signIn])} sync is paused — sign in again to resume`;
+        canReconnect = true;
+      } else if (retry.size > 0) {
+        status = "needs_attention";
+        statusDetail = `${joinNames([...retry])} sync is paused — Droplet will retry`;
       }
       break;
     }
@@ -423,7 +433,7 @@ async function usernameOf(prisma: PrismaClient, actor: ConnectionsActor): Promis
 }
 
 export async function buildConnectionsOverview(prisma: PrismaClient, actor: ConnectionsActor): Promise<ConnectionsOverview> {
-  if (!PERSONAL_CONNECT_ROLES.includes(actor.role)) return { ...EMPTY_OVERVIEW };
+  if (!PERSONAL_CONNECT_ROLES.includes(actor.role)) return emptyOverview();
   const boxWide = BOX_CONNECT_ROLES.includes(actor.role);
   const username = await usernameOf(prisma, actor);
 

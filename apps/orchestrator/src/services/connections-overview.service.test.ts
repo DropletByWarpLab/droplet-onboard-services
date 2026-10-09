@@ -54,9 +54,24 @@ describe("connection overview visibility and metadata", () => {
     expect(views.google).not.toHaveBeenCalled();
     expect(prisma.calendarSource.findMany).not.toHaveBeenCalled();
   });
-  it("reports paused Microsoft workloads with fixed copy, not raw errors", async () => {
+  it("a Microsoft workload whose grant stopped working asks for a fresh sign-in and offers Reconnect, never the raw error", async () => {
     views.microsoft.mockResolvedValue({ state: "CONNECTED", accountUpn: "member", mail: { enabled: true, state: "CONNECTED" }, calendar: { enabled: true, state: "ERROR", lastError: "SECRET_ERROR" }, sharePoint: { enabled: true } });
     const result = await buildConnectionsOverview(db() as never, { id: "person-id", username: "person", role: "family" });
-    expect(result.connected.find((row) => row.provider === "m365")).toMatchObject({ status: "needs_attention", statusDetail: "Calendar and files sync is paused — Droplet will retry" });
+    const row = result.connected.find((r) => r.provider === "m365");
+    expect(row).toMatchObject({ status: "needs_attention", statusDetail: "Calendar sync is paused — sign in again to resume", canReconnect: true });
+    expect(JSON.stringify(row)).not.toContain("SECRET_ERROR");
+  });
+  it("a Microsoft workload that only backs off says Droplet will retry and offers no Reconnect", async () => {
+    views.microsoft.mockResolvedValue({ state: "CONNECTED", accountUpn: "member", mail: { enabled: true, state: "CONNECTED" }, calendar: { enabled: true, state: "CONNECTED" }, sharePoint: { enabled: true } });
+    const result = await buildConnectionsOverview(db() as never, { id: "person-id", username: "person", role: "family" });
+    expect(result.connected.find((r) => r.provider === "m365")).toMatchObject({ status: "needs_attention", statusDetail: "Files sync is paused — Droplet will retry", canReconnect: false });
+  });
+  it("gives each guest a fresh empty overview, not a shared one", async () => {
+    const first = await buildConnectionsOverview(db() as never, { id: "g1", username: "g1", role: "guest" });
+    first.connected.push({} as never);
+    first.counts.connected = 9;
+    const second = await buildConnectionsOverview(db() as never, { id: "g2", username: "g2", role: "guest" });
+    expect(second.connected).toEqual([]);
+    expect(second.counts.connected).toBe(0);
   });
 });

@@ -3475,6 +3475,38 @@ export async function setWorkIntegrationsChannel(enabled: boolean): Promise<void
   }
 }
 
+/**
+ * WARP-3912 — the `remote_mcp` off-LAN channel: whether the assistant may use
+ * the outside services an owner or admin connected. Default off on new boxes;
+ * owner or admin may change it. `null` = unreadable; don't guess.
+ */
+export async function fetchRemoteMcpChannel(): Promise<{ enabled: boolean } | null> {
+  const res = await authFetch(`${BASE}/api/settings/off-lan`);
+  if (!res.ok) return null;
+  const body = (await res.json()) as { channels?: Array<{ key: string; enabled: boolean }> };
+  const row = body.channels?.find((c) => c.key === "remote_mcp");
+  return row ? { enabled: row.enabled === true } : null;
+}
+
+/** WARP-3912 — flip `remote_mcp`. Turning it off disconnects sessions on the box. */
+export async function setRemoteMcpChannel(enabled: boolean): Promise<void> {
+  const res = await authFetch(`${BASE}/api/settings/off-lan/remote_mcp`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      enabled,
+      reason: enabled
+        ? "Turned on from Connector credentials"
+        : "Turned off from Connector credentials",
+    }),
+  });
+  if (!res.ok) {
+    throw Object.assign(new Error(`Failed to change connected MCP servers: ${res.status}`), {
+      status: res.status,
+    });
+  }
+}
+
 /** `refused` is set when the `web_push` off-LAN channel is off (WARP-2904). */
 export async function sendTestPush(): Promise<{
   sent: number;

@@ -118,6 +118,14 @@ export {
   type RemoteToolDescriptor,
 } from "./remote-session.js";
 export {
+  createGuardedFetch,
+  guardedFetch,
+  isPublicAddress,
+  resolvePublicDestination,
+  type GuardDeps,
+  type PinnedDestination,
+} from "./pinned-fetch.js";
+export {
   assertSafeMcpUrl,
   parseAllowedMcpHosts,
   UnsafeMcpUrlError,

@@ -180,6 +180,22 @@ export const DENY_ALL_REMOTE_TOOLS: RemoteCallPolicy = ({ namespacedName }) => (
  */
 export const MAX_RETAINED_REJECTIONS = 100;
 
+/** WARP-3919 — longest remote tool description sent to the model. */
+export const MAX_REMOTE_DESCRIPTION_CHARS = 800;
+const TRUNCATION_MARKER = "… [truncated]";
+
+/** Cap at {@link MAX_REMOTE_DESCRIPTION_CHARS} including the marker, never splitting a surrogate pair. */
+export function capRemoteDescription(description: string): string {
+  // `typeof`: the wire is untrusted, a missing description must not throw.
+  if (typeof description !== "string" || description.length <= MAX_REMOTE_DESCRIPTION_CHARS) {
+    return description;
+  }
+  let end = MAX_REMOTE_DESCRIPTION_CHARS - TRUNCATION_MARKER.length;
+  const last = description.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1; // would orphan a high surrogate
+  return description.slice(0, end) + TRUNCATION_MARKER;
+}
+
 export interface McpToolMultiplexerOptions {
   /**
    * WARP-2418 — the operator allowlist. Returns `true` only for a server the
@@ -350,7 +366,9 @@ export class McpToolMultiplexer implements McpClientPort {
         if (!vetted) continue;
         remote.catalog.set(tool.name, vetted);
         taken.add(vetted.name);
-        out.push(vetted);
+        // WARP-3919 — the cap applies to the copy the MODEL sees; `catalog`
+        // (classification, review) keeps the full text.
+        out.push({ ...vetted, description: capRemoteDescription(vetted.description) });
       }
     }
     return out;

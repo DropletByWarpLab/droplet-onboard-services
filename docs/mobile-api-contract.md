@@ -378,6 +378,7 @@ To GENERATE a code, the dashboard (already authenticated) POSTs
 | PUT | `/cameras/business-hours` | Bearer (owner, admin; cameras manage access) | same complete schedule body and response; invalid schedule → 400 |
 | GET | `/cameras/events/:eventId/thumbnail` | Bearer (owner, admin, family) | image bytes: Frigate's own `Content-Type` (`image/jpeg` when it sends none), `Cache-Control: private, no-store`. `:eventId` is a Frigate event id, `^[a-zA-Z0-9._-]{1,128}$`; errors below the table |
 | GET | `/cameras/events/:eventId/snapshot` | Bearer | event JPEG |
+| GET | `/cameras/:name/recordings/snapshot?at=<epoch seconds>&h=` | Bearer (owner, admin, family; the assistant's `_service:mcp` principal is admitted and scoped to the person it acts for) | JPEG still from the **recorded** footage at that second (Frigate's `/<camera>/recordings/<ts>/snapshot.jpg`), not the current frame. `h` is clamped to 100–1080 (default 480). `Cache-Control: private, no-store`, `X-Content-Type-Options: nosniff`; each fetch is audited as a recording view. 400 when `at` is not a positive Unix-second timestamp or is in the future; 404 `{ "error": "recording_snapshot_not_found", "message": "No recording covers that moment." }` when no recording covers the instant; 503 `frigate_unavailable` with `X-Droplet-Degraded: frigate-unavailable` when Frigate cannot be asked |
 | GET | `/cameras/reviews/:reviewId/thumbnail` | Bearer | review item image bytes: `Content-Type: image/webp` (`image/jpeg` on an older Frigate), `Cache-Control: private, no-store`. 404 `{ "error": "review_not_found" }` or `{ "error": "thumbnail_not_found" }` when Frigate has no such review or no file for it (an in-progress review may not have one yet; key on the status). 503 `{ "error": "frigate_unavailable" }` with `X-Droplet-Degraded: frigate-unavailable` when Frigate is unreachable or answers with an error |
 | GET | `/cameras/reviews/:reviewId/preview` | Bearer | MP4 preview; preserves `Range`, 206, 416, `Content-Range`, `Accept-Ranges`, `Content-Length`. Missing preview → 404 `preview_not_found`; unavailable service → 503 `frigate_unavailable` |
 | GET | `/cameras/events/sse` | Bearer | SSE stream of camera events (`data: {json}`; `: heartbeat` every 30 s; first frame `{ "type": "connected" }`) |
@@ -435,6 +436,17 @@ gaps. A successful, completely covered quiet window has no gaps. Do not label
 an empty page as proof of no movement outside the retained footage and selected
 range. These bounded motion queries classify and filter the full activity
 spans before pagination.
+
+**Assistant camera tools (WARP-3927).** The chat's `summarize_camera_activity`,
+`get_camera_motion`, `list_camera_reviews` and `get_camera_recording` read
+`/cameras/events`, `/cameras/reviews`, `/cameras/motion` and
+`/cameras/:name/recordings` as the `_service:mcp` principal. Those four routes
+admit it alongside the roles above and scope every answer to the person the call
+acts for (`X-Nextcloud-User`); a call that names nobody gets 401
+`no_asserted_user`. Roles and responses are otherwise unchanged. Times the
+assistant accepts are ISO 8601 or `YYYY-MM-DD HH:mm` in the workspace zone (the
+business-hours `timezone` once saved, the box zone before that); the routes still
+take epoch seconds.
 
 **Review media.** The thumbnail proxy validates the review's own
 `/media/frigate/clips/review/thumb-<camera>-<reviewId>.webp` path. The preview
