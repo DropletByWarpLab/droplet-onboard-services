@@ -35,7 +35,6 @@ function candidates(data: unknown): unknown[] {
 
 /** The validated connect descriptor a tool call carries, or null (never throws). */
 export function connectResultOf(call: ChatToolCall): ConnectResult | null {
-  if (!["list_connections", "start_connection", "disconnect_connection"].includes(call.name)) return null;
   if (call.ok !== true || call.status === "confirmation_required") return null;
   try {
     for (const data of candidates(call.data)) {

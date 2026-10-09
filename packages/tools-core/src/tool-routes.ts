@@ -246,6 +246,8 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   { tool: "list_camera_events", client: "orchestrator", hops: [
     admit("get", "/api/cameras/:name/events"),
     admit("get", "/api/cameras/events/recent"),
+    // WARP-3747: the filtered route, used when after/before/labels/min_score are given.
+    admit("get", "/api/cameras/events"),
   ] },
   { tool: "scan_for_cameras", client: "orchestrator", hops: [admit("post", "/api/cameras/scan")] },
   // WARP-1847: was `none` (ctx.prisma). A live candidate's id is `mac:<MAC>`,
@@ -260,6 +262,17 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   none("get_camera_live_url"), // returns a URL string (no ctx.http hop)
   { tool: "share_clip", client: "orchestrator", hops: [admit("post", "/api/cameras/clips/share")] },
   { tool: "search_camera_events", client: "orchestrator", hops: [admit("get", "/api/cameras/events/search")] },
+  // WARP-3927: camera activity for chat. Every hop is MCP-admitted
+  // (requireRoleOrMcpService + the per-camera ACL, which resolves the acting
+  // person from X-Nextcloud-User); the admission suite proves it.
+  { tool: "summarize_camera_activity", client: "orchestrator", hops: [
+    admit("get", "/api/cameras/events"),
+    admit("get", "/api/cameras/reviews"),
+    admit("get", "/api/cameras/motion"),
+  ] },
+  { tool: "get_camera_motion", client: "orchestrator", hops: [admit("get", "/api/cameras/motion")] },
+  { tool: "list_camera_reviews", client: "orchestrator", hops: [admit("get", "/api/cameras/reviews")] },
+  { tool: "get_camera_recording", client: "orchestrator", hops: [admit("get", "/api/cameras/:name/recordings")] },
   { tool: "get_camera_health", client: "orchestrator", hops: [admit("get", "/api/cameras/system")] },
   { tool: "get_camera_storage", client: "orchestrator", hops: [admit("get", "/api/cameras/storage")] },
   { tool: "set_camera_detection", client: "orchestrator", hops: [
@@ -520,6 +533,8 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   // WARP-2180 — background runs. The route admits the mcp principal on
   // behalf of the named chat user (requireRoleOrMcpService).
   { tool: "start_agent_run", client: "orchestrator", hops: [admit("post", "/api/agent-runs")] },
+  { tool: "list_hosted_apps", client: "orchestrator", hops: [admit("get", "/api/hosted")] },
+  { tool: "hosted_app_logs", client: "orchestrator", hops: [admit("get", "/api/hosted/:slug/logs")] },
   // WARP-3302 — `run_id` reads one run; cancel stops one. Owner-scoped by the route guard.
   { tool: "list_agent_runs", client: "orchestrator", hops: [admit("get", "/api/agent-runs"), admit("get", "/api/agent-runs/:id")] },
   { tool: "cancel_agent_run", client: "orchestrator", hops: [admit("post", "/api/agent-runs/:id/cancel")] },

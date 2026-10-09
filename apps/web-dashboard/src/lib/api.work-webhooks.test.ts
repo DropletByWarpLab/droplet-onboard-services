@@ -15,7 +15,7 @@ import {
   testWorkWebhook,
   updateWorkWebhook,
 } from "./api.work-webhooks";
-import { fetchWorkIntegrationsChannel, setWorkIntegrationsChannel } from "./api";
+import { fetchRemoteMcpChannel, fetchWorkIntegrationsChannel, setRemoteMcpChannel, setWorkIntegrationsChannel } from "./api";
 import { authFetch } from "./auth";
 
 vi.mock("./auth", () => ({ authFetch: vi.fn() }));
@@ -126,5 +126,19 @@ describe("the work_integrations switch", () => {
     expect(call.body).toEqual({ enabled: true, reason: "Turned on from Work notifications" });
     authFetchMock.mockResolvedValue(res(403));
     await expect(setWorkIntegrationsChannel(false)).rejects.toMatchObject({ status: 403 });
+  });
+});
+
+describe("the remote_mcp switch (WARP-3912)", () => {
+  it("reads the channel and PATCHes remote_mcp with a reason", async () => {
+    authFetchMock.mockResolvedValue(res(200, { channels: [{ key: "remote_mcp", enabled: true }] }));
+    expect(await fetchRemoteMcpChannel()).toEqual({ enabled: true });
+    authFetchMock.mockResolvedValue(res(200));
+    await setRemoteMcpChannel(false);
+    const call = lastCall();
+    expect(call).toMatchObject({ url: "/api/settings/off-lan/remote_mcp", method: "PATCH" });
+    expect(call.body).toEqual({ enabled: false, reason: "Turned off from Connector credentials" });
+    authFetchMock.mockResolvedValue(res(403));
+    await expect(setRemoteMcpChannel(true)).rejects.toMatchObject({ status: 403 });
   });
 });

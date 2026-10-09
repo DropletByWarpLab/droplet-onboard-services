@@ -75,6 +75,8 @@
  * the thing being compared to the cap is the thing that is actually emitted.
  */
 
+import { labelRemoteToolResult } from "./remote-result-label.js";
+
 /**
  * Characters of tool result the model may see per call.
  *
@@ -1057,11 +1059,25 @@ function reduceToFit(
  * @param onRefusal called ONLY when zero content could be carried, so the loop
  *                  can log `agent_tool_result_refused` with its own
  *                  correlation keys. Never called on the success paths.
+ *
+ * WARP-3920 — a remote (namespaced) tool's result leaves here wrapped in an
+ * untrusted-data block naming its server and tool, AFTER bounding so the cap
+ * can never cut the end marker. This is the one place all three model-facing
+ * paths (chat loop, approved-call replay, durable-run worker) pass through.
  */
 export function boundToolResultForModel(
   text: string,
   toolName: string,
   onRefusal?: (r: BoundingRefusal) => void,
+  cap: number = MODEL_TOOL_RESULT_CAP_CHARS,
+): string {
+  return labelRemoteToolResult(boundToolText(text, toolName, onRefusal, cap), toolName);
+}
+
+function boundToolText(
+  text: string,
+  toolName: string,
+  onRefusal: ((r: BoundingRefusal) => void) | undefined,
   // WARP-2178 — the per-result threshold, now a knob
   // (config.AGENT_TOOL_RESULT_CAP_CHARS) so it can be set from a measured
   // distribution rather than inherited. Defaults to the historical value, so

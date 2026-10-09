@@ -104,7 +104,7 @@ function describeMailbox(a: MailboxAccount): { label: string; tone: string } {
 const DEFAULT_IMAP_PORT = 993;
 const DEFAULT_SMTP_PORT = 465;
 
-export function EmailAccountCard({ onConnected }: { onConnected?: () => void } = {}): JSX.Element {
+export function EmailAccountCard(): JSX.Element {
   const { user } = useAuth();
   const managesMailboxes = user?.role === "owner" || user?.role === "admin";
   const [accounts, setAccounts] = useState<MailboxAccount[]>([]);
@@ -195,7 +195,6 @@ export function EmailAccountCard({ onConnected }: { onConnected?: () => void } =
       setOpen(false);
       setSavedAt(Date.now());
       await load();
-      onConnected?.();
     } catch (err) {
       setError(translateError(err, "email"));
       // Everything else is kept so the owner can fix one field, but never

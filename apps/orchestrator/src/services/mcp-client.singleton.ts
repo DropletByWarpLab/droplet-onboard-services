@@ -22,6 +22,7 @@ import path from "node:path";
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
 import { McpBridgeClient } from "./mcp-bridge.client.js";
+import { abortRemoteMcpInFlight } from "./remote-mcp-gateway.service.js";
 import { McpClientService } from "./mcp-client.service.js";
 import { McpToolMultiplexer } from "./mcp-multiplexer.service.js";
 import {
@@ -298,6 +299,17 @@ export async function detachRemoteMcp(serverId: string): Promise<void> {
   const client = attachedClients.get(serverId);
   attachedClients.delete(serverId);
   await detachRemoteServer({ mux: mcpClient, serverId, ...(client ? { client } : {}) });
+}
+
+/**
+ * WARP-3912 (ADR-043 §4) - the `remote_mcp` channel was turned off: refuse new
+ * calls (the gate already does, on its next read), abort the ones in flight,
+ * and close every session this process holds (the bridge closes its streams
+ * with the session). Idempotent; a box that attached nothing does nothing.
+ */
+export async function tearDownRemoteMcp(): Promise<void> {
+  abortRemoteMcpInFlight();
+  await Promise.all([...attachedClients.keys()].map((id) => detachRemoteMcp(id)));
 }
 
 /** One bridge client for a given server id. A factory rather than a singleton

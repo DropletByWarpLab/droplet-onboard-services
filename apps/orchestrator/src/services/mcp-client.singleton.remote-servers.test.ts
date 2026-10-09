@@ -289,6 +289,7 @@ function fixturePrisma(rows: Record<string, RemoteMcpConnectionRow | null>) {
   const keyOf = (w: { serverId_toolName: { serverId: string; toolName: string } }) =>
     `${w.serverId_toolName.serverId} ${w.serverId_toolName.toolName}`;
   const prisma = {
+    offLanAllowlistChannel: { findUnique: async () => ({ enabled: true }) },
     integrationConnection: {
       findFirst: vi.fn(async (args: { where: { provider: string } }) => rows[args.where.provider] ?? null),
     },

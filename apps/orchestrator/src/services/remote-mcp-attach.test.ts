@@ -101,6 +101,7 @@ function prismaWith(row: RemoteMcpConnectionRow | null) {
   const state = { row };
   return {
     state,
+    offLanAllowlistChannel: { findUnique: async () => ({ enabled: true }) },
     integrationConnection: { findFirst: vi.fn(async () => state.row) },
   };
 }

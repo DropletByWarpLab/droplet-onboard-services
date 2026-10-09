@@ -365,6 +365,7 @@ export interface AttachRemoteDeps {
     integrationConnection: {
       findFirst(args: unknown): Promise<RemoteMcpConnectionRow | null>;
     };
+    offLanAllowlistChannel: RemoteMcpGatePrisma["offLanAllowlistChannel"];
   };
   allowlist: ReadonlySet<string>;
   /** Builds the bridge-backed port. Injected so a test supplies a fixture

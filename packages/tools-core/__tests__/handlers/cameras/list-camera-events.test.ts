@@ -65,7 +65,11 @@ describe("list_camera_events", () => {
     const r = await listCameraEvents.handler({ camera_name: "front" }, ctxWith(get));
     expect(r.ok).toBe(true);
     if (r.ok) {
-      expect(r.data).toEqual({ events });
+      // WARP-3747: local ISO times ride beside the epoch fields; nothing else changes.
+      const d = r.data as { events: Array<Record<string, unknown>>; timezone: string };
+      expect(d.events).toHaveLength(1);
+      expect(d.events[0]).toMatchObject({ ...events[0], startTimeIso: expect.any(String), endTimeIso: expect.any(String) });
+      expect(typeof d.timezone).toBe("string");
     }
   });
 
@@ -89,7 +93,7 @@ describe("list_camera_events", () => {
     expect(r.ok).toBe(true);
     if (r.ok) {
       const d = r.data as { events: unknown[]; media: Array<{ kind: string; snapshotUrl?: string }> };
-      expect(d.events).toEqual(events);
+      expect(d.events).toMatchObject(events);
       expect(d.media.map((m) => m.kind)).toEqual(["camera_clip", "camera_snapshot"]);
       expect(d.media[1].snapshotUrl).toBe("/api/cameras/events/a2/snapshot");
     }

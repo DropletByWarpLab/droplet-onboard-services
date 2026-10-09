@@ -85,6 +85,8 @@ import { createContactsRouter } from "./routes/contacts.js";
 import { createScenesRouter, type MatterDispatcher } from "./routes/scenes.js";
 import { createAgentRunsRouter } from "./routes/agent-runs.js";
 import { createWorkspaceRouter } from "./routes/workspace.js";
+import { createHostedManagementRouter, createHostedRelayRouter } from "./routes/hosted.js";
+import { hostedOriginGuard } from "./middleware/hosted-origin.js";
 import { createExtensionsRouter } from "./routes/extensions.js";
 import { extensionPrincipalGuard } from "./middleware/extension-principal-guard.js";
 import { pmApiTokenRateLimit, pmApiTokenScopeGuard } from "./middleware/pm-api-token-guard.js";
@@ -156,7 +158,7 @@ import { createEmailRouter, EMAIL_INGEST_PATH, wireEmailAnalysis } from "./route
 import { createEmailAnalysisFn } from "./services/email-analysis.service.js";
 import { resolveActiveModel } from "./services/active-model.service.js";
 import { createToolsRouter } from "./routes/tools.js";
-import { detachRemoteMcp, mcpClient, remoteCallPolicy } from "./services/mcp-client.singleton.js";
+import { detachRemoteMcp, mcpClient, remoteCallPolicy, tearDownRemoteMcp } from "./services/mcp-client.singleton.js";
 import { stepResultValue, type StepDispatcher } from "./services/tool-spec-runner.service.js";
 import { createModelsRouter } from "./routes/models.js";
 import { createLlmAccessRouter, exemptLlmAccessInternalCalls } from "./routes/llm-access.js";
@@ -204,6 +206,9 @@ export function createApp(
 
   // Trust the nginx reverse proxy so req.secure / X-Forwarded-Proto work
   app.set("trust proxy", 1);
+  // Express mounts are case-insensitive; every spelling must receive the
+  // same relay authentication, logging and CORS policy.
+  const hostedRelayRequest = (path: string) => /^\/api\/hosted\/relay(?:\/|$)/i.test(path);
 
   // Middleware
   // WARP-562 — credentialed CORS restricted to an explicit allowlist. Never
@@ -213,8 +218,7 @@ export function createApp(
   // is allowed; a disallowed Origin gets `cb(null, false)` → no
   // Access-Control-Allow-Origin header (the browser blocks the read) WITHOUT
   // raising an Error (which would 500 and route through the error handler).
-  app.use(
-    cors({
+  const dashboardCors = cors({
       credentials: true,
       // WARP-3052 — browser clients on an allowed cross-origin must be able to
       // read the Files degrade marker (it is not a CORS-safelisted header).
@@ -225,8 +229,9 @@ export function createApp(
         }
         return cb(null, false);
       },
-    }),
-  );
+    });
+  // The hosted origin has its own session/Origin checks, including OPTIONS.
+  app.use((req, res, next) => hostedRelayRequest(req.path) ? next() : dashboardCors(req, res, next));
   app.use(helmet());
   // WARP-3097 — every /api response is `no-store` unless its route says
   // otherwise. `private, max-age` still lets the CLIENT's own cache keep the
@@ -242,7 +247,15 @@ export function createApp(
   });
   app.use(cookieParser());
   app.use(requestIdMiddleware);
-  app.use(requestLogger);
+  // Hosted requests can carry one-use session codes and user app paths.
+  // Their authorization belongs to the dedicated relay below.
+  app.use((req, res, next) => hostedRelayRequest(req.path)
+    ? next() : requestLogger(req, res, next));
+  app.use("/api", hostedOriginGuard);
+  // Preserve the raw app upload/JSON stream and authenticate app sessions
+  // independently of dashboard credentials. The gateway alone exposes this
+  // router on its second TLS origin; the dashboard listener refuses it.
+  app.use("/api/hosted/relay", createHostedRelayRouter(prisma));
 
   // Parse `application/json` AND `application/scim+json` (Okta's SCIM client
   // sends the latter for /scim/v2/* — without it, req.body would arrive empty
@@ -728,6 +741,7 @@ export function createApp(
   // reached as /git/* through nginx). Owner/admin, admitting the mcp
   // principal for a run bound to the workspace ("run owns workspace").
   app.use("/api", createWorkspaceRouter(prisma));
+  app.use("/api/hosted", createHostedManagementRouter(prisma));
   // WARP-2900 (ADR-056 slice H2) — promote a workshop proposal into a
   // box-signed extension and install / disable / enable / uninstall it.
   // Promote is OWNER only (never the mcp principal); the rest owner/admin
@@ -884,7 +898,7 @@ export function createApp(
   // PATCH section with per-type validation). Mutations emit ActivityRow
   // rows via recordActivity (kind: system, severity: info — one row per
   // changed key). Reads open to owner+admin+family; writes owner+admin.
-  app.use("/api", createSettingsRouter(prisma));
+  app.use("/api", createSettingsRouter(prisma, { onRemoteMcpDisabled: () => tearDownRemoteMcp() }));
 
   // WARP-2944: the certificate lifecycle for Settings → Device information
   // (days left, when the box renews, whether renewal is failing). Owner +

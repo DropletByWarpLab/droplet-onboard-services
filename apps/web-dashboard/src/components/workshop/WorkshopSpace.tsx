@@ -56,12 +56,13 @@ import "./workshop.css";
 const POLL_MS = 3_000;
 const CALM_ERROR = "Something went wrong on the box. Try again in a moment.";
 
-function syncUrl(runId: string | null, workspaceId: string | null) {
+function syncUrl(runId: string | null, workspaceId: string | null, appIntent = false) {
   if (typeof window === "undefined") return;
   try {
     const qs = new URLSearchParams();
     if (runId) qs.set("run", runId);
     if (workspaceId) qs.set("workspace", workspaceId);
+    if (workspaceId && appIntent) qs.set("kind", "app");
     const q = qs.toString();
     window.history.replaceState(null, "", `${window.location.pathname}${q ? `?${q}` : ""}`);
   } catch {
@@ -73,6 +74,7 @@ export function WorkshopSpace() {
   const searchParams = useSearchParams();
   const deepLinkRunId = searchParams?.get("run") ?? null;
   const deepLinkWorkspace = searchParams?.get("workspace") ?? null;
+  const [appWorkspaceId, setAppWorkspaceId] = useState<string | null>(searchParams?.get("kind") === "app" ? deepLinkWorkspace : null);
 
   // ── Runs ─────────────────────────────────────────────────────────────
   const [runs, setRuns] = useState<AgentRunSummary[]>([]);
@@ -212,8 +214,8 @@ export function WorkshopSpace() {
   }, [detail?.workspaceId]);
 
   useEffect(() => {
-    syncUrl(selectedRunId, selectedWorkspaceId);
-  }, [selectedRunId, selectedWorkspaceId]);
+    syncUrl(selectedRunId, selectedWorkspaceId, appWorkspaceId === selectedWorkspaceId);
+  }, [selectedRunId, selectedWorkspaceId, appWorkspaceId]);
 
   // WARP-2878 — the run id is an ARGUMENT, not a closure capture, and the
   // failure path is guarded the way `loadDetail`'s is: a POST that fails
@@ -338,6 +340,7 @@ export function WorkshopSpace() {
     selectedWorkspaceId ? (
       <WorkspaceContext
         workspaceId={selectedWorkspaceId}
+        appIntent={appWorkspaceId === selectedWorkspaceId}
         live={workspaceLive}
         drawer={drawer}
         onClose={drawer ? () => setContextOpen(false) : undefined}
@@ -499,6 +502,7 @@ export function WorkshopSpace() {
         onClose={() => setNewToolOpen(false)}
         triggerRef={newToolTrigger}
         onCreated={(w) => {
+          if (w.kind === "app") setAppWorkspaceId(w.id);
           void loadWorkspaces();
           openWorkspace(w.id);
           setComposerStatus({ text: `"${w.name}" is ready. Tell it what to build.` });

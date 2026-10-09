@@ -51,7 +51,9 @@ orchestrator's timeout).
 
 from __future__ import annotations
 
+import hmac
 import http.client
+import io
 import json
 import os
 import re
@@ -67,6 +69,7 @@ from pathlib import Path
 from typing import Any
 
 import gitstore
+import hosted_http
 import supervisor
 from gitstore import StoreError
 
@@ -142,9 +145,12 @@ class Installed:
     port: int
     relay_key: str
     memory_mb: int
+    kind: str = "extension"
+    http: dict[str, Any] | None = None
+    serving: bool = False
 
     def public(self) -> dict[str, Any]:
-        snap = supervisor.SUPERVISOR.status(proc_id(self.slug))
+        snap = None if self.runtime == "static" else supervisor.SUPERVISOR.status(proc_id(self.slug))
         return {
             "slug": self.slug,
             "workspaceId": self.workspace_id,
@@ -153,7 +159,8 @@ class Installed:
             "memoryMb": self.memory_mb,
             "port": self.port,
             "process": snap,
-            "running": bool(snap and snap["state"] == "running"),
+            "running": self.serving if self.runtime == "static" else bool(snap and snap["state"] == "running"),
+            "kind": self.kind,
         }
 
 
@@ -320,24 +327,36 @@ def install(
     commit: str,
     tree: str,
     runtime: str,
-    entrypoint: str,
+    entrypoint: str | None,
     memory_mb: int,
-    token: str,
+    token: str | None,
     base_env: dict[str, str],
     orchestrator_url: str | None = None,
+    kind: str = "extension",
+    http: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     check_slug(slug)
     gitstore.check_id(workspace_id)
     if not SEMVER.match(version or ""):
         raise StoreError(400, "version must be semver")
-    if runtime not in RUNTIMES:
-        raise StoreError(400, f"runtime must be one of {sorted(RUNTIMES)}")
+    if kind not in {"extension", "app"} or runtime not in {*RUNTIMES, "static"}:
+        raise StoreError(400, "unsupported extension kind or runtime")
+    is_app = kind == "app"
+    if is_app:
+        http = hosted_http.validate_http(http, runtime)
+        if runtime == "static" and entrypoint is not None:
+            raise StoreError(400, "a static app has no entrypoint")
+        if token is not None or orchestrator_url is not None:
+            raise StoreError(400, "an app receives no orchestrator credential or callback URL")
+    elif runtime == "static" or http is not None:
+        raise StoreError(400, "static runtime and http are app-only")
     if not isinstance(memory_mb, int) or not MEMORY_MB_MIN <= memory_mb <= MEMORY_MB_MAX:
         raise StoreError(400, f"memoryMb must be {MEMORY_MB_MIN}–{MEMORY_MB_MAX}")
-    if not EXT_TOKEN.match(token or ""):
+    if not is_app and not EXT_TOKEN.match(token or ""):
         raise StoreError(400, "token must be a dxt_ extension bearer")
     left = budget(excluding=slug)
-    if memory_mb > left["availableMb"]:
+    process_memory_mb = 0 if runtime == "static" else memory_mb
+    if process_memory_mb > left["availableMb"]:
         raise StoreError(
             409,
             f"memoryMb {memory_mb} does not fit: {left['availableMb']} MB left of {left['ceilingMb']} MB "
@@ -358,13 +377,29 @@ def install(
             manifest = json.loads((directory / gitstore.MANIFEST_PATH).read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise StoreError(409, "the exported commit carries no readable extension-manifest.json") from exc
-        if manifest.get("runtime") != runtime or manifest.get("entrypoint") != entrypoint:
+        if not isinstance(manifest, dict):
+            raise StoreError(409, "the exported manifest must be an object")
+        if (manifest.get("runtime") != runtime or manifest.get("entrypoint") != entrypoint
+                or manifest.get("kind") != kind):
             raise StoreError(409, "the exported manifest does not name the runtime and entrypoint asked for")
+        if is_app:
+            if not isinstance(manifest.get("provides"), dict) or manifest["provides"].get("tools") != []:
+                raise StoreError(409, "an app must not provide tools")
+            resources = manifest.get("resources")
+            if (not isinstance(resources, dict) or type(resources.get("processes")) is not int
+                    or resources["processes"] != 1):
+                raise StoreError(409, "an app must declare exactly one process")
+            if (manifest.get("http") != http or resources.get("memoryMb") != memory_mb
+                    or manifest.get("egress") != "none"):
+                raise StoreError(409, "the exported app manifest disagrees with its HTTP, budget or egress request")
         if runtime == "node20" and (directory / "tsconfig.json").is_file():
             _build(directory)
-        entry = _inside(directory, entrypoint)
-        if not entry.is_file():
-            raise StoreError(422, f"entrypoint {entrypoint} does not exist after the build")
+        if runtime == "static":
+            hosted_http.static_root(directory, http)
+        else:
+            entry = _inside(directory, entrypoint)
+            if not entry.is_file():
+                raise StoreError(422, f"entrypoint {entrypoint} does not exist after the build")
         _make_readonly(directory)
     except Exception:
         _remove_tree(directory)
@@ -372,38 +407,48 @@ def install(
 
     with _lock:
         taken = {e.port for s, e in _installed.items() if s != slug}
-    port = _pick_port(taken)
+    port = 0 if runtime == "static" else _pick_port(taken)
     relay_key = secrets.token_urlsafe(32)
-    interpreter, shim = RUNTIMES[runtime]
     extra_env = {
         "DROPLET_EXT_ID": slug,
         "DROPLET_EXT_PORT": str(port),
-        "DROPLET_EXT_TOKEN": token,
-        "DROPLET_EXT_RELAY_KEY": relay_key,
     }
-    if orchestrator_url:
-        extra_env["DROPLET_ORCHESTRATOR_URL"] = orchestrator_url
-    try:
-        supervisor.SUPERVISOR.start(
-            proc_id(slug),
-            [interpreter, os.path.join(supervisor.HOST_SHIMS_DIR, shim), "."],
-            cwd=str(directory),
-            # Never: a dead extension returns only through install() (above).
-            restart="never",
-            max_restarts=0,
-            env=_dev_env(dict(base_env)),
-            extra_env=extra_env,
-            memory_mb=memory_mb,
-        )
-    except supervisor.SupervisorError as exc:
-        raise StoreError(exc.status, str(exc)) from exc
-    entry_rec = Installed(slug, workspace_id, version, runtime, directory, port, relay_key, memory_mb)
+    if is_app:
+        data = Path(os.getenv("SANDBOX_EXTENSIONS_DATA_DIR", "/var/lib/workspace-ext-data")) / slug
+        root_data = data.parent.resolve()
+        if data.is_symlink() or data.resolve() != root_data / slug:
+            raise StoreError(409, "app data directory must stay inside its volume")
+        data.mkdir(parents=True, exist_ok=True, mode=0o700)
+        data.chmod(0o700)
+        extra_env.update({"PORT": str(port), "DROPLET_EXT_BASE_PATH": f"/{slug}/",
+                          "DROPLET_EXT_DATA_DIR": data.resolve().as_posix()})
+    else:
+        extra_env.update({"DROPLET_EXT_TOKEN": token, "DROPLET_EXT_RELAY_KEY": relay_key})
+        if orchestrator_url:
+            extra_env["DROPLET_ORCHESTRATOR_URL"] = orchestrator_url
+    if runtime != "static":
+        interpreter, shim = RUNTIMES[runtime]
+        argv = [interpreter, entrypoint] if is_app else [interpreter, os.path.join(supervisor.HOST_SHIMS_DIR, shim), "."]
+        try:
+            supervisor.SUPERVISOR.start(
+                proc_id(slug), argv, cwd=str(directory), restart="never", max_restarts=0,
+                env=_dev_env(dict(base_env)), extra_env=extra_env, memory_mb=memory_mb,
+            )
+        except supervisor.SupervisorError as exc:
+            raise StoreError(exc.status, str(exc)) from exc
+    entry_rec = Installed(slug, workspace_id, version, runtime, directory, port, relay_key,
+                          process_memory_mb, kind, http, serving=runtime == "static")
     with _lock:
         _installed[slug] = entry_rec
-    if not _wait_ready(entry_rec):
+    try:
+        ready = _wait_ready(entry_rec)
+    except Exception:
+        stop(slug)
+        raise
+    if not ready:
         stop(slug)
         raise StoreError(502, f"extension {slug} did not answer on its loopback port within {READY_TIMEOUT_S:g} s")
-    return entry_rec.public()
+    return {**entry_rec.public(), **({"relayKey": relay_key} if is_app else {})}
 
 
 def _post(entry: Installed, body: bytes, timeout_s: float) -> tuple[int, bytes, bool]:
@@ -429,6 +474,30 @@ def _post(entry: Installed, body: bytes, timeout_s: float) -> tuple[int, bytes, 
 
 
 def _wait_ready(entry: Installed) -> bool:
+    if entry.kind == "app":
+        deadline = time.monotonic() + READY_TIMEOUT_S
+        while time.monotonic() < deadline:
+            if not entry.public()["running"]:
+                return False
+            ready = False
+            try:
+                if entry.runtime == "static":
+                    response = hosted_http.static_response(entry.directory, entry.http, entry.http["health"])
+                else:
+                    response = hosted_http.proxy_response(entry.port, "GET", f"/{entry.slug}" + entry.http["health"], "", {},
+                                                          io.BytesIO(), 0, min(2.0, deadline - time.monotonic()))
+                try:
+                    ready = 200 <= response.status < 300
+                finally:
+                    response.close()
+            except StoreError:
+                pass
+            if ready:
+                if entry.runtime != "static":
+                    hosted_http.assert_loopback_listener(entry.port)
+                return True
+            time.sleep(0.1)
+        return False
     ping = json.dumps({"jsonrpc": "2.0", "id": 0, "method": "ping"}).encode("utf-8")
     deadline = time.monotonic() + READY_TIMEOUT_S
     while time.monotonic() < deadline:
@@ -459,6 +528,8 @@ def _get(slug: str) -> Installed:
 
 def relay(slug: str, body: bytes, timeout_ms: int | None = None) -> tuple[int, bytes]:
     entry = _get(slug)
+    if entry.kind != "extension":
+        raise StoreError(400, "apps do not expose MCP RPC")
     timeout_ms = max(1000, min(int(timeout_ms or RELAY_DEFAULT_TIMEOUT_MS), RELAY_MAX_TIMEOUT_MS))
     try:
         status, data, over = _post(entry, body, timeout_ms / 1000)
@@ -482,10 +553,15 @@ def status(slug: str) -> dict[str, Any]:
 
 def stop(slug: str) -> dict[str, Any] | None:
     check_slug(slug)
+    with _lock:
+        entry = _installed.get(slug)
+        if entry and entry.runtime == "static":
+            entry.serving = False
+            return {"id": proc_id(slug), "state": "stopped", "pid": None, "exitCode": None}
     return supervisor.SUPERVISOR.stop(proc_id(slug))
 
 
-def uninstall(slug: str) -> dict[str, Any]:
+def uninstall(slug: str, *, delete_data: bool = False) -> dict[str, Any]:
     check_slug(slug)
     supervisor.SUPERVISOR.stop(proc_id(slug))
     supervisor.SUPERVISOR.forget(proc_id(slug))
@@ -494,6 +570,15 @@ def uninstall(slug: str) -> dict[str, Any]:
     slug_dir = extensions_root() / slug
     existed = existed or slug_dir.exists()
     _remove_tree(slug_dir)
+    if delete_data:
+        # The orchestrator owns the typed confirmation; this internal call
+        # must name the deletion explicitly. Default uninstall keeps data.
+        data_root = Path(os.getenv("SANDBOX_EXTENSIONS_DATA_DIR", "/var/lib/workspace-ext-data")).resolve()
+        data = data_root / slug
+        if not data.is_symlink() and data.resolve() == data_root / slug:
+            _remove_tree(data)
+        else:
+            raise StoreError(409, "app data directory must stay inside its volume")
     return {"slug": slug, "uninstalled": True, "existed": existed}
 
 
@@ -507,6 +592,34 @@ def listing() -> list[dict[str, Any]]:
     orchestrator's reconciler stops one whose row says it must not run."""
     out = []
     for slug in installed_slugs():
-        snap = supervisor.SUPERVISOR.status(proc_id(slug))
-        out.append({"slug": slug, "running": bool(snap and snap["state"] == "running")})
+        entry = _get(slug)
+        out.append({"slug": slug, "running": entry.public()["running"]})
     return out
+
+
+def app_request(slug: str, relay_key: str, method: str, path: str, query: str,
+                headers: dict[str, str], body, body_bytes: int,
+                timeout_s: float = hosted_http.MAX_TIMEOUT_S) -> hosted_http.RelayResponse:
+    entry = _get(slug)
+    if entry.kind != "app":
+        raise StoreError(400, "HTTP serving is app-only")
+    if not relay_key or not relay_key.isascii() or not hmac.compare_digest(relay_key, entry.relay_key):
+        raise StoreError(403, "app relay key refused")
+    if not entry.public()["running"]:
+        raise StoreError(503, "app is stopped")
+    if entry.runtime == "static":
+        return hosted_http.static_response(entry.directory, entry.http, path, method, headers)
+    # The server sees the same base path the public gateway gives the app.
+    return hosted_http.proxy_response(entry.port, method, f"/{slug}/" + path.lstrip("/"),
+                                      query, headers, body, body_bytes, timeout_s)
+
+
+def app_logs(slug: str, limit: int = 200, since: int | None = None) -> dict[str, Any]:
+    entry = _get(slug)
+    if entry.kind != "app":
+        raise StoreError(400, "app logs are app-only")
+    if entry.runtime == "static":
+        return {"id": proc_id(slug), "output": "", "process": False,
+                "note": "static apps have no process output"}
+    logs = supervisor.SUPERVISOR.logs(proc_id(slug), limit=limit, since=since)
+    return {**(logs or {"id": proc_id(slug), "output": ""}), "process": True}

@@ -226,7 +226,7 @@ function harness(over: HarnessOptions = {}) {
   const registry = new RuntimeToolRegistry();
   const lifecycle = new RemoteMcpLifecycleRegistry(() => 1_000_000);
   const row = over.row === undefined ? connectedRow() : over.row;
-  const prisma = { integrationConnection: { findFirst: vi.fn(async (_args: unknown) => row) } };
+  const prisma = { offLanAllowlistChannel: { findUnique: async () => ({ enabled: true }) }, integrationConnection: { findFirst: vi.fn(async (_args: unknown) => row) } };
   const recordClassifications = vi.fn(async () => undefined);
   const openCredentials = vi.fn((): Record<string, string> => {
     const secrets = over.secrets ?? { apiToken: FAKE_API_TOKEN };
@@ -485,7 +485,7 @@ describe("attachAtlassianRemote is the same function with Atlassian's registrati
       attach: () =>
         attachAtlassianRemote({
           mux,
-          prisma: { integrationConnection: { findFirst: async () => over.row ?? ATLASSIAN_ROW } },
+          prisma: { offLanAllowlistChannel: { findUnique: async () => ({ enabled: true }) }, integrationConnection: { findFirst: async () => over.row ?? ATLASSIAN_ROW } },
           allowlist,
           registry,
           recordClassifications: async () => undefined,
@@ -549,7 +549,7 @@ describe("attachAtlassianRemote is the same function with Atlassian's registrati
     const allowlist = new Set([ATLASSIAN_REMOTE_SERVER_ID]);
     const result = await attachAtlassianRemote({
       mux: new McpToolMultiplexer(localPort(), { isServerAllowed: () => true, remoteCallPolicy: allowAll }),
-      prisma: { integrationConnection: { findFirst: async () => ATLASSIAN_ROW } },
+      prisma: { offLanAllowlistChannel: { findUnique: async () => ({ enabled: true }) }, integrationConnection: { findFirst: async () => ATLASSIAN_ROW } },
       allowlist,
       registry: new RuntimeToolRegistry(),
       lifecycle: new RemoteMcpLifecycleRegistry(() => 1_000_000),

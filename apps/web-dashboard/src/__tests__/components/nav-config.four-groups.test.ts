@@ -64,15 +64,15 @@ describe("the tree is four groups (WARP-2967)", () => {
     ]);
   });
 
-  it("renders at most fifteen top-level rows with everything switched on", () => {
-    // The ticket's ≤ 14, plus WARP-3063's Workshop row. Workshop's owner/admin
-    // gate is pinned in workshop.nav.test.ts.
+  it("renders at most sixteen top-level rows with everything switched on", () => {
+    // The ticket's ≤ 14, plus Workshop and Apps. Their role gates are pinned
+    // in workshop.nav.test.ts.
     const rows = NAV_GROUPS.flatMap((g) => visible(g.label)).length;
-    expect(rows).toBeLessThanOrEqual(15);
+    expect(rows).toBeLessThanOrEqual(16);
   });
 
   it.each([
-    ["Work", ["/", "/chat", "/files", "/messages", "/email", "/calendar", "/workshop"]],
+    ["Work", ["/", "/chat", "/files", "/messages", "/email", "/calendar", "/workshop", "/hosted"]],
     ["Business", ["/business", "/customers", "/projects", "/practice"]],
     ["Systems", ["/cameras", "/network", "/devices"]],
     ["Admin", ["/settings"]],

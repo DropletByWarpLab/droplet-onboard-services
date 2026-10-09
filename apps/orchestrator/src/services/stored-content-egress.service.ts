@@ -38,6 +38,9 @@ import { TOOL_CATALOG, TOOL_DOMAINS, type ToolDomain } from "@droplet/tools-core
  * The domains whose tools read the customer's own stored material.
  *
  *  - `files`  — the Drive. The surface this ticket is about.
+ *  - `hosted_apps` — app inventory and process logs may carry private names,
+ *    URLs and customer content. Keep both read tools on the local model;
+ *    granting an app or its tool domain does not authorize cloud disclosure.
  *  - `memory` — the brain. `memory_recall` returns facts EXTRACTED from that
  *    same Drive content (the attachment path writes `BrainMemoryItem` +
  *    `FileContentChunk` rows), so withholding `files` while leaving `memory`

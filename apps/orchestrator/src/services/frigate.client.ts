@@ -519,6 +519,28 @@ export async function fetchEventSnapshot(eventId: string, height: number): Promi
 }
 
 /**
+ * WARP-3927 — the still from RECORDED footage at an instant (Frigate
+ * `GET /api/<camera>/recordings/<frame_time>/snapshot.jpg`), resized by Frigate
+ * (`height`). A 404 means no recording covers that second (never recorded,
+ * already pruned, or a gap), which is an answer rather than an outage: it is a
+ * typed `FrigateNotFoundError` so the route can say so; any other non-2xx
+ * throws the usual `Frigate <what>: <status>`.
+ */
+export async function fetchRecordingSnapshot(
+  cameraName: string,
+  at: number,
+  height: number,
+): Promise<Response> {
+  const resp = await fetch(
+    `${FRIGATE_URL}/api/${encodeURIComponent(cameraName)}/recordings/${Math.trunc(at)}/snapshot.jpg?height=${Math.trunc(height)}`,
+    { signal: timeout(SNAPSHOT_TIMEOUT) }
+  );
+  if (resp.status === 404) throw new FrigateNotFoundError("recording_snapshot_not_found");
+  if (!resp.ok) throw new Error(`Frigate recording snapshot: ${resp.status}`);
+  return resp;
+}
+
+/**
  * Toggle the `retain_indefinitely` flag on a Frigate event. When set,
  * Frigate exempts the event's clip + snapshot from the normal
  * retention sweep — the operator's way of saying "save this, I want

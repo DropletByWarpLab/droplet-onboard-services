@@ -10,11 +10,12 @@
  * mcp-server's `createHttpClient` auto-injects the service-principal
  * JWT for the orchestrator target.
  *
- * The route also accepts `labels`, `min_score`, `before` and `after`;
- * we deliberately expose only the query/camera/limit/search_type
- * subset — the natural-language query already carries object and time
- * intent, and fewer knobs means fewer ways for the model to
- * over-filter itself into empty results.
+ * The route also accepts `labels`, `min_score`, `before` and `after`.
+ * WARP-3747 exposes `after` / `before`: the semantic ranker cannot read
+ * "last Tuesday" out of a query, so the period has to be a real filter.
+ * `labels` / `min_score` stay unexposed on purpose — the query already
+ * carries object intent, and fewer knobs means fewer ways for the model
+ * to over-filter itself into empty results.
  *
  * Frigate without the embeddings stack makes the route answer 503 +
  * an operator hint; we surface that verbatim as
@@ -23,6 +24,8 @@
  */
 import { eventsMedia } from "@droplet/shared-types";
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
+import { EVENT_FILTER_PROPERTIES, parseEventFilters } from "./_event-filters.js";
+import { formatIsoInZone, withLocalTimes } from "./_time.js";
 
 const MAX_QUERY_CHARS = 300;
 const MAX_LIMIT = 50;
@@ -55,6 +58,7 @@ const inputSchema = {
       maximum: MAX_LIMIT,
       description: "Max events to return (default 50).",
     },
+    ...EVENT_FILTER_PROPERTIES,
     search_type: {
       type: "string",
       enum: ["thumbnail", "description"],
@@ -126,6 +130,11 @@ async function handler(
     params.search_type = args.search_type;
   }
 
+  const parsed = await parseEventFilters(args, ctx, false);
+  if (!parsed.ok) return invalidArgs(parsed.message);
+  const { filters } = parsed;
+  Object.assign(params, filters.params);
+
   let payload: Record<string, unknown>;
   try {
     const res = await ctx.http.orchestrator.get("/api/cameras/events/search", {
@@ -157,7 +166,9 @@ async function handler(
     return searchFailed("orchestrator not reachable");
   }
 
-  const events = Array.isArray(payload.events) ? payload.events : [];
+  const events = (Array.isArray(payload.events) ? payload.events : []).map((e) =>
+    e && typeof e === "object" ? withLocalTimes(e as Record<string, unknown>, filters.timezone) : e,
+  );
   const media = eventsMedia(events);
   return {
     ok: true,
@@ -166,6 +177,9 @@ async function handler(
       query,
       events,
       count: events.length,
+      timezone: filters.timezone,
+      ...(filters.after !== undefined ? { afterIso: formatIsoInZone(filters.after, filters.timezone) } : {}),
+      ...(filters.before !== undefined ? { beforeIso: formatIsoInZone(filters.before, filters.timezone) } : {}),
       // WARP-3691: best matches shown inline in the chat.
       ...(media.length > 0 ? { media } : {}),
     },
@@ -175,7 +189,7 @@ async function handler(
 const tool: Tool = {
   name: "search_camera_events",
   description:
-    'Search recorded security-camera events by natural language (e.g. "delivery truck last week", "person near the gate at night") using the NVR\'s semantic search. Optionally restrict to one camera. Requires the NVR\'s semantic-search feature — if it is disabled the tool returns SEMANTIC_SEARCH_DISABLED with instructions to relay to the user for enabling it.',
+    'Search recorded security-camera events by natural language (e.g. "delivery truck last week", "person near the gate at night") using the NVR\'s semantic search. Optionally restrict to one camera and a period (after/before). Requires the NVR\'s semantic-search feature — if it is disabled the tool returns SEMANTIC_SEARCH_DISABLED with instructions to relay to the user for enabling it.',
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

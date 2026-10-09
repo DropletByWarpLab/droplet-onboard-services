@@ -7,11 +7,9 @@ import { GoogleAccountCard } from "./GoogleAccountCard";
 import { AccountProviderSetup } from "./AccountProviderSetup";
 
 export interface AccountConnectionNavigation {
-  returnTo?: "/settings" | "/setup?step=accounts" | "/chat" | "/chat/connect-return";
+  returnTo?: "/settings" | "/setup?step=accounts";
   /** Persist the wizard's resume point before leaving for provider approval. */
   beforeConnect?: () => Promise<void>;
-  /** Release a reserved sign-in window if the start request failed. */
-  afterConnect?: () => void;
 }
 
 export function ConnectedAccounts({ returnTo, beforeConnect }: AccountConnectionNavigation = {}) {

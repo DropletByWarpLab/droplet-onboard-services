@@ -11,11 +11,11 @@ const inputSchema = {
   properties: {
     pattern: {
       type: "string",
-      description: "A regular expression (git grep syntax) to search for.",
+      description: "git grep regular expression.",
     },
     glob: {
       type: "string",
-      description: "Optional path pattern to limit the search, e.g. src/*.ts.",
+      description: "Optional path glob.",
     },
   },
   required: ["pattern"],
@@ -41,7 +41,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const workspaceSearch: Tool = {
   name: "workspace_search",
   description:
-    "Search the tracked files of this run's workspace with a regular expression. Returns matching lines with file and line number.",
+    "Search tracked workspace files; returns matching paths and lines.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

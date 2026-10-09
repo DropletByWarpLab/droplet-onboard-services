@@ -75,7 +75,7 @@ statement alone.
   never dials an extension: it calls the sandbox's bearer-gated
   `/extensions/<slug>/rpc`, and the sandbox relays over loopback with a
   timeout and an output cap that is reported when hit.
-- The child's environment is the sandbox's base environment plus an
+- The tool-extension child's environment is the sandbox's base environment plus an
   allowlist of keys (`DROPLET_EXT_ID`, `DROPLET_EXT_PORT`,
   `DROPLET_EXT_TOKEN`, `DROPLET_EXT_RELAY_KEY`, `DROPLET_ORCHESTRATOR_URL`).
   The sandbox's own bearer is not in it. The child runs as the server's uid,
@@ -238,6 +238,70 @@ ADR-043 §5 asks for. **Needs Stefan/Romain confirmation.**
   subtract the sandbox server's own RSS. `mem_limit` is the hard ceiling. A
   per-extension RSS cap needs cgroup delegation, which this `cap_drop: ALL`
   container does not have.
+
+### Hosted-app persistence
+
+Persistent app state lives on the `extensions-data` named volume at
+`/var/lib/workspace-ext-data` (`SANDBOX_EXTENSIONS_DATA_DIR`), separate from the
+signed code exports on `extensions-installed`. The image creates the root owned
+by sandbox uid 1000; `<slug>/` app directories use mode `0700`. App processes
+receive `DROPLET_EXT_DATA_DIR` (the absolute directory), `PORT`, and
+`DROPLET_EXT_BASE_PATH` (`/<slug>/`) beside their id and loopback port; they are
+not handed the tool extension's callback bearer or relay key. Code upgrades can replace
+the installed export without replacing app state. Device and restic backups
+capture this volume, and factory reset wipes it.
+
+The requested default **1 GiB per-app filesystem quota is not enforced**.
+Docker's default named-volume driver provides no per-directory quota. The
+existing NVR quota helper runs on the host with root authority against ext4
+mounted with project quotas; it does not cover Docker's app-data volume. App
+quota enforcement needs a separately reviewed host-side provisioning path.
+No capability, host bind, published port, Docker socket or network permission
+is added to the sandbox for app storage.
+
+The full hosted-app flow is implemented for review and remains unreleased and
+default-off. Security review is required before enabling hosted apps, including the
+HTTP relay and its authorization, writable data paths, same-uid process and
+data access, log exposure, and resource accounting. The existing shared-uid
+limitations below apply to persistent app state as well: `0700` does not isolate
+one app from another app running with the same uid.
+
+### Hosted-app browser and source boundaries
+
+The browser reaches apps only on the gateway's separate TLS origin at port
+8443. Its route goes through the orchestrator and the authenticated sandbox
+HTTP relay; app processes listen on assigned loopback ports and static apps
+need no process. The dashboard's TLS listener refuses the hosted relay.
+Opening an app uses a short-lived, one-use session code and an app-scoped,
+HttpOnly, Secure, SameSite=Lax cookie. The relay checks the active user and
+current app grant for every request.
+Exchange codes and app tokens are bound to the originating dashboard session;
+revoking that session also refuses pending exchanges and subsequent app requests.
+An unavailable session store refuses app authentication rather than extending a
+twelve-hour credential through the dashboard's short-token availability fallback.
+It strips dashboard credentials, arbitrary identity headers, app Set-Cookie
+and CORS headers. Apps receive only the
+validated user's id, username and role. Cookie-authenticated API writes with a
+foreign Origin are refused globally; authenticated Bearer callers retain their
+existing path.
+
+Apps share the 8443 origin with one another. Per-app cookie paths and audiences
+constrain authentication, but do not establish browser origin isolation between
+apps. Combined with the shared sandbox uid, this v1 supports owner-reviewed
+trusted code, not mutually hostile tenants. Stronger isolation belongs to the
+separate-container runtime work.
+
+Operator archive imports accept ZIP and gzip TAR with a 256 MiB compressed,
+1 GiB unpacked and 50,000-entry ceiling. Imports reject traversal, absolute
+paths, Git metadata, symlinks, hard links, devices, duplicates and malformed
+archive metadata before exposing a workspace. The first commit records the
+operator. Built UI assets and vendored dependencies survive imported ignore
+rules. No archive copy is retained. Git source access requires owner/admin.
+
+The `app-setup` brief runs through the existing durable agent architecture,
+bound to the operator's workspace and Chat conversation. It can inspect, edit,
+build/test, run `app-check` and propose a version. It cannot promote or grant
+access: those operations remain owner-MFA routes outside the tool catalog.
 
 ### Known limitations (for the WARP-2923 review; WARP-2898 is the fix)
 

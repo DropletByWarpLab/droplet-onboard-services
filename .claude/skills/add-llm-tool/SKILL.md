@@ -189,6 +189,12 @@ must never touch (runtime tools live outside `TOOLS`, ADR-043).
 
 ## Running the gates
 
+When the write-tool registry changes, regenerate the evaluation harness's
+`tests/agent-loop-eval/write_tools.json` with
+`npx tsx tests/agent-loop-eval/run.mts --write-tools` from the repository root,
+and run the offline harness self-test. This snapshot drives its write-action
+checks; a stale snapshot fails the orchestrator CI after Vitest completes.
+
 ```bash
 cd packages/tools-core && npx vitest run                 # sites 1-6, 9
 cd apps/orchestrator  && npx vitest run src/services src/__tests__

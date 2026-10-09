@@ -169,7 +169,8 @@ export interface OffLanChannelDefault {
     | "ambient_data"
     | "web_push"
     | "place_lookup"
-    | "work_integrations";
+    | "work_integrations"
+    | "remote_mcp";
   enabled: boolean;
   requiresAdmin: boolean;
 }
@@ -200,6 +201,10 @@ export const OFF_LAN_CHANNEL_DEFAULTS: readonly OffLanChannelDefault[] = [
   // data and this is the switch that lets it leave. Owner-only to turn on
   // (settings.ts OWNER_ONLY_CHANNELS). LAN destinations never need it.
   { key: "work_integrations", enabled: false, requiresAdmin: true },
+  // WARP-3912 (ADR-043 §4) — master switch over outbound MCP. OFF for new
+  // boxes; the 20261008090100 migration persists ON for boxes that already have
+  // a CONNECTED Atlassian account, so an upgrade does not cut it off.
+  { key: "remote_mcp", enabled: false, requiresAdmin: true },
 ];
 
 /**
