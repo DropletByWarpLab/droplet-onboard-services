@@ -73,6 +73,20 @@ export const ATLASSIAN_ALLOWED_MCP_HOSTS: ReadonlySet<string> = new Set([
   ATLASSIAN_MCP_HOST,
 ]);
 
+/** WARP-2401 — the authorization server for web sign-in (OAuth 2.1). A
+ *  whole-string literal for the same reason as {@link ATLASSIAN_MCP_HOST}: the
+ *  `atlassian-mcp` registry entry is backed by this line. */
+export const ATLASSIAN_AUTH_HOST = "auth.atlassian.com";
+
+/** WARP-2401 — every host an Atlassian OAuth hop (discovery, registration,
+ *  exchange, refresh, revoke) may reach. Exact match, nothing derived from a
+ *  metadata document: a protected-resource document that names any other
+ *  authorization server is refused before it is dialed. */
+export const ATLASSIAN_ALLOWED_OAUTH_HOSTS: ReadonlySet<string> = new Set([
+  ATLASSIAN_MCP_HOST,
+  ATLASSIAN_AUTH_HOST,
+]);
+
 /**
  * The MCP protocol version this integration speaks, PINNED.
  *

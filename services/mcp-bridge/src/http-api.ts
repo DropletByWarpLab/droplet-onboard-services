@@ -39,6 +39,8 @@
  * server text.
  */
 import { checkBridgeBearer } from "./http-auth.js";
+import type { OAuthDeps } from "./oauth/http.js";
+import { handleOAuthRoute } from "./oauth/routes.js";
 import {
   RemoteMcpSession,
   type RemoteToolCallOutcome,
@@ -288,6 +290,8 @@ export interface BridgeApiOptions {
   /** Injected. Receives a method, a path, a status and a server id — never a
    *  request body, never a header. */
   log?: (line: Record<string, unknown>) => void;
+  /** Test seams of the pinned fetch for the `/oauth/*` hops (WARP-2401). */
+  oauthDeps?: OAuthDeps;
 }
 
 const noopLog = (): void => undefined;
@@ -379,6 +383,10 @@ async function route(
   }
 
   const parts = req.path.split("/").filter((p) => p.length > 0);
+  // WARP-2401 — web sign-in hops. Bearer-checked above; the body is never logged.
+  if (parts[0] === "oauth" && parts.length <= 2) {
+    return handleOAuthRoute(parts[1], req.method, req.body, opts.oauthDeps);
+  }
   if (parts[0] !== "sessions" || parts.length < 1 || parts.length > 3) {
     return err(404, "NOT_FOUND", `No route for ${req.path}.`);
   }
