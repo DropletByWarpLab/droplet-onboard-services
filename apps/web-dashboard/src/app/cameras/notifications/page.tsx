@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
+  AlertTriangle,
   ArrowLeft,
   Bell,
   Car,
@@ -60,12 +61,40 @@ export default function NotificationsPage() {
   // Per-camera state, keyed by name.
   const [rows, setRows] = useState<Record<string, RowState>>({});
 
+  // Cameras whose settings could not be read, keyed by name. Without this a
+  // failed read left the row on a bare "Loading…" forever, which reads as a
+  // page that does not work.
+  const [loadErrors, setLoadErrors] = useState<Record<string, string>>({});
+
   // Track which cameras have already been hydrated so a second mount
   // doesn't re-fetch.
   const hydratedRef = useRef<Set<string>>(new Set());
 
+  // Read the prefs for these cameras. Each result is matched back to its
+  // camera by position, so a failure is reported against the right row.
+  const loadPrefs = useCallback((names: string[]) => {
+    setLoadErrors((cur) => {
+      const next = { ...cur };
+      for (const name of names) delete next[name];
+      return next;
+    });
+    Promise.allSettled(names.map((name) => fetchCameraNotifications(name))).then((results) => {
+      const loaded: Record<string, RowState> = {};
+      const failed: Record<string, string> = {};
+      results.forEach((r, i) => {
+        if (r.status === "fulfilled") {
+          loaded[names[i]] = { ...r.value, loading: false, dirty: false, error: null };
+        } else {
+          failed[names[i]] = r.reason instanceof Error ? r.reason.message : "Request failed";
+        }
+      });
+      setRows((current) => ({ ...current, ...loaded }));
+      setLoadErrors((cur) => ({ ...cur, ...failed }));
+    });
+  }, []);
+
   // Load prefs for any camera we haven't seen yet. Runs once per
-  // camera-name addition; the inFlight guard keeps a slow fetcher
+  // camera-name addition; the hydrated guard keeps a slow fetcher
   // from kicking off duplicates.
   useEffect(() => {
     if (cameras.length === 0) return;
@@ -76,31 +105,8 @@ export default function NotificationsPage() {
       inFlight.push(cam.name);
     }
     if (inFlight.length === 0) return;
-    Promise.allSettled(
-      inFlight.map((name) => fetchCameraNotifications(name).then((p) => [name, p] as const)),
-    ).then((results) => {
-      setRows((current) => {
-        const next = { ...current };
-        for (const r of results) {
-          if (r.status === "fulfilled") {
-            const [name, prefs] = r.value;
-            next[name] = {
-              ...prefs,
-              loading: false,
-              dirty: false,
-              error: null,
-            };
-          } else {
-            // We don't know which name failed without threading more
-            // info; store a generic error keyed off whatever we can
-            // recover. In practice the page surfaces "—" for the row.
-            // The retry is "click Refresh."
-          }
-        }
-        return next;
-      });
-    });
-  }, [cameras]);
+    loadPrefs(inFlight);
+  }, [cameras, loadPrefs]);
 
   const togglePref = (name: string, key: keyof NotificationPrefs) => {
     setRows((r) => {
@@ -157,6 +163,11 @@ export default function NotificationsPage() {
       onClick={() => {
         hydratedRef.current.clear();
         refresh();
+        // Rows that failed to load are retried here too; rows that did load
+        // are left alone so unsaved toggles are not thrown away.
+        const failedNames = Object.keys(loadErrors);
+        failedNames.forEach((n) => hydratedRef.current.add(n));
+        if (failedNames.length > 0) loadPrefs(failedNames);
       }}
       className="icon-btn"
       aria-label="Refresh"
@@ -257,6 +268,8 @@ export default function NotificationsPage() {
                 key={cam.name}
                 camera={cam}
                 row={rows[cam.name]}
+                loadError={loadErrors[cam.name]}
+                onRetry={() => loadPrefs([cam.name])}
                 onToggle={(key) => togglePref(cam.name, key)}
                 onSave={() => saveRow(cam.name)}
               />
@@ -271,11 +284,16 @@ export default function NotificationsPage() {
 function CameraNotificationRow({
   camera,
   row,
+  loadError,
+  onRetry,
   onToggle,
   onSave,
 }: {
   camera: CameraInfo;
   row: RowState | undefined;
+  /** Set when this camera's settings could not be read. */
+  loadError?: string;
+  onRetry: () => void;
   onToggle: (key: keyof NotificationPrefs) => void;
   onSave: () => void;
 }) {
@@ -366,6 +384,22 @@ function CameraNotificationRow({
             {loading ? "Saving" : dirty ? "Save" : "Saved"}
           </button>
         </>
+      ) : loadError ? (
+        <div
+          role="alert"
+          data-testid="notification-load-error"
+          className="col-span-full sm:col-span-5 flex flex-wrap items-center gap-2 type-caption-1"
+          style={{ color: "var(--text-muted)" }}
+        >
+          <AlertTriangle size={14} aria-hidden="true" className="flex-shrink-0" />
+          <span className="min-w-0">
+            Couldn&apos;t load notification settings for {camera.displayName}.
+          </span>
+          <button type="button" onClick={onRetry} className="btn ghost sm">
+            <RefreshCw size={12} aria-hidden="true" />
+            Retry
+          </button>
+        </div>
       ) : (
         <div className="col-span-full sm:col-span-5 type-caption-1 text-label-tertiary">
           Loading…
