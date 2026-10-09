@@ -28,7 +28,7 @@ export interface TrustedOrigin {
 export function _resetTrustedOriginCacheForTests(): void {}
 
 /** Strip a trailing `:port` from a host[:port] and lower-case it. */
-function bareHost(host: string): string {
+export function bareHost(host: string): string {
   const trimmed = host.trim().toLowerCase();
   if (!trimmed) return "";
   // IPv6 literals are bracketed (`[::1]:443`); leave the bracketed part intact
@@ -99,7 +99,7 @@ export async function resolveTrustedOrigin(): Promise<TrustedOrigin> {
 }
 
 /** The request host the proxy claims, in priority order: forwarded then direct. */
-function requestHost(req: Request): string | null {
+export function requestHost(req: Request): string | null {
   const xff = req.headers["x-forwarded-host"];
   const fromXff = Array.isArray(xff) ? xff[0] : xff;
   const host = fromXff || req.headers.host;
@@ -150,7 +150,7 @@ export function pickTrustedHost(
 }
 
 /** Whether the inbound request looks like https (direct TLS or proxied). */
-function requestIsHttps(req: Request): boolean {
+export function requestIsHttps(req: Request): boolean {
   return req.secure || req.headers["x-forwarded-proto"] === "https";
 }
 

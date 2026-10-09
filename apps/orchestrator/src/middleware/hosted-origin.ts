@@ -1,7 +1,7 @@
 /** Refuse app-origin cookie writes to dashboard APIs before reading a body. */
 import type { RequestHandler } from "express";
 import { config } from "../config.js";
-import { resolveTrustedOriginUrl } from "../lib/trusted-origin.js";
+import { bareHost, requestHost, requestIsHttps, resolveTrustedOriginUrl } from "../lib/trusted-origin.js";
 
 export const hostedOriginGuard: RequestHandler = async (req, res, next) => {
   // Express's default case-insensitive mounts must not become a CSRF bypass.
@@ -22,6 +22,12 @@ export const hostedOriginGuard: RequestHandler = async (req, res, next) => {
           res.status(403).json({ error: "foreign_origin_refused" }); return;
         }
         if (!bearer) {
+          // A request whose Origin is its own Host (same scheme) is same-origin: a
+          // cross-site attacker cannot make a browser send that pair, so it is not
+          // CSRF. This keeps IP / mDNS / extra-SAN access working. The canonical-
+          // host-only rule in trusted-origin.ts is for URL generation, not this check.
+          if (url.origin === origin && bareHost(url.host) === requestHost(req)
+              && url.protocol === (requestIsHttps(req) ? "https:" : "http:")) { next(); return; }
           const allowed = new Set((config.corsAllowedOrigins ?? []).map((v) => new URL(v).origin));
           allowed.add(await resolveTrustedOriginUrl(req));
           if (url.origin !== origin || !allowed.has(url.origin)) {
