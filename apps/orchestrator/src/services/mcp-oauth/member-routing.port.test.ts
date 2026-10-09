@@ -9,6 +9,7 @@ import { withRemoteCallAttribution } from "../remote-call-attribution.js";
 import { createGatedRemoteMcpPort, remoteMcpGate, type RemoteMcpGatePrisma } from "../remote-mcp-gateway.service.js";
 import { registerMcpOAuthRefresher } from "./mcp-oauth-refresher.js";
 import { sealTokens } from "./mcp-oauth.service.js";
+import { catalogOAuthFields } from "../remote-mcp-servers.js";
 import { createMemberRoutingPort, type OAuthRowLite } from "./member-routing.port.js";
 
 vi.mock("../activity.singleton.js", () => ({ recordActivity: vi.fn(async () => null), getActivitySigner: () => null }));
@@ -24,7 +25,7 @@ const WS_ID = "22222222-2222-2222-2222-222222222222";
 const ok = { content: [{ type: "text" as const, text: "{}" }], isError: false };
 
 function row(over: Partial<OAuthRowLite> & { id: string; scope: "MEMBER" | "WORKSPACE" }): OAuthRowLite {
-  const memberId = over.scope === "MEMBER" ? "user-1" : null;
+  const memberId = over.memberId !== undefined ? over.memberId : over.scope === "MEMBER" ? "user-1" : null;
   const base = { provider: SERVER, memberId, state: "CONNECTED", tokenExpiresAt: new Date(NOW.getTime() + 3600_000), ...over };
   return { ...base, tokensEnc: sealTokens({ id: base.id, scope: base.scope, memberId }, {
     accessToken: `access-${base.id}`, refreshToken: "r", expiresAt: base.tokenExpiresAt.toISOString(), scope: "s",
@@ -33,7 +34,7 @@ function row(over: Partial<OAuthRowLite> & { id: string; scope: "MEMBER" | "WORK
 }
 
 function setup(o: {
-  member?: OAuthRowLite | null; workspace?: OAuthRowLite | null; apiToken?: boolean;
+  member?: OAuthRowLite | null; workspace?: OAuthRowLite | null; apiToken?: boolean; baseCredential?: "member" | "workspace" | "api-token";
   integration?: { status?: string; providerConfig: unknown } | null; user?: { id: string } | null;
 } = {}) {
   const callToolFor = vi.fn(async (_id: string, _n: string, _a: Record<string, unknown>) => ok);
@@ -54,7 +55,7 @@ function setup(o: {
   const port = createMemberRoutingPort({
     serverId: SERVER, client, prisma, now: () => NOW,
     base: { isStarted: true, listTools: async () => [], callTool: baseCall },
-    baseCredential: o.apiToken ? "api-token" : "workspace",
+    baseCredential: o.baseCredential ?? (o.apiToken ? "api-token" : "workspace"),
   });
   const audit = vi.fn();
   const gated = createGatedRemoteMcpPort({ serverId: SERVER, upstream: port, gate: async () => ({ allowed: true }), audit });
@@ -113,6 +114,14 @@ describe("credential precedence: member, then Workspace, then API token, else si
     expect(JSON.stringify(out)).toContain("REMOTE_SIGN_IN_EXPIRED");
     expect(s.callToolFor).not.toHaveBeenCalled();
     expect(s.baseCall).not.toHaveBeenCalled();
+  });
+
+  it("an owner-backed base session never answers another member's call: no sign-in means REMOTE_SIGN_IN_REQUIRED", async () => {
+    const s = setup({ baseCredential: "member" }); // the catalog session runs on an owner's token
+    const out = await s.as(() => s.gated.callTool("t", {}));
+    expect(JSON.stringify(out)).toContain("REMOTE_SIGN_IN_REQUIRED");
+    expect(s.baseCall).not.toHaveBeenCalled();
+    expect(s.callToolFor).not.toHaveBeenCalled();
   });
 
   it("resolves the same way for a durable run (agentRunId alongside the username)", async () => {
@@ -237,5 +246,62 @@ describe("remoteMcpGate with sign-ins", () => {
 
   it("fails closed when the sign-in read fails", async () => {
     expect(await remoteMcpGate(gatePrisma({ row: null, signedIn: new Error("db") }), SERVER, allow)).toMatchObject({ allowed: false, reason: "gate_unavailable" });
+  });
+});
+
+describe("catalog credential: only an API token, a Workspace connection, or a current owner/admin", () => {
+  type AttachDeps = Parameters<typeof catalogOAuthFields>[0];
+  /** Evaluates the role join the real query asks Postgres for. */
+  function catalogDeps(members: { id: string; role: string }[], rows: OAuthRowLite[]) {
+    const where: unknown[] = [];
+    const table = {
+      count: async () => rows.length,
+      findUnique: async () => null,
+      findFirst: vi.fn(async (a: { where: Record<string, any> }) => {
+        where.push(a.where);
+        const w = a.where;
+        const roles: string[] | undefined = w.member?.is?.role?.in;
+        return rows.find((r) => r.scope === w.scope && r.state === w.state &&
+          (w.scope !== "MEMBER" || (roles?.includes(members.find((m) => m.id === r.memberId)?.role ?? "") ?? false))) ?? null;
+      }),
+    };
+    return { deps: { serverId: SERVER, prisma: { mcpOAuthConnection: table } } as unknown as AttachDeps, where };
+  }
+  const siteRow = { id: "c1", status: "CONNECTED", providerTokensEnc: null, providerConfig: { cloudId: CLOUD } };
+  const memberRow = (id: string, memberId: string) => row({ id, scope: "MEMBER", memberId });
+  const ownerRow = () => memberRow(MEMBER_ID, "owner-1");
+
+  it("a member-only box (one family sign-in) offers no catalog credential", async () => {
+    const { deps } = catalogDeps([{ id: "fam-1", role: "family" }], [memberRow(MEMBER_ID, "fam-1")]);
+    expect(await catalogOAuthFields(deps, siteRow)).toBeNull();
+  });
+
+  it("an owner's sign-in backs the catalog, audited as credential member", async () => {
+    const { deps } = catalogDeps([{ id: "owner-1", role: "owner" }], [ownerRow()]);
+    const got = await catalogOAuthFields(deps, siteRow);
+    expect(got).toMatchObject({ kind: "member", fields: { accessToken: `access-${MEMBER_ID}`, cloudId: CLOUD } });
+    // and the listing audit names it
+    const audit = vi.fn();
+    const up = { isStarted: true, listTools: async () => [], callTool: async () => ok, catalogCredential: got!.kind, callToolAttributed: async () => ({ outcome: ok, credential: got!.kind }) };
+    await createGatedRemoteMcpPort({ serverId: SERVER, upstream: up, gate: async () => ({ allowed: true }), audit }).listTools();
+    expect(audit).toHaveBeenCalledWith(expect.objectContaining({ op: "list_tools", credential: "member" }));
+  });
+
+  it("after the owner is demoted to family, a fresh attach refuses", async () => {
+    const rows = [ownerRow()];
+    expect(await catalogOAuthFields(catalogDeps([{ id: "owner-1", role: "admin" }], rows).deps, siteRow)).not.toBeNull();
+    expect(await catalogOAuthFields(catalogDeps([{ id: "owner-1", role: "family" }], rows).deps, siteRow)).toBeNull();
+  });
+
+  it("the query joins the role, active directory status and no pending deletion", async () => {
+    const { deps, where } = catalogDeps([{ id: "owner-1", role: "owner" }], [ownerRow()]);
+    await catalogOAuthFields(deps, siteRow);
+    expect(where[1]).toMatchObject({ member: { is: { role: { in: ["owner", "admin"] }, directoryStatus: "ACTIVE", deletionStatus: "NONE" } } });
+  });
+
+  it("prefers the Workspace connection over an owner's personal sign-in", async () => {
+    const ws = row({ id: WS_ID, scope: "WORKSPACE" });
+    const { deps } = catalogDeps([{ id: "owner-1", role: "owner" }], [ownerRow(), ws]);
+    expect(await catalogOAuthFields(deps, siteRow)).toMatchObject({ kind: "workspace" });
   });
 });

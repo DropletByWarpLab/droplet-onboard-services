@@ -537,7 +537,9 @@ export async function attachRemoteServer(
         message:
           apiRead && !apiRead.ok
             ? `The ${serverId} connection is missing: ${apiRead.missing.join(", ")}.`
-            : `The ${serverId} connection holds no credential.`,
+            : deps.prisma.mcpOAuthConnection
+              ? `An owner or admin must sign in to ${serverId} (or add a Workspace connection or API token) before its tools can be listed.`
+              : `The ${serverId} connection holds no credential.`,
       };
     }
     credentialFields = oauth.fields;
@@ -898,7 +900,7 @@ type RemoteCredentialRead =
  * The bridge's bearer profile takes `{ accessToken, cloudId }`; the site id is
  * the one the admin entered on the connection (never from the model).
  */
-async function catalogOAuthFields(
+export async function catalogOAuthFields(
   deps: AttachRemoteServerDeps,
   row: RemoteMcpConnectionRow | null,
 ): Promise<{ fields: Record<string, string>; kind: RemoteMcpCredentialKind } | null> {
@@ -907,8 +909,18 @@ async function catalogOAuthFields(
   if (!table || typeof site !== "string" || !site.trim()) return null;
   const candidates = [
     await table.findFirst({ where: { provider: deps.serverId, scope: "WORKSPACE", state: "CONNECTED" } }),
+    // A regular member's token backs ONLY that member's own calls. The shared
+    // catalog session may use a member's sign-in only if that person is an owner
+    // or admin RIGHT NOW (they approve servers and review their tools): the role
+    // is joined and checked at attach time, so a demotion or deactivation stops
+    // the next attach from picking them.
     await table.findFirst({
-      where: { provider: deps.serverId, scope: "MEMBER", state: "CONNECTED" },
+      where: {
+        provider: deps.serverId,
+        scope: "MEMBER",
+        state: "CONNECTED",
+        member: { is: { role: { in: ["owner", "admin"] }, directoryStatus: "ACTIVE", deletionStatus: "NONE" } },
+      },
       orderBy: { connectedAt: "asc" },
     }),
   ];
