@@ -1,4 +1,5 @@
 import path from "node:path";
+import { fileMediaFromPath } from "@droplet/shared-types";
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 import { MAX_WRITE_BYTES, validateNcPath } from "./_paths.js";
 import { needsUserApproval } from "./_approval.js";
@@ -81,7 +82,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   if (!res.ok) {
     return err("WRITE_FAILED", `the File Store returned ${res.status}`);
   }
-  return { ok: true, data: { written: v.path, bytes: buffer.byteLength } };
+  return { ok: true, data: { written: v.path, bytes: buffer.byteLength, media: fileMediaFromPath(v.path, { size: buffer.byteLength }) } };
 }
 
 const tool: Tool = {

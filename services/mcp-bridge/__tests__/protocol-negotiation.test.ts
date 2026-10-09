@@ -7,6 +7,14 @@
  * stub server, so the assertions are about the requests the bridge would send.
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
+
+// WARP-3914: this suite stubs the SOCKET (`globalThis.fetch`), so the DNS-
+// pinning fetch is swapped for a pass-through to it, as in rate-limit-seam.
+// The pin itself is covered in pinned-fetch.test.ts and streamable-http.test.ts.
+vi.mock("../src/pinned-fetch.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/pinned-fetch.js")>()),
+  guardedFetch: (url: string | URL, init?: RequestInit) => globalThis.fetch(url, init),
+}));
 import { createStreamableHttpConnection } from "../src/streamable-http.js";
 import { classifyRemoteMcpError } from "../src/session-state.js";
 import { MAX_EVENT_BYTES, MAX_RESPONSE_BYTES } from "../src/modern-connection.js";
@@ -17,7 +25,14 @@ const INPUT = {
   url: URL_,
   headers: { authorization: "Bearer FAKE-000000" },
 };
-const PROBE = { protocolNegotiation: "probe" } as const;
+/** The guard resolves a public address and "sends" through the stubbed global fetch,
+ *  so no DNS lookup and no socket happens (WARP-3914 pins every outbound hop). */
+const GUARD = {
+  resolve: async () => [{ address: "8.8.8.8", family: 4 }],
+  local: () => ({ addresses: [], cidrs: [] }),
+  send: (dest: { url: URL }, init: RequestInit) => globalThis.fetch(dest.url, init),
+};
+const PROBE = { protocolNegotiation: "probe", guard: GUARD } as const;
 
 interface Seen {
   url: string;
@@ -242,7 +257,7 @@ describe("legacy server (2025-11-25)", () => {
 
   it("is the unchanged default: no probe unless the profile opts in", async () => {
     const seen = stubNetwork(legacyServer(() => new Response(null, { status: 400 })));
-    const conn = await createStreamableHttpConnection(INPUT);
+    const conn = await createStreamableHttpConnection(INPUT, { guard: GUARD });
     await conn.listTools();
     expect(seen.some((s) => s.body?.method === "server/discover")).toBe(false);
     expect(seen[0]!.body.method).toBe("initialize");

@@ -818,12 +818,18 @@ cmd_reconcile_env() {
   log "reconcile-env $UPDATE_ID (host .env under $root)"
   if [ -n "$DRY_RUN" ]; then
     run /bin/sh "$root/docker/ota/env-reconcile.sh" "$root" "$UPDATE_ID"
+    run bash "$root/docker/ota/reconcile-service-tls.sh" "$root"
     retire_remote_access_connector
     return 0
   fi
   local out
   out="$(/bin/sh "$root/docker/ota/env-reconcile.sh" "$root" "$UPDATE_ID")" \
     || die "env-reconcile failed on the host for $UPDATE_ID"
+  # The configs bundle carries docker/, while the host issuer is installed
+  # by setup. Add newly required identities under the existing device CA.
+  # Diagnostics stay on stderr; stdout remains the canonical JSON report.
+  bash "$root/docker/ota/reconcile-service-tls.sh" "$root" >&2 \
+    || die "service TLS reconciliation failed on the host for $UPDATE_ID"
   # Every manifest apply reaches reconciliation, including a release with no
   # sidecar image changes. Retire the connector before any service swap.
   retire_remote_access_connector

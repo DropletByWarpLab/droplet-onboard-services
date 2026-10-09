@@ -81,11 +81,11 @@ class RenderError(ValueError):
     """A spec the renderer refuses. Surfaces to the caller as 400."""
 
 
-def render_slide_deck(title: str, slides: list[dict[str, Any]], format: str) -> bytes:
+def render_slide_deck(title: str, slides: list[dict[str, Any]], format: str, theme: str = "droplet") -> bytes:
     """A bounded 16:9 deck, with the same layout in PDF and editable PPTX."""
     from slides import render_deck
 
-    return render_deck(title, slides, format)
+    return render_deck(title, slides, format, theme)
 
 
 # ── .docx ────────────────────────────────────────────────────────────────
@@ -248,6 +248,7 @@ def render_xlsx(sheets: list[dict[str, Any]]) -> bytes:
     wb.calculation = CalcProperties(fullCalcOnLoad=True, forceFullCalc=True, calcMode="auto")
     wb.remove(wb.active)
     used: set[str] = set()
+    plans = []
 
     for index, spec in enumerate(sheets):
         if not isinstance(spec, dict):
@@ -278,16 +279,22 @@ def render_xlsx(sheets: list[dict[str, Any]]) -> bytes:
             ws.append([_cell(v) for v in row])
 
         _autofit(ws, columns, rows)
-        from workbook_features import WorkbookFeatureError, apply_workbook_features
+        ws._droplet_dimensions = (len(rows) + bool(columns), max([len(columns)] + [len(row) for row in rows]))
+        plans.append((ws, spec))
 
-        try:
+    from workbook_features import WorkbookFeatureError, apply_workbook_features, workbook_caches, inject_formula_caches
+    try:
+        # All sheets exist before parsing references; forward sheet references
+        # and whole-workbook dependency cycles are checked before bytes escape.
+        for ws, spec in plans:
             apply_workbook_features(ws, spec)
-        except WorkbookFeatureError as exc:
-            raise RenderError(str(exc)) from exc
+        caches = workbook_caches(wb)
+    except WorkbookFeatureError as exc:
+        raise RenderError(str(exc)) from exc
 
     buf = io.BytesIO()
     wb.save(buf)
-    return buf.getvalue()
+    return inject_formula_caches(buf.getvalue(), wb, caches)
 
 
 def _sheet_name(raw: Any, index: int, used: set[str]) -> str:

@@ -27,6 +27,7 @@ import { CameraEvents } from "@/components/cameras/CameraEvents";
 import { NetworkCameraList } from "@/components/cameras/NetworkCameraList";
 import { CameraNotificationToast } from "@/components/cameras/CameraNotificationToast";
 import { CameraServiceNotice } from "@/components/cameras/CameraServiceNotice";
+import { RecordingsNavChip } from "@/components/cameras/RecordingsNavChip";
 import { CameraSubnetCard } from "@/components/cameras/CameraSubnetCard";
 import { AddCameraModal } from "@/components/cameras/AddCameraModal";
 import { CameraGroupNav } from "@/components/cameras/CameraGroupNav";
@@ -325,7 +326,7 @@ export default function CamerasPage() {
       {/* Secondary sub-nav (chip row) for the camera-related sub-routes —
           People / Plates / Notifications / System / Birdseye — plus the
           "Scan network" discovery action. */}
-      <CamerasSubNav scanning={scanning} onScan={canManage ? handleScan : undefined} />
+      <CamerasSubNav cameras={cameras} scanning={scanning} onScan={canManage ? handleScan : undefined} />
 
       {/* WARP-3511: the camera service could not be read (a settings save
           restarts it for a few seconds; it can also be down). Say so, instead
@@ -525,18 +526,20 @@ export default function CamerasPage() {
 // ─────────────────────────────────────────────────────────────────
 
 interface CamerasSubNavProps {
+  /** For the Recordings chip, which sends you to one camera's recordings. */
+  cameras: ReadonlyArray<Pick<CameraInfo, "name" | "displayName">>;
   scanning: boolean;
   /** Absent for members: scanning leads to adopting a camera (owner/admin). */
   onScan?: () => void;
 }
 
-function CamerasSubNav({ scanning, onScan }: CamerasSubNavProps) {
+function CamerasSubNav({ cameras, scanning, onScan }: CamerasSubNavProps) {
   const pathname = usePathname();
 
   const items: Array<{ href: string; label: string; icon: LucideIcon; titleAttr: string }> = [
     { href: "/cameras/birdseye",      label: "Birdseye",      icon: LayoutGrid, titleAttr: "Auto-composited multi-camera view" },
-    { href: "/cameras/people",        label: "People",        icon: User,       titleAttr: "Known faces (face recognition)" },
-    { href: "/cameras/plates",        label: "Plates",        icon: Car,        titleAttr: "Detected license plates" },
+    { href: "/cameras/people",        label: "People",        icon: User,       titleAttr: "People detections and known faces" },
+    { href: "/cameras/plates",        label: "Plates",        icon: Car,        titleAttr: "Vehicle detections and license plates" },
     { href: "/cameras/notifications", label: "Notifications", icon: Bell,       titleAttr: "Per-camera notification preferences" },
     { href: "/cameras/system",        label: "System",        icon: Server,     titleAttr: "Recognition engine health" },
   ];
@@ -545,6 +548,9 @@ function CamerasSubNav({ scanning, onScan }: CamerasSubNavProps) {
 
   return (
     <div className="chiprow" style={{ overflowX: "auto" }}>
+      {/* Recordings sits first in the strip, before Birdseye: footage is what
+          people come to this page looking for. */}
+      <RecordingsNavChip cameras={cameras} />
       {items.map((item) => {
         const Icon = item.icon;
         const active = isActive(item.href);

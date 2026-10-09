@@ -340,6 +340,9 @@ jobs:
             # Lock file, not requirements-dev.txt — mirrors ci.yml's detect
             # plan and inference-manager-tests.yml.
             reqs: requirements-dev.lock
+          # Local media contract tests are intentionally GPU/weights free.
+          - service: media-gen
+          - service: web-fetch
     defaults:
       run:
         working-directory: services/${{ matrix.service }}

@@ -10,7 +10,7 @@ async function handler(_args: Record<string, unknown>, ctx: ToolContext): Promis
 const tool: Tool = {
   name: "list_smart_home_devices",
   description:
-    "List all devices connected via Matter, grouped by category (lights, switches, sensors, climate, media, covers, locks, other). Includes state, connection status, and attributes. Each device also carries the team's own names when set: `friendlyName` (what the user calls it, e.g. \"lobby strip\") and `roomName` (the room it's in, e.g. \"Reception\"). To act on a request like \"turn off the reception lights\" or \"dim the conference-room lamp\", match against these names to find the device's `nodeId`, then call control_device with it.",
+    "List Matter devices by category with state/status/attributes. Match friendlyName and roomName to user wording, then use resolved nodeId with control_device; never guess.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

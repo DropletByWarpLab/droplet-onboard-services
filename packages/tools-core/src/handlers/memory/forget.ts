@@ -139,7 +139,7 @@ async function handler(
 const tool: Tool = {
   name: "memory_forget",
   description:
-    "Permanently stop a remembered fact from influencing the model — soft-disables it (active=false; the row is retained for the evidence chain). Use when the user asks to forget, retract, or stop applying a remembered fact. Two-step: the first call returns confirmation_required with the fact — relay it to the user, and only after they explicitly approve, re-issue the SAME call with confirmed: true. Find fact ids via memory_recall.",
+    "Stop fact influencing model (soft-disable; retain evidence row). Find id via memory_recall. Relay confirmation_required fact; only after explicit approval repeat SAME call with confirmed: true.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

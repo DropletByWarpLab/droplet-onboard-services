@@ -44,6 +44,22 @@ const PM_POOL = [
 ];
 
 describe("selectAdvertisedTools (spec §3)", () => {
+  it.each([
+    ["Analyze these figures with Python", ["analyze_data"], ["files", "data"]],
+    ["Create an interactive simulation", ["create_artifact"], ["files"]],
+    ["Read this aloud as a speech file", ["create_audio"], ["files"]],
+    ["Draw me a portrait", ["generate_media"], ["files"]],
+    ["Create a video of waves", ["generate_media"], ["files"]],
+    ["Do deep research and cite your sources", ["web_search", "web_fetch", "start_agent_run"], ["data", "agent_runs"]],
+    ["Read https://example.com/guide", ["web_fetch"], ["data"]],
+  ])("routes %s to the actual chat capabilities", (userMessage, expected, domains) => {
+    const pool = [...POOL, "create_artifact", "analyze_data", "create_audio", "generate_media", "web_search", "web_fetch", "start_agent_run"];
+    const result = selectAdvertisedTools({ mode: "domains", userMessage, pool, conversationToolNames: [] });
+    expect(result.advertised).toEqual(expect.arrayContaining(expected));
+    expect(result.matchedDomains).toEqual(expect.arrayContaining(domains));
+    const restricted = selectAdvertisedTools({ mode: "domains", userMessage, pool: POOL, conversationToolNames: [] });
+    for (const name of expected) expect(restricted.advertised).not.toContain(name);
+  });
   describe("connection setup through natural language", () => {
     const tools = ["list_connections", "start_connection", "disconnect_connection"];
     it.each([

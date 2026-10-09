@@ -103,6 +103,11 @@ import { createNetworkThroughputRouter } from "./routes/network-throughput.js";
 import { createOffLanNetworkRouter } from "./routes/off-lan-network.js";
 import { createEgressAuditRouter } from "./routes/egress-audit.js";
 import { createWebRouter } from "./routes/web.js";
+import { createDataAnalysisRouter } from "./routes/data-analysis.js";
+import { createAudioRouter } from "./routes/audio-creation.js";
+import { createMediaGenerationRouter } from "./routes/media-generation.js";
+import { createOfficeFileRouter } from "./routes/office-file.js";
+import { createArtifactPreviewRouter } from "./routes/artifact-preview.js";
 import { createCamerasRouter, createCameraSharePublicRouter } from "./routes/cameras.js";
 import { createCameraBusinessHoursRouter } from "./routes/camera-business-hours.js";
 import { createCameraMotionRouter } from "./routes/camera-motion.js";
@@ -269,6 +274,7 @@ export function createApp(
   // an explicit limit; body-parser skips an already-parsed body, so the
   // global parser below leaves it alone and keeps its default elsewhere.
   app.use("/api/files/upload", express.json({ limit: "16mb" }));
+  app.use("/api/files/office", express.json({ limit: "1mb" }));
   // WARP-3267: the email ingest route carries attachments and parses its own
   // body with a larger limit, after its service-principal check — so the
   // global parser leaves that one path alone (see EMAIL_INGEST_PATH).
@@ -280,6 +286,7 @@ export function createApp(
   // Public auth routes (setup + login + invite-accept) — no authentication required.
   // Prisma is required for the WARP-217 invite-accept endpoints (token lookup).
   app.use("/api", createPublicAuthRouter(prisma));
+  app.use("/api", createArtifactPreviewRouter());
 
   // ADR-013 (PR #378) — external-IdP OIDC SSO (Google / Entra / Okta).
   // Public: a user signing in via SSO has no session yet. Mounted BEFORE the
@@ -605,6 +612,10 @@ export function createApp(
   // before the box records anyone (never creates a person).
   app.use("/api", createVoiceProfilesRouter(prisma));
   app.use("/api", createFilesRouter(prisma));
+  app.use("/api", createDataAnalysisRouter(prisma));
+  app.use("/api", createAudioRouter(prisma, config.TTS_URL));
+  app.use("/api", createMediaGenerationRouter(prisma));
+  app.use("/api", createOfficeFileRouter(prisma));
   app.use("/api", createFilesBrainRouter(prisma));
   app.use("/api", createFilesKnowledgeRouter(prisma));
   app.use("/api", createDeviceClientsRouter(prisma));

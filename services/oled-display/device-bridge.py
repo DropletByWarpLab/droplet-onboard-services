@@ -361,6 +361,7 @@ ROUTE_CLASSES = {
     ("POST", "/host/nvr-storage/resize"): "destructive",
     ("POST", "/host/nvr-storage/migrate"): "destructive",
     ("POST", "/host/nvr-storage/old/delete"): "destructive",
+    ("POST", "/host/router-pairing"): "destructive",
     ("POST", "/openwrt/wifi/hostapd"): "destructive",
     ("POST", "/openwrt/wifi/guest"): "destructive",
     ("DELETE", "/openwrt/wifi/guest"): "destructive",
@@ -4224,6 +4225,108 @@ def _nvr_post_handler(path):
 
 
 # ---------------------------------------------------------------------------
+# Router / AP / switch pairing persist (ADR-071 slice B, WARP-3739)
+# ---------------------------------------------------------------------------
+#
+# The routing service claims a freshly-flashed edge router with a password it
+# mints; the orchestrator hands that password to POST /host/router-pairing so it
+# survives a routing restart. Same split as the pool and NVR writers: this
+# sandboxed process (User=droplet, ProtectSystem=strict, NoNewPrivileges) can
+# neither write docker/secrets nor recreate a compose service, so it spools
+# {target, password} into its tmpfs RuntimeDirectory (0700 dir, 0600 file) and
+# `systemctl start`s droplet-pair-apply.service (polkit, start verb only), which
+# re-validates the request as root. The password is NEVER logged, echoed or put
+# in argv: this section logs the target and an outcome only.
+PAIR_SPOOL_DIR = os.environ.get(
+    "DROPLET_PAIR_SPOOL_DIR", "/run/droplet-bridge-pair-spool").strip()
+PAIR_APPLY_UNIT = os.environ.get(
+    "DROPLET_PAIR_APPLY_UNIT", "droplet-pair-apply.service").strip()
+_PAIR_TARGETS = ("router", "ap", "switch")
+_PAIR_PASSWORD_RE = re.compile(r"[0-9a-f]{32}")
+# The unit's own TimeoutStartSec is 120; the bridge waits just above it.
+_PAIR_APPLY_TIMEOUT_S = 130
+# One request/result slot: a second concurrent POST is refused, not queued.
+_PAIR_LOCK = threading.Lock()
+
+
+def _pair_error(status, code, message):
+    return status, {"ok": False, "code": code, "error": message}
+
+
+def _pair_spool_discard(path):
+    """Zero + unlink the spooled request. Never raises."""
+    _wipe_file(path)
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def run_router_pairing(body):
+    """POST /host/router-pairing {target, password} → (http_status, body).
+
+    Validates BEFORE anything is spooled: `target` must be one of router / ap /
+    switch and `password` exactly 32 lowercase hex characters (what the router's
+    `droplet.pair claim` mints). Never raises, never includes the password in a
+    log line or a response."""
+    if not isinstance(body, dict):
+        return _pair_error(400, "bad_request", "body must be a JSON object")
+    target = body.get("target")
+    password = body.get("password")
+    if not isinstance(target, str) or target not in _PAIR_TARGETS:
+        return _pair_error(400, "bad_request",
+                           "target must be one of router, ap, switch")
+    if (not isinstance(password, str)
+            or _PAIR_PASSWORD_RE.fullmatch(password) is None):
+        return _pair_error(400, "bad_request",
+                           "password must be exactly 32 lowercase hex characters")
+    if not _PAIR_LOCK.acquire(blocking=False):
+        return _pair_error(409, "busy", "another pairing write is in progress")
+    req_path = os.path.join(PAIR_SPOOL_DIR, "request.json")
+    try:
+        try:
+            os.makedirs(PAIR_SPOOL_DIR, mode=0o700, exist_ok=True)
+            os.chmod(PAIR_SPOOL_DIR, 0o700)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
+            # A stale request from an interrupted run must never be consumed.
+            _pair_spool_discard(req_path)
+            tmp = req_path + ".tmp"
+            _pair_spool_discard(tmp)
+            # 0600 from birth; O_EXCL|O_NOFOLLOW refuses a planted entry.
+            flags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                     | getattr(os, "O_NOFOLLOW", 0))
+            fd = os.open(tmp, flags, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump({"target": target, "password": password}, f)
+            # Atomic rename: the executor never sees a half-written request.
+            os.replace(tmp, req_path)
+        except Exception as e:                                      # noqa: BLE001
+            # str(e) can only name a path / errno here, never the password.
+            logger.warning("router pairing (%s): could not spool request: %s",
+                           target, type(e).__name__)
+            _pair_spool_discard(req_path)
+            return _pair_error(502, "executor_failed",
+                               "could not spool the pairing request")
+        try:
+            rc, out, err = _run(["systemctl", "start", PAIR_APPLY_UNIT],
+                                timeout=_PAIR_APPLY_TIMEOUT_S)
+        except Exception as e:                                      # noqa: BLE001
+            rc, out, err = 1, "", type(e).__name__
+        if rc != 0:
+            # The unit never ran (polkit denied / not installed) or the root
+            # script failed. Make sure no password stays on disk either way.
+            _pair_spool_discard(req_path)
+            msg = (err or out or "").strip()[:300] or "pairing executor failed"
+            logger.warning("router pairing (%s): executor failed (rc=%s): %s",
+                           target, rc, msg)
+            return _pair_error(502, "executor_failed", msg)
+        _pair_spool_discard(req_path)
+        logger.info("router pairing (%s): secret persisted", target)
+        return 200, {"ok": True}
+    finally:
+        _PAIR_LOCK.release()
+
+
+# ---------------------------------------------------------------------------
 # Single-box hostapd Wi-Fi WRITE (WARP-808)
 # ---------------------------------------------------------------------------
 #
@@ -5965,6 +6068,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(502, {"ok": False, "error": info})
             return self._send(200, {"ok": True,
                                     **(info if isinstance(info, dict) else {"info": info})})
+        if self.path == "/host/router-pairing":
+            # ADR-071 slice B: persist a router/AP/switch pairing secret. Admin
+            # token only (destructive class, WARP-3595): the orchestrator reaches
+            # here after an owner/admin session. The body carries a password, so
+            # it is never logged; validation happens before anything is spooled.
+            if not self._authed():
+                return self._send(401, {"ok": False, "error": "unauthorized"})
+            body, bad_request = _nvr_read_json_body(self)
+            if bad_request is not None:
+                return self._send(*bad_request)
+            status, payload = run_router_pairing(body)
+            return self._send(status, payload)
         nvr_handler = _nvr_post_handler(self.path)
         if nvr_handler is not None:
             # WARP-3514: camera-recordings storage — apply / resize / migrate /

@@ -34,7 +34,7 @@ import logging
 from contextlib import contextmanager
 from enum import Enum
 from http.client import HTTPException
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from urllib.request import Request, urlopen
 
 from request_context import get_request_id
@@ -137,6 +137,12 @@ UBUS_STATUS_INVALID_ARGUMENT = 2
 UBUS_STATUS_NOT_FOUND = 4
 UBUS_STATUS_NO_DATA = 5
 UBUS_STATUS_TIMEOUT = 7
+
+# safe_apply: seconds to let the router settle after `uci apply` before each
+# connectivity probe, and how many consecutive probes must pass before the
+# change is confirmed. Env-overridable (tests set 0 / 1).
+SAFE_APPLY_SETTLE_S = float(os.environ.get("SAFE_APPLY_SETTLE_S", "5"))
+SAFE_APPLY_PROBES = int(os.environ.get("SAFE_APPLY_PROBES", "2"))
 
 NULL_SESSION = "00000000000000000000000000000000"
 
@@ -511,12 +517,22 @@ class UbusClient:
 class SessionManager:
     """Handles authentication, session refresh, and logout."""
 
-    def __init__(self, client: UbusClient, username: str, password: str):
+    def __init__(self, client: UbusClient, username: str,
+                 password: "str | Callable[[], str]"):
         self.client = client
         self.username = username
-        self.password = password
+        # ADR-071: `password` may be a zero-arg callable (a "holder") that is
+        # resolved at every login, so a credential rotated at runtime (the
+        # pairing claim, a re-read secret file) takes effect on the next
+        # session refresh without rebuilding the router object.
+        self._password_source = password
         self.token: Optional[str] = None
         self.expires_at: float = 0
+
+    @property
+    def password(self) -> str:
+        source = self._password_source
+        return source() if callable(source) else source
 
     def login(self) -> str:
         """Authenticate and store the session token.
@@ -3084,7 +3100,8 @@ class DropletRouter:
     """
 
     def __init__(self, host: str = "192.168.50.1", port: int = 80,
-                 username: str = "droplet-ai", password: str = "",
+                 username: str = "droplet-ai",
+                 password: "str | Callable[[], str]" = "",
                  scheme: str = "http", timeout: int = 10,
                  auto_login: bool = True):
         self._client = UbusClient(host, port, scheme, timeout)
@@ -3162,7 +3179,8 @@ class DropletRouter:
             raise
 
     @contextmanager
-    def safe_apply(self, timeout: int = 60):
+    def safe_apply(self, timeout: int = 60, settle: Optional[float] = None,
+                   probes: Optional[int] = None):
         """
         Context manager for safe configuration changes.
 
@@ -3176,6 +3194,15 @@ class DropletRouter:
 
         Default is 60s to match the orchestrator's confirmation-token TTL
         (WARP-41) — a Tier 2 token can never outlive the apply window.
+
+        `settle` / `probes` (default SAFE_APPLY_SETTLE_S / SAFE_APPLY_PROBES):
+        after `uci apply` the router reconfigures asynchronously — netifd
+        rebuilds the bridge a moment AFTER the RPC returns. Probing immediately
+        answered over the old, still-open link and confirmed a change that cut
+        the box off a second later (2026-10-09: the first bridge-vlan on an
+        RB5009 switched br-lan to VLAN filtering and the rollback never fired
+        because the confirm had already landed). So each probe now waits
+        `settle` seconds first, `probes` times in a row, and only then confirms.
         """
         try:
             yield self
@@ -3205,13 +3232,21 @@ class DropletRouter:
         # Apply all pending changes
         self.uci.apply(timeout=timeout, rollback=True)
 
-        # Verify connectivity
+        # Verify connectivity — after the router has had time to actually
+        # reconfigure, and more than once, so a bridge/VLAN change that cuts
+        # the box off surfaces as ConnectionLost here and the router's own
+        # rollback timer reverts it, instead of being confirmed early.
+        settle_s = SAFE_APPLY_SETTLE_S if settle is None else float(settle)
+        n_probes = SAFE_APPLY_PROBES if probes is None else max(1, int(probes))
         connected = False
         try:
-            self.system.board_info()
+            for _ in range(n_probes):
+                if settle_s > 0:
+                    time.sleep(settle_s)
+                self.system.board_info()
             connected = True
             self.uci.confirm()
-            logger.info("Safe apply: changes confirmed.")
+            logger.info("Safe apply: changes confirmed after %d probe(s).", n_probes)
         except ConnectionLost:
             logger.warning(
                 "Safe apply: connectivity lost. Auto-rollback in %ds.", timeout

@@ -22,6 +22,7 @@
  * without a container.
  */
 import { config } from "../config.js";
+import { internalBaseUrl, internalFetch } from "../lib/internal-tls.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("sandbox-client");
@@ -61,11 +62,11 @@ export function createSandboxTransformer(opts: SandboxClientOptions = {}): Trans
   // Config is read at CALL time, not at construction: the router constructs
   // this at boot (as a default parameter), and a test that mocks `config`
   // with a partial object must not blow up on a step kind it never uses.
-  const fetchImpl = opts.fetchImpl ?? fetch;
+  const fetchImpl = opts.fetchImpl ?? internalFetch;
 
   return {
     async transform(code, inputs) {
-      const baseUrl = (opts.baseUrl ?? config.SANDBOX_URL ?? "http://sandbox:8030").replace(/\/+$/, "");
+      const baseUrl = internalBaseUrl(opts.baseUrl ?? config.SANDBOX_URL ?? "http://sandbox:8030").replace(/\/+$/, "");
       const token = opts.serviceToken ?? config.SANDBOX_SERVICE_TOKEN ?? "";
       const timeoutMs = opts.timeoutMs ?? config.SANDBOX_TRANSFORM_TIMEOUT_MS ?? 10_000;
       const outputCapBytes = opts.outputCapBytes ?? config.SANDBOX_OUTPUT_CAP_BYTES ?? 262_144;

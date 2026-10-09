@@ -7,6 +7,7 @@ import { assertFipsAtBootOrExit } from "@droplet/fips-selftest";
 import { config } from "./config.js";
 import { internalTlsEnabled, httpsServerOptions } from "./lib/internal-tls.js";
 import { createApp } from "./app.js";
+import { getRouterPairingService } from "./services/router-pairing.singleton.js";
 import { connectRedis } from "./services/cache.service.js";
 import { connectMqtt } from "./services/mqtt.service.js";
 import { notifyOwnersAndAdmins } from "./services/notifications.service.js";
@@ -608,6 +609,20 @@ async function main() {
         "API writes to schedule/phone-home/firewall state will be persisted to the " +
         "database but will NOT be enforced on the router until ROUTING_MODE is set " +
         "to real or mock.",
+    );
+  }
+
+  // ADR-071 slice B: tell routing which box fingerprint is "us" so it can tell
+  // "paired to me" from "paired elsewhere", and audit a router that reports a
+  // foreign pairing. Runs once now and every 5 min (routing may start after us
+  // or restart and forget it). Best effort: a routing build without the pairing
+  // endpoints just logs at debug. No lockKey: a PUT is idempotent.
+  if (routerSupervisionEnabled) {
+    const routerPairing = getRouterPairingService(prisma);
+    cronRuntime.scheduleInterval(
+      5 * 60_000,
+      () => routerPairing.reconcile(),
+      { immediate: true },
     );
   }
 

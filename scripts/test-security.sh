@@ -405,7 +405,8 @@ fi
 #   - the sandbox attached to exactly that network — no `ports:`, no
 #     `network_mode`, no `env_file`, no docker socket;
 #   - exactly four declared named volumes at their pinned paths (WARP-3906),
-#     including persistent app data, with no additional mount or host bind;
+#     including persistent app data, plus the one read-only service-TLS bind
+#     the sandbox stages its key from (WARP-3932); no other mount or host bind;
 #   - the hardening stanza (read-only, cap_drop ALL, no-new-privileges, tmpfs
 #     /tmp, non-root image) and the ADR-021 trio incl. `pids_limit`;
 #   - `init: true` (WARP-2900 / WARP-3012): a stopped extension's or a timed-out
@@ -447,8 +448,11 @@ expected_mounts = [
     "extensions-installed:/var/lib/workspace-ext",
     "extensions-data:/var/lib/workspace-ext-data",
 ]
-if sb.get("volumes") != expected_mounts:
-    problems.append(f"sandbox.volumes must be exactly {expected_mounts!r}, got {sb.get('volumes')!r}")
+# WARP-3932: the sandbox loads TLS from a read-only host bind of its own
+# service-tls directory; it is the only bind allowed, and it must stay :ro.
+tls_mount = "../data/secrets/service-tls/sandbox:/data/service-tls:ro"
+if sb.get("volumes") != expected_mounts + [tls_mount]:
+    problems.append(f"sandbox.volumes must be exactly {expected_mounts + [tls_mount]!r}, got {sb.get('volumes')!r}")
 declared_volumes = data.get("volumes") or {}
 for mount in expected_mounts:
     name = mount.split(":", 1)[0]

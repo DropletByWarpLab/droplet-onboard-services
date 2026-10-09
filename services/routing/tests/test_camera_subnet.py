@@ -13,6 +13,7 @@ propagates to `handle_router_error`.
 from __future__ import annotations
 
 import pytest
+from unittest.mock import call
 from fastapi.testclient import TestClient
 
 import main
@@ -142,9 +143,10 @@ def _wire_setup_router(mock_router, members):
     }
 
 
-def _bridge_vlan_writes(mock_router):
+def _bridge_vlan_writes(mock_router, vlan="100"):
     return [c for c in mock_router.uci.add.call_args_list
-            if tuple(c.args[:2]) == ("network", "bridge-vlan")]
+            if tuple(c.args[:2]) == ("network", "bridge-vlan")
+            and str(c.args[2].get("vlan")) == vlan]
 
 
 def test_setup_derives_tagged_ports_from_live_bridge(client, mock_router):
@@ -169,6 +171,136 @@ def test_setup_pi_shaped_bridge_derives_its_own_names(client, mock_router):
     assert resp.status_code == 200, resp.text
     values = _bridge_vlan_writes(mock_router)[0].args[2]
     assert values["ports"] == ["eth2:t", "eth0:t"]
+
+
+def _named_adds(mock_router, config):
+    return [c for c in mock_router.uci.add.call_args_list
+            if c.args[0] == config and c.kwargs.get("name") == "cameras"]
+
+
+def test_setup_creates_named_sections_with_add_on_a_fresh_router(client, mock_router):
+    """ubus `uci set` cannot create a section (it answers NOT_FOUND — the
+    live RB5009 500'd with exactly that), so a first-time setup must create
+    `network.cameras` and `dhcp.cameras` through `uci add` with `name=`."""
+    _wire_setup_router(mock_router, ["p2", "p3"])
+    mock_router.uci.get.side_effect = UbusError(NOT_FOUND, "section not found")
+    resp = client.post("/network/subnets/cameras/setup", json={}, headers=AUTH)
+    assert resp.status_code == 200, resp.text
+    net = _named_adds(mock_router, "network")
+    assert len(net) == 1 and net[0].args[1] == "interface"
+    assert net[0].kwargs["values"]["device"] == "br-lan.100"
+    dhcp = _named_adds(mock_router, "dhcp")
+    assert len(dhcp) == 1 and dhcp[0].args[1] == "dhcp"
+    assert dhcp[0].kwargs["values"]["interface"] == "cameras"
+    assert mock_router.uci.set.call_count == 0
+
+
+def test_setup_updates_existing_sections_with_set(client, mock_router):
+    """A re-run against a router that already has the sections updates them
+    in place instead of stacking duplicates."""
+    _wire_setup_router(mock_router, ["p2", "p3"])
+    mock_router.uci.get.return_value = {"values": {".type": "interface", "proto": "static"}}
+    resp = client.post("/network/subnets/cameras/setup", json={}, headers=AUTH)
+    assert resp.status_code == 200, resp.text
+    assert _named_adds(mock_router, "network") == []
+    assert _named_adds(mock_router, "dhcp") == []
+    set_targets = [tuple(c.args[:2]) for c in mock_router.uci.set.call_args_list]
+    assert ("network", "cameras") in set_targets
+    assert ("dhcp", "cameras") in set_targets
+
+
+# ---------------------------------------------------------------------------
+# The first bridge-vlan turns on VLAN filtering: keep untagged clients alive
+# ---------------------------------------------------------------------------
+#
+# 2026-10-09, lab RB5009: the only bridge-vlan written was "VLAN 100 tagged on
+# every port". VLAN filtering came on with no VLAN 1 entry, so the switch,
+# every PC and the Droplet box lost the LAN; safe_apply had already confirmed.
+
+
+def _network_cfg(*, with_vlan_table: bool):
+    values = {
+        "lan": {".type": "interface", "device": "br-lan", "proto": "static"},
+        "wan": {".type": "interface", "device": "eth1", "proto": "dhcp"},
+        "br_lan": {".type": "device", "name": "br-lan", "type": "bridge"},
+    }
+    if with_vlan_table:
+        values["cfg_v1"] = {".type": "bridge-vlan", "device": "br-lan", "vlan": "1",
+                            "ports": ["p2:u*", "p3:u*"]}
+    return {"values": values}
+
+
+def _wire_network_get(mock_router, cfg):
+    def fake_get(config, section=None, option=None, type=None):
+        if config == "network" and section is None:
+            return cfg
+        raise UbusError(NOT_FOUND, "section not found")
+    mock_router.uci.get.side_effect = fake_get
+
+
+def test_setup_on_a_bridge_without_vlan_table_writes_vlan1_untagged_first(client, mock_router):
+    _wire_setup_router(mock_router, ["p2", "p3"])
+    _wire_network_get(mock_router, _network_cfg(with_vlan_table=False))
+    resp = client.post("/network/subnets/cameras/setup", json={}, headers=AUTH)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["base_vlan_written"] is True
+    base = _bridge_vlan_writes(mock_router, vlan="1")
+    assert len(base) == 1
+    assert base[0].args[2]["ports"] == ["p2:u*", "p3:u*"]
+    assert len(_bridge_vlan_writes(mock_router, vlan="100")) == 1
+    # VLAN 1 must be staged before VLAN 100.
+    adds = [c for c in mock_router.uci.add.call_args_list
+            if tuple(c.args[:2]) == ("network", "bridge-vlan")]
+    assert [str(c.args[2]["vlan"]) for c in adds] == ["1", "100"]
+    # The interface on the bare bridge moves to br-lan.1 (OpenWrt's VLAN-aware layout).
+    assert call("network", "lan", {"device": "br-lan.1"}) in mock_router.uci.set.call_args_list
+    assert all(c.args[1] != "wan" for c in mock_router.uci.set.call_args_list)
+
+
+def test_setup_leaves_an_existing_vlan_table_alone(client, mock_router):
+    _wire_setup_router(mock_router, ["p2", "p3"])
+    _wire_network_get(mock_router, _network_cfg(with_vlan_table=True))
+    resp = client.post("/network/subnets/cameras/setup", json={}, headers=AUTH)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["base_vlan_written"] is False
+    assert _bridge_vlan_writes(mock_router, vlan="1") == []
+    assert len(_bridge_vlan_writes(mock_router, vlan="100")) == 1
+    assert all(c.args[1] != "lan" for c in mock_router.uci.set.call_args_list)
+
+
+def test_teardown_removes_the_camera_vlan_entry_but_never_vlan1(client, mock_router):
+    cfg = _network_cfg(with_vlan_table=True)
+    cfg["values"]["cameras"] = {".type": "interface", "device": "br-lan.100", "proto": "static"}
+    cfg["values"]["cfg_v100"] = {".type": "bridge-vlan", "device": "br-lan", "vlan": "100",
+                                 "ports": ["p2:t", "p3:t"]}
+
+    def fake_get(config, section=None, option=None, type=None):
+        if config == "network" and section is None:
+            return cfg
+        return {"values": {}}
+    mock_router.uci.get.side_effect = fake_get
+    resp = client.delete("/network/subnets/cameras", headers=AUTH)
+    assert resp.status_code == 200, resp.text
+    deletes = [tuple(c.args[:2]) for c in mock_router.uci.delete.call_args_list]
+    assert ("network", "cfg_v100") in deletes
+    assert ("network", "cfg_v1") not in deletes
+    assert ("network", "cameras") in deletes
+
+
+def test_teardown_reads_firewall_in_the_real_ubus_shape(client, mock_router):
+    """Real ubus wraps `uci get config=firewall` in {"values": {...}}; the
+    teardown used to iterate the wrapper and so never found the camera zone."""
+    def fake_get(config, section=None, option=None, type=None):
+        if config == "firewall":
+            return {"values": dict(_FW)}
+        return {"values": {}}
+    mock_router.uci.get.side_effect = fake_get
+    resp = client.delete("/network/subnets/cameras", headers=AUTH)
+    assert resp.status_code == 200, resp.text
+    deletes = [tuple(c.args[:2]) for c in mock_router.uci.delete.call_args_list]
+    assert ("firewall", "cfg_zone") in deletes
+    assert ("firewall", "cfg_fwd") in deletes
+    assert ("firewall", "cfg_rule") in deletes
 
 
 def test_setup_refuses_when_bridge_membership_unknown(client, mock_router):

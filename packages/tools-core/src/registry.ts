@@ -63,6 +63,13 @@ import createPdfReport from "./handlers/files/create-pdf-report.js";
 import createWordDocument from "./handlers/files/create-word-document.js";
 import createSpreadsheet from "./handlers/files/create-spreadsheet.js";
 import createSlideDeck from "./handlers/files/create-slide-deck.js";
+import createArtifact from "./handlers/files/create-artifact.js";
+import createAudio from "./handlers/files/create-audio.js";
+import generateMedia from "./handlers/files/generate-media.js";
+import officeFile from "./handlers/files/office-file.js";
+import analyzeData from "./handlers/data/analyze-data.js";
+import webSearch from "./handlers/data/web-search.js";
+import webFetch from "./handlers/data/web-fetch.js";
 // WARP-2664 — file cleanup: a read-only report (what could go, what an
 // organize would do), then the two approved writes it feeds. Bulk delete is
 // its own tool rather than a loop over delete_file so ONE confirmation is
@@ -333,6 +340,10 @@ const allTools: Tool[] = [
   createWordDocument,
   createSpreadsheet,
   createSlideDeck,
+  createArtifact,
+  createAudio,
+  generateMedia,
+  officeFile,
   analyzeFileCleanup,
   organizeFiles,
   deleteFiles,
@@ -464,6 +475,9 @@ const allTools: Tool[] = [
   regexTest,
   // WARP-1424: everyday utility tools (all Tier-1 read/pure-computation)
   calculate,
+  analyzeData,
+  webSearch,
+  webFetch,
   unitConvert,
   getCurrentDatetime,
   dateMath,

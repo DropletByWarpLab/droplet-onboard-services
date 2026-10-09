@@ -78,23 +78,28 @@ export function ncHeaders(ctx: ToolContext): Record<string, string> {
  * failure: a 409 means "that name is taken, pick another", which the model can
  * only act on if it is told.
  */
-export function interpretRenderResponse(
-  res: { ok: boolean; status: number; data?: unknown },
+export async function interpretRenderResponse(
+  res: Response,
   requestedPath: string,
-): ToolResult {
+): Promise<ToolResult> {
+  const payload: unknown = await res.json().catch(() => null);
+  const body = payload && typeof payload === "object" ? payload : {};
   if (!res.ok) {
-    const body = (res.data ?? {}) as { error?: string; path?: string };
+    const failure = body as { error?: string; path?: string };
     if (res.status === 409) {
       return err(
         "ALREADY_EXISTS",
-        `a file already exists at ${body.path ?? requestedPath} — choose another name`,
+        `a file already exists at ${failure.path ?? requestedPath} — choose another name`,
       );
     }
     if (res.status === 400) {
-      return err("INVALID_ARGS", body.error ?? "the document spec was rejected");
+      return err("INVALID_ARGS", failure.error ?? "the document spec was rejected");
     }
     if (res.status === 413) {
-      return err("TOO_LARGE", body.error ?? "the rendered document is too large");
+      return err("TOO_LARGE", failure.error ?? "the rendered document is too large");
+    }
+    if (res.status === 408) {
+      return err("OUTCOME_UNKNOWN", "Creation was interrupted. Check the destination filename before retrying; a save may have completed.");
     }
     if (res.status === 502) {
       return err("RENDERER_UNAVAILABLE", "the document renderer is not available");
@@ -102,7 +107,12 @@ export function interpretRenderResponse(
     return err("RENDER_FAILED", `render failed (${res.status})`);
   }
 
-  const data = (res.data ?? {}) as Partial<RenderOk>;
+  const data = body as Partial<RenderOk>;
+  if (typeof data.path !== "string" || !data.path.startsWith("/") || data.path.length > 4096 || /[\u0000-\u001f\\]/.test(data.path) || data.path.split("/").some((part) => part === "." || part === "..") ||
+      typeof data.filename !== "string" || !data.filename || data.filename.length > 255 || /[\u0000-\u001f]/.test(data.filename) ||
+      typeof data.bytes !== "number" || !Number.isSafeInteger(data.bytes) || data.bytes <= 0 || typeof data.mimeType !== "string" || !data.mimeType) {
+    return err("RENDER_FAILED", "the renderer returned no saved file metadata");
+  }
   return {
     ok: true,
     data: {

@@ -127,6 +127,7 @@ your handler is wrong; they only tell you it is wired.
 | File | Why it is in your blast radius |
 |---|---|
 | `apps/orchestrator/src/services/tool-access.service.ts` | `WRITE_TOOLS` is **derived** from `requiresWrite` here (it is no longer in `apps/orchestrator/src/routes/llm.ts`). RBAC picks your tool up with no manual sync — adding a literal list is the thing the guard test exists to reject. |
+| `apps/orchestrator/src/services/remote-tool-classification.service.ts` | `WRITE_TOOLS` also unions the remote tools whose classification row says write, read live from this cache (WARP-2436). A compiled tool never appears here; the write-tools guard reads it to prove there is still no second, hand-kept list. |
 | `packages/tools-core/src/interceptor.ts` | Enforces `requiresConfirmation` generically at dispatch. Setting the flag is the whole integration; do not hand-roll a prompt. |
 | `apps/orchestrator/src/services/confirmation-audit.ts` | Builds the signed approval audit rows from tool name and outcome only. The approval-values gate asserts these rows never carry an argument value; do not add a field an argument could be put in. |
 | `apps/orchestrator/src/services/tool-selection.service.ts` | `CORE_TOOL_NAMES` (the always-advertised floor). Read-only for a tool in an EXISTING domain — but see **site 10** if your tool opens a new one. |

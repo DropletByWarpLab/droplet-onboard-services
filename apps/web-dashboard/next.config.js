@@ -77,6 +77,12 @@ const nextConfig = {
     }
     return [];
   },
+  async headers() {
+    // Production nginx already pins frame-src to local origins. Keep the
+    // same restriction when Next is served directly (including development),
+    // so a generated artifact cannot navigate its frame to a remote site.
+    return [{ source: "/:path*", headers: [{ key: "Content-Security-Policy", value: "frame-src 'self' blob:" }] }];
+  },
 };
 
 module.exports = nextConfig;

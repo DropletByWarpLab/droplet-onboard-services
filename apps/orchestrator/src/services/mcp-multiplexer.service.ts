@@ -68,6 +68,7 @@ import type {
   McpToolDescriptor,
 } from "./mcp-client.port.js";
 import { withRemoteCallAttribution } from "./remote-call-attribution.js";
+import { auditRemoteMcp } from "./remote-mcp-gateway.service.js";
 
 const logger = createLogger("mcp-multiplexer");
 
@@ -453,6 +454,15 @@ export class McpToolMultiplexer implements McpClientPort {
         { serverId: parsed.serverId, tool: name, catalogLoaded: remote.catalogLoaded },
         "remote_tool_not_registered",
       );
+      // WARP-2439 — a refused attempt is still a row. No `tool`: this name is
+      // model-produced and not in the vetted catalog, so it is unbounded input.
+      auditRemoteMcp({
+        serverId: parsed.serverId,
+        op: "call_tool",
+        outcome: "refused_policy",
+        reason: "REMOTE_TOOL_NOT_REGISTERED",
+        who: { userId: context?.userId, agentRunId: context?.agentRunId },
+      });
       return errorOutcome(
         "REMOTE_TOOL_NOT_REGISTERED",
         name,
@@ -473,6 +483,14 @@ export class McpToolMultiplexer implements McpClientPort {
         { serverId: parsed.serverId, tool: name, code: decision.code },
         "remote_tool_denied",
       );
+      auditRemoteMcp({
+        serverId: parsed.serverId,
+        op: "call_tool",
+        outcome: "refused_policy",
+        tool: parsed.wireName,
+        reason: decision.code,
+        who: { userId: context?.userId, agentRunId: context?.agentRunId },
+      });
       return errorOutcome(decision.code, name, decision.message);
     }
 

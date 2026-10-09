@@ -1748,6 +1748,9 @@ export type RouterErrorCode =
   | "UNREACHABLE"
   | "TIMEOUT"
   | "AUTH"
+  // ADR-071: the router is enrolled to a DIFFERENT box. Re-pairing needs the
+  // router's button, so this is never folded into AUTH.
+  | "PAIRED_ELSEWHERE"
   | "ROLLED_BACK"
   | "DISABLED"
   // WARP-816: the radio is broadcasting the Droplet's own Wi-Fi on its only
@@ -2188,6 +2191,69 @@ export async function fetchSshAccess(): Promise<SshAccessStatus> {
   const res = await authFetch(`${BASE}/api/network/ssh`);
   if (!res.ok) throw new Error(`Failed to fetch SSH access status: ${res.status}`);
   return res.json();
+}
+
+// --- Router pairing (ADR-071 slice B) ---
+
+/** What the Network page's pairing card reads. `available:false` = this build's
+ *  routing service has no pairing surface, so no card is shown. */
+export interface RouterPairingView {
+  available: boolean;
+  state: "open" | "closed" | "paired" | "unknown" | null;
+  windowEndsAt: string | null;
+  /** 64 lowercase hex of the box the router is enrolled to, or null. */
+  pairedBox: string | null;
+  pairedElsewhere: boolean;
+  /** Paired and live, but the password is only in routing's memory. */
+  pendingPersist: boolean;
+  routerErrorCode: RouterErrorCode | null;
+  host: string | null;
+  model: string | null;
+}
+
+export interface RouterPairResult {
+  ok: boolean;
+  /** Only meaningful when `ok`: false = live now, lost on the next restart. */
+  persisted: boolean;
+  host?: string;
+  model?: string;
+  paired_at?: string;
+  error?: string;
+  code?: string;
+}
+
+export async function fetchRouterPairing(): Promise<RouterPairingView> {
+  const res = await authFetch(`${BASE}/api/network/router/pairing`);
+  if (!res.ok) throw new Error(`Failed to fetch router pairing state: ${res.status}`);
+  return res.json();
+}
+
+/** The pairing POSTs answer a structured `{ok:false, error, code}` on a refusal
+ *  (window closed, paired elsewhere...), which the card renders as-is. Only a
+ *  response that is not that shape throws. */
+async function postRouterPairing(path: string, fallback: string): Promise<RouterPairResult> {
+  const res = await authFetch(`${BASE}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+  const data = await res.json().catch(() => ({}));
+  if (typeof data?.ok === "boolean") return data as RouterPairResult;
+  throw new Error(
+    (typeof data?.message === "string" && data.message) ||
+      (typeof data?.error === "string" && data.error) ||
+      `${fallback}: ${res.status}`,
+  );
+}
+
+/** Owner/admin, after the confirmation dialog: claim the router and save the credential. */
+export function pairRouter(): Promise<RouterPairResult> {
+  return postRouterPairing("/api/network/router/pair", "Failed to pair the router");
+}
+
+/** Retry only the "save the password" leg after a pairing that was not persisted. */
+export function persistRouterPairing(): Promise<RouterPairResult> {
+  return postRouterPairing("/api/network/router/pair/persist", "Failed to save the router password");
 }
 
 /** Allow / disallow SSH. Tier 3 — answers 202 `confirmation_required`. */
@@ -3155,6 +3221,9 @@ export async function fetchCameraSettings(
 export async function fetchCameraSystemStatus(): Promise<CameraSystemStatus> {
   const res = await authFetch(`${BASE}/api/cameras/system`);
   if (!res.ok) throw new Error(`Failed to fetch system status: ${res.status}`);
+  // A Frigate outage is a degraded 200 carrying an all-zero status, which
+  // renders as "0 / 0 cameras, 0% CPU" — a healthy-looking page about nothing.
+  if (res.headers?.get("X-Droplet-Degraded")) throw new CamerasUnavailableError();
   const body = (await res.json()) as { status: CameraSystemStatus };
   return body.status;
 }

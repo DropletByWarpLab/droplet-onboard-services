@@ -25,7 +25,13 @@ logger = logging.getLogger(__name__)
 # ensure_birdseye() at startup. ``mode: continuous`` (not Frigate's
 # ``objects`` default) keeps idle cameras in the frame — the surface is
 # "show me everything", not "show me detections".
-BIRDSEYE_CONFIG: dict = {"enabled": True, "mode": "continuous"}
+#
+# ``restream: true`` is required for the dashboard to show the composite at
+# all: Frigate 0.17 has no birdseye MJPEG, and serves birdseye frames over HTTP
+# (``/api/birdseye/latest.jpg``, which the orchestrator polls to build the
+# dashboard stream) only when ``birdseye.restream`` is on. Boxes converged
+# before this key existed have ``restream: false`` and are re-converged here.
+BIRDSEYE_CONFIG: dict = {"enabled": True, "mode": "continuous", "restream": True}
 
 
 def camera_input_hosts(config: dict) -> set[str]:
@@ -95,8 +101,8 @@ class FrigateClient:
         a strict no-op — ``PUT /api/config/set`` with ``requires_restart=1``
         bounces Frigate and takes every camera dark for seconds, which
         must not happen on a routine service start. When the box differs
-        (birdseye disabled, or the wrong mode), the managed section is
-        deep-merged in and persisted to disk, so the fix survives
+        (birdseye disabled, the wrong mode, or restream off), the managed
+        section is deep-merged in and persisted to disk, so the fix survives
         restarts and every Droplet converges without a manual box step.
 
         Returns True when a config write was applied, False otherwise.

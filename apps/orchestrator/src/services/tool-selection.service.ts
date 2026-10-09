@@ -271,6 +271,7 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   // "make an Excel workbook" and "prepare a PowerPoint deck" must reach the
   // same writers as "create a spreadsheet" and "make presentation slides".
   { pattern: /\b(files?|documents?|docs?|pdf|photos?|images?|pictures?|notes?|folders?|receipts?|invoices?|csv|spreadsheets?|excel|xlsx|workbooks?|power[ -]?point|pptx|decks?|uploads?|attachments?|downloads?|scans?|presentations?|slides?|renam(e[sd]?|ing)|re-?label(s|l?ed|l?ing)?)\b/i, domains: ["files"] },
+  { pattern: /\b(artifacts?|interactive|simulations?|dashboards?|html|audio|narration|text.to.speech|speech file|read (this|it) aloud|draw|paint|illustrate|animate|(generate|create|make|edit) .{0,24}(image|picture|photo|portrait|video)|python|data analysis|analy[sz]e|statistics|datasets?)\b/i, domains: ["files"] },
   // WARP-2664 — the CLEANUP vocabulary. "what's cluttering my drive, get rid
   // of the junk" names no file, folder or document; without these verbs the
   // turn advertised the core four and none of the cleanup tools.
@@ -570,7 +571,7 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   // "sum up the thread" is a summary. Negatives pin those shapes. A time
   // range such as "3 - 4 pm" still admits this domain; that is the cheap
   // direction, and the date tools live here anyway.
-  { pattern: /\b(time|date|today|tomorrow|yesterday|weather|calculat\w*|maths?|mathematics|arithmetic|convert|translate|timestamp)\b|\d\s*[+*×÷^]\s*\d|\d\s+[-/x]\s+\d|\d\s*%\s*of\b/i, domains: ["data"] },
+  { pattern: /\b(time|date|today|tomorrow|yesterday|weather|calculat\w*|maths?|mathematics|arithmetic|convert|translate|timestamp|research|sources?|web|browse|python|data analysis|analy[sz]e|statistics|datasets?)\b|https?:\/\/|\d\s*[+*×÷^]\s*\d|\d\s+[-/x]\s+\d|\d\s*%\s*of\b/i, domains: ["data"] },
   // (WARP-3116's navigation rule is NOT in this list — see NAVIGATION_RULES
   // below the array, which is evaluated only for a pool that can use it.)
   // WARP-3074 — bulk labelling (`classify_items`) lives in `data`. The
@@ -693,7 +694,7 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   { pattern: /\b(storage|disks?|drives?|updates?|system|health|audit|cpu|ram|gpu|memory usage|backups?|uptime|logs?|disk space|how much (room|space))\b/i, domains: ["system"] },
   // WARP-2180 — durable background runs. Word boundaries on purpose; the
   // vocabulary is how a person hands work off, not the work's subject.
-  { pattern: /\b(background (run|task|job)s?|agent runs?|in the background|while (i'?m|i am) (away|out|asleep|gone)|keep working on (this|it)|work on (this|it) (later|overnight)|long[- ]running (task|job))\b/i, domains: ["agent_runs"] },
+  { pattern: /\b(deep research|comprehensive research|background (run|task|job)s?|agent runs?|in the background|while (i'?m|i am) (away|out|asleep|gone)|keep working on (this|it)|work on (this|it) (later|overnight)|long[- ]running (task|job))\b/i, domains: ["agent_runs"] },
   // WARP-3302 — stopping a run by its plain name. "How is it going?" needs no
   // rule: a chat that started a run carries start_agent_run in its prior tool
   // names, so continuity already advertises the domain on the follow-up.
