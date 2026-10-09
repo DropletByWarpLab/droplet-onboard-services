@@ -224,9 +224,12 @@ describe("WARP-2203 — the old character slice produced invalid JSON; the new o
 
   it("emits valid JSON for non-JSON stdio spew above the cap", async () => {
     // A remote tool: a local one's non-JSON is replaced by the WARP-3284 envelope.
-    const out = await boundedToolMessage("atlassian__read_page", "Segmentation fault ".repeat(2000), {
+    const wrapped = await boundedToolMessage("atlassian__read_page", "Segmentation fault ".repeat(2000), {
       isError: true,
     });
+    // WARP-3920 — a remote result is wrapped (header line, notice line, ..., end marker) AFTER bounding.
+    expect(wrapped.startsWith("<<<UNTRUSTED REMOTE TOOL RESULT")).toBe(true);
+    const out = wrapped.split("\n").slice(2, -1).join("\n");
     expect(out.length).toBeLessThanOrEqual(CAP);
     const parsed = parses(out) as Record<string, unknown>;
     expect(typeof parsed.value).toBe("string");
