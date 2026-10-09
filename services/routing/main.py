@@ -1648,15 +1648,11 @@ def get_camera_subnet():
         handle_router_error(exc)
 
 
-def _bridge_vlan_tagged_members(router, bridge: str = "br-lan") -> list:
-    """Every live member of *bridge*, tagged (``:t``), for a bridge-vlan write.
+def _bridge_members(router, bridge: str = "br-lan") -> list[str]:
+    """Every live member port of *bridge* (from `network.device status`).
 
-    Port names differ per router hardware (Pi lab unit: eth2/eth0 in br-lan;
-    MikroTik RB5009: p2..p8), so VLAN membership is derived from
-    `network.device status` at call time, never hardcoded. A bridge-vlan that
-    names an absent port is silently inert: netifd accepts the config, no
-    traffic ever flows on the VLAN, and safe-apply's rollback never trips
-    because connectivity was not harmed — the worst kind of wrong.
+    Raises 409 when none are visible: a bridge-vlan naming no real port is
+    silently inert, which is worse than a refusal.
     """
     devices = router.network.device_status()
     dev = devices.get(bridge) if isinstance(devices, dict) else None
@@ -1667,7 +1663,70 @@ def _bridge_vlan_tagged_members(router, bridge: str = "br-lan") -> list:
             status_code=409,
             detail=f"cannot derive VLAN membership: bridge '{bridge}' reports no members",
         )
-    return [f"{p}:t" for p in ports]
+    return ports
+
+
+def _network_sections(router) -> dict:
+    """All uci `network` sections as {name: {...}}; empty when unreadable.
+
+    Accepts both the real ubus shape (`{"values": {...}}`) and a flat map.
+    """
+    try:
+        cfg = router.uci.get("network")
+    except UbusError as exc:
+        if exc.code in (UBUS_STATUS_NOT_FOUND, UBUS_STATUS_NO_DATA):
+            return {}
+        raise
+    if not isinstance(cfg, dict):
+        return {}
+    values = cfg.get("values", cfg)
+    if not isinstance(values, dict):
+        return {}
+    return {k: v for k, v in values.items() if isinstance(v, dict)}
+
+
+def _ensure_untagged_base_vlan(router, bridge: str, members: list[str]) -> bool:
+    """Keep untagged LAN clients alive when the FIRST bridge-vlan is written.
+
+    On OpenWrt/DSA the first `bridge-vlan` section switches the bridge to
+    VLAN filtering. Every port then carries only the VLANs declared for it:
+    a bridge whose only table entry is "VLAN 100 tagged" drops ALL untagged
+    traffic (the switch, every PC, and the Droplet box itself; lab RB5009,
+    2026-10-09). So before the camera VLAN is added to a bridge that has no
+    VLAN table yet, declare VLAN 1 untagged + PVID on every current member
+    and move the interfaces that sit on the bare bridge (`lan`) onto
+    `<bridge>.1`, which is exactly OpenWrt's own VLAN-aware default layout.
+    A bridge that already has a VLAN table is left alone (the operator or the
+    firmware owns it). Returns True when the base VLAN was written.
+    """
+    sections = _network_sections(router)
+    if any(
+        sec.get(".type") == "bridge-vlan" and sec.get("device") == bridge
+        for sec in sections.values()
+    ):
+        return False
+    router.uci.add("network", "bridge-vlan", {
+        "device": bridge,
+        "vlan": "1",
+        "ports": [f"{p}:u*" for p in members],
+    })
+    for name, sec in sections.items():
+        if sec.get(".type") == "interface" and sec.get("device") == bridge:
+            router.uci.set("network", name, {"device": f"{bridge}.1"})
+    return True
+
+
+def _bridge_vlan_tagged_members(router, bridge: str = "br-lan") -> list:
+    """Every live member of *bridge*, tagged (``:t``), for a bridge-vlan write.
+
+    Port names differ per router hardware (Pi lab unit: eth2/eth0 in br-lan;
+    MikroTik RB5009: p2..p8), so VLAN membership is derived from
+    `network.device status` at call time, never hardcoded. A bridge-vlan that
+    names an absent port is silently inert: netifd accepts the config, no
+    traffic ever flows on the VLAN, and safe-apply's rollback never trips
+    because connectivity was not harmed — the worst kind of wrong.
+    """
+    return [f"{p}:t" for p in _bridge_members(router, bridge)]
 
 
 def _uci_section_exists(router, config: str, section: str) -> bool:
@@ -1716,9 +1775,14 @@ def setup_camera_subnet(req: CameraSubnetSetupRequest):
 
         # Resolved BEFORE the safe-apply window opens, so a derivation fault
         # cannot leave a rollback timer armed with nothing applied.
-        tagged_ports = _bridge_vlan_tagged_members(r)
+        members = _bridge_members(r)
+        tagged_ports = [f"{p}:t" for p in members]
 
         with r.safe_apply(timeout=60):
+            # 0. Never turn on VLAN filtering without a VLAN 1 untagged base,
+            #    or every untagged client (and this box) drops off the LAN.
+            base_vlan_written = _ensure_untagged_base_vlan(r, "br-lan", members)
+
             # 1. Create VLAN interface
             device_name = f"br-lan.{req.vlan_id}"
             _uci_upsert_named(r, "network", "interface", "cameras", {
@@ -1790,6 +1854,7 @@ def setup_camera_subnet(req: CameraSubnetSetupRequest):
             "netmask": req.netmask,
             "dhcp_range": f"{req.subnet.rsplit('.', 1)[0]}.{req.dhcp_start} - .{req.dhcp_start + req.dhcp_limit - 1}",
             "firewall": "cameras zone created with LAN→cameras and cameras→WAN forwarding",
+            "base_vlan_written": base_vlan_written,
         }
 
     except ConnectionLost as exc:
@@ -1839,12 +1904,24 @@ def teardown_camera_subnet():
         r = get_router()
 
         with r.safe_apply(timeout=60):
-            # Remove network interface
+            # Remove network interface, then the camera VLAN's bridge-vlan
+            # entry (matched on the interface's `br-lan.<id>` device; VLAN 1,
+            # the untagged base that keeps the LAN alive, is never touched).
+            sections = _network_sections(r)
+            cam_dev = str(sections.get("cameras", {}).get("device", ""))
+            cam_vlan = cam_dev.rsplit(".", 1)[1] if "." in cam_dev else ""
             _step("network.cameras delete", lambda: r.uci.delete("network", "cameras"))
+            if cam_vlan and cam_vlan != "1":
+                for name, sec in sections.items():
+                    if sec.get(".type") == "bridge-vlan" and str(sec.get("vlan")) == cam_vlan:
+                        _step(f"network.{name} (bridge-vlan {cam_vlan}) delete",
+                              lambda name=name: r.uci.delete("network", name))
             _step("network commit", lambda: r.uci.commit("network"))
 
             # Remove firewall zone and rules related to cameras
             fw_config = r.uci.get("firewall")
+            if isinstance(fw_config, dict) and isinstance(fw_config.get("values"), dict):
+                fw_config = fw_config["values"]  # real ubus shape
             if isinstance(fw_config, dict):
                 to_delete = []
                 for name, section in fw_config.items():
