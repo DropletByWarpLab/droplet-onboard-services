@@ -38,7 +38,7 @@ The rogue-DHCP incident class (uplink NIC landing inside the DHCP-serving bridge
 
 ### 5. Credentials: per-unit, operator-synced today, paired tomorrow
 
-Every device mints its own random `droplet-ai` password at first boot under `/etc/droplet/`. The box learns them via **operator copy into `.env` → `setup.sh --sync-secrets` → docker secrets** (`openwrt_password`, `switch_password`, `ap_openwrt_password`). A device reflash regenerates its credential and strands the copy — the dashboard surfaces this as the typed **AUTH / "Credentials rejected"** state (WARP-1673, and its AP/switch analogues) rather than "offline". **An automatic pairing/enrollment handshake is the named gap** (candidate: extend the QR tunnel-enroll pattern); until it lands, the manual recipe in droplet-edge-router `docs/OPERATIONS.md` is the contract.
+Every device mints its own random `droplet-ai` password at first boot under `/etc/droplet/`. The box learns them via **operator copy into `.env` → `setup.sh --sync-secrets` → docker secrets** (`openwrt_password`, `switch_password`, `ap_openwrt_password`). A device reflash regenerates its credential and strands the copy — the dashboard surfaces this as the typed **AUTH / "Credentials rejected"** state (WARP-1673, and its AP/switch analogues) rather than "offline". **The automatic pairing handshake is [ADR-071](ADR-071-box-router-pairing.md)**: the router opens a pairing window, the box mints and claims the credential, the owner clicks **Pair** in the dashboard, and the box writes `docker/secrets/openwrt_password` itself (slice B for the router; AP and switch reuse it in slice C). Until a router image carries the pairing plugin (slice A, droplet-edge-router), or for the AP and switch, the manual recipe in droplet-edge-router `docs/OPERATIONS.md` remains the contract.
 
 ### 6. ADR-018 §5 and ADR-024 are a registry with a default, not a contradiction
 
@@ -61,7 +61,7 @@ ADR-018 §5 ("no EasyMesh / TR-069") and ADR-024 (EasyMesh + UniFi backend scaff
 5. [x] AP direct-rpcd configuration + radio gating (WARP-1675).
 6. [x] Secrets plumbing for the AP credential + shape documentation in `.env.example` (this change).
 7. [ ] `setup.sh` shape detection for `edge-router` (auto-write the table in §2) + manifest enum entry.
-8. [ ] Pairing/enrollment handshake replacing the manual credential copy (design ticket; QR tunnel-enroll pattern).
+8. [ ] Pairing/enrollment handshake replacing the manual credential copy — designed in [ADR-071](ADR-071-box-router-pairing.md); box side for the router (slice B, WARP-3739) landed here, router plugin (slice A) and AP/switch reuse (slice C) are follow-ups.
 9. [ ] GS1900 bench flash + supervised live-write confirmation → flip `SWITCH_LIVE_WRITES` (droplet-edge-router `switch/docs/STATUS.md`).
 10. [ ] AP radio bring-up (WARP-1664, droplet-edge-router `ap/`).
 11. [ ] Handbook: merge the pi-edge-router runbook (PR #23) + refresh `lab-network-topology`.

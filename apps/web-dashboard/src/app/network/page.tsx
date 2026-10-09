@@ -31,6 +31,8 @@ import { DevicesTab } from "@/components/network/DevicesTab";
 // DevicesTab) so its single-editable-surface source split is render-testable.
 import { WifiTab } from "@/components/network/WifiTab";
 import { PhoneHomeCard } from "@/components/network/PhoneHomeCard";
+// ADR-071 slice B — Pair / paired-elsewhere / "paired but not saved" card.
+import { RouterPairingCard } from "@/components/network/RouterPairingCard";
 import { AiAgentAccessCard } from "@/components/network/AiAgentAccessCard";
 import { DhcpPoolForm } from "@/components/network/DhcpPoolForm";
 import { DnsOverTlsCard } from "@/components/network/DnsOverTlsCard";
@@ -94,6 +96,12 @@ const ROUTER_ERROR_COPY: Record<string, { title: string; body: string }> = {
   AUTH: {
     title: "Credentials rejected",
     body: "The shared bearer token or OpenWrt password is wrong. Re-run ./scripts/setup.sh --sync-secrets and restart the routing container.",
+  },
+  // ADR-071: the router is enrolled to a different device. The explanation (with
+  // the other device's fingerprint) is RouterPairingCard's; this is the headline.
+  PAIRED_ELSEWHERE: {
+    title: "Router paired to another device",
+    body: "This Droplet can't manage the router until it is paired again.",
   },
   ROLLED_BACK: {
     title: "Last change rolled back",
@@ -363,6 +371,9 @@ function NetworkPageInner() {
               {routerErrorMessage}
             </p>
           )}
+          {(routerErrorCode === "AUTH" || routerErrorCode === "PAIRED_ELSEWHERE") && (
+            <RouterPairingCard routerErrorCode={routerErrorCode} onChanged={refresh} />
+          )}
           {!isDisabled && (
             <button
               onClick={refresh}
@@ -390,6 +401,10 @@ function NetworkPageInner() {
 
   return (
     <ShellPage icon={<Router size={15} />} label="Network" title="Network">
+      {/* ADR-071: only ever renders here for "paired, but the password was not
+          saved" — the router is live, so the AUTH / elsewhere states are the
+          error branch's. */}
+      <RouterPairingCard routerErrorCode={null} onChanged={refresh} />
       {/* Refresh action — sits next to the tab strip where the operator's
           eye lands, paired with the Simple/Advanced mode toggle. */}
       <div className="flex items-center justify-between gap-3 mb-4 flex-wrap">
