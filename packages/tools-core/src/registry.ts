@@ -115,6 +115,11 @@ import deleteClip from "./handlers/cameras/delete-clip.js";
 // WARP-1893: rename a camera's household-facing label (displayName only —
 // never the Frigate config key, which owns the recordings).
 import renameCamera from "./handlers/cameras/rename-camera.js";
+// WARP-3927: camera activity for chat (motion, reviews, recorded footage, one-call summary)
+import getCameraMotion from "./handlers/cameras/get-camera-motion.js";
+import listCameraReviews from "./handlers/cameras/list-camera-reviews.js";
+import getCameraRecording from "./handlers/cameras/get-camera-recording.js";
+import summarizeCameraActivity from "./handlers/cameras/summarize-camera-activity.js";
 
 // switch
 import getSwitchPorts from "./handlers/switch/get-switch-ports.js";
@@ -367,6 +372,11 @@ const allTools: Tool[] = [
   setDetectionZones,
   deleteClip,
   renameCamera,
+  // WARP-3927: camera activity for chat (all Tier-1 reads)
+  summarizeCameraActivity,
+  getCameraMotion,
+  listCameraReviews,
+  getCameraRecording,
   // switch
   getSwitchPorts,
   getSwitchVlans,

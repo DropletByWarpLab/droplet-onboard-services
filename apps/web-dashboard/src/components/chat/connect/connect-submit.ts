@@ -35,6 +35,7 @@
  */
 import {
   CREDENTIAL_VARIANT_FIELD,
+  credentialsConnectPath,
   isAllowedConnectPostPath,
   isAllowedOauthStartPath,
   isProbedOnConnect,
@@ -172,10 +173,10 @@ export async function submitCredentials(
   values: FieldValues,
   variantId: string | null,
 ): Promise<ConnectAttempt> {
-  // The parser already refuses a card naming anything off the generic allowlist; this is the
-  // second lock, same as submitInline's: the connect path must name THIS card's own provider,
-  // or a card for one provider could save its secret under another provider's route.
-  if (card.post.path !== `/api/integrations/${card.provider}/connect`) {
+  // The parser already refuses a card naming anything off the generic allowlist (and, since
+  // WARP-3904's hardening, anything but its own provider's route); this is the second lock,
+  // same as submitInline's: a card for one provider must not save its secret under another's.
+  if (card.post.path !== credentialsConnectPath(card.provider)) {
     return { ok: false, tone: "other", message: GENERIC_MESSAGE };
   }
   const savePath = credentialsPathFor(card.post.path);

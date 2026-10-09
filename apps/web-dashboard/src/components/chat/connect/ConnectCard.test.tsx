@@ -316,7 +316,11 @@ describe("ConnectCard — credentials form", () => {
   });
 
   it("refuses to save when post.path names a different provider than the card, and posts nothing", async () => {
-    const { onOutcome } = setup(stripe({ post: { path: "/api/integrations/hubspot/connect" } }));
+    // The parser itself now refuses a mismatched post.path (WARP-3904 hardening), so this
+    // tampers with an already-parsed card to exercise submitCredentials' own second lock —
+    // the same defense-in-depth submitInline already has for mailbox/calendar.
+    const tampered = { ...stripe(), post: { path: "/api/integrations/hubspot/connect" } };
+    const { onOutcome } = setup(tampered);
     type(/restricted key/i, SECRET);
     click("Connect Stripe");
 
