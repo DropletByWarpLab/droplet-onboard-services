@@ -172,6 +172,12 @@ export async function submitCredentials(
   values: FieldValues,
   variantId: string | null,
 ): Promise<ConnectAttempt> {
+  // The parser already refuses a card naming anything off the generic allowlist; this is the
+  // second lock, same as submitInline's: the connect path must name THIS card's own provider,
+  // or a card for one provider could save its secret under another provider's route.
+  if (card.post.path !== `/api/integrations/${card.provider}/connect`) {
+    return { ok: false, tone: "other", message: GENERIC_MESSAGE };
+  }
   const savePath = credentialsPathFor(card.post.path);
   if (!savePath) return { ok: false, tone: "other", message: GENERIC_MESSAGE };
 

@@ -315,6 +315,17 @@ describe("ConnectCard — credentials form", () => {
     for (const [, init] of authFetch.mock.calls) expect((init as RequestInit).headers).toEqual({ "Content-Type": "application/json" });
   });
 
+  it("refuses to save when post.path names a different provider than the card, and posts nothing", async () => {
+    const { onOutcome } = setup(stripe({ post: { path: "/api/integrations/hubspot/connect" } }));
+    type(/restricted key/i, SECRET);
+    click("Connect Stripe");
+
+    expect(await screen.findByTestId("connect-card-error")).toBeInTheDocument();
+    expect(screen.getByText("Something went wrong on the box. Try again in a moment.")).toBeInTheDocument();
+    expect(authFetch).not.toHaveBeenCalled();
+    expect(onOutcome).not.toHaveBeenCalled();
+  });
+
   it("calls onOutcome exactly once, with the connected sentence and nothing that was typed", async () => {
     script(json({ state: "PROVISIONING" }), json({ status: "CONNECTED" }));
     const { onOutcome, rerender } = setup(stripe());
