@@ -72,6 +72,10 @@ export interface RemoteMcpSessionHealth {
   consecutiveFailures: number;
   lastReadyAt: number | null;
   reason: string | null;
+  /** WARP-2409 — how many per-connection sessions the bridge holds for this
+   *  server. A count only: no ids, no members. */
+  connectionSessions?: number;
+}| null;
 }
 
 /** The bridge's refusal vocabulary. Mirrors `http-api.ts`'s
@@ -186,6 +190,14 @@ const DEFAULT_TIMEOUT_MS = 30_000;
  */
 const SERVER_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
+/** A connection id is the `McpOAuthConnection` uuid; refuse anything else before it reaches a body. */
+const CONNECTION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function assertConnectionId(id: string): void {
+  if (!CONNECTION_ID_PATTERN.test(id)) {
+    throw new McpBridgeError("INVALID_CONNECTION_ID", "connectionId is not a valid connection id.", 0);
+  }
+}
+
 export class McpBridgeClient implements McpClientPort {
   readonly serverId: string;
   readonly #baseUrl: string;
@@ -201,6 +213,7 @@ export class McpBridgeClient implements McpClientPort {
    * bridge's own session state and is never conflated with it.
    */
   #opened = false;
+  #closeEpoch = 0;
 
   /**
    * The tool names the BRIDGE advertised on the last successful `listTools`.
@@ -244,8 +257,36 @@ export class McpBridgeClient implements McpClientPort {
       `/sessions/${this.serverId}/open`,
       input,
     );
-    this.#opened = true;
+    // A per-connection session (WARP-2409) is not THIS client's base session.
+    if (typeof input.connectionId !== "string") this.#opened = true;
     return body.state;
+  }
+
+  /**
+   * WARP-2409 — dispatch one call on a member's or the Workspace's own
+   * bridge session (keyed by the `McpOAuthConnection` id). A 409 `NO_SESSION`
+   * means the bridge no longer holds it; the caller re-opens and retries once.
+   */
+  async callToolFor(connectionId: string, name: string, args: Record<string, unknown>): Promise<McpToolCallOutcome> {
+    assertConnectionId(connectionId);
+    const body = await this.#send<{ result: McpToolCallOutcome }>(
+      "POST",
+      `/sessions/${this.serverId}/call`,
+      { name, args, connectionId },
+    );
+    return body.result;
+  }
+
+  /** WARP-2409 — close one per-connection session (sign-out, refresh failure). */
+  async closeConnection(connectionId: string): Promise<void> {
+    assertConnectionId(connectionId);
+    await this.#send("POST", `/sessions/${this.serverId}/close`, { connectionId });
+  }
+
+  /** Bumps on every {@link close}: the bridge tears down every per-connection
+   *  session with the base one, so a cache keyed on this knows to drop its own. */
+  get closeEpoch(): number {
+    return this.#closeEpoch;
   }
 
   async listTools(): Promise<McpToolDescriptor[]> {
@@ -353,6 +394,7 @@ export class McpBridgeClient implements McpClientPort {
       // leaving `#opened` true would let a later call dial a session this
       // process has already disowned.
       this.#opened = false;
+      this.#closeEpoch++;
     }
   }
 

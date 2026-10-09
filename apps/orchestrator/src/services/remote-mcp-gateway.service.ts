@@ -59,6 +59,30 @@ import { remoteCallAttribution, type RemoteCallAttribution } from "./remote-call
 
 const logger = createLogger("remote-mcp-gateway");
 
+/** WARP-2409 — whose sign-in a call ran under: the asking member's own, the
+ *  Workspace connection, or the shared API token. Recorded as `refs.credential`. */
+export type RemoteMcpCredentialKind = "member" | "workspace" | "api-token";
+
+/** A refusal made BEFORE any vendor call because no usable sign-in exists. */
+export type RemoteMcpSignInRefusal = "REMOTE_SIGN_IN_REQUIRED" | "REMOTE_SIGN_IN_EXPIRED";
+
+/**
+ * WARP-2409 — an upstream that chooses the credential per call (the member
+ * routing port). The gate prefers it over `callTool` so the audit row can say
+ * which credential ran, and so a sign-in refusal is audited as a policy refusal.
+ */
+export interface CredentialAttributingPort extends McpClientPort {
+  /** Credential the catalog session was opened with, for the listing audit. */
+  readonly catalogCredential?: RemoteMcpCredentialKind;
+  callToolAttributed(name: string, args: Record<string, unknown>): Promise<
+    | { outcome: McpToolCallOutcome; credential: RemoteMcpCredentialKind }
+    | { outcome: McpToolCallOutcome; refusal: RemoteMcpSignInRefusal }
+  >;
+}
+
+const isAttributing = (p: McpClientPort): p is CredentialAttributingPort =>
+  typeof (p as Partial<CredentialAttributingPort>).callToolAttributed === "function";
+
 /** The two outbound operations this front covers. */
 export type RemoteMcpOp = "list_tools" | "call_tool";
 
@@ -96,6 +120,13 @@ export interface RemoteMcpGatePrisma {
   /** WARP-3912 — the `remote_mcp` off-LAN channel row. */
   offLanAllowlistChannel: {
     findUnique(args: unknown): Promise<{ enabled: boolean } | null>;
+  };
+  /**
+   * WARP-2409 — rule 3 also passes on a signed-in connection. Optional so a
+   * caller without the model sees only the API-token rung (fail closed).
+   */
+  mcpOAuthConnection?: {
+    count(args: unknown): Promise<number>;
   };
   integrationConnection: {
     findFirst(args: unknown): Promise<{
@@ -165,6 +196,23 @@ export async function remoteMcpGate(
       message: "The remote MCP gate could not be read. Refusing egress.",
     };
   }
+  // WARP-2409 — a CONNECTED sign-in (a member's or the Workspace's) satisfies rule 3
+  // when the API-token connection does not. Which one a CALL uses is decided
+  // per call (member-routing.port.ts); this only says the server may be dialled.
+  if (!(row?.status === "CONNECTED" && row.providerTokensEnc !== null) && prisma.mcpOAuthConnection) {
+    try {
+      if ((await prisma.mcpOAuthConnection.count({ where: { provider: serverId, state: "CONNECTED" } })) > 0) {
+        return { allowed: true };
+      }
+    } catch (err) {
+      logger.warn({ err, serverId }, "remote_mcp sign-in read failed — failing closed (no egress)");
+      return {
+        allowed: false,
+        reason: "gate_unavailable",
+        message: "The remote MCP gate could not be read. Refusing egress.",
+      };
+    }
+  }
   if (!row) {
     return {
       allowed: false,
@@ -199,6 +247,8 @@ export function auditRemoteMcp(input: {
   reason?: string;
   /** Who the call ran for. Defaults to the multiplexer's in-process scope
    *  (remote-call-attribution.ts); a caller outside that scope passes it. */
+  /** WARP-2409 — whose credential the call ran under. A name, never a token. */
+  credential?: RemoteMcpCredentialKind;
   who?: RemoteCallAttribution;
 }): void {
   // WARP-2439 — the requesting member, the way the stdio `tool_call` row names
@@ -219,6 +269,7 @@ export function auditRemoteMcp(input: {
       outcome: input.outcome,
       ...(input.tool ? { tool: input.tool } : {}),
       ...(input.reason ? { reason: input.reason } : {}),
+      ...(input.credential ? { credential: input.credential } : {}),
       ...(who?.userId ? { userId: who.userId } : {}),
       ...(who?.agentRunId ? { agentRunId: who.agentRunId } : {}),
     },
@@ -318,7 +369,8 @@ export function createGatedRemoteMcpPort(opts: GatedRemoteMcpPortOptions): McpCl
       }
       try {
         const tools = await abortable(serverId, () => upstream.listTools());
-        audit({ serverId, op: "list_tools", outcome: "allowed" });
+        const catalogCredential = isAttributing(upstream) ? upstream.catalogCredential : undefined;
+        audit({ serverId, op: "list_tools", outcome: "allowed", ...(catalogCredential ? { credential: catalogCredential } : {}) });
         return tools;
       } catch (err) {
         audit({
@@ -347,6 +399,16 @@ export function createGatedRemoteMcpPort(opts: GatedRemoteMcpPortOptions): McpCl
         return errorOutcome("REMOTE_MCP_GATE_REFUSED", name, decision.message);
       }
       try {
+        if (isAttributing(upstream)) {
+          const r = await abortable(serverId, () => upstream.callToolAttributed(name, args));
+          if ("refusal" in r) {
+            // No usable sign-in: refused before the vendor, the same policy refusal as a denied tool.
+            audit({ serverId, op: "call_tool", outcome: "refused_policy", tool: name, reason: r.refusal });
+          } else {
+            audit({ serverId, op: "call_tool", outcome: "allowed", tool: name, credential: r.credential });
+          }
+          return r.outcome;
+        }
         const result = await abortable(serverId, () => upstream.callTool(name, args));
         audit({ serverId, op: "call_tool", outcome: "allowed", tool: name });
         return result;
@@ -380,7 +442,7 @@ const aborted = (err: unknown): boolean =>
 
 /** Same envelope `mcp-multiplexer.service.ts` uses for a refusal, so the model
  *  sees one shape whichever layer refused. */
-function errorOutcome(code: string, tool: string, message: string): McpToolCallOutcome {
+export function errorOutcome(code: string, tool: string, message: string): McpToolCallOutcome {
   return {
     isError: true,
     content: [{ type: "text", text: JSON.stringify({ error: code, tool, message }) }],
