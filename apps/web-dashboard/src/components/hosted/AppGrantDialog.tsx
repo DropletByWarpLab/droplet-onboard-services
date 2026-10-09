@@ -1,0 +1,55 @@
+"use client";
+import { useEffect, useRef, useState, type RefObject } from "react";
+import useSWR from "swr";
+import { Dialog } from "@/components/Dialog";
+import { fetchHostedAppGrants, hostedErrorCopy, updateHostedAppGrants } from "./api";
+import { useOwnerConfirmation } from "./useOwnerConfirmation";
+import { useHostedActionScope } from "./useHostedActionScope";
+
+export function AppGrantDialog({ slug, onClose, onSaved, triggerRef }: {
+  slug: string; onClose: () => void; onSaved: () => Promise<void>; triggerRef: RefObject<HTMLElement | null>;
+}) {
+  const scope = useHostedActionScope(`grants:${slug}`, ["owner"]);
+  const openedBy = useRef(scope.key);
+  const retired = useRef(false);
+  if (openedBy.current !== scope.key) retired.current = true;
+  const visible = scope.key !== null && !retired.current;
+  useEffect(() => { if (!visible) onClose(); }, [visible, onClose]);
+  const pending = useRef<AbortController | null>(null);
+  // authFetch can retry after a shared refresh; retire the request itself as
+  // well as its UI callbacks before it can act with replacement credentials.
+  useEffect(() => () => { pending.current?.abort(); pending.current = null; }, [scope.key]);
+  const initialFocus = useRef<HTMLInputElement>(null);
+  const grants = useSWR(visible ? `/api/extensions/${slug}/grants` : null, () => fetchHostedAppGrants(slug));
+  const [members, setMembers] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const owner = useOwnerConfirmation({ actionLabel: "Save access", onError: setError, triggerRef });
+  const allowMembers = members ?? grants.data?.roles.includes("family") ?? false;
+  const save = async (currentPassword?: string) => {
+    const isCurrent = scope.capture();
+    if (!visible || !isCurrent()) return;
+    const operation = new AbortController(); pending.current = operation;
+    setBusy(true); setError(null);
+    try { await updateHostedAppGrants(slug, allowMembers ? ["family"] : [], currentPassword, operation.signal); if (!isCurrent()) return; await onSaved(); if (isCurrent()) onClose(); }
+    catch (err) { if (isCurrent() && !owner.requestConfirmation(err, save)) setError(hostedErrorCopy(err)); }
+    finally { if (pending.current === operation) pending.current = null; if (isCurrent()) setBusy(false); }
+  };
+  if (!visible) return null;
+  return <>
+    <Dialog open={!owner.confirmingIdentity} onClose={() => { if (!busy) onClose(); }} triggerRef={triggerRef}
+      initialFocusRef={initialFocus} labelledBy="app-grants-heading">
+      <form className="flex flex-col gap-3" onSubmit={(event) => { event.preventDefault(); if (!busy && grants.data) void save(); }}>
+        <h2 id="app-grants-heading" className="type-headline">Who can open {slug}</h2>
+        <p className="sub">The owner and admins always have access. Guests cannot open apps.</p>
+        {grants.isLoading && <p role="status" className="sub">Loading access…</p>}
+        {grants.error && <p role="alert" className="sub">Couldn&apos;t read access. {hostedErrorCopy(grants.error)}</p>}
+        {grants.data && <label><input ref={initialFocus} type="checkbox" checked={allowMembers} disabled={busy} onChange={(event) => setMembers(event.target.checked)} /> Allow members to open this app</label>}
+        {error && <p role="alert" className="sub" style={{ color: "var(--danger-ink)" }}>{error}</p>}
+        <div className="flex justify-end gap-2"><button type="button" className="btn" disabled={busy} onClick={onClose}>Cancel</button>
+          <button type="submit" className="btn primary" disabled={busy || !grants.data || !!grants.error}>{busy ? "Saving…" : "Save access"}</button></div>
+      </form>
+    </Dialog>
+    {owner.confirmation}
+  </>;
+}

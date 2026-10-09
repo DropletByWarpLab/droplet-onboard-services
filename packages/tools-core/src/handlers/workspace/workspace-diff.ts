@@ -11,7 +11,7 @@ const inputSchema = {
   properties: {
     base: {
       type: "string",
-      description: "Optional commit or tag to diff HEAD against. Omit for the uncommitted changes.",
+      description: "Commit/tag; omit for uncommitted changes.",
     },
   },
   required: [],
@@ -43,7 +43,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const workspaceDiff: Tool = {
   name: "workspace_diff",
   description:
-    "Show the changes in this run's workspace: the uncommitted edits, or, given a base commit or tag, everything since it.",
+    "Show workspace edits: uncommitted by default, or changes since base.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

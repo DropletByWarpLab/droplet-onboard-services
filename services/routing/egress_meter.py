@@ -94,6 +94,8 @@ CHANNEL_KEYS = (
     # WARP-3532 — work webhooks and chat-app notifications (ADR-069 §9). No
     # overlay chain classifies it yet, so it reads 0 until one does.
     "work_integrations",
+    # WARP-3912 — outbound MCP master switch (ADR-043 §4); no chain classifies it.
+    "remote_mcp",
 )
 CHAIN_PREFIX = "droplet_offlan_"
 

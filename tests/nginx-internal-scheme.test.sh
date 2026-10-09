@@ -11,7 +11,7 @@
 #   * the mTLS variant maps to https + presents the gateway client cert with
 #     verification pinned to the internal CA,
 #   * nginx.conf includes the active variant and uses $internal_scheme on the
-#     three FIRST-PARTY legs only (user-plane legs stay literal http://),
+#     FIRST-PARTY legs only (user-plane legs stay literal http://),
 #   * the entrypoint actually SELECTS the right variant from
 #     DROPLET_INTERNAL_TLS (executed here against a temp dir),
 #   * the Dockerfile bakes both variants + the selector and self-tests them.
@@ -53,17 +53,41 @@ else
   fail "mtls variant is missing the https map or a proxy_ssl directive"
 fi
 
-# 3) nginx.conf includes the active variant; the five first-party legs use
+# 3) nginx.conf includes the active variant; the seven first-party legs use
 #    $internal_scheme (the three orchestrator/ai-gateway legs, the WARP-2093
 #    streaming `location = /api/files/upload`, and the WARP-3452 /llm/ leg to
-#    ai-gateway); user-plane legs are still literal http://.
+#    ai-gateway, plus hosted relay and workspace import); user-plane legs are
+#    still literal http://.
 conf="$NGINX_DIR/nginx.conf"
 scheme_legs=$(grep -cE 'proxy_pass[[:space:]]+\$internal_scheme://' "$conf")
 if grep -qE 'include[[:space:]]+/etc/nginx/internal-scheme\.active\.conf;' "$conf" \
-   && [ "$scheme_legs" -eq 5 ]; then
-  pass "nginx.conf includes internal-scheme.active.conf; 5 first-party legs use \$internal_scheme"
+   && [ "$scheme_legs" -eq 7 ]; then
+  pass "nginx.conf includes internal-scheme.active.conf; 7 first-party legs use \$internal_scheme"
 else
-  fail "nginx.conf include/scheme-leg count wrong (got $scheme_legs \$internal_scheme legs, want 5)"
+  fail "nginx.conf include/scheme-leg count wrong (got $scheme_legs \$internal_scheme legs, want 7)"
+fi
+# WebSocket-required legs must allow only that protocol in BOTH headers.
+# Counting Connection alone would still permit a raw h2c Upgrade upstream.
+upgrade_map=$(awk '/map \$http_upgrade \$websocket_upgrade \{/ { inblock = 1; next }
+  inblock && /^[[:space:]]*}/ { exit } inblock { print }' "$conf")
+connection_map=$(awk '/map \$websocket_upgrade \$connection_upgrade \{/ { inblock = 1; next }
+  inblock && /^[[:space:]]*}/ { exit } inblock { print }' "$conf")
+if printf '%s\n' "$upgrade_map" | grep -qE "^[[:space:]]*default[[:space:]]+'';" \
+   && printf '%s\n' "$upgrade_map" | grep -qE '^[[:space:]]*websocket[[:space:]]+websocket;' \
+   && printf '%s\n' "$connection_map" | grep -qE '^[[:space:]]*default[[:space:]]+close;' \
+   && printf '%s\n' "$connection_map" | grep -qE '^[[:space:]]*websocket[[:space:]]+upgrade;' \
+   && ! grep -qE 'proxy_set_header[[:space:]]+Upgrade[[:space:]]+\$http_upgrade;' "$NGINX_DIR"/*.conf; then
+  pass "WebSocket legs strip arbitrary Upgrade values and pair Connection with the filtered protocol"
+else
+  fail "a WebSocket leg can forward a protocol other than websocket"
+fi
+hosted_leg=$(awk '/listen 8443 ssl;/ { inblock = 1 } inblock { print }
+  inblock && /^[[:space:]]*}[[:space:]]*$/ { exit }' "$conf")
+if printf '%s\n' "$hosted_leg" | grep -qE 'proxy_set_header[[:space:]]+Upgrade[[:space:]]+"";' \
+   && printf '%s\n' "$hosted_leg" | grep -qE 'proxy_set_header[[:space:]]+Connection[[:space:]]+"";'; then
+  pass "hosted relay strips both Upgrade and Connection (no WebSockets v1)"
+else
+  fail "hosted relay can forward a connection upgrade"
 fi
 # WARP-1686: the docserver leg moved out of nginx.conf into the DOCS_ENGINE
 # variant pair (docs-engine.{collabora,onlyoffice}.conf — selected at container

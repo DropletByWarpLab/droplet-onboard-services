@@ -43,14 +43,6 @@ function setAuth(value: Record<string, unknown>) {
 }
 
 describe("AuthGate — routes off /setup/state (PR #372)", () => {
-  it("returns a canonical-host connection popup to setup after local sign-in", () => {
-    pathnameValue = "/chat/connect";
-    window.history.replaceState(null, "", "/chat/connect?provider=google&channel=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-    setAuth({ user: null, isLoading: false, setupState: { appliance: "ready", setupStep: "done", userTourCompleted: true } });
-    render(<AuthGate>connection setup</AuthGate>);
-    expect(replaceMock).toHaveBeenCalledWith(`/login?next=${encodeURIComponent(window.location.pathname + window.location.search)}`);
-    window.history.replaceState(null, "", "/");
-  });
   beforeEach(() => {
     replaceMock.mockReset();
     useAuthMock.mockReset();

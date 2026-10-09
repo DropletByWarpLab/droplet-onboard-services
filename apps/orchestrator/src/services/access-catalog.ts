@@ -421,6 +421,12 @@ export const FEATURE_UNGATED_TOOL_DOMAINS: Readonly<Partial<Record<ToolDomain, s
     "the model only inside a workshop run (bound_tool_domains), which only owner/admin may " +
     "start, and /api/workspace refuses any call whose run is not the actor's, running, and " +
     "bound to that workspace. The tool grant withholds the offer.",
+  hosted_apps:
+    "Hosted web-app discovery and logs (WARP-3909). Workshop is not a registered module, " +
+    "so a feature grant cannot own this domain. The domain tool grant controls Chat's offer; " +
+    "the hosted backend resolves the current acting human and applies explicit per-app " +
+    "HostedAppGrant visibility (family only when granted). Logs remain owner/admin-only, " +
+    "and app sessions/relay are independently gated by supervision and current app grants.",
   erp:
     "Connector reach is the §5.4 connectors axis (AccessRoleConnectorGrant), not a feature, " +
     "and erp is never a grantable tool domain.",

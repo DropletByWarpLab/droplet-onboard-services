@@ -45,3 +45,7 @@ so an existing box gains `rest-profile`. A template directory `templates.git`
 already has is never touched, even when the image's copy differs: an
 operator's commits to it are theirs. Editing an existing template here
 therefore changes what NEW boxes seed, not what existing boxes hold.
+
+## Hosted apps
+
+`static-site`, `node-app` and `python-app` start a web app with no external dependencies. Import existing code or edit a template, ask Chat to set it up in a workspace, run `app-check`, then review and promote the pinned proposal. Promotion signs the app. Ports are assigned internally; apps open through the dedicated hosted-app listener. Built output and vendored dependencies must be committed.

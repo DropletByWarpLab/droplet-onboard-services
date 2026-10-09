@@ -387,6 +387,12 @@ export function toolAllowedForTier(
   isVoice = false,
 ): boolean {
   if (isPrivilegedRole(tier)) return true;
+  // WARP-3916 (ADR-072 section 3) — guests are external: first-party tools only. A
+  // POSITIVE allowlist (compiled catalog), not a denylist on live registry state, so a
+  // remote/extension/unknown name is refused whether or not its server is attached at
+  // the moment this runs (offer-time and execute-time can never skew). Axis A, so every
+  // caller of the shared predicate inherits it.
+  if (tier === "guest" && !CATALOG_BY_NAME.has(name)) return false;
   // Connection handlers and their browser routes serve members and admins;
   // even their read-only setup descriptors are not offered to external guests.
   if (CATALOG_BY_NAME.get(name)?.domain === "connections" && tier !== "family") return false;

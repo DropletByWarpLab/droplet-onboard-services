@@ -18,7 +18,7 @@ import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("extension-sandbox");
 
-export type ExtensionRuntime = "node20" | "python312";
+export type ExtensionRuntime = "node20" | "python312" | "static";
 
 export interface ProposalManifest {
   workspaceId: string;
@@ -46,6 +46,8 @@ export interface SandboxExtensionStatus {
   port: number;
   running: boolean;
   process: { state: string; restarts: number; exitCode: number | null } | null;
+  kind?: "extension" | "app";
+  relayKey?: string;
 }
 
 /** One entry of GET /extensions: an extension the sandbox holds. */
@@ -60,10 +62,12 @@ export interface ExtensionInstallRequest {
   commit: string;
   tree: string;
   runtime: ExtensionRuntime;
-  entrypoint: string;
+  entrypoint?: string;
+  kind?: "extension" | "app";
+  http?: { health: string; dir?: string; spa?: boolean };
   memoryMb: number;
   /** The extension's call-back bearer (dxt_…); it reaches the child's env only. */
-  token: string;
+  token?: string;
   orchestratorUrl?: string;
 }
 
@@ -97,7 +101,8 @@ export interface ExtensionSandboxClient {
   install(slug: string, req: ExtensionInstallRequest): Promise<SandboxExtensionStatus>;
   /** Stop the process; a missing one is not an error. */
   stop(slug: string): Promise<void>;
-  uninstall(slug: string): Promise<void>;
+  uninstall(slug: string, deleteData?: boolean): Promise<void>;
+  logs?(slug: string, limit?: number, since?: number): Promise<unknown>;
   /** Relay one JSON-RPC message to the extension (used by the attach port, H3). */
   rpc(slug: string, message: unknown, timeoutMs?: number): Promise<{ status: number; json: unknown }>;
 }
@@ -300,8 +305,11 @@ export function createExtensionSandboxClient(
       if (r.status === 404 && !isGate(r)) return;
       unwrap(r, "stop extension");
     },
-    async uninstall(slug) {
-      unwrap(await call("DELETE", slugPath(slug), undefined, DEFAULT_TIMEOUT_MS), "uninstall extension");
+    async uninstall(slug, deleteData = false) {
+      unwrap(await call("DELETE", slugPath(slug) + (deleteData ? "?deleteData=true" : ""), undefined, DEFAULT_TIMEOUT_MS), "uninstall extension");
+    },
+    async logs(slug, limit = 200, since) {
+      return unwrap(await call("GET", `${slugPath(slug)}/logs?limit=${limit}${since === undefined ? "" : `&since=${since}`}`, undefined, DEFAULT_TIMEOUT_MS), "app logs");
     },
     async rpc(slug, message, timeoutMs) {
       const budget = timeoutMs ?? DEFAULT_TIMEOUT_MS;

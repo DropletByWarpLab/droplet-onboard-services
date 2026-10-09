@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "static-site",
+  "name": "Static Site",
+  "version": "0.1.0",
+  "kind": "app",
+  "runtime": "static",
+  "http": {
+    "health": "/healthz",
+    "dir": "."
+  },
+  "provides": {
+    "tools": [],
+    "routineDrafts": [],
+    "proposedGrants": []
+  },
+  "resources": {
+    "memoryMb": 128,
+    "processes": 1
+  },
+  "egress": "none"
+}

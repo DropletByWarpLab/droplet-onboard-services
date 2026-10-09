@@ -18,12 +18,12 @@ const inputSchema = {
     command: {
       type: "string",
       description:
-        "The command line to run: one of npm test, npm run build, pytest, ruff, tsc, with plain arguments (e.g. pytest -q, ruff check ., tsc --noEmit). Nothing else runs.",
+        "npm test, npm run build, pytest, ruff or tsc with plain arguments; app-check alone probes an app.",
     },
     timeout_seconds: {
       type: "integer",
       minimum: 1,
-      description: "Optional ceiling. Default 120, at most 600.",
+      description: "Seconds: default 120, max 600.",
     },
   },
   required: ["command"],
@@ -54,6 +54,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     stdout: string;
     stderr: string;
     truncated: boolean;
+    appCheck?: Record<string, unknown>;
   };
   return {
     ok: true,
@@ -65,6 +66,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
       durationMs: data.durationMs,
       stdout: data.stdout,
       stderr: data.stderr,
+      ...(data.appCheck ? { appCheck: data.appCheck } : {}),
       ...(data.truncated ? { truncated: true, note: "Output was longer than what is shown." } : {}),
       message: data.timedOut
         ? `${data.argv.join(" ")} did not finish in time.`
@@ -78,7 +80,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const workspaceRun: Tool = {
   name: "workspace_run",
   description:
-    "Run one allowed command in this run's workspace — npm test, npm run build, pytest, ruff or tsc, with plain arguments — and return exit code and output.",
+    "Run an allowed check in the run's workspace; returns exit code and bounded output.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: false,

@@ -110,8 +110,9 @@ BACKUP_KEEP="${BACKUP_KEEP:-7}"
 # reset destroys and that holds customer/operator data must be captured here.
 # Postgres volumes are excluded (captured via pg_dump); caches are excluded.
 # workspace-git (WARP-2896) is the workshop's bare git store — every workspace
-# commit is pushed there, so it alone is the customer's extension work; the
-# working checkouts are excluded below as rebuildable.
+# commit is pushed there, so it holds the customer's extension code; the
+# working checkouts are excluded below as rebuildable. extensions-data
+# (WARP-3906) holds app state that cannot be rebuilt from those commits.
 # pm-attachments (WARP-1505) holds the files customers attached to work items;
 # the Postgres rows in the pg_dump carry only their metadata, so the two must
 # travel together or a restore pairs rows with files that are gone.
@@ -123,6 +124,7 @@ DATA_VOLUMES=(
   nvrdata
   ops-audit
   workspace-git
+  extensions-data
   pm-attachments
 )
 

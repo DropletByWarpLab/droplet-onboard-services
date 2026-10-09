@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "python-app",
+  "name": "Python App",
+  "version": "0.1.0",
+  "kind": "app",
+  "runtime": "python312",
+  "http": {
+    "health": "/healthz"
+  },
+  "provides": {
+    "tools": [],
+    "routineDrafts": [],
+    "proposedGrants": []
+  },
+  "resources": {
+    "memoryMb": 128,
+    "processes": 1
+  },
+  "egress": "none",
+  "entrypoint": "app.py"
+}

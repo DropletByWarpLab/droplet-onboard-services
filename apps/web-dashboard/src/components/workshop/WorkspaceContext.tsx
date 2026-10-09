@@ -47,6 +47,8 @@ import {
   type WorkspaceStatus,
 } from "./workspaces/api";
 import { when } from "./RunTranscript";
+import { WorkspaceAppFacts } from "@/components/hosted/WorkspaceAppFacts";
+import { APP_TEMPLATES } from "./NewAppForm";
 
 const CALM_ERROR = "Something went wrong on the box. Try again in a moment.";
 const POLL_MS = 5_000;
@@ -72,10 +74,12 @@ export interface WorkspaceContextProps {
   onOpenRun?: (runId: string) => void;
   /** The owner deleted this custom tool; the pane has nothing left to show. */
   onDeleted?: (workspace: { id: string; name: string }) => void;
+  appIntent?: boolean;
 }
 
-export function WorkspaceContext({ workspaceId, live, drawer, onClose, onStartRun, onOpenRun, onDeleted }: WorkspaceContextProps) {
-  const [detail, setDetail] = useState<WorkspaceDetail | null>(null);
+export function WorkspaceContext({ workspaceId, live, drawer, onClose, onStartRun, onOpenRun, onDeleted, appIntent }: WorkspaceContextProps) {
+  const [loadedDetail, setDetail] = useState<WorkspaceDetail | null>(null);
+  const detail = loadedDetail?.id === workspaceId ? loadedDetail : null;
   const [log, setLog] = useState<WorkspaceLogEntry[] | null>(null);
   const [diff, setDiff] = useState<{ diff: string; truncated: boolean } | null>(null);
   const [output, setOutput] = useState<WorkspaceLastRun | null | undefined>(undefined);
@@ -86,18 +90,19 @@ export function WorkspaceContext({ workspaceId, live, drawer, onClose, onStartRu
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleteError, setDeleteError] = useState<{ text: string; title?: string } | null>(null);
   const deleteTrigger = useRef<HTMLButtonElement>(null);
-  // The pane is reused across workspaces (no key), so an export or a delete
-  // still running when the person switches must not write onto the next
-  // workspace's pane. Every switch bumps the generation; each reports only
-  // into its own.
+  // The pane is reused across workspaces (no key). Reads and actions still
+  // running when the person switches must report only into their own pane.
   const paneGen = useRef(0);
   const { user } = useAuth();
   const canExport = isAdminRole(user?.role);
   const canDelete = user?.role === "owner";
 
   const load = useCallback(async () => {
+    const gen = paneGen.current;
+    const current = () => paneGen.current === gen;
     try {
       const d = await getWorkspace(workspaceId);
+      if (!current()) return;
       setDetail(d);
       setError(null);
       // The three reads are independent; one failing must not blank the others.
@@ -106,10 +111,12 @@ export function WorkspaceContext({ workspaceId, live, drawer, onClose, onStartRu
         getWorkspaceDiff(workspaceId),
         getWorkspaceOutput(workspaceId),
       ]);
+      if (!current()) return;
       setLog(l.status === "fulfilled" ? l.value : []);
       setDiff(df.status === "fulfilled" ? df.value : { diff: "", truncated: false });
       setOutput(o.status === "fulfilled" ? o.value : null);
     } catch (err) {
+      if (!current()) return;
       setError({
         message: err instanceof Error ? err.message : String(err),
         status: err instanceof WorkspaceApiError ? err.status : null,
@@ -129,6 +136,7 @@ export function WorkspaceContext({ workspaceId, live, drawer, onClose, onStartRu
     setDeleteOpen(false);
     setDeleteError(null);
     void load();
+    return () => { paneGen.current += 1; };
   }, [load]);
 
   useEffect(() => {
@@ -190,6 +198,7 @@ export function WorkspaceContext({ workspaceId, live, drawer, onClose, onStartRu
   const git = detail && !("error" in detail.git) ? detail.git : null;
   const draft = detail ? connectorDraftOf(detail) : null;
   const activeRun = detail?.runs.find((r) => r.status === "queued" || r.status === "running" || r.status === "awaiting_confirmation");
+  const appWorkspace = Boolean(detail?.kind === "app" || appIntent || (detail?.app && !("error" in detail.app)) || APP_TEMPLATES.includes(detail?.template ?? ""));
 
   return (
     <div className={`ws-ctx${drawer ? " is-drawer" : ""}`} data-testid="workspace-context">
@@ -288,7 +297,7 @@ export function WorkspaceContext({ workspaceId, live, drawer, onClose, onStartRu
                     ref={deleteTrigger}
                     type="button"
                     className="btn sm"
-                    aria-label="Delete this custom tool"
+                    aria-label={appWorkspace ? "Delete this app workspace" : "Delete this custom tool"}
                     onClick={() => {
                       setDeleteError(null);
                       setDeleteOpen(true);
@@ -312,6 +321,9 @@ export function WorkspaceContext({ workspaceId, live, drawer, onClose, onStartRu
                 </p>
               )}
             </section>
+
+            {appWorkspace &&
+              <WorkspaceAppFacts key={detail.id} detail={detail} working={Boolean(activeRun)} />}
 
             <section className="ws-sect" aria-labelledby="ws-changes">
               <h3 className="ws-sect-h" id="ws-changes">

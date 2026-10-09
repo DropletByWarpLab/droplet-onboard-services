@@ -153,12 +153,20 @@ interface ChatMessageProps {
    * active thumb again clears the rating (null).
    */
   onFeedback?: (messageId: string, feedback: "up" | "down" | null) => void;
-  /** True only for the newest assistant turn produced in this live session. */
-  connectionSetupInteractive?: boolean;
-  /** Fixed successful-connection outcome; setup inputs never cross this boundary. */
-  onConnectionOutcome?: (turn: string) => void;
-  /** Shared across a local assistant message being replaced by its persisted id. */
-  connectionSetupSeenIds?: Set<string>;
+  /**
+   * WARP-3904: send the quiet follow-up user turn a connect card resolves with
+   * ("<name> is connected now."). Wired by the page to its normal send path.
+   * Without it (a surface that cannot send), connect cards render as compact
+   * rows rather than forms.
+   */
+  onConnectOutcome?: (turn: string) => void;
+  /** WARP-3904: the open conversation, stored with an OAuth round trip. */
+  conversationId?: string | null;
+  /**
+   * WARP-3904: this message arrived with a LOADED transcript rather than this
+   * session's stream. A loaded transcript never offers a live connect form.
+   */
+  fromHistory?: boolean;
 }
 
 export const ChatMessage = memo(function ChatMessage({
@@ -174,9 +182,9 @@ export const ChatMessage = memo(function ChatMessage({
   onRerequestApproval,
   onEdit,
   onFeedback,
-  connectionSetupInteractive = false,
-  onConnectionOutcome,
-  connectionSetupSeenIds,
+  onConnectOutcome,
+  conversationId = null,
+  fromHistory,
 }: ChatMessageProps) {
   // WARP-844 — inline edit state for user bubbles.
   const [editing, setEditing] = useState(false);
@@ -250,14 +258,23 @@ export const ChatMessage = memo(function ChatMessage({
   // WARP-3303 — a `start_agent_run` that produced a run is a card (below),
   // not a chip: the run outlives the turn and the card follows it.
   const runCalls = hasToolCalls ? toolCalls!.filter((c) => runIdOf(c) !== null) : [];
-  const connectCalls = !isUser ? connectCallsOf(toolCalls) : [];
-  const connectCallIds = new Set(connectCalls.map(({ call }) => call.id));
   // WARP-3691 - a successful call whose result carries valid `media` (camera
   // snapshot / live feed / clip, or a file) is a card under the message, not a
   // chip. Calls with no media, and failed ones, keep their chip.
+  //
+  // WARP-3904 - a successful call whose result is a connect descriptor
+  // (connect_card / connections_overview / connection_disconnected) is a card
+  // too, so it is kept out of the chip row the same way a run is.
+  const connectCalls = hasToolCalls ? connectCallsOf(toolCalls) : [];
+  const connectCallIds = new Set(connectCalls.map((c) => c.call.id));
   const { chipCalls, mediaCalls } = hasToolCalls
     ? splitMediaCalls(toolCalls!, (c) => runIdOf(c) !== null || connectCallIds.has(c.id))
     : { chipCalls: [], mediaCalls: [] };
+  // WARP-3904 - a connect card is a live form only on the newest assistant
+  // message of a conversation that is open in this session, and only where the
+  // surface can send the follow-up turn. Everywhere else it is a compact row.
+  const connectInteractive =
+    Boolean(isLastAssistant) && !fromHistory && Boolean(onConnectOutcome);
   const toolChipRow = chipCalls.length > 0 ? (
     <div className="flex flex-wrap gap-1.5" data-testid="tool-call-chips">
       {chipCalls.map((call) => (
@@ -291,6 +308,8 @@ export const ChatMessage = memo(function ChatMessage({
     !message.content &&
     !confirmCall &&
     !hasFailure &&
+    // A connect card is something to act on: show it the moment its tool
+    // result lands, even while the model is still reasoning toward its text.
     connectCalls.length === 0 &&
     (hasThinking || !hasToolCalls);
   if (isThinking) {
@@ -394,7 +413,12 @@ export const ChatMessage = memo(function ChatMessage({
             ) : null}
             {runCards}
             <ToolMediaCards calls={mediaCalls} />
-            {connectCalls.length > 0 && <ToolConnectCards calls={connectCalls} interactive={connectionSetupInteractive} onOutcome={onConnectionOutcome} seenIds={connectionSetupSeenIds} />}
+            <ToolConnectCards
+              calls={connectCalls}
+              interactive={connectInteractive}
+              conversationId={conversationId}
+              onOutcome={(turn) => onConnectOutcome?.(turn)}
+            />
             {/* WARP-2469 — a WARP-2305 interceptor challenge gets the real
                 approval prompt: Approve / Don't, a PHI-free argument
                 summary, and an expired state that offers a re-request.

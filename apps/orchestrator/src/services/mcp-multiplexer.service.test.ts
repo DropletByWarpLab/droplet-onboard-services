@@ -7,7 +7,9 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import {
+  capRemoteDescription,
   DENY_ALL_REMOTE_TOOLS,
+  MAX_REMOTE_DESCRIPTION_CHARS,
   MAX_RETAINED_REJECTIONS,
   McpToolMultiplexer,
   namespacedToolName,
@@ -596,5 +598,49 @@ describe("WARP-2432 — the runtime deny tier runs on every remote callTool", ()
     expect(blocked.content.length).toBeGreaterThan(0);
     expect(parse(blocked).status).toBe("blocked");
     expect(parse(blocked).message).toEqual(expect.any(String));
+  });
+});
+
+describe("WARP-3919 — remote tool descriptions are capped for the model only", () => {
+  const long = "x".repeat(MAX_REMOTE_DESCRIPTION_CHARS + 500);
+  const withDesc = (name: string, description: string): McpToolDescriptor => ({
+    ...tool(name),
+    description,
+  });
+
+  it("truncates a long remote description to the cap, marker included", async () => {
+    const mux = new McpToolMultiplexer(portDouble([tool("local_one")]), {
+      isServerAllowed: allowAll,
+    });
+    mux.attachRemote("srv", portDouble([withDesc("t", long)]));
+    const remote = (await mux.listTools()).find((t) => t.name === "srv__t")!;
+    expect(remote.description).toHaveLength(MAX_REMOTE_DESCRIPTION_CHARS);
+    expect(remote.description.endsWith("… [truncated]")).toBe(true);
+  });
+
+  it("leaves short remote and all local descriptions unchanged", async () => {
+    const mux = new McpToolMultiplexer(portDouble([withDesc("local_one", long)]), {
+      isServerAllowed: allowAll,
+    });
+    mux.attachRemote("srv", portDouble([tool("t")]));
+    const tools = await mux.listTools();
+    expect(tools.find((t) => t.name === "local_one")!.description).toBe(long);
+    expect(tools.find((t) => t.name === "srv__t")!.description).toBe("t desc");
+  });
+
+  it("keeps the full text in the catalog that classification and review read", async () => {
+    const mux = new McpToolMultiplexer(portDouble([tool("local_one")]), {
+      isServerAllowed: allowAll,
+    });
+    mux.attachRemote("srv", portDouble([withDesc("t", long)]));
+    await mux.listTools();
+    expect(mux.remoteCatalog("srv")[0]!.description).toBe(long);
+  });
+
+  it("does not split a surrogate pair at the cut", () => {
+    const cut = MAX_REMOTE_DESCRIPTION_CHARS - "… [truncated]".length;
+    const capped = capRemoteDescription("a".repeat(cut - 1) + "😀" + "b".repeat(100));
+    expect(capped.length).toBeLessThanOrEqual(MAX_REMOTE_DESCRIPTION_CHARS);
+    expect(capped).not.toMatch(/[\ud800-\udbff](?![\udc00-\udfff])/);
   });
 });

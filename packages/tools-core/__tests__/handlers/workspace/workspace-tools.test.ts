@@ -105,6 +105,12 @@ describe("workspace_* address the context's workspace and carry the run id", () 
 });
 
 describe("workspace_run", () => {
+  it("returns actual bounded app-check probe facts to the setup agent", async () => {
+    const appCheck = { runtime: "static", health: { status: 200 }, root: { status: 200 } };
+    const post = vi.fn().mockResolvedValue(makeResponse(200, { argv: ["app-check"], exitCode: 0, timedOut: false, durationMs: 2, stdout: "", stderr: "", truncated: false, appCheck }));
+    const result = await workspaceRun.handler({ command: "app-check" }, ctxWith({ post }));
+    expect(result).toMatchObject({ ok: true, data: { passed: true, appCheck } });
+  });
   it("splits the command line into argv and forwards the timeout in ms", async () => {
     const post = vi.fn(async (_path: string, _body: unknown, _init?: unknown) =>
       makeResponse(200, { argv: ["ruff", "check", "."], exitCode: 1, timedOut: false, durationMs: 5, stdout: "E501", stderr: "", truncated: false }),
@@ -179,14 +185,15 @@ describe("workspace_propose", () => {
     });
   });
 
-  it("keeps its name, schema, tier and description (WARP-2899 changes the result only)", () => {
+  it("keeps its proposal arguments and confirmation tier for apps and extensions", () => {
     expect(workspacePropose.name).toBe("workspace_propose");
     expect(workspacePropose.requiresWrite).toBe(true);
     expect(workspacePropose.requiresConfirmation).toBe(true);
     const schema = workspacePropose.inputSchema as { properties: Record<string, unknown>; required: string[] };
     expect(Object.keys(schema.properties)).toEqual(["name", "version", "summary"]);
     expect(schema.required).toEqual(["name", "version", "summary"]);
-    expect(workspacePropose.description).toMatch(/^Finish this run by proposing the workspace as an extension/);
+    expect(workspacePropose.description).toContain("app/extension proposal for owner review");
+    expect(workspacePropose.description).toContain("ends this run");
   });
 });
 

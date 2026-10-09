@@ -65,6 +65,15 @@ describe("chat connections member floor", () => {
 });
 
 describe("WARP-2665 — writeToolsIn / hasWriteTool, the one write classification", () => {
+  it("uses the hosted_apps tool grant for read discovery without giving workspace writes", () => {
+    const scope = scopeOf(["hosted_apps"]);
+    expect(toolAllowedInScope("list_hosted_apps", scope)).toBe(true);
+    expect(toolAllowedInScope("list_hosted_apps", scopeOf([]))).toBe(false);
+    expect(toolAllowedInScope("workspace_write", scope)).toBe(false);
+    // Catalog admission is not per-app authorization; the hosted service
+    // independently filters a family's app grants and refuses their logs.
+    expect(isCatalogRead("list_hosted_apps")).toBe(true);
+  });
   const read = nameOf("files", false);
   const write = nameOf("files", true);
 
