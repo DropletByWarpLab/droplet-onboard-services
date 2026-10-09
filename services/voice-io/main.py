@@ -80,6 +80,7 @@ from voice.dsp import DspRestartError, restart_dsp
 from voice.enabled import VoiceEnabledStore
 from voice.pipeline import (
     DEFAULT_CALIBRATION_MODE_TTL_S,
+    DEFAULT_CAPTURE_STALL_S,
     DEFAULT_DEBOUNCE_S,
     DEFAULT_FLATLINE_DBFS,
     DEFAULT_FLATLINE_WINDOW_S,
@@ -211,6 +212,28 @@ VOICE_FLATLINE_DBFS = float(
     (os.environ.get("VOICE_FLATLINE_DBFS") or "").strip()
     or str(DEFAULT_FLATLINE_DBFS),
 )
+
+# Capture-liveness watchdog (WARP-3934) - see pipeline.py's
+# DEFAULT_CAPTURE_STALL_S. Seconds with no completed mic read while
+# state=listening before voice-io exits so Docker restarts it (PortAudio
+# spins in C on a re-enumerated USB mic instead of raising). 0 disables.
+# Empty env = default; an unparseable value warns and falls back rather
+# than crashing the service at import.
+def _capture_stall_from_env() -> float:
+    raw = (os.environ.get("VOICE_CAPTURE_STALL_S") or "").strip()
+    if not raw:
+        return DEFAULT_CAPTURE_STALL_S
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning(
+            "VOICE_CAPTURE_STALL_S=%r is not a number - using %.0f s",
+            raw, DEFAULT_CAPTURE_STALL_S,
+        )
+        return DEFAULT_CAPTURE_STALL_S
+
+
+VOICE_CAPTURE_STALL_S = _capture_stall_from_env()
 
 # WARP-3710 - hot-plug rescan. Seconds between the cheap ALSA-card
 # fingerprint checks that notice a USB mic array enumerating AFTER boot
@@ -655,6 +678,9 @@ def _build_and_start_pipeline() -> None:
             active_device_is_xvf=_active_input_is_xvf,
             device_fingerprint=alsa_fingerprint,
             device_rescan_interval_s=DEVICE_RESCAN_INTERVAL,
+            # WARP-3934 - exit for a supervisor restart if the capture thread
+            # wedges inside PortAudio on a re-enumerated USB mic.
+            capture_stall_s=VOICE_CAPTURE_STALL_S,
         )
         # WARP-1055 — a persisted calibration (named-volume JSON) wins
         # over the env-derived gain/threshold. Applied before start()

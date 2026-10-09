@@ -67,6 +67,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import re
 import threading
 import time
@@ -484,6 +485,20 @@ DEFAULT_FLATLINE_DBFS = -70.0      # frames below this count as "no signal".
                                    # 20·log10(input_gain) — see
                                    # _track_input_level (WARP-1060).
                                    # Env: VOICE_FLATLINE_DBFS.
+# Capture-liveness watchdog (WARP-3934). When the USB mic drops off the bus,
+# Debian's libportaudio2 19.6.0 ALSA host API does NOT raise from
+# `stream.read()` - it busy-spins in C on the deleted device node, so the
+# read loop never gets control back and no in-process recovery (the reopen
+# flag, `_DeviceError`, the WARP-1409 DSP reboot budget) can ever run. The
+# read loop completes ~12x a second while healthy, so 15 s with no
+# completed read while `listening` means PortAudio is wedged. Only the
+# `listening` state is judged: a voice turn runs inside `_on_frame` on the
+# capture thread and legitimately stops draining the stream for a while.
+# 0 disables. Env: VOICE_CAPTURE_STALL_S.
+DEFAULT_CAPTURE_STALL_S = 15.0
+# Exit code used when the watchdog gives up (EX_SOFTWARE); compose's
+# `restart: always` brings voice-io back on the re-enumerated device.
+CAPTURE_STALL_EXIT_CODE = 70
 DEFAULT_RMS_WINDOW_FRAMES = 25     # rolling-RMS window ≈ 2 s of 80 ms frames —
                                    # smooth enough for a wizard level meter,
                                    # short enough to feel live.
@@ -759,6 +774,23 @@ def pcm_level_dbfs(pcm: np.ndarray) -> tuple[float, float]:
     return _db(rms), _db(peak)
 
 
+def _exit_for_capture_stall(reason: str) -> None:
+    """Default ``on_capture_stall`` (WARP-3934): log loudly, flush, and exit
+    the process so the container supervisor restarts voice-io.
+
+    Nothing in-process can interrupt a C call that is spinning inside
+    PortAudio, so this is deliberately crash-only. ``os._exit`` skips
+    atexit / thread joins, which would block on the very thread that is
+    stuck."""
+    logger.critical("capture stall - exiting for supervisor restart: %s", reason)
+    for handler in list(logging.getLogger().handlers) + list(logger.handlers):
+        try:
+            handler.flush()  # the CRITICAL line must reach `docker logs`
+        except Exception:  # pragma: no cover - defensive
+            pass
+    os._exit(CAPTURE_STALL_EXIT_CODE)
+
+
 class WakePipeline:
     """Owns the wake-detection background thread + status state.
 
@@ -810,6 +842,8 @@ class WakePipeline:
         active_device_is_xvf: Optional[Callable[[], bool]] = None,
         device_fingerprint: Optional[Callable[[], Any]] = None,
         device_rescan_interval_s: float = 0.0,
+        capture_stall_s: float = DEFAULT_CAPTURE_STALL_S,
+        on_capture_stall: Optional[Callable[[str], None]] = None,
     ):
         self._detector = detector
         self._input_device_index = input_device_index
@@ -962,6 +996,15 @@ class WakePipeline:
         self._dsp_recovery: str = "nominal"  # nominal | restarting | escalated
         self._dsp_restart_attempts: int = 0
         self._dsp_last_restart_at: Optional[float] = None
+        # WARP-3934 - capture-liveness watchdog. `_last_capture_progress_at`
+        # (monotonic) is refreshed after every completed stream.read() and on
+        # every state change; `_check_capture_liveness` (scheduler ticks)
+        # fires `_on_capture_stall` once if the capture thread stalls while
+        # `listening`. <= 0 disables.
+        self._capture_stall_s = float(capture_stall_s)
+        self._on_capture_stall = on_capture_stall or _exit_for_capture_stall
+        self._last_capture_progress_at: float = time.monotonic()
+        self._capture_stall_fired = False
         # WARP-3710 — in-process input self-heal. The `xvf_host` reboot
         # only means something when the ACTIVE device is an XVF3800: on
         # the motherboard codec it exits 8 ("could not connect") three
@@ -1198,6 +1241,7 @@ class WakePipeline:
         the one place inside voice-io that periodically observes it and
         can emit the dsp_wedge / dsp_recovered transition events.
         """
+        self._check_capture_liveness()
         with self._probe_lock:
             if self._shutdown.is_set():
                 return
@@ -1217,6 +1261,44 @@ class WakePipeline:
                 self._maybe_auto_recover_dsp()
             except Exception:  # pragma: no cover
                 logger.exception("dsp auto-recovery tick crashed")
+
+    def _check_capture_liveness(self) -> None:
+        """Exit the process when the capture thread is wedged inside
+        PortAudio (WARP-3934).
+
+        Ticked from `_rescan_tick` (5 s) and `_probe_tick` (30 s) - both
+        APScheduler jobs, so it still runs while the capture thread is stuck
+        in C. If the pipeline claims `listening` but no `stream.read()` has
+        completed for `capture_stall_s`, the ALSA host API is spinning on a
+        removed / re-enumerated USB device (libportaudio2 19.6.0 never
+        raises there), the reopen flag and `_DeviceError` path can never run,
+        and only a process restart recovers. One-shot: fires at most once.
+        Other states are not judged - wake_detected / transcribing /
+        transcript_ready / speaking run inside
+        `_on_frame` and legitimately stop draining the stream; no_mic /
+        error / idle / loading have no live stream to stall."""
+        if self._capture_stall_s <= 0:
+            return
+        with self._lock:
+            if self._capture_stall_fired or self._state != "listening":
+                return
+            stalled_for = time.monotonic() - self._last_capture_progress_at
+            if stalled_for <= self._capture_stall_s:
+                return
+            self._capture_stall_fired = True
+        reason = (
+            f"capture thread made no progress for {stalled_for:.0f}s while "
+            "listening - PortAudio is wedged on a removed/re-enumerated "
+            "device; exiting so the container supervisor restarts voice-io"
+        )
+        logger.error(reason)
+        # No activity event: the orchestrator's voiceEventSchema is a fixed
+        # enum (see voice/activity.py EVENT_TYPES) and the process is about
+        # to exit anyway.
+        try:
+            self._on_capture_stall(reason)
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("capture-stall handler raised")
 
     # ──────────────────────────────────────────────────────────────
     # Activity-feed emission (WARP-1058)
@@ -1346,7 +1428,11 @@ class WakePipeline:
         supervisor's ``stream.read()`` never errors and never reopens. The
         only fix is an out-of-band ``xvf_host REBOOT 1`` (the same heal the
         dashboard button and the host watchdog issue), after which the DSP
-        drops off USB → the read finally errors → the self-heal reopens.
+        drops off USB and re-enumerates. On this PortAudio (Debian
+        libportaudio2 19.6.0) the blocked ``stream.read()`` then spins in C
+        instead of erroring (WARP-3934), so the in-process self-heal cannot
+        run; the capture-liveness watchdog (``_check_capture_liveness``)
+        detects the stall and restarts the process on the new device.
 
         Ticked from the probe loop: while ``input_flatlined`` holds, issue
         that reboot via the injected ``_dsp_restart``, bounded to
@@ -1576,7 +1662,12 @@ class WakePipeline:
         """Scheduler job: when the host's audio-card set changed (a USB
         array enumerated late, or re-enumerated), re-pick. Cheap - one
         sysfs listing; PortAudio is only re-initialised by the capture
-        loop once its stream is closed."""
+        loop once its stream is closed.
+
+        Also the capture-liveness watchdog's fast clock (WARP-3934): it runs
+        first, before the early returns, so it ticks even with no
+        fingerprint source wired."""
+        self._check_capture_liveness()
         if self._shutdown.is_set() or self._device_fingerprint is None:
             return
         try:
@@ -2651,6 +2742,7 @@ class WakePipeline:
             # timestamps can't instantly flag a recovered stream.
             with self._lock:
                 self._audio_watch_started_at = time.time()
+                self._last_capture_progress_at = time.monotonic()
             self._set_state("listening")
             with self._lock:
                 # A mic restart can arrive while the supervisor is retrying
@@ -2679,6 +2771,8 @@ class WakePipeline:
                     frames, overflowed = stream.read(read_frames)
                 except device_errors as exc:
                     raise _DeviceError(str(exc) or exc.__class__.__name__) from exc
+                # WARP-3934 - liveness heartbeat for _check_capture_liveness.
+                self._last_capture_progress_at = time.monotonic()
                 if overflowed:
                     # Capture buffer outran our predict() pace. Common
                     # on first run while ONNX kernels JIT; logs once
@@ -3277,6 +3371,9 @@ class WakePipeline:
     def _set_state(self, state: PipelineState) -> None:
         with self._lock:
             self._state = state
+            # WARP-3934 - a transition (e.g. back to `listening` after a
+            # voice turn) restarts the capture-liveness clock.
+            self._last_capture_progress_at = time.monotonic()
             if state != "error":
                 self._error_message = None
 

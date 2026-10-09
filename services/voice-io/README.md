@@ -76,6 +76,17 @@ env). When a new input appears that beats the current pick, the
 capture loop restarts against it. Useful for the customer plugging a
 USB mic in after the box has already booted.
 
+**Capture stall watchdog (WARP-3934).** The in-process reopen above only
+works if `stream.read()` returns or raises. When the reSpeaker XVF3800
+drops off USB and re-enumerates (spontaneously, or after the WARP-1409
+`xvf_host REBOOT 1` auto-recovery), Debian's libportaudio2 19.6.0 spins
+in C on the deleted device node and the Python read loop never regains
+control - so `POST /voice/mic/restart` and the hot-plug rescan are never
+consumed. The scheduler ticks (which still run) therefore check that a
+read completed within `VOICE_CAPTURE_STALL_S` while `listening`; if not,
+voice-io logs `capture thread made no progress ...` and exits with code
+70 so the compose restart policy relaunches it on the new device.
+
 ## Configuration
 
 | Env var | Default | Meaning |
@@ -107,6 +118,7 @@ USB mic in after the box has already booted.
 | `TTS_SYNTHESIZE_TIMEOUT_S` | `60` | Absolute synthesis response budget, range 1–300 seconds. |
 | `VOICE_FLATLINE_WINDOW_S` | `240` | Flatline watchdog (WARP-1037): seconds of at/near-digital-zero input while `state=listening` before `/health` degrades to 503. The ReSpeaker XVF3800's XMOS DSP can wedge with the USB stream still open — the pipeline keeps "listening" while every frame is pure silence. The pipeline measures a rolling input RMS inside its own frame handler (never a second stream on the same hw device) and flags the wedge so the Docker healthcheck + ops-console see it. Recovery is automatic when audio returns. `0` disables. |
 | `VOICE_FLATLINE_DBFS` | `-70.0` | Level (dBFS) below which a frame counts as "no signal" for the flatline watchdog. A healthy capture chain's noise floor sits ≈ -60…-50 dBFS; a wedged DSP emits exact zeros (-120 floor) or ±1-count dither (≈ -90). |
+| `VOICE_CAPTURE_STALL_S` | `15` | Capture-stall watchdog (WARP-3934): seconds with no completed mic read while `state=listening` before voice-io logs a CRITICAL line and exits (code 70) so Docker (`restart: always`) brings it back on the re-enumerated device. Needed because Debian's libportaudio2 19.6.0 busy-spins in C on a removed USB mic instead of raising, so no in-process reopen can run. Other states (`wake_detected` / `transcribing` / `transcript_ready` / `speaking`, where a voice turn legitimately stops draining the stream) are never judged. `0` disables; a non-numeric value warns and uses the default. |
 | `VOICE_MAX_TOKENS` | `1024` | **Voice turn shaping (WARP-1432).** Per-turn generation cap sent to the orchestrator on every reply. The box's `gpt-oss` voice model spends reasoning-channel tokens *before* visible content, so the default is deliberately generous — enough for reasoning + a short spoken sentence; too low empties the reply (WARP-854). The gateway hard-caps at 4096; a non-numeric or out-of-range value falls back to `1024`. Voice also always sends `ephemeral:true` (a constant, not an env — voice has no persisted chat session, so a per-utterance `ChatSession` would only litter the sidebar). |
 | `VOICE_MAX_ITER` | `4` | **Agent-loop step budget (WARP-3316).** Sent to the orchestrator as `max_iter` on every reply. The last iteration is the spoken answer, so the old budget of 2 died on the *second* tool call with the orchestrator's "couldn't finish… within my step limit" fallback; 4 covers up to three tool calls before answering. Clamped to 1..10 (the orchestrator's cap); a non-numeric value falls back to `4`. |
 | `VOICE_ALLOWED_TOOLS` | *(curated default)* | **Voice turn shaping (WARP-1432).** Comma-separated tool names the assistant may use on tool-enabled turns. Empty (default) sends a curated scope — box health, cameras, network, files, smart devices + `control_device`, calendar, reminders — instead of the full ~43-tool set, cutting schema prefill from ~5k to ~1–1.5k tokens/turn. Whitespace and empty segments are ignored; an all-empty value falls back to the default. The greeting fast path (`tool_choice="none"`) sends zero tools regardless. |
