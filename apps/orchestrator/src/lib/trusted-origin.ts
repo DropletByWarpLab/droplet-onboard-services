@@ -149,6 +149,41 @@ export function pickTrustedHost(
   return null;
 }
 
+/** Split `host[:port]` / `[v6][:port]` into a lower-cased host and optional port. */
+function splitHostPort(raw: string): { host: string; port: string | null } | null {
+  const v = raw.trim().toLowerCase();
+  if (!v) return null;
+  if (v.startsWith("[")) {
+    const close = v.indexOf("]");
+    if (close === -1) return null;
+    const rest = v.slice(close + 1);
+    if (rest && !/^:\d{1,5}$/.test(rest)) return null;
+    return { host: v.slice(0, close + 1), port: rest ? rest.slice(1) : null };
+  }
+  const m = /^([^:]+)(?::(\d{1,5}))?$/.exec(v);
+  return m ? { host: m[1], port: m[2] ?? null } : null;
+}
+
+/**
+ * The request's own authority for the same-origin check: `host` plus the
+ * effective port. Deliberately IGNORES `X-Forwarded-Host` (nginx does not set
+ * it on /api/, so a client-supplied value would pass straight through). The
+ * port comes from `X-Forwarded-Port` (nginx overwrites it from $server_port;
+ * its `Host $host` strips the port) else the Host header's own port, else the
+ * scheme default. Returns null when Host is missing or malformed.
+ */
+export function requestAuthority(req: Request): { host: string; port: string } | null {
+  const hostHeader = req.headers.host;
+  if (!hostHeader || typeof hostHeader !== "string") return null;
+  const parsed = splitHostPort(hostHeader);
+  if (!parsed) return null;
+  const xfp = req.headers["x-forwarded-port"];
+  const xfpFirst = (Array.isArray(xfp) ? xfp[0] : xfp)?.split(",")[0]?.trim();
+  const port = (xfpFirst && /^\d{1,5}$/.test(xfpFirst) ? xfpFirst : null)
+    ?? parsed.port ?? (requestIsHttps(req) ? "443" : "80");
+  return { host: parsed.host, port };
+}
+
 /** Whether the inbound request looks like https (direct TLS or proxied). */
 export function requestIsHttps(req: Request): boolean {
   return req.secure || req.headers["x-forwarded-proto"] === "https";
