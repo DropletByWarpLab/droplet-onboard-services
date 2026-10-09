@@ -46,7 +46,7 @@ Routes, all under `/api/recordings`, all behind the ADR-032 module gate `recordi
 |---|---|---|
 | `POST /` | owner, admin; family only when the consent setting allows it; never guest; the voice principal only with an ADR-015 confirmation token | Creates the row in `starting`, allocates the File Store folder, returns the id and the chunk endpoint. Refused with `recording_consent_off` while §2.2's setting is off. |
 | `POST /:id/chunks` | the starter's session, or voice-io's service bearer for `box_mic` rows | Appends one chunk (WAV from the box, webm/opus from a browser). Rejects after 3 hours of audio with `max_duration`, which also stops the recording. |
-| `POST /:id/stop` | **any** signed-in user, the voice principal with no confirmation, the kill-switch hook, the capture-liveness watchdog | Finalises the file, moves to `stopped`, hands off to §2.4. Stop is deliberately open: anyone in the room, at any role, can end a recording of themselves. |
+| `POST /:id/stop` | **any** signed-in user, the voice principal with no confirmation, the kill-switch hook, the capture-liveness watchdog | Finalises the file, moves to `stopped`, hands off to §2.4. Stop is deliberately open: anyone in the room, at any role, can end a recording of themselves. A stop by anyone other than the starter (including a participant of a claimed meeting) is never silent: the chain entry and `CommandAuditLog` row record the stopper's identity (or `voice` / `kill_switch` / `watchdog` for non-user stops) in `refs.stoppedBy`, and the starter gets an in-app notification and, for a voice start, a spoken line on the box's next idle ("Recording was stopped by <name>"). Stop never needs the starter's approval. |
 | `GET /`, `GET /:id` | the starter, owner, admin, and the participants of a claimed meeting | List and detail, including status for the indicator (§2.9). |
 | `DELETE /:id` | owner, admin, the starter | Deletes the audio, crypto-shreds the transcript and notes chunks, moves to `purged`. The row stays as an audit fact. |
 
@@ -54,7 +54,7 @@ Every start, stop and delete writes the signed activity chain (`kind: "voice"` f
 
 ### 2.2 Consent: off until an owner opts in; start is announced, stop is open
 
-A `RecordingConsentSetting` singleton in the `BrainSetting` shape: `enabled` default **false**, `enabledById` and `enabledAt` server-stamped from the session, `audioRetentionDays` default 30, `familyMayStart` default false. Only an owner can turn it on, and the settings copy says what it means in plain words: the box will record people in the room who may never have touched it, it will say so out loud when it starts, and anyone can stop it.
+A `RecordingConsentSetting` singleton in the `BrainSetting` shape: `enabled` default **false**, `enabledById` and `enabledAt` server-stamped from the session, `audioRetentionDays` default 30, `transcriptRetentionDays` default unset (keep), `familyMayStart` default false. Only an owner can turn it on, and the settings copy says what it means in plain words: the box will record people in the room who may never have touched it, it will say so out loud when it starts, and anyone can stop it.
 
 While the setting is off, `POST /api/recordings` is refused and the box answers a spoken request with "Recording is off. An owner can turn it on in Settings". Turning the setting off while a recording runs stops it (`stopReason = consent_revoked`).
 
@@ -64,7 +64,7 @@ Start and stop are asymmetric on purpose. Start needs consent on, an authorised 
 
 `docs/voice-assistant-overview.md:171` and `services/voice-io/README.md` say audio is never written to disk. That becomes: audio is written to disk only while a recording the owner enabled and the box announced is running, and only to `/data`. The copy change lands in the capture-tee PR (WARP-3941), not before and not after.
 
-The kill switch wins: when `enabled.py` flips to off, voice-io finalises the chunk in flight, posts `stop` with `stopReason = kill_switch`, and tears the pipeline down as it does today. The orchestrator independently stops every `box_mic` recording when `POST /voice/enabled` persists `false`, so the result does not depend on voice-io being alive to notice. WARP-1617 (the hardware proof of the kill switch) stays a blocker for shipping §2.5 to a customer box.
+The kill switch wins: when `enabled.py` flips to off, voice-io finalises the chunk in flight, posts `stop` with `stopReason = kill_switch`, and tears the pipeline down as it does today. The orchestrator independently stops every `box_mic` recording when `POST /voice/enabled` persists `false`, so the result does not depend on voice-io being alive to notice. WARP-1617 (the hardware proof of the kill switch) is an explicit gate on WARP-3941: voice start is not enabled on any customer box until WARP-1617 passes. The slice may merge behind the gate (the `box_mic` source refuses to start while the gate is closed); the dashboard and upload sources are not affected. WARP-1377 is not a gate, because speaker identity is never used to authorise a start (§2.5).
 
 ### 2.4 CPU budget: the WARP-218 queue transcribes, an agent run writes the notes
 
@@ -98,7 +98,7 @@ Consequently there is **no** `start_recording` tool. The LLM gets read-only tool
 
 Each recording gets a File Store folder `/Recordings/<yyyy-mm-dd> <title>/` holding `audio.wav` or `audio.webm`, `transcript.md` and `notes.md`. An ad hoc recording lives in the starter's personal folder. When a `TeamChatMeeting` is in progress at start (or the starter picks one), the recording is claimed by it and lives in that meeting's group folder, so its participants can reach it through the normal share rules; a voice-started recording with exactly one meeting in progress is claimed automatically, and the box says which one.
 
-Retention follows ADR-070's shape: `audioRetentionDays` (default 30, owner-settable) governs a daily purge at 03:30, after the ASR window, that deletes the audio and sets `audioPurgedAt`. Transcript and notes stay until the recording is deleted. Nothing is deleted silently from a row the owner has not seen: the Recordings view shows the purge date on each card.
+Retention follows ADR-070's shape: `audioRetentionDays` (default 30, owner-settable) governs a daily purge at 03:30, after the ASR window, that deletes the audio and sets `audioPurgedAt`. Transcript and notes stay until the recording is deleted. That default is a deliberate decision for the owner to confirm, not an oversight: a transcript of a room is itself sensitive. The consent panel states it in plain words, and `transcriptRetentionDays` (default unset, meaning keep) lets an owner set a purge that crypto-shreds the transcript and notes chunks on the same daily job. Nothing is deleted silently from a row the owner has not seen: the Recordings view shows the purge date on each card.
 
 ### 2.9 The box must look and sound different while it records
 
