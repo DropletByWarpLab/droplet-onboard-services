@@ -1670,6 +1670,38 @@ def _bridge_vlan_tagged_members(router, bridge: str = "br-lan") -> list:
     return [f"{p}:t" for p in ports]
 
 
+def _uci_section_exists(router, config: str, section: str) -> bool:
+    """True iff ``config.section`` already exists on the router.
+
+    Mirrors ``interface_exists`` in the SDK: a ubus NOT_FOUND/NO_DATA on the
+    section means absent; an empty/non-dict read also means absent.
+    """
+    try:
+        result = router.uci.get(config, section)
+    except UbusError as exc:
+        if exc.code in (UBUS_STATUS_NOT_FOUND, UBUS_STATUS_NO_DATA):
+            return False
+        raise
+    if not isinstance(result, dict):
+        return False
+    return bool(result.get("values") or result.get(".type"))
+
+
+def _uci_upsert_named(router, config: str, type_: str, section: str, values: dict) -> None:
+    """Create-or-update a NAMED uci section.
+
+    The OpenWrt ubus ``uci set`` method only updates sections that already
+    exist — on a fresh router it answers NOT_FOUND (the camera subnet setup
+    500'd with exactly that on the lab RB5009, 2026-10-09). ``uci add`` with
+    ``name=`` creates the named section in one shot, so a first-time setup
+    goes through ``add`` and a re-run through ``set``.
+    """
+    if _uci_section_exists(router, config, section):
+        router.uci.set(config, section, values)
+    else:
+        router.uci.add(config, type_, values=values, name=section)
+
+
 @app.post("/network/subnets/cameras/setup")
 @_uci_serialised
 def setup_camera_subnet(req: CameraSubnetSetupRequest):
@@ -1689,7 +1721,7 @@ def setup_camera_subnet(req: CameraSubnetSetupRequest):
         with r.safe_apply(timeout=60):
             # 1. Create VLAN interface
             device_name = f"br-lan.{req.vlan_id}"
-            r.uci.set("network", "cameras", {
+            _uci_upsert_named(r, "network", "interface", "cameras", {
                 "proto": "static",
                 "device": device_name,
                 "ipaddr": req.subnet,
@@ -1743,7 +1775,7 @@ def setup_camera_subnet(req: CameraSubnetSetupRequest):
             r.uci.commit("firewall")
 
             # 7. Create DHCP pool for camera subnet
-            r.uci.set("dhcp", "cameras", {
+            _uci_upsert_named(r, "dhcp", "dhcp", "cameras", {
                 "interface": "cameras",
                 "start": str(req.dhcp_start),
                 "limit": str(req.dhcp_limit),

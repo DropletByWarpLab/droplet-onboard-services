@@ -171,6 +171,42 @@ def test_setup_pi_shaped_bridge_derives_its_own_names(client, mock_router):
     assert values["ports"] == ["eth2:t", "eth0:t"]
 
 
+def _named_adds(mock_router, config):
+    return [c for c in mock_router.uci.add.call_args_list
+            if c.args[0] == config and c.kwargs.get("name") == "cameras"]
+
+
+def test_setup_creates_named_sections_with_add_on_a_fresh_router(client, mock_router):
+    """ubus `uci set` cannot create a section (it answers NOT_FOUND — the
+    live RB5009 500'd with exactly that), so a first-time setup must create
+    `network.cameras` and `dhcp.cameras` through `uci add` with `name=`."""
+    _wire_setup_router(mock_router, ["p2", "p3"])
+    mock_router.uci.get.side_effect = UbusError(NOT_FOUND, "section not found")
+    resp = client.post("/network/subnets/cameras/setup", json={}, headers=AUTH)
+    assert resp.status_code == 200, resp.text
+    net = _named_adds(mock_router, "network")
+    assert len(net) == 1 and net[0].args[1] == "interface"
+    assert net[0].kwargs["values"]["device"] == "br-lan.100"
+    dhcp = _named_adds(mock_router, "dhcp")
+    assert len(dhcp) == 1 and dhcp[0].args[1] == "dhcp"
+    assert dhcp[0].kwargs["values"]["interface"] == "cameras"
+    assert mock_router.uci.set.call_count == 0
+
+
+def test_setup_updates_existing_sections_with_set(client, mock_router):
+    """A re-run against a router that already has the sections updates them
+    in place instead of stacking duplicates."""
+    _wire_setup_router(mock_router, ["p2", "p3"])
+    mock_router.uci.get.return_value = {"values": {".type": "interface", "proto": "static"}}
+    resp = client.post("/network/subnets/cameras/setup", json={}, headers=AUTH)
+    assert resp.status_code == 200, resp.text
+    assert _named_adds(mock_router, "network") == []
+    assert _named_adds(mock_router, "dhcp") == []
+    set_targets = [tuple(c.args[:2]) for c in mock_router.uci.set.call_args_list]
+    assert ("network", "cameras") in set_targets
+    assert ("dhcp", "cameras") in set_targets
+
+
 def test_setup_refuses_when_bridge_membership_unknown(client, mock_router):
     """No members visible → 409 BEFORE the safe-apply window opens and before
     any uci write. A refusal is diagnosable; a silently inert VLAN is not."""
