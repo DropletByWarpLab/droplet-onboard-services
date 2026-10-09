@@ -49,10 +49,10 @@ const settingsHrefs = (role: Parameters<typeof visibleItems>[1]) =>
   );
 
 describe("Workshop nav entry (WARP-2925 → WARP-3063)", () => {
-  it("is a visible Work row, the last one, and never an Admin item", () => {
+  it("is a visible Work row before Apps, and never an Admin item", () => {
     const hrefs = visibleWork("owner");
     expect(hrefs).toContain("/workshop");
-    expect(hrefs[hrefs.length - 1]).toBe("/workshop");
+    expect(hrefs.indexOf("/hosted")).toBe(hrefs.indexOf("/workshop") + 1);
     const admin = NAV_GROUPS.find((g) => g.label === "Admin");
     expect(admin?.items.map((i) => i.href) ?? []).not.toContain("/workshop");
   });
@@ -88,5 +88,14 @@ describe("Workshop nav entry (WARP-2925 → WARP-3063)", () => {
 
   it("keeps its label", () => {
     expect(workshop()?.label).toBe("Workshop");
+  });
+});
+
+describe("Apps nav entry", () => {
+  it("is offered to owners, admins and members but hidden from guests", () => {
+    for (const role of ["owner", "admin", "family"] as const) expect(visibleWork(role)).toContain("/hosted");
+    expect(visibleWork("guest")).not.toContain("/hosted");
+    expect(moduleForPath("/hosted")).toBeNull();
+    expect(isSettingsContext("/hosted")).toBe(false);
   });
 });

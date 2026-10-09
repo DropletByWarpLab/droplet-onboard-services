@@ -82,6 +82,7 @@ export type RemoteMcpOutcome =
 export type RemoteMcpGateReason =
   | "server_not_allowlisted"
   | "no_connection_row"
+  | "channel_disabled"
   | "connection_not_connected"
   | "no_credential"
   | "gate_unavailable";
@@ -92,6 +93,10 @@ export type RemoteMcpGateDecision =
 
 /** The minimal Prisma surface the gate needs, so a test passes a literal. */
 export interface RemoteMcpGatePrisma {
+  /** WARP-3912 — the `remote_mcp` off-LAN channel row. */
+  offLanAllowlistChannel: {
+    findUnique(args: unknown): Promise<{ enabled: boolean } | null>;
+  };
   integrationConnection: {
     findFirst(args: unknown): Promise<{
       id: string;
@@ -122,6 +127,28 @@ export async function remoteMcpGate(
       message:
         `"${serverId}" is not in REMOTE_MCP_SERVER_ALLOWLIST. No session is opened and ` +
         "nothing from it is callable.",
+    };
+  }
+  // WARP-3912 — the owner's master switch, after the allowlist (an unconfigured box
+  // still reads nothing) and before the connection row. Explicit `enabled`, never
+  // "a row exists"; a missing row or a failed read both refuse.
+  try {
+    const channel = await prisma.offLanAllowlistChannel.findUnique({ where: { key: "remote_mcp" } });
+    if (channel?.enabled !== true) {
+      return {
+        allowed: false,
+        reason: "channel_disabled",
+        message:
+          "Remote MCP servers are switched off by the workspace owner (off-LAN channel remote_mcp). " +
+          "Nothing was sent; ask the owner or an admin to turn it on in Settings.",
+      };
+    }
+  } catch (err) {
+    logger.warn({ err, serverId }, "remote_mcp channel read failed — failing closed (no egress)");
+    return {
+      allowed: false,
+      reason: "gate_unavailable",
+      message: "The remote MCP gate could not be read. Refusing egress.",
     };
   }
   let row: { id: string; status: string; providerTokensEnc: string | null } | null;
@@ -201,6 +228,56 @@ export function auditRemoteMcp(input: {
   });
 }
 
+/**
+ * WARP-3912 — every in-flight remote call, by server id. Turning `remote_mcp` off
+ * aborts them all (ADR-043 §4: tear down, do not merely decline to re-establish).
+ * Process-wide because the switch is: the one chokepoint below registers every
+ * call, so a future owner-added server is covered without wiring of its own.
+ */
+const inFlight = new Map<string, Set<AbortController>>();
+
+/** Abort every in-flight remote call (one server, or all). Returns how many. */
+export function abortRemoteMcpInFlight(serverId?: string): number {
+  let n = 0;
+  for (const [id, set] of inFlight) {
+    if (serverId !== undefined && id !== serverId) continue;
+    for (const ac of set) {
+      ac.abort();
+      n++;
+    }
+  }
+  return n;
+}
+
+/** Run `fn`, rejecting as soon as the switch aborts it. The bridge session close
+ *  that follows ({@link detachRemoteServer}) is what stops the upstream work. */
+async function abortable<T>(serverId: string, fn: () => Promise<T>): Promise<T> {
+  const ac = new AbortController();
+  let set = inFlight.get(serverId);
+  if (!set) inFlight.set(serverId, (set = new Set()));
+  set.add(ac);
+  try {
+    return await new Promise<T>((resolve, reject) => {
+      ac.signal.addEventListener(
+        "abort",
+        () =>
+          reject(
+            new McpBridgeError(
+              "REMOTE_MCP_GATE_REFUSED",
+              "Remote MCP was switched off by the workspace owner while this call was running. It was aborted.",
+              451,
+            ),
+          ),
+        { once: true },
+      );
+      fn().then(resolve, reject);
+    });
+  } finally {
+    set.delete(ac);
+    if (set.size === 0) inFlight.delete(serverId);
+  }
+}
+
 export interface GatedRemoteMcpPortOptions {
   serverId: string;
   /** The bridge-backed port. Never a socket this process owns (ADR-043 §5). */
@@ -240,14 +317,14 @@ export function createGatedRemoteMcpPort(opts: GatedRemoteMcpPortOptions): McpCl
         throw new McpBridgeError("REMOTE_MCP_GATE_REFUSED", decision.message, 451);
       }
       try {
-        const tools = await upstream.listTools();
+        const tools = await abortable(serverId, () => upstream.listTools());
         audit({ serverId, op: "list_tools", outcome: "allowed" });
         return tools;
       } catch (err) {
         audit({
           serverId,
           op: "list_tools",
-          outcome: isAbort(err) ? "aborted" : "provider_error",
+          outcome: aborted(err) ? "refused_gate" : isAbort(err) ? "aborted" : "provider_error",
           reason: isAbort(err) ? "aborted" : err instanceof McpBridgeError ? err.code : "unknown",
         });
         throw err;
@@ -270,7 +347,7 @@ export function createGatedRemoteMcpPort(opts: GatedRemoteMcpPortOptions): McpCl
         return errorOutcome("REMOTE_MCP_GATE_REFUSED", name, decision.message);
       }
       try {
-        const result = await upstream.callTool(name, args);
+        const result = await abortable(serverId, () => upstream.callTool(name, args));
         audit({ serverId, op: "call_tool", outcome: "allowed", tool: name });
         return result;
       } catch (err) {
@@ -278,7 +355,7 @@ export function createGatedRemoteMcpPort(opts: GatedRemoteMcpPortOptions): McpCl
         audit({
           serverId,
           op: "call_tool",
-          outcome: isAbort(err) ? "aborted" : "provider_error",
+          outcome: aborted(err) ? "refused_gate" : isAbort(err) ? "aborted" : "provider_error",
           tool: name,
           reason: isAbort(err) ? "aborted" : code,
         });
@@ -296,6 +373,10 @@ export function createGatedRemoteMcpPort(opts: GatedRemoteMcpPortOptions): McpCl
 function isAbort(err: unknown): boolean {
   return err instanceof Error && err.name === "AbortError";
 }
+
+/** The switch aborted this call (see {@link abortable}) - a refusal, not a vendor failure. */
+const aborted = (err: unknown): boolean =>
+  err instanceof McpBridgeError && err.code === "REMOTE_MCP_GATE_REFUSED";
 
 /** Same envelope `mcp-multiplexer.service.ts` uses for a refusal, so the model
  *  sees one shape whichever layer refused. */

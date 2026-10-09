@@ -38,7 +38,7 @@ export interface PromoteReadbackProps {
   domains: readonly string[];
   busy: boolean;
   error: string | null;
-  onConfirm: (operatorDomain: string) => void;
+  onConfirm: (operatorDomain: string, hostedAppRoles?: string[]) => void;
   onCancel: () => void;
 }
 
@@ -47,6 +47,8 @@ const DEFAULT_DOMAIN = "data";
 export function PromoteReadback(props: PromoteReadbackProps) {
   const { readback, preflight } = props;
   const [domain, setDomain] = useState(DEFAULT_DOMAIN);
+  const [allowMembers, setAllowMembers] = useState(false);
+  const app = readback.kind === "app";
   const areas = props.domains.includes(DEFAULT_DOMAIN) ? props.domains : [DEFAULT_DOMAIN, ...props.domains];
   const blocked = preflight.blocking.length > 0;
 
@@ -62,7 +64,8 @@ export function PromoteReadback(props: PromoteReadbackProps) {
           <li key={line}>{line}</li>
         ))}
       </ul>
-      <p className="sub">{TOOLS_START_BLOCKED}</p>
+      {!app && <p className="sub">{TOOLS_START_BLOCKED}</p>}
+      {app && <p className="sub">The owner and admins can open this app. Guests cannot open apps.</p>}
 
       {blocked ? (
         <div role="alert" style={{ margin: "12px 0" }}>
@@ -95,7 +98,7 @@ export function PromoteReadback(props: PromoteReadbackProps) {
             subMono
           />
         ) : null}
-        {props.confirmable ? (
+        {props.confirmable && !app ? (
           <Row
             title="Area"
             sub="Where the assistant looks for its tools when a message is about that area."
@@ -110,6 +113,9 @@ export function PromoteReadback(props: PromoteReadbackProps) {
             }
           />
         ) : null}
+        {props.confirmable && app && readback.proposedGrantRoles?.includes("family") && <Row title="Member access" sub="Approve the proposed access for members of this Droplet."
+          right={<label><input type="checkbox" checked={allowMembers} disabled={props.busy} onChange={(event) => setAllowMembers(event.target.checked)} /> Allow members to open this app</label>} />}
+        {props.confirmable && app && !readback.proposedGrantRoles?.includes("family") && <Row title="Access" sub="Available to the owner and admins. You can share it with members after installation." />}
       </div>
 
       {props.error ? (
@@ -124,7 +130,7 @@ export function PromoteReadback(props: PromoteReadbackProps) {
             type="button"
             className="btn primary"
             disabled={blocked || props.busy}
-            onClick={() => props.onConfirm(domain)}
+            onClick={() => app ? props.onConfirm("", allowMembers ? ["family"] : []) : props.onConfirm(domain)}
           >
             {props.busy ? "Signing…" : "Sign and install"}
           </button>

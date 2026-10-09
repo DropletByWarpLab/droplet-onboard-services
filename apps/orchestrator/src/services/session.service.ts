@@ -298,11 +298,15 @@ export async function checkSession(
 
   if (touch && now - record.lastSeenAt >= SESSION_TOUCH_INTERVAL_SECONDS) {
     try {
-      await getRedis().set(
+      // A logout/revoke may delete the record after the GET above. XX keeps
+      // this activity write from reviving it, and KEEPTTL preserves its cap.
+      const written = await getRedis().set(
         recKey,
         JSON.stringify({ ...record, lastSeenAt: now }),
         "KEEPTTL",
+        "XX",
       );
+      if (written === null) return { kind: "missing" };
     } catch (err) {
       // Non-fatal — the next request retries the touch. The idle clock only
       // ever errs in the STRICT direction (an unslid window expires sooner).

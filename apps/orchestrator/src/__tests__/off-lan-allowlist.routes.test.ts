@@ -102,6 +102,7 @@ function mkUser(role: AuthUser["role"], username = "stefan"): AuthUser {
 function buildApp(
   prismaMock: ReturnType<typeof createPrismaMock>,
   user: AuthUser,
+  deps: { onRemoteMcpDisabled?: () => Promise<void> } = {},
 ) {
   const app = express();
   app.use(express.json());
@@ -109,7 +110,7 @@ function buildApp(
     (req as Request & { user: AuthUser }).user = user;
     next();
   });
-  app.use("/api", createSettingsRouter(prismaMock as unknown as import("@prisma/client").PrismaClient));
+  app.use("/api", createSettingsRouter(prismaMock as unknown as import("@prisma/client").PrismaClient, deps));
   return app;
 }
 
@@ -384,5 +385,49 @@ describe("WARP-467 — PATCH /api/settings/off-lan/:key", () => {
       .patch("/api/settings/off-lan/telemetry")
       .send({ enabled: false, reason: "x".repeat(1025) });
     expect(res.status).toBe(400);
+  });
+});
+
+// ADR-043 §4 / ADR-072 §1: the owner's master switch over outbound MCP. Turning
+// it OFF must tear remote sessions down, not merely decline the next call.
+describe("WARP-3912 — remote_mcp teardown on turn-off", () => {
+  const mcpRow = (enabled: boolean): MockChannelRow => ({
+    key: "remote_mcp",
+    enabled,
+    requiresAdmin: true,
+    lastChangedBy: null,
+    lastChangedAt: new Date("2026-10-08T00:00:00Z"),
+    reason: null,
+  });
+
+  it("turning it off runs the teardown once; turning it on does not", async () => {
+    const teardown = vi.fn(async () => undefined);
+    const off = createPrismaMock([mcpRow(true)]);
+    const resOff = await request(buildApp(off, mkUser("admin"), { onRemoteMcpDisabled: teardown }))
+      .patch("/api/settings/off-lan/remote_mcp")
+      .send({ enabled: false, reason: "No outbound MCP" });
+    expect(resOff.status).toBe(200);
+    expect(teardown).toHaveBeenCalledTimes(1);
+
+    const on = createPrismaMock([mcpRow(false)]);
+    await request(buildApp(on, mkUser("admin"), { onRemoteMcpDisabled: teardown }))
+      .patch("/api/settings/off-lan/remote_mcp")
+      .send({ enabled: true, reason: "Back on" });
+    expect(teardown).toHaveBeenCalledTimes(1);
+  });
+
+  it("a teardown that throws does not fail the PATCH (the switch is already persisted)", async () => {
+    const prisma = createPrismaMock([mcpRow(true)]);
+    const res = await request(
+      buildApp(prisma, mkUser("owner"), {
+        onRemoteMcpDisabled: async () => {
+          throw new Error("bridge down");
+        },
+      }),
+    )
+      .patch("/api/settings/off-lan/remote_mcp")
+      .send({ enabled: false, reason: "x" });
+    expect(res.status).toBe(200);
+    expect(prisma.rows.get("remote_mcp")?.enabled).toBe(false);
   });
 });

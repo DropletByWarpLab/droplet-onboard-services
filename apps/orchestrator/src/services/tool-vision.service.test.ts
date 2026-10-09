@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   fetchEventCamera: vi.fn(),
   fetchEventSnapshot: vi.fn(),
   fetchEventThumbnail: vi.fn(),
+  fetchRecordingSnapshot: vi.fn(),
   ncGetFileId: vi.fn(),
   ncFetchThumbnail: vi.fn(),
   buildImageBlocks: vi.fn(),
@@ -30,6 +31,7 @@ vi.mock("./frigate.client.js", () => ({
   fetchEventCamera: mocks.fetchEventCamera,
   fetchEventSnapshot: mocks.fetchEventSnapshot,
   fetchEventThumbnail: mocks.fetchEventThumbnail,
+  fetchRecordingSnapshot: mocks.fetchRecordingSnapshot,
 }));
 vi.mock("./nextcloud.client.js", () => ({
   ncGetFileId: mocks.ncGetFileId,
@@ -71,6 +73,7 @@ function ports(over: Partial<ToolVisionPorts> = {}): ToolVisionPorts {
     fetchFrame: vi.fn().mockImplementation(async () => jpegResponse()),
     fetchEventSnapshot: vi.fn().mockImplementation(async () => jpegResponse()),
     fetchEventThumbnail: vi.fn().mockImplementation(async () => jpegResponse()),
+    fetchRecordingFrame: vi.fn().mockImplementation(async () => jpegResponse()),
     fileId: vi.fn().mockResolvedValue(42),
     fileThumbnail: vi.fn().mockResolvedValue({ body: JPEG.buffer.slice(0), contentType: "image/jpeg" }),
     brainImage: vi.fn().mockResolvedValue({ type: "image_url", image_url: { url: "data:image/jpeg;base64,AAAA" } }),
@@ -177,6 +180,85 @@ describe("createToolVision — vision model, on-box", () => {
     const tv = createToolVision({ offLan: false, isVisionModel: vision, ports: ports() });
     expect(await tv.inspect("list_cameras", { cameras: [] })).toEqual({ blocks: [], notes: [], attached: 0 });
     expect(vision).not.toHaveBeenCalled();
+  });
+});
+
+// WARP-3927 — get_camera_recording attaches a still FROM A RECORDING. It has no
+// eventId, so before the recording_frame ref it would have read as a current-
+// frame snapshot and the model would have been shown NOW labelled as then.
+describe("recording stills (WARP-3927)", () => {
+  const AT = 1_791_422_400; // 2026-10-08T01:20:00Z
+  const recordingMedia = (camera = "front_door", at = AT) => ({
+    media: [{ kind: "camera_snapshot", camera, snapshotUrl: `/api/cameras/${camera}/recordings/snapshot?at=${at}` }],
+  });
+
+  it("selects a recording_frame at the stated instant, not the live frame", () => {
+    expect(selectImageRefs(recordingMedia())).toEqual([{ kind: "recording_frame", camera: "front_door", at: AT }]);
+    expect(selectImageRefs(recordingMedia())).not.toContainEqual({ kind: "camera_frame", camera: "front_door" });
+  });
+
+  it("names the camera from the URL, not from the descriptor's own claim", () => {
+    const m = {
+      media: [{ kind: "camera_snapshot", camera: "garage", snapshotUrl: `/api/cameras/front_door/recordings/snapshot?at=${AT}` }],
+    };
+    expect(selectImageRefs(m)).toEqual([{ kind: "recording_frame", camera: "front_door", at: AT }]);
+  });
+
+  it("an event still keeps its own ref, and a bare snapshot URL stays a live frame", () => {
+    expect(selectImageRefs({ media: eventMedia({ id: "1700000000.1-abc", camera: "yard", hasSnapshot: true }) })).toEqual([
+      { kind: "event_snapshot", eventId: "1700000000.1-abc", camera: "yard" },
+    ]);
+    expect(selectImageRefs(snap())).toEqual([{ kind: "camera_frame", camera: "front_door" }]);
+  });
+
+  it.each([
+    "/api/cameras/front_door/recordings/snapshot",
+    "/api/cameras/front_door/recordings/snapshot?at=abc",
+    "/api/cameras/front_door/recordings/snapshot?at=12",
+    "/api/cameras/front_door/recordings/snapshot?at=1791422400123456",
+  ])("a malformed recording URL (%s) is treated as a plain snapshot, never fetched as a recording", (url) => {
+    const refs = selectImageRefs({ media: [{ kind: "camera_snapshot", camera: "front_door", snapshotUrl: url }] });
+    expect(refs.some((r) => r.kind === "recording_frame")).toBe(false);
+  });
+
+  it("fetches the recorded frame (resized) as the user, labels it with the moment, and audits it", async () => {
+    const p = ports();
+    const out = await make(p).inspect("get_camera_recording", recordingMedia());
+    expect(out.attached).toBe(1);
+    expect(p.canAccessCamera).toHaveBeenCalledWith("front_door");
+    expect(p.fetchRecordingFrame).toHaveBeenCalledWith("front_door", AT, 640);
+    expect(p.fetchFrame).not.toHaveBeenCalled();
+    expect(p.auditCamera).toHaveBeenCalledWith("front_door", undefined);
+    const marker = out.blocks[0] as { text: string };
+    expect(marker.text).toBe(`[Image from tool get_camera_recording: front_door, captured ${new Date(AT * 1000).toISOString()}]`);
+  });
+
+  it("a camera the user may not see is never fetched", async () => {
+    const p = ports({ canAccessCamera: vi.fn().mockResolvedValue(false) });
+    const out = await make(p).inspect("get_camera_recording", recordingMedia("bedroom"));
+    expect(out.attached).toBe(0);
+    expect(out.notes).toEqual([NOTE_COULD_NOT_VIEW]);
+    expect(p.fetchRecordingFrame).not.toHaveBeenCalled();
+  });
+
+  it("a moment with no recording degrades to could-not-view", async () => {
+    const p = ports({ fetchRecordingFrame: vi.fn().mockRejectedValue(new Error("no recording")) });
+    const out = await make(p).inspect("get_camera_recording", recordingMedia());
+    expect(out).toMatchObject({ attached: 0, notes: [NOTE_COULD_NOT_VIEW] });
+  });
+
+  it("an off-LAN turn gets no bytes at all", async () => {
+    const p = ports();
+    const out = await make(p, { offLan: true }).inspect("get_camera_recording", recordingMedia());
+    expect(out.notes).toEqual([NOTE_OFF_LAN]);
+    expect(p.fetchRecordingFrame).not.toHaveBeenCalled();
+  });
+
+  it("the production port reads Frigate's recording snapshot", async () => {
+    mocks.fetchRecordingSnapshot.mockResolvedValue(jpegResponse());
+    const p = userToolVisionPorts({ prisma: {} as never, user: { id: "u", role: "family", username: "sam" } });
+    await p.fetchRecordingFrame("front_door", AT, 640);
+    expect(mocks.fetchRecordingSnapshot).toHaveBeenCalledWith("front_door", AT, 640);
   });
 });
 

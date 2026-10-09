@@ -13,6 +13,7 @@ import { withRemoteCallAttribution } from "./remote-call-attribution.js";
 import { redactSecretParams, REDACTION_PLACEHOLDER } from "../lib/log-redaction.js";
 import {
   auditRemoteMcp,
+  abortRemoteMcpInFlight,
   createGatedRemoteMcpPort,
   remoteMcpGate,
   type RemoteMcpGateDecision,
@@ -67,7 +68,7 @@ describe("the gate reads two EXPLICIT columns, and fails closed", () => {
   const allow = new Set([SERVER]);
 
   it("refuses a server the operator has not allowlisted, before reading the row", async () => {
-    const prisma = { integrationConnection: { findFirst: vi.fn() } };
+    const prisma = { offLanAllowlistChannel: { findUnique: async () => ({ enabled: true }) }, integrationConnection: { findFirst: vi.fn() } };
     const d = await remoteMcpGate(prisma, SERVER, new Set());
     expect(d).toMatchObject({ allowed: false, reason: "server_not_allowlisted" });
     expect(prisma.integrationConnection.findFirst).not.toHaveBeenCalled();
@@ -75,6 +76,7 @@ describe("the gate reads two EXPLICIT columns, and fails closed", () => {
 
   it("allows a CONNECTED row holding a credential", async () => {
     const prisma = {
+      offLanAllowlistChannel: { findUnique: async () => ({ enabled: true }) },
       integrationConnection: {
         findFirst: async () => ({ id: "c1", status: "CONNECTED", providerTokensEnc: "dcv1:x" }),
       },
@@ -84,12 +86,13 @@ describe("the gate reads two EXPLICIT columns, and fails closed", () => {
 
   it("distinguishes no-row, wrong-status and no-credential — three different remedies", async () => {
     const row = (over: Record<string, unknown>) => ({
+      offLanAllowlistChannel: { findUnique: async () => ({ enabled: true }) },
       integrationConnection: {
         findFirst: async () => ({ id: "c1", status: "CONNECTED", providerTokensEnc: "dcv1:x", ...over }),
       },
     });
     expect(
-      await remoteMcpGate({ integrationConnection: { findFirst: async () => null } }, SERVER, allow),
+      await remoteMcpGate({ offLanAllowlistChannel: { findUnique: async () => ({ enabled: true }) }, integrationConnection: { findFirst: async () => null } }, SERVER, allow),
     ).toMatchObject({ reason: "no_connection_row" });
     expect(await remoteMcpGate(row({ status: "ERROR" }), SERVER, allow)).toMatchObject({
       reason: "connection_not_connected",
@@ -101,6 +104,7 @@ describe("the gate reads two EXPLICIT columns, and fails closed", () => {
 
   it("a DB error REFUSES — the ambientDataGate posture, not outboundEmailGate's throw", async () => {
     const prisma = {
+      offLanAllowlistChannel: { findUnique: async () => ({ enabled: true }) },
       integrationConnection: {
         findFirst: async () => {
           throw new Error("db down");
@@ -324,5 +328,65 @@ describe("a remote tool's arguments never reach logs or the audit row", () => {
     const out = JSON.stringify(redactSecretParams(args));
     for (const s of SECRETS) expect(out).not.toContain(s);
     expect(out).toContain(REDACTION_PLACEHOLDER);
+  });
+});
+
+describe("WARP-3912 — the remote_mcp off-LAN channel is the master switch", () => {
+  const allow = new Set([SERVER]);
+  const connected = {
+    findFirst: async () => ({ id: "c1", status: "CONNECTED", providerTokensEnc: "dcv1:x" }),
+  };
+  const withChannel = (findUnique: () => Promise<{ enabled: boolean } | null>) => ({
+    offLanAllowlistChannel: { findUnique },
+    integrationConnection: connected,
+  });
+
+  it("refuses when the channel is off, a connected Atlassian account notwithstanding", async () => {
+    const d = await remoteMcpGate(withChannel(async () => ({ enabled: false })), SERVER, allow);
+    expect(d).toMatchObject({ allowed: false, reason: "channel_disabled" });
+  });
+
+  it("refuses when the channel row is missing, and when it cannot be read", async () => {
+    expect(await remoteMcpGate(withChannel(async () => null), SERVER, allow)).toMatchObject({
+      reason: "channel_disabled",
+    });
+    const boom = withChannel(async () => {
+      throw new Error("db down");
+    });
+    expect(await remoteMcpGate(boom, SERVER, allow)).toMatchObject({ reason: "gate_unavailable" });
+  });
+
+  it("a tool call through the real gate with the channel off is refused, audited, and never dials", async () => {
+    const up = upstreamDouble();
+    const audit = vi.fn();
+    const prisma = withChannel(async () => ({ enabled: false }));
+    const port = createGatedRemoteMcpPort({
+      serverId: SERVER,
+      upstream: up.port,
+      gate: () => remoteMcpGate(prisma, SERVER, allow),
+      audit,
+    });
+    const out = await port.callTool("atlassian__getJiraIssue", {});
+    expect(out.isError).toBe(true);
+    expect(JSON.stringify(out)).toContain("switched off by the workspace owner");
+    expect(up.callTool).not.toHaveBeenCalled();
+    expect(audit).toHaveBeenCalledWith(
+      expect.objectContaining({ op: "call_tool", outcome: "refused_gate", reason: "channel_disabled" }),
+    );
+  });
+
+  it("turning the channel off aborts a call that is already in flight, with an audited refusal", async () => {
+    const callTool = vi.fn(() => new Promise<never>(() => undefined)); // never settles
+    const h = gated({ allowed: true }, { callTool: callTool as McpClientPort["callTool"] });
+    const pending = h.port.callTool("atlassian__searchJiraIssuesUsingJql", {});
+    await new Promise((r) => setTimeout(r, 0));
+    expect(abortRemoteMcpInFlight()).toBe(1);
+    const out = await pending;
+    expect(out.isError).toBe(true);
+    expect(JSON.stringify(out)).toContain("switched off");
+    expect(h.audit).toHaveBeenCalledWith(
+      expect.objectContaining({ op: "call_tool", outcome: "refused_gate" }),
+    );
+    expect(abortRemoteMcpInFlight()).toBe(0);
   });
 });

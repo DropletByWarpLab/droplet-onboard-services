@@ -540,6 +540,7 @@ function stack(row: SaasConnectionRow | null, allowlist: string[]) {
     remoteCallPolicy: allowAllReads,
   });
   const prisma = {
+    offLanAllowlistChannel: { findUnique: async () => ({ enabled: true }) },
     integrationConnection: { findFirst: vi.fn(async () => row) },
   };
   return {

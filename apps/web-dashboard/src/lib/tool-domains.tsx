@@ -10,6 +10,7 @@
  */
 
 import {
+  AppWindow,
   Bell,
   Braces,
   Building2,
@@ -89,6 +90,7 @@ export const DOMAIN_META: Record<string, DomainMeta> = {
   // WARP-2896 (ADR-056) — the workshop's workspace tools. Label matches the
   // /workshop nav entry for the same reason.
   workspace: { label: "Workshop", icon: Hammer },
+  hosted_apps: { label: "Hosted apps", icon: AppWindow },
 };
 
 /** Title-case a slug as a last resort: `smart-home` → `Smart home`. */

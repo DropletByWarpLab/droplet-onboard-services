@@ -104,6 +104,9 @@ interface Turn {
  * the corpus does not require remembering to update a count in a comment.
  */
 const TURNS: Turn[] = [
+  { label: "hosted apps / status", message: "Is the website I put on Droplet still up?", requires: "list_hosted_apps" },
+  { label: "hosted apps / logs", message: "My web app stopped working, show me why it crashed", requires: "hosted_app_logs" },
+  { label: "hosted apps / setup", message: "Help me host my UI in the workspace", requires: "start_agent_run" },
   {
     label: "files / find a document by what it is",
     message: "I need the invoice from the plumber, can you dig it out?",

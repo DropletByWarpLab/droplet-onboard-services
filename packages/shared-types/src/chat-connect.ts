@@ -263,6 +263,11 @@ export function isSafeDashboardHref(u: unknown): u is string {
   return !decoded.split("/").includes("..");
 }
 
+/** The one connect route a credentials card for `provider` may post to. */
+export function credentialsConnectPath(provider: string): string {
+  return `/api/integrations/${provider}/connect`;
+}
+
 export function isAllowedConnectPostPath(p: unknown): p is string {
   return typeof p === "string" && CONNECT_POST_PATH_RES.some((re) => re.test(p));
 }
@@ -386,6 +391,11 @@ export function parseConnectCard(data: unknown): ConnectCard | null {
     case "credentials": {
       const post = isRecord(data.post) ? data.post.path : undefined;
       if (!isAllowedConnectPostPath(post)) return null;
+      // Its OWN provider's route, not merely an allowlisted one: the dashboard
+      // derives the credential-save target from this path, so a card for
+      // "stripe" that named another provider's connect route would save the
+      // typed key under that provider.
+      if (post !== credentialsConnectPath(provider)) return null;
       const card: CredentialsConnectCard = { ...base, mode: "credentials", fields: parseFields(data.fields), post: { path: post } };
       if (Array.isArray(data.variants)) {
         const variants: NonNullable<CredentialsConnectCard["variants"]> = [];

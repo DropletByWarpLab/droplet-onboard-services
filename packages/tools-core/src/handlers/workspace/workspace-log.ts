@@ -50,7 +50,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const workspaceLog: Tool = {
   name: "workspace_log",
   description:
-    "List the commits in this run's workspace, newest first, with author, date and subject.",
+    "List workspace commits newest first: author, date and subject.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

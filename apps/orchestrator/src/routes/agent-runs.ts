@@ -61,6 +61,7 @@ import {
 } from "../utils/rrule.js";
 import { isUniqueViolation } from "../lib/prisma-errors.js";
 import { queuePositions, waitingForOf } from "../services/agent-run-events.service.js";
+import { isRunBriefKey } from "../services/run-brief.service.js";
 
 const MCP_PRINCIPAL_ID = "_service:mcp";
 const RUN_STARTER_ROLES: ReadonlySet<string> = new Set(["owner", "admin"]);
@@ -69,6 +70,7 @@ const RUN_STARTER_ROLES: ReadonlySet<string> = new Set(["owner", "admin"]);
  *  — the unit suites stub the client, and a structural check is what a raw
  *  `Prisma.PrismaClientKnownRequestError` satisfies too. */
 const startRunSchema = z.object({
+  brief: z.literal("app-setup").optional(),
   goal: z.string().trim().min(1).max(4000),
   model: z.string().trim().min(1).max(200).optional(),
   sessionId: z.string().trim().min(1).max(200).optional(),
@@ -189,6 +191,7 @@ function defaultModel(prisma: PrismaClient): Promise<string | null> {
 }
 
 interface RunRow {
+  brief?: string | null;
   id: string;
   userId: string;
   sessionId: string | null;
@@ -236,6 +239,7 @@ function serializeRun(r: RunRow, withTrace: boolean, positions: ReadonlyMap<stri
       : {};
   return {
     id: r.id,
+    brief: r.brief ?? null,
     goal: r.goal,
     model: r.model,
     status: r.status,
@@ -296,6 +300,7 @@ function serializeRun(r: RunRow, withTrace: boolean, positions: ReadonlyMap<stri
 }
 
 const RUN_SELECT = {
+  brief: true,
   id: true,
   userId: true,
   sessionId: true,
@@ -383,6 +388,22 @@ export function createAgentRunsRouter(prisma: PrismaClient): Router {
       }
       const actor = await actorOr403(req, res, parsed.data.onBehalfOf);
       if (!actor) return;
+      // A dashboard may start the supported setup brief in its own chat.
+      // Arbitrary origin fields remain service-only, and a foreign chat is
+      // never accepted merely because the caller supplied its id.
+      const setupBrief = parsed.data.brief;
+      if (setupBrief) {
+        if (!config.SANDBOX_PROCESS_SUPERVISION) { res.status(503).json({ error: "Hosted app supervision is disabled" }); return; }
+        if (!isRunBriefKey(setupBrief) || !parsed.data.workspaceId || !parsed.data.sessionId) {
+          res.status(400).json({ error: "app-setup requires workspaceId and sessionId" });
+          return;
+        }
+        const session = await prisma.chatSession.findFirst({
+          where: { id: parsed.data.sessionId, userId: { in: [actor.id, actor.username] } },
+          select: { id: true },
+        });
+        if (!session) { res.status(404).json({ error: "No such conversation" }); return; }
+      }
       const model = parsed.data.model ?? (await defaultModel(prisma));
       if (!model) {
         res.status(400).json({ error: "model is required (no active model is installed and LLM_MODEL is not set)" });
@@ -400,12 +421,13 @@ export function createAgentRunsRouter(prisma: PrismaClient): Router {
       if (parsed.data.workspaceId) {
         const ws = await prisma.workshopWorkspace.findUnique({
           where: { id: parsed.data.workspaceId },
-          select: { id: true, status: true },
+          select: { id: true, status: true, userId: true },
         });
         if (!ws) {
           res.status(404).json({ error: "No such workspace" });
           return;
         }
+        if (setupBrief && ws.userId !== actor.id) { res.status(404).json({ error: "No such workspace" }); return; }
         if (ws.status !== "active") {
           res.status(409).json({ error: `workspace is ${ws.status}; start a new one to keep working` });
           return;
@@ -420,19 +442,20 @@ export function createAgentRunsRouter(prisma: PrismaClient): Router {
       }
       // WARP-3299 — the chat link is honoured from the mcp service principal
       // only; anyone else's claim to be "from chat" is dropped, not refused.
-      const fromChat = isMcpService(req) && parsed.data.origin === "chat";
+      const fromChat = !!setupBrief || (isMcpService(req) && parsed.data.origin === "chat");
       let id: string;
       try {
         ({ id } = await enqueueAgentRun(prisma, {
           userId: actor.id,
+          brief: setupBrief ?? null,
           goal: parsed.data.goal,
           model,
           sessionId: parsed.data.sessionId ?? null,
           maxIter: parsed.data.maxIter,
           workspaceId: parsed.data.workspaceId ?? null,
           origin: fromChat ? "chat" : "workshop",
-          originMessageId: fromChat ? (parsed.data.originMessageId ?? null) : null,
-          originToolCallId: fromChat ? (parsed.data.originToolCallId ?? null) : null,
+          originMessageId: isMcpService(req) && fromChat ? (parsed.data.originMessageId ?? null) : null,
+          originToolCallId: isMcpService(req) && fromChat ? (parsed.data.originToolCallId ?? null) : null,
           title: parsed.data.title,
           deliverable: parsed.data.deliverable,
         }));
@@ -471,6 +494,7 @@ export function createAgentRunsRouter(prisma: PrismaClient): Router {
         id,
         status: "queued",
         workspaceId: parsed.data.workspaceId ?? null,
+        sessionId: parsed.data.sessionId ?? null,
         queuePosition,
       });
     } catch (err) {

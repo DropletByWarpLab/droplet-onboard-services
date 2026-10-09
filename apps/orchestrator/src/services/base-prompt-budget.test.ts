@@ -453,7 +453,16 @@ describe("worst-case fixed system-block budget", () => {
     // leaves roughly two average tools before the next author decides again.
     //
     // MEASURED 2026-10-02: 110,779 chars over 154 tools — 1,221 under the line.
-    expect(fullRegistryJson.length).toBeLessThan(112000);
+    //
+    // WARP-3927 crossed it (111,940 over 161 tools → 115,380 over 165): four
+    // camera read tools (`summarize_camera_activity`, `get_camera_motion`,
+    // `list_camera_reviews`, `get_camera_recording`, 640-800 chars each after
+    // trimming, ~2,850 together) plus the period/label filters WARP-3747 adds to
+    // `list_camera_events` and `search_camera_events` (~420). Raised by 4K, not
+    // re-based, for the reasons above (MCP-facing surface, no window): the
+    // per-domain worst case and the chat-pool mean stay green, and the headroom
+    // is ~600 chars, roughly one more tool before the next author decides.
+    expect(fullRegistryJson.length).toBeLessThan(116000);
   });
 
   /**

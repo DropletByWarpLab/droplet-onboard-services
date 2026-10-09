@@ -18,13 +18,15 @@ vi.mock("../services/cache.service.js", () => ({
 vi.mock("../services/mqtt.service.js", () => ({ publish: vi.fn() }));
 vi.mock("../services/activity.singleton.js", () => ({ recordActivity: vi.fn().mockResolvedValue(null) }));
 
-const { deleteConversationForUser, cancelAgentRun } = vi.hoisted(() => ({
+const { deleteConversationForUser, cancelAgentRun, ensureConversation } = vi.hoisted(() => ({
+  ensureConversation: vi.fn().mockResolvedValue({ id: "chat-new", created: true }),
   deleteConversationForUser: vi.fn(),
   cancelAgentRun: vi.fn(),
 }));
 vi.mock("../services/chat-persistence.service.js", () => ({
-  ChatPersistenceService: vi.fn().mockImplementation(function () { return { deleteConversationForUser }; }),
+  ChatPersistenceService: vi.fn().mockImplementation(function () { return { deleteConversationForUser, ensureConversation }; }),
 }));
+vi.mock("../services/active-model.service.js", () => ({ resolveActiveModel: vi.fn().mockResolvedValue("local-model") }));
 vi.mock("../services/agent-run-worker.service.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../services/agent-run-worker.service.js")>()),
   cancelAgentRun,
@@ -51,6 +53,20 @@ function buildApp(liveRuns: { id: string; title: string; status: string }[]) {
 }
 
 const live = [{ id: "run-1", title: "Supplier price check", status: "running" }];
+describe("POST /api/llm/conversations", () => {
+  it("creates an owned empty conversation before a dashboard setup run", async () => {
+    const { app } = buildApp([]);
+    const res = await request(app).post("/api/llm/conversations").send({ title: "Set up " + "a".repeat(80) });
+    expect(res.status).toBe(201);
+    expect(res.body).toEqual({ id: "chat-new" });
+    expect(ensureConversation).toHaveBeenCalledWith(expect.objectContaining({ conversationId: null, userId: "romain", model: "local-model", firstUserContent: "Set up " + "a".repeat(80) }));
+  });
+  it("does not let caller-supplied identity or ids create someone else's conversation", async () => {
+    const { app } = buildApp([]);
+    expect((await request(app).post("/api/llm/conversations").send({ userId: "other", conversationId: "foreign" })).status).toBe(400);
+    expect(ensureConversation).not.toHaveBeenCalled();
+  });
+});
 
 beforeEach(() => {
   vi.clearAllMocks();

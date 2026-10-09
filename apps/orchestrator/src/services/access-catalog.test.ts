@@ -31,6 +31,14 @@ import { toolLayers } from "./tool-layers.service.js";
 import { MODULES } from "../modules/module-registry.js";
 
 describe("access-catalog — module vocabulary", () => {
+  it("keeps hosted discovery reachable by domain grants while each app enforces its own visibility", () => {
+    expect(OWNERS_BY_DOMAIN.has("hosted_apps")).toBe(false);
+    expect(FEATURE_UNGATED_TOOL_DOMAINS.hosted_apps).toContain("HostedAppGrant");
+    expect(FEATURE_UNGATED_TOOL_DOMAINS.hosted_apps).toContain("owner/admin-only");
+    expect(domainsForFeatures(new Set()).has("hosted_apps")).toBe(true);
+    expect(isGrantableDomain("hosted_apps")).toBe(true);
+    expect(unmappedToolDomains()).toEqual([]);
+  });
   // WARP-2117/2018 added `crm` and `contacts`, taking this from 12 to 14;
   // WARP-2581 added `money` for 15; WARP-3528 added `support` for 16. The list
   // is pinned so a new ModuleId cannot arrive without someone writing its
