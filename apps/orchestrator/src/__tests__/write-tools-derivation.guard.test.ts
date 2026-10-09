@@ -25,7 +25,8 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
 import { TOOLS } from "@droplet/tools-core";
 import { defaultToolCallInterceptor } from "@droplet/tools-core";
-import { WRITE_TOOLS } from "../services/tool-access.service.js";
+import { WRITE_TOOLS, hasWriteTool } from "../services/tool-access.service.js";
+import { remoteToolClassificationCache } from "../services/remote-tool-classification.service.js";
 
 // `__dirname`, not `import.meta.url`: this package builds to CommonJS,
 // where `import.meta` is a TS1470 error. `vitest` does not typecheck
@@ -105,6 +106,71 @@ describe("WRITE_TOOLS is derived from requiresWrite (WARP-2345)", () => {
       "utf8",
     );
     expect(source).toContain("filter((t) => t.requiresWrite)");
+  });
+});
+
+describe("remote classifications feed the SAME derivation (WARP-2436)", () => {
+  const now = new Date();
+  const row = (toolName: string, requiresWrite: boolean) => ({
+    serverId: "ext-x",
+    toolName,
+    requiresWrite,
+    requiresConfirmation: requiresWrite,
+    denied: false,
+    reviewedBy: null,
+    reviewedAt: null,
+    wireDescription: null,
+    firstSeenAt: now,
+    lastSeenAt: now,
+  });
+  afterEach(() => remoteToolClassificationCache.seed([]));
+
+  it("a remote tool classified a write is a member with no registration step; a read is not", () => {
+    const before = [...WRITE_TOOLS].length;
+    expect(WRITE_TOOLS.has("ext-x__create_issue")).toBe(false);
+
+    remoteToolClassificationCache.seed([row("create_issue", true), row("get_issue", false)]);
+
+    expect(WRITE_TOOLS.has("ext-x__create_issue")).toBe(true);
+    expect(WRITE_TOOLS.has("ext-x__get_issue")).toBe(false);
+    expect([...WRITE_TOOLS]).toContain("ext-x__create_issue");
+    expect(WRITE_TOOLS.size).toBe(before + 1);
+    // The downstream gates read it: a spec calling it is a write.
+    expect(hasWriteTool(["ext-x__create_issue"])).toBe(true);
+    expect(hasWriteTool(["ext-x__get_issue"])).toBe(false);
+  });
+
+  /**
+   * MUTATION: snapshot the remote names once at import (or into a second
+   * set) → the demotion below does not remove it and this goes red.
+   */
+  it("demoting it to read-only removes it in the same operation, with nothing to invalidate", () => {
+    remoteToolClassificationCache.seed([row("create_issue", true)]);
+    expect(WRITE_TOOLS.has("ext-x__create_issue")).toBe(true);
+
+    remoteToolClassificationCache.seed([row("create_issue", false)]);
+
+    expect(WRITE_TOOLS.has("ext-x__create_issue")).toBe(false);
+    expect([...WRITE_TOOLS]).not.toContain("ext-x__create_issue");
+  });
+
+  it("the compiled derivation still owns the local answer, and an unclassified remote name is not invented", () => {
+    const derived = [...TOOLS.values()].filter((t) => t.requiresWrite).map((t) => t.name);
+    expect([...WRITE_TOOLS].sort()).toEqual(derived.sort());
+    expect(WRITE_TOOLS.has("ext-x__never_seen")).toBe(false);
+  });
+
+  it("no parallel remote write list exists in the orchestrator or tools-core", () => {
+    const pattern = /REMOTE_WRITE_TOOLS|remoteWriteTools\s*[:=]/;
+    const roots = [ORCH_SRC, path.resolve(ORCH_SRC, "../../../packages/tools-core/src")];
+    const offenders: string[] = [];
+    for (const root of roots) {
+      for (const file of walk(root)) {
+        if (!file.endsWith(".ts") || file === THIS_FILE) continue;
+        if (pattern.test(readFileSync(file, "utf8"))) offenders.push(file);
+      }
+    }
+    expect(offenders).toEqual([]);
   });
 });
 
