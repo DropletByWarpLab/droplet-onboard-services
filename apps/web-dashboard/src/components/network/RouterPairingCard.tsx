@@ -117,7 +117,8 @@ export function RouterPairingCard({ routerErrorCode, onChanged }: RouterPairingC
   //    state with a deadline (the next restart).
   if (unsaved || data.pendingPersist) {
     return (
-      <div className="card mb-4" role="alert" data-testid="router-pairing-retry">
+      <div className="mb-4">
+<div className="card" role="alert" data-testid="router-pairing-retry">
         <div className="flex items-start gap-3">
           <AlertTriangle size={18} className="mt-0.5 flex-shrink-0 text-system-orange" aria-hidden="true" />
           <div className="flex-1 min-w-0">
@@ -153,6 +154,7 @@ export function RouterPairingCard({ routerErrorCode, onChanged }: RouterPairingC
           </div>
         </div>
       </div>
+      </div>
     );
   }
 
@@ -179,7 +181,8 @@ export function RouterPairingCard({ routerErrorCode, onChanged }: RouterPairingC
     const where = data.host ? ` at ${data.host}` : "";
     const what = data.model ? `Router ${data.model}` : "Router";
     return (
-      <div className="card mt-4 text-left" data-testid="router-pairing-offer">
+      <div className="mt-4 text-left">
+<div className="card" data-testid="router-pairing-offer">
         <div className="flex items-start gap-3">
           <Link2 size={18} className="mt-0.5 flex-shrink-0" style={{ color: "var(--text-muted)" }} aria-hidden="true" />
           <div className="flex-1 min-w-0">
@@ -222,6 +225,7 @@ export function RouterPairingCard({ routerErrorCode, onChanged }: RouterPairingC
           confirmLabel="Pair"
           variant="neutral"
         />
+      </div>
       </div>
     );
   }

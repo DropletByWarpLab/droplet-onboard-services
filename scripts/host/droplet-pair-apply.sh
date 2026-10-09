@@ -160,6 +160,11 @@ try:
         raise ValueError("password must be exactly 32 lowercase hex characters")
 
     os.makedirs(secrets_dir, mode=0o700, exist_ok=True)
+    # The directory itself is droplet-owned: refuse a symlink swapped in for it
+    # (O_NOFOLLOW below only guards the final path component).
+    import stat
+    if not stat.S_ISDIR(os.lstat(secrets_dir).st_mode):
+        raise ValueError("secrets dir is not a plain directory")
     dest = os.path.join(secrets_dir, FILES[target])
     tmp = "%s.pair.%d" % (dest, os.getpid())
     try:

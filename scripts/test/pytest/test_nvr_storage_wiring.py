@@ -161,7 +161,7 @@ def _unit_text(name: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# polkit: the bridge may START the two on-demand units, nothing else
+# polkit: the bridge may START the on-demand units, nothing else
 # ---------------------------------------------------------------------------
 
 def test_polkit_grants_exactly_the_allowed_starts():
@@ -171,6 +171,7 @@ def test_polkit_grants_exactly_the_allowed_starts():
         "droplet-panel-console.service",
         "droplet-nvr-storage-apply.service",
         "droplet-nvr-migrate.service",
+        "droplet-pair-apply.service",
     ])
     assert len(p["units"]) == len(set(p["units"])), "a unit is granted twice"
     # ONE rule, start verb only, for the unprivileged bridge user only.
