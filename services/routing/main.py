@@ -47,6 +47,17 @@ from droplet_openwrt_sdk import (
     discovery_service_allowed,
     DISCOVERY_SERVICE_ALLOWLIST,
 )
+from pairing import (
+    FINGERPRINT_RE,
+    PairingApi,
+    PairingClaimError,
+    PairingState,
+    PairingUnsupported,
+    PairStatus,
+    STATE_CLOSED,
+    STATE_OPEN,
+    STATE_PAIRED,
+)
 from router_ports import (
     DeviceSectionNameExhausted,
     annotate_write_guards,
@@ -54,8 +65,10 @@ from router_ports import (
     get_router_ports,
 )
 import json
+import secrets
 from schemas import (
     HealthResponse,
+    PairingFingerprintRequest,
     SetSsidRequest,
     SetPasswordRequest,
     SetChannelRequest,
@@ -159,6 +172,36 @@ def _load_openwrt_password() -> str:
 
 
 OPENWRT_PASSWORD = _load_openwrt_password()
+
+
+def _read_openwrt_password_file() -> str:
+    """Quiet re-read of the secret file (no warnings - this runs at every
+    login). Empty string when the file is absent, empty or unreadable."""
+    secret_path = os.environ.get("OPENWRT_PASSWORD_FILE", "/run/secrets/openwrt_password")
+    try:
+        with open(secret_path, "r", encoding="utf-8") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+# ADR-071 slice B: process-wide pairing state (probe cache, box fingerprint,
+# the password minted by a claim until it is persisted). Looked up as a module
+# global so tests can swap it per-test (conftest autouse fixture).
+pairing_state = PairingState()
+
+
+def current_openwrt_password() -> str:
+    """The password every router login uses - the "holder" the SDK resolves at
+    login time (ADR-071 runtime reload), not a value frozen at construction.
+
+    Resolution order: the password minted by a claim in this process (the
+    secret file still holds the OLD value until the orchestrator persists the
+    new one) -> the secret file, re-read every call so a container recreate or
+    an out-of-band update is picked up -> the value resolved at import (which
+    also covers the deprecated OPENWRT_PASSWORD env fallback).
+    """
+    return pairing_state.live_password() or _read_openwrt_password_file() or OPENWRT_PASSWORD
 
 # ---------------------------------------------------------------------------
 # WARP-1675: external-AP credentials
@@ -290,7 +333,7 @@ def _connect_to_openwrt() -> DropletRouter:
             host=OPENWRT_HOST,
             port=OPENWRT_PORT,
             username=OPENWRT_USERNAME,
-            password=OPENWRT_PASSWORD,
+            password=current_openwrt_password,
             auto_login=True,
         )
     except LoginDenied:
@@ -321,6 +364,17 @@ _ROUTER_AUTH_DETAIL = {
 }
 
 
+def _paired_elsewhere_detail(paired_box: str) -> dict:
+    return {
+        "code": "ROUTER_PAIRED_ELSEWHERE",
+        "message": (
+            "This router is paired to another device (fingerprint "
+            f"{paired_box[:16]}...). Press the router's button to re-pair."
+        ),
+        "paired_box": paired_box,
+    }
+
+
 def _set_router_instance(router: DropletRouter) -> None:
     global router_instance
     router_instance = router
@@ -341,7 +395,31 @@ reconnect_coordinator = ReconnectCoordinator(
     connect_fn=_connect_to_openwrt,
     on_connected=_set_router_instance,
     is_connected=_router_is_connected,
+    on_background_failure=lambda: _probe_pairing_if_auth(),
 )
+
+
+def _pairing_api() -> PairingApi:
+    """Null-session `droplet.pair` client against the configured router."""
+    return PairingApi(OPENWRT_HOST, OPENWRT_PORT)
+
+
+def _probe_pairing_if_auth() -> None:
+    """ADR-071 section 2.2 step 1: while the router refuses our credentials,
+    ask it - with the null session - whether a pairing window is open. Called
+    from the background reconnect tick only; the result is cached in
+    `pairing_state` and served by /health. Never raises."""
+    if _last_connect_failure != "auth" or router_instance is not None:
+        return
+    try:
+        status = _pairing_api().status()
+    except PairingUnsupported:
+        pairing_state.record_probe(PairStatus())
+    except (ConnectionLost, UbusError) as exc:
+        logger.warning("droplet.pair status probe failed: %s", exc)
+        pairing_state.record_probe(PairStatus())
+    else:
+        pairing_state.record_probe(status)
 
 
 def get_router() -> DropletRouter:
@@ -357,6 +435,11 @@ def get_router() -> DropletRouter:
         # typed 502 so the dashboard shows "Credentials rejected", not
         # "Router offline".
         if _last_connect_failure == "auth":
+            # ADR-071: a router paired to ANOTHER box is a distinct, visible
+            # state - the owner needs the button, not a secret re-sync.
+            foreign = pairing_state.foreign_paired_box()
+            if foreign:
+                raise HTTPException(status_code=502, detail=_paired_elsewhere_detail(foreign))
             raise HTTPException(status_code=502, detail=_ROUTER_AUTH_DETAIL)
         raise HTTPException(status_code=503, detail="Router not connected")
     return router_instance
@@ -662,16 +745,25 @@ def health():
         # WARP-1673: name the reason when we know it — an operator reading
         # /health should see "bad credentials" (fix the secret), not go
         # checking cables for a router that is answering fine.
-        error = (
-            _ROUTER_AUTH_DETAIL["message"]
-            if _last_connect_failure == "auth"
-            else "Router not connected at startup"
-        )
+        auth_failed = _last_connect_failure == "auth"
+        error_code: Optional[str] = None
+        if auth_failed:
+            foreign = pairing_state.foreign_paired_box()
+            if foreign:
+                error = _paired_elsewhere_detail(foreign)["message"]
+                error_code = "ROUTER_PAIRED_ELSEWHERE"
+            else:
+                error = _ROUTER_AUTH_DETAIL["message"]
+                error_code = "ROUTER_AUTH"
+        else:
+            error = "Router not connected at startup"
         return HealthResponse(
             status="disconnected",
             connected=False,
             router_host=OPENWRT_HOST,
             error=error,
+            error_code=error_code,
+            pairing=pairing_state.snapshot(connected=False, auth_failed=auth_failed),
         )
     try:
         # WARP-2111: board_info() is the reachability probe — a successful call
@@ -689,6 +781,7 @@ def health():
             connected=True,
             router_host=OPENWRT_HOST,
             topology=_best_effort_topology(),
+            pairing=pairing_state.snapshot(connected=True, auth_failed=False),
         )
     except (ConnectionLost, UbusError) as exc:
         return HealthResponse(
@@ -696,7 +789,164 @@ def health():
             connected=False,
             router_host=OPENWRT_HOST,
             error=str(exc),
+            pairing=pairing_state.snapshot(connected=True, auth_failed=False),
         )
+
+
+# ---------------------------------------------------------------------------
+# Router pairing (ADR-071 slice B, WARP-3739)
+# ---------------------------------------------------------------------------
+# The router opens a pairing window (`droplet.pair`, null-session ubus); the
+# box mints the credential, claims, proves the claim by logging in, switches
+# its live session and hands the password to the orchestrator over this
+# service-token channel. The orchestrator persists it (device-bridge ->
+# droplet-pair-apply) and confirms with POST /pairing/persisted. Until then
+# the password is held in memory (`pending_persist`).
+def _pair_error(status: int, code: str, detail: str, **extra) -> JSONResponse:
+    return JSONResponse(
+        status_code=status,
+        content={"code": code, "detail": detail, **extra},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+def _valid_fingerprint(value: Optional[str]) -> bool:
+    return isinstance(value, str) and FINGERPRINT_RE.match(value) is not None
+
+
+@app.put("/pairing/identity")
+@_uci_serialised
+def pairing_identity(req: PairingFingerprintRequest):
+    """Record this box's fingerprint so a router paired to a DIFFERENT box can be
+    named ROUTER_PAIRED_ELSEWHERE even before the first claim."""
+    if not _valid_fingerprint(req.box_fingerprint):
+        return _pair_error(
+            400, "INVALID_FINGERPRINT", "box_fingerprint must be 64 lowercase hex characters"
+        )
+    pairing_state.set_box_fingerprint(req.box_fingerprint)
+    return {"ok": True}
+
+
+@app.post("/pairing/claim")
+@_uci_serialised
+def pairing_claim(req: PairingFingerprintRequest):
+    """Mint a password, claim the router with it, prove the claim, go live on it."""
+    global _last_connect_failure
+    fingerprint = req.box_fingerprint
+    if not _valid_fingerprint(fingerprint):
+        return _pair_error(
+            400, "INVALID_FINGERPRINT", "box_fingerprint must be 64 lowercase hex characters"
+        )
+    if ROUTING_MODE != "real":
+        return _pair_error(
+            502, "PAIR_UNSUPPORTED", f"pairing is unavailable in ROUTING_MODE={ROUTING_MODE}"
+        )
+    pairing_state.set_box_fingerprint(fingerprint)
+
+    api = _pairing_api()
+    try:
+        status = api.status()
+    except PairingUnsupported:
+        return _pair_error(502, "PAIR_UNSUPPORTED", "router does not provide droplet.pair")
+    except (ConnectionLost, UbusError) as exc:
+        logger.warning("pairing status probe failed: %s", type(exc).__name__)
+        return _pair_error(503, "ROUTER_UNREACHABLE", "router unreachable")
+    pairing_state.record_probe(status)
+
+    if status.state == STATE_PAIRED:
+        if status.paired_box and status.paired_box != fingerprint:
+            return _pair_error(
+                409,
+                "ROUTER_PAIRED_ELSEWHERE",
+                "router is paired to another device; press its button to re-pair",
+                paired_box=status.paired_box,
+            )
+        return _pair_error(409, "PAIR_WINDOW_CLOSED", "router is already paired and no pairing window is open")
+    if status.state != STATE_OPEN:
+        if status.state == STATE_CLOSED:
+            return _pair_error(409, "PAIR_WINDOW_CLOSED", "no pairing window is open")
+        return _pair_error(502, "PAIR_UNSUPPORTED", "router pairing state could not be determined")
+
+    password = secrets.token_hex(16)
+    try:
+        api.claim(password, fingerprint)
+    except PairingUnsupported:
+        return _pair_error(502, "PAIR_UNSUPPORTED", "router does not provide droplet.pair")
+    except PairingClaimError as exc:
+        logger.warning("router rejected pairing claim: %s", type(exc).__name__)
+        return _pair_error(502, "PAIR_CLAIM_FAILED", "router rejected the pairing claim")
+    except (ConnectionLost, UbusError) as exc:
+        logger.warning("pairing claim request failed: %s", type(exc).__name__)
+        return _pair_error(502, "PAIR_CLAIM_FAILED", "claim request failed")
+
+    # Prove the claim took: a FRESH login with the new password (never the
+    # holder - this must exercise the password the router now holds).
+    verify: Optional[DropletRouter] = None
+    model: Optional[str] = None
+    try:
+        verify = DropletRouter(
+            host=OPENWRT_HOST,
+            port=OPENWRT_PORT,
+            username=OPENWRT_USERNAME,
+            password=password,
+            auto_login=True,
+        )
+    except (ConnectionLost, UbusError) as exc:
+        logger.error(
+            "PAIR_VERIFY_FAILED: router accepted the claim but login as %s with the "
+            "new credential failed (%s) - router and box now disagree; keeping AUTH state",
+            OPENWRT_USERNAME,
+            exc,
+        )
+        return _pair_error(
+            502,
+            "PAIR_VERIFY_FAILED",
+            "claim was accepted but logging in with the new credential failed",
+        )
+    try:
+        board = verify.system.board_info()
+        if isinstance(board, dict):
+            model = board.get("model")
+            logger.info("Paired router verified: model=%s hostname=%s", model, board.get("hostname"))
+    except (ConnectionLost, UbusError) as exc:
+        logger.warning("Paired router verified but `system board` read failed: %s", exc)
+    finally:
+        try:
+            verify.disconnect()
+        except Exception:  # noqa: BLE001 - best-effort logout of the proof session
+            pass
+
+    # Switch the live session: the holder now returns the new password, so every
+    # login from here on (reconnect, session refresh, samplers) uses it.
+    paired_at = pairing_state.record_claim(password, fingerprint)
+    _last_connect_failure = None
+    reconnect_coordinator.reconnect_now(reason="pairing")
+    logger.info("Router paired: host=%s box=%s...", OPENWRT_HOST, fingerprint[:16])
+    return JSONResponse(
+        content={
+            "ok": True,
+            "password": password,
+            "host": OPENWRT_HOST,
+            "model": model,
+            "paired_at": paired_at,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/pairing/pending")
+def pairing_pending():
+    """The password minted by a claim that the orchestrator has not yet confirmed
+    persisted (the "paired but not saved -> Retry" path)."""
+    return JSONResponse(content=pairing_state.pending(), headers={"Cache-Control": "no-store"})
+
+
+@app.post("/pairing/persisted")
+@_uci_serialised
+def pairing_persisted():
+    """The orchestrator confirmed the new password is on disk: forget it."""
+    pairing_state.mark_persisted(_read_openwrt_password_file())
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------
@@ -1648,15 +1898,11 @@ def get_camera_subnet():
         handle_router_error(exc)
 
 
-def _bridge_vlan_tagged_members(router, bridge: str = "br-lan") -> list:
-    """Every live member of *bridge*, tagged (``:t``), for a bridge-vlan write.
+def _bridge_members(router, bridge: str = "br-lan") -> list[str]:
+    """Every live member port of *bridge* (from `network.device status`).
 
-    Port names differ per router hardware (Pi lab unit: eth2/eth0 in br-lan;
-    MikroTik RB5009: p2..p8), so VLAN membership is derived from
-    `network.device status` at call time, never hardcoded. A bridge-vlan that
-    names an absent port is silently inert: netifd accepts the config, no
-    traffic ever flows on the VLAN, and safe-apply's rollback never trips
-    because connectivity was not harmed — the worst kind of wrong.
+    Raises 409 when none are visible: a bridge-vlan naming no real port is
+    silently inert, which is worse than a refusal.
     """
     devices = router.network.device_status()
     dev = devices.get(bridge) if isinstance(devices, dict) else None
@@ -1667,7 +1913,102 @@ def _bridge_vlan_tagged_members(router, bridge: str = "br-lan") -> list:
             status_code=409,
             detail=f"cannot derive VLAN membership: bridge '{bridge}' reports no members",
         )
-    return [f"{p}:t" for p in ports]
+    return ports
+
+
+def _network_sections(router) -> dict:
+    """All uci `network` sections as {name: {...}}; empty when unreadable.
+
+    Accepts both the real ubus shape (`{"values": {...}}`) and a flat map.
+    """
+    try:
+        cfg = router.uci.get("network")
+    except UbusError as exc:
+        if exc.code in (UBUS_STATUS_NOT_FOUND, UBUS_STATUS_NO_DATA):
+            return {}
+        raise
+    if not isinstance(cfg, dict):
+        return {}
+    values = cfg.get("values", cfg)
+    if not isinstance(values, dict):
+        return {}
+    return {k: v for k, v in values.items() if isinstance(v, dict)}
+
+
+def _ensure_untagged_base_vlan(router, bridge: str, members: list[str]) -> bool:
+    """Keep untagged LAN clients alive when the FIRST bridge-vlan is written.
+
+    On OpenWrt/DSA the first `bridge-vlan` section switches the bridge to
+    VLAN filtering. Every port then carries only the VLANs declared for it:
+    a bridge whose only table entry is "VLAN 100 tagged" drops ALL untagged
+    traffic (the switch, every PC, and the Droplet box itself; lab RB5009,
+    2026-10-09). So before the camera VLAN is added to a bridge that has no
+    VLAN table yet, declare VLAN 1 untagged + PVID on every current member
+    and move the interfaces that sit on the bare bridge (`lan`) onto
+    `<bridge>.1`, which is exactly OpenWrt's own VLAN-aware default layout.
+    A bridge that already has a VLAN table is left alone (the operator or the
+    firmware owns it). Returns True when the base VLAN was written.
+    """
+    sections = _network_sections(router)
+    if any(
+        sec.get(".type") == "bridge-vlan" and sec.get("device") == bridge
+        for sec in sections.values()
+    ):
+        return False
+    router.uci.add("network", "bridge-vlan", {
+        "device": bridge,
+        "vlan": "1",
+        "ports": [f"{p}:u*" for p in members],
+    })
+    for name, sec in sections.items():
+        if sec.get(".type") == "interface" and sec.get("device") == bridge:
+            router.uci.set("network", name, {"device": f"{bridge}.1"})
+    return True
+
+
+def _bridge_vlan_tagged_members(router, bridge: str = "br-lan") -> list:
+    """Every live member of *bridge*, tagged (``:t``), for a bridge-vlan write.
+
+    Port names differ per router hardware (Pi lab unit: eth2/eth0 in br-lan;
+    MikroTik RB5009: p2..p8), so VLAN membership is derived from
+    `network.device status` at call time, never hardcoded. A bridge-vlan that
+    names an absent port is silently inert: netifd accepts the config, no
+    traffic ever flows on the VLAN, and safe-apply's rollback never trips
+    because connectivity was not harmed — the worst kind of wrong.
+    """
+    return [f"{p}:t" for p in _bridge_members(router, bridge)]
+
+
+def _uci_section_exists(router, config: str, section: str) -> bool:
+    """True iff ``config.section`` already exists on the router.
+
+    Mirrors ``interface_exists`` in the SDK: a ubus NOT_FOUND/NO_DATA on the
+    section means absent; an empty/non-dict read also means absent.
+    """
+    try:
+        result = router.uci.get(config, section)
+    except UbusError as exc:
+        if exc.code in (UBUS_STATUS_NOT_FOUND, UBUS_STATUS_NO_DATA):
+            return False
+        raise
+    if not isinstance(result, dict):
+        return False
+    return bool(result.get("values") or result.get(".type"))
+
+
+def _uci_upsert_named(router, config: str, type_: str, section: str, values: dict) -> None:
+    """Create-or-update a NAMED uci section.
+
+    The OpenWrt ubus ``uci set`` method only updates sections that already
+    exist — on a fresh router it answers NOT_FOUND (the camera subnet setup
+    500'd with exactly that on the lab RB5009, 2026-10-09). ``uci add`` with
+    ``name=`` creates the named section in one shot, so a first-time setup
+    goes through ``add`` and a re-run through ``set``.
+    """
+    if _uci_section_exists(router, config, section):
+        router.uci.set(config, section, values)
+    else:
+        router.uci.add(config, type_, values=values, name=section)
 
 
 @app.post("/network/subnets/cameras/setup")
@@ -1684,12 +2025,17 @@ def setup_camera_subnet(req: CameraSubnetSetupRequest):
 
         # Resolved BEFORE the safe-apply window opens, so a derivation fault
         # cannot leave a rollback timer armed with nothing applied.
-        tagged_ports = _bridge_vlan_tagged_members(r)
+        members = _bridge_members(r)
+        tagged_ports = [f"{p}:t" for p in members]
 
         with r.safe_apply(timeout=60):
+            # 0. Never turn on VLAN filtering without a VLAN 1 untagged base,
+            #    or every untagged client (and this box) drops off the LAN.
+            base_vlan_written = _ensure_untagged_base_vlan(r, "br-lan", members)
+
             # 1. Create VLAN interface
             device_name = f"br-lan.{req.vlan_id}"
-            r.uci.set("network", "cameras", {
+            _uci_upsert_named(r, "network", "interface", "cameras", {
                 "proto": "static",
                 "device": device_name,
                 "ipaddr": req.subnet,
@@ -1743,7 +2089,7 @@ def setup_camera_subnet(req: CameraSubnetSetupRequest):
             r.uci.commit("firewall")
 
             # 7. Create DHCP pool for camera subnet
-            r.uci.set("dhcp", "cameras", {
+            _uci_upsert_named(r, "dhcp", "dhcp", "cameras", {
                 "interface": "cameras",
                 "start": str(req.dhcp_start),
                 "limit": str(req.dhcp_limit),
@@ -1758,6 +2104,7 @@ def setup_camera_subnet(req: CameraSubnetSetupRequest):
             "netmask": req.netmask,
             "dhcp_range": f"{req.subnet.rsplit('.', 1)[0]}.{req.dhcp_start} - .{req.dhcp_start + req.dhcp_limit - 1}",
             "firewall": "cameras zone created with LAN→cameras and cameras→WAN forwarding",
+            "base_vlan_written": base_vlan_written,
         }
 
     except ConnectionLost as exc:
@@ -1807,12 +2154,24 @@ def teardown_camera_subnet():
         r = get_router()
 
         with r.safe_apply(timeout=60):
-            # Remove network interface
+            # Remove network interface, then the camera VLAN's bridge-vlan
+            # entry (matched on the interface's `br-lan.<id>` device; VLAN 1,
+            # the untagged base that keeps the LAN alive, is never touched).
+            sections = _network_sections(r)
+            cam_dev = str(sections.get("cameras", {}).get("device", ""))
+            cam_vlan = cam_dev.rsplit(".", 1)[1] if "." in cam_dev else ""
             _step("network.cameras delete", lambda: r.uci.delete("network", "cameras"))
+            if cam_vlan and cam_vlan != "1":
+                for name, sec in sections.items():
+                    if sec.get(".type") == "bridge-vlan" and str(sec.get("vlan")) == cam_vlan:
+                        _step(f"network.{name} (bridge-vlan {cam_vlan}) delete",
+                              lambda name=name: r.uci.delete("network", name))
             _step("network commit", lambda: r.uci.commit("network"))
 
             # Remove firewall zone and rules related to cameras
             fw_config = r.uci.get("firewall")
+            if isinstance(fw_config, dict) and isinstance(fw_config.get("values"), dict):
+                fw_config = fw_config["values"]  # real ubus shape
             if isinstance(fw_config, dict):
                 to_delete = []
                 for name, section in fw_config.items():
