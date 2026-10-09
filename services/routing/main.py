@@ -47,6 +47,17 @@ from droplet_openwrt_sdk import (
     discovery_service_allowed,
     DISCOVERY_SERVICE_ALLOWLIST,
 )
+from pairing import (
+    FINGERPRINT_RE,
+    PairingApi,
+    PairingClaimError,
+    PairingState,
+    PairingUnsupported,
+    PairStatus,
+    STATE_CLOSED,
+    STATE_OPEN,
+    STATE_PAIRED,
+)
 from router_ports import (
     DeviceSectionNameExhausted,
     annotate_write_guards,
@@ -54,8 +65,10 @@ from router_ports import (
     get_router_ports,
 )
 import json
+import secrets
 from schemas import (
     HealthResponse,
+    PairingFingerprintRequest,
     SetSsidRequest,
     SetPasswordRequest,
     SetChannelRequest,
@@ -159,6 +172,36 @@ def _load_openwrt_password() -> str:
 
 
 OPENWRT_PASSWORD = _load_openwrt_password()
+
+
+def _read_openwrt_password_file() -> str:
+    """Quiet re-read of the secret file (no warnings - this runs at every
+    login). Empty string when the file is absent, empty or unreadable."""
+    secret_path = os.environ.get("OPENWRT_PASSWORD_FILE", "/run/secrets/openwrt_password")
+    try:
+        with open(secret_path, "r", encoding="utf-8") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+# ADR-071 slice B: process-wide pairing state (probe cache, box fingerprint,
+# the password minted by a claim until it is persisted). Looked up as a module
+# global so tests can swap it per-test (conftest autouse fixture).
+pairing_state = PairingState()
+
+
+def current_openwrt_password() -> str:
+    """The password every router login uses - the "holder" the SDK resolves at
+    login time (ADR-071 runtime reload), not a value frozen at construction.
+
+    Resolution order: the password minted by a claim in this process (the
+    secret file still holds the OLD value until the orchestrator persists the
+    new one) -> the secret file, re-read every call so a container recreate or
+    an out-of-band update is picked up -> the value resolved at import (which
+    also covers the deprecated OPENWRT_PASSWORD env fallback).
+    """
+    return pairing_state.live_password() or _read_openwrt_password_file() or OPENWRT_PASSWORD
 
 # ---------------------------------------------------------------------------
 # WARP-1675: external-AP credentials
@@ -290,7 +333,7 @@ def _connect_to_openwrt() -> DropletRouter:
             host=OPENWRT_HOST,
             port=OPENWRT_PORT,
             username=OPENWRT_USERNAME,
-            password=OPENWRT_PASSWORD,
+            password=current_openwrt_password,
             auto_login=True,
         )
     except LoginDenied:
@@ -321,6 +364,17 @@ _ROUTER_AUTH_DETAIL = {
 }
 
 
+def _paired_elsewhere_detail(paired_box: str) -> dict:
+    return {
+        "code": "ROUTER_PAIRED_ELSEWHERE",
+        "message": (
+            "This router is paired to another device (fingerprint "
+            f"{paired_box[:16]}...). Press the router's button to re-pair."
+        ),
+        "paired_box": paired_box,
+    }
+
+
 def _set_router_instance(router: DropletRouter) -> None:
     global router_instance
     router_instance = router
@@ -341,7 +395,31 @@ reconnect_coordinator = ReconnectCoordinator(
     connect_fn=_connect_to_openwrt,
     on_connected=_set_router_instance,
     is_connected=_router_is_connected,
+    on_background_failure=lambda: _probe_pairing_if_auth(),
 )
+
+
+def _pairing_api() -> PairingApi:
+    """Null-session `droplet.pair` client against the configured router."""
+    return PairingApi(OPENWRT_HOST, OPENWRT_PORT)
+
+
+def _probe_pairing_if_auth() -> None:
+    """ADR-071 section 2.2 step 1: while the router refuses our credentials,
+    ask it - with the null session - whether a pairing window is open. Called
+    from the background reconnect tick only; the result is cached in
+    `pairing_state` and served by /health. Never raises."""
+    if _last_connect_failure != "auth" or router_instance is not None:
+        return
+    try:
+        status = _pairing_api().status()
+    except PairingUnsupported:
+        pairing_state.record_probe(PairStatus())
+    except (ConnectionLost, UbusError) as exc:
+        logger.warning("droplet.pair status probe failed: %s", exc)
+        pairing_state.record_probe(PairStatus())
+    else:
+        pairing_state.record_probe(status)
 
 
 def get_router() -> DropletRouter:
@@ -357,6 +435,11 @@ def get_router() -> DropletRouter:
         # typed 502 so the dashboard shows "Credentials rejected", not
         # "Router offline".
         if _last_connect_failure == "auth":
+            # ADR-071: a router paired to ANOTHER box is a distinct, visible
+            # state - the owner needs the button, not a secret re-sync.
+            foreign = pairing_state.foreign_paired_box()
+            if foreign:
+                raise HTTPException(status_code=502, detail=_paired_elsewhere_detail(foreign))
             raise HTTPException(status_code=502, detail=_ROUTER_AUTH_DETAIL)
         raise HTTPException(status_code=503, detail="Router not connected")
     return router_instance
@@ -662,16 +745,25 @@ def health():
         # WARP-1673: name the reason when we know it — an operator reading
         # /health should see "bad credentials" (fix the secret), not go
         # checking cables for a router that is answering fine.
-        error = (
-            _ROUTER_AUTH_DETAIL["message"]
-            if _last_connect_failure == "auth"
-            else "Router not connected at startup"
-        )
+        auth_failed = _last_connect_failure == "auth"
+        error_code: Optional[str] = None
+        if auth_failed:
+            foreign = pairing_state.foreign_paired_box()
+            if foreign:
+                error = _paired_elsewhere_detail(foreign)["message"]
+                error_code = "ROUTER_PAIRED_ELSEWHERE"
+            else:
+                error = _ROUTER_AUTH_DETAIL["message"]
+                error_code = "ROUTER_AUTH"
+        else:
+            error = "Router not connected at startup"
         return HealthResponse(
             status="disconnected",
             connected=False,
             router_host=OPENWRT_HOST,
             error=error,
+            error_code=error_code,
+            pairing=pairing_state.snapshot(connected=False, auth_failed=auth_failed),
         )
     try:
         # WARP-2111: board_info() is the reachability probe — a successful call
@@ -689,6 +781,7 @@ def health():
             connected=True,
             router_host=OPENWRT_HOST,
             topology=_best_effort_topology(),
+            pairing=pairing_state.snapshot(connected=True, auth_failed=False),
         )
     except (ConnectionLost, UbusError) as exc:
         return HealthResponse(
@@ -696,7 +789,164 @@ def health():
             connected=False,
             router_host=OPENWRT_HOST,
             error=str(exc),
+            pairing=pairing_state.snapshot(connected=True, auth_failed=False),
         )
+
+
+# ---------------------------------------------------------------------------
+# Router pairing (ADR-071 slice B, WARP-3739)
+# ---------------------------------------------------------------------------
+# The router opens a pairing window (`droplet.pair`, null-session ubus); the
+# box mints the credential, claims, proves the claim by logging in, switches
+# its live session and hands the password to the orchestrator over this
+# service-token channel. The orchestrator persists it (device-bridge ->
+# droplet-pair-apply) and confirms with POST /pairing/persisted. Until then
+# the password is held in memory (`pending_persist`).
+def _pair_error(status: int, code: str, detail: str, **extra) -> JSONResponse:
+    return JSONResponse(
+        status_code=status,
+        content={"code": code, "detail": detail, **extra},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+def _valid_fingerprint(value: Optional[str]) -> bool:
+    return isinstance(value, str) and FINGERPRINT_RE.match(value) is not None
+
+
+@app.put("/pairing/identity")
+@_uci_serialised
+def pairing_identity(req: PairingFingerprintRequest):
+    """Record this box's fingerprint so a router paired to a DIFFERENT box can be
+    named ROUTER_PAIRED_ELSEWHERE even before the first claim."""
+    if not _valid_fingerprint(req.box_fingerprint):
+        return _pair_error(
+            400, "INVALID_FINGERPRINT", "box_fingerprint must be 64 lowercase hex characters"
+        )
+    pairing_state.set_box_fingerprint(req.box_fingerprint)
+    return {"ok": True}
+
+
+@app.post("/pairing/claim")
+@_uci_serialised
+def pairing_claim(req: PairingFingerprintRequest):
+    """Mint a password, claim the router with it, prove the claim, go live on it."""
+    global _last_connect_failure
+    fingerprint = req.box_fingerprint
+    if not _valid_fingerprint(fingerprint):
+        return _pair_error(
+            400, "INVALID_FINGERPRINT", "box_fingerprint must be 64 lowercase hex characters"
+        )
+    if ROUTING_MODE != "real":
+        return _pair_error(
+            502, "PAIR_UNSUPPORTED", f"pairing is unavailable in ROUTING_MODE={ROUTING_MODE}"
+        )
+    pairing_state.set_box_fingerprint(fingerprint)
+
+    api = _pairing_api()
+    try:
+        status = api.status()
+    except PairingUnsupported:
+        return _pair_error(502, "PAIR_UNSUPPORTED", "router does not provide droplet.pair")
+    except (ConnectionLost, UbusError) as exc:
+        logger.warning("pairing status probe failed: %s", type(exc).__name__)
+        return _pair_error(503, "ROUTER_UNREACHABLE", "router unreachable")
+    pairing_state.record_probe(status)
+
+    if status.state == STATE_PAIRED:
+        if status.paired_box and status.paired_box != fingerprint:
+            return _pair_error(
+                409,
+                "ROUTER_PAIRED_ELSEWHERE",
+                "router is paired to another device; press its button to re-pair",
+                paired_box=status.paired_box,
+            )
+        return _pair_error(409, "PAIR_WINDOW_CLOSED", "router is already paired and no pairing window is open")
+    if status.state != STATE_OPEN:
+        if status.state == STATE_CLOSED:
+            return _pair_error(409, "PAIR_WINDOW_CLOSED", "no pairing window is open")
+        return _pair_error(502, "PAIR_UNSUPPORTED", "router pairing state could not be determined")
+
+    password = secrets.token_hex(16)
+    try:
+        api.claim(password, fingerprint)
+    except PairingUnsupported:
+        return _pair_error(502, "PAIR_UNSUPPORTED", "router does not provide droplet.pair")
+    except PairingClaimError as exc:
+        logger.warning("router rejected pairing claim: %s", type(exc).__name__)
+        return _pair_error(502, "PAIR_CLAIM_FAILED", "router rejected the pairing claim")
+    except (ConnectionLost, UbusError) as exc:
+        logger.warning("pairing claim request failed: %s", type(exc).__name__)
+        return _pair_error(502, "PAIR_CLAIM_FAILED", "claim request failed")
+
+    # Prove the claim took: a FRESH login with the new password (never the
+    # holder - this must exercise the password the router now holds).
+    verify: Optional[DropletRouter] = None
+    model: Optional[str] = None
+    try:
+        verify = DropletRouter(
+            host=OPENWRT_HOST,
+            port=OPENWRT_PORT,
+            username=OPENWRT_USERNAME,
+            password=password,
+            auto_login=True,
+        )
+    except (ConnectionLost, UbusError) as exc:
+        logger.error(
+            "PAIR_VERIFY_FAILED: router accepted the claim but login as %s with the "
+            "new credential failed (%s) - router and box now disagree; keeping AUTH state",
+            OPENWRT_USERNAME,
+            exc,
+        )
+        return _pair_error(
+            502,
+            "PAIR_VERIFY_FAILED",
+            "claim was accepted but logging in with the new credential failed",
+        )
+    try:
+        board = verify.system.board_info()
+        if isinstance(board, dict):
+            model = board.get("model")
+            logger.info("Paired router verified: model=%s hostname=%s", model, board.get("hostname"))
+    except (ConnectionLost, UbusError) as exc:
+        logger.warning("Paired router verified but `system board` read failed: %s", exc)
+    finally:
+        try:
+            verify.disconnect()
+        except Exception:  # noqa: BLE001 - best-effort logout of the proof session
+            pass
+
+    # Switch the live session: the holder now returns the new password, so every
+    # login from here on (reconnect, session refresh, samplers) uses it.
+    paired_at = pairing_state.record_claim(password, fingerprint)
+    _last_connect_failure = None
+    reconnect_coordinator.reconnect_now(reason="pairing")
+    logger.info("Router paired: host=%s box=%s...", OPENWRT_HOST, fingerprint[:16])
+    return JSONResponse(
+        content={
+            "ok": True,
+            "password": password,
+            "host": OPENWRT_HOST,
+            "model": model,
+            "paired_at": paired_at,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/pairing/pending")
+def pairing_pending():
+    """The password minted by a claim that the orchestrator has not yet confirmed
+    persisted (the "paired but not saved -> Retry" path)."""
+    return JSONResponse(content=pairing_state.pending(), headers={"Cache-Control": "no-store"})
+
+
+@app.post("/pairing/persisted")
+@_uci_serialised
+def pairing_persisted():
+    """The orchestrator confirmed the new password is on disk: forget it."""
+    pairing_state.mark_persisted(_read_openwrt_password_file())
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------

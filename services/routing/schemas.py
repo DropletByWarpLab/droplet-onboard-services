@@ -711,6 +711,33 @@ class HealthResponse(BaseModel):
     # unreachable router instead of rendering it OFFLINE. Best-effort: null when the
     # router is unreachable or the (non-fatal) topology probe fails.
     topology: Optional[str] = None
+    # ADR-071: the wire code behind `error` when the failure is one of the typed
+    # router-credential states ("ROUTER_AUTH" | "ROUTER_PAIRED_ELSEWHERE").
+    # /health always answers 200 (Docker healthcheck), so the distinction the
+    # 502 `code` carries on router-backed routes rides here instead.
+    error_code: Optional[str] = None
+    # ADR-071 section 2.2 step 1: pairing state, served from the reconnect
+    # tick's cache - /health never blocks on the network for it.
+    pairing: Optional["HealthPairing"] = None
+
+
+class HealthPairing(BaseModel):
+    state: str  # "open" | "closed" | "paired" | "unknown"
+    window_ends_at: Optional[str] = None
+    paired_box: Optional[str] = None
+    paired_elsewhere: bool = False
+    pending_persist: bool = False
+
+
+HealthResponse.model_rebuild()
+
+
+class PairingFingerprintRequest(BaseModel):
+    """ADR-071: the box's identity (SHA-256 of the DER SPKI, lowercase hex),
+    supplied by the orchestrator. Validated in the route so a malformed value is
+    a 400 with a `code`, not FastAPI's generic 422."""
+
+    box_fingerprint: Optional[str] = None
 
 
 class ErrorResponse(BaseModel):

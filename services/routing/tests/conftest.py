@@ -38,6 +38,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 import main  # noqa: E402
 from droplet_openwrt_sdk import ConnectionLost  # noqa: E402
+from pairing import PairingState  # noqa: E402
 from reconnect import ReconnectCoordinator  # noqa: E402
 
 
@@ -78,6 +79,9 @@ def _isolated_reconnect_coordinator(monkeypatch: pytest.MonkeyPatch) -> None:
     # `router_instance` — reset it so an auth-failure test can never leak the
     # typed 502 into a neighbour expecting the plain 503.
     monkeypatch.setattr(main, "_last_connect_failure", None)
+    # ADR-071: pairing state (probe cache, minted password) is process-global
+    # too - a fresh one per test so a claim can never leak into a neighbour.
+    monkeypatch.setattr(main, "pairing_state", PairingState())
     monkeypatch.setattr(
         main,
         "reconnect_coordinator",
