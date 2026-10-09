@@ -169,7 +169,7 @@ describe("discovery", () => {
     expect(calls.map((c) => new URL(c.url).hostname)).toEqual(["mcp.atlassian.com"]);
   });
 
-  it("curated Atlassian set cannot be widened by the caller's allowedIssuerHosts on the route", async () => {
+  it("a caller-supplied allowedIssuerHosts is ignored: the curated Atlassian set cannot be widened", async () => {
     const mcp = "https://mcp.atlassian.com/v1/mcp/authv2";
     const { deps, calls } = net({
       "https://mcp.atlassian.com/.well-known/oauth-protected-resource/v1/mcp/authv2": {
@@ -328,19 +328,27 @@ async function call(path: string, body: unknown, oauthDeps: OAuthDeps, over: Par
   return Object.assign(res, { logLines });
 }
 
+// The routes serve the curated Atlassian hosts only (the egress registry is closed per vendor).
+const A_MCP = "https://mcp.atlassian.com/v1/mcp/authv2";
+const A_ISSUER = "https://auth.atlassian.com/tenant1";
+const A_PRM = "https://mcp.atlassian.com/.well-known/oauth-protected-resource/v1/mcp/authv2";
+const A_AS = "https://auth.atlassian.com/.well-known/oauth-authorization-server/tenant1";
+const A_TOKEN = "https://auth.atlassian.com/oauth/token";
+const A_REGISTER = "https://auth.atlassian.com/tenant1/dcr/register";
+const A_REVOKE = "https://auth.atlassian.com/oauth/revoke";
+
 describe("/oauth/* routes", () => {
   const exchangeBody = {
-    tokenEndpoint: TOKEN_URL,
+    tokenEndpoint: A_TOKEN,
     clientId: "cid",
     code: FAKE_CODE,
     codeVerifier: VERIFIER,
     redirectUri: "https://box.example.test/cb",
-    resource: MCP,
-    allowedHosts: ["as.example.test"],
+    resource: A_MCP,
   };
 
   it("is bearer-gated", async () => {
-    const { deps, calls } = net({ [TOKEN_URL]: TOKENS });
+    const { deps, calls } = net({ [A_TOKEN]: TOKENS });
     const res = await call("/oauth/exchange", exchangeBody, deps, { authorization: null });
     expect(res.status).toBe(401);
     expect(calls).toHaveLength(0);
@@ -353,7 +361,7 @@ describe("/oauth/* routes", () => {
   });
 
   it("refuses a bare code (no verifier) without dialing, naming the field", async () => {
-    const { deps, calls } = net({ [TOKEN_URL]: TOKENS });
+    const { deps, calls } = net({ [A_TOKEN]: TOKENS });
     const { codeVerifier: _drop, ...bare } = exchangeBody;
     const res = await call("/oauth/exchange", bare, deps);
     expect(res.status).toBe(400);
@@ -362,13 +370,13 @@ describe("/oauth/* routes", () => {
   });
 
   it("exchanges, and neither the log nor an error body carries the code, verifier or tokens", async () => {
-    const ok = net({ [TOKEN_URL]: TOKENS });
+    const ok = net({ [A_TOKEN]: TOKENS });
     const res = await call("/oauth/exchange", exchangeBody, ok.deps);
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ accessToken: "FAKE-ACCESS-0000", refreshToken: FAKE_REFRESH });
     expect(res.logLines).toEqual([{ method: "POST", path: "/oauth/exchange", status: 200 }]);
 
-    const bad = net({ [TOKEN_URL]: { status: 400, body: { error: "invalid_grant", error_description: FAKE_CODE } } });
+    const bad = net({ [A_TOKEN]: { status: 400, body: { error: "invalid_grant", error_description: FAKE_CODE } } });
     const res2 = await call("/oauth/exchange", exchangeBody, bad.deps);
     expect(res2.status).toBe(502);
     expect(res2.body).toMatchObject({ error: { code: "OAUTH_TOKEN_ERROR" }, oauthError: "invalid_grant" });
@@ -376,36 +384,48 @@ describe("/oauth/* routes", () => {
     for (const secret of [FAKE_CODE, VERIFIER]) expect(wire).not.toContain(secret);
   });
 
-  it("a non-curated host needs the caller to name it; the empty set refuses", async () => {
-    const { deps, calls } = net({ [TOKEN_URL]: TOKENS });
-    const { allowedHosts: _drop, ...noHosts } = exchangeBody;
-    const res = await call("/oauth/exchange", noHosts, deps);
-    expect(res.status).toBe(422);
-    expect(res.body).toMatchObject({ reason: "HOST_NOT_ALLOWED" });
-    expect(calls).toHaveLength(0);
+  it("every route refuses a non-curated host, even when the body names it as allowed, and never dials", async () => {
+    const evil = "https://evil.example/x";
+    const named = { allowedHosts: ["evil.example"], allowedIssuerHosts: ["evil.example"] };
+    const bodies: Array<[string, Record<string, unknown>]> = [
+      ["/oauth/discover", { mcpUrl: evil }],
+      ["/oauth/register", { registrationEndpoint: evil, redirectUris: ["https://box.example.test/cb"] }],
+      ["/oauth/exchange", { ...exchangeBody, tokenEndpoint: evil }],
+      ["/oauth/refresh", { tokenEndpoint: evil, clientId: "c", refreshToken: FAKE_REFRESH, resource: A_MCP }],
+      ["/oauth/revoke", { revocationEndpoint: evil, clientId: "c", token: FAKE_REFRESH }],
+    ];
+    for (const [path, body] of bodies) {
+      const { deps, calls } = net({ [evil]: TOKENS });
+      const res = await call(path, { ...body, ...named }, deps);
+      expect(res.status, path).toBe(422);
+      expect(res.body, path).toMatchObject({ reason: "HOST_NOT_ALLOWED" });
+      expect(calls, path).toHaveLength(0);
+    }
   });
 
   it("maps a PKCE refusal to 422 OAUTH_PKCE_UNSUPPORTED", async () => {
-    const meta = asMeta();
+    const meta = asMeta({ issuer: A_ISSUER });
     delete (meta.body as Record<string, unknown>).code_challenge_methods_supported;
-    const { deps } = net({ [PRM_URL]: prm(), [AS_URL]: meta });
-    const res = await call("/oauth/discover", { mcpUrl: MCP, allowedIssuerHosts: [...HOSTS] }, deps);
+    const { deps } = net({
+      [A_PRM]: { body: { resource: A_MCP, authorization_servers: [A_ISSUER] } },
+      [A_AS]: meta,
+    });
+    const res = await call("/oauth/discover", { mcpUrl: A_MCP }, deps);
     expect(res.status).toBe(422);
     expect(res.body).toMatchObject({ error: { code: "OAUTH_PKCE_UNSUPPORTED" } });
   });
 
   it("registers, refreshes and revokes through the same guard", async () => {
     const { deps, calls } = net({
-      "https://as.example.test/register": { status: 201, body: { client_id: "new-client" } },
-      [TOKEN_URL]: TOKENS,
-      "https://as.example.test/revoke": { raw: "" },
+      [A_REGISTER]: { status: 201, body: { client_id: "new-client" } },
+      [A_TOKEN]: TOKENS,
+      [A_REVOKE]: { raw: "" },
     });
-    const hosts = { allowedHosts: ["as.example.test"] };
-    const reg = await call("/oauth/register", { registrationEndpoint: "https://as.example.test/register", redirectUris: ["https://box.example.test/cb"], ...hosts }, deps);
+    const reg = await call("/oauth/register", { registrationEndpoint: A_REGISTER, redirectUris: ["https://box.example.test/cb"] }, deps);
     expect(reg).toMatchObject({ status: 200, body: { clientId: "new-client" } });
-    const ref = await call("/oauth/refresh", { tokenEndpoint: TOKEN_URL, clientId: "c", refreshToken: FAKE_REFRESH, resource: MCP, ...hosts }, deps);
+    const ref = await call("/oauth/refresh", { tokenEndpoint: A_TOKEN, clientId: "c", refreshToken: FAKE_REFRESH, resource: A_MCP }, deps);
     expect(ref.status).toBe(200);
-    const rev = await call("/oauth/revoke", { revocationEndpoint: "https://as.example.test/revoke", clientId: "c", token: FAKE_REFRESH, ...hosts }, deps);
+    const rev = await call("/oauth/revoke", { revocationEndpoint: A_REVOKE, clientId: "c", token: FAKE_REFRESH }, deps);
     expect(rev).toMatchObject({ status: 200, body: { revoked: true } });
     expect(calls).toHaveLength(3);
   });

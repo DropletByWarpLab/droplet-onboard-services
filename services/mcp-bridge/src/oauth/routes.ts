@@ -15,7 +15,7 @@ import { UnsafeMcpUrlError } from "../safe-url.js";
 import { isAllowedRedirectUri, registerClient } from "./dcr.js";
 import { discover } from "./discovery.js";
 import { OAuthRefusedError, OAuthTokenError, PkceUnsupportedError } from "./errors.js";
-import { asRecord, hostSetOf, vetUrl, type OAuthDeps } from "./http.js";
+import { asRecord, vetUrl, type OAuthDeps } from "./http.js";
 import { isValidVerifier } from "./pkce.js";
 import { exchangeCode, refreshToken, revokeToken } from "./token.js";
 
@@ -30,17 +30,20 @@ function str(body: Record<string, unknown>, key: string, max: number): string | 
 }
 
 /**
- * Hosts a hop may reach. The curated Atlassian set wins whenever the URL is on
- * one of its hosts, whatever the caller says; any other server needs the caller
- * to name its hosts, and the empty set refuses everything.
+ * Hosts a hop may reach, derived ONLY from this bridge's own curated registry,
+ * never from the request body: the egress registry is closed per vendor
+ * (`allowed-egress.yaml`), so a bearer holder must not be able to name a host.
+ * A URL on a curated vendor's hosts gets that vendor's set; anything else gets
+ * the EMPTY set, which refuses every hop with HOST_NOT_ALLOWED before a dial.
+ * Owner-added servers are WARP-3913 and need their own registry entry.
  */
-function allowedFor(rawUrl: string, callerList: unknown): ReadonlySet<string> {
+function allowedFor(rawUrl: string): ReadonlySet<string> {
   try {
     if (ATLASSIAN_ALLOWED_OAUTH_HOSTS.has(new URL(rawUrl).hostname.toLowerCase())) return ATLASSIAN_ALLOWED_OAUTH_HOSTS;
   } catch {
-    /* fall through to the caller's list; vetUrl refuses a non-URL */
+    /* not a URL: the empty set, and vetUrl refuses it */
   }
-  return hostSetOf(callerList);
+  return new Set();
 }
 
 function mapError(e: unknown): BridgeResponse {
@@ -72,7 +75,7 @@ export async function handleOAuthRoute(
     if (action === "discover") {
       const mcpUrl = str(body, "mcpUrl", 2048);
       if (!mcpUrl) return missing("mcpUrl");
-      return { status: 200, body: await discover(mcpUrl, allowedFor(mcpUrl, body.allowedIssuerHosts), deps) };
+      return { status: 200, body: await discover(mcpUrl, allowedFor(mcpUrl), deps) };
     }
 
     if (action === "register") {
@@ -82,7 +85,7 @@ export async function handleOAuthRoute(
       if (!Array.isArray(uris) || uris.length === 0 || uris.length > 5 || !uris.every(isAllowedRedirectUri)) {
         return missing("redirectUris");
       }
-      const url = await vetUrl(endpoint, allowedFor(endpoint, body.allowedHosts), deps);
+      const url = await vetUrl(endpoint, allowedFor(endpoint), deps);
       return { status: 200, body: await registerClient(url, { redirectUris: uris as string[] }, deps) };
     }
 
@@ -99,7 +102,7 @@ export async function handleOAuthRoute(
       const hint = rawHint === "access_token" || rawHint === "refresh_token" ? rawHint : undefined;
       if (!endpoint || !token) return missing(...(!endpoint ? ["revocationEndpoint"] : []), ...(!token ? ["token"] : []));
       if (rawHint !== undefined && hint === undefined) return missing("tokenTypeHint");
-      const url = await vetUrl(endpoint, allowedFor(endpoint, body.allowedHosts), deps);
+      const url = await vetUrl(endpoint, allowedFor(endpoint), deps);
       await revokeToken({ revocationEndpoint: url, clientId, token, ...(hint ? { tokenTypeHint: hint } : {}) }, deps);
       return { status: 200, body: { revoked: true } };
     }
@@ -109,7 +112,7 @@ export async function handleOAuthRoute(
     if (!tokenEndpoint || !resource) {
       return missing(...(!tokenEndpoint ? ["tokenEndpoint"] : []), ...(!resource ? ["resource"] : []));
     }
-    const url = await vetUrl(tokenEndpoint, allowedFor(tokenEndpoint, body.allowedHosts), deps);
+    const url = await vetUrl(tokenEndpoint, allowedFor(tokenEndpoint), deps);
 
     if (action === "exchange") {
       const code = str(body, "code", 4096);

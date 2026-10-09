@@ -59,18 +59,6 @@ export function asRecord(v: unknown): Record<string, unknown> | null {
   return typeof v === "object" && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
 }
 
-/** An exact-host set from an untrusted list. Anything malformed yields fewer
- *  hosts, and the empty set refuses everything (fail closed). */
-export function hostSetOf(raw: unknown): ReadonlySet<string> {
-  if (!Array.isArray(raw)) return new Set();
-  return new Set(
-    raw
-      .filter((h): h is string => typeof h === "string" && h.length > 0 && h.length <= 253)
-      .slice(0, 16)
-      .map((h) => h.toLowerCase()),
-  );
-}
-
 /**
  * Screen one URL taken from the wire or from a metadata document: exact host in
  * the allowed set, then the address check (https, 443, no userinfo, every
