@@ -484,6 +484,7 @@ DEFAULT_FLATLINE_DBFS = -70.0      # frames below this count as "no signal".
                                    # so the compare compensates by
                                    # 20·log10(input_gain) — see
                                    # _track_input_level (WARP-1060).
+                                   # Env: VOICE_FLATLINE_DBFS.
 # Capture-liveness watchdog (WARP-3934). When the USB mic drops off the bus,
 # Debian's libportaudio2 19.6.0 ALSA host API does NOT raise from
 # `stream.read()` - it busy-spins in C on the deleted device node, so the
@@ -498,7 +499,6 @@ DEFAULT_CAPTURE_STALL_S = 15.0
 # Exit code used when the watchdog gives up (EX_SOFTWARE); compose's
 # `restart: always` brings voice-io back on the re-enumerated device.
 CAPTURE_STALL_EXIT_CODE = 70
-                                   # Env: VOICE_FLATLINE_DBFS.
 DEFAULT_RMS_WINDOW_FRAMES = 25     # rolling-RMS window ≈ 2 s of 80 ms frames —
                                    # smooth enough for a wizard level meter,
                                    # short enough to feel live.
