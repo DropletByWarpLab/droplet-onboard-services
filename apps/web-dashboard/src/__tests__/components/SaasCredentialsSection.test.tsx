@@ -917,12 +917,10 @@ describe("a saved credential is checked, and the state line shows the verdict", 
   });
 
   it("does not probe an mcp track — the paste is the connection", async () => {
-    const onConnected = vi.fn();
     saveSaasCredentialMock.mockResolvedValue({ ...CRM, state: "CONNECTED", hasCredentials: true });
     setRole("owner");
-    render(<SaasCredentialsSection onConnected={onConnected} />);
+    render(<SaasCredentialsSection />);
     await screen.findByLabelText(/Private app token/);
-    expect(onConnected).not.toHaveBeenCalled();
     fireEvent.change(screen.getByLabelText(/Private app token/), {
       target: { value: "pat-" + "fixture" },
     });
@@ -932,18 +930,6 @@ describe("a saved credential is checked, and the state line shows the verdict", 
     const card = await screen.findByTestId(`provider-${CRM.provider}`);
     await waitFor(() => expect(card).toHaveTextContent("Saved"));
     expect(connectCloudProviderMock).not.toHaveBeenCalled();
-    expect(onConnected.mock.calls).toEqual([[CRM.provider]]);
-  });
-
-  it("does not report cleared MCP credentials as connected", async () => {
-    const onConnected = vi.fn();
-    saveSaasCredentialMock.mockResolvedValue({ ...CRM, state: "NOT_CONFIGURED", hasCredentials: false });
-    setRole("owner");
-    render(<SaasCredentialsSection onConnected={onConnected} />);
-    fireEvent.change(await screen.findByLabelText(/Private app token/), { target: { value: "fixture-only-token" } });
-    fireEvent.click(screen.getAllByRole("button", { name: /Save/ })[1]);
-    await waitFor(() => expect(screen.getByTestId(`provider-${CRM.provider}`)).toHaveTextContent("Saved"));
-    expect(onConnected).not.toHaveBeenCalled();
   });
 
   it("reports a failed check as an error and keeps the saved state honest", async () => {

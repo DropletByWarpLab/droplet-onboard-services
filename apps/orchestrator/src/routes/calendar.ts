@@ -145,7 +145,7 @@ const eventPatchSchema = z.object({
   allDay: z.boolean().optional(),
 });
 
-const sourceCreateSchema = z.object({
+export const sourceCreateSchema = z.object({
   name: z.string().min(1).max(200),
   // WARP-2022 — `z.string().url()` accepts http://127.0.0.1/,
   // http://169.254.169.254/ and file:///etc/passwd. The real destination rule

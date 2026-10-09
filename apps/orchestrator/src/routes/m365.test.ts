@@ -297,7 +297,6 @@ describe("GET /api/m365/callback", () => {
   it.each([
     ...["connected", "cancelled", "expired", "failed"].map((outcome) => ({ returnTo: "/setup?step=accounts", outcome, location: `/setup?step=accounts&m365=${outcome}` })),
     ...["connected", "cancelled", "expired", "failed"].map((outcome) => ({ returnTo: "/chat", outcome, location: `/chat?m365=${outcome}` })),
-    ...["connected", "cancelled", "expired", "failed"].map((outcome) => ({ returnTo: "/chat/connect-return", outcome, location: `/chat/connect-return?m365=${outcome}` })),
   ])("returns $outcome to the stored $returnTo destination", async ({ returnTo, outcome, location }) => {
     const prisma = fakePrisma();
     const entra = fakeEntra();
@@ -314,7 +313,7 @@ describe("GET /api/m365/callback", () => {
     expect(res.text).not.toMatch(/evil.example|PROVIDER_SECRET/);
   });
 
-  it.each(["https://evil.example", "//evil.example", "/setup?step=done", "/settings#x", "/chat?x=1", "/chat#x", "/chat/", "/chat/connect-return?x=1", "/chat/connect-return#x", "/chat/connect-return/", "/other"])("rejects an untrusted Microsoft return destination %s before creating a flow", async (returnTo) => {
+  it.each(["https://evil.example", "//evil.example", "/setup?step=done", "/settings#x", "/chat?x=1", "/chat#x", "/chat/", "/chat/connect-return", "/chat/connect-return?x=1", "/chat/connect-return#x", "/chat/connect-return/", "/other"])("rejects an untrusted Microsoft return destination %s before creating a flow", async (returnTo) => {
     const prisma = fakePrisma();
     const res = await request(authedApp(prisma, fakeEntra())).post("/api/m365/connect").send({ ...APP, returnTo });
     expect(res.status).toBe(400);

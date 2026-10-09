@@ -1,5 +1,5 @@
 /** Fixed local destinations only; OAuth callback query parameters never choose a destination. */
-export const ACCOUNT_CONNECT_RETURN_PATHS = ["/settings", "/setup", "/setup?step=accounts", "/chat", "/chat/connect-return"] as const;
+export const ACCOUNT_CONNECT_RETURN_PATHS = ["/settings", "/setup", "/setup?step=accounts", "/chat"] as const;
 export type AccountConnectReturnTo = typeof ACCOUNT_CONNECT_RETURN_PATHS[number];
 
 export function accountConnectReturnTo(value: unknown): AccountConnectReturnTo {
