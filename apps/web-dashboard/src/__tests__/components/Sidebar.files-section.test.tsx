@@ -29,23 +29,23 @@ function findItem(href: string): NavItem {
 }
 
 describe("Files section shape (WARP-2966)", () => {
-  it("offers Drives alongside Recent, Shared and Trash", () => {
+  // Drives left: it redirected to Settings → Storage (see
+  // storage-surface-move.test.tsx). The /files toolbar's Drives menu is its door.
+  it("offers Recent, Shared and Trash", () => {
     const files = findItem("/files");
     expect(files.children?.map((c) => c.label)).toEqual([
-      "Drives",
       "Recent",
       "Shared",
       "Trash",
     ]);
     expect(files.children?.map((c) => c.href)).toEqual([
-      "/files/drives",
       "/files/recents",
       "/files/shared",
       "/files/trash",
     ]);
   });
 
-  it("keeps the Drives shortcut under the Files module gate", () => {
+  it("keeps the old /files/drives address under the Files module gate", () => {
     expect(moduleForPath("/files/drives")?.moduleId).toBe("files");
   });
 

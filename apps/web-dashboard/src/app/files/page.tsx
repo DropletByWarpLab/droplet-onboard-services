@@ -6,7 +6,6 @@ import Link from "next/link";
 import {
   Folder,
   FolderPlus,
-  HardDrive,
   Link as LinkIcon,
   X,
   Eye,
@@ -32,6 +31,7 @@ import {
 import { SelectionToolbar } from "@/components/FileManager/SelectionToolbar";
 import { MoveCopyDialog } from "@/components/FileManager/MoveCopyDialog";
 import { ConnectDriveDialog } from "@/components/FileManager/ConnectDriveDialog";
+import { DrivesMenu } from "@/components/FileManager/DrivesMenu";
 import { VersionHistoryPanel } from "@/components/FileManager/VersionHistoryPanel";
 import { TagChips } from "@/components/FileManager/TagChips";
 import { CommentsPanel } from "@/components/FileManager/CommentsPanel";
@@ -1652,17 +1652,7 @@ export default function FilesPage() {
         <Star size={14} />
         <span className="hidden sm:inline">Favorites</span>
       </Link>
-      {canConnectDrive && (
-        <button
-          onClick={() => setShowConnectDrive(true)}
-          aria-label="Connect network drive"
-          className="btn ghost"
-          type="button"
-        >
-          <HardDrive size={14} />
-          <span className="hidden sm:inline">Connect drive</span>
-        </button>
-      )}
+      <DrivesMenu canConnect={canConnectDrive} onConnect={() => setShowConnectDrive(true)} />
       <button
         onClick={() => !isReaderSpace && setShowNewFolder(true)}
         disabled={isReaderSpace}

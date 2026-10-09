@@ -295,17 +295,31 @@ describe("<FilesPage /> (WARP-883 smoke)", () => {
   });
 
   // Personal WebDAV drives are open to owner/admin/family only — a guest has
-  // nothing to connect (the route 403s them), so the toolbar hides the button.
+  // nothing to connect (the route 403s them), so the Drives menu leaves it out.
   it.each(["owner", "admin", "family"])("offers Connect drive to %s", (role) => {
     mockUser = { id: "u1", email: "x@example.com", role };
     render(<FilesPage />);
-    expect(screen.getByRole("button", { name: "Connect network drive" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Drives" }));
+    expect(screen.getByRole("menuitem", { name: /connect network drive/i })).toBeInTheDocument();
   });
 
   it("hides Connect drive from a guest", () => {
     mockUser = { id: "u1", email: "guest@example.com", role: "guest" };
     render(<FilesPage />);
-    expect(screen.queryByRole("button", { name: "Connect network drive" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Drives" }));
+    expect(screen.queryByRole("menuitem", { name: /connect network drive/i })).not.toBeInTheDocument();
+  });
+
+  // Drives left the side nav: a row there redirected to Settings → Storage and
+  // swapped the sidebar mid-click. The toolbar menu is its door now, and it
+  // names where it goes.
+  it("leads to Settings → Storage from the Drives menu", () => {
+    render(<FilesPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Drives" }));
+    const manage = screen.getByRole("menuitem", { name: /manage drives/i });
+    expect(manage).toHaveTextContent("In Settings → Storage");
+    fireEvent.click(manage);
+    expect(pushMock).toHaveBeenCalledWith("/settings/storage");
   });
 });
 
