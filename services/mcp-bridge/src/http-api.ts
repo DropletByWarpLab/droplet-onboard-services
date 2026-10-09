@@ -152,6 +152,12 @@ function connectionIdOf(body: unknown): string | undefined | null {
 }
 
 /** `<serverId>#<connectionId>` for a member session, else the bare server id. */
+function killSwitchError(): Error {
+  return Object.assign(new Error("the session was closed by the kill switch while it was opening."), {
+    code: "SESSION_CLOSED_BY_KILL_SWITCH",
+  });
+}
+
 function keyOf(serverId: string, connectionId?: string): string {
   return connectionId ? `${serverId}#${connectionId}` : serverId;
 }
@@ -257,10 +263,13 @@ export class BridgeSessionStore {
     connectionId?: string,
   ): Promise<RemoteMcpSessionHealth> {
     const key = keyOf(serverId, connectionId);
+    // Read synchronously on entry, before waiting on the chain (kill switch).
+    const gen = this.#generationOf(serverId);
     return this.#serialize(key, async () => {
       const profile = this.#profiles.get(serverId);
       if (!profile) throw new Error(`no session factory for "${serverId}"`);
       await this.#closeNow(key);
+      if (gen !== this.#generationOf(serverId)) throw killSwitchError();
       if (connectionId) {
         // Bounded: a replacement frees its own slot first (above), so only a
         // genuinely new connection can hit the cap.
@@ -277,7 +286,18 @@ export class BridgeSessionStore {
         this.#lastUsed.set(key, this.#now());
         this.#armSweep();
       }
-      return session.connect();
+      const health = await session.connect();
+      // Re-checked after the dial: a kill switch that ran while we connected
+      // wins, so no session outlives it.
+      if (gen !== this.#generationOf(serverId)) {
+        if (this.#sessions.get(key) === session) {
+          this.#sessions.delete(key);
+          this.#lastUsed.delete(key);
+        }
+        await session.close();
+        throw killSwitchError();
+      }
+      return health;
     });
   }
 
@@ -292,10 +312,20 @@ export class BridgeSessionStore {
    * chain is queued behind), so a session mid-connect cannot survive.
    */
   async closeAll(serverId: string): Promise<boolean> {
+    // Synchronously, BEFORE the snapshot: an open that began earlier is
+    // refused at its next checkpoint; one that begins later is a new event.
+    this.#generation.set(serverId, this.#generationOf(serverId) + 1);
     const ours = (k: string) => k === serverId || k.startsWith(`${serverId}#`);
     const keys = new Set([...this.#sessions.keys(), ...this.#chains.keys()].filter(ours));
     const results = await Promise.all([...keys].map((k) => this.#serialize(k, () => this.#closeNow(k))));
     return results.some(Boolean);
+  }
+
+  /** Kill-switch generation per server: `closeAll` bumps it; an `open` that
+   *  began before the bump refuses to create or keep a session. */
+  readonly #generation = new Map<string, number>();
+  #generationOf(serverId: string): number {
+    return this.#generation.get(serverId) ?? 0;
   }
 
   readonly #lastUsed = new Map<string, number>();
@@ -648,6 +678,7 @@ async function openSession(
     );
     return { status: 200, body: { state } satisfies BridgeStateBody };
   } catch (e) {
+    if (codeOf(e) === "SESSION_CLOSED_BY_KILL_SWITCH") return err(409, "SESSION_NOT_OPEN", messageOf(e));
     // `connect()` classifies its own failures into the session state and does
     // NOT throw; anything that lands here is a construction-time refusal —
     // `assertSafeMcpUrl` rejecting a host, or an empty cloudId. Both are the

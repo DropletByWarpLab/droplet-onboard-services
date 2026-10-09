@@ -188,18 +188,28 @@ describe("the kill switch", () => {
     expect(store.get("atlassian")).toBeUndefined();
   });
 
-  it("also closes a member session still connecting when DELETE arrives", async () => {
+  it("a kill switch that runs while a NEW connection is still connecting wins: nothing survives", async () => {
     let release: () => void = () => {};
     const gate = new Promise<void>((r) => (release = r));
     const h = harness(() => gate);
     const store = storeOf(h.factory);
     const opening = send(store, "POST", "/sessions/atlassian/open", bearerBody(CONN_A));
-    await Promise.resolve();
+    await vi.waitFor(() => expect(h.conns).toHaveLength(1));
     const killing = send(store, "DELETE", "/sessions/atlassian");
     release();
-    await Promise.all([opening, killing]);
-    expect(h.conns[0]!.close).toHaveBeenCalledTimes(1);
+    const [res] = await Promise.all([opening, killing]);
+    expect(res.status).toBe(409);
     expect(store.get("atlassian", CONN_A)).toBeUndefined();
+    expect(store.connectionSessionCounts()).toEqual({});
+    expect(h.conns[0]!.close).toHaveBeenCalled();
+  });
+
+  it("an open that starts after the kill switch returned is allowed (an event, not a latch)", async () => {
+    const h = harness();
+    const store = storeOf(h.factory);
+    await send(store, "DELETE", "/sessions/atlassian");
+    expect((await send(store, "POST", "/sessions/atlassian/open", bearerBody(CONN_A))).status).toBe(200);
+    expect(store.get("atlassian", CONN_A)).toBeDefined();
   });
 
   it("GET /sessions reports a count per server and no connection id or member", async () => {
