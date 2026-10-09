@@ -6,7 +6,7 @@ The Droplet platform prevents the AI assistant (and any API client) from perform
 
 | Tier | Behavior | Examples |
 |------|----------|---------|
-| **Tier 1** | Auto-execute (with rate limiting) | Read port status, list VLANs, get camera list, WiFi scan |
+| **Tier 1** | Auto-execute (with rate limiting) | Read port status, list VLANs, get camera list, WiFi scan, camera activity (`summarize_camera_activity`, `get_camera_motion`, `list_camera_reviews`, `get_camera_recording`) |
 | **Tier 2** | Requires user confirmation token | Delete camera, disable PoE, create/delete VLAN, change SSID, firewall rules |
 | **Tier 3** | Blocked for AI entirely | Reboot, factory reset, VPN config, disable the appliance's switch port |
 
@@ -46,6 +46,26 @@ Tokens expire after 60 seconds. Each confirmation is logged to the audit trail.
 | `disable_camera` | 2 | Stops surveillance |
 | `camera_subnet_setup` | 2 | Network infrastructure change |
 | `camera_subnet_teardown` | 2 | Removes security isolation |
+
+#### Camera reads (Tier 1, WARP-3927 / WARP-3747)
+
+Pure reads over footage and detections the person could already open in the
+Cameras page; none writes, none confirms. They run as the `_service:mcp`
+principal, and the orchestrator scopes every answer to the person asking
+(per-camera grants, `guest` excluded), so the assistant sees no camera the
+dashboard would hide.
+
+| Tool | Tier | Reads |
+|------|------|-------|
+| `summarize_camera_activity` | 1 | events, review items and recorded motion for a period (max 26 h) |
+| `get_camera_motion` | 1 | motion in retained recordings, with footage coverage |
+| `list_camera_reviews` | 1 | review items, alerts first |
+| `get_camera_recording` | 1 | a clip and a still from recorded footage (range max 30 min) |
+| `list_camera_events` / `search_camera_events` | 1 | detections; take `after` / `before` (WARP-3747), `list_camera_events` also `labels` and `min_score` |
+
+Each result carries `incomplete` and/or a `coverageNote` when the footage or a
+source is partial, so a quiet answer over missing footage is never presented as
+an all-clear.
 
 ### Files (WARP-2669)
 

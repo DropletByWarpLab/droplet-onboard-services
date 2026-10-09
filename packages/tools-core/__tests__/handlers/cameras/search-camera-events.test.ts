@@ -112,7 +112,7 @@ describe("search_camera_events", () => {
 
     expect(res.ok).toBe(true);
     if (res.ok) {
-      expect(res.data).toEqual({
+      expect(res.data).toMatchObject({
         type: "search_camera_events",
         query: "delivery truck last week",
         events: EVENTS,
@@ -184,7 +184,7 @@ describe("search_camera_events", () => {
     );
     expect(res.ok).toBe(true);
     if (res.ok) {
-      expect(res.data).toEqual({
+      expect(res.data).toMatchObject({
         type: "search_camera_events",
         query: "unicorn",
         events: [],
@@ -318,6 +318,8 @@ describe("search_camera_events — tool metadata", () => {
     expect(schema.additionalProperties).toBe(false);
     expect(schema.required).toEqual(["query"]);
     expect(Object.keys(schema.properties ?? {}).sort()).toEqual([
+      "after",
+      "before",
       "camera",
       "limit",
       "query",
