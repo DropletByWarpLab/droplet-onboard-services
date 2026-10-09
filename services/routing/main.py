@@ -885,7 +885,8 @@ def pairing_claim(req: PairingFingerprintRequest):
     except PairingUnsupported:
         return _pair_error(502, "PAIR_UNSUPPORTED", "router does not provide droplet.pair")
     except (ConnectionLost, UbusError) as exc:
-        return _pair_error(503, "ROUTER_UNREACHABLE", f"router unreachable: {exc}")
+        logger.warning("pairing status probe failed: %s", type(exc).__name__)
+        return _pair_error(503, "ROUTER_UNREACHABLE", "router unreachable")
     pairing_state.record_probe(status)
 
     if status.state == STATE_PAIRED:
@@ -908,9 +909,11 @@ def pairing_claim(req: PairingFingerprintRequest):
     except PairingUnsupported:
         return _pair_error(502, "PAIR_UNSUPPORTED", "router does not provide droplet.pair")
     except PairingClaimError as exc:
-        return _pair_error(502, "PAIR_CLAIM_FAILED", str(exc))
+        logger.warning("router rejected pairing claim: %s", type(exc).__name__)
+        return _pair_error(502, "PAIR_CLAIM_FAILED", "router rejected the pairing claim")
     except (ConnectionLost, UbusError) as exc:
-        return _pair_error(502, "PAIR_CLAIM_FAILED", f"claim request failed: {exc}")
+        logger.warning("pairing claim request failed: %s", type(exc).__name__)
+        return _pair_error(502, "PAIR_CLAIM_FAILED", "claim request failed")
 
     # Prove the claim took: a FRESH login with the new password (never the
     # holder - this must exercise the password the router now holds).
