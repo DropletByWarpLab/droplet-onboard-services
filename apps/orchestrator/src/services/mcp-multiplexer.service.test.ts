@@ -16,6 +16,11 @@ import {
 } from "./mcp-multiplexer.service.js";
 import type { McpClientPort, McpToolDescriptor } from "./mcp-client.port.js";
 import { createToolCallInterceptor } from "@droplet/tools-core";
+import {
+  createRecordBackedRemoteCallPolicy,
+  RemoteToolClassificationCache,
+  type RemoteToolClassificationRow,
+} from "./remote-tool-classification.service.js";
 
 function tool(name: string): McpToolDescriptor {
   return { name, description: `${name} desc`, inputSchema: { type: "object" } };
@@ -503,5 +508,93 @@ describe("WARP-2437 — a remote write fails closed without an interceptor and r
     const { mux, remote } = await setup({ remoteCallPolicy: () => ({ kind: "allow" }) });
     await mux.callTool("atlassian__jira_create_issue", {});
     expect(remote.callTool).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("WARP-2432 — the runtime deny tier runs on every remote callTool", () => {
+  const now = new Date();
+  const row = (toolName: string, over: Partial<RemoteToolClassificationRow> = {}): RemoteToolClassificationRow => ({
+    serverId: "ext-x",
+    toolName,
+    requiresWrite: false,
+    requiresConfirmation: false,
+    denied: false,
+    reviewedBy: "owner",
+    reviewedAt: now,
+    wireDescription: null,
+    firstSeenAt: now,
+    lastSeenAt: now,
+    ...over,
+  });
+  const parse = (res: { content: { text?: string }[] }) => JSON.parse(res.content[0].text ?? "{}");
+
+  async function setup(rows: RemoteToolClassificationRow[], names: string[]) {
+    const cache = new RemoteToolClassificationCache();
+    cache.seed(rows);
+    const remote = portDouble(names.map(tool));
+    const mux = new McpToolMultiplexer(portDouble([]), {
+      isServerAllowed: allowAll,
+      remoteCallPolicy: createRecordBackedRemoteCallPolicy(cache.lookup),
+    });
+    mux.attachRemote("ext-x", remote);
+    return { mux, remote, cache };
+  }
+
+  /**
+   * Hiding is not blocking. MUTATION: apply the policy in `listTools` (drop
+   * unclassified names) and delete it from `callTool` → the model-supplied
+   * call below reaches the wire and this goes red.
+   * MUTATION: default an unknown name to `{ kind: "allow" }` → red.
+   */
+  it("an advertised tool with no classification row is still denied at callTool, fail-closed", async () => {
+    const { mux, remote } = await setup([row("read_a")], ["read_a", "mystery"]);
+
+    const listed = (await mux.listTools()).map((t) => t.name);
+    expect(listed).toContain("ext-x__mystery");
+
+    const res = await mux.callTool("ext-x__mystery", {});
+    expect(res.isError).toBe(true);
+    expect(parse(res)).toMatchObject({ status: "blocked", error: "REMOTE_TOOL_NOT_CLASSIFIED" });
+    expect(remote.callTool).not.toHaveBeenCalled();
+
+    await mux.callTool("ext-x__read_a", {});
+    expect(remote.callTool).toHaveBeenCalledTimes(1);
+  });
+
+  it("is evaluated per call, with no memo: demoting or blocking a tool bites the next call", async () => {
+    const { mux, remote, cache } = await setup([row("read_a")], ["read_a"]);
+    await mux.listTools();
+
+    expect((await mux.callTool("ext-x__read_a", {})).isError).toBe(false);
+
+    cache.seed([row("read_a", { denied: true })]);
+    expect(parse(await mux.callTool("ext-x__read_a", {}))).toMatchObject({ error: "REMOTE_TOOL_DENIED" });
+
+    cache.seed([row("read_a", { requiresWrite: true })]);
+    expect(parse(await mux.callTool("ext-x__read_a", {}))).toMatchObject({ error: "REMOTE_WRITE_NOT_PERMITTED" });
+
+    cache.seed([]);
+    expect(parse(await mux.callTool("ext-x__read_a", {}))).toMatchObject({ error: "REMOTE_TOOL_NOT_CLASSIFIED" });
+    expect(remote.callTool).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * MUTATION: make `errorOutcome` return `{ content: [], isError: false }` →
+   * red. A blocked call is `isError` AND carries `status: "blocked"` with a
+   * code; a legitimately empty remote answer is neither.
+   */
+  it("a blocked call is distinguishable from a successful empty answer", async () => {
+    const { mux, remote } = await setup([row("read_a")], ["read_a", "mystery"]);
+    await mux.listTools();
+    remote.callTool.mockResolvedValueOnce({ content: [], isError: false });
+
+    const empty = await mux.callTool("ext-x__read_a", {});
+    const blocked = await mux.callTool("ext-x__mystery", {});
+
+    expect(empty).toEqual({ content: [], isError: false });
+    expect(blocked.isError).toBe(true);
+    expect(blocked.content.length).toBeGreaterThan(0);
+    expect(parse(blocked).status).toBe("blocked");
+    expect(parse(blocked).message).toEqual(expect.any(String));
   });
 });
