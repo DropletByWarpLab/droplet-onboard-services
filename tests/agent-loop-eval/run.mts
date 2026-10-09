@@ -112,6 +112,11 @@ const { toolResultToContent } = await import(`${ORCH}/../../services/mcp-server/
 // The route's own role narrowing (routes/llm.ts narrowAllowedToolsForRole is a thin wrapper over this).
 const { narrowToolNamesForPrincipal } = await import(`${ORCH}/src/services/tool-access.service.ts`);
 
+const { runtimeToolRegistry } = await import(`${ORCH}/src/services/runtime-tool-registry.service.ts`);
+// WARP-3920: the outside servers the previous case registered, and their tool descriptions.
+let registeredRemoteServers: string[] = [];
+const remoteDescriptions = new Map<string, string>();
+
 const TOOLS: Map<string, any> = tc.TOOLS instanceof Map ? tc.TOOLS : new Map(Object.entries(tc.TOOLS));
 const USER = "eval-owner";
 
@@ -148,6 +153,9 @@ interface Case {
   // Tool names a box would carry from earlier turns' persisted trace. Seeded
   // turns are text only, so without this selection sees no earlier tools.
   prior_tool_names?: string[];
+  // WARP-3920: tools of an outside MCP server, scripted. Each is advertised as `<server>__<name>` and answers
+  // with `result` as plain text, the way a vendor server does, so the loop's untrusted-result labelling is on the path.
+  remote_tools?: { server: string; name: string; description: string; result: string }[];
   expected: Record<string, unknown>;
 }
 
@@ -158,15 +166,22 @@ interface Dispatch {
   fault?: Fault;
 }
 
-function makePort(world: WorldState, faults: Record<string, Fault[]>, log: Dispatch[], who: Ctx) {
+function makePort(world: WorldState, faults: Record<string, Fault[]>, log: Dispatch[], who: Ctx, remote: Map<string, string>) {
   const interceptor = tc.createToolCallInterceptor();
   const pending = Object.fromEntries(Object.entries(faults).map(([k, v]) => [k, [...v]]));
   return {
     isStarted: true,
     async listTools() {
-      return [...TOOLS.values()].map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema }));
+      return [
+        ...[...TOOLS.values()].map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })),
+        ...[...remote.keys()].map((name) => ({ name, description: remoteDescriptions.get(name) ?? "", inputSchema: { type: "object" } })),
+      ];
     },
     async callTool(name: string, args: Record<string, unknown>, ctx?: { confirmationToken?: string }) {
+      if (remote.has(name)) {
+        log.push({ tool: name, args, outcome: "executed" });
+        return { content: [{ type: "text", text: remote.get(name)! }], isError: false };
+      }
       const tool = TOOLS.get(name);
       if (!tool) {
         return { content: [{ type: "text", text: JSON.stringify({ error: `Unknown tool: ${name}` }) }], isError: true };
@@ -236,7 +251,22 @@ async function runCase(c: Case, repeat: number, window: number, script: any[] | 
   const world = normalizeWorld({ ...base, ...overlay } as WorldState);
   validateWorld(world);
   const dispatches: Dispatch[] = [];
-  const mcp = makePort(world, expandDeep(c.faults ?? {}, today) as Record<string, Fault[]>, dispatches, who);
+  // WARP-3920: scripted outside-server tools. The registry is process-wide, so drop the last case's servers first.
+  for (const id of registeredRemoteServers) runtimeToolRegistry.unregisterServer(id);
+  registeredRemoteServers = [...new Set((c.remote_tools ?? []).map((r) => r.server))];
+  const remote = new Map<string, string>();
+  for (const id of registeredRemoteServers) {
+    const mine = (c.remote_tools ?? []).filter((r) => r.server === id);
+    runtimeToolRegistry.registerServerTools(id, mine.map((r) => ({
+      name: `${id}__${r.name}`, serverId: id, domain: "data", domainSource: "server",
+      description: r.description, inputSchema: { type: "object" },
+    })));
+    for (const r of mine) {
+      remote.set(`${id}__${r.name}`, r.result);
+      remoteDescriptions.set(`${id}__${r.name}`, r.description);
+    }
+  }
+  const mcp = makePort(world, expandDeep(c.faults ?? {}, today) as Record<string, Fault[]>, dispatches, who, remote);
   const approvals = createChatApprovalStore();
   const steps: any[] = [];
   const confirmations: any[] = [];

@@ -3156,6 +3156,7 @@ model User {
   id                 String              @id @default(uuid())
   googleConnection   GoogleConnection?
   mediaGenerationJobs MediaGenerationJob[]
+  mcpOAuthConnections McpOAuthConnection[]
   // Login handle. Unique across the directory. For Nextcloud-mirror
   // rows this matches the OCS user id so `req.user.username` from the
   // auth middleware resolves directly to this row.
@@ -11187,4 +11188,81 @@ model GoogleConnection {
   lastError        String?
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
+}
+
+/// WARP-2409 / ADR-072 §2 — whose account a remote MCP connection acts as.
+/// An explicit column, never inferred from `memberId IS NULL`.
+enum McpOAuthScope {
+  /// One member's own sign-in. The default: the token reads only what that
+  /// member can, and offboarding the member deletes the row (WARP-3924).
+  MEMBER
+  /// One shared account that everyone allowed to use the server acts as.
+  /// Only an admin's explicit choice, recorded in `workspaceAckAt`.
+  WORKSPACE
+}
+
+/// Same shape and same insistence as `M365ConnectionState`:
+/// `NEEDS_RECONNECT` ("the token died") MUST stay distinguishable from
+/// `DISCONNECTED` ("never connected") — different UI, different alerts.
+enum McpOAuthConnectionState {
+  /// Never connected, or deliberately disconnected. The default.
+  DISCONNECTED
+  /// Sign-in in flight at the authorization server.
+  PENDING_CONSENT
+  /// Usable: a token is held and the last refresh succeeded.
+  CONNECTED
+  /// Token revoked/expired beyond refresh. Not an error: asks the person to
+  /// sign in again. Never collapse into DISCONNECTED.
+  NEEDS_RECONNECT
+  /// Unexpected failure; see `lastError` (never carries token material).
+  ERROR
+}
+
+/// WARP-2409 / WARP-2412 / ADR-072 §1-§3 — OAuth connection to a remote MCP
+/// server, keyed by (provider, owner). `M365Connection` is the precedent but is
+/// `userId @unique` with MSAL's cache, so it cannot be extended.
+///
+/// Owner: `scope` + `memberId`, tied by a CHECK (MEMBER <=> memberId set). A
+/// WORKSPACE row requires the admin acknowledgement (`workspaceAckAt/By`).
+/// At most one MEMBER row per (provider, member) and one WORKSPACE row per
+/// provider (partial unique index in the migration; Prisma cannot express it).
+///
+/// `tokensEnc` / `clientSecretEnc` are `dcv1:` blobs under
+/// `deriveMcpOAuthTokenKey()`, AAD-bound to row id + scope + owner
+/// (`mcpOAuthAad`), so a blob moved to another row or member fails closed.
+/// `issuer` and `tokenEndpointHost` are pinned at sign-in (ADR-072 §1/§2): a
+/// later refresh to any other host is refused by the flow (WARP-2401/2405).
+model McpOAuthConnection {
+  id       String        @id @default(uuid())
+  provider String
+  scope    McpOAuthScope
+  /// Required when scope = MEMBER, null when WORKSPACE (CHECK). Cascades so a
+  /// deleted member cannot leave a token behind.
+  memberId String?
+  member   User?         @relation(fields: [memberId], references: [id], onDelete: Cascade)
+
+  state McpOAuthConnectionState @default(DISCONNECTED)
+
+  /// Authorization-server issuer and token-endpoint host, pinned at sign-in.
+  issuer            String
+  tokenEndpointHost String
+
+  clientId        String?
+  clientSecretEnc String?
+  tokensEnc       String?
+
+  /// Admin acknowledgement of "everyone allowed to use this server acts as
+  /// this account and sees what it sees." Required (CHECK) for WORKSPACE.
+  workspaceAckAt DateTime?
+  workspaceAckBy String?
+
+  connectedAt     DateTime?
+  lastRefreshOkAt DateTime?
+  lastError       String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([provider, memberId])
+  /// Offboarding: find every row a departing member owns (WARP-3924).
+  @@index([memberId])
 }
