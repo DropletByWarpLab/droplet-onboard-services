@@ -248,7 +248,12 @@ describe("tool-layers — the synchronous runtime lookup the dispatch sites shar
         row("bookings", "cancel_slot", { denied: true }),
       ]),
     );
-    expect(lookup("bookings__list_slots")).toEqual({ domain: "ext-bookings", requiresWrite: false });
+    expect(lookup("bookings__list_slots")).toEqual({
+      domain: "ext-bookings",
+      requiresWrite: false,
+      serverId: "bookings",
+      allowlisted: false,
+    });
     expect(lookup("bookings__cancel_slot")).toBeUndefined();
     expect(lookup("bookings__never_registered")).toBeUndefined();
     // A compiled tool is not the runtime lookup's business.
@@ -268,7 +273,7 @@ describe("tool-layers — the synchronous runtime lookup the dispatch sites shar
 // the server- and default-sourced specs go red.
 describe("tool-layers — only an OPERATOR-mapped domain admits a runtime tool to a scoped role", () => {
   const readRow = (wireName: string) =>
-    row("vendor", wireName, { requiresWrite: false, requiresConfirmation: false });
+    row("vendor", wireName, { requiresWrite: false, requiresConfirmation: false, allowlisted: true });
   const rows = [readRow("op_read"), readRow("srv_read"), readRow("def_read")];
   const opTool = descriptor("vendor", "op_read", "pm", { domainSource: "operator" });
   const srvTool = descriptor("vendor", "srv_read", "pm", { domainSource: "server" });
@@ -282,6 +287,9 @@ describe("tool-layers — only an OPERATOR-mapped domain admits a runtime tool t
     domains: new Set(["pm", DEFAULT_RUNTIME_TOOL_DOMAIN]),
     writeDomains: new Set(["pm", DEFAULT_RUNTIME_TOOL_DOMAIN]),
     locks: false,
+    // WARP-2434 — and the server granted too, so the domain rule is the only
+    // thing under test here.
+    connectorGrants: new Map([["vendor", "read"]]),
   };
 
   function lookupOver(...tools: RuntimeToolDescriptor[]) {
@@ -292,7 +300,12 @@ describe("tool-layers — only an OPERATOR-mapped domain admits a runtime tool t
 
   it("operator-sourced: reachable for a scoped role whose grant admits its domain", () => {
     const lookup = lookupOver(opTool);
-    expect(lookup(opTool.name)).toEqual({ domain: "pm", requiresWrite: false });
+    expect(lookup(opTool.name)).toEqual({
+      domain: "pm",
+      requiresWrite: false,
+      serverId: "vendor",
+      allowlisted: true,
+    });
     expect(toolAllowedInScope(opTool.name, scoped, lookup)).toBe(true);
     expect(populatedDomains(toolLayers(runtimeLayer([opTool], lookupOf(rows)))).has("pm")).toBe(true);
   });

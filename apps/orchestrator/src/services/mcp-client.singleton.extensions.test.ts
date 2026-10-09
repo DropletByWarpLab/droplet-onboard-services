@@ -97,7 +97,7 @@ describe("the call policy for an extension", () => {
   });
 
   it("a vendor server keeps the composed policy (the table's own refusal stands)", () => {
-    remoteToolClassificationCache.seed([row({ serverId: "vendor", toolName: "x" })]);
+    remoteToolClassificationCache.seed([row({ serverId: "vendor", toolName: "x", allowlisted: true })]);
     expect(decide("vendor", "x")).toMatchObject({ kind: "deny", code: "REMOTE_TOOL_NOT_CLASSIFIED" });
   });
 });

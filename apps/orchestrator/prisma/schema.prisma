@@ -11004,6 +11004,11 @@ model RemoteToolClassification {
   requiresWrite        Boolean   @default(true)
   requiresConfirmation Boolean   @default(true)
   denied               Boolean   @default(false)
+  /// WARP-2434: the per-server POSITIVE allowlist. A remote tool is offered and
+  /// callable only while this is true (and `denied` is false). Default false;
+  /// written only by the owner/admin allowlist route; a changed input-schema
+  /// hash resets it with the rest of the review.
+  allowlisted          Boolean   @default(false)
   reviewedBy           String?
   reviewedAt           DateTime?
   wireDescription      String?

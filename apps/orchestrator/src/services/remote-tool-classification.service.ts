@@ -103,6 +103,7 @@ export const RECORD_DENY_CODES = {
   notClassified: "REMOTE_TOOL_NOT_CLASSIFIED",
   denied: "REMOTE_TOOL_DENIED",
   writeBlocked: "REMOTE_WRITE_NOT_PERMITTED",
+  notAllowlisted: "REMOTE_TOOL_NOT_ALLOWLISTED",
   definitionChanged: "REMOTE_TOOL_DEFINITION_CHANGED",
 } as const;
 
@@ -112,6 +113,12 @@ export interface RemoteToolClassificationRow {
   requiresWrite: boolean;
   requiresConfirmation: boolean;
   denied: boolean;
+  /**
+   * WARP-2434 — the per-server positive allowlist. Optional on the type so a
+   * row from before the column reads as NOT admitted: only `=== true` admits
+   * ({@link remoteToolAllowlisted}).
+   */
+  allowlisted?: boolean;
   reviewedBy: string | null;
   reviewedAt: Date | null;
   wireDescription: string | null;
@@ -258,6 +265,8 @@ export async function recordDiscoveredRemoteTools(
             ...(before.denied
               ? {}
               : {
+                  // WARP-2434 — changed arguments leave the allowlist too.
+                  allowlisted: false,
                   requiresWrite: IMPORT_DEFAULT_CLASSIFICATION.requiresWrite,
                   requiresConfirmation: IMPORT_DEFAULT_CLASSIFICATION.requiresConfirmation,
                   reviewedBy: null,
@@ -390,6 +399,44 @@ export async function classifyRemoteTool(
     "remote_tool_classified",
   );
   return { ok: true, row };
+}
+
+/**
+ * WARP-2434 — admit or withdraw one DISCOVERED tool. A tool the server has
+ * never advertised has no row and cannot be allowlisted (`NOT_FOUND`): the
+ * allowlist names tools the box has seen, never invents them.
+ */
+export async function setRemoteToolAllowlisted(
+  prisma: ClassificationPrisma,
+  input: { serverId: string; toolName: string; allowlisted: boolean },
+): Promise<{ ok: true; row: RemoteToolClassificationRow } | { ok: false; code: "NOT_FOUND" }> {
+  const where = { serverId: input.serverId, toolName: input.toolName };
+  const u = await prisma.remoteToolClassification.updateMany({
+    where,
+    data: { allowlisted: input.allowlisted },
+  });
+  if (u.count === 0) return { ok: false, code: "NOT_FOUND" };
+  const row = (await prisma.remoteToolClassification.findUnique({
+    where: { serverId_toolName: where },
+  })) as RemoteToolClassificationRow | null;
+  return row ? { ok: true, row } : { ok: false, code: "NOT_FOUND" };
+}
+
+/**
+ * WARP-2434 — THE allowlist predicate. Positive and fail-closed: a tool is
+ * admitted only when its record row exists, says `allowlisted === true` and is
+ * not blocked. An unknown server, an unknown tool, an unreadable row and a
+ * pre-column row all answer false. Every surface that offers or dispatches a
+ * remote tool asks this one function (the multiplexer's listing and policy, and
+ * the role-scope facts in tool-layers.service.ts), so they cannot skew.
+ */
+export function remoteToolAllowlisted(
+  lookup: ClassificationLookup,
+  serverId: string,
+  wireName: string,
+): boolean {
+  const row = lookup(serverId, wireName);
+  return row?.allowlisted === true && row.denied !== true;
 }
 
 export async function listRemoteToolClassifications(
@@ -526,6 +573,27 @@ export function decideFromRecord(
     };
   }
   return { kind: "allow" };
+}
+
+/**
+ * WARP-2434 — the allowlist in front of any policy: a call whose tool is not
+ * {@link remoteToolAllowlisted} is refused BEFORE the inner policy is asked, so
+ * nothing the inner policy would allow can widen the allowlist.
+ */
+export function withRemoteAllowlist(
+  lookup: ClassificationLookup,
+  inner: RemoteCallPolicy,
+): RemoteCallPolicy {
+  return (input) =>
+    remoteToolAllowlisted(lookup, input.serverId, input.wireName)
+      ? inner(input)
+      : {
+          kind: "deny",
+          code: RECORD_DENY_CODES.notAllowlisted,
+          message:
+            `'${input.namespacedName}' is not on this server's tool allowlist. ` +
+            "Do not retry; answer without it.",
+        };
 }
 
 /** A policy that reads ONLY the record. The whole authority for a server no

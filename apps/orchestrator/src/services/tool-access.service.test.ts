@@ -214,10 +214,14 @@ describe("narrowToolsToScope — the single narrowing expression (WARP-2556)", (
 // `currentRuntimeToolLookup`, shared by both LLM sites) supplies the domain
 // from the descriptor and the write flag from the classification record.
 describe("toolAllowedInScope — runtime tools (WARP-2897)", () => {
+  // An `ext-*` server: extensions keep their own review lifecycle and are not
+  // subject to the WARP-2434 vendor allowlist / connector-grant axis (covered
+  // for vendor servers in remote-tool-allowlist.test.ts).
+  const ext = { serverId: "ext-bookings", allowlisted: false };
   const runtime: RuntimeToolLookup = (name) =>
     ({
-      "bookings__list_slots": { domain: "ext-bookings", requiresWrite: false },
-      "bookings__book_slot": { domain: "ext-bookings", requiresWrite: true },
+      "bookings__list_slots": { domain: "ext-bookings", requiresWrite: false, ...ext },
+      "bookings__book_slot": { domain: "ext-bookings", requiresWrite: true, ...ext },
     })[name];
 
   /**
@@ -246,7 +250,12 @@ describe("toolAllowedInScope — runtime tools (WARP-2897)", () => {
   it("a runtime lookup never rescues a compiled tool the scope drops", () => {
     // The catalog answers first; a lookup that (wrongly) claimed a compiled
     // name must not widen it.
-    const liar: RuntimeToolLookup = () => ({ domain: "files", requiresWrite: false });
+    const liar: RuntimeToolLookup = () => ({
+      domain: "files",
+      requiresWrite: false,
+      serverId: "ext-liar",
+      allowlisted: false,
+    });
     expect(toolAllowedInScope(nameOf("cameras", false), scopeOf(["files"]), liar)).toBe(false);
   });
 

@@ -237,6 +237,14 @@ export interface McpToolMultiplexerOptions {
   /** Audit sink for the interceptor's decisions (denied / challenged /
    *  refused / confirmed). Scalars only: never arguments (rule 19, PHI). */
   onConfirmationEvent?: (event: InterceptorAuditEvent, ctx: { userId?: string }) => void;
+  /**
+   * WARP-2434 — offer-time half of the per-server allowlist: a remote tool for
+   * which this returns false stays in the vetted catalog but is not listed to
+   * the model. NEVER the boundary — `remoteCallPolicy` re-decides at dispatch.
+   * Defaults to offering everything, because the dispatch policy's default is
+   * deny-all.
+   */
+  isRemoteToolOffered?: (serverId: string, wireName: string) => boolean;
 }
 
 interface AttachedRemote {
@@ -283,6 +291,7 @@ export class McpToolMultiplexer implements McpClientPort {
   readonly #rejections: RemoteRejection[] = [];
   readonly #isServerAllowed: (serverId: string) => boolean;
   readonly #remoteCallPolicy: RemoteCallPolicy;
+  readonly #isRemoteToolOffered: (serverId: string, wireName: string) => boolean;
 
   readonly #writeInterceptor: ToolCallInterceptor | undefined;
   readonly #onConfirmationEvent: McpToolMultiplexerOptions["onConfirmationEvent"];
@@ -291,6 +300,7 @@ export class McpToolMultiplexer implements McpClientPort {
     this.#local = local;
     this.#writeInterceptor = opts.writeInterceptor;
     this.#onConfirmationEvent = opts.onConfirmationEvent;
+    this.#isRemoteToolOffered = opts.isRemoteToolOffered ?? (() => true);
     this.#isServerAllowed = opts.isServerAllowed ?? (() => false);
     this.#remoteCallPolicy = opts.remoteCallPolicy ?? DENY_ALL_REMOTE_TOOLS;
   }
@@ -411,7 +421,9 @@ export class McpToolMultiplexer implements McpClientPort {
         taken.add(vetted.name);
         // WARP-3919 — the cap applies to the copy the MODEL sees; `catalog`
         // (classification, review) keeps the full text.
-        out.push({ ...vetted, description: capRemoteDescription(vetted.description) });
+        if (this.#isRemoteToolOffered(serverId, tool.name)) {
+          out.push({ ...vetted, description: capRemoteDescription(vetted.description) });
+        }
       }
     }
     return out;

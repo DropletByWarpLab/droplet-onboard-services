@@ -31,7 +31,9 @@ import { McpToolMultiplexer } from "./mcp-multiplexer.service.js";
 import {
   composeRemoteCallPolicy,
   createRecordBackedRemoteCallPolicy,
+  remoteToolAllowlisted,
   remoteToolClassificationCache,
+  withRemoteAllowlist,
 } from "./remote-tool-classification.service.js";
 import { remoteToolTablePolicy } from "./remote-tool-tables.js";
 import type { RemoteCallPolicy } from "./mcp-multiplexer.service.js";
@@ -138,12 +140,19 @@ export function isRemoteServerAllowed(serverId: string): boolean {
 // table is registered there exactly as it was built here (API-token mode, deny-all
 // fallback), and a server with NO table is DENIED by default: the shipping
 // deny-all, which the record may then fill one reviewed read at a time.
-const vendorRemoteCallPolicy: RemoteCallPolicy = composeRemoteCallPolicy({
-  lookup: remoteToolClassificationCache.lookup,
-  table: remoteToolTablePolicy,
-  // WARP-3918 — fail-closed pin against the latest listing's definition hash.
-  live: remoteToolClassificationCache.liveDefinition,
-});
+//
+// WARP-2434 — in FRONT of all of that, the per-server positive allowlist: a
+// vendor tool that is not allowlisted is refused here whatever the table or the
+// record would say, for every caller (chat, durable runs, approvals, ToolSpecs).
+const vendorRemoteCallPolicy: RemoteCallPolicy = withRemoteAllowlist(
+  remoteToolClassificationCache.lookup,
+  composeRemoteCallPolicy({
+    lookup: remoteToolClassificationCache.lookup,
+    table: remoteToolTablePolicy,
+    // WARP-3918 — fail-closed pin against the latest listing's definition hash.
+    live: remoteToolClassificationCache.liveDefinition,
+  }),
+);
 
 /**
  * WARP-2900 — no compiled table speaks for an extension, so for `ext-*` the
@@ -176,6 +185,11 @@ export const mcpClient = new McpToolMultiplexer(localClient, {
       // Recorder already swallows internally; defence-in-depth.
     });
   },
+  // WARP-2434 — offer-time half of the same predicate the policy asks.
+  // Extensions keep their own review lifecycle and are not allowlisted here.
+  isRemoteToolOffered: (serverId, wireName) =>
+    serverId.startsWith(EXTENSION_SERVER_PREFIX) ||
+    remoteToolAllowlisted(remoteToolClassificationCache.lookup, serverId, wireName),
 });
 
 let started = false;

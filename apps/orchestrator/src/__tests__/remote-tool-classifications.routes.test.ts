@@ -24,6 +24,7 @@ import {
   recordDiscoveredRemoteTools,
   type ClassificationPrisma,
   type RemoteToolClassificationRow,
+  remoteToolAllowlisted,
   remoteToolReviewHash,
 } from "../services/remote-tool-classification.service.js";
 import type { AuthUser } from "../middleware/auth.js";
@@ -181,5 +182,74 @@ describe("PATCH /api/admin/remote-tools/classifications/:serverId/:toolName", ()
     expect((await request(app).patch(`${BASE}/atlassian/createJiraIssue`).send({ requiresWrite: "yes" })).status).toBe(400);
     expect((await request(app).patch(`${BASE}/Bad_Id/createJiraIssue`).send({ requiresWrite: false, requiresConfirmation: false, denied: false })).status).toBe(400);
     expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+});
+
+// WARP-2434 — the per-server tool allowlist writer. Owner OR admin; a member is
+// refused at registration; every change refreshes the policy cache and writes an
+// audit row; only a DISCOVERED tool can be allowlisted.
+describe("PUT /api/admin/remote-tools/allowlist/:serverId/:toolName", () => {
+  const ALLOW = "/api/admin/remote-tools/allowlist";
+
+  it("is owner/admin only: a member is 403 and nothing changes", async () => {
+    const { prisma, rows } = fakePrisma();
+    await recordDiscoveredRemoteTools(prisma, "atlassian", [{ wireName: "getConfluencePage" }]);
+    const res = await request(buildApp(prisma, family, new RemoteToolClassificationCache()))
+      .put(`${ALLOW}/atlassian/getConfluencePage`)
+      .send({ allowlisted: true });
+    expect(res.status).toBe(403);
+    expect(rows.get("atlassian|getConfluencePage")!.allowlisted).not.toBe(true);
+    // The role guard logs its own `auth` denial; no allowlist (`system`) row.
+    expect(recordActivityMock.mock.calls.filter((c) => c[0].kind === "system")).toEqual([]);
+  });
+
+  it("a newly discovered tool is NOT allowlisted; an admin allowlists it, the cache is live, an audit row is written; withdrawing closes it", async () => {
+    const { prisma } = fakePrisma();
+    await recordDiscoveredRemoteTools(prisma, "atlassian", [{ wireName: "getConfluencePage" }]);
+    const cache = new RemoteToolClassificationCache();
+    await cache.refresh(prisma);
+    expect(remoteToolAllowlisted(cache.lookup, "atlassian", "getConfluencePage")).toBe(false);
+
+    const on = await request(buildApp(prisma, admin, cache))
+      .put(`${ALLOW}/atlassian/getConfluencePage`)
+      .send({ allowlisted: true });
+    expect(on.status).toBe(200);
+    expect(on.body.classification).toMatchObject({ allowlisted: true });
+    // MUTATION: drop `cache.refresh` from the route -> red.
+    expect(remoteToolAllowlisted(cache.lookup, "atlassian", "getConfluencePage")).toBe(true);
+    expect(recordActivityMock).toHaveBeenCalledTimes(1);
+    expect(recordActivityMock.mock.calls[0]![0]).toMatchObject({
+      refs: { serverId: "atlassian", toolName: "getConfluencePage", allowlisted: true },
+    });
+
+    const off = await request(buildApp(prisma, owner, cache))
+      .put(`${ALLOW}/atlassian/getConfluencePage`)
+      .send({ allowlisted: false });
+    expect(off.status).toBe(200);
+    expect(remoteToolAllowlisted(cache.lookup, "atlassian", "getConfluencePage")).toBe(false);
+    expect(recordActivityMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("refuses an unseen tool (404), a malformed body (400) and a malformed id (400), auditing nothing", async () => {
+    const { prisma } = fakePrisma();
+    const app = buildApp(prisma, owner, new RemoteToolClassificationCache());
+    expect((await request(app).put(`${ALLOW}/atlassian/ghost`).send({ allowlisted: true })).status).toBe(404);
+    expect((await request(app).put(`${ALLOW}/atlassian/ghost`).send({ allowlisted: "yes" })).status).toBe(400);
+    expect((await request(app).put(`${ALLOW}/atlassian/ghost`).send({ allowlisted: true, denied: false })).status).toBe(400);
+    expect((await request(app).put(`${ALLOW}/Bad_Id/ghost`).send({ allowlisted: true })).status).toBe(400);
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+
+  it("a changed input-schema hash drops the tool off the allowlist with the rest of its review", async () => {
+    const { prisma } = fakePrisma();
+    await recordDiscoveredRemoteTools(prisma, "vendor", [{ wireName: "t", inputSchemaHash: "h1" }]);
+    const cache = new RemoteToolClassificationCache();
+    await request(buildApp(prisma, owner, cache)).put(`${ALLOW}/vendor/t`).send({ allowlisted: true });
+    expect(remoteToolAllowlisted(cache.lookup, "vendor", "t")).toBe(true);
+
+    const out = await recordDiscoveredRemoteTools(prisma, "vendor", [{ wireName: "t", inputSchemaHash: "h2" }]);
+    expect(out.reset).toEqual(["t"]);
+    await cache.refresh(prisma);
+    expect(remoteToolAllowlisted(cache.lookup, "vendor", "t")).toBe(false);
   });
 });
