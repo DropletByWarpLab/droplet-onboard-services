@@ -9523,7 +9523,6 @@ export interface SaasCredentialView {
   variant?: string | null;
   /** WARP-3951: present when the provider offers a web sign-in beside its API token. */
   signIn?: { kind: "oauth" };
-  fields: SaasCredentialField[];| null;
   fields: SaasCredentialField[];
   /** Non-secret field values only. */
   values: Record<string, string | number>;
