@@ -416,7 +416,7 @@ export type LiveDefinitionLookup = (
 ) => { tracked: false } | { tracked: true; hash: string | undefined };
 
 function key(serverId: string, toolName: string): string {
-  return `${serverId}
+  return `${serverId} ${toolName}`;
 }
 
 /**
