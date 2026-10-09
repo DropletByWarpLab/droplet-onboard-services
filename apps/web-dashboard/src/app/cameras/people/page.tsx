@@ -19,12 +19,15 @@ import type { KnownFace } from "@/lib/types";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useToast } from "@/components/Toast";
 import { ShellPage } from "@/components/shell/ShellPage";
+import { DetectionsSection } from "@/components/cameras/DetectionsSection";
 import { useAuth } from "@/lib/auth";
 
 /**
- * Known-faces management (Phase 7.5).
+ * People: the person detections your cameras have seen (the same events as
+ * "Recent detections" on /cameras, filtered to people), then the known-faces
+ * roster (Phase 7.5).
  *
- * Lists every person Frigate's face recogniser has training images
+ * The roster lists every person Frigate's face recogniser has training images
  * for. Each card shows the count of training images, with an
  * expand-to-see-thumbnails section. Per-image and per-person delete.
  *
@@ -34,9 +37,9 @@ import { useAuth } from "@/lib/auth";
  * focused on management of the known-set.
  *
  * Frigate's face_recognition feature must be enabled in config.yml.
- * Without it, /api/cameras/faces returns an empty list — we surface
- * that as a clear "feature not enabled" hint rather than a blank
- * page.
+ * Without it, /api/cameras/faces returns an empty list — we cannot tell
+ * "off" from "nobody tagged yet", so the roster says both. The detections
+ * section above it does not depend on face recognition at all.
  */
 export default function PeoplePage() {
   // WARP-3104: the face and plate rosters are owner/admin to change.
@@ -47,6 +50,8 @@ export default function PeoplePage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  // Bumped by Refresh so the detections section reloads with the roster.
+  const [reloadKey, setReloadKey] = useState(0);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [deleteFaceTarget, setDeleteFaceTarget] = useState<KnownFace | null>(null);
   const [deleteImageTarget, setDeleteImageTarget] = useState<
@@ -129,7 +134,10 @@ export default function PeoplePage() {
         Cameras
       </button>
       <button
-        onClick={() => void refresh()}
+        onClick={() => {
+          setReloadKey((k) => k + 1);
+          void refresh();
+        }}
         disabled={loading}
         className="icon-btn"
         aria-label="Refresh"
@@ -143,12 +151,26 @@ export default function PeoplePage() {
 
   return (
     <ShellPage
+      rhythm
       icon={<User size={15} />}
       label="People"
       title="People"
-      sub="Faces this Droplet has been trained to recognise. Add new ones from the Events page by tagging a person."
+      sub="People your cameras have detected, newest first, and the faces this Droplet has been trained to recognise."
       actions={actions}
     >
+      <DetectionsSection
+        title="People detections"
+        labels={["person"]}
+        noun="people"
+        icon={<User size={24} />}
+        reloadKey={reloadKey}
+      />
+
+      <div className="sect">
+        <h2>Known faces</h2>
+        {faces && faces.length > 0 && <span className="sx">{faces.length}</span>}
+      </div>
+
       {error && (
         <div className="card" style={{ display: "flex", alignItems: "center", gap: 8, color: "#ef4444" }}>
           <AlertTriangle size={14} />
@@ -168,8 +190,10 @@ export default function PeoplePage() {
             <span className="ei"><User size={24} /></span>
             <span className="eh">No known faces</span>
             <span style={{ maxWidth: "44ch" }}>
-              Face recognition isn&apos;t enabled, or no one has been tagged
-              yet. Tag someone from an event on the Events page to start.
+              Face recognition is off on this Droplet, or nobody has been
+              tagged yet, so detections above aren&apos;t matched to names.
+              Once it is on, tag someone from an event on the Events page to
+              start.
             </span>
           </div>
         </div>

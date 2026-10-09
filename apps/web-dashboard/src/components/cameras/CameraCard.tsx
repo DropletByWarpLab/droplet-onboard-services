@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Maximize2, Pin, PinOff, Settings, VideoOff, Circle } from "lucide-react";
+import Link from "next/link";
+import { Film, Maximize2, Pin, PinOff, Settings, VideoOff, Circle } from "lucide-react";
 import { getCameraLiveUrl, getCameraSnapshotUrl } from "@/lib/api";
 import {
   MODE_CHIP_LABEL,
@@ -161,6 +162,12 @@ export function CameraCard({
   const handleSettingsClick = (e: React.MouseEvent) => {
     e.stopPropagation(); // don't open the detail view when opening settings
     onOpenSettings?.(camera);
+  };
+
+  // A real link, so it opens in a new tab like any other; the card around it
+  // is itself a click target, so the click must not also open the detail view.
+  const stopCardActivation = (e: React.MouseEvent | React.KeyboardEvent) => {
+    e.stopPropagation();
   };
 
   const handlePinClick = async (e: React.MouseEvent) => {
@@ -358,6 +365,19 @@ export function CameraCard({
                 {formatStorageBytes(rec.usedBytes)}
               </span>
             )}
+            <Link
+              href={`/cameras/${encodeURIComponent(camera.name)}/recordings`}
+              data-testid="recordings-link"
+              onClick={stopCardActivation}
+              onKeyDown={stopCardActivation}
+              aria-label={`Recordings for ${camera.displayName}`}
+              title="See this camera's recordings"
+              className="ml-auto inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full hover:bg-[var(--hover)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]"
+              style={{ color: "var(--brand)" }}
+            >
+              <Film size={12} aria-hidden="true" />
+              Recordings
+            </Link>
           </div>
         )}
       </div>
