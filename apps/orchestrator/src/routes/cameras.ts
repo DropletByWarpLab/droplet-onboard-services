@@ -355,10 +355,19 @@ Object.freeze(EMPTY_SYSTEM_STATUS.storage);
 Object.freeze(EMPTY_SYSTEM_STATUS);
 
 /** Service-to-service auth headers for routing/discovery services. */
+/**
+ * Bearer for the routing service's camera-subnet routes. The routing
+ * service checks `ROUTING_SERVICE_TOKEN` (see `require_bearer` in
+ * services/routing/main.py and the canonical openwrt.client.ts), NOT the
+ * orchestrator's generic `SERVICE_SECRET`; sending the latter — empty on a
+ * provisioned box — made every subnet call 401, which the status route then
+ * reported as "Router not reachable" and the setup/teardown confirms failed.
+ */
 function serviceAuthHeaders(): Record<string, string> {
   const headers: Record<string, string> = {};
-  if (config.SERVICE_SECRET) {
-    headers["Authorization"] = `Bearer ${config.SERVICE_SECRET}`;
+  const token = config.ROUTING_SERVICE_TOKEN || config.SERVICE_SECRET;
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
   }
   return headers;
 }
