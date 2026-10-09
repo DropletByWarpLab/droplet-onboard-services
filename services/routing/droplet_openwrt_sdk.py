@@ -135,14 +135,14 @@ UBUS_STATUS = {
 # (e.g. a single-box with no `wan`); see ADR-011.
 UBUS_STATUS_INVALID_ARGUMENT = 2
 UBUS_STATUS_NOT_FOUND = 4
+UBUS_STATUS_NO_DATA = 5
+UBUS_STATUS_TIMEOUT = 7
 
 # safe_apply: seconds to let the router settle after `uci apply` before each
 # connectivity probe, and how many consecutive probes must pass before the
 # change is confirmed. Env-overridable (tests set 0 / 1).
 SAFE_APPLY_SETTLE_S = float(os.environ.get("SAFE_APPLY_SETTLE_S", "5"))
 SAFE_APPLY_PROBES = int(os.environ.get("SAFE_APPLY_PROBES", "2"))
-UBUS_STATUS_NO_DATA = 5
-UBUS_STATUS_TIMEOUT = 7
 
 NULL_SESSION = "00000000000000000000000000000000"
 

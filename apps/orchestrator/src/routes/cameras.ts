@@ -354,7 +354,6 @@ Object.freeze(EMPTY_SYSTEM_STATUS.gpus);
 Object.freeze(EMPTY_SYSTEM_STATUS.storage);
 Object.freeze(EMPTY_SYSTEM_STATUS);
 
-/** Service-to-service auth headers for routing/discovery services. */
 /**
  * Bearer for the routing service's camera-subnet routes. The routing
  * service checks `ROUTING_SERVICE_TOKEN` (see `require_bearer` in
