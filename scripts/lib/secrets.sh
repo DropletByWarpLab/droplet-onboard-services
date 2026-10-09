@@ -1951,6 +1951,16 @@ sync_switch_password_secret() {
   chmod 700 "$secret_dir"
 
   if [ -z "$password" ]; then
+    # ADR-071 slice C: a credential the dashboard's Pair button wrote (device-bridge
+    # -> droplet-pair-apply) lives ONLY in this file; .env never held it. A blank
+    # SWITCH_PASSWORD line must not erase it - that is the WARP-3738 outage again,
+    # for the switch (every --sync-secrets would unpair it, and a paired switch's
+    # window does not reopen without its button). To unconfigure a switch, empty
+    # the file by hand.
+    if [ -s "$secret_file" ]; then
+      log_info "SWITCH_PASSWORD not set in .env — keeping the existing credential in $secret_file (paired from the dashboard, or set by hand)."
+      return 0
+    fi
     # No operator credential supplied — write an empty placeholder so Compose can
     # mount the secret and the switch service still starts (degraded → the switch
     # reports "disconnected"). NEVER generate a switch password here. Boxes
@@ -1960,6 +1970,14 @@ sync_switch_password_secret() {
     log_info "SWITCH_PASSWORD not set in .env — wrote empty $secret_file (no managed switch)"
     log_info "  For a managed switch: set SWITCH_PASSWORD in .env, then re-run ./scripts/setup.sh --sync-secrets"
     return 0
+  fi
+
+  # An operator-supplied value replaces whatever is there, as documented. Say so
+  # when that is a DIFFERENT credential (never print either value): a switch that
+  # was paired from the dashboard after this .env line was written would otherwise
+  # be silently reverted to the stale one.
+  if [ -s "$secret_file" ] && [ "$(cat "$secret_file")" != "$password" ]; then
+    log_warn "SWITCH_PASSWORD in .env replaces the different credential already in $secret_file. If the switch was paired from the dashboard, remove the SWITCH_PASSWORD line from .env instead."
   fi
 
   # Write atomically: stage to .tmp then rename, so a crashed write never leaves
@@ -1994,11 +2012,22 @@ sync_ap_password_secret() {
   chmod 700 "$secret_dir"
 
   if [ -z "$password" ]; then
+    # ADR-071 slice C: same rule as the switch - an AP credential the dashboard's
+    # Pair button wrote lives only in this file, and a blank AP_OPENWRT_PASSWORD
+    # line must not erase it. (One secret serves every AP, ADR-071 section 2.3.)
+    if [ -s "$secret_file" ]; then
+      log_info "AP_OPENWRT_PASSWORD not set in .env — keeping the existing credential in $secret_file (paired from the dashboard, or set by hand)."
+      return 0
+    fi
     : > "$secret_file"
     chmod 600 "$secret_file"
     log_info "AP_OPENWRT_PASSWORD not set in .env — wrote empty $secret_file (no external AP)"
     log_info "  For an external OpenWrt AP: copy its /etc/droplet/droplet-ai-password into AP_OPENWRT_PASSWORD in .env, then re-run ./scripts/setup.sh --sync-secrets"
     return 0
+  fi
+
+  if [ -s "$secret_file" ] && [ "$(cat "$secret_file")" != "$password" ]; then
+    log_warn "AP_OPENWRT_PASSWORD in .env replaces the different credential already in $secret_file. If an AP was paired from the dashboard, remove the AP_OPENWRT_PASSWORD line from .env instead."
   fi
 
   local tmp="$secret_file.tmp"

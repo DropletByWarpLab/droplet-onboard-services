@@ -170,6 +170,10 @@ Per ADR-002 §"Phase 0.5" item 5: every uci push from the orchestrator surfaces 
 - `openwrt/files/etc/uci-defaults/99-droplet-setup` adds the umdns `_droplet-ap._tcp` advertisement block and the dawn enable. Idempotent (grep-guarded) — re-running on a converged AP is a no-op. Honors the existing single-image pattern: the same uci-defaults script runs on both the main router and any extender; the `role` field in the mDNS TXT distinguishes them, and the orchestrator side keys onboarding off the `role=extender` filter.
 - `openwrt/files/usr/share/rpcd/acl.d/droplet-ai.json` grants `umdns: ["browse"]` so the orchestrator can read the discovered services without root.
 
+## Credential step (ADR-071)
+
+Approval configures the AP's own radios over its rpcd as `droplet-ai`, which needs the AP's per-unit password (WARP-1675, `ap_openwrt_password`). How the box obtains that password is [ADR-071](ADR-071-box-router-pairing.md) §2.3, not a manual copy: the AP image carries the same `droplet.pair` plugin as the router, and a Droplet-image AP whose pairing window is open shows a **Pair** button next to **Approve** in Coverage Extenders. Pair claims that AP through the onboarding path (the AP's address comes from the same mDNS inventory approval uses, routing `POST /aps/{mac}/pairing/claim`), the orchestrator saves the minted password through the device-bridge (`POST /api/network/aps/:mac/pair`, audit service `ap-pairing`), and the state machine above is unchanged: pairing is a precondition of `AWAITING_APPROVAL → PROVISIONING`, never a state of its own. The box keeps **one** AP secret for all APs today, so pairing a second AP replaces the credential the first was paired with (ADR-071 §2.3: per-device escrow is not delivered).
+
 ## Consequences
 
 **Easier:** Adding an extender becomes "plug it in, hit Approve in the dashboard". Coverage extension is no longer an installer-only feature. Apple roaming is solved out of the box. The state machine has a single source of truth that supports audit and reporting without join-and-derive queries.

@@ -2193,25 +2193,35 @@ export async function fetchSshAccess(): Promise<SshAccessStatus> {
   return res.json();
 }
 
-// --- Router pairing (ADR-071 slice B) ---
+// --- Device pairing (ADR-071 slices B + C) ---
 
-/** What the Network page's pairing card reads. `available:false` = this build's
- *  routing service has no pairing surface, so no card is shown. */
-export interface RouterPairingView {
+/** Which device a pairing card is for. */
+export type DevicePairingRole = "router" | "switch" | "ap";
+
+/** What a pairing card reads. `available:false` = this build's owning service
+ *  has no pairing surface, so no card is shown. The same shape for the router,
+ *  the managed switch and each access point. */
+export interface DevicePairingView {
   available: boolean;
   state: "open" | "closed" | "paired" | "unknown" | null;
   windowEndsAt: string | null;
-  /** 64 lowercase hex of the box the router is enrolled to, or null. */
+  /** 64 lowercase hex of the box the device is enrolled to, or null. */
   pairedBox: string | null;
   pairedElsewhere: boolean;
-  /** Paired and live, but the password is only in routing's memory. */
+  /** Paired and live, but the password is only in the service's memory. */
   pendingPersist: boolean;
+  /** The device's typed error right now (AUTH, PAIRED_ELSEWHERE, ...). Named for
+   *  the router because slice B's card reads it; the switch and AP views carry
+   *  their own device's state in the same field. */
   routerErrorCode: RouterErrorCode | null;
   host: string | null;
   model: string | null;
 }
 
-export interface RouterPairResult {
+/** Slice B's name for the same shape. */
+export type RouterPairingView = DevicePairingView;
+
+export interface DevicePairResult {
   ok: boolean;
   /** Only meaningful when `ok`: false = live now, lost on the next restart. */
   persisted: boolean;
@@ -2222,23 +2232,32 @@ export interface RouterPairResult {
   code?: string;
 }
 
-export async function fetchRouterPairing(): Promise<RouterPairingView> {
-  const res = await authFetch(`${BASE}/api/network/router/pairing`);
-  if (!res.ok) throw new Error(`Failed to fetch router pairing state: ${res.status}`);
+/** Slice B's name for the same shape. */
+export type RouterPairResult = DevicePairResult;
+
+/** `/api/network/router`, `/api/network/switch`, `/api/network/aps/:mac`. */
+function pairingBase(role: DevicePairingRole, mac?: string): string {
+  if (role === "ap") return `/api/network/aps/${encodeURIComponent(mac ?? "")}`;
+  return `/api/network/${role}`;
+}
+
+async function fetchDevicePairing(role: DevicePairingRole, mac?: string): Promise<DevicePairingView> {
+  const res = await authFetch(`${BASE}${pairingBase(role, mac)}/pairing`);
+  if (!res.ok) throw new Error(`Failed to fetch ${role} pairing state: ${res.status}`);
   return res.json();
 }
 
 /** The pairing POSTs answer a structured `{ok:false, error, code}` on a refusal
  *  (window closed, paired elsewhere...), which the card renders as-is. Only a
  *  response that is not that shape throws. */
-async function postRouterPairing(path: string, fallback: string): Promise<RouterPairResult> {
+async function postDevicePairing(path: string, fallback: string): Promise<DevicePairResult> {
   const res = await authFetch(`${BASE}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: "{}",
   });
   const data = await res.json().catch(() => ({}));
-  if (typeof data?.ok === "boolean") return data as RouterPairResult;
+  if (typeof data?.ok === "boolean") return data as DevicePairResult;
   throw new Error(
     (typeof data?.message === "string" && data.message) ||
       (typeof data?.error === "string" && data.error) ||
@@ -2246,14 +2265,45 @@ async function postRouterPairing(path: string, fallback: string): Promise<Router
   );
 }
 
+// Router (slice B).
+export function fetchRouterPairing(): Promise<DevicePairingView> {
+  return fetchDevicePairing("router");
+}
+
 /** Owner/admin, after the confirmation dialog: claim the router and save the credential. */
-export function pairRouter(): Promise<RouterPairResult> {
-  return postRouterPairing("/api/network/router/pair", "Failed to pair the router");
+export function pairRouter(): Promise<DevicePairResult> {
+  return postDevicePairing("/api/network/router/pair", "Failed to pair the router");
 }
 
 /** Retry only the "save the password" leg after a pairing that was not persisted. */
-export function persistRouterPairing(): Promise<RouterPairResult> {
-  return postRouterPairing("/api/network/router/pair/persist", "Failed to save the router password");
+export function persistRouterPairing(): Promise<DevicePairResult> {
+  return postDevicePairing("/api/network/router/pair/persist", "Failed to save the router password");
+}
+
+// Managed switch (slice C).
+export function fetchSwitchPairing(): Promise<DevicePairingView> {
+  return fetchDevicePairing("switch");
+}
+
+export function pairSwitch(): Promise<DevicePairResult> {
+  return postDevicePairing("/api/network/switch/pair", "Failed to pair the switch");
+}
+
+export function persistSwitchPairing(): Promise<DevicePairResult> {
+  return postDevicePairing("/api/network/switch/pair/persist", "Failed to save the switch password");
+}
+
+// Access points (slice C), per MAC. One shared AP secret on the box (ADR-071 §2.3).
+export function fetchApPairing(mac: string): Promise<DevicePairingView> {
+  return fetchDevicePairing("ap", mac);
+}
+
+export function pairAp(mac: string): Promise<DevicePairResult> {
+  return postDevicePairing(`${pairingBase("ap", mac)}/pair`, "Failed to pair the access point");
+}
+
+export function persistApPairing(mac: string): Promise<DevicePairResult> {
+  return postDevicePairing(`${pairingBase("ap", mac)}/pair/persist`, "Failed to save the access point password");
 }
 
 /** Allow / disallow SSH. Tier 3 — answers 202 `confirmation_required`. */

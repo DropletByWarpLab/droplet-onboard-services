@@ -204,7 +204,7 @@ class OpenWrtSwitchDriver(SwitchDriver):
         host: str,
         port: int = 80,
         username: str = "droplet-ai",
-        password: str = "",
+        password: "str | Callable[[], str]" = "",
         plan_only: bool = True,
         timeout_s: float = 8.0,
         transport: Optional[Transport] = None,
@@ -213,7 +213,10 @@ class OpenWrtSwitchDriver(SwitchDriver):
         self._host = host
         self._port = port
         self._username = username
-        self._password = password
+        # ADR-071: `password` may be a zero-arg callable (a "holder") resolved at
+        # every login, so a credential rotated at runtime (the pairing claim, a
+        # re-read secret file) applies on the next session refresh.
+        self._password_source = password
         # The uplink/trunk this appliance reaches the router through. 0 = none
         # configured, nothing protected. See `_refuse_if_protected`.
         self._protected_port = protected_port
@@ -278,6 +281,14 @@ class OpenWrtSwitchDriver(SwitchDriver):
             raise SwitchAPIError(code=code, message=f"ubus status {code} on {obj}.{method}")
         return result[1] if len(result) > 1 else {}
 
+    def _current_password(self) -> str:
+        source = self._password_source
+        return source() if callable(source) else source
+
+    @property
+    def _password(self) -> str:
+        return self._current_password()
+
     async def _login(self) -> None:
         async with self._auth_lock:
             if self._session_token and time.monotonic() < self._session_expires_at:
@@ -285,7 +296,7 @@ class OpenWrtSwitchDriver(SwitchDriver):
             try:
                 data = await self._rpc(NULL_SESSION, "session", "login", {
                     "username": self._username,
-                    "password": self._password,
+                    "password": self._current_password(),
                 })
             except SwitchAPIError as exc:
                 if exc.code == UBUS_PERMISSION_DENIED:

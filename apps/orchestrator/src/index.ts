@@ -8,6 +8,7 @@ import { config } from "./config.js";
 import { internalTlsEnabled, httpsServerOptions } from "./lib/internal-tls.js";
 import { createApp } from "./app.js";
 import { getRouterPairingService } from "./services/router-pairing.singleton.js";
+import { getSwitchPairingService } from "./services/device-pairing.singleton.js";
 import { connectRedis } from "./services/cache.service.js";
 import { connectMqtt } from "./services/mqtt.service.js";
 import { notifyOwnersAndAdmins } from "./services/notifications.service.js";
@@ -622,6 +623,16 @@ async function main() {
     cronRuntime.scheduleInterval(
       5 * 60_000,
       () => routerPairing.reconcile(),
+      { immediate: true },
+    );
+    // ADR-071 slice C: the same for the managed switch (identity publish +
+    // foreign-pairing audit). Best effort: a box with no switch service just
+    // logs at debug. Routing applies the router's published identity to its AP
+    // pairing state too, so the AP role needs no job of its own.
+    const switchPairing = getSwitchPairingService(prisma);
+    cronRuntime.scheduleInterval(
+      5 * 60_000,
+      () => switchPairing.reconcile(),
       { immediate: true },
     );
   }

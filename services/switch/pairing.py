@@ -1,18 +1,19 @@
-"""ADR-071 slice B (WARP-3739) - box <-> edge-router pairing, routing half.
+"""ADR-071 slice C (WARP-3739) - box <-> managed-switch pairing, switch half.
 
-Two pieces live here, kept out of main.py so the wire-level client and the
-process-wide pairing state can be unit-tested without the FastAPI app:
+Mirrors services/routing/pairing.py (slice B) for the switch. The two services
+ship as separate images with no shared Python package path on either side (the
+switch image COPYs only services/switch/ and four named services/_shared files),
+so this module is a deliberate sibling copy rather than an import. What differs:
 
-  * `PairingApi` - the NULL-SESSION client for the router's `droplet.pair`
-    ubus object (`status`, `claim`). The caller holds no credential yet, so
-    every call is made with the all-zero session id (ADR-071 section 2.1). A
-    router image without the plugin answers "Object not found" / "Access
-    denied"; that is `PairingUnsupported` (state `unknown`), never a crash.
-  * `PairingState` - the explicit, thread-safe state routing keeps about the
-    pairing: the last `status` probe (cached, served by /health), the box
-    fingerprint supplied by the orchestrator, whether a claim succeeded in
-    this process, and the freshly-minted password held in memory until the
-    orchestrator confirms it was persisted (`pending_persist`).
+  * `PairingApi` is ASYNC (httpx) - the switch driver and every route here are
+    async, and the switch has no SDK to borrow a sync `UbusClient` from. The
+    wire contract is identical: the NULL session id and the `droplet.pair`
+    object's `status` / `claim` methods.
+  * Errors are the switch driver's own (`ConnectionLost` for transport,
+    `PairingProtocolError` where the router's client raises `UbusError`).
+
+`PairingState` and the typed-state helpers are kept line-for-line the same as
+the routing copy so a fix to one is a mechanical fix to the other.
 
 The password is NEVER logged or echoed anywhere except the 200 body of
 `POST /pairing/claim` (and the service-token-gated `GET /pairing/pending`).
@@ -24,21 +25,24 @@ import re
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
-from droplet_openwrt_sdk import NULL_SESSION, UbusClient, UbusError
+import httpx
 
-logger = logging.getLogger("droplet.routing.pairing")
+from drivers.base import ConnectionLost
+
+logger = logging.getLogger("droplet.switch.pairing")
 
 PAIR_OBJECT = "droplet.pair"
+NULL_SESSION = "0" * 32
 
-# Router-side pairing states (ADR-071 section 2.1) plus `unknown` for "could
+# Device-side pairing states (ADR-071 section 2.1) plus `unknown` for "could
 # not tell".
 STATE_OPEN = "open"
 STATE_CLOSED = "closed"
 STATE_PAIRED = "paired"
 STATE_UNKNOWN = "unknown"
-_ROUTER_STATES = frozenset({STATE_OPEN, STATE_CLOSED, STATE_PAIRED})
+_DEVICE_STATES = frozenset({STATE_OPEN, STATE_CLOSED, STATE_PAIRED})
 
 # JSON-RPC error codes rpcd/uhttpd-mod-ubus returns for a missing object
 # (plugin not installed) and for a method the null session may not call.
@@ -50,14 +54,27 @@ _UBUS_PERMISSION_DENIED = 6
 
 FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
 
+#: Injectable transport for tests: takes the JSON-RPC payload dict, returns the
+#: parsed response dict. Production uses httpx against http://host:port/ubus.
+Transport = Callable[[dict], Awaitable[dict]]
+
 
 class PairingUnsupported(Exception):
-    """The router has no `droplet.pair` object (or refuses the null session)."""
+    """The switch has no `droplet.pair` object (or refuses the null session)."""
+
+
+class PairingProtocolError(Exception):
+    """A ubus-level failure that is not "plugin absent" (the router client's
+    `UbusError`). Carries the ubus status code when there is one."""
+
+    def __init__(self, status: int = -1, message: str = ""):
+        self.status = status
+        super().__init__(message or f"ubus status {status}")
 
 
 class PairingClaimError(Exception):
     """`droplet.pair claim` was answered with an error. The message is the
-    router's reason - it never contains the password (the router never echoes
+    device's reason - it never contains the password (the device never echoes
     it)."""
 
 
@@ -69,7 +86,7 @@ class PairStatus:
 
 
 def _iso(value: Any) -> Optional[str]:
-    """Normalise the router's window end to ISO-8601 UTC. The plugin may report
+    """Normalise the device's window end to ISO-8601 UTC. The plugin may report
     epoch seconds or an already-formatted string; anything else is dropped."""
     if value is None or value == "" or isinstance(value, bool):
         return None
@@ -85,45 +102,68 @@ def _now_iso() -> str:
 
 
 class PairingApi:
-    """Null-session client for the router's `droplet.pair` ubus object."""
+    """Null-session client for the switch's `droplet.pair` ubus object."""
 
-    def __init__(self, host: str, port: int = 80, timeout: int = 5,
-                 client: Optional[UbusClient] = None):
-        self._client = client or UbusClient(host, port, "http", timeout)
+    def __init__(self, host: str, port: int = 80, timeout: float = 5.0,
+                 transport: Optional[Transport] = None):
+        self._base_url = f"http://{host}:{port}/ubus"
+        self._timeout = timeout
+        self._transport = transport
+        self._rpc_id = 0
 
-    def _call(self, method: str, args: Optional[dict] = None) -> dict:
-        resp = self._client.raw_call(
-            "call", [NULL_SESSION, PAIR_OBJECT, method, args or {}]
-        )
+    async def _post(self, payload: dict) -> dict:
+        try:
+            if self._transport is not None:
+                return await self._transport(payload)
+            async with httpx.AsyncClient(timeout=self._timeout) as client:
+                res = await client.post(self._base_url, json=payload)
+            if res.status_code != 200:
+                raise ConnectionLost(
+                    f"Switch ubus endpoint returned HTTP {res.status_code} at {self._base_url}"
+                )
+            return res.json()
+        except httpx.HTTPError as exc:
+            raise ConnectionLost(f"Cannot reach switch at {self._base_url}: {exc}") from exc
+        except ValueError as exc:  # json.JSONDecodeError
+            raise ConnectionLost(f"Malformed ubus response from {self._base_url}") from exc
+
+    async def _call(self, method: str, args: Optional[dict] = None) -> dict:
+        self._rpc_id += 1
+        resp = await self._post({
+            "jsonrpc": "2.0",
+            "id": self._rpc_id,
+            "method": "call",
+            "params": [NULL_SESSION, PAIR_OBJECT, method, args or {}],
+        })
         err = resp.get("error")
         if err:
             code = err.get("code") if isinstance(err, dict) else None
             if code in (_RPC_OBJECT_NOT_FOUND, _RPC_ACCESS_DENIED):
                 raise PairingUnsupported(
-                    f"{PAIR_OBJECT}.{method} unavailable on router "
-                    f"(rpc error {code})"
+                    f"{PAIR_OBJECT}.{method} unavailable on switch (rpc error {code})"
                 )
             message = err.get("message") if isinstance(err, dict) else str(err)
-            raise UbusError(-1, str(message))
+            raise PairingProtocolError(-1, str(message))
         result = resp.get("result") or []
         if not result:
-            raise UbusError(-1, "Empty result")
+            raise PairingProtocolError(-1, "Empty result")
         code = result[0]
         if code in (_UBUS_NOT_FOUND, _UBUS_PERMISSION_DENIED):
             raise PairingUnsupported(
-                f"{PAIR_OBJECT}.{method} unavailable on router (ubus status {code})"
+                f"{PAIR_OBJECT}.{method} unavailable on switch (ubus status {code})"
             )
         if code != 0:
-            raise UbusError(code)
+            raise PairingProtocolError(code)
         data = result[1] if len(result) > 1 else {}
         return data if isinstance(data, dict) else {}
 
-    def status(self) -> PairStatus:
+    async def status(self) -> PairStatus:
         """Read the pairing window state. Raises `PairingUnsupported` for a
-        router without the plugin; `ConnectionLost` / `UbusError` pass through."""
-        data = self._call("status")
+        switch without the plugin; `ConnectionLost` / `PairingProtocolError`
+        pass through."""
+        data = await self._call("status")
         state = data.get("pairing")
-        if state not in _ROUTER_STATES:
+        if state not in _DEVICE_STATES:
             state = STATE_UNKNOWN
         paired_box = data.get("paired_box")
         if not (isinstance(paired_box, str) and FINGERPRINT_RE.match(paired_box)):
@@ -134,14 +174,14 @@ class PairingApi:
             paired_box=paired_box,
         )
 
-    def claim(self, password: str, box_fingerprint: str) -> None:
-        """Claim the router. Raises `PairingClaimError` when the router answers
-        with an error, `PairingUnsupported` when the plugin is absent."""
+    async def claim(self, password: str, box_fingerprint: str) -> None:
+        """Claim the switch. Raises `PairingClaimError` when it answers with an
+        error, `PairingUnsupported` when the plugin is absent."""
         try:
-            data = self._call(
+            data = await self._call(
                 "claim", {"password": password, "box_fingerprint": box_fingerprint}
             )
-        except UbusError as exc:
+        except PairingProtocolError as exc:
             raise PairingClaimError(f"claim refused: {exc.status}") from exc
         if data.get("error") or data.get("ok") is False:
             raise PairingClaimError(str(data.get("error") or "claim refused"))
@@ -150,10 +190,7 @@ class PairingApi:
 class PairingState:
     """Process-wide pairing state. Plain, explicit fields guarded by one lock."""
 
-    def __init__(self, role: str = "router") -> None:
-        # role only words the foreign-pairing log line; the state machine is
-        # identical for the router and (slice C) the AP flow's own instance.
-        self._role = role
+    def __init__(self) -> None:
         self._lock = threading.RLock()
         self._status = PairStatus()
         self._box_fingerprint: Optional[str] = None
@@ -198,16 +235,13 @@ class PairingState:
         if foreign and foreign not in self._foreign_logged:
             self._foreign_logged.add(foreign)
             logger.warning(
-                "%s_PAIRED_ELSEWHERE: %s is paired to a different box "
-                "(fingerprint %s...) - a %s button press is needed to re-pair",
-                self._role.upper(),
-                self._role,
+                "SWITCH_PAIRED_ELSEWHERE: switch is paired to a different box "
+                "(fingerprint %s...) - a switch button press is needed to re-pair",
                 foreign[:16],
-                self._role,
             )
 
     def foreign_paired_box(self) -> Optional[str]:
-        """The foreign fingerprint when the cached probe says the router is
+        """The foreign fingerprint when the cached probe says the switch is
         paired to another box, else None. None whenever our own fingerprint is
         not yet known - the state is never guessed."""
         with self._lock:

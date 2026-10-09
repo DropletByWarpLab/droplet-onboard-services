@@ -150,3 +150,69 @@ def test_external_router_sync_keeps_what_the_writer_produced(env):
     assert _run(env).returncode == 0
     secret = env["repo"] / "docker" / "secrets" / "openwrt_password"
     assert secret.stat().st_size == 32
+
+
+# --- ADR-071 slice C: the AP and switch targets ------------------------------
+SECRETS = {
+    "router": "openwrt_password",
+    "ap": "ap_openwrt_password",
+    "switch": "switch_password",
+}
+
+
+@pytest.mark.parametrize("target", ["router", "ap", "switch"])
+def test_a_target_only_ever_replaces_its_own_secret(env, target):
+    """Pairing the AP must not clobber the router's or the switch's credential."""
+    secrets = env["repo"] / "docker" / "secrets"
+    for name in SECRETS.values():
+        (secrets / name).write_text("untouched-" + name)
+    _spool(env, {"target": target, "password": PASSWORD})
+    assert _run(env).returncode == 0
+    for other, name in SECRETS.items():
+        expected = PASSWORD if other == target else "untouched-" + name
+        assert (secrets / name).read_text() == expected, other
+
+
+@pytest.mark.parametrize("target", ["ap", "switch"])
+def test_ap_and_switch_secrets_get_the_same_mode_and_no_newline(env, target):
+    _spool(env, {"target": target, "password": PASSWORD})
+    assert _run(env).returncode == 0
+    secret = env["repo"] / "docker" / "secrets" / SECRETS[target]
+    assert secret.read_bytes() == PASSWORD.encode()
+    assert stat.S_IMODE(secret.stat().st_mode) == 0o600
+    assert [p.name for p in secret.parent.iterdir()] == [SECRETS[target]]  # no .pair.* leftovers
+
+
+@pytest.mark.parametrize("target,container", [("ap", "routing"), ("switch", "switch")])
+def test_ap_and_switch_recreate_failure_names_the_container_not_the_secret(env, target, container):
+    _spool(env, {"target": target, "password": PASSWORD})
+    r = _run(env, DOCKER_RC="1")
+    assert r.returncode != 0
+    assert container + " recreate FAILED" in r.stderr
+    assert PASSWORD not in r.stdout + r.stderr
+
+
+def test_every_target_maps_to_a_compose_service_that_mounts_that_secret():
+    """The recreate is only meaningful if the compose file really binds the secret
+    into the container the script recreates (the router and AP into `routing`,
+    the switch into `switch`), and the secret files are the ones the script writes."""
+    import re
+
+    compose = (REPO_ROOT / "docker" / "docker-compose.yml").read_text(encoding="utf-8")
+
+    def service_block(name: str) -> str:
+        m = re.search(
+            r"^  %s:\n(.*?)(?=^  [A-Za-z0-9_-]+:\n|^[a-z]+:\n)" % re.escape(name),
+            compose,
+            re.S | re.M,
+        )
+        assert m, "compose service %s not found" % name
+        return m.group(1)
+
+    routing, switch = service_block("routing"), service_block("switch")
+    assert re.search(r"^      - openwrt_password$", routing, re.M)
+    assert re.search(r"^      - ap_openwrt_password$", routing, re.M)
+    assert re.search(r"^      - switch_password$", switch, re.M)
+    for name in SECRETS.values():
+        pattern = r"^  %s:\n    file: \.\./docker/secrets/%s$" % (name, name)
+        assert re.search(pattern, compose, re.M), name
