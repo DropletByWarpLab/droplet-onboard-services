@@ -19,6 +19,7 @@ import {
   Zap,
 } from "lucide-react";
 import { fetchCameraSystemStatus, fetchCameraStorage, restartFrigate } from "@/lib/api";
+import { isCamerasUnavailableError } from "@/lib/files-unavailable";
 import type { CameraStorageSummary } from "@/lib/types";
 import { confirmCameraCommand } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
@@ -177,6 +178,10 @@ export default function CameraSystemPage() {
     </>
   );
 
+  // The box answered, but its camera engine did not: the zeroed status it sends
+  // then is not data, so none of it is shown.
+  const unavailable = Boolean(error) && isCamerasUnavailableError(error);
+
   return (
     <ShellPage
       icon={<Server size={15} />}
@@ -185,22 +190,39 @@ export default function CameraSystemPage() {
       sub="Live health for the camera engine. Refreshes every 5 seconds."
       actions={actions}
     >
-      {error && (
-        <div className="card" style={{ display: "flex", alignItems: "center", gap: 8, color: "#ef4444", marginBottom: 16 }}>
-          <AlertTriangle size={14} />
+      {unavailable ? (
+        <div
+          className="card"
+          role="alert"
+          data-testid="camera-system-unavailable"
+          style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16 }}
+        >
+          <AlertTriangle size={14} aria-hidden="true" style={{ color: "var(--text-muted)" }} />
           <span>
-            Couldn&apos;t reach the camera service:{" "}
-            {error instanceof Error ? error.message : String(error)}
+            The camera service is unreachable, so stats are unavailable. It
+            usually comes back on its own; this page keeps checking.
           </span>
         </div>
+      ) : (
+        error && (
+          <div className="card" style={{ display: "flex", alignItems: "center", gap: 8, color: "#ef4444", marginBottom: 16 }}>
+            <AlertTriangle size={14} />
+            <span>
+              Couldn&apos;t reach the camera service:{" "}
+              {error instanceof Error ? error.message : String(error)}
+            </span>
+          </div>
+        )
       )}
 
-      {!data ? (
-        <div className="grid c4">
-          {Array.from({ length: 4 }).map((_, i) => (
-            <div key={i} className="card" style={{ height: 96, background: "var(--surface-2)" }} />
-          ))}
-        </div>
+      {!data || unavailable ? (
+        error ? null : (
+          <div className="grid c4">
+            {Array.from({ length: 4 }).map((_, i) => (
+              <div key={i} className="card" style={{ height: 96, background: "var(--surface-2)" }} />
+            ))}
+          </div>
+        )
       ) : (
         <>
           {/* Top stat tiles */}

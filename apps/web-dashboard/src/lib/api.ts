@@ -3155,6 +3155,9 @@ export async function fetchCameraSettings(
 export async function fetchCameraSystemStatus(): Promise<CameraSystemStatus> {
   const res = await authFetch(`${BASE}/api/cameras/system`);
   if (!res.ok) throw new Error(`Failed to fetch system status: ${res.status}`);
+  // A Frigate outage is a degraded 200 carrying an all-zero status, which
+  // renders as "0 / 0 cameras, 0% CPU" — a healthy-looking page about nothing.
+  if (res.headers?.get("X-Droplet-Degraded")) throw new CamerasUnavailableError();
   const body = (await res.json()) as { status: CameraSystemStatus };
   return body.status;
 }

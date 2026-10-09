@@ -22,18 +22,22 @@ import type { KnownPlate } from "@/lib/types";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useToast } from "@/components/Toast";
 import { ShellPage } from "@/components/shell/ShellPage";
+import { DetectionsSection } from "@/components/cameras/DetectionsSection";
 import { useAuth } from "@/lib/auth";
 
 /**
- * License plate management (Phase 7.6).
+ * Vehicles: the vehicle detections your cameras have seen (the car events
+ * behind "Recent detections" on /cameras, with the plate when one was read),
+ * then the license-plate roster (Phase 7.6).
  *
- * Lists every plate Frigate's LPR has read off events, with a per-row
+ * The roster lists every plate Frigate's LPR has read off events, with a per-row
  * "name this plate" affordance so the operator can tag them
  * ("ABC-1234 → Alice's Civic"). Tagged plates show their owner-name in
  * notifications and event descriptions.
  *
  * Frigate's LPR feature must be enabled. Without it, /api/cameras/plates
- * returns []; we surface that as a hint.
+ * returns [] — indistinguishable from "no plate read yet", so the roster says
+ * both. The detections section does not depend on LPR.
  */
 export default function PlatesPage() {
   // WARP-3104: the face and plate rosters are owner/admin to change.
@@ -44,6 +48,8 @@ export default function PlatesPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  // Bumped by Refresh so the detections section reloads with the roster.
+  const [reloadKey, setReloadKey] = useState(0);
   const [editing, setEditing] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<KnownPlate | null>(null);
@@ -113,7 +119,10 @@ export default function PlatesPage() {
         Cameras
       </button>
       <button
-        onClick={() => void refresh()}
+        onClick={() => {
+          setReloadKey((k) => k + 1);
+          void refresh();
+        }}
         disabled={loading}
         className="icon-btn"
         aria-label="Refresh"
@@ -127,12 +136,26 @@ export default function PlatesPage() {
 
   return (
     <ShellPage
+      rhythm
       icon={<Car size={15} />}
       label="License plates"
       title="License plates"
-      sub="License plates this Droplet has read. Name them so notifications show “Alice’s Civic arrived” instead of a string of characters."
+      sub="Vehicles your cameras have detected, newest first, and the license plates this Droplet has read. Name a plate so notifications show “Alice’s Civic arrived” instead of a string of characters."
       actions={actions}
     >
+      <DetectionsSection
+        title="Vehicle detections"
+        labels={["car"]}
+        noun="vehicles"
+        icon={<Car size={24} />}
+        reloadKey={reloadKey}
+      />
+
+      <div className="sect">
+        <h2>Known plates</h2>
+        {plates && plates.length > 0 && <span className="sx">{plates.length}</span>}
+      </div>
+
       {error && (
         <div className="card" style={{ display: "flex", alignItems: "center", gap: 8, color: "#ef4444" }}>
           <AlertTriangle size={14} />
@@ -152,9 +175,9 @@ export default function PlatesPage() {
             <span className="ei"><Car size={24} /></span>
             <span className="eh">No plates read yet</span>
             <span style={{ maxWidth: "44ch" }}>
-              License-plate recognition isn&apos;t enabled, or no vehicle has
-              driven by yet. Plates appear here after the first event with a
-              readable plate.
+              License plate reading is off on this Droplet, or no plates have
+              been read yet. Plates appear here after the first vehicle
+              event with a readable plate.
             </span>
           </div>
         </div>
