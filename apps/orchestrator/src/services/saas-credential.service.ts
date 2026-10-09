@@ -145,13 +145,7 @@ export interface SaasConnectionRow {
    */
   apiCredentialsEnc: string | null;
   providerConfig: unknown;
-  updatedAt?: Date |  remoteMcp: RemoteMcpAttachView | null;
-  /**
-   * WARP-2405 — present only when this MCP server also offers web sign-in
-   * (the descriptor declares `signIn`). The client shows the sign-in card from
-   * this; the URLs and scopes stay on the box.
-   */
-  signIn?: { kind: "oauth" };
+  updatedAt?: Date | null;
 }
 
 /** One field as the admin form should render it. Mirrors the descriptor's
@@ -291,6 +285,12 @@ export interface SaasCredentialView {
    * id: the state itself is always a declared value.
    */
   remoteMcp: RemoteMcpAttachView | null;
+  /**
+   * WARP-2405 — present only when this MCP server also offers web sign-in
+   * (the descriptor declares `signIn`). The client shows the sign-in card from
+   * this; the URLs and scopes stay on the box.
+   */
+  signIn?: { kind: "oauth" };
 }
 
 /** Raised when a submitted field fails the descriptor's own validation. The

@@ -1,4 +1,4 @@
-  if (!row || !ownerOk || !row.clientId) { await settleFailure(prisma, flow, "sign_in_failed"); return result("failed"); }/**
+/**
  * WARP-2405 / WARP-2401 — web sign-in (OAuth 2.1 + PKCE) for a remote MCP server.
  *
  * The box is the OAuth client. The bridge makes every outbound hop (discovery,
@@ -147,8 +147,7 @@ function signInFor(provider: string): { displayName: string; signIn: McpSignIn }
 function httpsUrl(raw: string): URL | null {
   try {
     const u = new URL(raw);
-    return u.protocol === "https:" && !u.username && !u.password && !u.hash ? u :  member: { id: string; state: McpOAuthStateName; connectedAt: string |  /** `ackBy` is shown to owners and admins only. */
-  workspace: { id: string; state: McpOAuthStateName; ackBy: string | null; connectedAt: string | null } | null; lastRefreshOkAt: string | null } | null;
+    return u.protocol === "https:" && !u.username && !u.password && !u.hash ? u : null;
   } catch {
     return null;
   }
@@ -418,7 +417,7 @@ export async function completeMcpSignIn(
   const row = await prisma.mcpOAuthConnection.findUnique({ where: { id: flow.connectionId } });
   const ownerOk = !!row && row.provider === flow.provider && row.state === "PENDING_CONSENT" && row.scope === flow.scope &&
     (flow.scope === "MEMBER" ? row.memberId === flow.userId : row.memberId === null);
-  if (!row || !ownerOk || !row.clientId) return result("failed");
+  if (!row || !ownerOk || !row.clientId) { await settleFailure(prisma, flow, "sign_in_failed"); return result("failed"); }
 
   const now = deps.now();
   try {
@@ -508,8 +507,9 @@ export function parsePastedRedirect(text: unknown): { state: string; code: strin
 
 export interface McpSignInView {
   provider: string;
-  member: { state: McpOAuthStateName; connectedAt: string | null; lastError: string | null; id: string } | null;
-  workspace: { state: McpOAuthStateName; ackBy: string | null; connectedAt: string | null; id: string } | null;
+  member: { id: string; state: McpOAuthStateName; connectedAt: string | null; lastRefreshOkAt: string | null } | null;
+  /** `ackBy` is shown to owners and admins only. */
+  workspace: { id: string; state: McpOAuthStateName; ackBy: string | null; connectedAt: string | null } | null;
   redirectUri: string;
   callbackSupported: boolean;
   /** Whether a shared API token is also connected (the last rung). */
