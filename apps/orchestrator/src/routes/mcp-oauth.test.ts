@@ -144,7 +144,7 @@ describe("MCP OAuth routes", () => {
     const state2 = new URL(s2.body.authorizeUrl).searchParams.get("state")!;
     const ok = await asUser(request(app).post("/api/mcp/oauth/paste")).send({ redirectUrl: `http://127.0.0.1/api/mcp/oauth/callback?code=c&state=${state2}` });
     expect(ok.status).toBe(200);
-    expect(ok.body).toEqual({ outcome: "connected", provider: "atlassian" });
+    expect(ok.body).toEqual({ outcome: "connected" });
     expect(db.rows[0].state).toBe("CONNECTED");
   });
 
@@ -155,7 +155,16 @@ describe("MCP OAuth routes", () => {
     await request(app).get("/api/mcp/oauth/callback").query({ state, code: "c" }).set("Cookie", `${MCP_OAUTH_STATE_COOKIE}=${state}`);
     const list = await asUser(request(app).get("/api/mcp/oauth/connections"));
     expect(list.status).toBe(200);
-    expect(list.body.connections[0]).toMatchObject({ provider: "atlassian", member: { state: "CONNECTED" }, workspace: null, apiToken: false });
+    // The pinned contract the Mac app and the dashboard are coded to.
+    expect(Object.keys(list.body)).toEqual(["providers"]);
+    expect(list.body.providers[0]).toEqual({
+      provider: "atlassian",
+      member: { id: db.rows[0].id, state: "CONNECTED", connectedAt: expect.any(String), lastRefreshOkAt: expect.any(String) },
+      workspace: null,
+      redirectUri: "https://box.customer.com/api/mcp/oauth/callback",
+      callbackSupported: true,
+      apiToken: false,
+    });
     expect(list.text).not.toMatch(/ACCESS-SECRET|tokensEnc|clientSecret|auth\.example/);
     const id = db.rows[0].id;
     expect((await asUser(request(app).delete(`/api/mcp/oauth/connections/${id}`), "family", "u2")).status).toBe(404);
@@ -181,5 +190,27 @@ describe("MCP OAuth routes", () => {
     expect(lines.length).toBeGreaterThan(0);
     const all = lines.join("\n");
     for (const secret of [state, "LEAKY-CODE", "LEAKY-ISS", "LEAKY-PASTED", "ACCESS-SECRET"]) expect(all).not.toContain(secret);
+  });
+});
+
+describe("GET /mcp/oauth/connections visibility", () => {
+  beforeEach(() => __setColumnCryptoKeyForTest(Buffer.alloc(32, 9).toString("base64")));
+  afterEach(() => __setColumnCryptoKeyForTest(null));
+
+  it("shows a member only their own row, and the Workspace row without ackBy unless admin", async () => {
+    const { app, db } = setup();
+    const s = await asUser(request(app).post("/api/mcp/oauth/start"), "admin", "a1")
+      .send({ provider: "atlassian", scope: "WORKSPACE", acknowledge: true });
+    const state = new URL(s.body.authorizeUrl).searchParams.get("state")!;
+    await request(app).get("/api/mcp/oauth/callback").query({ state, code: "c" }).set("Cookie", `${MCP_OAUTH_STATE_COOKIE}=${state}`);
+    await db.seed({ provider: "atlassian", scope: "MEMBER", memberId: "someone-else", issuer: "i", tokenEndpointHost: "h" });
+
+    const asMember = await asUser(request(app).get("/api/mcp/oauth/connections"), "family", "u1");
+    expect(asMember.body.providers[0].member).toBeNull(); // never another member's row
+    expect(asMember.body.providers[0].workspace).toMatchObject({ state: "CONNECTED", ackBy: null });
+    expect(asMember.body.providers[0].workspace.id).toEqual(expect.any(String));
+
+    const asAdmin = await asUser(request(app).get("/api/mcp/oauth/connections"), "admin", "a1");
+    expect(asAdmin.body.providers[0].workspace.ackBy).toBe("alice");
   });
 });
