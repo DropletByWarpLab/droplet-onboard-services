@@ -10091,8 +10091,7 @@ export async function fetchMcpOAuthConnections(): Promise<McpSignInView[]> {
   const res = await authFetch(`${BASE}/api/mcp/oauth/connections`);
   if (!res.ok) throw new Error(`Failed to load sign-in status: ${res.status}`);
   const body = await res.json();
-  const list = Array.isArray(body) ? body : body?.connections;
-  return Array.isArray(list) ? list : [];
+  return Array.isArray(body?.providers) ? body.providers : [];
 }
 
 async function mcpOAuthError(res: Response, fallback: string): Promise<Error> {
@@ -10105,6 +10104,8 @@ export async function startMcpSignIn(args: {
   provider: string;
   scope: "MEMBER" | "WORKSPACE";
   acknowledge?: true;
+  /** `loopback` when the box has no registered HTTPS address: the person pastes the landing address back. */
+  redirectMode?: "origin" | "loopback";
 }): Promise<{ authorizeUrl: string; expiresAt: string; redirectUri: string }> {
   const res = await authFetch(`${BASE}/api/mcp/oauth/start`, {
     method: "POST",

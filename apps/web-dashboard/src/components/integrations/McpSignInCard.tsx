@@ -113,6 +113,7 @@ export function McpSignInCard({
         provider,
         scope,
         ...(scope === "WORKSPACE" ? { acknowledge: true as const } : {}),
+        ...(view.callbackSupported ? {} : { redirectMode: "loopback" as const }),
       });
       // Only ever an http(s) address the box returned; never built from page state.
       const target = new URL(body.authorizeUrl);
@@ -198,7 +199,7 @@ export function McpSignInCard({
           <button type="button" className="btn" disabled={busy} onClick={() => void disconnect(view.member)}>Disconnect</button>
         )}
       </div>
-      {pending && (
+      {(pending || !view.callbackSupported) && (
         <div className="space-y-1">
           <label className="type-caption-1 block" htmlFor={`mcp-paste-${provider}`}>
             If the browser ended on a page that did not load, paste its full address here
