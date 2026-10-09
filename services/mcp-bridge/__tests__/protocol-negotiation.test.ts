@@ -7,6 +7,14 @@
  * stub server, so the assertions are about the requests the bridge would send.
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
+
+// WARP-3914: this suite stubs the SOCKET (`globalThis.fetch`), so the DNS-
+// pinning fetch is swapped for a pass-through to it, as in rate-limit-seam.
+// The pin itself is covered in pinned-fetch.test.ts and streamable-http.test.ts.
+vi.mock("../src/pinned-fetch.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/pinned-fetch.js")>()),
+  guardedFetch: (url: string | URL, init?: RequestInit) => globalThis.fetch(url, init),
+}));
 import { createStreamableHttpConnection } from "../src/streamable-http.js";
 import { classifyRemoteMcpError } from "../src/session-state.js";
 import { MAX_EVENT_BYTES, MAX_RESPONSE_BYTES } from "../src/modern-connection.js";
