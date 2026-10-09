@@ -52,6 +52,9 @@ export interface RemoteToolDescriptor {
   name: string;
   description: string;
   inputSchema: object;
+  /** WARP-3918 — sha256 of the canonical wire object (name, description,
+   *  schema, annotations). Opaque to the orchestrator, which pins it. */
+  definitionHash?: string;
 }
 
 export interface RemoteToolCallOutcome {

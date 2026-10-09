@@ -36,12 +36,27 @@
  * (`requiresWrite: true, requiresConfirmation: false`) is not expressible
  * through any writer: the service refuses it.
  *
+ * WARP-3918 extends that pin to EVERY server. The bridge (the only component
+ * that sees the wire object, `annotations` included) sends a sha256 of each
+ * tool's canonical name, description, input schema and annotations; the
+ * attach path passes it as `inputSchemaHash`, so this same mechanism applies.
+ * Because a curated server's compiled table ALLOWS a tool regardless of the
+ * record, a reset also sets the explicit `definitionStatus: CHANGED`, which
+ * dispatch refuses ahead of the table, until a person classifies the tool
+ * again. Rows recorded before the pin (no stored hash) are baselined once
+ * (`baselineUnpinned`) instead of reset, so an upgrade does not take every
+ * reviewed Atlassian read offline.
+ *
  * ## What the record decides at dispatch
  *
  * {@link createRecordBackedRemoteCallPolicy} is a {@link RemoteCallPolicy}:
  *
  *   - no row            → `REMOTE_TOOL_NOT_CLASSIFIED` (never seen; deny)
  *   - `denied`          → `REMOTE_TOOL_DENIED` (an operator blocked it; deny)
+ *   - definition CHANGED → `REMOTE_TOOL_DEFINITION_CHANGED` (WARP-3918: the
+ *                          pinned wire definition moved since a person
+ *                          reviewed it; deny, for curated and owner-added
+ *                          servers alike, until classified again)
  *   - `requiresWrite`   → `REMOTE_WRITE_NOT_PERMITTED` — ADR-043 §3 still
  *                          holds: a remote write may not run until the
  *                          interceptor can confirm a RUNTIME tool, which is
@@ -88,6 +103,7 @@ export const RECORD_DENY_CODES = {
   notClassified: "REMOTE_TOOL_NOT_CLASSIFIED",
   denied: "REMOTE_TOOL_DENIED",
   writeBlocked: "REMOTE_WRITE_NOT_PERMITTED",
+  definitionChanged: "REMOTE_TOOL_DEFINITION_CHANGED",
 } as const;
 
 export interface RemoteToolClassificationRow {
@@ -105,6 +121,16 @@ export interface RemoteToolClassificationRow {
    * caller sent no schema hash.
    */
   inputSchemaHash?: string | null;
+  /**
+   * WARP-3918 — CHANGED when the pinned definition no longer matches the one a
+   * person reviewed; refused at dispatch (every server) until re-classified.
+   * Absent is CURRENT (fixtures built before the column).
+   */
+  definitionStatus?: "CURRENT" | "CHANGED";
+  definitionChangedAt?: Date | null;
+  /** What the review screen (WARP-2430) diffs against; set at the first change. */
+  previousReviewHash?: string | null;
+  previousWireDescription?: string | null;
   firstSeenAt: Date;
   lastSeenAt: Date;
 }
@@ -158,18 +184,48 @@ export async function recordDiscoveredRemoteTools(
   serverId: string,
   tools: readonly DiscoveredRemoteTool[],
   now: Date = new Date(),
-): Promise<{ created: string[]; seen: number; reset: string[] }> {
+  /**
+   * WARP-3918 — `baselineUnpinned`: a row with NO stored hash (recorded before
+   * the definition pin existed) adopts the hash it is first seen with instead
+   * of being reset. The vendor attach sets it so the first boot after the
+   * upgrade does not take every reviewed Atlassian read offline; the `ext-*`
+   * attach does not (its rows have always carried a hash).
+   */
+  opts: { baselineUnpinned?: boolean } = {},
+): Promise<{
+  created: string[];
+  seen: number;
+  reset: string[];
+  /** WARP-3918 — per reset tool, whether its description is what changed
+   *  (otherwise its schema or annotations), for the owners' notice. */
+  changes: { toolName: string; descriptionChanged: boolean }[];
+}> {
   const created: string[] = [];
   const reset: string[] = [];
+  const changes: { toolName: string; descriptionChanged: boolean }[] = [];
   for (const tool of tools) {
     const wireDescription = tool.description?.slice(0, 2000) ?? null;
     const before = (await prisma.remoteToolClassification.findUnique({
       where: { serverId_toolName: { serverId, toolName: tool.wireName } },
-      select: { id: true, denied: true, inputSchemaHash: true },
-    })) as { id: string; denied: boolean; inputSchemaHash: string | null } | null;
+      select: {
+        id: true,
+        denied: true,
+        inputSchemaHash: true,
+        wireDescription: true,
+        definitionStatus: true,
+      },
+    })) as {
+      id: string;
+      denied: boolean;
+      inputSchemaHash: string | null;
+      wireDescription: string | null;
+      definitionStatus?: "CURRENT" | "CHANGED";
+    } | null;
     // The description and the arguments together: a person reviewed both.
     const hash = tool.inputSchemaHash === undefined ? undefined : remoteToolReviewHash(tool.description, tool.inputSchemaHash);
-    const schemaChanged = before !== null && hash !== undefined && before.inputSchemaHash !== hash;
+    const baselined =
+      opts.baselineUnpinned === true && before !== null && hash !== undefined && (before.inputSchemaHash ?? null) === null;
+    const schemaChanged = before !== null && hash !== undefined && before.inputSchemaHash !== hash && !baselined;
     await prisma.remoteToolClassification.upsert({
       where: { serverId_toolName: { serverId, toolName: tool.wireName } },
       create: {
@@ -188,6 +244,15 @@ export async function recordDiscoveredRemoteTools(
             lastSeenAt: now,
             wireDescription,
             inputSchemaHash: hash,
+            // WARP-3918 — the explicit flag dispatch refuses on (a curated
+            // table's allow cannot see a reset), and what a review screen
+            // diffs against. A second change before re-review keeps the
+            // FIRST previous: that is what a person last reviewed.
+            definitionStatus: "CHANGED",
+            definitionChangedAt: now,
+            ...(before.definitionStatus === "CHANGED"
+              ? {}
+              : { previousReviewHash: before.inputSchemaHash, previousWireDescription: before.wireDescription }),
             // A block is final: the reset re-opens a review, it never
             // unblocks a tool (nor forgets who blocked it).
             ...(before.denied
@@ -199,16 +264,21 @@ export async function recordDiscoveredRemoteTools(
                   reviewedAt: null,
                 }),
           }
-        : { lastSeenAt: now, wireDescription },
+        : baselined
+          ? { lastSeenAt: now, wireDescription, inputSchemaHash: hash }
+          : { lastSeenAt: now, wireDescription },
     });
     if (!before) created.push(tool.wireName);
-    else if (schemaChanged) reset.push(tool.wireName);
+    else if (schemaChanged) {
+      reset.push(tool.wireName);
+      changes.push({ toolName: tool.wireName, descriptionChanged: before.wireDescription !== wireDescription });
+    }
   }
   logger.info(
     { serverId, seen: tools.length, created: created.length, reset: reset.length },
     "remote_tools_recorded_as_confirming_writes",
   );
-  return { created, seen: tools.length, reset };
+  return { created, seen: tools.length, reset, changes };
 }
 
 export interface ClassifyRemoteToolInput {
@@ -274,6 +344,13 @@ export async function classifyRemoteTool(
     denied: input.denied,
     reviewedBy,
     reviewedAt: now,
+    // WARP-3918 — a person classifying the tool is the re-review: the pinned
+    // definition is now the one they saw (the optional expected hash above is
+    // what makes that true under a race).
+    definitionStatus: "CURRENT" as const,
+    definitionChangedAt: null,
+    previousReviewHash: null,
+    previousWireDescription: null,
   };
   let row: RemoteToolClassificationRow;
   if (input.expectedInputSchemaHash !== undefined) {
@@ -328,6 +405,16 @@ export async function listRemoteToolClassifications(
 /** `(serverId, toolName)` → row, for the synchronous policy. */
 export type ClassificationLookup = (serverId: string, toolName: string) => RemoteToolClassificationRow | undefined;
 
+/**
+ * WARP-3918 — the live definition of a tool. `tracked: false`: this server
+ * reports no definition hashes (an `ext-*` extension), nothing to compare.
+ * Tracked with no `hash`: the latest listing carried none for this tool.
+ */
+export type LiveDefinitionLookup = (
+  serverId: string,
+  toolName: string,
+) => { tracked: false } | { tracked: true; hash: string | undefined };
+
 function key(serverId: string, toolName: string): string {
   return `${serverId} ${toolName}`;
 }
@@ -348,10 +435,29 @@ export class RemoteToolClassificationCache {
 
   /** Test hook — seed without a database. */
   seed(rows: readonly RemoteToolClassificationRow[]): void {
+    this.#live = new Map(); // a seeded snapshot starts with no live listing
     this.#rows = new Map(rows.map((r) => [key(r.serverId, r.toolName), r]));
   }
 
   lookup: ClassificationLookup = (serverId, toolName) => this.#rows.get(key(serverId, toolName));
+
+  /**
+   * WARP-3918 — the review hash of each tool as the server's LATEST listing
+   * defined it (wire name → {@link remoteToolReviewHash}), held in memory.
+   * This, not the database write that records a change, is what dispatch
+   * compares against the reviewed hash: a write that failed cannot leave a
+   * changed tool callable. Replaced wholesale on every listing.
+   */
+  #live = new Map<string, ReadonlyMap<string, string>>();
+
+  setLiveDefinitions(serverId: string, hashes: ReadonlyMap<string, string>): void {
+    this.#live.set(serverId, hashes);
+  }
+
+  liveDefinition: LiveDefinitionLookup = (serverId, toolName) => {
+    const m = this.#live.get(serverId);
+    return m ? { tracked: true, hash: m.get(toolName) } : { tracked: false };
+  };
 
   /**
    * WARP-2436 — is this NAMESPACED remote tool name classified a write right
@@ -378,6 +484,16 @@ export class RemoteToolClassificationCache {
 /** The process-wide snapshot the singleton's policy reads. */
 export const remoteToolClassificationCache = new RemoteToolClassificationCache();
 
+function definitionChangedDecision(namespacedName: string): RemoteCallDecision {
+  return {
+    kind: "deny",
+    code: RECORD_DENY_CODES.definitionChanged,
+    message:
+      `'${namespacedName}' changed its description, arguments or hints since it was last reviewed, ` +
+      "so it is switched off until an owner reviews it again. Do not retry; answer without it.",
+  };
+}
+
 /** The decision for one row (or none) — separated so a surface can render it. */
 export function decideFromRecord(
   row: RemoteToolClassificationRow | undefined,
@@ -399,6 +515,7 @@ export function decideFromRecord(
       message: `'${namespacedName}' is blocked on this box by its operator. Do not retry; answer without it.`,
     };
   }
+  if (row.definitionStatus === "CHANGED") return definitionChangedDecision(namespacedName);
   if (row.requiresWrite) {
     return {
       kind: "deny",
@@ -429,11 +546,21 @@ export function createRecordBackedRemoteCallPolicy(lookup: ClassificationLookup)
 export function composeRemoteCallPolicy(opts: {
   lookup: ClassificationLookup;
   table?: RemoteCallPolicy;
+  /**
+   * WARP-3918 — the FAIL-CLOSED pin. For a server that reports definition
+   * hashes, an ALLOW stands only while the tool's live hash (latest listing,
+   * in memory) equals the hash stored on its reviewed row. Mismatch, no live
+   * hash, no stored hash, or no row: refused. Independent of whether the
+   * database write that records a change succeeded.
+   */
+  live?: LiveDefinitionLookup;
 }): RemoteCallPolicy {
   const table = opts.table ?? DENY_ALL_REMOTE_TOOLS;
-  return (input) => {
+  const decide: RemoteCallPolicy = (input) => {
     const row = opts.lookup(input.serverId, input.wireName);
-    if (row?.denied) return decideFromRecord(row, input.namespacedName);
+    // WARP-3918 — a CHANGED definition beats the table's allow too: the table
+    // vouched for the tool as it was reviewed, not for what it says now.
+    if (row?.denied || row?.definitionStatus === "CHANGED") return decideFromRecord(row, input.namespacedName);
     const base = table(input);
     if (base.kind === "allow") return base;
     if (base.code === RECORD_DENY_CODES.notClassified && row) {
@@ -443,5 +570,15 @@ export function composeRemoteCallPolicy(opts: {
       if (fromRecord.kind === "allow" && row.reviewedAt) return fromRecord;
     }
     return base;
+  };
+  const live = opts.live;
+  if (!live) return decide;
+  return (input) => {
+    const d = decide(input);
+    if (d.kind !== "allow") return d;
+    const l = live(input.serverId, input.wireName);
+    if (!l.tracked) return d;
+    const stored = opts.lookup(input.serverId, input.wireName)?.inputSchemaHash;
+    return l.hash && stored && l.hash === stored ? d : definitionChangedDecision(input.namespacedName);
   };
 }
