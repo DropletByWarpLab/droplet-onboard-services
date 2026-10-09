@@ -181,7 +181,7 @@ export const createStreamableHttpConnection = async (
     }
     const modern = await connectModern(
       input,
-      createObservingFetch(opts.onRateLimitHeaders),
+      createObservingFetch(opts.onRateLimitHeaders, opts.guard),
       opts.clientInfo ?? MCP_BRIDGE_CLIENT_INFO,
     );
     if (modern !== "legacy") return modern;

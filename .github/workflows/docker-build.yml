@@ -140,7 +140,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  COMPOSE: docker compose -f docker/docker-compose.yml --profile full --profile eval
+  COMPOSE: docker compose -f docker/docker-compose.yml --profile full --profile eval --profile media
 
 # WARP-3677: least privilege. Top-level default is read-only; every job that
 # needs more (see the per-job `permissions:` blocks below) declares its own.
@@ -182,7 +182,7 @@ jobs:
           KNOWN: >-
             ["ai-gateway","camera-discovery","device-identity-svc",
             "doc-render","email-indexer","file-indexer","gateway",
-            "matter-controller","mcp-server","orchestrator","rag-eval",
+            "matter-controller","mcp-server","media-gen","orchestrator","rag-eval",
             "routing","sandbox","switch","web-dashboard"]
         run: |
           set -eu
@@ -282,6 +282,9 @@ jobs:
             doc-render:
               - *py-shared
               - "services/doc-render/**"
+            media-gen:
+              - *py-shared
+              - "services/media-gen/**"
             sandbox:
               - *py-shared
               - "services/sandbox/**"

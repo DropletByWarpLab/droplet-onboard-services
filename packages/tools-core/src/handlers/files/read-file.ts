@@ -230,7 +230,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "read_file",
   description:
-    "Read File Store text in pages of up to 10,000 characters. Resume with offset=next_offset until next_offset is null, the ONLY completion signal; never summarize before reading every page. chars_total is text length; bytes_total is file size. For PDFs, Word docs, scans or chat attachments use read_document_text.",
+    "Read File Store text in 10000-character pages; offset is a CHARACTER index. Follow next_offset until null (the ONLY complete signal); never summarize incomplete text. chars_total/bytes_total give full sizes. PDF/Word/scans and chat attachments: read_document_text.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

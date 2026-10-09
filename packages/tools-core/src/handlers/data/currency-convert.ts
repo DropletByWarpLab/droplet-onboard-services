@@ -141,8 +141,7 @@ async function handler(
 
 const tool: Tool = {
   name: "currency_convert",
-  description:
-    'Convert an amount between currencies using cached daily ECB (European Central Bank) reference rates fetched via the box\'s screened web access. Provide a numeric value plus 3-letter from/to currency codes (case-insensitive). The result includes the applied rate, the rate date (`ratesAsOf`), and a `stale` flag when the box is serving older cached rates. If the box\'s web access for this data is disabled, the user must enable "Weather & currency data" in the dashboard\'s off-LAN settings.',
+  description: "Convert numeric value between 3-letter currency codes using screened cached daily ECB rates. Returns rate, ratesAsOf and stale. If disabled, enable Weather & currency data in off-LAN settings.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

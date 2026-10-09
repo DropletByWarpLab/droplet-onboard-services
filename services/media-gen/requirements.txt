@@ -1,0 +1,13 @@
+# Existing fleet HTTP pins; inference libraries verified from PyPI 2026-10-08.
+fastapi==0.141.1
+uvicorn[standard]==0.52.1
+torch==2.14.1
+diffusers==0.41.0
+transformers==5.19.0
+accelerate==1.15.0
+safetensors==0.8.0
+pillow==12.3.0
+sentencepiece==0.2.1
+protobuf==6.33.6
+ftfy==6.3.1
+idna>=3.15

@@ -81,6 +81,7 @@ import gitstore
 import hosted_http
 import supervisor
 import workspace
+from analysis_artifacts import validate_artifacts
 
 SANDBOX_SERVICE_TOKEN = os.getenv("SANDBOX_SERVICE_TOKEN", "").strip()
 
@@ -123,6 +124,8 @@ SERVER_UNDUMPABLE = _make_undumpable()
 AUTH_EXEMPT_PATHS = frozenset({"/health"})
 
 RUNNER = Path(__file__).resolve().parent / "runner.py"
+ANALYSIS_RUNNER = Path(__file__).resolve().parent / "analysis_runner.py"
+ANALYSIS_LOCK = threading.Lock()
 
 # Ceilings the request may ask for, never exceed. The orchestrator passes its
 # own (config SANDBOX_TRANSFORM_TIMEOUT_MS / SANDBOX_OUTPUT_CAP_BYTES); these
@@ -175,6 +178,19 @@ class TransformRequest(BaseModel):
     outputCapBytes: int = Field(default=256_000, ge=1_024, le=MAX_OUTPUT_CAP_BYTES)
 
 
+class AnalysisSource(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=255)
+    format: str = Field(pattern=r"^(csv|xlsx)$")
+    contentBase64: str = Field(max_length=4 * 1024 * 1024)
+
+
+class AnalysisRequest(TransformRequest):
+    model_config = ConfigDict(extra="forbid")
+    sources: list[AnalysisSource] = Field(default_factory=list, max_length=4)
+    outputCapBytes: int = Field(default=1_048_576, ge=1_024, le=MAX_OUTPUT_CAP_BYTES)
+
+
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     # The git store's one boot-time job: templates.git exists after the
@@ -209,6 +225,13 @@ async def health():
     return {"status": "ok", "processes": supervisor.SUPERVISION_ENABLED, "workspaces": gitstore.REPOS_DIR.is_dir()}
 
 
+@app.get("/capabilities")
+async def creation_capabilities():
+    # Query kernel support without sealing this API or executing user/sample code.
+    from analysis_readiness import kernel_eligible
+    return {"version": 1, "analysisEligible": kernel_eligible(), "busy": ANALYSIS_LOCK.locked()}
+
+
 def _read_capped(stream, cap: int) -> tuple[bytes, bool]:
     """Read at most ``cap + 1`` bytes so the excess is DETECTED, not buffered."""
     chunks: list[bytes] = []
@@ -223,28 +246,40 @@ def _read_capped(stream, cap: int) -> tuple[bytes, bool]:
             return b"".join(chunks), True
 
 
-def run_transform(req: TransformRequest) -> dict[str, Any]:
+def run_transform(req: TransformRequest, analysis: bool = False) -> dict[str, Any]:
     """One child process, one deadline, one output cap. Pure function of the
     request so the tests can call it without the HTTP layer."""
     inputs_json = json.dumps(req.inputs)
     if len(inputs_json.encode("utf-8")) > MAX_INPUTS_BYTES:
         return {"error": f"inputs exceed {MAX_INPUTS_BYTES} bytes"}
-    payload = json.dumps(
-        {"code": req.code, "inputs": req.inputs, "maxMemoryBytes": CHILD_MAX_MEMORY_BYTES},
-    ).encode("utf-8")
+    scratch = tempfile.TemporaryDirectory(prefix="analysis-", dir=SCRATCH_DIR) if analysis else None
+    child_cwd = scratch.name if scratch is not None else SCRATCH_DIR
+    request_data = {"code": req.code, "inputs": req.inputs, "maxMemoryBytes": CHILD_MAX_MEMORY_BYTES}
+    if analysis and isinstance(req, AnalysisRequest):
+        request_data["sources"] = [s.model_dump() for s in req.sources]
+        request_data["scratchDir"] = child_cwd
+    payload = json.dumps(request_data).encode("utf-8")
+    if len(payload) > MAX_INPUTS_BYTES:
+        if scratch is not None:
+            scratch.cleanup()
+        return {"error": f"analysis request exceeds {MAX_INPUTS_BYTES} bytes"}
 
     deadline = time.monotonic() + req.timeoutMs / 1000
     try:
         proc = subprocess.Popen(
-            [sys.executable, "-I", "-S", "-B", str(RUNNER)],
+            # Analysis's trusted XLSX loader needs installed openpyxl. User
+            # imports still go through runner.py's stdlib-only guard.
+            [sys.executable, "-I", *([] if analysis else ["-S"]), "-B", str(ANALYSIS_RUNNER if analysis else RUNNER)],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            cwd=SCRATCH_DIR,
-            env=CHILD_ENV,
+            cwd=child_cwd,
+            env={**CHILD_ENV, "HOME": child_cwd},
             close_fds=True,
         )
     except OSError as exc:
+        if scratch is not None:
+            scratch.cleanup()
         return {"error": f"could not start the transform process: {exc}"}
 
     stdout_data = b""
@@ -291,6 +326,8 @@ def run_transform(req: TransformRequest) -> dict[str, Any]:
         proc.wait(timeout=5)
     reader.join(timeout=1)
     drainer.join(timeout=1)
+    if scratch is not None:
+        scratch.cleanup()
 
     if timed_out:
         return {"error": f"transform exceeded {req.timeoutMs} ms"}
@@ -306,7 +343,16 @@ def run_transform(req: TransformRequest) -> dict[str, Any]:
     if isinstance(result, dict) and ("output" in result or "error" in result):
         if "error" in result:
             return {"error": str(result["error"])}
-        return {"output": result["output"]}
+        if analysis:
+            try:
+                # The child can introspect/replace its helpers and globals.
+                # Validate bytes here, after it exits, in the trusted parent.
+                result["artifacts"] = validate_artifacts(result.get("artifacts"))
+                if len(json.dumps(result, separators=(",", ":"), allow_nan=False).encode("utf-8")) > req.outputCapBytes:
+                    return {"error": f"output exceeded {req.outputCapBytes} bytes after artifact validation"}
+            except (ValueError, TypeError) as exc:
+                return {"error": f"invalid analysis artifacts: {exc}"}
+        return result if analysis else {"output": result["output"]}
 
     # The child died without answering — a MemoryError past what runner.py
     # could catch, a kill by the pid ceiling, a segfault. Say what we know.
@@ -321,6 +367,19 @@ async def transform(req: TransformRequest):
     import anyio
 
     return await anyio.to_thread.run_sync(run_transform, req)
+
+
+@app.post("/analysis")
+async def data_analysis(req: AnalysisRequest):
+    import anyio
+
+    # Same bearer, environment, process/memory/time/output limits as transforms.
+    if not ANALYSIS_LOCK.acquire(blocking=False):
+        return {"error": "data analysis sandbox is busy; try again after the running analysis finishes"}
+    try:
+        return await anyio.to_thread.run_sync(run_transform, req, True)
+    finally:
+        ANALYSIS_LOCK.release()
 
 
 # ── Slice H's seam: long-lived, supervised processes ───────────────────────

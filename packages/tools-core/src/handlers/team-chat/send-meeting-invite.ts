@@ -310,7 +310,7 @@ async function handler(
 const tool: Tool = {
   name: "team_chat_send_meeting_invite",
   description:
-    "Invite members to a meeting through Messages (team chat) on the user's behalf. recipients = usernames or email addresses of people in this Workspace; the meeting card is posted in the (deduped 1:1 or new group) thread, recipients RSVP from it, and the meeting lands on the organizer's local calendar with a reminder before start. Two-step: the first call returns confirmation_required with the meeting details — relay them to the user, and only after they explicitly approve, re-issue the SAME call with confirmed: true.",
+    "Invite usernames or email addresses of people in this Workspace to a Messages meeting (direct/group thread, RSVP, organizer calendar and reminder). Relay confirmation_required details; only after explicit approval repeat SAME call with confirmed: true.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

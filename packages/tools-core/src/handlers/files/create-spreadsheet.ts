@@ -15,7 +15,7 @@ const inputSchema = {
   properties: {
     path: {
       type: "string",
-      description: "New .xlsx file path.",
+      description: "New .xlsx path.",
     },
     sheets: {
       type: "array",
@@ -34,7 +34,7 @@ const inputSchema = {
           rows: {
             type: "array",
             items: { type: "array", items: {} },
-            description: "Typed values; strings stay text.",
+            description: "Typed values; literal strings.",
           },
           formulas: {
             type: "array",
@@ -44,19 +44,22 @@ const inputSchema = {
               required: ["cell", "expression"],
               additionalProperties: false,
             },
-            description: "Existing cell formulas: arithmetic, SUM/AVERAGE/MIN/MAX/COUNT/ROUND/ABS; local references only.",
+            description: "Formulas: arithmetic/comparisons; IF/SUM/AVERAGE/MIN/MAX/COUNT/COUNTIF/SUMIF/ROUND/ABS; supplied-sheet A1 refs.",
           },
+          formats: { type: "array", items: { type: "object", properties: { range: { type: "string" }, kind: { type: "string" }, precision: { type: "integer" }, currency: { type: "string" } }, required: ["range", "kind"], additionalProperties: false }, description: "In-grid ranges; kind number/currency/percent/date; precision 0–8; currency USD/EUR/GBP/JPY/CAD/AUD." },
+          table_name: { type: "string" },
           chart: {
             type: "object",
             properties: {
               title: { type: "string" },
-              kind: { type: "string", description: "bar or line" },
+              kind: { type: "string", description: "bar, line or pie" },
               category_column: { type: "integer" },
               value_column: { type: "integer" },
+              value_columns: { type: "array", items: { type: "integer" } },
             },
-            required: ["kind", "category_column", "value_column"],
+            required: ["kind", "category_column"],
             additionalProperties: false,
-            description: "1-based columns; all data rows.",
+            description: "1-based columns; value_column or value_columns (1–8 series; pie one).",
           },
         },
         required: ["columns", "rows"],
@@ -89,7 +92,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "create_spreadsheet",
   description:
-    "Create Excel with optional formulas (recalculate on open) and chart; refuses overwrite.",
+    "New Excel: typed cells, cached formulas, formats, tables, charts.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: false,

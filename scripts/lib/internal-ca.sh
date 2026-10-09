@@ -47,7 +47,7 @@ INTERNAL_CERT_RENEW_WINDOW_S=$(( INTERNAL_CERT_DAYS * 86400 / 3 ))
 INTERNAL_CA_SERVICES=(
   orchestrator gateway ai-gateway mcp-server voice-io email-indexer rag-eval
   ops-console file-indexer routing switch oled-display matter-controller
-  camera-discovery broker frigate
+  camera-discovery broker frigate media-gen doc-render web-fetch sandbox
   # WARP-234: Redis server TLS — the compose `cache` service stages this
   # bundle as its server cert (docker-compose.yml cache.command); nextcloud
   # mounts its bundle for the phpredis CA pin (zz-redis-tls.config.php).

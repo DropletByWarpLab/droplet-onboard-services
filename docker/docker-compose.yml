@@ -227,6 +227,7 @@ services:
       - default
       - droplet-internal
       - droplet-speech
+      - droplet-media
     environment:
       # Static config only — all secrets come from .env via env_file
       - PORT=3000
@@ -234,6 +235,7 @@ services:
       # WARP-2895: the code-execution service, reachable only over the
       # internal network. SANDBOX_SERVICE_TOKEN arrives via env_file.
       - SANDBOX_URL=http://sandbox:8030
+      - MEDIA_GEN_URL=http://media-gen:8040
       - SANDBOX_PROCESS_SUPERVISION=${SANDBOX_PROCESS_SUPERVISION:-0}
       # WARP-2131: the model-catalog sidecar. SET EXPLICITLY — this is not
       # cosmetic. model-catalog.service.ts does NOT treat an unset value as
@@ -2186,10 +2188,13 @@ services:
       - OPENSSL_CONF=/etc/ssl/openssl.cnf
       # Bare names: value from .env, unset when absent (env_file semantics).
       - WEB_FETCH_SERVICE_TOKEN
+      - BRAVE_SEARCH_API_KEY
       - DROPLET_INTERNAL_TLS
       - DROPLET_TLS_CERT
       - DROPLET_TLS_KEY
       - DROPLET_TLS_CA
+    volumes:
+      - ../data/secrets/service-tls/web-fetch:/data/service-tls:ro
     cap_drop:
       - ALL
     security_opt:
@@ -2312,6 +2317,8 @@ services:
       - DROPLET_TLS_CERT
       - DROPLET_TLS_KEY
       - DROPLET_TLS_CA
+    volumes:
+      - ../data/secrets/service-tls/doc-render:/data/service-tls:ro
     cap_drop:
       - ALL
     security_opt:
@@ -2321,6 +2328,65 @@ services:
     mem_limit: ${DOC_RENDER_MEM_LIMIT:-384m}
     cpus: ${DOC_RENDER_CPUS:-1.0}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
+
+  # --- Local image/video inference — explicitly provisioned, off by default ---
+  # ADR-009: Orch coordinates media; this worker has no storage/provider access.
+  # No WAN route, no runtime downloads, no appliance .env. Model snapshots are
+  # installed by the operator under fixed sdxl/wan/ltx folders and mounted ro.
+  media-gen:
+    build:
+      context: ..
+      dockerfile: services/media-gen/Dockerfile
+    expose: ["8040"]
+    profiles: ["media"]
+    networks: [droplet-media]
+    # Root exists only during TLS staging; the entrypoint execs uid/gid 1000.
+    user: "0:0"
+    environment:
+      - DROPLET_FIPS_REQUIRED=false
+      - OPENSSL_CONF=/etc/ssl/openssl.cnf
+      - MEDIA_GEN_SERVICE_TOKEN=${MEDIA_GEN_SERVICE_TOKEN:-}
+      - MEDIA_GEN_MODEL_ROOT=/models
+      - MEDIA_GEN_VIDEO_ENGINE=${MEDIA_GEN_VIDEO_ENGINE:-wan}
+      - MEDIA_GEN_DEVICE=${MEDIA_GEN_DEVICE:-cuda}
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
+      - HF_HUB_DISABLE_TELEMETRY=1
+      - HF_HUB_DISABLE_IMPLICIT_TOKEN=1
+      - HF_HOME=/tmp/huggingface
+      - DROPLET_INTERNAL_TLS
+      - DROPLET_TLS_CERT
+      - DROPLET_TLS_KEY
+      - DROPLET_TLS_CA
+    volumes:
+      - type: bind
+        source: ${MEDIA_GEN_MODELS_DIR:-../data/media-models}
+        target: /models
+        read_only: true
+        bind:
+          create_host_path: false
+      - ../data/secrets/service-tls/media-gen:/data/service-tls:ro
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=${MEDIA_GEN_TMPFS_SIZE:-256m}
+    init: true
+    cap_drop: [ALL]
+    # Bootstrap alone reads/stages 0600 host TLS keys and changes uid/gid.
+    # privilege_drop.sh clears these before the API or model code executes.
+    cap_add: [CHOWN, DAC_OVERRIDE, SETUID, SETGID]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "python", "-m", "_shared.healthcheck", "8040", "/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    restart: unless-stopped
+    <<: *default-logging
+    # CPU RAM during CUDA offload; provision a larger host before opting in.
+    mem_limit: ${MEDIA_GEN_MEM_LIMIT:-16g}
+    cpus: ${MEDIA_GEN_CPUS:-4.0}
+    pids_limit: ${MEDIA_GEN_PIDS_LIMIT:-256}
 
   # --- Sandbox — the box's one code-execution substrate (WARP-2895) ---
   # ADR-056 §6.3 / ADR-047 §4. Runs a routine's `transform` / `when` steps
@@ -2358,6 +2424,8 @@ services:
       - "8030"
     networks:
       - droplet-internal
+    # Root exists only during TLS staging; the entrypoint execs uid/gid 1000.
+    user: "0:0"
     environment:
       # Not one of the six FIPS provider-carrying images — pin the boot gate +
       # OpenSSL config to the literal OFF posture (`environment:` beats env_file).
@@ -2372,6 +2440,10 @@ services:
       # closed, which is the safe direction. Rotate both sides in lockstep —
       # change .env, then `up -d --force-recreate orchestrator sandbox`.
       - SANDBOX_SERVICE_TOKEN=${SANDBOX_SERVICE_TOKEN:-}
+      - DROPLET_INTERNAL_TLS
+      - DROPLET_TLS_CERT
+      - DROPLET_TLS_KEY
+      - DROPLET_TLS_CA
       # Slice H's process-supervision seam. Off until an operator turns it on;
       # off, its routes are 404 and nothing on the box can discover them.
       - SANDBOX_PROCESS_SUPERVISION=${SANDBOX_PROCESS_SUPERVISION:-0}
@@ -2396,6 +2468,8 @@ services:
       - workspace-checkouts:/var/lib/workspace
       - extensions-installed:/var/lib/workspace-ext
       - extensions-data:/var/lib/workspace-ext-data
+      # Read-only service-TLS material the entrypoint stages before dropping root.
+      - ../data/secrets/service-tls/sandbox:/data/service-tls:ro
     # WARP-2900 / WARP-3012: a stopped extension's process group and a
     # timed-out run's are killed with killpg; their orphans are reparented to
     # PID 1. An init (Docker's tini) reaps them. Without it PID 1 is the
@@ -2407,11 +2481,14 @@ services:
       - /tmp:size=64m,mode=1777
     cap_drop:
       - ALL
+    # Bootstrap alone stages TLS keys; the API and code children run uid 1000
+    # with empty effective/permitted/inherited/ambient capabilities.
+    cap_add: [CHOWN, DAC_OVERRIDE, SETUID, SETGID]
     security_opt:
       - no-new-privileges:true
     healthcheck:
       # /health is the one route served without a bearer.
-      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:8030/health',timeout=5)\""]
+      test: ["CMD", "python", "-m", "_shared.healthcheck", "8030", "/health"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -3977,6 +4054,8 @@ networks:
   droplet-internal:
     internal: true
   droplet-speech:
+    internal: true
+  droplet-media:
     internal: true
 
 secrets:

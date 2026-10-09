@@ -75,7 +75,28 @@ export interface FileMedia {
   thumbnailUrl?: string;
 }
 
-export type ChatMedia = CameraSnapshotMedia | CameraLiveMedia | CameraClipMedia | FileMedia;
+/** Explicit opt-in to an opaque, network-disabled interactive HTML preview. */
+export interface ArtifactMedia {
+  kind: "artifact";
+  path: string;
+  name: string;
+  size?: number;
+  downloadUrl: string;
+}
+
+export interface MediaJobMedia {
+  kind: "media_job";
+  jobId: string;
+  statusUrl: string;
+}
+
+const MEDIA_JOB_ID_RE = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
+export function mediaJobMedia(jobId: string): MediaJobMedia {
+  if (!MEDIA_JOB_ID_RE.test(jobId)) throw new Error("Invalid media job id");
+  return { kind: "media_job", jobId, statusUrl: `/api/files/media/${jobId}` };
+}
+
+export type ChatMedia = CameraSnapshotMedia | CameraLiveMedia | CameraClipMedia | FileMedia | ArtifactMedia | MediaJobMedia;
 
 // ── URL guard ────────────────────────────────────────────────────────────
 
@@ -261,6 +282,7 @@ const MIME_BY_EXT: Record<string, string> = {
   md: "text/markdown",
   csv: "text/csv",
   json: "application/json",
+  html: "text/html",
   docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
@@ -295,6 +317,15 @@ export function fileMediaFromPath(
     ...(mimeType.startsWith("image/")
       ? { thumbnailUrl: `/api/files/thumbnail?path=${enc}&x=512&y=512` }
       : {}),
+  };
+}
+
+export function artifactMediaFromPath(path: string, size?: number): ArtifactMedia {
+  return {
+    kind: "artifact", path,
+    name: path.split("/").filter(Boolean).pop() || "Artifact.html",
+    ...(size !== undefined ? { size } : {}),
+    downloadUrl: `/api/files/download?path=${encodeURIComponent(path)}`,
   };
 }
 
@@ -337,6 +368,21 @@ export function parseOneChatMedia(raw: unknown): ChatMedia | null {
   if (!raw || typeof raw !== "object") return null;
   const m = raw as Record<string, unknown>;
   switch (m.kind) {
+    case "media_job": {
+      if (typeof m.jobId !== "string" || !MEDIA_JOB_ID_RE.test(m.jobId)) return null;
+      const expected = mediaJobMedia(m.jobId);
+      return m.statusUrl === expected.statusUrl ? expected : null;
+    }
+    case "artifact": {
+      const path = str(m.path, 4096);
+      if (!path || !path.startsWith("/") || !path.toLowerCase().endsWith(".html") || /[\u0000-\u001f\\]/.test(path) || path.split("/").includes("..")) return null;
+      const expected = artifactMediaFromPath(path);
+      // A remote tool cannot make the preview fetch another API or a URL it chose.
+      if (m.downloadUrl !== expected.downloadUrl || !isSafeMediaUrl(expected.downloadUrl)) return null;
+      const size = num(m.size);
+      if (size !== undefined && (size < 0 || size > 192 * 1024)) return null;
+      return artifactMediaFromPath(path, size);
+    }
     case "camera_snapshot": {
       const camera = camName(m.camera);
       const snapshotUrl = safeUrl(m.snapshotUrl);

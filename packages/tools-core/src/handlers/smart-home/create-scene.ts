@@ -350,8 +350,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 
 const tool: Tool = {
   name: "create_scene",
-  description:
-    'Create a named device-control scene (e.g. "open up") from a list of device actions so it can be run later with run_scene or scheduled from the dashboard. Creating a scene does NOT run any device action. Each action\'s device may be a nodeId or a given name from list_smart_home_devices. Two-step: the first call returns confirmation_required echoing the scene name and the resolved device actions — relay it to the user, and only after they explicitly approve, re-issue the SAME call with confirmed: true.',
+  description: "Create a named scene from device actions; does not run them. Use nodeIds or names from list_smart_home_devices. First call returns confirmation_required with resolved actions: relay it, then only after explicit approval re-issue the SAME call with confirmed: true.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

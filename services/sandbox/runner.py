@@ -189,7 +189,7 @@ def _apply_limits(max_bytes: int) -> None:
         pass
 
 
-def _run(request: dict) -> dict:
+def _run(request: dict, extra_globals: dict | None = None) -> dict:
     code = request.get("code")
     inputs = request.get("inputs") or {}
     if not isinstance(code, str) or not code.strip():
@@ -222,6 +222,9 @@ def _run(request: dict) -> dict:
         "inputs": json.loads(json.dumps(inputs)),  # a private copy
         "output": None,
     }
+    # Trusted hosts may supply analysis helpers. Never taken from user input.
+    if extra_globals:
+        namespace.update(extra_globals)
     sys.meta_path.insert(0, _Finder())
     try:
         compiled = compile(code, USER_MODULE, "exec")

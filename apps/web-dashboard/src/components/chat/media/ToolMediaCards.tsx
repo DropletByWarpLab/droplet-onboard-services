@@ -11,9 +11,15 @@ import { CameraClipCard } from "./CameraClipCard";
 import { CameraLiveCard } from "./CameraLiveCard";
 import { CameraSnapshotCard } from "./CameraSnapshotCard";
 import { FileMediaCard } from "./FileMediaCard";
+import { ArtifactMediaCard } from "./ArtifactMediaCard";
+import { MediaJobCard } from "./MediaJobCard";
 
 function MediaCard({ media, autoStartLive }: { media: ChatMedia; autoStartLive: boolean }) {
   switch (media.kind) {
+    case "media_job":
+      return <MediaJobCard media={media} />;
+    case "artifact":
+      return <ArtifactMediaCard media={media} />;
     case "camera_snapshot":
       return <CameraSnapshotCard media={media} />;
     case "camera_live":

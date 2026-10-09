@@ -21,6 +21,7 @@ import { SessionHeader } from "@/components/chat/SessionHeader";
 import { ChatHistoryPanel, type ChatHistoryPanelHandle } from "@/components/chat/ChatHistoryPanel";
 import { ContextPinsPopover } from "@/components/chat/ContextPinsPopover";
 import { CloudModelsPill } from "@/components/chat/CloudModelsPill";
+import { CreationCapabilitiesPopover } from "@/components/chat/CreationCapabilities";
 import { ChatFileRail } from "@/components/chat/ChatFileRail";
 import { MemoryPanel } from "@/components/chat/MemoryPanel";
 import {
@@ -1040,6 +1041,7 @@ export default function ChatPage() {
           </div>
           {/* WARP-461: workspace-global memory — always available. */}
           <MemoryPanel />
+          <CreationCapabilitiesPopover />
           {/* WARP-460: pins are per-session — the popover appears once
               the first turn has minted a conversationId. */}
           {conversationId && <ContextPinsPopover sessionId={conversationId} />}

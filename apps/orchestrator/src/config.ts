@@ -1185,6 +1185,12 @@ const envSchema = z.object({
   // unauthenticated — and doc-render itself 503s, so both ends refuse.
   DOC_RENDER_SERVICE_TOKEN: z.string().default(""),
 
+  // Optional offline inference profile; no models are downloaded at runtime.
+  MEDIA_GEN_URL: z.string().default("http://media-gen:8040"),
+  MEDIA_GEN_SERVICE_TOKEN: z.string().default(""),
+  // Installed Wyoming speech server; voice names are checked before synthesis.
+  TTS_URL: z.string().default("tcp://kokoro-tts:10200"),
+
   // --- Sandbox (WARP-2895, ADR-056 §6.3) ---
   // SANDBOX_URL — compose-internal base URL of services/sandbox, the box's
   // one code-execution substrate: a routine's `transform` / `when` steps run

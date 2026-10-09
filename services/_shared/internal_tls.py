@@ -11,6 +11,18 @@ from __future__ import annotations
 
 import os
 import ssl
+import sys
+
+
+def protect_process() -> None:
+    """Refuse same-uid /proc/ptrace reads before retaining private TLS keys."""
+    if not sys.platform.startswith("linux"):
+        raise RuntimeError("private TLS key protection requires Linux")
+    import ctypes
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(4, 0, 0, 0, 0) != 0:  # PR_SET_DUMPABLE
+        raise RuntimeError(f"private TLS key protection failed: {os.strerror(ctypes.get_errno())}")
 
 
 def _cert() -> str:

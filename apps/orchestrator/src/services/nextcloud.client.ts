@@ -150,7 +150,7 @@ export async function ncUploadFile(
   path: string,
   filename: string,
   buffer: Buffer,
-  options?: { ifNoneMatch?: boolean }
+  options?: { ifNoneMatch?: boolean; signal?: AbortSignal }
 ): Promise<NcWriteOutcome> {
   const url = webdavUrl(user, `${path}/${filename}`);
   const headers: Record<string, string> = {
@@ -169,6 +169,7 @@ export async function ncUploadFile(
     method: "PUT",
     headers,
     body: new Uint8Array(buffer),
+    signal: options?.signal,
   });
 
   if (options?.ifNoneMatch && resp.status === 412) {
@@ -304,13 +305,14 @@ export async function ncFetchFileResponse(
   token: string,
   user: string,
   path: string,
-  rangeHeader?: string | null
+  rangeHeader?: string | null,
+  signal?: AbortSignal,
 ): Promise<Response | null> {
   const url = webdavUrl(user, path);
   const headers: Record<string, string> = { ...davHeaders(token) };
   if (rangeHeader) headers["Range"] = rangeHeader;
 
-  const resp = await fetch(url, { headers });
+  const resp = await fetch(url, { headers, signal });
 
   if (resp.status === 404) return null;
   // 416 is the upstream's verdict on the caller's Range header, not a fault —
@@ -370,12 +372,14 @@ export async function ncDeleteFile(
 export async function ncCreateDirectory(
   token: string,
   user: string,
-  path: string
+  path: string,
+  signal?: AbortSignal,
 ): Promise<void> {
   const url = webdavUrl(user, path);
   const resp = await fetch(url, {
     method: "MKCOL",
     headers: davHeaders(token),
+    signal,
   });
 
   if (!resp.ok && resp.status !== 201 && resp.status !== 405) {

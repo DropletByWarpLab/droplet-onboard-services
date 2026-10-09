@@ -1,0 +1,8 @@
+# Contract tests deliberately do not install GPU/model libraries. Production
+# dependencies are hash-locked separately in requirements.lock.
+fastapi==0.141.1
+pillow==12.3.0
+pytest==9.1.1
+pytest-asyncio==1.4.0
+httpx==0.28.1
+pyyaml==6.0.3

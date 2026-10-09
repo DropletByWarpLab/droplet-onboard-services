@@ -32,6 +32,7 @@ import { cacheGet, cacheSet } from "../services/cache.service.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { createLogger } from "../lib/logger.js";
+import { createWebResearchRouter } from "./web-research.js";
 
 const logger = createLogger("web-routes");
 
@@ -109,6 +110,7 @@ async function fetchUpstream(path: string, token: string): Promise<globalThis.Re
 
 export function createWebRouter(prisma: PrismaClient): Router {
   const router = Router();
+  router.use(createWebResearchRouter(prisma));
 
   // `service` included for parity with the other read surfaces the
   // MCP/voice service principals consume (see routes/off-lan-network.ts).
