@@ -66,7 +66,7 @@ describe("McpSignInCard", () => {
 
   it("refuses a non-http authorize URL", async () => {
     const navigate = vi.fn();
-    api.startMcpSignIn.mockResolvedValue({ authorizeUrl: "javascript:alert(1)", expiresAt: "t", redirectUri: "r" });
+    api.startMcpSignIn.mockResolvedValue({ authorizeUrl: "javascript:void(0)", expiresAt: "t", redirectUri: "r" });
     render(<McpSignInCard provider="atlassian" displayName="Atlassian" navigate={navigate} />);
     fireEvent.click(await screen.findByRole("button", { name: "Sign in with Atlassian" }));
     expect(await screen.findByRole("alert")).toBeInTheDocument();
