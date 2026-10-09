@@ -220,16 +220,22 @@ describe("🔴 a custom role does not reach a runtime tool", () => {
       locks: true,
     };
     attributed.fn.mockResolvedValue({ scope, tier: "family", unresolved: null });
+    // A reviewed READ: a write-classified runtime tool is withheld at
+    // `write_tier` first since WARP-2436 (it is now in WRITE_TOOLS).
     const r = await inspectToolsForPerson(
       prisma,
       { targetUserId: "u1", selectionMode: "off" },
-      { runtimeTools: [ext("delete_everything")] },
+      { runtimeTools: [ext("word_count"), ext("delete_everything")] },
     );
-    const row = rowOf(r, "ext-wc__delete_everything");
+    const row = rowOf(r, "ext-wc__word_count");
     expect(row.gate).toBe("role_grant");
     expect(row.reason).toMatch(/custom roles do not reach tools added at runtime/);
     expect(row.alsoWithheldBy).not.toContain("runtime_classification");
-    expect(row.callRefusal).toMatch(/every call is refused/);
+
+    const write = rowOf(r, "ext-wc__delete_everything");
+    expect(write.gate).toBe("write_tier");
+    expect(write.alsoWithheldBy).toContain("role_grant");
+    expect(write.callRefusal).toMatch(/every call is refused/);
   });
 });
 
