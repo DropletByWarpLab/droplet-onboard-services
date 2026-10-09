@@ -71,8 +71,15 @@ import type { McpBridgeClient, McpBridgeOpenInput } from "./mcp-bridge.client.js
 import {
   createGatedRemoteMcpPort,
   remoteMcpGate,
+  type RemoteMcpCredentialKind,
   type RemoteMcpGatePrisma,
 } from "./remote-mcp-gateway.service.js";
+import {
+  createMemberRoutingPort,
+  usableConnection,
+  type MemberRoutingPrisma,
+} from "./mcp-oauth/member-routing.port.js";
+import { openTokens } from "./mcp-oauth/mcp-oauth.service.js";
 import { openSaasCredentials } from "./saas-credential.service.js";
 import {
   auditRemoteMcpLifecycle,
@@ -366,6 +373,10 @@ export interface AttachRemoteDeps {
       findFirst(args: unknown): Promise<RemoteMcpConnectionRow | null>;
     };
     offLanAllowlistChannel: RemoteMcpGatePrisma["offLanAllowlistChannel"];
+    /** WARP-2409 — the sign-in rows. Optional: absent, the API token is the only rung. */
+    mcpOAuthConnection?: NonNullable<RemoteMcpGatePrisma["mcpOAuthConnection"]> &
+      MemberRoutingPrisma["mcpOAuthConnection"];
+    user?: MemberRoutingPrisma["user"];
   };
   allowlist: ReadonlySet<string>;
   /** Builds the bridge-backed port. Injected so a test supplies a fixture
@@ -491,46 +502,52 @@ export async function attachRemoteServer(
     where: { provider: serverId },
     select: { id: true, status: true, providerTokensEnc: true, providerConfig: true },
   });
-  // The gate already proved the row and its credential column are there; this
-  // re-read is the one that returns the material. A row that vanished between
-  // the two reads is a `credential_incomplete` skip, not a crash.
-  if (!row?.providerTokensEnc) {
-    settle("detached", "credential_incomplete");
-    return {
-      attached: false,
-      serverId,
-      reason: "credential_incomplete",
-      message: `The ${serverId} connection holds no credential.`,
-    };
-  }
-
+  // The gate already proved a usable connection is there; this re-read is the one
+  // that returns the material. A row that vanished between the two reads is a
+  // `credential_incomplete` skip, not a crash.
+  //
   // ADR-042 seam, re-read AT THIS MOMENT and never cached between ticks. The
   // reconciler calls this function on every re-open, so the plaintext credential
   // exists only inside this call: it is opened here, handed to the bridge, and
   // dropped. Holding it across ticks would put a customer's API token in a
   // long-lived orchestrator field for the life of the process, which is exactly
-  // what the sealed column and rule 19 exist to prevent — and it would also
+  // what the sealed column and rule 19 exist to prevent - and it would also
   // keep using a credential the operator has since rotated.
-  const credential = readRemoteCredential(
-    row,
-    deps.descriptor,
-    deps.openCredentials ?? openSaasCredentials,
-  );
-  if (!credential.ok) {
-    settle("detached", "credential_incomplete");
-    return {
-      attached: false,
-      serverId,
-      reason: "credential_incomplete",
-      // Names the FIELD, never a value.
-      message: `The ${serverId} connection is missing: ${credential.missing.join(", ")}.`,
-    };
+  //
+  // WARP-2409 - the CATALOG session's credential, in order: the API token, the
+  // Workspace connection, the oldest connected member. It is audited on every
+  // listing (`refs.credential`). Which sign-in a CALL runs under is decided per
+  // call by the member routing port below.
+  const apiRead = row?.providerTokensEnc
+    ? readRemoteCredential(row, deps.descriptor, deps.openCredentials ?? openSaasCredentials)
+    : null;
+  let credentialFields: McpBridgeOpenInput;
+  let baseCredential: RemoteMcpCredentialKind = "api-token";
+  if (apiRead?.ok) {
+    credentialFields = apiRead.fields;
+  } else {
+    const oauth = await catalogOAuthFields(deps, row);
+    if (!oauth) {
+      settle("detached", "credential_incomplete");
+      return {
+        attached: false,
+        serverId,
+        reason: "credential_incomplete",
+        // Names the FIELD, never a value.
+        message:
+          apiRead && !apiRead.ok
+            ? `The ${serverId} connection is missing: ${apiRead.missing.join(", ")}.`
+            : `The ${serverId} connection holds no credential.`,
+      };
+    }
+    credentialFields = oauth.fields;
+    baseCredential = oauth.kind;
   }
 
   const client = deps.createClient();
   try {
     await client.open({
-      ...credential.fields,
+      ...credentialFields,
       // Only when we HAVE a baseline. An always-present `knownTools: []` would
       // tell the bridge we vetted an empty surface.
       ...(deps.knownTools && deps.knownTools.length > 0
@@ -557,7 +574,23 @@ export async function attachRemoteServer(
 
   const gated = createGatedRemoteMcpPort({
     serverId,
-    upstream: client,
+    // WARP-2409 - with the sign-in models available, each call picks the asking
+    // member's own sign-in, then the Workspace's, then the API token. Without
+    // them (a narrow test, an old build) the base session is the only rung.
+    upstream:
+      deps.prisma.user && deps.prisma.mcpOAuthConnection
+        ? createMemberRoutingPort({
+            serverId,
+            client,
+            base: client,
+            baseCredential,
+            prisma: {
+              user: deps.prisma.user,
+              mcpOAuthConnection: deps.prisma.mcpOAuthConnection,
+              integrationConnection: deps.prisma.integrationConnection,
+            },
+          })
+        : client,
     // Re-read on EVERY call, not captured once here: an operator who
     // disconnects the account mid-session must stop reaching the vendor on the
     // next call, not on the next reboot.
@@ -858,6 +891,43 @@ async function readSessionState(
 type RemoteCredentialRead =
   | { ok: true; fields: McpBridgeOpenInput }
   | { ok: false; missing: string[] };
+
+/**
+ * WARP-2409 - the catalog session's sign-in credential when there is no usable
+ * API token: the Workspace connection first, else the oldest connected member.
+ * The bridge's bearer profile takes `{ accessToken, cloudId }`; the site id is
+ * the one the admin entered on the connection (never from the model).
+ */
+async function catalogOAuthFields(
+  deps: AttachRemoteServerDeps,
+  row: RemoteMcpConnectionRow | null,
+): Promise<{ fields: Record<string, string>; kind: RemoteMcpCredentialKind } | null> {
+  const table = deps.prisma.mcpOAuthConnection;
+  const site = (row?.providerConfig as Record<string, unknown> | null | undefined)?.cloudId;
+  if (!table || typeof site !== "string" || !site.trim()) return null;
+  const candidates = [
+    await table.findFirst({ where: { provider: deps.serverId, scope: "WORKSPACE", state: "CONNECTED" } }),
+    await table.findFirst({
+      where: { provider: deps.serverId, scope: "MEMBER", state: "CONNECTED" },
+      orderBy: { connectedAt: "asc" },
+    }),
+  ];
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    const live = await usableConnection({ mcpOAuthConnection: table }, candidate);
+    if (!live) continue;
+    try {
+      return {
+        fields: { accessToken: openTokens(live).accessToken, cloudId: site.trim() },
+        kind: live.scope === "WORKSPACE" ? "workspace" : "member",
+      };
+    } catch {
+      // A blob that does not open under its own row is not a credential.
+      logger.warn({ serverId: deps.serverId }, "remote_mcp_oauth_tokens_unreadable");
+    }
+  }
+  return null;
+}
 
 /**
  * Pull the facts a session needs out of one connection row, as the descriptor

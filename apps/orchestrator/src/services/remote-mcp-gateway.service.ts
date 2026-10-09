@@ -64,7 +64,11 @@ const logger = createLogger("remote-mcp-gateway");
 export type RemoteMcpCredentialKind = "member" | "workspace" | "api-token";
 
 /** A refusal made BEFORE any vendor call because no usable sign-in exists. */
-export type RemoteMcpSignInRefusal = "REMOTE_SIGN_IN_REQUIRED" | "REMOTE_SIGN_IN_EXPIRED";
+export type RemoteMcpSignInRefusal =
+  | "REMOTE_SIGN_IN_REQUIRED"
+  | "REMOTE_SIGN_IN_EXPIRED"
+  // An owner or admin turned the connection off; no sign-in overrides that.
+  | "REMOTE_CONNECTION_DISABLED";
 
 /**
  * WARP-2409 — an upstream that chooses the credential per call (the member
@@ -107,6 +111,7 @@ export type RemoteMcpGateReason =
   | "server_not_allowlisted"
   | "no_connection_row"
   | "channel_disabled"
+  | "connection_disabled"
   | "connection_not_connected"
   | "no_credential"
   | "gate_unavailable";
@@ -196,9 +201,21 @@ export async function remoteMcpGate(
       message: "The remote MCP gate could not be read. Refusing egress.",
     };
   }
-  // WARP-2409 — a CONNECTED sign-in (a member's or the Workspace's) satisfies rule 3
-  // when the API-token connection does not. Which one a CALL uses is decided
-  // per call (member-routing.port.ts); this only says the server may be dialled.
+  // WARP-2409 — an owner's or admin's Disconnect is DISABLED, and it wins over
+  // every sign-in: one member's token must never reopen egress an admin closed.
+  // Any OTHER status the API-token path refuses (NEEDS_RECONNECT, ERROR, ...)
+  // describes the shared token, not an admin decision, so it does not block a
+  // member's own sign-in below.
+  if (row?.status === "DISABLED") {
+    return {
+      allowed: false,
+      reason: "connection_disabled",
+      message: "An owner or admin turned this connection off. Nothing was sent.",
+    };
+  }
+  // A CONNECTED sign-in (a member's or the Workspace's) satisfies rule 3 when the
+  // API-token connection does not. Which one a CALL uses is decided per call
+  // (member-routing.port.ts); this only says the server may be dialled.
   if (!(row?.status === "CONNECTED" && row.providerTokensEnc !== null) && prisma.mcpOAuthConnection) {
     try {
       if ((await prisma.mcpOAuthConnection.count({ where: { provider: serverId, state: "CONNECTED" } })) > 0) {

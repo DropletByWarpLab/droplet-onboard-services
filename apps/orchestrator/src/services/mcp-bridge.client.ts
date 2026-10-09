@@ -75,7 +75,6 @@ export interface RemoteMcpSessionHealth {
   /** WARP-2409 — how many per-connection sessions the bridge holds for this
    *  server. A count only: no ids, no members. */
   connectionSessions?: number;
-}| null;
 }
 
 /** The bridge's refusal vocabulary. Mirrors `http-api.ts`'s
