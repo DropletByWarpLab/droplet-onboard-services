@@ -1210,6 +1210,9 @@ const envSchema = z.object({
   // Extension rows dials nothing. Ships dark with the sandbox's
   // SANDBOX_PROCESS_SUPERVISION=0: no extension can be promoted then.
   EXTENSION_RECONCILE_INTERVAL_MS: z.coerce.number().int().min(5_000).max(3_600_000).default(60_000),
+  // Match the sandbox's existing, case-sensitive enable aliases; every other
+  // value is off. Parsing must not enable supervision or reject a disabled box.
+  SANDBOX_PROCESS_SUPERVISION: z.string().default("0").transform((v) => ["1", "true", "yes"].includes(v.trim())),
   // WARP-2900 (ADR-056 slice H3) — the orchestrator URL an extension calls
   // back on (handed to the child as DROPLET_ORCHESTRATOR_URL, next to its own
   // dxt_ bearer). The orchestrator's name on `droplet-internal`: the only

@@ -62,7 +62,7 @@ import {
 type Entry = { value: string; expiresAt: number };
 
 /** In-memory Redis fake covering the ops session.service uses:
- *  get/set(EX|KEEPTTL)/del/exists + zadd/zrange/zrem/expire. */
+ *  get/set(EX|KEEPTTL, XX)/del/exists + zadd/zrange/zrem/expire. */
 function makeFakeRedis() {
   const kv = new Map<string, Entry>();
   const zsets = new Map<string, Map<string, number>>();
@@ -76,9 +76,10 @@ function makeFakeRedis() {
     get: vi.fn(async (k: string) => (live(kv.get(k)) ? kv.get(k)!.value : null)),
     set: vi.fn(async (k: string, v: string, ...args: unknown[]) => {
       const prev = kv.get(k);
+      if (args.includes("XX") && !live(prev)) return null;
       let expiresAt = 0;
       if (args[0] === "EX") expiresAt = Date.now() + Number(args[1]) * 1000;
-      else if (args[0] === "KEEPTTL") expiresAt = prev?.expiresAt ?? 0;
+      else if (args.includes("KEEPTTL")) expiresAt = live(prev) ? prev!.expiresAt : 0;
       kv.set(k, { value: v, expiresAt });
       return "OK";
     }),
@@ -240,6 +241,7 @@ describe("createSession", () => {
 describe("checkSession — idle + absolute enforcement", () => {
   it("returns ok inside both windows and slides lastSeenAt past the throttle", async () => {
     const { sid } = await createSession(alice);
+    const expiresAt = fake.kv.get(SESSION_KEY_PREFIX + sid)!.expiresAt;
     advanceSeconds(SESSION_TOUCH_INTERVAL_SECONDS + 1);
 
     const result = await checkSession(sid);
@@ -247,6 +249,30 @@ describe("checkSession — idle + absolute enforcement", () => {
 
     const stored = JSON.parse(fake.kv.get(SESSION_KEY_PREFIX + sid)!.value);
     expect(stored.lastSeenAt).toBe(Math.floor(Date.now() / 1000));
+    expect(fake.kv.get(SESSION_KEY_PREFIX + sid)!.expiresAt).toBe(expiresAt);
+  });
+
+  it("cannot recreate a session revoked while its activity touch is pending", async () => {
+    const { sid } = await createSession(alice);
+    advanceSeconds(SESSION_TOUCH_INTERVAL_SECONDS + 1);
+    const write = fake.set.getMockImplementation()!;
+    let entered!: () => void;
+    let resume!: () => void;
+    const touching = new Promise<void>((resolve) => { entered = resolve; });
+    const released = new Promise<void>((resolve) => { resume = resolve; });
+    fake.set.mockImplementationOnce(async (...args) => {
+      entered();
+      await released;
+      return write(...args);
+    });
+    const pending = checkSession(sid);
+    await touching;
+    expect(await revokeAllSessions(alice.id)).toBe(1);
+    resume();
+    expect(await pending).toEqual({ kind: "missing" });
+    expect(fake.kv.has(SESSION_KEY_PREFIX + sid)).toBe(false);
+    expect(fake.zsets.get(SESSION_INDEX_PREFIX + alice.id)!.has(sid)).toBe(false);
+    expect(await checkSession(sid)).toEqual({ kind: "missing" });
   });
 
   it("does NOT rewrite lastSeenAt inside the 30s throttle window", async () => {

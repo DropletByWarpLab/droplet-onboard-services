@@ -11,6 +11,10 @@
  *     than placed in a response header.
  */
 import { createHash } from "node:crypto";
+import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { ReadStream } from "node:fs";
 import { describe, it, expect, vi, afterEach } from "vitest";
 
 vi.mock("../config.js", () => ({
@@ -102,6 +106,43 @@ describe("bundle()", () => {
       );
       expect(await rejection(client.bundle("ws-a")), String(head)).toMatchObject({ status: 502 });
     }
+  });
+});
+
+describe("importArchive()", () => {
+  it("streams source bytes with encoded attribution and always closes its file", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "archive-client-"));
+    const file = join(dir, "source.zip");
+    await writeFile(file, "source bytes");
+    let source: ReadStream | undefined;
+    try {
+      const { client, fetchImpl } = clientWith(async (url, init) => {
+        expect(url).toBe("http://sandbox:8030/workspaces/ws-a/import?format=tar.gz");
+        expect(init.headers).toMatchObject({ Authorization: "Bearer t", "Content-Length": "12",
+          "X-Droplet-Author-Name": "%C3%86sa", "X-Droplet-Author-Email": "asa%40example.test" });
+        source = init.body as unknown as ReadStream;
+        expect((await drain(source)).toString()).toBe("source bytes");
+        return Response.json({ id: "ws-a", branch: "work", head: HEAD, dirty: false, tags: [] });
+      });
+      expect(await client.importArchive!("ws-a", "tar.gz", { name: "Æsa", email: "asa@example.test" }, file, 12)).toMatchObject({ head: HEAD });
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      expect(source?.destroyed).toBe(true);
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+
+  it("relays hostile-archive errors and closes a rejected upload stream", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "archive-client-"));
+    const file = join(dir, "source.zip");
+    await writeFile(file, "bad");
+    let source: ReadStream | undefined;
+    try {
+      const { client } = clientWith((_url, init) => {
+        source = init.body as unknown as ReadStream;
+        return Response.json({ detail: "unsafe path" }, { status: 400 });
+      });
+      expect(await rejection(client.importArchive!("ws-a", "zip", { name: "A", email: "a@b.test" }, file, 3))).toMatchObject({ status: 400 });
+      expect(source?.destroyed).toBe(true);
+    } finally { await rm(dir, { recursive: true, force: true }); }
   });
 });
 

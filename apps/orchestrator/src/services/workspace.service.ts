@@ -16,6 +16,7 @@
  * ToolSpec walker) so the routes are testable without a container.
  */
 import { pipeline, Readable, Transform } from "node:stream";
+import { createReadStream } from "node:fs";
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
 import { parseConnectorDraftFacts, type ConnectorDraftFacts } from "./connector-draft.js";
@@ -30,6 +31,7 @@ export const WORKSPACE_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
  * follows is checked against {@link RUN_ARG}. Mirrors services/sandbox
  * workspace.py RUN_COMMANDS — the sandbox test pins its own copy, and
  * `workspace.routes.test.ts` pins this one against the same cases.
+ * `app-check` is an exact, argument-free command handled separately below.
  */
 export const RUN_COMMANDS: ReadonlyArray<ReadonlyArray<string>> = [
   ["npm", "test"],
@@ -44,6 +46,9 @@ const RUN_ARG = /^[A-Za-z0-9_./=:@,+-]{1,128}$/;
 export function refuseRunArgv(argv: unknown): string | null {
   if (!Array.isArray(argv) || argv.length === 0 || argv.length > 16) {
     return "argv must have 1–16 entries";
+  }
+  if (argv[0] === "app-check") {
+    return argv.length === 1 ? null : "app-check takes no arguments";
   }
   if (!argv.every((a) => typeof a === "string")) return "argv must be strings";
   const words = argv as string[];
@@ -88,6 +93,8 @@ export class WorkspaceSandboxError extends Error {
 export interface WorkspaceSandboxClient {
   templates(): Promise<string[]>;
   create(id: string, template: string | null, author: WorkspaceAuthor): Promise<SandboxWorkspaceStatus>;
+  /** Human archive upload; streamed from a temporary file and never executed. */
+  importArchive?(id: string, format: "zip" | "tar.gz", author: WorkspaceAuthor, file: string, bytes: number): Promise<SandboxWorkspaceStatus>;
   status(id: string): Promise<SandboxWorkspaceStatus>;
   remove(id: string): Promise<void>;
   op(id: string, op: WorkspaceOp, body: Record<string, unknown>, timeoutMs?: number): Promise<unknown>;
@@ -230,6 +237,30 @@ export function createWorkspaceSandboxClient(opts: WorkspaceSandboxClientOptions
         await call("POST", "/workspaces", { id, template, author }, DEFAULT_OP_TIMEOUT_MS),
         "create workspace",
       );
+    },
+    async importArchive(id, format, author, file, bytes) {
+      const { baseUrl, token } = settings();
+      const source = createReadStream(file);
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 300_000);
+      try {
+        const init = {
+          method: "POST", body: source, duplex: "half", signal: controller.signal,
+          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/octet-stream",
+            "Content-Length": String(bytes), "X-Droplet-Author-Name": encodeURIComponent(author.name),
+            "X-Droplet-Author-Email": encodeURIComponent(author.email) },
+        } as unknown as RequestInit;
+        const response = await fetchImpl(`${baseUrl}/workspaces/${encodeURIComponent(id)}/import?format=${encodeURIComponent(format)}`, init);
+        return unwrap<SandboxWorkspaceStatus>({status: response.status, json: await response.json().catch(() => null)}, "import archive");
+      } catch (err) {
+        if (err instanceof WorkspaceSandboxError) throw err;
+        throw new WorkspaceSandboxError(controller.signal.aborted ? "archive import timed out" : "archive import could not reach the sandbox",
+          controller.signal.aborted ? 504 : 502, controller.signal.aborted ? "TIMEOUT" : "UNREACHABLE");
+      } finally {
+        clearTimeout(timer);
+        controller.abort();
+        source.destroy();
+      }
     },
     async status(id) {
       return unwrap<SandboxWorkspaceStatus>(

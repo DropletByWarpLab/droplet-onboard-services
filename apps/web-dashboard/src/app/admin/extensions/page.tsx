@@ -34,6 +34,7 @@ import { InstalledList } from "@/components/admin/extensions/InstalledList";
 import { ProposalsList } from "@/components/admin/extensions/ProposalsList";
 import { PromoteReadback } from "@/components/admin/extensions/PromoteReadback";
 import { ToolReviews } from "@/components/admin/extensions/ToolReview";
+import { useOwnerConfirmation } from "@/components/hosted/useOwnerConfirmation";
 import {
   EXTENSIONS_SUB,
   OWNER_ONLY,
@@ -82,6 +83,11 @@ function isPreflight(v: unknown): v is ExtensionPreflight {
 
 export default function ExtensionsAdminPage() {
   const { user } = useAuth();
+  return <ExtensionsAdminContent key={JSON.stringify([user?.id, user?.role])} />;
+}
+
+function ExtensionsAdminContent() {
+  const { user } = useAuth();
   const isOwner = user?.role === "owner";
   const ext = useExtensions();
   const { domains } = useToolCatalog();
@@ -94,6 +100,7 @@ export default function ExtensionsAdminPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [busySlug, setBusySlug] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const ownerConfirm = useOwnerConfirmation({ actionLabel: "Continue", onError: setActionError });
 
   const closeReview = () => {
     setReview(null);
@@ -101,19 +108,21 @@ export default function ExtensionsAdminPage() {
     setConfirmError(null);
   };
 
-  const onReview = async (workspaceId: string) => {
+  const onReview = async (workspaceId: string, currentPassword?: string) => {
     setReviewing(workspaceId);
     setReview(null);
     setReviewError(null);
     setConfirmError(null);
     setNotice(null);
     try {
-      const phase1 = await ext.preparePromotion(workspaceId);
+      const phase1 = await ext.preparePromotion(workspaceId, currentPassword);
       setReview({ kind: "ready", phase1 });
     } catch (err) {
       // A blocked preflight is a readback the owner should still see — with
       // the reason — just not one they can confirm.
-      if (
+      if (ownerConfirm.requestConfirmation(err, (password) => onReview(workspaceId, password))) {
+        // The readback is fetched again after this session is confirmed.
+      } else if (
         err instanceof ExtensionRequestError &&
         err.code === "preflight_blocked" &&
         isReadback(err.body.readback) &&
@@ -137,13 +146,13 @@ export default function ExtensionsAdminPage() {
     }
   };
 
-  const onConfirm = async (operatorDomain: string) => {
+  const onConfirm = async (operatorDomain: string, hostedAppRoles?: string[], currentPassword?: string) => {
     if (review?.kind !== "ready") return;
     const { phase1 } = review;
     setConfirming(true);
     setConfirmError(null);
     try {
-      const result = await ext.confirmPromotion(phase1, operatorDomain);
+      const result = await ext.confirmPromotion(phase1, operatorDomain, hostedAppRoles, currentPassword);
       closeReview();
       // The install error by its code only: its message can carry the
       // extension's build output and error text (review #2326).
@@ -154,19 +163,19 @@ export default function ExtensionsAdminPage() {
           : `${promoted}, but it is not running. ${explainLifecycleFailure(result.installError?.code ?? null)}`,
       );
     } catch (err) {
-      setConfirmError(explainExtensionError(err));
+      if (!ownerConfirm.requestConfirmation(err, (password) => onConfirm(operatorDomain, hostedAppRoles, password))) setConfirmError(explainExtensionError(err));
     } finally {
       setConfirming(false);
     }
   };
 
-  const runAction = async (slug: string, action: () => Promise<void>) => {
+  const runAction = async (slug: string, action: (currentPassword?: string) => Promise<void>, currentPassword?: string) => {
     setBusySlug(slug);
     setActionError(null);
     try {
-      await action();
+      await action(currentPassword);
     } catch (err) {
-      setActionError(explainExtensionError(err));
+      if (!ownerConfirm.requestConfirmation(err, (password) => runAction(slug, action, password))) setActionError(explainExtensionError(err));
     } finally {
       setBusySlug(null);
     }
@@ -210,6 +219,7 @@ export default function ExtensionsAdminPage() {
 
       {review?.kind === "ready" ? (
         <PromoteReadback
+          key={review.phase1.confirmationToken}
           slug={review.phase1.slug}
           version={review.phase1.version}
           commit={review.phase1.commit}
@@ -220,7 +230,7 @@ export default function ExtensionsAdminPage() {
           domains={domains}
           busy={confirming}
           error={confirmError}
-          onConfirm={(d) => void onConfirm(d)}
+          onConfirm={(d, roles) => void onConfirm(d, roles)}
           onCancel={closeReview}
         />
       ) : review?.kind === "blocked" ? (
@@ -245,8 +255,9 @@ export default function ExtensionsAdminPage() {
         error={ext.extensionsError}
         canManage={isOwner}
         busy={busySlug}
-        onSetEnabled={(slug, enabled) => void runAction(slug, () => ext.setEnabled(slug, enabled))}
-        onUninstall={(slug) => void runAction(slug, () => ext.uninstall(slug))}
+        onSetEnabled={(slug, enabled) => void runAction(slug, (password) => ext.setEnabled(slug, enabled, password))}
+        onUninstall={(slug) => void runAction(slug, (password) => ext.uninstall(slug, password))}
+        onRefresh={ext.refresh}
       />
       {actionError ? (
         <Card>
@@ -256,7 +267,8 @@ export default function ExtensionsAdminPage() {
         </Card>
       ) : null}
 
-      <ToolReviews extensions={ext.extensions} canReview={isOwner} />
+      <ToolReviews extensions={ext.extensions.filter((item) => item.readback?.kind !== "app")} canReview={isOwner} />
+      {ownerConfirm.confirmation}
     </ShellPage>
   );
 }

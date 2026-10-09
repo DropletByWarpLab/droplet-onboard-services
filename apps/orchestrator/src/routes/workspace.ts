@@ -42,6 +42,9 @@ import type { PrismaClient } from "@prisma/client";
 import { createHash, randomBytes } from "node:crypto";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import multer, { MulterError } from "multer";
+import { unlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import {
   recordAccessDenied,
   requireRole,
@@ -69,19 +72,14 @@ import {
   parseConnectorDraftFacts,
   summarizeConnectorDraft,
 } from "../services/connector-draft.js";
+import { parseExtensionManifest, deriveReadback } from "../services/extension-manifest.js";
 
 const logger = createLogger("workspace-routes");
 const MCP_PRINCIPAL_ID = "_service:mcp";
 const WORKSHOP_ROLES: ReadonlySet<string> = new Set(["owner", "admin"]);
-// Fetch for every authenticated HUMAN role; push for owner/admin only. This is
-// the ticket's AC verbatim — "read for any authenticated role; push for
-// owner/admin" (WARP-2896, first bullet) — and deliberate: an extension's
-// source is not the box's data (its files, mail, calendar), it is code a run
-// wrote from a template, and the workshop's WRITE path (`/api/workspace/*`,
-// owner/admin) is what protects the box. A guest cloning an in-progress
-// extension sees what the owner could hand them anyway; tightening this is a
-// product call to make on the ticket, not silently here.
-const GIT_FETCH_ROLES: ReadonlySet<string> = new Set(["owner", "admin", "family", "guest"]);
+// Hosted applications can carry private source and vendored assets. Keep
+// fetch at the same owner/admin boundary as the Workshop's source API.
+const GIT_FETCH_ROLES: ReadonlySet<string> = new Set(["owner", "admin"]);
 const GIT_PUSH_ROLES: ReadonlySet<string> = new Set(["owner", "admin"]);
 export const AGENT_RUN_HEADER = "x-droplet-agent-run";
 const TEMPLATES_REPO = "templates";
@@ -91,6 +89,7 @@ const createSchema = z.object({
   id: z.string().regex(WORKSPACE_ID).optional(),
   template: z.string().trim().min(1).max(64).optional(),
   onBehalfOf: z.string().trim().min(1).max(200).optional(),
+  kind: z.enum(["extension", "app"]).optional(),
 });
 const idParam = z.string().regex(WORKSPACE_ID);
 const onBehalf = z.object({ onBehalfOf: z.string().trim().min(1).max(200).optional() });
@@ -114,6 +113,18 @@ const opSchemas: Record<WorkspaceOp, z.ZodTypeAny> = {
 };
 /** The ops a person may drive from the dashboard without a run. */
 const HUMAN_OPS: ReadonlySet<WorkspaceOp> = new Set(["read", "search", "diff", "log"]);
+const APP_TEMPLATES = new Set(["static-site", "node-app", "python-app"]);
+const ARCHIVE_UPLOAD_BYTES = 256 * 1024 * 1024;
+const archiveUpload = multer({
+  storage: multer.diskStorage({ destination: tmpdir(), filename: (_req, _file, cb) => cb(null, `droplet-app-${randomBytes(20).toString("hex")}`) }),
+  limits: { fileSize: ARCHIVE_UPLOAD_BYTES, files: 1, fields: 2, parts: 3, fieldSize: 1024 },
+}).single("archive");
+
+function appCreationEnabled(res: Response): boolean {
+  if (["1", "true", "yes"].includes((process.env.SANDBOX_PROCESS_SUPERVISION ?? "0").trim())) return true;
+  res.status(503).json({ error: "App hosting is turned off on this Droplet", code: "HOSTING_DISABLED" });
+  return false;
+}
 
 interface Actor {
   id: string;
@@ -258,6 +269,7 @@ export function createWorkspaceRouter(
       res.json({
         workspaces: rows.map((w) => ({
           id: w.id,
+          kind: w.kind ?? "extension",
           name: w.name,
           template: w.template,
           status: w.status,
@@ -285,6 +297,7 @@ export function createWorkspaceRouter(
       }
       const actor = await actorOr403(req, res, parsed.data.onBehalfOf);
       if (!actor) return;
+      if ((parsed.data.kind === "app" || APP_TEMPLATES.has(parsed.data.template ?? "")) && !appCreationEnabled(res)) return;
       const id = parsed.data.id ?? slugify(parsed.data.name);
       if (id === TEMPLATES_REPO) {
         res.status(400).json({ error: "that id is reserved" });
@@ -299,37 +312,75 @@ export function createWorkspaceRouter(
       // state the box must never run in, and the sandbox refuses a
       // duplicate on its own (409) if the DB and the volume ever disagree.
       const status = await sandbox.create(id, parsed.data.template ?? null, authorOf(actor));
-      try {
-        const row = await prisma.workshopWorkspace.create({
-          data: { id, userId: actor.id, name: parsed.data.name, template: parsed.data.template ?? null },
-        });
-        await recordActivity({
-          kind: "tool_run",
-          severity: "info",
-          sourceIcon: "hammer",
-          what: "Workspace created",
-          sub: parsed.data.name,
-          actor: actorFromRequest(req),
-          refs: { workspaceId: id, userId: actor.username, template: parsed.data.template ?? null },
-        });
-        res.status(201).json({
-          id: row.id,
-          name: row.name,
-          template: row.template,
-          status: row.status,
-          createdAt: row.createdAt.toISOString(),
-          git: status,
-        });
-      } catch (err) {
+      const row = await prisma.workshopWorkspace.create({
+        data: { id, userId: actor.id, name: parsed.data.name, template: parsed.data.template ?? null,
+          kind: parsed.data.kind === "app" || APP_TEMPLATES.has(parsed.data.template ?? "") ? "app" : "extension" },
+      }).catch(async (err) => {
         await sandbox.remove(id).catch(() => undefined);
         throw err;
-      }
+      });
+      await recordActivity({
+        kind: "tool_run",
+        severity: "info",
+        sourceIcon: "hammer",
+        what: "Workspace created",
+        sub: parsed.data.name,
+        actor: actorFromRequest(req),
+        refs: { workspaceId: id, userId: actor.username, template: parsed.data.template ?? null },
+      });
+      res.status(201).json({
+        id: row.id,
+        kind: row.kind ?? "extension",
+        name: row.name,
+        template: row.template,
+        status: row.status,
+        createdAt: row.createdAt.toISOString(),
+        git: status,
+      });
     } catch (err) {
       relaySandboxError(err, res, next);
     }
   });
 
   // ── one workspace ───────────────────────────────────────────────────────
+
+  router.post("/workspace/import", requireRole("owner", "admin"), async (req, res, next) => {
+    if (!appCreationEnabled(res)) return;
+    const timer = setTimeout(() => req.destroy(new Error("archive upload timed out")), 120_000);
+    try {
+      await new Promise<void>((resolve, reject) => archiveUpload(req, res, (err) => err ? reject(err) : resolve()));
+      clearTimeout(timer);
+      const parsed = createSchema.pick({ name: true, id: true }).strict().safeParse(req.body);
+      if (!parsed.success || !req.file) {
+        res.status(400).json({ error: "Choose a name and one zip or tar.gz archive" });
+        return;
+      }
+      const format = /\.zip$/i.test(req.file.originalname) ? "zip" : /\.(tar\.gz|tgz)$/i.test(req.file.originalname) ? "tar.gz" : null;
+      if (!format) { res.status(400).json({ error: "Archive must be zip or tar.gz" }); return; }
+      const actor = await actorOr403(req, res, undefined);
+      if (!actor) return;
+      const id = parsed.data.id ?? slugify(parsed.data.name);
+      if (id === TEMPLATES_REPO) { res.status(400).json({ error: "that id is reserved" }); return; }
+      if (await prisma.workshopWorkspace.findUnique({ where: { id }, select: { id: true } })) {
+        res.status(409).json({ error: `workspace ${id} already exists` }); return;
+      }
+      if (!sandbox.importArchive) { res.status(503).json({ error: "Archive import is unavailable" }); return; }
+      const git = await sandbox.importArchive(id, format, authorOf(actor), req.file.path, req.file.size);
+      const row = await prisma.workshopWorkspace.create({ data: { id, userId: actor.id, name: parsed.data.name, template: null, kind: "app" } }).catch(async (err) => {
+        await sandbox.remove(id).catch(() => undefined);
+        throw err;
+      });
+      await recordActivity({ kind: "tool_run", severity: "info", sourceIcon: "hammer", what: "Application source imported",
+        sub: parsed.data.name, actor: actorFromRequest(req), refs: { workspaceId: id, userId: actor.username } });
+      res.status(201).json({ id: row.id, kind: row.kind ?? "extension", name: row.name, template: row.template, status: row.status, createdAt: row.createdAt.toISOString(), git });
+    } catch (err) {
+      if (err instanceof MulterError) { res.status(err.code === "LIMIT_FILE_SIZE" ? 413 : 400).json({ error: "Archive upload exceeds its size or field limits" }); return; }
+      relaySandboxError(err, res, next);
+    } finally {
+      clearTimeout(timer);
+      if (req.file) await unlink(req.file.path).catch(() => undefined);
+    }
+  });
 
   router.get("/workspace/:id", gate, async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -367,8 +418,23 @@ export function createWorkspaceRouter(
           throw err;
         },
       );
+      const app = await sandbox.op(id.data, "read", { path: "extension-manifest.json" }).then((value) => {
+        const content = (value as { content?: unknown })?.content;
+        if (typeof content !== "string") return null;
+        const parsed = parseExtensionManifest(Buffer.from(content));
+        if (!parsed.ok || parsed.manifest.kind !== "app") return null;
+        const manifest = parsed.manifest;
+        return { kind: manifest.kind, runtime: manifest.runtime, http: manifest.http,
+          memoryMb: manifest.runtime === "static" ? 0 : manifest.resources.memoryMb,
+          egress: manifest.egress, lines: deriveReadback(manifest).lines };
+      }, (err: unknown) => {
+        if (err instanceof WorkspaceSandboxError && err.status === 404) return null;
+        if (err instanceof WorkspaceSandboxError) return { error: err.message, code: err.code };
+        throw err;
+      });
       res.json({
         id: row.id,
+        kind: row.kind ?? "extension",
         name: row.name,
         template: row.template,
         status: row.status,
@@ -379,6 +445,7 @@ export function createWorkspaceRouter(
         userId: row.userId,
         git,
         connectorDraft,
+        app,
         runs: row.runs.map((r) => ({
           id: r.id,
           status: r.status,

@@ -75,6 +75,7 @@ import {
 } from "../services/extension-sandbox.client.js";
 import { extensionSelfCallRefusal } from "../services/extension-self-call.js";
 import { createLogger } from "../lib/logger.js";
+import { createHostedService, HostedError } from "../services/hosted.service.js";
 
 const logger = createLogger("extensions-route");
 
@@ -83,9 +84,11 @@ const phase2Schema = z
     confirmationToken: z.string().min(1).max(200),
     manifestSha256: z.string().regex(/^[0-9a-f]{64}$/),
     operatorDomain: z.string().min(1).max(64).nullish(),
+    hostedAppRoles: z.array(z.literal("family")).max(1).optional(),
+    currentPassword: z.string().max(1000).optional(),
   })
   .strict();
-const phase1Schema = z.object({}).strict();
+const phase1Schema = z.object({ currentPassword: z.string().max(1000).optional() }).strict();
 const selfCallSchema = z
   .object({
     tool: z.string().min(1).max(64),
@@ -140,6 +143,7 @@ export function createExtensionsRouter(prisma: PrismaClient, deps: ExtensionsRou
   // account two-step policy (REQUIRE_ADMIN_TWO_STEP, off by default), so with
   // the policy off promote still needs no recent second factor.
   const promoteMfaGate = createRequireAdminStepUp(prisma);
+  const hosted = createHostedService(prisma, { sandbox });
 
   const ownerOrAdmin = requireRole("owner", "admin");
   const ownerOnly = requireRole("owner");
@@ -150,6 +154,9 @@ export function createExtensionsRouter(prisma: PrismaClient, deps: ExtensionsRou
     if (err instanceof PromoteError) {
       res.status(err.httpStatus).json({ error: err.code, message: err.message, ...err.body });
       return;
+    }
+    if (err instanceof HostedError) {
+      res.status(err.status).json({ error: err.code }); return;
     }
     if (err instanceof ExtensionLifecycleError) {
       res.status(err.httpStatus).json({ error: err.code, message: err.message, ...err.body });
@@ -398,7 +405,7 @@ export function createExtensionsRouter(prisma: PrismaClient, deps: ExtensionsRou
         return;
       }
       const result = await confirmPromotion(promoteDeps, owner(req), workspaceId.data, parsed.data);
-      res.status(201).json(result);
+      res.status(201).json({ ...result, extension: result.extension ? { ...result.extension, appRelayKeyEnc: undefined } : null });
     } catch (err) {
       if (!(err instanceof PromoteError)) logger.warn({ err }, "extension_promote_failed");
       fail(err, res, next);
@@ -421,17 +428,32 @@ export function createExtensionsRouter(prisma: PrismaClient, deps: ExtensionsRou
       }
     };
 
-  router.post("/extensions/:slug/disable", ownerOnly, transition("disable"));
-  router.post("/extensions/:slug/enable", ownerOnly, transition("enable"));
+  router.get("/extensions/:slug/grants", ownerOrAdmin, async (req, res, next) => {
+    try {
+      if (!["owner", "admin"].includes((await hosted.actor(req)).role)) throw new HostedError(403, "app_grants_refused");
+      res.json(await hosted.grants(req.params.slug));
+    } catch (err) { fail(err, res, next); }
+  });
+  router.put("/extensions/:slug/grants", ownerOnly, promoteMfaGate, async (req, res, next) => {
+    const parsed = z.object({ roles: z.array(z.literal("family")).max(1), currentPassword: z.string().max(1000).optional() }).strict().safeParse(req.body);
+    if (!parsed.success) { res.status(400).json({ error: "invalid_app_grants" }); return; }
+    try { res.json(await hosted.grants(req.params.slug, parsed.data.roles, await hosted.actor(req))); } catch (err) { fail(err, res, next); }
+  });
+  router.post("/extensions/:slug/disable", ownerOnly, promoteMfaGate, transition("disable"));
+  router.post("/extensions/:slug/enable", ownerOnly, promoteMfaGate, transition("enable"));
 
-  router.delete("/extensions/:slug", ownerOnly, async (req, res, next) => {
+  router.delete("/extensions/:slug", ownerOnly, promoteMfaGate, async (req, res, next) => {
     const slug = slugParam.safeParse(req.params.slug);
     if (!slug.success) {
       res.status(400).json({ error: "invalid_extension" });
       return;
     }
+    const body = z.object({ deleteData: z.boolean().optional(), confirmSlug: z.string().optional(), currentPassword: z.string().max(1000).optional() }).strict().safeParse(req.body ?? {});
+    if (!body.success || (body.data.deleteData && body.data.confirmSlug !== slug.data)) {
+      res.status(400).json({ error: "typed_app_confirmation_required" }); return;
+    }
     try {
-      const row = await lifecycle.uninstall(slug.data, actorFromRequest(req));
+      const row = await lifecycle.uninstall(slug.data, actorFromRequest(req), body.data.deleteData === true);
       res.json({ id: row.id, status: row.status });
     } catch (err) {
       fail(err, res, next);

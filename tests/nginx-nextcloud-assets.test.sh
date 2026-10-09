@@ -177,7 +177,7 @@ echo "--- Phase 1b: the Host variable never appears in PROSE (file-wide) ---"
 prose_hits=""
 while IFS=: read -r lineno _; do
   [ -n "$lineno" ] || continue
-  if ! grep -qE '^[[:space:]]*proxy_set_header Host \$host;$' \
+  if ! grep -qE '^[[:space:]]*proxy_set_header (Host|X-Forwarded-Host) \$host;$' \
        <<<"$(sed -n "${lineno}p" "$CONF")"; then
     prose_hits="$prose_hits $lineno"
   fi

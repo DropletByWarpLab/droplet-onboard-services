@@ -273,7 +273,7 @@ describe("phase 2 — confirm, sign, store, install", () => {
     expect(t.sandbox.installs).toHaveLength(1);
     const req = t.sandbox.installs[0].req;
     expect(req.token).toMatch(/^dxt_[A-Za-z0-9_-]{43}$/);
-    expect(t.db.extensions.get(WS)?.serviceTokenHash).toBe(hashExtensionToken(req.token));
+    expect(t.db.extensions.get(WS)?.serviceTokenHash).toBe(hashExtensionToken(req.token!));
     // The install request carries the extension's own bearer and NOTHING else
     // secret: no sandbox bearer, no mcp token, no other service token.
     expect(Object.keys(req).sort()).toEqual(

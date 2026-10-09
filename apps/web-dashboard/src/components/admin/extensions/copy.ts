@@ -19,10 +19,10 @@ import { ExtensionRequestError } from "@/lib/api";
 import type { ExtensionStatus } from "@/lib/types";
 
 export const EXTENSIONS_SUB =
-  "Tools built in the workshop, promoted by an owner, and run by this box in its sandbox.";
+  "Tools and apps built in the workshop, promoted by an owner, and run by this box in its sandbox.";
 
 export const WHAT_PROMOTING_DOES =
-  "Promoting signs the exact code of a workshop proposal with this box's key, runs it in the sandbox with no internet, and adds its tools to the assistant.";
+  "Promoting signs the exact code of a workshop proposal with this box's key and runs it in the sandbox with no internet. Apps open in your browser; tools can be added to the assistant.";
 
 /** The WARP-2321 caveat, in the owner's terms. */
 export const TOOLS_START_BLOCKED =
@@ -147,6 +147,14 @@ export function explainExtensionError(err: unknown): string {
         return "Its manifest is not valid, so nothing was signed.";
       case "invalid_domain":
         return "That area is not one this box knows.";
+      case "MFA_ENROLLMENT_REQUIRED":
+        return "Turn on two-factor sign-in in Settings first, then try again.";
+      case "mfa_required":
+      case "mfa_stale":
+        return "Confirm it's you to continue.";
+      case "STEP_UP_PASSWORD_REQUIRED":
+      case "INVALID_PASSWORD":
+        return "Confirm your current password to continue.";
       default:
         return lifecycleCopyFor(err.code) ?? EXTENSION_ERROR_DEFAULT;
     }

@@ -20,7 +20,27 @@
  *
  * `summary` and every `description` are free text the extension author
  * wrote. Nothing the owner is asked to confirm is derived from them:
- * `deriveReadback` reads provides/resources/egress only.
+ * `deriveReadback` reads kind/runtime/provides/resources/egress only.
+ *
+ * ## Hosted apps (WARP-3905, slice HA-1 of the hosted-apps design)
+ *
+ * `kind` is "extension" (a tool extension: MCP tools, as before) or "app" (a
+ * web app the box serves). Both stay schemaVersion 1; the change is additive:
+ *
+ *   - an app REQUIRES `http: { health, dir?, spa? }`; an extension REFUSES it;
+ *   - `runtime: "static"` is only valid for an app, requires `http.dir` and
+ *     refuses `entrypoint` (the sandbox serves the directory: no process);
+ *     `dir` and `spa` are static only. A node20/python312 app keeps its
+ *     `entrypoint`: it IS the HTTP server;
+ *   - an app's `provides.tools` is empty in v1; an extension keeps min 1;
+ *   - there is no port anywhere: the box assigns it, and strictness refuses
+ *     a manifest that names one;
+ *   - `egress` is still the literal "none".
+ *
+ * The rules that tie fields together (kind, http, runtime, entrypoint, tools)
+ * are checked in `extensionManifestSchema`, which wraps the strict object
+ * schema (`extensionManifestObjectSchema`), and are mirrored in the JSON
+ * Schema's `allOf`.
  *
  * ## The statement (what the box key actually signs)
  *
@@ -41,8 +61,18 @@ import { z } from "zod";
 
 export const EXTENSION_MANIFEST_SCHEMA_VERSION = 1;
 export const EXTENSION_STATEMENT_SCHEMA_VERSION = 1;
+/**
+ * The kind of the signed STATEMENT, and of a tool extension's manifest. The
+ * statement stays this one literal for every manifest kind: the box key signs
+ * one statement shape (update-agent/extension-verify.ts).
+ */
 export const EXTENSION_KIND = "extension";
-export const EXTENSION_RUNTIMES = ["node20", "python312"] as const;
+/** What a manifest declares itself to be. An app is a web app the box serves. */
+export const EXTENSION_MANIFEST_KINDS = ["extension", "app"] as const;
+export type ExtensionManifestKind = (typeof EXTENSION_MANIFEST_KINDS)[number];
+/** "static" is valid for apps only: the sandbox serves a directory, no process. */
+export const EXTENSION_RUNTIMES = ["node20", "python312", "static"] as const;
+export type ExtensionRuntime = (typeof EXTENSION_RUNTIMES)[number];
 
 /** Mirrors services/sandbox/gitstore.py WORKSPACE_ID. */
 export const WORKSPACE_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
@@ -55,6 +85,19 @@ export const EXTENSION_VERSION_PATTERN = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/;
  */
 export const ENTRYPOINT_PATTERN =
   /^[A-Za-z0-9_][A-Za-z0-9_.-]*(\/[A-Za-z0-9_][A-Za-z0-9_.-]*)*$/;
+/**
+ * `http.dir`: "." (the installed tree itself) or a relative POSIX path of
+ * entrypoint-style segments. No ".." anywhere in it, no leading "/", no
+ * "./", no empty segment, no backslash, no drive letter.
+ */
+export const HTTP_DIR_PATTERN =
+  /^(?!.*\.\.)(\.|[A-Za-z0-9_][A-Za-z0-9_.-]*(\/[A-Za-z0-9_][A-Za-z0-9_.-]*)*)$/;
+/**
+ * `http.health`: an absolute URL path of unreserved characters and "/" only
+ * (no query, no fragment, no space, no control character, no escape), with
+ * no ".." anywhere in it. The sandbox sends `GET <health>` to the app.
+ */
+export const HTTP_HEALTH_PATTERN = /^(?!.*\.\.)\/[A-Za-z0-9._~/-]*$/;
 /** snake_case; a subset of the multiplexer's wire-name pattern. */
 export const TOOL_NAME_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
 /** A plain JS/Python identifier: the named export the host shim calls. */
@@ -101,18 +144,37 @@ const proposedGrantSchema = z
   })
   .strict();
 
-export const extensionManifestSchema = z
+const httpSchema = z
+  .object({
+    // GET must answer 2xx within the install deadline (HA-3).
+    health: z.string().max(256).regex(HTTP_HEALTH_PATTERN),
+    // Static only: the directory of the installed tree the sandbox serves.
+    dir: z.string().max(256).regex(HTTP_DIR_PATTERN).optional(),
+    // Static only: unknown paths fall back to index.html.
+    spa: z.boolean().optional(),
+  })
+  .strict();
+
+/**
+ * The structural schema: every key, strict at every level. The rules that tie
+ * fields together live on {@link extensionManifestSchema}, which wraps this.
+ */
+export const extensionManifestObjectSchema = z
   .object({
     schemaVersion: z.literal(EXTENSION_MANIFEST_SCHEMA_VERSION),
     id: z.string().regex(WORKSPACE_ID_PATTERN),
     name: z.string().min(1).max(120),
     version: z.string().regex(EXTENSION_VERSION_PATTERN),
-    kind: z.literal(EXTENSION_KIND),
+    kind: z.enum(EXTENSION_MANIFEST_KINDS),
     runtime: z.enum(EXTENSION_RUNTIMES),
-    entrypoint: z.string().max(256).regex(ENTRYPOINT_PATTERN),
+    // The server for node20/python312; absent for static (kind-aware rule).
+    entrypoint: z.string().max(256).regex(ENTRYPOINT_PATTERN).optional(),
+    // Required for an app, refused for an extension (kind-aware rule).
+    http: httpSchema.optional(),
     provides: z
       .object({
-        tools: z.array(toolSchema).min(1).max(32),
+        // min 1 for an extension, empty for an app (kind-aware rule).
+        tools: z.array(toolSchema).max(32),
         routineDrafts: z.array(routineDraftSchema).max(16),
         proposedGrants: z.array(proposedGrantSchema).max(32),
       })
@@ -133,6 +195,36 @@ export const extensionManifestSchema = z
     summary: z.string().max(2000).optional(),
   })
   .strict();
+
+/**
+ * The manifest: the strict object plus the rules that tie fields together.
+ * docs/schemas/extension-manifest.schema.json states the same rules in its
+ * `allOf`; the drift test runs one corpus through both.
+ */
+export const extensionManifestSchema = extensionManifestObjectSchema.superRefine((m, ctx) => {
+  const issue = (path: (string | number)[], message: string): void =>
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path, message });
+  const isApp = m.kind === "app";
+  const tools = m.provides.tools.length;
+  if (isApp) {
+    if (m.http === undefined) issue(["http"], "an app requires an http block");
+    if (tools > 0) issue(["provides", "tools"], "an app provides no tools in v1");
+  } else {
+    if (m.http !== undefined) issue(["http"], "only an app has an http block");
+    if (tools === 0) issue(["provides", "tools"], "an extension provides at least one tool");
+  }
+  if (m.runtime === "static") {
+    if (!isApp) issue(["runtime"], "runtime static is only valid for an app");
+    if (m.entrypoint !== undefined) issue(["entrypoint"], "a static app has no entrypoint: nothing runs");
+    if (m.http !== undefined && m.http.dir === undefined) {
+      issue(["http", "dir"], "a static app requires http.dir");
+    }
+  } else {
+    if (m.entrypoint === undefined) issue(["entrypoint"], `a ${m.runtime} manifest requires an entrypoint`);
+    if (m.http?.dir !== undefined) issue(["http", "dir"], "http.dir is for static apps only");
+    if (m.http?.spa !== undefined) issue(["http", "spa"], "http.spa is for static apps only");
+  }
+});
 
 export type ExtensionManifest = z.infer<typeof extensionManifestSchema>;
 
@@ -303,6 +395,11 @@ export function deriveExtensionSlug(workspaceId: string): string {
 // ─── the promote readback ────────────────────────────────────────────────
 
 export interface ExtensionReadback {
+  /** So the UI can tell an app from an extension, and render the app's URL. */
+  kind: ExtensionManifestKind;
+  runtime: ExtensionRuntime;
+  http?: { health: string; dir?: string; spa?: boolean };
+  proposedGrantRoles?: string[];
   tools: {
     total: number;
     /** Every extension tool imports as write + confirm (WARP-2426). */
@@ -320,11 +417,33 @@ export interface ExtensionReadback {
 
 const plural = (n: number, one: string, many: string): string => (n === 1 ? one : many);
 
+const APP_ALWAYS_VISIBLE_TO = ["owner", "admin"];
+
 /**
- * What the owner confirms at promote, derived ONLY from provides, resources
- * and egress. It never reads name, summary or any description: those are
- * the author's words, and the readback exists to say what the code will get,
- * not what its author claims.
+ * The one sentence an owner confirms for an app. Built ONLY from kind,
+ * runtime, resources, egress and the proposed grants' roles (each a
+ * pattern-checked slug): never from summary or a description. A static app
+ * runs no process, so it states no memory either.
+ */
+function appSentence(m: ExtensionManifest, egress: string): string {
+  const proposed = [...new Set(m.provides.proposedGrants.map((g) => g.role))].filter(
+    (r) => !APP_ALWAYS_VISIBLE_TO.includes(r),
+  );
+  const extra = proposed.length > 0 ? ` (+ proposed: ${proposed.join(", ")})` : "";
+  return [
+    "Serves a web app",
+    `runtime ${m.runtime}`,
+    m.runtime === "static" ? "no process" : `one process · ${m.resources.memoryMb} MB`,
+    egress,
+    `visible to: ${APP_ALWAYS_VISIBLE_TO.join(", ")}${extra}`,
+  ].join(" · ");
+}
+
+/**
+ * What the owner confirms at promote, derived ONLY from kind, runtime,
+ * provides, resources and egress. It never reads name, summary or any
+ * description: those are the author's words, and the readback exists to say
+ * what the code will get, not what its author claims.
  */
 export function deriveReadback(m: ExtensionManifest): ExtensionReadback {
   const total = m.provides.tools.length;
@@ -334,7 +453,28 @@ export function deriveReadback(m: ExtensionManifest): ExtensionReadback {
   const drafts = m.provides.routineDrafts.length;
   const grants = m.provides.proposedGrants.length;
   const egress = "reaches nothing outside the box" as const;
+  const common = { kind: m.kind, runtime: m.runtime } as const;
+  if (m.kind === "app") {
+    // An app provides no tools (v1): the sentence replaces the tool, egress
+    // and memory lines; the routine drafts and the grant count are still said.
+    return {
+      ...common,
+      http: m.http,
+      proposedGrantRoles: [...new Set(m.provides.proposedGrants.map((g) => g.role))],
+      tools: { total: 0, startsAsWriteWithConfirmation: 0, proposedReadOnly: 0 },
+      routineDrafts: drafts,
+      proposedGrants: grants,
+      memoryMb: m.runtime === "static" ? 0 : m.resources.memoryMb,
+      egress,
+      lines: [
+        appSentence(m, egress),
+        `${drafts} routine ${plural(drafts, "draft", "drafts")} seeded`,
+        `${grants} access ${plural(grants, "grant", "grants")} proposed`,
+      ],
+    };
+  }
   return {
+    ...common,
     tools: { total, startsAsWriteWithConfirmation: total, proposedReadOnly },
     routineDrafts: drafts,
     proposedGrants: grants,

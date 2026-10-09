@@ -234,6 +234,20 @@ beforeEach(() => {
 });
 
 describe("a workshop run ends on workspace_propose (WARP-2896)", () => {
+  it("applies the persisted app-setup brief in a real worker claim", async () => {
+    const db = createAgentRunPrismaMock({ users: [OWNER] });
+    const { id } = await enqueueAgentRun(db.prisma, { userId: OWNER.id, goal: "Keep my blue UI", model: "m", workspaceId: "ws-app", origin: "chat", sessionId: "chat-1", brief: "app-setup" });
+    const mcp = interceptingMcp(new Set(["workspace_propose"]));
+    const worker = makeWorker(db, mcp);
+    await worker.worker.tickOnce();
+    await settle(worker.worker);
+    const first = worker.chat.mock.calls[0]?.[0];
+    expect(JSON.stringify(first?.messages)).toContain("Keep my blue UI");
+    expect(JSON.stringify(first?.messages)).toContain("DROPLET_EXT_BASE_PATH");
+    expect(JSON.stringify(first?.messages)).toContain("app-check");
+    expect(JSON.stringify(first?.messages)).toContain("Never promote");
+    expect(db.row(id).brief).toBe("app-setup");
+  });
   it("write runs ungated with the workspace on the wire; propose parks; approve → the tool runs once and the run is succeeded/proposed", async () => {
     const db = createAgentRunPrismaMock({ users: [OWNER] });
     const { id } = await enqueueAgentRun(db.prisma, { userId: OWNER.id, goal: "build a word counter", model: "m", workspaceId: "ws-a" });

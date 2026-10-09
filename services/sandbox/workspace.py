@@ -11,7 +11,7 @@ from gone:
   * every path stays inside the checkout (realpath, not string prefix);
   * `.git/` is never read or written through the file operations;
   * `run` executes ONLY an allow-listed argv (npm test, npm run build,
-    pytest, ruff, tsc) — the orchestrator refuses anything else before the
+    pytest, ruff, tsc, and the argument-free app-check) — the orchestrator refuses anything else before the
     request is made, and this end refuses it again;
   * output is capped and the cap is REPORTED, never silently sliced.
 
@@ -32,6 +32,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+import app_check
 import connector_draft
 import gitstore
 from gitstore import Author, StoreError, git, must
@@ -258,6 +259,10 @@ def resolve_run_argv(argv: list[str]) -> list[str]:
     """The allow-list. Returns the executable argv or raises StoreError(400)."""
     if not argv or len(argv) > 16:
         raise StoreError(400, "argv must have 1–16 entries")
+    if argv[0] == "app-check":
+        if argv != ["app-check"]:
+            raise StoreError(400, "app-check takes no arguments")
+        return ["app-check"]
     for prefix, exe in RUN_COMMANDS.items():
         if tuple(argv[: len(prefix)]) == prefix:
             rest = argv[len(prefix) :]
@@ -356,6 +361,12 @@ def run(workspace_id: str, argv: list[str], timeout_ms: int | None = None) -> di
         env["PATH"] = os.environ.get("PATH", "")
         env["SYSTEMROOT"] = os.environ.get("SYSTEMROOT", r"C:\Windows")
         env["HOME"] = os.environ.get("TEMP", "")
+    if argv == ["app-check"]:
+        result = app_check.run(work, timeout_ms, env=env, with_limits=_with_limits)
+        record = work / LAST_RUN_FILE
+        record.parent.mkdir(parents=True, exist_ok=True)
+        record.write_text(json.dumps(result, indent=2), encoding="utf-8")
+        return result
     started = time.monotonic()
     timed_out = False
     try:
@@ -492,7 +503,7 @@ def normalize_manifest(existing: dict[str, Any], defaults: dict[str, Any]) -> di
         resources["memoryMb"] = legacy_mb if isinstance(legacy_mb, int) else DEFAULT_MEMORY_MB
     resources["processes"] = 1
     manifest["resources"] = resources
-    for key in ("runtime", "entrypoint"):
+    for key in (("runtime",) if manifest.get("runtime") == "static" else ("runtime", "entrypoint")):
         if key not in manifest and key in defaults:
             manifest[key] = defaults[key]
     for key in ("schemaVersion", "id", "name", "version"):
@@ -532,7 +543,7 @@ def propose(workspace_id: str, name: str, version: str, summary: str, author: Au
                 manifest = normalize_manifest(existing, defaults)
         except (json.JSONDecodeError, OSError):
             pass
-    manifest["kind"] = "extension"
+    manifest["kind"] = "app" if manifest.get("kind") == "app" else "extension"
     manifest["egress"] = "none"
     manifest["summary"] = summary
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -546,7 +557,7 @@ def propose(workspace_id: str, name: str, version: str, summary: str, author: Au
     # `kind` says what was proposed. A connector draft (WARP-2899) answers
     # "connector-draft" from _propose_connector_draft below, with no
     # manifest, and the orchestrator lists that as not promotable.
-    return {"kind": "extension", "commit": head, "tag": tag, "manifest": manifest}
+    return {"kind": manifest["kind"], "commit": head, "tag": tag, "manifest": manifest}
 
 
 # ── connector drafts (WARP-2899) ────────────────────────────────────────────

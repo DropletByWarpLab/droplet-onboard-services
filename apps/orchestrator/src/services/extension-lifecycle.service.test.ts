@@ -208,7 +208,8 @@ describe("install re-verifies and rotates", () => {
     // H3: a start that attached is `live`.
     expect(row.status).toBe("live");
     const token = k.sandbox.installs[0].req.token;
-    expect(k.db.extensions.get("wc")?.serviceTokenHash).toBe(hashExtensionToken(token));
+    expect(token).toMatch(/^dxt_/);
+    expect(k.db.extensions.get("wc")?.serviceTokenHash).toBe(hashExtensionToken(token!));
     expect(k.attach.attach).toHaveBeenCalledWith("wc");
     expect(installedExtensionIds.has("ext-wc")).toBe(true);
     expect(k.audit.mock.calls[0][0]).toMatchObject({ kind: "tool_run", refs: { extensionId: "wc", op: "install" } });
@@ -856,7 +857,8 @@ describe("H3 — an extension is live only once its tools are attached", () => {
         expect(startsAtAttach).toEqual([1]);
         expect(k.sandbox.installs).toHaveLength(1);
         const token = k.sandbox.installs[0].req.token;
-        expect(k.db.extensions.get("wc")).toMatchObject({ status: "live", serviceTokenHash: hashExtensionToken(token) });
+        expect(token).toMatch(/^dxt_/);
+        expect(k.db.extensions.get("wc")).toMatchObject({ status: "live", serviceTokenHash: hashExtensionToken(token!) });
       });
     }
 
