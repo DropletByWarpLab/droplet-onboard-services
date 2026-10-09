@@ -77,6 +77,20 @@ const NOUN: Record<DevicePairingRole, string> = {
   ap: "access point",
 };
 
+/** Outer spacing for the card variant, kept off the .card itself (module-level so
+ *  its identity is stable across renders and the children keep their state). */
+function Spaced({
+  variant,
+  spacing,
+  children,
+}: {
+  variant: "card" | "inline";
+  spacing: string;
+  children: ReactNode;
+}) {
+  return variant === "card" ? <div className={spacing}>{children}</div> : <>{children}</>;
+}
+
 /**
  * Role gate, resolved only by the states that render a write. The card is
  * mounted inside panels (an AP's row, the switch panel) on every page load and
@@ -153,8 +167,18 @@ export function DevicePairingCard({
   if (!data || !data.available) return null;
 
   const code = errorCode === undefined ? data.routerErrorCode : errorCode;
-  const chrome = variant === "card" ? "card mt-4 text-left" : "mt-3 text-left";
-  const retryChrome = variant === "card" ? "card mb-4" : "mt-3 text-left";
+  // Page spacing is the page's job (card-outer-margin ratchet): the card
+  // variant carries no margin on the .card itself, a plain wrapper does.
+  const chrome = variant === "card" ? "card text-left" : "mt-3 text-left";
+  const retryChrome = variant === "card" ? "card" : "mt-3 text-left";
+
+  // ADR-071 section 2.3: one AP secret per box, and the address comes from mDNS
+  // discovery - name both so the operator can check the target, and say that a
+  // second pairing replaces the first AP's password.
+  const apNote =
+    role === "ap"
+      ? ` Target: ${[mac, data.host].filter(Boolean).join(" at ") || "this access point"}. All access points share one password, so pairing this one replaces the password of any access point you paired before - pair them one at a time and re-pair the earlier ones if needed.`
+      : "";
 
   async function onConfirmPair() {
     setError(null);
@@ -212,6 +236,7 @@ export function DevicePairingCard({
   //    state with a deadline (the next restart).
   if (unsaved || data.pendingPersist) {
     return (
+      <Spaced variant={variant} spacing="mb-4">
       <CanPair>
         {(canPair) => (
           <div
@@ -272,6 +297,7 @@ export function DevicePairingCard({
           </div>
         )}
       </CanPair>
+      </Spaced>
     );
   }
 
@@ -311,6 +337,7 @@ export function DevicePairingCard({
     const named = data.model ?? model ?? null;
     const what = named ? `${upperFirst(noun)} ${named}` : upperFirst(noun);
     return (
+      <Spaced variant={variant} spacing="mt-4">
       <CanPair>
         {(canPair) => (
           <div className={chrome} data-testid={`${role}-pairing-offer`}>
@@ -368,13 +395,14 @@ export function DevicePairingCard({
               onConfirm={onConfirmPair}
               triggerRef={pairButtonRef}
               title={`Pair this ${noun}?`}
-              description={`Pairing gives this Droplet control of the ${noun}'s network settings. The ${noun}'s old password is replaced with one only this Droplet knows.`}
+              description={`Pairing gives this Droplet control of the ${noun}'s network settings. The ${noun}'s old password is replaced with one only this Droplet knows.${apNote}`}
               confirmLabel="Pair"
               variant="neutral"
             />
           </div>
         )}
       </CanPair>
+      </Spaced>
     );
   }
 

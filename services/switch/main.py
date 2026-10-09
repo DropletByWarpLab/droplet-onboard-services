@@ -574,7 +574,7 @@ async def lifespan(app: FastAPI):
     except AuthenticationError as exc:
         # The switch answered and refused our credential (reflashed -> a new
         # per-unit password). Distinct from "unreachable": ADR-071 pairing.
-        logger.warning("Switch at %s rejected our credentials: %s", SWITCH_HOST, exc)
+        logger.warning("Switch at %s rejected authentication (%s)", SWITCH_HOST, type(exc).__name__)
         driver_instance = None
         _auth_rejected = True
     except Exception as exc:
@@ -773,7 +773,8 @@ async def pairing_claim(req: PairingFingerprintRequest):
         except PairingUnsupported:
             return _pair_error(502, "PAIR_UNSUPPORTED", "switch does not provide droplet.pair")
         except (ConnectionLost, PairingProtocolError) as exc:
-            return _pair_error(503, "SWITCH_UNREACHABLE", f"switch unreachable: {exc}")
+            logger.warning("switch pairing status probe failed: %s", type(exc).__name__)
+            return _pair_error(503, "SWITCH_UNREACHABLE", "switch unreachable")
         pairing_state.record_probe(status)
 
         if status.state == STATE_PAIRED:
@@ -800,9 +801,11 @@ async def pairing_claim(req: PairingFingerprintRequest):
         except PairingUnsupported:
             return _pair_error(502, "PAIR_UNSUPPORTED", "switch does not provide droplet.pair")
         except PairingClaimError as exc:
-            return _pair_error(502, "PAIR_CLAIM_FAILED", str(exc))
+            logger.warning("switch rejected pairing claim: %s", type(exc).__name__)
+            return _pair_error(502, "PAIR_CLAIM_FAILED", "switch rejected the pairing claim")
         except (ConnectionLost, PairingProtocolError) as exc:
-            return _pair_error(502, "PAIR_CLAIM_FAILED", f"claim request failed: {exc}")
+            logger.warning("switch pairing claim request failed: %s", type(exc).__name__)
+            return _pair_error(502, "PAIR_CLAIM_FAILED", "claim request failed")
 
         # Prove the claim took: a FRESH login with the new password (a fixed
         # value, never the holder - this must exercise the password the switch
