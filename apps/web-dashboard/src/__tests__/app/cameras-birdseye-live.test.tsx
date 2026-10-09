@@ -14,9 +14,22 @@
  *  - the empty state renders ONLY when the probe says disabled.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import React from "react";
 import { render, screen, cleanup, waitFor, act, fireEvent } from "@testing-library/react";
 
 import BirdseyePage from "@/app/cameras/birdseye/page";
+
+// The shell chrome (SWR health chip, inbox bell) is not under test here.
+vi.mock("@/components/shell/ShellPage", () => ({
+  ShellPage: ({ title, sub, actions, children }: { title?: string; sub?: string; actions?: React.ReactNode; children?: React.ReactNode }) => (
+    <div>
+      {title ? <h1>{title}</h1> : null}
+      {sub ? <p>{sub}</p> : null}
+      {actions}
+      {children}
+    </div>
+  ),
+}));
 
 const BIRDSEYE_LIVE_URL = "/api/cameras/birdseye/live";
 
@@ -65,14 +78,34 @@ describe("Birdseye live view (WARP-1918)", () => {
     expect(screen.queryByText("Birdseye not enabled")).not.toBeInTheDocument();
   });
 
+  it("renders inside the shell: page title, one-line explanation, 16:9 feed card, fullscreen button", async () => {
+    fetchMock.mockResolvedValue(ENABLED);
+    render(<BirdseyePage />);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    await flushProbe();
+
+    expect(screen.getByRole("heading", { name: "Birdseye" })).toBeInTheDocument();
+    expect(
+      screen.getByText("Every active camera in one view; cameras with motion come forward."),
+    ).toBeInTheDocument();
+    const feed = screen.getByAltText("Birdseye live composite").parentElement!;
+    expect(feed).toHaveAttribute("id", "birdseye-feed");
+    expect(feed.className).toContain("aspect-video");
+    expect(screen.getByRole("button", { name: "Fullscreen" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /Cameras/ })).toBeInTheDocument();
+  });
+
   it("renders the not-enabled empty state only when the probe says disabled", async () => {
     fetchMock.mockResolvedValue(DISABLED);
     render(<BirdseyePage />);
 
     await screen.findByText("Birdseye not enabled");
     expect(
-      screen.getByText(/isn't set up on this Droplet/),
+      screen.getByText(/isn't set up on this Droplet yet/),
     ).toBeInTheDocument();
+    // The empty state names the cause (restream) and says it will appear on its own.
+    expect(screen.getByText(/restream option/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Fullscreen" })).toBeDisabled();
     expect(
       screen.queryByAltText("Birdseye live composite"),
     ).not.toBeInTheDocument();

@@ -47,6 +47,7 @@ import {
   deleteFaceImage,
   deleteKnownPlate,
   nameKnownPlate,
+  FrigatePlatesUnsupportedError,
   regenerateEventDescription,
   tagEventAsFace,
   openBirdseyeStream,
@@ -1077,6 +1078,9 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       await nameKnownPlate(req.params.plate, name);
       res.status(204).end();
     } catch (err) {
+      if (err instanceof FrigatePlatesUnsupportedError) {
+        return res.status(501).json({ error: err.message, code: "PLATES_UNSUPPORTED" });
+      }
       next(err);
     }
   });
@@ -1089,16 +1093,21 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       await deleteKnownPlate(req.params.plate);
       res.status(204).end();
     } catch (err) {
+      if (err instanceof FrigatePlatesUnsupportedError) {
+        return res.status(501).json({ error: err.message, code: "PLATES_UNSUPPORTED" });
+      }
       next(err);
     }
   });
 
   // --- Birdseye live (Phase 6.2) ---
   //
-  // Frigate's auto-composited multi-camera MJPEG stream. Cameras with
-  // current motion get foregrounded automatically; the operator gets
-  // a single "what's happening anywhere?" feed without paying for
-  // every camera's bandwidth.
+  // Frigate's auto-composited multi-camera view. Cameras with current
+  // motion get foregrounded automatically; the operator gets a single
+  // "what's happening anywhere?" feed without paying for every camera's
+  // bandwidth. Frigate 0.17 has no birdseye MJPEG, so openBirdseyeStream
+  // synthesizes one from /api/birdseye/latest.jpg (needs birdseye.restream);
+  // when Frigate 404s that still, the catch below answers the "not enabled" 404.
   //
   // Fixed path because /cameras/birdseye/live has 3 segments — adding
   // it here keeps it next to the system route which has the same
