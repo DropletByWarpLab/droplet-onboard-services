@@ -295,6 +295,5 @@ export function McpSignInCard({
         onCancel={() => setConfirming(null)}
       />
     </section>
-    </section>
   );
 }
