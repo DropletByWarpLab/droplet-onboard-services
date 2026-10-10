@@ -123,7 +123,7 @@ function fixtureDescriptor(id: string): McpProviderDescriptor {
     track: "mcp",
     mcpServerId: id,
     description: "Test-only.",
-    setupGuideHref: `/help/integrations/${id}`,
+    setupGuideHref: `/help/connectors/${id}`,
     credentialFields: [
       {
         name: "apiToken",

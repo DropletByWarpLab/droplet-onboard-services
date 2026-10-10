@@ -89,7 +89,7 @@ describe("department templates", () => {
       finance: ["/money", "/customers", "/files", "/reports"],
       operations: ["/projects", "/calendar", "/files", "/routines"],
       front_desk: ["/calendar", "/email", "/messages", "/customers"],
-      it: ["/network", "/devices", "/integrations", "/users", "/health"],
+      it: ["/network", "/devices", "/connectors", "/users", "/health"],
       custom: [],
     });
   });

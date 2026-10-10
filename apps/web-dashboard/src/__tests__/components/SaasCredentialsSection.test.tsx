@@ -833,7 +833,7 @@ describe("a provider with credential variants names its path on save", () => {
  * `handleSave` used to stop at `saveSaasCredential` and show "Saved" — true,
  * and beside the point: the box had stored the key and answered PROVISIONING
  * ("stored, not yet checked"), and nothing ever asked the vendor. The page
- * now posts `/integrations/:provider/connect` after the save and renders the
+ * now posts `/connectors/:provider/connect` after the save and renders the
  * state the probe returns, in the same words `STATE_COPY` already had for it.
  *
  * The two fixture providers are registered as descriptors here because the
@@ -859,7 +859,7 @@ describe("a saved credential is checked, and the state line shows the verdict", 
     track: "mcp",
     mcpServerId: "fixture-crm",
     description: "Fixture MCP.",
-    setupGuideHref: "/help/integrations/fixture-crm",
+    setupGuideHref: "/help/connectors/fixture-crm",
     credentialFields: [],
     egressHosts: ["mcp.fixture-crm.invalid"],
     datasets: [],
@@ -1032,7 +1032,7 @@ const MCP_VIEW: SaasCredentialView = {
   ],
   values: { email: "ops@vendor.example" },
   updatedAt: null,
-  setupGuideHref: "/help/integrations/fixture-mcp",
+  setupGuideHref: "/help/connectors/fixture-mcp",
   credentialExpiry: { status: "VALID", daysRemaining: 200 },
 };
 
@@ -1043,7 +1043,7 @@ describe("the setup guide link", () => {
     render(<SaasCredentialsSection />);
 
     const link = await screen.findByTestId("guide-fixture-mcp");
-    expect(link).toHaveAttribute("href", "/help/integrations/fixture-mcp");
+    expect(link).toHaveAttribute("href", "/help/connectors/fixture-mcp");
   });
 
   it("renders no link at all for a provider that declares none", async () => {

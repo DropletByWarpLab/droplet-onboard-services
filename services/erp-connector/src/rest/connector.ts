@@ -87,7 +87,7 @@ export type RestCredentialResolver = () => Promise<Record<string, string>>;
 export const blockedRestCredentialResolver: RestCredentialResolver = () => {
   throw new ConnectorBlockedError(
     "resolve the vendor credential",
-    "no credential resolver was wired for this connection — reconnect the integration from the Integrations page",
+    "no credential resolver was wired for this connection — reconnect the integration from the Connectors page",
   );
 };
 
@@ -216,7 +216,7 @@ export class RestUnreachableError extends ConnectorBlockedError {
 }
 
 const REST_TRACK_REMEDIATION =
-  "check the key you pasted is still valid in the vendor's console, then reconnect this integration from the Integrations page";
+  "check the key you pasted is still valid in the vendor's console, then reconnect this integration from the Connectors page";
 
 /**
  * The remediation for a request that never got an ANSWER.

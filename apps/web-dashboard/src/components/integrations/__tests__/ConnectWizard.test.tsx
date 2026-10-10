@@ -84,7 +84,7 @@ const PASTE_ONLY: ProviderDescriptor = {
     category: "Payments",
     description: "One pasted key, nothing else.",
     availability: "available",
-    setupGuideHref: "/docs/integrations/fixture-paste",
+    setupGuideHref: "/docs/connectors/fixture-paste",
     order: 90,
   },
 };
@@ -124,7 +124,7 @@ const PAIR: ProviderDescriptor = {
     availability: "available",
     // A DIFFERENT href from PASTE_ONLY's — the WARP-2342 assertion is that two
     // providers link to two places, which a hardcoded link would fail.
-    setupGuideHref: "/docs/integrations/fixture-pair",
+    setupGuideHref: "/docs/connectors/fixture-pair",
     order: 91,
   },
 };
@@ -189,7 +189,7 @@ const TWO_PATH: ProviderDescriptor = {
     category: "Accounting",
     description: "Two ways in, one account.",
     availability: "available",
-    setupGuideHref: "/docs/integrations/fixture-ledger",
+    setupGuideHref: "/docs/connectors/fixture-ledger",
     order: 92,
   },
 };
@@ -582,7 +582,7 @@ describe("a secret field never leaks its value back into the DOM", () => {
  * vendor whether the key worked: the row sat at PROVISIONING for good, and
  * PROVISIONING is not a status the sync scheduler polls.
  *
- * Now the wizard posts `/integrations/:provider/connect` AFTER the save and
+ * Now the wizard posts `/connectors/:provider/connect` AFTER the save and
  * renders the VERDICT the box returns. A key the vendor turned down is shown
  * as exactly that, on the same screen, in the words the hub tile uses.
  */
@@ -900,8 +900,8 @@ describe("the wizard is closed to vendors and open to descriptors", () => {
     await screen.findByText("Client ID *");
     const b = screen.getByTestId("setup-guide-link").getAttribute("href");
 
-    expect(a).toBe("/docs/integrations/fixture-paste");
-    expect(b).toBe("/docs/integrations/fixture-pair");
+    expect(a).toBe("/docs/connectors/fixture-paste");
+    expect(b).toBe("/docs/connectors/fixture-pair");
     expect(a).not.toBe(b);
   });
 

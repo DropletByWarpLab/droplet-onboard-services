@@ -9548,7 +9548,7 @@ export interface SaasCredentialView {
 }
 
 export async function fetchSaasCredentials(): Promise<SaasCredentialView[]> {
-  const res = await authFetch(`${BASE}/api/integrations/credentials`);
+  const res = await authFetch(`${BASE}/api/connectors/credentials`);
   if (!res.ok) throw new Error(`Failed to load integration credentials: ${res.status}`);
   const body = await res.json();
   return Array.isArray(body?.providers) ? body.providers : [];
@@ -9568,7 +9568,7 @@ export async function saveSaasCredential(
   fields: Record<string, string | number>,
 ): Promise<SaasCredentialView> {
   const res = await authFetch(
-    `${BASE}/api/integrations/${encodeURIComponent(provider)}/credentials`,
+    `${BASE}/api/connectors/${encodeURIComponent(provider)}/credentials`,
     {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },

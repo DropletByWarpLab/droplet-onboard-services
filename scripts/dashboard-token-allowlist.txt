@@ -62,7 +62,7 @@ legacy-token app/files/page.tsx
 legacy-token app/global-error.tsx
 legacy-token app/globals.css
 legacy-token app/help/page.tsx
-legacy-token app/integrations/page.tsx
+legacy-token app/connectors/page.tsx
 legacy-token app/knowledge/BrainMemoryTab.tsx
 legacy-token app/knowledge/RecentlyIndexedTab.tsx
 legacy-token app/knowledge/SearchTab.tsx

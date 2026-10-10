@@ -56,7 +56,7 @@ function takeOutcome(provider: string): keyof typeof OUTCOMES | null {
 
 /** Fixed sentences for the box's 409 codes; the box's own message is never shown. */
 const START_BLOCKED: Record<string, (name: string) => string> = {
-  remote_mcp_off: () => "Remote MCP is switched off for this Workspace. An owner or admin can turn it on in Integrations › Connector credentials.",
+  remote_mcp_off: () => "Remote MCP is switched off for this Workspace. An owner or admin can turn it on in Connectors › Connector credentials.",
   server_not_allowed: (name) => `This Droplet isn't set up to reach ${name}.`,
   connection_disabled: (name) => `An owner or admin turned ${name} off for this Workspace.`,
 };
@@ -280,7 +280,7 @@ export function McpSignInCard({
       )}
       {error && <p role="alert" className="type-footnote text-system-red">{error}</p>}
       {blockedCode === "remote_mcp_off" && isAdmin && (
-        <a className="type-caption-1 underline" style={{ color: "var(--brand)" }} href="/integrations/credentials">Open the remote MCP switch</a>
+        <a className="type-caption-1 underline" style={{ color: "var(--brand)" }} href="/connectors/credentials">Open the remote MCP switch</a>
       )}
       <ConfirmDialog
         open={confirming !== null}

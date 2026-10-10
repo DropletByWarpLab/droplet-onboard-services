@@ -97,7 +97,7 @@ function bearerDescriptor(over: Partial<McpProviderDescriptor> = {}): McpProvide
     track: "mcp",
     mcpServerId: FIXTURE_ID,
     description: "Test-only.",
-    setupGuideHref: "/help/integrations/fixture-bearer",
+    setupGuideHref: "/help/connectors/fixture-bearer",
     credentialFields: [
       {
         name: "apiToken",

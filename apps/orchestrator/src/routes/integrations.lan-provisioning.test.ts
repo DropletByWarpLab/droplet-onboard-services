@@ -2,7 +2,7 @@
  * WARP-2520 — the LAN connect/test verbs, addressed by provider.
  *
  * The defect these pin: `ConnectWizard` has been descriptor-driven since
- * WARP-2451 and posts `/api/integrations/${descriptor.id}/{connect,test}` for
+ * WARP-2451 and posts `/api/connectors/${descriptor.id}/{connect,test}` for
  * whichever tile opened it, while the orchestrator registered those two verbs
  * ONLY as `eaglesoft` literals. Eaglesoft is the one provider whose id makes
  * that URL match a literal, so the generic wizard looked like it worked and a
@@ -99,16 +99,16 @@ afterEach(() => {
   __resetRegisteredProvidersForTest();
 });
 
-describe("POST /api/integrations/:provider/connect", () => {
+describe("POST /api/connectors/:provider/connect", () => {
   /**
    * The headline. Against `origin/stage` this is a 404: no route matches.
    *
-   * Mutation: delete the `/integrations/:provider/connect` registration → red
+   * Mutation: delete the `/connectors/:provider/connect` registration → red
    * with a 404, which IS the shipped defect.
    */
   it("provisions a LAN provider the URL names, not the one the literal route meant", async () => {
     const res = await request(app())
-      .post("/api/integrations/acme-pms/connect")
+      .post("/api/connectors/acme-pms/connect")
       .send(BODY);
 
     expect(res.status).toBe(200);
@@ -134,7 +134,7 @@ describe("POST /api/integrations/:provider/connect", () => {
    * body then reaches the service for Stripe.
    */
   it("admits a cloud provider with an EMPTY body and hands the service that provider", async () => {
-    const res = await request(app()).post("/api/integrations/stripe/connect").send({});
+    const res = await request(app()).post("/api/connectors/stripe/connect").send({});
 
     expect(res.status).toBe(200);
     expect(connectMock).toHaveBeenCalledTimes(1);
@@ -144,14 +144,14 @@ describe("POST /api/integrations/:provider/connect", () => {
   });
 
   it("refuses the LAN body shape for a cloud provider, and never reaches the service", async () => {
-    const res = await request(app()).post("/api/integrations/stripe/connect").send(BODY);
+    const res = await request(app()).post("/api/connectors/stripe/connect").send(BODY);
 
     expect(res.status).toBe(400);
     expect(connectMock).not.toHaveBeenCalled();
   });
 
   it("admits a REST-track provider the same way (WARP-2707 — rest is probed like cloud)", async () => {
-    const res = await request(app()).post("/api/integrations/square/connect").send({});
+    const res = await request(app()).post("/api/connectors/square/connect").send({});
 
     expect(res.status).toBe(200);
     expect(connectMock.mock.calls[0][0]).toMatchObject({ provider: "square" });
@@ -161,7 +161,7 @@ describe("POST /api/integrations/:provider/connect", () => {
     // `isKnownErpProvider` excludes `mcp` (erp-provider.ts): the paste IS the
     // connection for that track, and `connect()` would refuse it anyway. The
     // route says so before the service has to.
-    const res = await request(app()).post("/api/integrations/atlassian/connect").send({});
+    const res = await request(app()).post("/api/connectors/atlassian/connect").send({});
 
     expect(res.status).toBe(404);
     expect(connectMock).not.toHaveBeenCalled();
@@ -169,7 +169,7 @@ describe("POST /api/integrations/:provider/connect", () => {
 
   it("threads the actor into the cloud connect, so the consent record names who", async () => {
     await request(app({ id: "u-owner", role: "owner" }))
-      .post("/api/integrations/stripe/connect")
+      .post("/api/connectors/stripe/connect")
       .send({});
 
     expect(connectMock.mock.calls[0][1]).toMatchObject({ actor: expect.objectContaining({ id: "u-owner" }) });
@@ -180,7 +180,7 @@ describe("POST /api/integrations/:provider/connect", () => {
     // "admin")` → red, because a `family` session then re-probes a vendor
     // with the owner's key.
     const res = await request(app({ id: "u-2", role: "family" }))
-      .post("/api/integrations/stripe/connect")
+      .post("/api/connectors/stripe/connect")
       .send({});
 
     expect(res.status).toBe(403);
@@ -194,7 +194,7 @@ describe("POST /api/integrations/:provider/connect", () => {
    */
   it("404s a provider no descriptor declares", async () => {
     const res = await request(app())
-      .post("/api/integrations/not-a-provider/connect")
+      .post("/api/connectors/not-a-provider/connect")
       .send(BODY);
 
     expect(res.status).toBe(404);
@@ -213,7 +213,7 @@ describe("POST /api/integrations/:provider/connect", () => {
    */
   it("refuses a body provider that contradicts the URL", async () => {
     const res = await request(app())
-      .post("/api/integrations/acme-pms/connect")
+      .post("/api/connectors/acme-pms/connect")
       .send({ ...BODY, provider: "eaglesoft-api" });
 
     expect(res.status).toBe(400);
@@ -222,7 +222,7 @@ describe("POST /api/integrations/:provider/connect", () => {
 
   it("accepts a body provider that agrees with the URL", async () => {
     const res = await request(app())
-      .post("/api/integrations/acme-pms/connect")
+      .post("/api/connectors/acme-pms/connect")
       .send({ ...BODY, provider: "acme-pms" });
 
     expect(res.status).toBe(200);
@@ -231,7 +231,7 @@ describe("POST /api/integrations/:provider/connect", () => {
 
   it("still validates the body", async () => {
     const res = await request(app())
-      .post("/api/integrations/acme-pms/connect")
+      .post("/api/connectors/acme-pms/connect")
       .send({ port: 2638 });
 
     expect(res.status).toBe(400);
@@ -247,7 +247,7 @@ describe("POST /api/integrations/:provider/connect", () => {
    */
   it("is admin-gated", async () => {
     const res = await request(app({ id: "u-2", role: "family" }))
-      .post("/api/integrations/acme-pms/connect")
+      .post("/api/connectors/acme-pms/connect")
       .send(BODY);
 
     expect(res.status).toBe(403);
@@ -255,9 +255,9 @@ describe("POST /api/integrations/:provider/connect", () => {
   });
 });
 
-describe("POST /api/integrations/:provider/test", () => {
+describe("POST /api/connectors/:provider/test", () => {
   it("tests the LAN provider the URL names", async () => {
-    const res = await request(app()).post("/api/integrations/acme-pms/test").send(BODY);
+    const res = await request(app()).post("/api/connectors/acme-pms/test").send(BODY);
 
     expect(res.status).toBe(200);
     expect(testMock.mock.calls[0][0]).toMatchObject({ provider: "acme-pms" });
@@ -267,7 +267,7 @@ describe("POST /api/integrations/:provider/test", () => {
     // Unchanged by WARP-2842: `test()` validates a body's credentials before
     // anything is persisted, and a cloud track's credential is on the ROW —
     // there is nothing in a body for it to test.
-    const res = await request(app()).post("/api/integrations/hubspot/test").send(BODY);
+    const res = await request(app()).post("/api/connectors/hubspot/test").send(BODY);
 
     expect(res.status).toBe(404);
     expect(testMock).not.toHaveBeenCalled();
@@ -280,7 +280,7 @@ describe("POST /api/integrations/:provider/test", () => {
  * today. Removing them on the lifecycle aliases' schedule would drop that.
  *
  * Mutation: register the parameterised routes BEFORE the literals → red on the
- * second case, because `/integrations/eaglesoft/connect` then matches
+ * second case, because `/connectors/eaglesoft/connect` then matches
  * `:provider` and the contradiction check rejects the REST track's body.
  *
  * WARP-2842 — but the body may only name a LAN track. Before this, `{
@@ -288,12 +288,12 @@ describe("POST /api/integrations/:provider/test", () => {
  * ConnectInput and no row material, the probe rejected CONNECTOR_BLOCKED, and
  * a Stripe row holding a perfectly good key was driven PROVISIONING →
  * NOT_CONFIGURED. Now the literal alias is gated to the tracks its body
- * shape describes; the cloud tracks have `/integrations/:provider/connect`.
+ * shape describes; the cloud tracks have `/connectors/:provider/connect`.
  */
 describe("the deprecated eaglesoft literal connect/test", () => {
   it("still answers, defaulting the provider in the service", async () => {
     const res = await request(app())
-      .post("/api/integrations/eaglesoft/connect")
+      .post("/api/connectors/eaglesoft/connect")
       .send({ host: "10.0.1.5" });
 
     expect(res.status).toBe(200);
@@ -302,7 +302,7 @@ describe("the deprecated eaglesoft literal connect/test", () => {
 
   it("is how the REST track is selected, by body", async () => {
     const res = await request(app())
-      .post("/api/integrations/eaglesoft/connect")
+      .post("/api/connectors/eaglesoft/connect")
       .send({ host: "10.0.1.5", provider: "eaglesoft-api" });
 
     expect(res.status).toBe(200);
@@ -318,7 +318,7 @@ describe("the deprecated eaglesoft literal connect/test", () => {
     "refuses a body provider naming a non-LAN track (%s), and never reaches the service",
     async (provider) => {
       const res = await request(app())
-        .post("/api/integrations/eaglesoft/connect")
+        .post("/api/connectors/eaglesoft/connect")
         .send({ host: "x", provider });
 
       expect(res.status).toBe(400);
@@ -328,7 +328,7 @@ describe("the deprecated eaglesoft literal connect/test", () => {
 
   it("refuses the same on the literal test route", async () => {
     const res = await request(app())
-      .post("/api/integrations/eaglesoft/test")
+      .post("/api/connectors/eaglesoft/test")
       .send({ host: "x", provider: "stripe" });
 
     expect(res.status).toBe(400);
@@ -351,7 +351,7 @@ describe("connect body: connection-string fields are pattern-checked", () => {
     ["serverName", "SRV;Encryption=NONE"],
   ])("refuses %s=%j and never reaches the service", async (field, value) => {
     const res = await request(app())
-      .post("/api/integrations/acme-pms/connect")
+      .post("/api/connectors/acme-pms/connect")
       .send({ ...BODY, [field]: value });
 
     expect(res.status).toBe(400);
@@ -360,7 +360,7 @@ describe("connect body: connection-string fields are pattern-checked", () => {
 
   it("refuses the same on the test route", async () => {
     const res = await request(app())
-      .post("/api/integrations/acme-pms/test")
+      .post("/api/connectors/acme-pms/test")
       .send({ ...BODY, host: "10.0.1.9;x=y" });
 
     expect(res.status).toBe(400);
@@ -369,7 +369,7 @@ describe("connect body: connection-string fields are pattern-checked", () => {
 
   it("accepts ordinary hostnames and names", async () => {
     const res = await request(app())
-      .post("/api/integrations/acme-pms/connect")
+      .post("/api/connectors/acme-pms/connect")
       .send({ host: "eaglesoft-srv.office.lan", serverName: "EAGLESOFT_1", databaseName: "Patterson.PM-2" });
 
     expect(res.status).toBe(200);

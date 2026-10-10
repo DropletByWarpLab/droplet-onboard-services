@@ -1,0 +1,264 @@
+"use client";
+
+/**
+ * Integrations hub (/connectors) — every system Droplet can connect to, in
+ * one place (design brief §3). WARP-1101.
+ *
+ * WARP-2291: dispatch is data, not a vendor name. Both handlers used to be a
+ * bare equality test against a single hardcoded vendor id, with no `else`, so
+ * Connect on any other tile called a function that did nothing and returned —
+ * no navigation, no wizard, no error, indistinguishable from a slow page.
+ * Every tile now carries its own `connect`/`open` action from the provider
+ * descriptor, and the one branch that cannot act says why out loud. No vendor
+ * id appears in this file at all any more, and a test asserts that.
+ */
+
+import { Fragment, useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
+import Link from "next/link";
+import { Blocks, ShieldCheck, ChevronRight, AlertTriangle } from "lucide-react";
+import { ShellPage } from "@/components/shell/ShellPage";
+import { Sect } from "@/components/shell/primitives";
+import { useIntegrations, type HubEntry } from "@/lib/hooks/useIntegrations";
+import { ConnectorCard } from "@/components/integrations/ConnectorCard";
+import { ConnectWizard } from "@/components/integrations/ConnectWizard";
+import { LanApiSetupDialog, isLanApiProvider } from "@/components/integrations/LanApiConnectionSetup";
+import { connectorIcon } from "@/components/integrations/connector-visuals";
+import {
+  REPORTED_CATEGORY,
+  type ConnectAction,
+} from "@/components/integrations/provider-descriptors";
+import { syncedAgo } from "@/lib/erp-format";
+import { writeModeOf } from "@/lib/erp-types";
+
+/**
+ * WARP-2968 — the grid, in one section per category.
+ *
+ * A `Map` rather than a sort: insertion order IS catalog order, so a category
+ * appears where its first provider does and the grid cannot reshuffle under
+ * the owner's cursor when a response arrives. Sorting the categories by name
+ * instead would move every vendor the day one is renamed.
+ *
+ * Nothing is dropped and nothing is collapsed — every entry lands in exactly
+ * one section, which is the property the hub test asserts against the whole
+ * descriptor list rather than against a literal.
+ */
+function byCategory(entries: readonly HubEntry[]): { category: string; entries: HubEntry[] }[] {
+  const sections = new Map<string, HubEntry[]>();
+  for (const e of entries) {
+    // A provider the catalog does not classify has no category of its own;
+    // they share one trailing heading rather than each inventing a vertical.
+    const category = e.meta.category === REPORTED_CATEGORY ? "Other" : e.meta.category;
+    const existing = sections.get(category);
+    if (existing) existing.push(e);
+    else sections.set(category, [e]);
+  }
+  return [...sections].map(([category, grouped]) => ({ category, entries: grouped }));
+}
+
+export default function IntegrationsPage() {
+  const router = useRouter();
+  const { entries, connected, error, refresh } = useIntegrations();
+  // WHICH tile opened the wizard, not merely THAT one did (WARP-2451). A
+  // boolean could only ever open one vendor's form, which is the whole defect
+  // one layer down from the dispatch WARP-2291 fixed.
+  const [wizardFor, setWizardFor] = useState<string | null>(null);
+  const [blocked, setBlocked] = useState<{ name: string; reason: string } | null>(null);
+  // WARP-3904 - the Patterson API track has its own form (the generic wizard for
+  // its tile is the direct-SQL one), opened by the hand-off below.
+  const [lanApiOpen, setLanApiOpen] = useState(false);
+
+  /**
+   * The whole dispatch. Exhaustive over `ConnectAction`, so a tile can only
+   * navigate, open the wizard, or say why it can do neither — there is no path
+   * out of this function that leaves the click unanswered.
+   */
+  const run = (e: HubEntry, action: ConnectAction) => {
+    switch (action.kind) {
+      case "route":
+        setBlocked(null);
+        router.push(action.href);
+        return;
+      case "wizard":
+        setBlocked(null);
+        setWizardFor(action.catalogId);
+        return;
+      case "unavailable":
+        setBlocked({ name: e.meta.name, reason: action.reason });
+        return;
+    }
+  };
+
+  const openConnector = (e: HubEntry) => run(e, e.open);
+  const connectConnector = (e: HubEntry) => run(e, e.connect);
+
+  // WARP-3904 - `?connect=<provider>` is the hand-off from Ask AI ("Open the
+  // wizard", "Manage in Integrations"): do what that tile's Connect does, then
+  // strip the parameter so a refresh or a back-navigation does not reopen it.
+  // The one provider whose setup is not its tile's wizard opens its own form
+  // instead. Read from `window.location` rather than `useSearchParams`, which
+  // would force a Suspense boundary onto the whole hub. A provider the catalog
+  // does not know is stripped too and opens nothing: the page never guesses.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const url = new URL(window.location.href);
+    const wanted = url.searchParams.get("connect");
+    if (wanted === null) return;
+    url.searchParams.delete("connect");
+    window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+    if (isLanApiProvider(wanted)) {
+      setLanApiOpen(true);
+      return;
+    }
+    const entry = entries.find((e) => e.meta.id === wanted || e.providerKeys.includes(wanted));
+    if (entry) run(entry, entry.connect);
+    // Once per mount: `entries` is the static catalog merged with the status
+    // read, and the catalog half is complete on the first render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const nothingConnected = connected.length === 0;
+
+  return (
+    <ShellPage
+      icon={<Blocks size={15} />}
+      label="Connectors"
+      title="Connectors"
+      sub="Systems Droplet connects to — all on your network."
+    >
+      {/* A failed status read is a fact the owner is told, not one smoothed
+          into an empty, healthy-looking hub. */}
+      {error && (
+        <div className="card" role="alert" style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+          <AlertTriangle size={16} className="shrink-0" style={{ marginTop: 1, color: "var(--danger-ink)" }} aria-hidden />
+          <span className="type-footnote text-label-secondary">
+            {error} What you see below may be out of date.
+          </span>
+        </div>
+      )}
+
+      {/* Connected strip */}
+      <div className="card" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, marginBottom: 14 }}>
+        <span className="type-footnote text-label-secondary">Link pull requests, commits, and branches to project work items.</span>
+        <Link className="btn secondary" href="/connectors/development">Configure development links</Link>
+      </div>
+      {connected.length > 0 && (
+        <>
+          <Sect title="Connected" />
+          <div className="card" style={{ padding: 6 }}>
+            <div className="rows">
+              {connected.map((e) => {
+                const Icon = connectorIcon(e.meta.id);
+                const conn = e.state.connection;
+                const mode = writeModeOf(conn);
+                return (
+                  <button
+                    key={e.meta.id}
+                    type="button"
+                    className="lrow ev-row"
+                    style={{ width: "100%", textAlign: "left", background: "transparent", border: 0, cursor: "pointer" }}
+                    onClick={() => openConnector(e)}
+                  >
+                    <span className="ri brand" aria-hidden><Icon size={17} /></span>
+                    <span className="rt">
+                      <span className="nm">{e.meta.name}</span>
+                      <span className="sub">
+                        {/* WARP-2659 — the sync clause is dropped for a track
+                            that does not sync. `syncedAgo(undefined)` is the
+                            string "never", so a connected MCP provider would
+                            otherwise read "Connected · synced never" and send
+                            the owner looking for a broken sync that does not
+                            exist on this track. */}
+                        Connected ·{e.syncs ? ` synced ${syncedAgo(conn.lastSyncedAt)} ·` : ""}{" "}
+                        {mode === "writes-enabled" ? "writes enabled" : mode === "writes-paused" ? "writes paused" : "read-only"}
+                      </span>
+                    </span>
+                    {/* WARP-2659 — the badge describes the SYNCED COPY: the
+                        datasets a LAN or cloud track lands on this box and
+                        nowhere else. A track that syncs nothing has no copy to
+                        describe, and its tile already says so ("nothing is
+                        copied onto the box"); rendering the badge there would
+                        claim a residency for data the box never holds. Gated
+                        on the same `syncs` fact that drops the "synced …"
+                        clause above, because it is the same fact — the
+                        dashboard descriptor carries no track, and `syncs` is
+                        the per-track statement of exactly this. */}
+                    {e.syncs && (
+                      <span className="badge muted" style={{ gap: 5 }}>
+                        <ShieldCheck size={11} /> On this box only
+                      </span>
+                    )}
+                    <ChevronRight size={16} className="text-label-tertiary" />
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* First-run empty state */}
+      {nothingConnected && (
+        <div className="empty" style={{ paddingBottom: 8 }}>
+          <span className="ei" aria-hidden><Blocks size={24} /></span>
+          <div className="eh">Connect your first system</div>
+          <p className="type-footnote" style={{ maxWidth: 420 }}>
+            Start with Eaglesoft — Droplet will read your schedule and patients right from your own network.
+          </p>
+        </div>
+      )}
+
+      {/* Why the last click could not do anything. Shown because a click that
+          silently returns is worse than one that explains itself. */}
+      {blocked && (
+        <p
+          className="type-footnote text-label-secondary"
+          role="status"
+          data-testid="hub-blocked-reason"
+          style={{ marginBottom: 12 }}
+        >
+          <strong>{blocked.name}:</strong> {blocked.reason}
+        </p>
+      )}
+
+      {/* Catalog — every provider, under the heading for its category. */}
+      {byCategory(entries).map(({ category, entries: grouped }) => (
+        <Fragment key={category}>
+          <Sect title={category} />
+          <div className="grid c3 stagger">
+            {grouped.map((e) => (
+              <ConnectorCard
+                key={e.meta.id}
+                entry={e}
+                onConnect={() => connectConnector(e)}
+                onOpen={() => openConnector(e)}
+                // WARP-2518 — the same re-read the wizard's `onConnected`
+                // triggers. It is what makes the tile's own
+                // `credentialsPurged` line appear: the hub asserts nothing
+                // about the disconnect itself, it just asks the box again.
+                onDisconnected={() => refresh()}
+              />
+            ))}
+          </div>
+        </Fragment>
+      ))}
+
+      {/* Safety footer */}
+      <p
+        className="type-caption-1 text-label-tertiary"
+        style={{ marginTop: 24, display: "flex", alignItems: "flex-start", gap: 8, maxWidth: 720 }}
+      >
+        <ShieldCheck size={14} className="shrink-0" style={{ marginTop: 1 }} />
+        Droplet connects to these systems over your local network only. Nothing is sent to us or to
+        the cloud, and you can disconnect any time.
+      </p>
+
+      <ConnectWizard
+        catalogId={wizardFor}
+        onClose={() => setWizardFor(null)}
+        onConnected={() => refresh()}
+      />
+      <LanApiSetupDialog open={lanApiOpen} onClose={() => setLanApiOpen(false)} onConnected={() => refresh()} />
+    </ShellPage>
+  );
+}

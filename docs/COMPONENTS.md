@@ -210,8 +210,8 @@ network. Host-published ports and host-network services are called out.
   deleting archived messages after a remote move/delete. Turning mail import
   off purges only that local mailbox and its drafts, preserving Calendar/files.
   No new service or public
-  inbound listener is introduced. Setup guides: [Google](integrations/google-mail.md),
-  [Microsoft](integrations/microsoft-365.md).
+  inbound listener is introduced. Setup guides: [Google](connectors/google-mail.md),
+  [Microsoft](connectors/microsoft-365.md).
 - **Data model:** `prisma/schema.prisma` — **55 models, 21 enums**, PostgreSQL
   (`DATABASE_URL`). Notable: `BrainMemoryItemStatus` / `ApDeviceStatus` are
   explicit status enums (the [no-guessing rule](#repo-wide-conventions)),
@@ -253,9 +253,9 @@ network. Host-published ports and host-network services are called out.
   sixth, `GET /api/pm/assigned-to-me`, lists only the caller's own assigned
   items, which is how a guest finds them, WARP-3407). A
   guest cannot own a deal or customer or lead a project. Single company-wide
-  routes floor with `requireRole`: `GET /api/integrations` and
-  `GET /api/integrations/eaglesoft` are owner/admin (a member reads the
-  provider-free `/api/integrations/summary`), `GET /api/devices`
+  routes floor with `requireRole`: `GET /api/connectors` and
+  `GET /api/connectors/eaglesoft` are owner/admin (a member reads the
+  provider-free `/api/connectors/summary`), `GET /api/devices`
   drops `ip` and `networkMode` for a member and is refused to a guest, and the
   `/api/tools` routines refuse a guest. `GET /api/app-downloads` stays open to
   every role but sends the store's raw `detail` to owner/admin only;
@@ -666,7 +666,7 @@ network. Host-published ports and host-network services are called out.
   orchestrator (a workspace library, not a container): Eaglesoft direct-SQL
   (through `services/erp-sql-bridge`) plus the REST connectors (Stripe, Xero,
   HubSpot, …). Builds to `dist/` — one of the `npm run bootstrap` leaves.
-- **Reference:** `services/erp-connector/README.md`, `docs/integrations/eaglesoft.md`.
+- **Reference:** `services/erp-connector/README.md`, `docs/connectors/eaglesoft.md`.
 
 ## services/fleet-agent
 

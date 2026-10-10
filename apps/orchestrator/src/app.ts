@@ -556,15 +556,15 @@ export function createApp(
   // (WARP-2217), so it adds no per-vendor routes: one generic surface renders
   // and validates whatever `credentialFields` a provider declares.
   //
-  // WARP-2485 — this shares the /api/integrations prefix with
+  // WARP-2485 — this shares the /api/connectors prefix with
   // `createIntegrationsRouter` above, and with nothing else: `createErpRouter`
   // below owns /api/erp, a different prefix. Mount order is NOT what keeps the
   // two apart, and neither mount is load-bearing on being second. The invariant
   // is that their path sets are disjoint — no single URL can match a route in
   // both — and while that holds either order behaves identically.
-  // `/integrations/:provider/credentials` ends in a literal `credentials`;
-  // the Eaglesoft routes are `/integrations`, `/integrations/eaglesoft`, and
-  // `/integrations/eaglesoft/<literal verb>`. If a route is ever added that one
+  // `/connectors/:provider/credentials` ends in a literal `credentials`;
+  // the Eaglesoft routes are `/connectors`, `/connectors/eaglesoft`, and
+  // `/connectors/eaglesoft/<literal verb>`. If a route is ever added that one
   // URL could match in both, mount order silently picks the winner and the
   // loser becomes unreachable, so the disjointness is checked rather than
   // asserted here: `routes/integrations-prefix.mount.test.ts` enumerates both
@@ -576,8 +576,8 @@ export function createApp(
   // route whose guard is narrower than its neighbours' is safer as its own
   // registration than as an exception inside someone else's file.
   //
-  // `/integrations/:connectionId/drift` is match-disjoint from every other
-  // route under /api/integrations — it is the only one whose LAST segment is
+  // `/connectors/:connectionId/drift` is match-disjoint from every other
+  // route under /api/connectors — it is the only one whose LAST segment is
   // `drift`, and the two-segment routes differ in arity — so this mount's
   // POSITION is not load-bearing and reordering this block cannot change which
   // handler serves a request. See the table in routes/erp-drift.ts. WARP-2485

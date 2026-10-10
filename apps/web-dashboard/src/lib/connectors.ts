@@ -22,7 +22,7 @@
  * declared on the descriptor rather than guessed here.
  *
  * Live connection *status* is still merged in from the backend
- * (GET /api/integrations) by useIntegrations — this file remains descriptive
+ * (GET /api/connectors) by useIntegrations — this file remains descriptive
  * metadata only.
  */
 

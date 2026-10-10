@@ -60,7 +60,7 @@ export const MANAGE_HREF = {
   m365: "/settings#connected-accounts",
   mailbox: "/settings#email",
   calendar: "/calendar",
-  integration: "/integrations",
+  integration: "/connectors",
 } as const;
 
 /** CalendarSource.authMode values a person creates by hand; `google_oauth` / `m365_oauth` belong to those families. */
@@ -77,7 +77,7 @@ const STATUS_LINE = {
   limited: "Connected — your plan or permissions withhold one kind of record",
   drift: "The system's data layout changed — an admin needs to review it",
   keyStopped: "The key stopped working — paste a new one to resume",
-  integrationError: "Droplet cannot connect — check the setup in Integrations",
+  integrationError: "Droplet cannot connect — check the setup in Connectors",
 } as const;
 
 /** A fresh object per call: a spread copies the top level only, so a caller that appended to one guest's arrays would change the next guest's. */
@@ -122,7 +122,7 @@ export function isCatalogAvailable(descriptor: ProviderDescriptor): boolean {
   return descriptor.catalog?.availability !== "coming-soon";
 }
 
-/** Same rule as GET /api/integrations/catalog's `connectInput`: how a card collects what the provider needs. */
+/** Same rule as GET /api/connectors/catalog's `connectInput`: how a card collects what the provider needs. */
 export type ConnectInputKind = "lan" | "lan_api" | "credentials" | "mcp" | null;
 export function connectInputFor(descriptor: ProviderDescriptor): ConnectInputKind {
   if (descriptor.lanProvisioning) return "lan";

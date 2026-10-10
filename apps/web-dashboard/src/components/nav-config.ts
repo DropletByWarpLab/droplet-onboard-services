@@ -102,7 +102,7 @@ export type NavItem = {
    * integration may be unconfigured. Default: no capability gate.
    *
    * WARP-2880: `medicalConnector` is resolved by the Sidebar from GET
-   * /api/integrations (a connected practice-management system — see
+   * /api/connectors (a connected practice-management system — see
    * `isMedicalConnector`), not from /api/admin/capabilities. Same gate, same
    * fail-closed posture: hidden until positively known.
    */
@@ -634,8 +634,10 @@ export const NAV_GROUPS: NavGroup[] = [
       // (connector reach is ADR-032 §5.4's connectors axis), so `roles` — not
       // `requiresModule` — is the honest gate.
       {
-        href: "/integrations",
-        label: "Integrations",
+        href: "/connectors",
+        label: "Connectors",
+        // The old name stays searchable (WARP-3956).
+        keywords: ["integrations"],
         icon: Blocks,
         roles: ["owner", "admin"],
         hidden: true,
@@ -652,7 +654,7 @@ export const NAV_GROUPS: NavGroup[] = [
       // `roles` on both entries, for the same reason it was on both before —
       // a future widening of one must not silently widen the other.
       {
-        href: "/integrations/credentials",
+        href: "/connectors/credentials",
         label: "Credentials",
         icon: KeyRound,
         roles: ["owner", "admin"],
@@ -668,7 +670,7 @@ export const NAV_GROUPS: NavGroup[] = [
       // gate on the /api/pm prefix those routes live under, so the entry is hidden
       // exactly when the API would answer module_disabled.
       {
-        href: "/integrations/work-notifications",
+        href: "/connectors/work-notifications",
         label: "Work notifications",
         icon: Webhook,
         roles: ["owner", "admin"],
@@ -1006,7 +1008,7 @@ export function passesParentGate(
 
 /** The resolved capability flags a nav gate reads — the admin capabilities
  *  endpoint's two plus the WARP-2880 `medicalConnector` the Sidebar derives
- *  from /api/integrations. Named so a second nav surface can take the same
+ *  from /api/connectors. Named so a second nav surface can take the same
  *  shape without restating the union. */
 export type NavCapabilities = Record<
   NonNullable<NavItem["requiresCapability"]>,

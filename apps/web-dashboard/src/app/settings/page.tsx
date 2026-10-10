@@ -247,7 +247,7 @@ export default function SettingsPage() {
             CLOSED (hidden until positively known) — correct here, since
             Activity and RAG eval genuinely do not exist without their backing
             integration. `medicalConnector` is the Sidebar's own
-            /api/integrations probe and no tucked item uses it (pinned in
+            /api/connectors probe and no tucked item uses it (pinned in
             nav-config.four-groups.test.ts), so this page does not run that
             second probe. The MODULE gate stays fail-OPEN via `useModuleGate`,
             which is the WARP-1807 posture: a probe blip must never hide the

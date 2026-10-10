@@ -3,7 +3,7 @@
  *
  * `visibleItems` is pinned in nav-business-group.test.ts; this file pins the
  * Sidebar's WIRING of the flag: it must come from what the box reports on
- * GET /api/integrations, classified by connector, and never from a module or
+ * GET /api/connectors, classified by connector, and never from a module or
  * admin-capability probe. Mock setup mirrors Sidebar.module-gating.test.tsx,
  * with the role raised to owner (Practice is role-hidden from family/guest
  * before this gate is ever consulted).

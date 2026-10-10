@@ -8,7 +8,7 @@
  * Until this existed the only Disconnect control in the product was inside
  * `ManageSheet`, which is reached from the practice surface's connected hero —
  * i.e. only for a provider that has a detail page. Every cloud connection an
- * owner made through `/integrations` or `/integrations/credentials` could be
+ * owner made through `/connectors` or `/connectors/credentials` could be
  * *created* in the dashboard and *removed* only by calling the API, which
  * makes ADR-041 §2's promise ("disconnecting revokes and purges the stored
  * tokens, not merely flips a flag") true of the box and unreachable from the
@@ -44,7 +44,7 @@
  *
  * ## The role gate is here, not in each parent
  *
- * `POST /api/integrations/:provider/disconnect` is `requireRole("owner",
+ * `POST /api/connectors/:provider/disconnect` is `requireRole("owner",
  * "admin")`. Mirroring that here means a new surface cannot forget it, and it
  * closes a live hole: `ManageSheet` showed the button to `family`/`guest`
  * sessions, whose click 403'd into the swallowing `catch {}`.

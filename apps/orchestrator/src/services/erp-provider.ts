@@ -664,7 +664,7 @@ export function cloudMaterialFromRow(
             throw new ConnectorBlockedError(
               `resolve the ${row.provider} credential`,
               "the stored credential bundle carries no value for this field — " +
-                "re-enter it from the Integrations page",
+                "re-enter it from the Connectors page",
             );
           }
           return value;
@@ -1330,7 +1330,7 @@ function connectorFactoryFor(provider: string): ConnectorFactory | undefined {
  *  registry the owner has never heard of. */
 const UNKNOWN_PROVIDER_REMEDIATION =
   "this connection names an integration this version of Droplet does not ship — " +
-  "reconnect it from the Integrations page, or update the appliance if it was " +
+  "reconnect it from the Connectors page, or update the appliance if it was " +
   "connected on a newer build";
 
 /**

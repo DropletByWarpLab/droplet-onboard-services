@@ -765,7 +765,7 @@ describe("disconnect() also returns the connection's cursors to unstarted", () =
  * The end-to-end statement of the defect: what the HUB READS BACK.
  *
  * Every other assertion in this file is about the shape of a write. These two
- * are about the answer `GET /api/integrations` gives afterwards, which is
+ * are about the answer `GET /api/connectors` gives afterwards, which is
  * where a customer actually met the bug — a purged connection asking to be
  * re-authorized, and reporting a sync failure for a sync that is not running.
  */
@@ -1359,7 +1359,7 @@ describe.each(READ_ONLY_TRACK_PROVIDERS)(
  * sibling site, on a track whose `applyWrite` throws unconditionally. That is
  * the same "flag nothing can honour" state, and it feeds the same two
  * consumers: `effective-access.service.ts`'s per-provider `read_write` grant
- * (WARP-2465) and the claim in `docs/integrations/square.md` that writes are
+ * (WARP-2465) and the claim in `docs/connectors/square.md` that writes are
  * off and nobody can turn them back on.
  *
  * Driven over EVERY rest-track provider rather than Square alone, so a third
