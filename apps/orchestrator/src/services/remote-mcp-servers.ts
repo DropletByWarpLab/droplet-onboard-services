@@ -80,6 +80,7 @@ import {
   type MemberRoutingPrisma,
 } from "./mcp-oauth/member-routing.port.js";
 import { openTokens } from "./mcp-oauth/mcp-oauth.service.js";
+import { setCatalogBacking } from "./mcp-oauth/catalog-repick.js";
 import { openSaasCredentials } from "./saas-credential.service.js";
 import {
   auditRemoteMcpLifecycle,
@@ -523,11 +524,14 @@ export async function attachRemoteServer(
     : null;
   let credentialFields: McpBridgeOpenInput;
   let baseCredential: RemoteMcpCredentialKind = "api-token";
+  /** The sign-in row behind the catalog session, if any (WARP-2416: re-open when it refreshes). */
+  let backingRowId: string | null = null;
   if (apiRead?.ok) {
     credentialFields = apiRead.fields;
   } else {
     const oauth = await catalogOAuthFields(deps, row);
     if (!oauth) {
+      setCatalogBacking(serverId, null);
       settle("detached", "credential_incomplete");
       return {
         attached: false,
@@ -544,6 +548,7 @@ export async function attachRemoteServer(
     }
     credentialFields = oauth.fields;
     baseCredential = oauth.kind;
+    backingRowId = oauth.rowId;
   }
 
   const client = deps.createClient();
@@ -558,6 +563,8 @@ export async function attachRemoteServer(
       // WARP-2409 - a personal sign-in backing the catalog never answers calls.
       ...catalogOnlyFor(baseCredential),
     });
+    // Remember what backs this session so a refresh of that row re-opens it.
+    setCatalogBacking(serverId, backingRowId);
   } catch (err) {
     logger.warn(
       { serverId, code: err instanceof Error ? err.message : String(err) },
@@ -849,6 +856,7 @@ export interface DetachRemoteResult {
  */
 export async function detachRemoteServer(deps: DetachRemoteDeps): Promise<DetachRemoteResult> {
   const { serverId } = deps;
+  setCatalogBacking(serverId, null);
   let sessionClosed = false;
   if (deps.client) {
     await deps.client.close().catch((err: unknown) => {
@@ -910,7 +918,7 @@ export function catalogOnlyFor(kind: RemoteMcpCredentialKind): { catalogOnly: tr
 export async function catalogOAuthFields(
   deps: AttachRemoteServerDeps,
   row: RemoteMcpConnectionRow | null,
-): Promise<{ fields: Record<string, string>; kind: RemoteMcpCredentialKind } | null> {
+): Promise<{ fields: Record<string, string>; kind: RemoteMcpCredentialKind; rowId: string } | null> {
   const table = deps.prisma.mcpOAuthConnection;
   const site = (row?.providerConfig as Record<string, unknown> | null | undefined)?.cloudId;
   if (!table || typeof site !== "string" || !site.trim()) return null;
@@ -939,6 +947,7 @@ export async function catalogOAuthFields(
       return {
         fields: { accessToken: openTokens(live).accessToken, cloudId: site.trim() },
         kind: live.scope === "WORKSPACE" ? "workspace" : "member",
+        rowId: live.id,
       };
     } catch {
       // A blob that does not open under its own row is not a credential.

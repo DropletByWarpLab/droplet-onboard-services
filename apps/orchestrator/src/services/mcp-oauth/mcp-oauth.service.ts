@@ -122,6 +122,8 @@ export interface McpOAuthDependencies {
   now: () => Date;
   /** Closes a connection's live bridge session (sign-out). Best effort. */
   closeSession: (provider: string, connectionId: string) => Promise<void>;
+  /** WARP-2416: a row that may back a server's catalog session just ended (disconnect). Best effort. */
+  catalogChanged?: (provider: string, connectionId: string) => Promise<void>;
   /**
    * The rules every remote MCP call obeys before it may reach the vendor (server
    * allowlist, `remote_mcp` channel, connection not DISABLED), applied before
@@ -165,6 +167,10 @@ export function mcpOAuthDependencies(overrides: Partial<McpOAuthDependencies> = 
     now: () => new Date(),
     pending: PROCESS_PENDING,
     // Lazy: the singleton pulls the whole MCP stack, which this module must not load with it.
+    catalogChanged: async (provider, connectionId) => {
+      const { catalogSignInChanged } = await import("../mcp-client.singleton.js");
+      await catalogSignInChanged(provider, connectionId);
+    },
     closeSession: async (provider, connectionId) => {
       const { closeRemoteConnectionSession } = await import("../mcp-client.singleton.js");
       await closeRemoteConnectionSession(provider, connectionId);
@@ -664,7 +670,7 @@ export async function disconnectMcpOAuth(
   prisma: PrismaClient,
   id: string,
   caller: { id: string; role: string | undefined },
-  deps?: Pick<McpOAuthDependencies, "oauth" | "closeSession" | "egress">,
+  deps?: Pick<McpOAuthDependencies, "oauth" | "closeSession" | "egress" | "catalogChanged">,
   /** Filled in for the caller: `revokeSkipped` when remote MCP is switched off. */
   notes: { revokeSkipped?: boolean } = {},
 ): Promise<boolean> {
@@ -699,6 +705,8 @@ export async function disconnectMcpOAuth(
     data: { state: "DISCONNECTED", tokensEnc: null, tokenExpiresAt: null, connectedAt: null, lastError: null },
   });
   await deps?.closeSession(row.provider, row.id).catch(() => undefined);
+  // If this row backed the catalog session, re-pick it (or detach). Not awaited.
+  void deps?.catalogChanged?.(row.provider, row.id).catch(() => undefined);
   return true;
 }
 

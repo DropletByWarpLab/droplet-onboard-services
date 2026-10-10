@@ -57,8 +57,9 @@ async function setup(o: { expiresInMin?: number; refreshToken?: string | null; t
   const closeSession = vi.fn(async (_p: string, _c: string): Promise<void> => {});
   const gate: { current: Egress } = { current: { allowed: true, row: null } };
   const egress = async (): Promise<Egress> => gate.current;
-  const refresher = createMcpOAuthRefresher({ prisma: db.prisma, oauth, now: () => clock, closeSession, egress });
-  return { db, v, oauth, closeSession, refresher, gate, egress, row, first, advance: (ms: number) => { clock = new Date(clock.getTime() + ms); }, now: () => clock };
+  const catalogChanged = vi.fn(async (_p: string, _c: string): Promise<void> => {});
+  const refresher = createMcpOAuthRefresher({ prisma: db.prisma, oauth, now: () => clock, closeSession, egress, catalogChanged });
+  return { db, v, oauth, closeSession, catalogChanged, refresher, gate, egress, row, first, advance: (ms: number) => { clock = new Date(clock.getTime() + ms); }, now: () => clock };
 }
 
 beforeEach(() => {
@@ -131,6 +132,37 @@ describe("single flight", () => {
     });
     expect(await s.refresher.refreshNow(ID)).toBe("refreshed");
     expect(openTokens(s.row).accessToken).toBe("someone-elses");
+  });
+});
+
+describe("the catalog session follows the row (WARP-2416)", () => {
+  it("tells the catalog after a successful refresh, with the row's provider and id", async () => {
+    const s = await setup();
+    await s.refresher.refreshNow(ID);
+    expect(s.catalogChanged).toHaveBeenCalledWith("atlassian", ID);
+  });
+
+  it("tells it when the sign-in ends (invalid_grant), but not on a transient failure or when egress is refused", async () => {
+    const dead = await setup();
+    dead.oauth.refresh.mockRejectedValueOnce(new McpBridgeError("OAUTH_TOKEN_ERROR", "revoked", 502, undefined, "invalid_grant"));
+    await dead.refresher.refreshNow(ID);
+    expect(dead.catalogChanged).toHaveBeenCalledWith("atlassian", ID);
+
+    const flaky = await setup();
+    flaky.oauth.refresh.mockRejectedValueOnce(new McpBridgeError("REMOTE_CALL_FAILED", "502", 502));
+    await flaky.refresher.refreshNow(ID);
+    expect(flaky.catalogChanged).not.toHaveBeenCalled();
+
+    const off = await setup();
+    off.gate.current = { allowed: false, reason: "channel_disabled", message: "" };
+    await off.refresher.refreshNow(ID);
+    expect(off.catalogChanged).not.toHaveBeenCalled();
+  });
+
+  it("a failing hook never fails the refresh", async () => {
+    const s = await setup();
+    s.catalogChanged.mockRejectedValueOnce(new Error("boom"));
+    expect(await s.refresher.refreshNow(ID)).toBe("refreshed");
   });
 });
 

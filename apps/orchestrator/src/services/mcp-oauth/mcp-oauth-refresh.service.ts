@@ -37,6 +37,12 @@ export interface McpOAuthRefreshDeps {
   /** Ends the connection's live bridge session after its sign-in died. Best effort. */
   closeSession?: (provider: string, connectionId: string) => Promise<void>;
   /**
+   * WARP-2416 - this row just refreshed, or its sign-in just ended. If it backs a
+   * server's catalog session, that session is re-opened (or re-picked, or the
+   * server detached). Not awaited: a refresh on the call path must not wait for it.
+   */
+  catalogChanged?: (provider: string, connectionId: string) => Promise<void>;
+  /**
    * The rules every remote MCP call obeys (allowlist, `remote_mcp` channel, not
    * DISABLED). A refresh is a hop to the vendor like any other, so a refusal
    * skips it WITHOUT touching the row: the token is simply not renewed while
@@ -54,6 +60,9 @@ export function createMcpOAuthRefresher(deps: McpOAuthRefreshDeps): McpOAuthRefr
   const { prisma } = deps;
   const now = deps.now ?? (() => new Date());
   const inFlight = new Map<string, Promise<McpOAuthRefreshOutcome>>();
+  const catalogChanged = (provider: string, id: string): void => {
+    void deps.catalogChanged?.(provider, id).catch(() => undefined);
+  };
 
   async function endSignIn(
     row: { id: string; provider: string; tokensEnc: string | null },
@@ -78,6 +87,8 @@ export function createMcpOAuthRefresher(deps: McpOAuthRefreshDeps): McpOAuthRefr
       logger.warn({ provider: row.provider }, "mcp_oauth_refresh_audit_failed");
     }
     await deps.closeSession?.(row.provider, row.id).catch(() => undefined);
+    // The catalog session may have been riding this row: re-pick or detach it.
+    catalogChanged(row.provider, row.id);
   }
 
   async function run(id: string): Promise<McpOAuthRefreshOutcome> {
@@ -147,7 +158,10 @@ export function createMcpOAuthRefresher(deps: McpOAuthRefreshDeps): McpOAuthRefr
         where: { id: row.id, state: "CONNECTED", tokensEnc: row.tokensEnc },
         data: { tokensEnc, tokenExpiresAt: expiresAt, lastRefreshOkAt: at, lastError: null },
       });
-      if (written.count === 1) return "refreshed";
+      if (written.count === 1) {
+        catalogChanged(row.provider, row.id);
+        return "refreshed";
+      }
       // Someone else changed the row while we were at the vendor; do not overwrite it.
       const now2 = await prisma.mcpOAuthConnection.findUnique({ where: { id } });
       return now2?.state === "CONNECTED" && now2.tokensEnc !== row.tokensEnc ? "refreshed" : "unavailable";

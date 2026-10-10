@@ -49,6 +49,7 @@ import {
   type RemoteServerRegistration,
 } from "./remote-mcp-servers.js";
 import type { RemoteMcpReconcilerDeps } from "./remote-mcp-reconciler.service.js";
+import { catalogBackingRow, createCatalogRepicker } from "./mcp-oauth/catalog-repick.js";
 
 const logger = createLogger("mcp-client-singleton");
 
@@ -232,6 +233,7 @@ async function attachRegistered(
    *  claim as no baseline. */
   knownTools?: readonly string[],
 ): Promise<RemoteAttachResult> {
+  attachPrisma = prisma;
   const result = await attachRemoteServer({
     ...server,
     mux: mcpClient,
@@ -337,6 +339,29 @@ export async function detachRemoteMcp(serverId: string): Promise<void> {
   attachedClients.delete(serverId);
   await detachRemoteServer({ mux: mcpClient, serverId, ...(client ? { client } : {}) });
 }
+
+/** The Prisma client the last attach used, so a sign-in change can run the same attach again. */
+let attachPrisma: AttachRemoteDeps["prisma"] | null = null;
+
+/**
+ * WARP-2416 - the sign-in row behind a server's catalog session refreshed or
+ * stopped working: detach and run the ordinary gated attach again. That re-opens
+ * with the new token (and `catalogOnly` exactly as before), or re-picks the
+ * credential (API token, Workspace, a CURRENT owner/admin), or detaches the
+ * server when nothing qualifies. The channel being off means nothing re-opens.
+ * A row that does not back a catalog is ignored; one server re-attaches at a time.
+ */
+export const catalogSignInChanged = createCatalogRepicker({
+  backingRow: catalogBackingRow,
+  reattach: async (serverId) => {
+    const server = registeredRemoteServers().find((s) => s.serverId === serverId);
+    const prisma = attachPrisma;
+    if (!server || !prisma) return;
+    const known = attachedClients.get(serverId)?.lastAdvertisedToolNames();
+    await detachRemoteMcp(serverId);
+    await attachRegistered(prisma, server, known && known.length > 0 ? known : undefined);
+  },
+});
 
 /**
  * WARP-3912 (ADR-043 §4) - the `remote_mcp` channel was turned off: refuse new

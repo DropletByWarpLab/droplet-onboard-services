@@ -33,7 +33,7 @@ function setup(logDest?: { write(s: string): void }) {
   };
   const closeSession = vi.fn(async (_p: string, _c: string): Promise<void> => {});
   const gate: { current: Awaited<ReturnType<McpOAuthDependencies["egress"]>> } = { current: { allowed: true, row: null } };
-  const deps: McpOAuthDependencies = mcpOAuthDependencies({ oauth, closeSession, egress: async () => gate.current });
+  const deps: McpOAuthDependencies = mcpOAuthDependencies({ oauth, closeSession, catalogChanged: async () => {}, egress: async () => gate.current });
   const app = express();
   app.use(express.json());
   app.use(cookieParser());
