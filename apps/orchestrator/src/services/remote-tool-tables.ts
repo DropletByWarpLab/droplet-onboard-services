@@ -53,6 +53,7 @@
  */
 import {
   ATLASSIAN_SERVER_ID,
+  ATLASSIAN_TOOL_INDEX,
   createAtlassianRemoteCallPolicy,
 } from "./atlassian-tool-policy.js";
 import {
@@ -442,3 +443,18 @@ export const remoteToolTablePolicy: RemoteCallPolicy = (input) => {
     : undefined;
   return (table ?? DENY_ALL_REMOTE_TOOLS)(input);
 };
+
+/**
+ * WARP-3962 — what a tool DOES, read off the compiled table that speaks for its
+ * server (Atlassian's reviewed table, or a vendor def). `undefined` when no
+ * table lists it — the caller treats that as a write (fail closed). The table
+ * supplies the grade; the permission lives on the classification record.
+ */
+export function remoteToolGradeOf(serverId: string, wireName: string): RemoteToolGrade | undefined {
+  if (serverId === ATLASSIAN_SERVER_ID) return ATLASSIAN_TOOL_INDEX.get(wireName)?.grade;
+  return REMOTE_TOOL_TABLE_DEFS.find((d) => d.serverId === serverId)?.rows.find((r) => r.name === wireName)?.grade;
+}
+
+/** WARP-3962 — does a compiled table speak for this server? (Own-property read, as {@link remoteToolTablePolicy}.) */
+export const remoteToolTableExists = (serverId: string): boolean =>
+  Object.prototype.hasOwnProperty.call(REMOTE_TOOL_TABLES, serverId);

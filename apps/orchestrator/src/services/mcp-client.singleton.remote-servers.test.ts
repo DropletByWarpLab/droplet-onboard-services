@@ -729,10 +729,10 @@ describe("the singleton's call policy speaks through the table registry (TC-1.3)
 
   it("is Atlassian's reviewed table for Atlassian: a read runs, a write is blocked, a Compass tool is refused for the credential it needs", () => {
     expect(decide(ATLASSIAN, "getJiraIssue")).toEqual({ kind: "allow" });
-    expect(decide(ATLASSIAN, "createJiraIssue")).toMatchObject({
-      kind: "deny",
-      code: "REMOTE_WRITE_NOT_PERMITTED",
-    });
+    // WARP-3962 — the table grades createJiraIssue a write; the record's "ask"
+    // (the beforeEach rows are write+confirm) lifts the block through the
+    // thumbs-up, never to a plain allow.
+    expect(decide(ATLASSIAN, "createJiraIssue")).toEqual({ kind: "allow", requiresConfirmation: true, grade: "write" });
     expect(decide(ATLASSIAN, "getCompassComponents")).toMatchObject({
       kind: "deny",
       code: "ATLASSIAN_TOOL_UNAVAILABLE_IN_AUTH_MODE",
@@ -740,9 +740,11 @@ describe("the singleton's call policy speaks through the table registry (TC-1.3)
     expect(decide(ATLASSIAN, "notATool")).toMatchObject({ kind: "deny", code: "REMOTE_TOOL_NOT_CLASSIFIED" });
   });
 
-  it("is the shipping deny-all for every server no table speaks for — even one named like an Atlassian read", () => {
-    expect(decide(FIXTURE, "getJiraIssue")).toMatchObject({ kind: "deny", code: "REMOTE_TOOL_NOT_CLASSIFIED" });
-    expect(decide("constructor", "getJiraIssue")).toMatchObject({ kind: "deny" });
+  it("a server no table speaks for is governed by its record alone — a tool with no row is denied, even one named like an Atlassian read", () => {
+    expect(decide(FIXTURE, "unlisted")).toMatchObject({ kind: "deny", code: "REMOTE_TOOL_NOT_CLASSIFIED" });
+    expect(decide("constructor", "unlisted")).toMatchObject({ kind: "deny", code: "REMOTE_TOOL_NOT_CLASSIFIED" });
+    // WARP-3962 — a classified write there asks first (the Atlassian table's reads do not leak across).
+    expect(decide(FIXTURE, "getJiraIssue")).toEqual({ kind: "allow", requiresConfirmation: true, grade: "write" });
   });
 });
 

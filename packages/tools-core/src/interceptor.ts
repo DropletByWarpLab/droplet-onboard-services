@@ -435,7 +435,8 @@ export function interceptOutcomeToToolResult(
     error: {
       code: "CONFIRMATION_REQUIRED",
       message:
-        `'${tool.name}' writes, so it needs a thumbs-up. Relay this to the user, and ` +
+        // WARP-3962 — a read an owner chose to ask before says so.
+        `'${tool.name}' ${tool.requiresWrite === false ? "reads" : "writes"}, so it needs a thumbs-up. Relay this to the user, and ` +
         "only after they explicitly approve, re-issue the SAME call with the SAME arguments " +
         "presenting this confirmationToken. Do NOT approve on the user's behalf: setting " +
         "`confirmed: true` yourself approves nothing and only asks again.",

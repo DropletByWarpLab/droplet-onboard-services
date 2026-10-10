@@ -39,6 +39,7 @@ import {
   ATLASSIAN_TOOL_CLASSIFICATIONS,
   ATLASSIAN_V1_READ_TOOLS,
 } from "./atlassian-tool-policy.js";
+import { DEFAULT_PERMISSION } from "./remote-tool-classification.service.js";
 
 /** Path of the committed artefact, relative to the repo root. */
 export const ATLASSIAN_SNAPSHOT_PATH = "docs/security/atlassian-mcp-tool-surface.json";
@@ -47,7 +48,7 @@ export const ATLASSIAN_SNAPSHOT_PATH = "docs/security/atlassian-mcp-tool-surface
  * Bumped whenever the snapshot's SHAPE changes (a new column, a renamed key),
  * so a reviewer can tell a format change from a privilege change at a glance.
  */
-export const ATLASSIAN_SNAPSHOT_FORMAT = 1;
+export const ATLASSIAN_SNAPSHOT_FORMAT = 2;
 
 /**
  * Where the tool names came from, carried IN the artefact.
@@ -78,6 +79,14 @@ export function buildAtlassianToolSnapshot(): string {
     provenance: ATLASSIAN_SNAPSHOT_PROVENANCE,
     toolCount: ATLASSIAN_TOOL_CLASSIFICATIONS.length,
     v1ReadToolCount: ATLASSIAN_V1_READ_TOOLS.size,
+    // WARP-3962 — the product contract as the default permission per grade,
+    // applied to a tool no human has reviewed. The `v1` field below stays the
+    // compiled floor; the permission itself lives on the classification record.
+    defaultPermissions: DEFAULT_PERMISSION,
+    v1Meaning:
+      "allowed = a read; blocked-write = a write, released only by an owner or admin " +
+      "setting its permission to ask (the thumbs-up); excluded = never callable. " +
+      "Destructive tools are blocked and immutable.",
     authModes: ATLASSIAN_PRODUCT_AUTH_MODES,
     tools: [...ATLASSIAN_TOOL_CLASSIFICATIONS]
       .sort((a, b) => a.name.localeCompare(b.name))

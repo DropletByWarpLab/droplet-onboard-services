@@ -11029,11 +11029,21 @@ model RemoteToolClassification {
   /// re-review, so a second change does not erase what was reviewed.
   previousReviewHash      String?
   previousWireDescription String?
+  /// WARP-3962: what the tool DOES. Bounds the permission a person may set
+  /// (read: always|ask|block, write: ask|block, destructive: block). An
+  /// explicit column, never derived; unknown is WRITE.
+  grade                RemoteToolGrade @default(WRITE)
   firstSeenAt          DateTime  @default(now())
   lastSeenAt           DateTime  @default(now())
 
   @@unique([serverId, toolName])
   @@index([serverId])
+}
+
+enum RemoteToolGrade {
+  READ
+  WRITE
+  DESTRUCTIVE
 }
 
 enum RemoteToolDefinitionStatus {

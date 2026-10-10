@@ -98,6 +98,65 @@ export const IMPORT_DEFAULT_CLASSIFICATION = Object.freeze({
   denied: false,
 });
 
+/**
+ * WARP-3962 — what a tool DOES (the `grade` column), and the permission a
+ * person gives it. The product contract is the validator: "reads run
+ * automatically, writes ask for a thumbs-up, destructive actions are blocked."
+ *
+ *   read        → always | ask | block
+ *   write       → ask | block            (never always)
+ *   destructive → block                  (immutable)
+ *
+ * The default for a tool nobody has reviewed is the contract itself:
+ * read → always, write → ask, destructive → block. An unknown grade is a
+ * write.
+ */
+export type RemoteToolGradeValue = "read" | "write" | "destructive";
+export type RemoteToolPermission = "always" | "ask" | "block";
+
+const LEGAL_PERMISSIONS: Readonly<Record<RemoteToolGradeValue, readonly RemoteToolPermission[]>> = Object.freeze({
+  read: ["always", "ask", "block"],
+  write: ["ask", "block"],
+  destructive: ["block"],
+});
+
+/** The default permission per grade — the contract. */
+export const DEFAULT_PERMISSION: Readonly<Record<RemoteToolGradeValue, RemoteToolPermission>> = Object.freeze({
+  read: "always",
+  write: "ask",
+  destructive: "block",
+});
+
+/** Tightness order, for the admin tighten-only rule. */
+const PERMISSION_RANK: Readonly<Record<RemoteToolPermission, number>> = { always: 0, ask: 1, block: 2 };
+
+const GRADE_DB = { read: "READ", write: "WRITE", destructive: "DESTRUCTIVE" } as const;
+
+export function gradeFromDb(g: string | undefined | null): RemoteToolGradeValue {
+  // Fail closed: anything unrecognised (or a pre-column row) is a write.
+  return g === "READ" ? "read" : g === "DESTRUCTIVE" ? "destructive" : "write";
+}
+
+/** The classification columns a permission means for a grade. */
+export function permissionColumns(grade: RemoteToolGradeValue, permission: RemoteToolPermission) {
+  const isWrite = grade !== "read";
+  if (permission === "always") {
+    return { requiresWrite: false, requiresConfirmation: false, denied: false, allowlisted: true };
+  }
+  if (permission === "ask") {
+    return { requiresWrite: isWrite, requiresConfirmation: true, denied: false, allowlisted: true };
+  }
+  return { requiresWrite: isWrite, requiresConfirmation: isWrite, denied: true, allowlisted: false };
+}
+
+/** What a row currently says, as a permission. Pure. */
+export function permissionOf(
+  row: Pick<RemoteToolClassificationRow, "denied" | "requiresConfirmation" | "allowlisted">,
+): RemoteToolPermission {
+  if (row.denied || row.allowlisted !== true) return "block";
+  return row.requiresConfirmation ? "ask" : "always";
+}
+
 /** Refusal codes. Machine-readable; callers switch on these, never on prose. */
 export const RECORD_DENY_CODES = {
   notClassified: "REMOTE_TOOL_NOT_CLASSIFIED",
@@ -119,6 +178,11 @@ export interface RemoteToolClassificationRow {
    * ({@link remoteToolAllowlisted}).
    */
   allowlisted?: boolean;
+  /**
+   * WARP-3962 — what the tool does; bounds the permission a person may set.
+   * Absent (a fixture from before the column) reads as a write.
+   */
+  grade?: "READ" | "WRITE" | "DESTRUCTIVE";
   reviewedBy: string | null;
   reviewedAt: Date | null;
   wireDescription: string | null;
@@ -198,7 +262,18 @@ export async function recordDiscoveredRemoteTools(
    * upgrade does not take every reviewed Atlassian read offline; the `ext-*`
    * attach does not (its rows have always carried a hash).
    */
-  opts: { baselineUnpinned?: boolean } = {},
+  opts: {
+    baselineUnpinned?: boolean;
+    /**
+     * WARP-3962 — the grade of a tool, from the reviewed compiled table for the
+     * server (undefined = no table speaks for it = a write). When given, a NEW
+     * row starts at the contract's default permission for its grade (read →
+     * always, write → ask, destructive → block) and a changed definition
+     * resets to that default. When absent (extensions) the import default
+     * stands.
+     */
+    gradeOf?: (serverId: string, wireName: string) => RemoteToolGradeValue | undefined;
+  } = {},
 ): Promise<{
   created: string[];
   seen: number;
@@ -233,12 +308,15 @@ export async function recordDiscoveredRemoteTools(
     const baselined =
       opts.baselineUnpinned === true && before !== null && hash !== undefined && (before.inputSchemaHash ?? null) === null;
     const schemaChanged = before !== null && hash !== undefined && before.inputSchemaHash !== hash && !baselined;
+    const grade = opts.gradeOf ? (opts.gradeOf(serverId, tool.wireName) ?? "write") : undefined;
+    // The default a row starts at (and a changed definition resets to).
+    const defaults = grade ? permissionColumns(grade, DEFAULT_PERMISSION[grade]) : undefined;
     await prisma.remoteToolClassification.upsert({
       where: { serverId_toolName: { serverId, toolName: tool.wireName } },
       create: {
         serverId,
         toolName: tool.wireName,
-        ...IMPORT_DEFAULT_CLASSIFICATION,
+        ...(grade && defaults ? { grade: GRADE_DB[grade], ...defaults } : IMPORT_DEFAULT_CLASSIFICATION),
         wireDescription,
         ...(hash !== undefined ? { inputSchemaHash: hash } : {}),
         firstSeenAt: now,
@@ -267,8 +345,11 @@ export async function recordDiscoveredRemoteTools(
               : {
                   // WARP-2434 — changed arguments leave the allowlist too.
                   allowlisted: false,
-                  requiresWrite: IMPORT_DEFAULT_CLASSIFICATION.requiresWrite,
-                  requiresConfirmation: IMPORT_DEFAULT_CLASSIFICATION.requiresConfirmation,
+                  // WARP-3962 — back to the contract's default for the grade.
+                  requiresWrite: defaults?.requiresWrite ?? IMPORT_DEFAULT_CLASSIFICATION.requiresWrite,
+                  requiresConfirmation:
+                    defaults?.requiresConfirmation ?? IMPORT_DEFAULT_CLASSIFICATION.requiresConfirmation,
+                  ...(grade ? { grade: GRADE_DB[grade] } : {}),
                   reviewedBy: null,
                   reviewedAt: null,
                 }),
@@ -399,6 +480,170 @@ export async function classifyRemoteTool(
     "remote_tool_classified",
   );
   return { ok: true, row };
+}
+
+export type SetPermissionFailure =
+  | "NOT_FOUND"
+  | "NO_REVIEWER"
+  | "PERMISSION_NOT_ALLOWED_FOR_GRADE"
+  | "ADMIN_CAN_ONLY_TIGHTEN"
+  | "STALE_REVIEW";
+
+export type SetRemoteToolPermissionResult =
+  | { ok: true; row: RemoteToolClassificationRow; before: RemoteToolPermission; grade: RemoteToolGradeValue }
+  | { ok: false; code: SetPermissionFailure; message: string };
+
+/** The contract check shared by the single and the group writer. */
+function checkPermission(
+  row: Pick<RemoteToolClassificationRow, "toolName" | "grade" | "denied" | "requiresConfirmation" | "allowlisted">,
+  permission: RemoteToolPermission,
+  role: string,
+): { ok: true; grade: RemoteToolGradeValue; before: RemoteToolPermission } | { ok: false; code: SetPermissionFailure; message: string } {
+  const grade = gradeFromDb(row.grade);
+  const legal = LEGAL_PERMISSIONS[grade];
+  if (!legal.includes(permission)) {
+    return {
+      ok: false,
+      code: "PERMISSION_NOT_ALLOWED_FOR_GRADE",
+      message: `${row.toolName} is a ${grade} tool; its permission can be ${legal.join(", ")}, not ${permission}.`,
+    };
+  }
+  const before = permissionOf(row);
+  // Owner sets any legal value. Anything else (admin) may only tighten.
+  if (role !== "owner" && PERMISSION_RANK[permission] < PERMISSION_RANK[before]) {
+    return {
+      ok: false,
+      code: "ADMIN_CAN_ONLY_TIGHTEN",
+      message: `${row.toolName} is "${before}"; only an owner can loosen it.`,
+    };
+  }
+  return { ok: true, grade, before };
+}
+
+const reviewReset = {
+  // WARP-3918 — a person setting the permission is the re-review.
+  definitionStatus: "CURRENT" as const,
+  definitionChangedAt: null,
+  previousReviewHash: null,
+  previousWireDescription: null,
+};
+
+/**
+ * WARP-3962 — a person gives one tool a permission. Validated against the
+ * tool's grade (the product contract, see {@link LEGAL_PERMISSIONS}); an owner
+ * may set any legal value, an admin may only tighten (always → ask → block).
+ * Stamps the reviewer, re-reviews a CHANGED definition, and — with
+ * `inputSchemaHash` — lands only while the row still has the hash the person
+ * was shown (STALE_REVIEW otherwise).
+ */
+export async function setRemoteToolPermission(
+  prisma: ClassificationPrisma,
+  input: {
+    serverId: string;
+    toolName: string;
+    permission: RemoteToolPermission;
+    actor: { id: string; role: string };
+    inputSchemaHash?: string;
+  },
+  now: Date = new Date(),
+): Promise<SetRemoteToolPermissionResult> {
+  const reviewedBy = input.actor.id.trim();
+  if (!reviewedBy) return { ok: false, code: "NO_REVIEWER", message: "A permission change needs a reviewer." };
+  const where = { serverId: input.serverId, toolName: input.toolName };
+  const existing = (await prisma.remoteToolClassification.findUnique({
+    where: { serverId_toolName: where },
+  })) as RemoteToolClassificationRow | null;
+  if (!existing) {
+    return { ok: false, code: "NOT_FOUND", message: `${input.serverId} has never advertised a tool named ${input.toolName}.` };
+  }
+  const check = checkPermission(existing, input.permission, input.actor.role);
+  if (!check.ok) return check;
+  const data = {
+    ...permissionColumns(check.grade, input.permission),
+    reviewedBy,
+    reviewedAt: now,
+    ...reviewReset,
+  };
+  // The hash in the WHERE (as classifyRemoteTool does): one statement, so a
+  // reset that lands after the read above still wins.
+  const u = await prisma.remoteToolClassification.updateMany({
+    where: { ...where, ...(input.inputSchemaHash !== undefined ? { inputSchemaHash: input.inputSchemaHash } : {}) },
+    data,
+  });
+  if (u.count === 0) {
+    return {
+      ok: false,
+      code: "STALE_REVIEW",
+      message:
+        `${input.serverId}'s ${input.toolName} has changed since it was shown to you; ` +
+        "reload it and review the new definition.",
+    };
+  }
+  const row = (await prisma.remoteToolClassification.findUnique({
+    where: { serverId_toolName: where },
+  })) as RemoteToolClassificationRow;
+  logger.info(
+    { serverId: input.serverId, toolName: input.toolName, grade: check.grade, permission: input.permission, reviewedBy },
+    "remote_tool_permission_set",
+  );
+  return { ok: true, row, before: check.before, grade: check.grade };
+}
+
+/**
+ * WARP-3962 — the group dropdown: one permission for every tool of a grade on a
+ * server. All-or-nothing: every tool is validated first and the write is ONE
+ * `updateMany`, so a refusal for any tool refuses the group and nothing lands.
+ * A tool whose definition CHANGED is left for its own review (its hash must be
+ * shown to a person); the result lists it as skipped.
+ */
+export async function setRemoteToolGroupPermission(
+  prisma: ClassificationPrisma,
+  input: {
+    serverId: string;
+    group: "read" | "write";
+    permission: RemoteToolPermission;
+    actor: { id: string; role: string };
+  },
+  now: Date = new Date(),
+): Promise<
+  | { ok: true; changed: string[]; skipped: string[] }
+  | { ok: false; code: SetPermissionFailure; message: string }
+> {
+  const reviewedBy = input.actor.id.trim();
+  if (!reviewedBy) return { ok: false, code: "NO_REVIEWER", message: "A permission change needs a reviewer." };
+  const rows = (await prisma.remoteToolClassification.findMany({
+    where: { serverId: input.serverId, grade: GRADE_DB[input.group] },
+  })) as RemoteToolClassificationRow[];
+  if (rows.length === 0) {
+    return { ok: false, code: "NOT_FOUND", message: `${input.serverId} has no ${input.group} tools.` };
+  }
+  const skipped = rows.filter((r) => r.definitionStatus === "CHANGED").map((r) => r.toolName);
+  const todo = rows.filter((r) => r.definitionStatus !== "CHANGED");
+  for (const r of todo) {
+    const check = checkPermission(r, input.permission, input.actor.role);
+    if (!check.ok) return check;
+  }
+  if (todo.length > 0) {
+    await prisma.remoteToolClassification.updateMany({
+      where: {
+        serverId: input.serverId,
+        grade: GRADE_DB[input.group],
+        definitionStatus: "CURRENT",
+        toolName: { in: todo.map((r) => r.toolName) },
+      },
+      data: {
+        ...permissionColumns(input.group, input.permission),
+        reviewedBy,
+        reviewedAt: now,
+        ...reviewReset,
+      },
+    });
+  }
+  logger.info(
+    { serverId: input.serverId, group: input.group, permission: input.permission, changed: todo.length, reviewedBy },
+    "remote_tool_group_permission_set",
+  );
+  return { ok: true, changed: todo.map((r) => r.toolName), skipped };
 }
 
 /**
@@ -541,6 +786,14 @@ function definitionChangedDecision(namespacedName: string): RemoteCallDecision {
   };
 }
 
+function destructiveDecision(namespacedName: string): RemoteCallDecision {
+  return {
+    kind: "deny",
+    code: RECORD_DENY_CODES.writeBlocked,
+    message: `'${namespacedName}' is destructive, and destructive actions are blocked on this box. Do not retry; tell the user it was not done.`,
+  };
+}
+
 /** The decision for one row (or none) — separated so a surface can render it. */
 export function decideFromRecord(
   row: RemoteToolClassificationRow | undefined,
@@ -584,8 +837,11 @@ export function withRemoteAllowlist(
   lookup: ClassificationLookup,
   inner: RemoteCallPolicy,
 ): RemoteCallPolicy {
-  return (input) =>
-    remoteToolAllowlisted(lookup, input.serverId, input.wireName)
+  return (input) => {
+    // WARP-3962 — a block is "blocked", not "not on the list": the honest code.
+    const blocked = lookup(input.serverId, input.wireName);
+    if (blocked?.denied === true) return decideFromRecord(blocked, input.namespacedName);
+    return remoteToolAllowlisted(lookup, input.serverId, input.wireName)
       ? inner(input)
       : {
           kind: "deny",
@@ -594,6 +850,7 @@ export function withRemoteAllowlist(
             `'${input.namespacedName}' is not on this server's tool allowlist. ` +
             "Do not retry; answer without it.",
         };
+  };
 }
 
 /** A policy that reads ONLY the record. The whole authority for a server no
@@ -607,9 +864,16 @@ export function createRecordBackedRemoteCallPolicy(lookup: ClassificationLookup)
  *   1. the record's `denied` wins over everything — an operator's block is
  *      final whatever a JSON reviewed months ago says;
  *   2. the table's allow stands;
- *   3. the record's reviewed read fills a table HOLE (`REMOTE_TOOL_NOT_CLASSIFIED`)
- *      and nothing else — a table's write-block cannot be demoted around;
+ *   3. the record's reviewed read fills a table HOLE (`REMOTE_TOOL_NOT_CLASSIFIED`);
  *   4. otherwise the table's own refusal, with its own honest code.
+ *
+ * WARP-3962 — the permission (always | ask | block) lives on the record and the
+ * grade is the floor: a destructive tool never runs; a table WRITE block
+ * (`REMOTE_WRITE_NOT_PERMITTED`) is released only by an `ask` row (the
+ * thumbs-up, `requiresConfirmation`) and never to a plain allow; a table read
+ * with an explicit read-`ask` row asks; a server NO table speaks for follows its
+ * record alone (ask → thumbs-up). A tool a server's table does not list stays
+ * denied. The table's `excluded` rows keep their own code.
  */
 export function composeRemoteCallPolicy(opts: {
   lookup: ClassificationLookup;
@@ -622,20 +886,48 @@ export function composeRemoteCallPolicy(opts: {
    * database write that records a change succeeded.
    */
   live?: LiveDefinitionLookup;
+  /**
+   * WARP-3962 — does a reviewed compiled table speak for this server? Defaults
+   * to "yes" whenever a `table` is given and "no" without one.
+   */
+  tableSpeaksFor?: (serverId: string) => boolean;
 }): RemoteCallPolicy {
   const table = opts.table ?? DENY_ALL_REMOTE_TOOLS;
+  const tableSpeaksFor = (serverId: string): boolean =>
+    opts.table !== undefined && (opts.tableSpeaksFor?.(serverId) ?? true);
   const decide: RemoteCallPolicy = (input) => {
     const row = opts.lookup(input.serverId, input.wireName);
     // WARP-3918 — a CHANGED definition beats the table's allow too: the table
     // vouched for the tool as it was reviewed, not for what it says now.
     if (row?.denied || row?.definitionStatus === "CHANGED") return decideFromRecord(row, input.namespacedName);
     const base = table(input);
-    if (base.kind === "allow") return base;
-    if (base.code === RECORD_DENY_CODES.notClassified && row) {
-      const fromRecord = decideFromRecord(row, input.namespacedName);
-      // The record may only ALLOW a reviewed read here; its own write-block is
-      // the same refusal as the table's hole, so the table's code stands.
-      if (fromRecord.kind === "allow" && row.reviewedAt) return fromRecord;
+    // WARP-3962 — a destructive tool is blocked whatever the row says.
+    if (row && gradeFromDb(row.grade) === "destructive") return destructiveDecision(input.namespacedName);
+    if (base.kind === "allow") {
+      // The table vouches for a read; the record may only add the thumbs-up
+      // (an explicit read-ask row: not a write, confirming).
+      return row && !row.requiresWrite && row.requiresConfirmation
+        ? { ...base, requiresConfirmation: true, grade: "read" }
+        : base;
+    }
+    if (!row) return base;
+    // WARP-3962 — the table's write-block (and its hole) is the GRADE; the
+    // record carries the permission. "ask" lifts the block through the existing
+    // thumbs-up path; "always" on a write is not a state, and the table's
+    // `excluded` refusal (its own code) stands.
+    if (base.code === RECORD_DENY_CODES.writeBlocked) {
+      return row.requiresWrite && row.requiresConfirmation ? { kind: "allow", requiresConfirmation: true, grade: "write" } : base;
+    }
+    if (base.code === RECORD_DENY_CODES.notClassified) {
+      // No table speaks for this server (an owner-added one): the record is
+      // the authority, by its permission. A server WITH a table keeps its hole
+      // closed: a tool the reviewed table does not list is never offered a
+      // thumbs-up (ADR-043 §2).
+      if (row.requiresConfirmation && !tableSpeaksFor(input.serverId)) {
+        return { kind: "allow", requiresConfirmation: true, grade: row.requiresWrite ? "write" : "read" };
+      }
+      // A read with no thumbs-up needs a person's review behind it.
+      if (!row.requiresWrite && row.reviewedAt) return { kind: "allow" };
     }
     return base;
   };

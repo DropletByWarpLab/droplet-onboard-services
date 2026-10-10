@@ -33,9 +33,13 @@ import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import {
   classifyRemoteTool,
+  gradeFromDb,
   listRemoteToolClassifications,
+  permissionOf,
   remoteToolClassificationCache,
   setRemoteToolAllowlisted,
+  setRemoteToolGroupPermission,
+  setRemoteToolPermission,
   type ClassificationPrisma,
   type RemoteToolClassificationCache,
   type RemoteToolClassificationRow,
@@ -89,7 +93,12 @@ export function createRemoteToolClassificationsRouter(
           return;
         }
         const rows = await listRemoteToolClassifications(db, serverId);
-        res.json({ classifications: await toolReview(rows) });
+        // WARP-3962 — `grade` (read|write|destructive) and `permission`
+        // (always|ask|block) per row; the DB enum is replaced by its lowercase wire value.
+        const reviewed = await toolReview(rows);
+        res.json({
+          classifications: reviewed.map((r) => ({ ...r, grade: gradeFromDb(r.grade), permission: permissionOf(r) })),
+        });
       } catch (err) {
         next(err);
       }
@@ -153,6 +162,134 @@ export function createRemoteToolClassificationsRouter(
           },
         });
         res.json({ classification: result.row });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // WARP-3962 — tool permissions, bound to the product contract: "reads run
+  // automatically, writes ask for a thumbs-up, destructive actions are
+  // blocked." Owner OR admin; an admin may only tighten (always → ask →
+  // block). The service validates the permission against the tool's grade.
+  // `:serverId` is the registry server id (= the connector directory id).
+  const permissionBody = z
+    .object({
+      permission: z.enum(["always", "ask", "block"]),
+      inputSchemaHash: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+    })
+    .strict();
+  const groupBody = z
+    .object({ group: z.enum(["read", "write"]), permission: z.enum(["always", "ask", "block"]) })
+    .strict();
+  const failStatus: Record<string, number> = {
+    NOT_FOUND: 404,
+    NO_REVIEWER: 400,
+    PERMISSION_NOT_ALLOWED_FOR_GRADE: 400,
+    ADMIN_CAN_ONLY_TIGHTEN: 403,
+    STALE_REVIEW: 409,
+  };
+  const failToken = (code: string): string =>
+    code === "PERMISSION_NOT_ALLOWED_FOR_GRADE"
+      ? "permission_not_allowed_for_grade"
+      : code === "ADMIN_CAN_ONLY_TIGHTEN"
+        ? "admin_can_only_tighten"
+        : code === "STALE_REVIEW"
+          ? "stale_review"
+          : code === "NOT_FOUND"
+            ? "not_found"
+            : "invalid_request";
+  const actorOf = (req: Request) => ({ id: req.user?.username ?? "", role: req.user?.role ?? "" });
+  const label = (p: string) => (p === "always" ? "always allowed" : p === "ask" ? "asks first" : "blocked");
+
+  router.patch(
+    "/admin/remote-tools/permissions/:serverId/:toolName",
+    requireRole("owner", "admin"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const { serverId, toolName } = req.params;
+        if (!SERVER_ID.test(serverId) || !TOOL_NAME.test(toolName)) {
+          res.status(400).json({ error: "invalid_request", message: "Invalid serverId or toolName" });
+          return;
+        }
+        const parsed = permissionBody.safeParse(req.body);
+        if (!parsed.success) {
+          res.status(400).json({ error: "invalid_request", details: parsed.error.flatten() });
+          return;
+        }
+        const result = await setRemoteToolPermission(db, {
+          serverId,
+          toolName,
+          permission: parsed.data.permission,
+          actor: actorOf(req),
+          ...(parsed.data.inputSchemaHash !== undefined ? { inputSchemaHash: parsed.data.inputSchemaHash } : {}),
+        });
+        if (!result.ok) {
+          res.status(failStatus[result.code] ?? 400).json({ error: failToken(result.code), message: result.message });
+          return;
+        }
+        await cache.refresh(db);
+        await recordActivity({
+          kind: "system",
+          severity: "info",
+          sourceIcon: "shield",
+          what: `Remote tool permission: ${label(parsed.data.permission)}`,
+          sub: `${serverId} · ${toolName}`,
+          actor: actorFromRequest(req),
+          refs: {
+            serverId,
+            toolName,
+            grade: result.grade,
+            permission: parsed.data.permission,
+            previous: result.before,
+            inputSchemaHash: result.row.inputSchemaHash,
+          },
+        });
+        res.json({
+          tool: {
+            name: toolName,
+            grade: result.grade,
+            permission: permissionOf(result.row),
+            changed: result.before !== parsed.data.permission,
+          },
+        });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  router.patch(
+    "/admin/remote-tools/permissions/:serverId",
+    requireRole("owner", "admin"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const { serverId } = req.params;
+        if (!SERVER_ID.test(serverId)) {
+          res.status(400).json({ error: "invalid_request", message: "Invalid serverId" });
+          return;
+        }
+        const parsed = groupBody.safeParse(req.body);
+        if (!parsed.success) {
+          res.status(400).json({ error: "invalid_request", details: parsed.error.flatten() });
+          return;
+        }
+        const result = await setRemoteToolGroupPermission(db, { serverId, ...parsed.data, actor: actorOf(req) });
+        if (!result.ok) {
+          res.status(failStatus[result.code] ?? 400).json({ error: failToken(result.code), message: result.message });
+          return;
+        }
+        await cache.refresh(db);
+        await recordActivity({
+          kind: "system",
+          severity: "info",
+          sourceIcon: "shield",
+          what: `Remote ${parsed.data.group} tools: ${label(parsed.data.permission)}`,
+          sub: serverId,
+          actor: actorFromRequest(req),
+          refs: { serverId, group: parsed.data.group, permission: parsed.data.permission, changed: result.changed.length },
+        });
+        res.json({ group: parsed.data.group, permission: parsed.data.permission, changed: result.changed, skipped: result.skipped });
       } catch (err) {
         next(err);
       }

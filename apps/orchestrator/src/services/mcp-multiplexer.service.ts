@@ -152,11 +152,15 @@ export type RemoteCallDecision =
        * WARP-2437 — the policy classed this call a WRITE. It is then routed
        * through the confirmation interceptor, and refused outright when none
        * is registered, instead of dispatched. Absent = a read, which runs.
-       * No shipping policy sets it yet: remote writes stay
-       * REMOTE_WRITE_NOT_PERMITTED. This is the seat for lifting that, so the
-       * lift cannot skip the thumbs-up.
+       * WARP-3962 — the vendor policy sets it for a tool whose permission is
+       * "ask" (the existing thumbs-up card; no new prompt path).
        */
       requiresConfirmation?: boolean;
+      /**
+       * WARP-3962 — "read" when the tool is a read a person chose to ask
+       * before (the card then says it reads). Absent = a write.
+       */
+      grade?: "read" | "write";
     }
   | { kind: "deny"; code: string; message: string };
 
@@ -509,7 +513,7 @@ export class McpToolMultiplexer implements McpClientPort {
     // WARP-2437 — a write never dispatches on the policy's say-so alone.
     let callArgs = args;
     if (decision.requiresConfirmation === true) {
-      const gated = this.#confirmWrite(name, args, context);
+      const gated = this.#confirmWrite(name, args, context, decision.grade !== "read");
       if (gated.refusal) return gated.refusal;
       callArgs = gated.args;
     }
@@ -538,6 +542,7 @@ export class McpToolMultiplexer implements McpClientPort {
     name: string,
     args: Record<string, unknown>,
     context: McpCallContext | undefined,
+    isWrite = true,
   ): { refusal: McpToolCallOutcome; args?: undefined } | { refusal?: undefined; args: Record<string, unknown> } {
     const audit = (event: InterceptorAuditEvent) => {
       try {
@@ -572,7 +577,7 @@ export class McpToolMultiplexer implements McpClientPort {
         },
       };
     }
-    const tool = { name, requiresConfirmation: true, requiresWrite: true };
+    const tool = { name, requiresConfirmation: true, requiresWrite: isWrite };
     const outcome = interceptor.intercept(tool, args, {
       confirmationToken: context?.confirmationToken,
     });

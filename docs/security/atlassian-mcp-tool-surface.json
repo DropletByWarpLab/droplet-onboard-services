@@ -1,8 +1,14 @@
 {
-  "format": 1,
+  "format": 2,
   "provenance": "Recorded 2026-09-02 from the tool surface advertised by an OAuth-connected Atlassian Rovo MCP client. NOT a probe of the API-token path: Warp Lab holds no Atlassian credential. Compass tools are present and JSM/Bitbucket tools are absent, which corroborates the auth-mode matrix rather than contradicting it. A tool absent from this file is DENIED at dispatch (REMOTE_TOOL_NOT_CLASSIFIED), so the missing rows cost capability, not safety.",
   "toolCount": 40,
   "v1ReadToolCount": 26,
+  "defaultPermissions": {
+    "read": "always",
+    "write": "ask",
+    "destructive": "block"
+  },
+  "v1Meaning": "allowed = a read; blocked-write = a write, released only by an owner or admin setting its permission to ask (the thumbs-up); excluded = never callable. Destructive tools are blocked and immutable.",
   "authModes": {
     "jira": [
       "api-token",

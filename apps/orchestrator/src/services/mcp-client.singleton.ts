@@ -35,7 +35,7 @@ import {
   remoteToolClassificationCache,
   withRemoteAllowlist,
 } from "./remote-tool-classification.service.js";
-import { remoteToolTablePolicy } from "./remote-tool-tables.js";
+import { remoteToolTableExists, remoteToolTablePolicy } from "./remote-tool-tables.js";
 import type { RemoteCallPolicy } from "./mcp-multiplexer.service.js";
 import { installedExtensionIds } from "./extension-lifecycle.service.js";
 import { EXTENSION_SERVER_PREFIX } from "./extension-token.js";
@@ -108,7 +108,9 @@ const localClient = new McpClientService({
  * invocation of tools an operator has explicitly demoted to read status under
  * §2 may ship before those land. Writes may not."* The table §2 requires now
  * exists, in this repo, reviewed as a diff on
- * `docs/security/atlassian-mcp-tool-surface.json`. Writes stay blocked.
+ * `docs/security/atlassian-mcp-tool-surface.json`. WARP-3962: a write is
+ * released only by its record's "ask" permission (the thumbs-up), never to a
+ * plain allow; a destructive tool stays blocked.
  *
  */
 
@@ -151,6 +153,9 @@ const vendorRemoteCallPolicy: RemoteCallPolicy = withRemoteAllowlist(
   composeRemoteCallPolicy({
     lookup: remoteToolClassificationCache.lookup,
     table: remoteToolTablePolicy,
+    // WARP-3962 — a server with no table (owner-added) is governed by the
+    // record's permission; one with a table keeps the table as its floor.
+    tableSpeaksFor: remoteToolTableExists,
     // WARP-3918 — fail-closed pin against the latest listing's definition hash.
     live: remoteToolClassificationCache.liveDefinition,
   }),
