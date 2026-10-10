@@ -84,6 +84,9 @@ export const BRIDGE_ERROR_CODES = [
   "INVALID_REQUEST",
   "UNKNOWN_SERVER_ID",
   "SESSION_NOT_OPEN",
+  // WARP-2409 - the bridge's per-connection sessions (gated by adr-043-boundary.test.ts).
+  "NO_SESSION",
+  "CATALOG_ONLY",
   "SESSION_NOT_READY",
   "REMOTE_CALL_FAILED",
 ] as const;
