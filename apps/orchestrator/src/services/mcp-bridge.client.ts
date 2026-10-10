@@ -102,6 +102,10 @@ export class McpBridgeError extends Error {
     message: string,
     readonly httpStatus: number,
     readonly state?: RemoteMcpSessionHealth,
+    /** `/oauth/*` only: why the bridge refused (e.g. `HOST_NOT_ALLOWED`), or the
+     *  authorization server's own `error` (e.g. `invalid_grant`). Both come off
+     *  the wire as short codes, never as server text. */
+    readonly reason?: string,
   ) {
     super(message);
     this.code = code;
@@ -123,7 +127,15 @@ export class McpBridgeError extends Error {
  * profile declares; and `adr-043-boundary.test.ts` gates that the two agree.
  */
 export interface McpBridgeOpenInput {
-  readonly [field: string]: string | readonly string[] | undefined;
+  readonly [field: string]: string | boolean | readonly string[] | undefined;
+  /**
+   * WARP-2409 - set when the base (catalog) session is opened with a PERSONAL
+   * sign-in (an owner or admin's): the bridge then answers 409 `CATALOG_ONLY` to
+   * any `/call` on it, so that person's token can list tools but never answer
+   * another member's call. Unset for the API token and the Workspace connection,
+   * the shared credentials meant to answer calls.
+   */
+  catalogOnly?: boolean;
   /** Test-only override; the bridge screens it against its own host set. */
   url?: string;
   /**
@@ -157,6 +169,10 @@ export interface BridgeSessionsBody {
   /** Every session the BRIDGE currently holds — including ones this process
    *  does not own, which is the whole point of reading it (WARP-2651). */
   sessions: RemoteMcpSessionHealth[];
+  /** WARP-2409 - per server id, how many per-connection (member or Workspace)
+   *  sessions the bridge holds. A count only: no ids, no members. The orphan
+   *  sweep reads `sessions` (base sessions) and ignores this. */
+  connectionSessions?: Record<string, number>;
 }
 
 export interface McpBridgeClientOptions {
@@ -189,6 +205,14 @@ const DEFAULT_TIMEOUT_MS = 30_000;
  */
 const SERVER_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
+/** A connection id is the `McpOAuthConnection` uuid; refuse anything else before it reaches a body. */
+const CONNECTION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/; // lowercase only, as Prisma's uuid()
+function assertConnectionId(id: string): void {
+  if (!CONNECTION_ID_PATTERN.test(id)) {
+    throw new McpBridgeError("INVALID_CONNECTION_ID", "connectionId is not a valid connection id.", 0);
+  }
+}
+
 export class McpBridgeClient implements McpClientPort {
   readonly serverId: string;
   readonly #baseUrl: string;
@@ -204,6 +228,7 @@ export class McpBridgeClient implements McpClientPort {
    * bridge's own session state and is never conflated with it.
    */
   #opened = false;
+  #closeEpoch = 0;
 
   /**
    * The tool names the BRIDGE advertised on the last successful `listTools`.
@@ -247,8 +272,36 @@ export class McpBridgeClient implements McpClientPort {
       `/sessions/${this.serverId}/open`,
       input,
     );
-    this.#opened = true;
+    // A per-connection session (WARP-2409) is not THIS client's base session.
+    if (typeof input.connectionId !== "string") this.#opened = true;
     return body.state;
+  }
+
+  /**
+   * WARP-2409 — dispatch one call on a member's or the Workspace's own
+   * bridge session (keyed by the `McpOAuthConnection` id). A 409 `NO_SESSION`
+   * means the bridge no longer holds it; the caller re-opens and retries once.
+   */
+  async callToolFor(connectionId: string, name: string, args: Record<string, unknown>): Promise<McpToolCallOutcome> {
+    assertConnectionId(connectionId);
+    const body = await this.#send<{ result: McpToolCallOutcome }>(
+      "POST",
+      `/sessions/${this.serverId}/call`,
+      { name, args, connectionId },
+    );
+    return body.result;
+  }
+
+  /** WARP-2409 — close one per-connection session (sign-out, refresh failure). */
+  async closeConnection(connectionId: string): Promise<void> {
+    assertConnectionId(connectionId);
+    await this.#send("POST", `/sessions/${this.serverId}/close`, { connectionId });
+  }
+
+  /** Bumps on every {@link close}: the bridge tears down every per-connection
+   *  session with the base one, so a cache keyed on this knows to drop its own. */
+  get closeEpoch(): number {
+    return this.#closeEpoch;
   }
 
   async listTools(): Promise<McpToolDescriptor[]> {
@@ -356,61 +409,239 @@ export class McpBridgeClient implements McpClientPort {
       // leaving `#opened` true would let a later call dial a session this
       // process has already disowned.
       this.#opened = false;
+      this.#closeEpoch++;
     }
   }
 
   async #send<T>(method: string, path: string, body?: unknown): Promise<T> {
-    if (this.#serviceToken.length === 0) {
-      // No dial. `routes/web.ts`'s rule, and the log line is the operator's
-      // only signal that a secret was never provisioned.
-      logger.error(
-        "MCP_BRIDGE_SERVICE_TOKEN is unset — refusing %s %s (fail-closed, no upstream call)",
-        method,
-        path,
-      );
-      throw new McpBridgeError(
-        "AUTH_NOT_CONFIGURED",
-        "MCP_BRIDGE_SERVICE_TOKEN is not configured on the orchestrator.",
-        0,
-      );
-    }
-    let res: Response;
-    try {
-      res = await this.#fetch(`${this.#baseUrl}${path}`, {
-        method,
-        headers: {
-          Authorization: `Bearer ${this.#serviceToken}`,
-          ...(body !== undefined ? { "content-type": "application/json" } : {}),
-        },
-        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-        signal: AbortSignal.timeout(this.#timeoutMs),
-      });
-    } catch (e) {
-      // The bridge container itself is unreachable — a compose/health problem,
-      // distinct from the VENDOR being unreachable (which arrives as a 502 with
-      // a classified session state). Different remedies, so different codes.
-      throw new McpBridgeError(
-        "BRIDGE_UNREACHABLE",
-        `mcp-bridge did not answer ${method} ${path}.`,
-        0,
-      );
-    }
+    return bridgeRequest<T>(
+      { baseUrl: this.#baseUrl, serviceToken: this.#serviceToken, fetchImpl: this.#fetch, timeoutMs: this.#timeoutMs },
+      method,
+      path,
+      body,
+    );
+  }
+}
 
-    const parsed = (await res.json().catch(() => null)) as
-      | (Record<string, unknown> & { error?: { code?: string; message?: string }; state?: RemoteMcpSessionHealth })
-      | null;
+interface BridgeTransport {
+  baseUrl: string;
+  serviceToken: string;
+  fetchImpl: typeof fetch;
+  timeoutMs: number;
+}
 
-    if (!res.ok) {
-      throw new McpBridgeError(
-        parsed?.error?.code ?? "REMOTE_CALL_FAILED",
-        parsed?.error?.message ?? `mcp-bridge answered ${res.status}.`,
-        res.status,
-        parsed?.state,
-      );
+/** One bearer-gated call to the bridge. Shared by the per-server client above
+ *  and {@link McpBridgeOAuthClient}, so both fail closed identically. */
+async function bridgeRequest<T>(t: BridgeTransport, method: string, path: string, body?: unknown): Promise<T> {
+  if (t.serviceToken.length === 0) {
+    // No dial. `routes/web.ts`'s rule, and the log line is the operator's
+    // only signal that a secret was never provisioned.
+    logger.error(
+      "MCP_BRIDGE_SERVICE_TOKEN is unset — refusing %s %s (fail-closed, no upstream call)",
+      method,
+      path,
+    );
+    throw new McpBridgeError(
+      "AUTH_NOT_CONFIGURED",
+      "MCP_BRIDGE_SERVICE_TOKEN is not configured on the orchestrator.",
+      0,
+    );
+  }
+  let res: Response;
+  try {
+    res = await t.fetchImpl(`${t.baseUrl}${path}`, {
+      method,
+      headers: {
+        Authorization: `Bearer ${t.serviceToken}`,
+        ...(body !== undefined ? { "content-type": "application/json" } : {}),
+      },
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+      signal: AbortSignal.timeout(t.timeoutMs),
+    });
+  } catch (e) {
+    // The bridge container itself is unreachable — a compose/health problem,
+    // distinct from the VENDOR being unreachable (which arrives as a 502 with
+    // a classified session state). Different remedies, so different codes.
+    throw new McpBridgeError(
+      "BRIDGE_UNREACHABLE",
+      `mcp-bridge did not answer ${method} ${path}.`,
+      0,
+    );
+  }
+
+  const parsed = (await res.json().catch(() => null)) as
+    | (Record<string, unknown> & { error?: { code?: string; message?: string }; state?: RemoteMcpSessionHealth })
+    | null;
+
+  if (!res.ok) {
+    // `/oauth/*`: 422 `OAUTH_PKCE_UNSUPPORTED` / `OAUTH_REFUSED` carry a top-level
+    // `reason` (e.g. HOST_NOT_ALLOWED); 502 `OAUTH_TOKEN_ERROR` carries the
+    // authorization server's `oauthError` (e.g. invalid_grant). A short code only.
+    const raw = parsed?.reason ?? parsed?.oauthError;
+    const reason = typeof raw === "string" && /^[A-Za-z0-9_.-]{1,64}$/.test(raw) ? raw : undefined;
+    throw new McpBridgeError(
+      parsed?.error?.code ?? "REMOTE_CALL_FAILED",
+      parsed?.error?.message ?? `mcp-bridge answered ${res.status}.`,
+      res.status,
+      parsed?.state,
+      reason,
+    );
+  }
+  if (parsed === null) {
+    throw new McpBridgeError("REMOTE_CALL_FAILED", "mcp-bridge answered with no JSON body.", res.status);
+  }
+  return parsed as T;
+}
+
+// ─── WARP-2401 / WARP-2405 — the OAuth hops, made by the bridge ──────────────
+//
+// ADR-043 §5: every outbound hop to a vendor (discovery, client registration,
+// code exchange, refresh, revoke) is the bridge's, through its DNS-pinned
+// `guardedFetch`. The orchestrator never dials an authorization server. These
+// bodies are the plan's contract with `services/mcp-bridge/src/oauth/`.
+
+/** 422 `error.code`: the authorization server does not advertise PKCE S256. */
+export const OAUTH_PKCE_UNSUPPORTED = "OAUTH_PKCE_UNSUPPORTED";
+
+/** 422 `error.code`: any other refusal; `reason` says which (HOST_NOT_ALLOWED,
+ *  RESOURCE_MISMATCH, ISSUER_MISMATCH, UNSAFE_URL, DISCOVERY_FAILED). */
+export const OAUTH_REFUSED = "OAUTH_REFUSED";
+
+/** 502 `error.code`: the authorization server answered a token request with an
+ *  OAuth error; `reason` carries its `error` (e.g. `invalid_grant`). */
+export const OAUTH_TOKEN_ERROR = "OAUTH_TOKEN_ERROR";
+
+/** `reason` on a 422 `OAUTH_REFUSED`: an endpoint host the bridge's curated registry does not allow. */
+export const OAUTH_HOST_NOT_ALLOWED = "HOST_NOT_ALLOWED";
+
+/** What `POST /oauth/discover` answers: the vetted metadata of the server's authorization server. */
+export interface McpOAuthDiscovery {
+  /** The RFC 9728 `resource`; the bridge has checked it equals the MCP URL. */
+  resource: string;
+  /** The authorization server's `issuer`, string-equal to its own metadata. */
+  issuer: string;
+  authorizationEndpoint: string;
+  tokenEndpoint: string;
+  registrationEndpoint?: string;
+  revocationEndpoint?: string;
+  /** RFC 9207 `authorization_response_iss_parameter_supported`. When true the
+   *  callback MUST carry `iss`. */
+  issParameterSupported: boolean;
+}
+
+/** The only fields kept from a token response. */
+export interface McpOAuthTokenResult {
+  accessToken: string;
+  refreshToken?: string;
+  /** Seconds. */
+  expiresIn?: number;
+  scope?: string;
+}
+
+export interface McpOAuthExchangeInput {
+  tokenEndpoint: string;
+  clientId: string;
+  clientSecret?: string;
+  code: string;
+  codeVerifier: string;
+  redirectUri: string;
+  /** RFC 8707, sent on the token request as well as the authorize URL. */
+  resource: string;
+}
+
+export interface McpOAuthRefreshInput {
+  tokenEndpoint: string;
+  clientId: string;
+  clientSecret?: string;
+  refreshToken: string;
+  resource: string;
+  scope?: string;
+}
+
+export interface McpOAuthRevokeInput {
+  revocationEndpoint: string;
+  clientId: string;
+  clientSecret?: string;
+  token: string;
+}
+
+export interface McpBridgeOAuthClientOptions {
+  baseUrl: string;
+  serviceToken: string;
+  fetchImpl?: typeof fetch;
+  timeoutMs?: number;
+}
+
+const isStr = (v: unknown): v is string => typeof v === "string" && v.length > 0;
+
+function tokenResult(raw: unknown): McpOAuthTokenResult {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  // Fail closed on a malformed answer; keep nothing beyond the four fields.
+  if (!isStr(r.accessToken)) {
+    throw new McpBridgeError("REMOTE_CALL_FAILED", "mcp-bridge answered a token request without an access token.", 502);
+  }
+  return {
+    accessToken: r.accessToken,
+    ...(isStr(r.refreshToken) ? { refreshToken: r.refreshToken } : {}),
+    ...(typeof r.expiresIn === "number" && Number.isFinite(r.expiresIn) ? { expiresIn: r.expiresIn } : {}),
+    ...(isStr(r.scope) ? { scope: r.scope } : {}),
+  };
+}
+
+/** The orchestrator's side of the bridge's `/oauth/*` routes. */
+export class McpBridgeOAuthClient {
+  readonly #t: BridgeTransport;
+
+  constructor(opts: McpBridgeOAuthClientOptions) {
+    this.#t = {
+      baseUrl: opts.baseUrl.replace(/\/+$/, ""),
+      serviceToken: opts.serviceToken,
+      fetchImpl: opts.fetchImpl ?? fetch,
+      timeoutMs: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    };
+  }
+
+  /** The bridge decides which hosts are allowed from its own curated registry;
+   *  the box never sends a host list. */
+  async discover(mcpUrl: string): Promise<McpOAuthDiscovery> {
+    const d = await bridgeRequest<Partial<McpOAuthDiscovery> & { authorizationResponseIssParameterSupported?: unknown }>(
+      this.#t, "POST", "/oauth/discover", { mcpUrl },
+    );
+    if (!isStr(d.resource) || !isStr(d.issuer) || !isStr(d.authorizationEndpoint) || !isStr(d.tokenEndpoint)) {
+      throw new McpBridgeError("REMOTE_CALL_FAILED", "mcp-bridge answered discovery with incomplete metadata.", 502);
     }
-    if (parsed === null) {
-      throw new McpBridgeError("REMOTE_CALL_FAILED", "mcp-bridge answered with no JSON body.", res.status);
+    return {
+      resource: d.resource,
+      issuer: d.issuer,
+      authorizationEndpoint: d.authorizationEndpoint,
+      tokenEndpoint: d.tokenEndpoint,
+      ...(isStr(d.registrationEndpoint) ? { registrationEndpoint: d.registrationEndpoint } : {}),
+      ...(isStr(d.revocationEndpoint) ? { revocationEndpoint: d.revocationEndpoint } : {}),
+      // Explicit true or false, never absence read as false by a caller.
+      issParameterSupported: d.authorizationResponseIssParameterSupported === true,
+    };
+  }
+
+  async register(registrationEndpoint: string, redirectUris: readonly string[]): Promise<{ clientId: string; clientSecret?: string }> {
+    const r = await bridgeRequest<{ clientId?: unknown; clientSecret?: unknown }>(this.#t, "POST", "/oauth/register", {
+      registrationEndpoint,
+      redirectUris,
+    });
+    if (!isStr(r.clientId)) {
+      throw new McpBridgeError("REMOTE_CALL_FAILED", "mcp-bridge answered registration without a client id.", 502);
     }
-    return parsed as T;
+    return { clientId: r.clientId, ...(isStr(r.clientSecret) ? { clientSecret: r.clientSecret } : {}) };
+  }
+
+  async exchange(input: McpOAuthExchangeInput): Promise<McpOAuthTokenResult> {
+    return tokenResult(await bridgeRequest(this.#t, "POST", "/oauth/exchange", input));
+  }
+
+  async refresh(input: McpOAuthRefreshInput): Promise<McpOAuthTokenResult> {
+    return tokenResult(await bridgeRequest(this.#t, "POST", "/oauth/refresh", input));
+  }
+
+  async revoke(input: McpOAuthRevokeInput): Promise<void> {
+    await bridgeRequest(this.#t, "POST", "/oauth/revoke", input);
   }
 }

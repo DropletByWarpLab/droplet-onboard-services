@@ -194,8 +194,10 @@ describe("the credential fields match what the attach path reads", () => {
     const byName = new Map(atlassian().credentialFields.map((f) => [f.name, f]));
     expect([...byName.keys()]).toEqual(["email", "apiToken", "cloudId", "tokenExpiresAt"]);
 
+    // WARP-2405 - email and apiToken are one optional path (the shared API token);
+    // the site id is needed on every path, including a member's own sign-in.
     expect(byName.get("email")).toMatchObject({
-      required: true,
+      required: false,
       secret: false,
       storage: "providerConfig",
     });
@@ -205,7 +207,7 @@ describe("the credential fields match what the attach path reads", () => {
       storage: "providerConfig",
     });
     expect(byName.get("apiToken")).toMatchObject({
-      required: true,
+      required: false,
       secret: true,
       storage: "encrypted",
     });

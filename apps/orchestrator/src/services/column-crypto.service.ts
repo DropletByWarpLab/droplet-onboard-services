@@ -199,6 +199,16 @@ export function mcpOAuthAad(row: {
   }
   return `mcp-oauth:${row.id}:MEMBER:${row.memberId}`;
 }
+/**
+ * WARP-2416 - the AAD that binds an `McpOAuthClient.clientSecretEnc` to its record
+ * (id + provider + issuer): a secret copied to another record, or another issuer's,
+ * fails to decrypt. Distinct from {@link mcpOAuthAad}, so a connection's token
+ * blob and a client secret can never stand in for each other.
+ */
+export function mcpOAuthClientAad(rec: { id: string; provider: string; issuer: string }): string {
+  if (!rec.id || !rec.provider || !rec.issuer) throw new Error("column-crypto: mcp-oauth client AAD needs id, provider and issuer");
+  return `mcp-oauth-client:${rec.id}:${rec.provider}:${rec.issuer}`;
+}
 export function generateDek(): Buffer { return randomBytes(32); }
 
 function seal(key: Buffer, plaintext: Buffer, aad?: Buffer): Buffer {

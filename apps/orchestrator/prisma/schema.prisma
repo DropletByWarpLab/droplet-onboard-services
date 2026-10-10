@@ -11280,11 +11280,41 @@ model McpOAuthConnection {
 
   connectedAt     DateTime?
   lastRefreshOkAt DateTime?
+  /// WARP-2405 — when the held access token stops working, from the token
+  /// response's `expires_in`. The refresh job (WARP-2416) selects on it, so a
+  /// token is renewed before a call pays a 401. Cleared with the tokens.
+  tokenExpiresAt  DateTime?
   lastError       String?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
   @@unique([provider, memberId])
+  @@index([state, tokenExpiresAt])
   /// Offboarding: find every row a departing member owns (WARP-3924).
   @@index([memberId])
+}
+
+/// WARP-2416 / ADR-072 §2 - where a remote MCP provider's OAuth client lives: ONE
+/// record per (provider, issuer). `PASTED` is an owner/admin's own app, `DCR` a
+/// dynamic registration the box made. Sign-in start reads this (never another
+/// person's row); a connection row keeps only "the client that issued MY tokens",
+/// for its own refresh and revoke. `clientSecretEnc` is a `dcv1:` blob under
+/// `deriveMcpOAuthTokenKey()`, AAD-bound to this record (`mcpOAuthClientAad`).
+enum McpOAuthClientSource {
+  PASTED
+  DCR
+}
+
+model McpOAuthClient {
+  id              String               @id @default(uuid())
+  provider        String
+  issuer          String
+  clientId        String
+  clientSecretEnc String?
+  source          McpOAuthClientSource
+  updatedAt       DateTime             @updatedAt
+  /// User id of the owner/admin who pasted it (null for a registration).
+  updatedBy       String?
+
+  @@unique([provider, issuer])
 }

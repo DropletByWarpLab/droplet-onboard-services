@@ -33,6 +33,7 @@ import { createErpDriftRouter } from "./routes/erp-drift.js";
 import { createCloudFilesRouter } from "./routes/cloud-files.js";
 import { createM365CallbackRouter, createM365Router } from "./routes/m365.js";
 import { createGoogleCallbackRouter, createGoogleRouter } from "./routes/google.js";
+import { createMcpOAuthRouters } from "./routes/mcp-oauth.js";
 import { createAccountProviderSetupRouter } from "./routes/account-provider-setup.js";
 import { createErpRouter } from "./routes/erp.js";
 import { createSttRouter } from "./routes/stt.js";
@@ -301,6 +302,13 @@ export function createApp(
   // is on the authenticated router below.
   app.use("/api", createM365CallbackRouter(prisma));
   app.use("/api", createGoogleCallbackRouter(prisma));
+  // WARP-2405 — the remote-MCP sign-in callback. Public for the same reason as the
+  // Google one: it identifies the person by the flow (state cookie + single-use
+  // server-side entry), never by a session. Both halves (this callback and the
+  // session-authenticated start/paste routes mounted below) come from ONE call, so
+  // they share the in-flight sign-in state.
+  const mcpOAuthRouters = createMcpOAuthRouters(prisma);
+  app.use("/api", mcpOAuthRouters.callback);
 
   // PR #377 — passwordless WebAuthn / passkey authentication. The
   // authenticate/options + authenticate/verify endpoints are how a caller
@@ -593,6 +601,7 @@ export function createApp(
   app.use("/api", createM365Router(prisma));
   app.use("/api", createAccountProviderSetupRouter(prisma));
   app.use("/api", createGoogleRouter(prisma));
+  app.use("/api", mcpOAuthRouters.session);
   // WARP-3538 (D13) — ONE search over every cloud a person has connected: their
   // OneDrive, their SharePoint libraries and, as those connectors land, Google
   // Drive and Dropbox. Self-scoped like the connection routes above, and also

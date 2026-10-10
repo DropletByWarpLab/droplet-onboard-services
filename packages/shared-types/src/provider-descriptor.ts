@@ -638,6 +638,15 @@ export type ProviderDescriptor =
     })
   | McpProviderDescriptor;
 
+/** WARP-2405 — a remote MCP server's web sign-in (see {@link McpProviderDescriptor.signIn}). */
+export interface McpSignIn {
+  readonly kind: "oauth";
+  /** The OAuth-protected MCP endpoint: discovery starts here, and it is the RFC 8707 `resource`. */
+  readonly mcpUrl: string;
+  /** The scopes asked for at sign-in. The box never requests a wider set on its own. */
+  readonly scopes: readonly string[];
+}
+
 /**
  * WARP-2650 — a provider reached through a vendor's hosted MCP server.
  *
@@ -691,6 +700,15 @@ export type McpProviderDescriptor = Omit<ProviderDescriptorBase, "datasets"> & {
    */
   readonly mcpServerId: string;
   readonly datasets: readonly [];
+  /**
+   * WARP-2405 — web sign-in (OAuth 2.1 + PKCE) for this server, offered NEXT TO
+   * the credential fields rather than instead of them. Absent = the server only
+   * takes the credential fields. `mcpUrl` is the OAuth-protected MCP endpoint
+   * (it can differ from the API-token endpoint) and is the RFC 8707 `resource`
+   * on both legs; `scopes` is the smallest set the box asks for, never widened
+   * silently.
+   */
+  readonly signIn?: McpSignIn;
   /**
    * WARP-2659 — the hub card's one line: what connecting this does.
    *

@@ -285,6 +285,12 @@ export interface SaasCredentialView {
    * id: the state itself is always a declared value.
    */
   remoteMcp: RemoteMcpAttachView | null;
+  /**
+   * WARP-2405 — present only when this MCP server also offers web sign-in
+   * (the descriptor declares `signIn`). The client shows the sign-in card from
+   * this; the URLs and scopes stay on the box.
+   */
+  signIn?: { kind: "oauth" };
 }
 
 /** Raised when a submitted field fails the descriptor's own validation. The
@@ -576,6 +582,7 @@ export function buildCredentialView(
     // state it has no session for.
     remoteMcp:
       descriptor.track === "mcp" ? lifecycle.view(descriptor.mcpServerId) : null,
+    ...(descriptor.track === "mcp" && descriptor.signIn ? { signIn: { kind: "oauth" as const } } : {}),
   };
 }
 

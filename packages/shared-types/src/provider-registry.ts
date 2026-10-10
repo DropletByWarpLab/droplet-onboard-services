@@ -675,6 +675,34 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
     // The bridge's `SESSION_FACTORIES` key. Gated against the bridge's own
     // source by `adr-043-boundary.test.ts`, which now checks four declarations.
     mcpServerId: "atlassian",
+    // WARP-2405 — web sign-in beside the API token. The OAuth endpoint is
+    // `/v1/mcp/authv2` (the `/v1/mcp` path takes the Basic credential only);
+    // it keeps the reviewed tool catalog. Jira and Confluence, read and write
+    // (the box's interceptor still asks for a thumbs-up on every write), plus
+    // `offline_access` so the sign-in can refresh. No Compass or TWG scopes.
+    // `email` and `apiToken` are therefore optional (the shared-account path); only
+    // the site id is needed on every path. The bridge accepts either field set and
+    // `adr-043-boundary.test.ts` gates the two agreeing.
+    signIn: {
+      kind: "oauth",
+      mcpUrl: "https://mcp.atlassian.com/v1/mcp/authv2",
+      scopes: [
+        "read:me",
+        "read:account",
+        "offline_access",
+        "email",
+        "read:jira-work",
+        "search:confluence",
+        "read:confluence-user",
+        "read:page:confluence",
+        "read:comment:confluence",
+        "read:space:confluence",
+        "read:hierarchical-content:confluence",
+        "write:jira-work",
+        "write:page:confluence",
+        "write:comment:confluence",
+      ],
+    },
     credentialFields: [
       {
         // `readAtlassianCredential` (`remote-mcp-servers.ts`) reads exactly
@@ -686,18 +714,23 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
         name: "email",
         label: "Atlassian account email",
         type: "string",
-        required: true,
+        // WARP-2405 - optional now that people can sign in with Atlassian: the email
+        // and the token are one path (an API token) and are used together, or not at
+        // all. The bridge accepts either set; adr-043-boundary.test.ts gates that.
+        required: false,
         secret: false,
         storage: "providerConfig",
         help:
-          "The account the API token belongs to. The token carries that person's " +
-          "full permissions, so choose an account that will outlive any one individual.",
+          "The account the API token belongs to, or sign in with Atlassian below instead. The token " +
+          "carries that person's full permissions, so choose an account that will outlive any one individual.",
       },
       {
         name: "apiToken",
         label: "Atlassian API token",
         type: "string",
-        required: true,
+        // WARP-2405 - optional alongside the email (see above): the API token is the
+        // shared-account path; members can sign in with Atlassian instead.
+        required: false,
         secret: true,
         storage: "encrypted",
         // Deliberately NO `pattern`. Atlassian's `ATATT`-prefixed format is not
@@ -713,8 +746,8 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
         // the customer's browser does. The full URL lives in the guide, which
         // is where a person following a click-path actually is.
         help:
-          "Account settings → Security → Create and manage API tokens. Copy it once; " +
-          "Atlassian never shows it again.",
+          "Or sign in with Atlassian below. Account settings → Security → Create and manage API tokens. " +
+          "Copy it once; Atlassian never shows it again.",
       },
       {
         name: "cloudId",
