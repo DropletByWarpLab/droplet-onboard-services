@@ -7,7 +7,7 @@ import { __setColumnCryptoKeyForTest } from "../services/column-crypto.service.j
 import { mcpOAuthDependencies, type McpOAuthDependencies } from "../services/mcp-oauth/mcp-oauth.service.js";
 import { fakeMcpOAuthDb } from "../services/mcp-oauth/__tests__/fake-db.js";
 import { createRequestLogger } from "../middleware/request-logger.js";
-import { createMcpOAuthCallbackRouter, createMcpOAuthRouter, MCP_OAUTH_STATE_COOKIE } from "./mcp-oauth.js";
+import { createMcpOAuthCallbackRouter, createMcpOAuthRouter, createMcpOAuthRouters, MCP_OAUTH_STATE_COOKIE } from "./mcp-oauth.js";
 
 vi.mock("../config.js", () => ({ config: {
   AUTH_ENABLED: true, SERVICE_TOKEN_EMAIL: "email-service-secret", SERVICE_TOKEN_VOICE: "voice-service-secret", DROPLET_LAN_HOSTNAME: "box.customer.com", WIREGUARD_ENDPOINT_HOST: "",
@@ -253,5 +253,45 @@ describe("GET /mcp/oauth/connections visibility", () => {
 
     const asAdmin = await asUser(request(app).get("/api/mcp/oauth/connections"), "admin", "a1");
     expect(asAdmin.body.providers[0].workspace.ackBy).toBe("alice");
+  });
+});
+
+describe("production wiring: the callback and the start route share one set of in-flight sign-ins", () => {
+  beforeEach(() => __setColumnCryptoKeyForTest(Buffer.alloc(32, 9).toString("base64")));
+  afterEach(() => __setColumnCryptoKeyForTest(null));
+
+  it("a real browser redirect completes: start, then callback, built the way app.ts builds them", async () => {
+    const db = fakeMcpOAuthDb();
+    const oauth = {
+      discover: vi.fn(async (_u: string) => ({
+        resource: MCP_URL, issuer: ISSUER, authorizationEndpoint: "https://auth.example/authorize",
+        tokenEndpoint: "https://auth.example/token", registrationEndpoint: "https://auth.example/dcr", issParameterSupported: false,
+      })),
+      register: vi.fn(async (_e: string, _r: readonly string[]) => ({ clientId: "client-1" })),
+      exchange: vi.fn(async (_i: unknown) => ({ accessToken: "ACCESS-SECRET", refreshToken: "REFRESH-SECRET", expiresIn: 3600 })),
+    };
+    // Exactly one call, as in app.ts: no deps object is shared by hand.
+    const routers = createMcpOAuthRouters(db.prisma, { oauth, egress: async () => ({ allowed: true, row: null }) });
+    const app = express();
+    app.use(express.json());
+    app.use(cookieParser());
+    app.use("/api", routers.callback); // public, before session auth
+    app.use((req, _res, next) => {
+      req.user = { id: "u1", username: "alice", displayName: "Alice", role: "family" };
+      next();
+    });
+    app.use("/api", routers.session);
+
+    const started = await request(app).post("/api/mcp/oauth/start").send({ provider: "atlassian", scope: "MEMBER" });
+    expect(started.status).toBe(200);
+    const state = new URL(started.body.authorizeUrl).searchParams.get("state")!;
+    const done = await request(app).get("/api/mcp/oauth/callback").query({ state, code: "c" }).set("Cookie", `${MCP_OAUTH_STATE_COOKIE}=${state}`);
+    expect(done.headers.location).toBe("/settings?mcp=atlassian:connected");
+    expect(oauth.exchange).toHaveBeenCalledTimes(1);
+    expect(db.rows[0].state).toBe("CONNECTED");
+  });
+
+  it("the default dependency sets never get separate in-flight maps", () => {
+    expect(mcpOAuthDependencies().pending).toBe(mcpOAuthDependencies().pending);
   });
 });
