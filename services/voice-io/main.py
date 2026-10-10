@@ -35,6 +35,7 @@ from pydantic import (
 
 from voice.audio_io import (
     AudioUnavailable,
+    detect_tone,
     echo_check,
     measure_input_level,
     record,
@@ -107,6 +108,7 @@ from voice.speaking_voice import InvalidSpeakingVoice, SpeakingVoiceStore, Speak
 from voice.volume import VolumeController, VolumeStore
 from voice.wake import (
     VOSK_DEFAULT_THRESHOLD,
+    WAKE_SAMPLE_RATE,
     VoskWakeWordDetector,
     build_detector_from_env,
 )
@@ -1608,12 +1610,73 @@ def audio_measure(req: MeasureRequest) -> MeasureResponse:
     )
 
 
+# Echo check through the wake pipeline's own stream (WARP-1055 step 4 on an
+# exclusive mic). The tap collects ECHO_CHECK_SECONDS of the room; the tone
+# starts ECHO_TAP_LEAD_S after the tap arms and ends before the tap closes,
+# so the capture window brackets the playback the way full-duplex playrec
+# guaranteed.
+ECHO_CHECK_SECONDS = 2.0
+ECHO_TONE_SECONDS = 1.2
+ECHO_TONE_HZ = 440.0
+ECHO_TAP_LEAD_S = 0.3
+
+
+def _echo_check_via_pipeline(pipeline: WakePipeline, output_device: int) -> dict:
+    """Play the test tone through the speaker while the wake pipeline's
+    ALREADY-OPEN capture stream is tapped, then ask `detect_tone` whether
+    the tone came back — no second PortAudio input stream.
+
+    The duplex `echo_check` needs the input side of the device pair, and
+    the reSpeaker's hw device is exclusive: with the assistant listening
+    (always) `playrec` failed with PortAudio -9985 and the wizard's
+    speaker step could never pass — the dashboard then told the owner the
+    speaker didn't respond, on a speaker that was fine. The tap is the
+    same one /voice/mic/test uses, so wake handling is suppressed while
+    it runs and the tone cannot start a turn. Raises MeasurementUnavailable
+    when the pipeline delivers no audio; playback faults propagate.
+    """
+    outcome: dict[str, object] = {}
+
+    def _tap() -> None:
+        try:
+            outcome["pcm"] = pipeline.capture_input(ECHO_CHECK_SECONDS)
+        except MeasurementUnavailable as exc:
+            outcome["error"] = exc
+
+    tap = threading.Thread(target=_tap, name="echo-check-tap", daemon=True)
+    tap.start()
+    time.sleep(ECHO_TAP_LEAD_S)  # the tap must be armed before the tone starts
+    try:
+        test_tone(
+            duration_s=ECHO_TONE_SECONDS,
+            samplerate=SAMPLE_RATE,
+            frequency_hz=ECHO_TONE_HZ,
+            device=output_device,
+        )
+    finally:
+        tap.join(ECHO_CHECK_SECONDS + 5.0)
+    error = outcome.get("error")
+    if error is not None:
+        raise MeasurementUnavailable(str(error))
+    pcm = outcome.get("pcm")
+    if pcm is None:
+        raise MeasurementUnavailable(
+            "The microphone stopped delivering audio during the speaker check."
+        )
+    return detect_tone(
+        np.asarray(pcm), samplerate=WAKE_SAMPLE_RATE, frequency_hz=ECHO_TONE_HZ,
+    )
+
+
 @app.post("/audio/echo-check", response_model=EchoCheckResponse)
 def audio_echo_check() -> EchoCheckResponse:
     """Wizard step 4 (WARP-1055): play the test tone and listen for it
-    in the same window (full-duplex playrec), then judge whether the
-    tone arrived (voice.audio_io.detect_tone). Fully automatic — the
-    user does nothing."""
+    in the same window, then judge whether the tone arrived
+    (voice.audio_io.detect_tone). Fully automatic — the user does nothing.
+
+    While the wake pipeline holds the (exclusive) mic the listening half
+    taps its live stream (`_echo_check_via_pipeline`); the full-duplex
+    `playrec` is only used when no pipeline holds the device."""
     _require_voice_on()
     r = _resolve()
     if r.input_device is None:
@@ -1629,11 +1692,24 @@ def audio_echo_check() -> EchoCheckResponse:
     if not _capture_lock.acquire(blocking=False):
         raise HTTPException(status_code=409, detail=_CAPTURE_BUSY_DETAIL)
     try:
-        result = echo_check(
-            samplerate=SAMPLE_RATE,
-            input_device=r.input_device.index,
-            output_device=r.output_device.index,
-        )
+        pipeline = _pipeline
+        if pipeline is not None:
+            try:
+                result = _echo_check_via_pipeline(pipeline, r.output_device.index)
+            except MeasurementUnavailable as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "The microphone didn't respond during the speaker "
+                        f"check ({exc}). Try again in a moment."
+                    ),
+                )
+        else:
+            result = echo_check(
+                samplerate=SAMPLE_RATE,
+                input_device=r.input_device.index,
+                output_device=r.output_device.index,
+            )
     except AudioUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     except _PortAudioError as exc:
@@ -2250,9 +2326,18 @@ def _require_speaker_embedder() -> OnnxSpeakerEmbedder:
 def _capture_speaker_pcm(seconds: float) -> np.ndarray:
     """One mono enrollment/match capture off the picked input device.
 
-    Same coexistence posture as /audio/measure: sounddevice.rec under
-    the shared _capture_lock (never two overlapping captures on the hw
-    device), AudioUnavailable/PortAudio faults → operational 503s. The
+    Same coexistence posture as /audio/measure (WARP-1410): while the
+    wake pipeline holds the mic, tap its ALREADY-OPEN capture stream —
+    the same tap /voice/mic/test uses — instead of opening a second one.
+    The reSpeaker's hw device is exclusive, so the `sounddevice.rec` this
+    used to open failed with PortAudio -9985 ("Device unavailable") for
+    the whole time the assistant was listening, which is always: every
+    enrollment line came back "The microphone didn't respond". While the
+    tap is armed the pipeline counts wakes but never handles them, so
+    reading "Hey Droplet, ..." off the script cannot start a turn
+    mid-line. `sounddevice.rec` under the shared _capture_lock remains
+    the path when no pipeline holds the device (voice on, no mic at
+    boot). AudioUnavailable/PortAudio faults → operational 503s. The
     returned PCM lives only for the embed call — never persisted.
 
     WARP-1599 — the kill-switch guard sits HERE rather than on each of
@@ -2270,6 +2355,18 @@ def _capture_speaker_pcm(seconds: float) -> np.ndarray:
     if not _capture_lock.acquire(blocking=False):
         raise HTTPException(status_code=409, detail=_CAPTURE_BUSY_DETAIL)
     try:
+        pipeline = _pipeline
+        if pipeline is not None:
+            try:
+                return np.asarray(pipeline.capture_input(seconds)).reshape(-1)
+            except MeasurementUnavailable as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        f"The microphone didn't respond ({exc}). Check the "
+                        "mic and try again."
+                    ),
+                )
         data = record(
             duration_s=seconds,
             samplerate=SAMPLE_RATE,

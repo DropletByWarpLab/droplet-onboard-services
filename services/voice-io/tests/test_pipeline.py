@@ -5419,3 +5419,51 @@ class TestCaptureCapIsAudioTime:
         pipe._on_frame(_silence_frame())  # elapsed past the window
         assert stt.finished is True
         assert pipe.status().last_turn_timing["vad_end"] == "cap"
+
+
+
+# ────────────────────────────────────────────────────────────────────
+# A wake during a capture tap is counted, not handled (WARP-1056/1410)
+# ────────────────────────────────────────────────────────────────────
+
+class TestWakeSuppressedWhileTapped:
+    """A mic test, an enrollment line or the echo check taps the live
+    stream; the person may well read "Hey Droplet, ..." into it. The wake
+    is recorded (last_wake_at) but never starts a turn, and the frame
+    still reaches the tap."""
+
+    def test_a_wake_during_a_capture_is_counted_not_handled(self):
+        stt = _RecordingSTT(scripted_transcripts=["never"])
+        pipe = WakePipeline(
+            detector=_ScriptedDetector([{"hey_jarvis": 0.9}, {"hey_jarvis": 0.9}]),
+            input_device_index=0,
+            threshold=0.5,
+            stt=stt,
+            debounce_s=0.0,
+        )
+        pipe._stt_available = True
+        pipe._state = "listening"
+        pipe._capture_tap = []  # an enrollment line is collecting frames
+        pipe._on_frame(_silence_frame())
+        s = pipe.status()
+        assert s.state == "listening"
+        assert s.last_wake_at is not None  # counted
+        assert stt.sessions_opened == 0    # not handled
+        assert len(pipe._capture_tap) == 1  # the frame still reached the tap
+        # Tap released: the next fire is handled normally.
+        pipe._capture_tap = None
+        pipe._on_frame(_silence_frame())
+        assert pipe.status().state == "wake_detected"
+
+    def test_a_near_miss_during_a_capture_emits_no_feed_row(self):
+        reporter = _RecordingReporter()
+        pipe = WakePipeline(
+            detector=_ScriptedDetector([{"hey_jarvis": 0.4}]),
+            input_device_index=0,
+            threshold=0.5,
+            activity_reporter=reporter,
+        )
+        pipe._state = "listening"
+        pipe._capture_tap = []
+        pipe._on_frame(_silence_frame())
+        assert reporter.events == []

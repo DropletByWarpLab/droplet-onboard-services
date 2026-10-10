@@ -3199,11 +3199,13 @@ class WakePipeline:
             # clear enough to clear the gate — the §3.4 "Missed wake
             # word" feed row. Debounced like fires (one row per
             # utterance) and suppressed during the wizard's calibration
-            # mode (its deliberate wake tests aren't misses).
+            # mode (its deliberate wake tests aren't misses) and while a
+            # capture tap is armed (a scripted enrollment line isn't one).
             if (
                 score >= self._threshold * WAKE_MISS_RATIO
                 and now - self._last_miss_emit_at >= self._debounce_s
                 and not self._calibration_mode_active(now)
+                and self._capture_tap is None
             ):
                 self._last_miss_emit_at = now
                 self._emit_activity(
@@ -3226,11 +3228,16 @@ class WakePipeline:
             # three times" counter rides last_wake_at changes — but the
             # state stays 'listening', so _on_frame never routes into
             # the STT capture path and nothing gets spoken back.
+            # The same while a capture tap is armed (a mic test, an
+            # enrollment line, the echo check — WARP-1056/WARP-1410):
+            # the person is reading "Hey Droplet, ..." off a script into
+            # a capture that must keep flowing, not starting a turn.
             calibrating = self._calibration_mode_active(now)
+            capturing = self._capture_tap is not None
             self._last_wake_at = event.detected_at
             self._last_wake_score = event.score
             self._last_wake_model = event.model_name
-            if not calibrating:
+            if not (calibrating or capturing):
                 self._state = "wake_detected"
                 # A new turn starts clean: drop the last failed turn's
                 # note (WARP-3199). A latched 'error' never reaches here —
@@ -3239,10 +3246,12 @@ class WakePipeline:
                 # WARP-3124 — a handled wake starts the turn's timing.
                 self._turn_timing = _TurnTiming(wake_at=time.monotonic())
 
-        if calibrating:
+        if calibrating or capturing:
             logger.info(
-                "wake detected in calibration mode (model=%s score=%.3f) — "
-                "counted, not handled", event.model_name, event.score,
+                "wake detected %s (model=%s score=%.3f) — counted, not handled",
+                "in calibration mode" if calibrating
+                else "while a capture is in progress",
+                event.model_name, event.score,
             )
             # Same rationale as the decay path: don't carry a stateful
             # recognizer's half-decoded utterance into the next try.

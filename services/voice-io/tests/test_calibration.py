@@ -447,3 +447,87 @@ def test_post_calibration_rejects_absurd_gain(client, cal_path):
     )
     assert resp.status_code == 422
     assert not cal_path.exists()
+
+
+# ── POST /audio/echo-check through the live pipeline stream ────────
+#
+# Full-duplex playrec needs the input side of the device pair, and the
+# reSpeaker's hw device is exclusive: with the assistant listening the
+# duplex check failed -9985 and the wizard's speaker step could never
+# pass. With a pipeline the tone now plays while the pipeline's own
+# stream is tapped; playrec stays for a box with no pipeline.
+
+def _tone_pcm(seconds: float = 2.0, hz: float = 440.0, amp: float = 0.3) -> np.ndarray:
+    t = np.arange(int(seconds * 16000)) / 16000.0
+    return (amp * np.sin(2 * np.pi * hz * t) * 32767).astype(np.int16)
+
+
+class _EchoPipeline:
+    def __init__(self, pcm=None):
+        self._pcm = pcm
+        self.taps: list[float] = []
+
+    def capture_input(self, seconds: float):
+        self.taps.append(seconds)
+        if self._pcm is None:
+            raise main.MeasurementUnavailable("the microphone stopped delivering audio")
+        return self._pcm
+
+
+@pytest.fixture
+def _no_tap_lead(monkeypatch):
+    monkeypatch.setattr(main, "ECHO_TAP_LEAD_S", 0.0)
+
+
+def test_echo_check_taps_the_pipeline_and_hears_the_tone(client, monkeypatch, _no_tap_lead):
+    monkeypatch.setattr(main, "_resolve", lambda: _FakeResolution())
+    pipe = _EchoPipeline(_tone_pcm())
+    monkeypatch.setattr(main, "_pipeline", pipe)
+    played: list[dict] = []
+    monkeypatch.setattr(main, "test_tone", lambda **kw: played.append(kw))
+    monkeypatch.setattr(
+        main, "echo_check",
+        lambda **kw: pytest.fail("duplex playrec must not run while the pipeline holds the mic"),
+    )
+    resp = client.post("/audio/echo-check")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["heard"] is True
+    assert body["tone_dbfs"] > body["floor_dbfs"] + 12.0
+    assert pipe.taps == [main.ECHO_CHECK_SECONDS]
+    assert played == [{
+        "duration_s": main.ECHO_TONE_SECONDS, "samplerate": main.SAMPLE_RATE,
+        "frequency_hz": main.ECHO_TONE_HZ, "device": 0,
+    }]
+
+
+def test_echo_check_through_the_pipeline_reports_a_silent_room(client, monkeypatch, _no_tap_lead):
+    monkeypatch.setattr(main, "_resolve", lambda: _FakeResolution())
+    monkeypatch.setattr(main, "_pipeline", _EchoPipeline(np.zeros(32000, dtype=np.int16)))
+    monkeypatch.setattr(main, "test_tone", lambda **kw: None)
+    resp = client.post("/audio/echo-check")
+    assert resp.status_code == 200
+    assert resp.json()["heard"] is False
+
+
+def test_echo_check_maps_a_dead_tap_to_503(client, monkeypatch, _no_tap_lead):
+    monkeypatch.setattr(main, "_resolve", lambda: _FakeResolution())
+    monkeypatch.setattr(main, "_pipeline", _EchoPipeline(None))
+    monkeypatch.setattr(main, "test_tone", lambda **kw: None)
+    resp = client.post("/audio/echo-check")
+    assert resp.status_code == 503
+    assert "try again" in resp.json()["detail"].lower()
+
+
+def test_echo_check_tone_playback_fault_is_503(client, monkeypatch, _no_tap_lead):
+    monkeypatch.setattr(main, "_resolve", lambda: _FakeResolution())
+    monkeypatch.setattr(main, "_pipeline", _EchoPipeline(_tone_pcm()))
+
+    def boom(**kw):
+        raise main._PortAudioError("Invalid sample rate [PaErrorCode -9997]")
+
+    monkeypatch.setattr(main, "test_tone", boom)
+    resp = client.post("/audio/echo-check")
+    assert resp.status_code == 503
+    assert "try again" in resp.json()["detail"].lower()
+    assert not main._capture_lock.locked()
