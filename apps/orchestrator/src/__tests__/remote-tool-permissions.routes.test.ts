@@ -97,7 +97,7 @@ describe("PATCH one tool", () => {
       const res = await request(app).patch(`${P}/atlassian/${DESTRUCTIVE}`).send({ permission });
       expect(res.status).toBe(400);
       expect(res.body.error).toBe("permission_not_allowed_for_grade");
-      expect(res.body.message).toContain("destructive");
+      expect(res.body.message).toContain("blocked");
     }
     expect((await request(app).patch(`${P}/atlassian/${DESTRUCTIVE}`).send({ permission: "block" })).status).toBe(200);
   });

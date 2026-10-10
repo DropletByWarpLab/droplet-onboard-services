@@ -90,8 +90,12 @@ describe("the call policy for an extension", () => {
     expect(decide("ext-wc", "word_count")).toMatchObject({ kind: "deny", code: "REMOTE_TOOL_DENIED" });
   });
 
-  it("a vendor server keeps the composed policy (the table's own refusal stands)", () => {
-    remoteToolClassificationCache.seed([row({ serverId: "vendor", toolName: "x", allowlisted: true })]);
-    expect(decide("vendor", "x")).toMatchObject({ kind: "deny", code: "REMOTE_TOOL_NOT_CLASSIFIED" });
+  it("a vendor server keeps the composed policy: a server with no table asks first (WARP-3962); one with a table keeps its refusal", () => {
+    remoteToolClassificationCache.seed([
+      row({ serverId: "vendor", toolName: "x", allowlisted: true }),
+      row({ serverId: "atlassian", toolName: "notInTheTable", allowlisted: true }),
+    ]);
+    expect(decide("vendor", "x")).toEqual({ kind: "allow", requiresConfirmation: true, grade: "write" });
+    expect(decide("atlassian", "notInTheTable")).toMatchObject({ kind: "deny", code: "REMOTE_TOOL_NOT_CLASSIFIED" });
   });
 });
