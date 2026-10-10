@@ -887,7 +887,14 @@ function readRemoteCredential(
   descriptor: McpProviderDescriptor,
   open: (connectionId: string, blob: string) => Record<string, string>,
 ): RemoteCredentialRead {
-  const required = descriptor.credentialFields.filter((f) => f.required);
+  // WARP-2405 - a server that also takes a sign-in declares the API-token fields
+  // optional (a sign-in-only box has none), but THIS reader runs only for a row
+  // that holds a sealed credential, i.e. the API-token path, which needs them all
+  // (minus the optional expiry date, a fact about the credential, never an input).
+  const expiryField = descriptor.credentialExpiry?.field;
+  const required = descriptor.credentialFields.filter(
+    (f) => f.required || (descriptor.signIn !== undefined && f.name !== expiryField),
+  );
   const sealed = required.filter((f) => f.storage === "encrypted");
   let secrets: Record<string, string> = {};
   try {
