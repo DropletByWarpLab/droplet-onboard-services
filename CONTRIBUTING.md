@@ -408,8 +408,8 @@ src/
     layout.tsx           Root layout with sidebar
     page.tsx             Dashboard (device status, service health)
     <route>/page.tsx     ~30 routes: admin, calendar, cameras, chat, clips,
-                         context, devices, email, events, files, health, help,
-                         integrations, invite, knowledge, login, models,
+                         connectors, context, devices, email, events, files,
+                         health, help, invite, knowledge, login, models,
                          network, projects, remote-access, settings, setup,
                          tools, tour, trust, users, voice, …
   components/            Shared UI (sidebar, chat, network, files, …)

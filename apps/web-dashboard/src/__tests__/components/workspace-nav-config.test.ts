@@ -235,8 +235,8 @@ describe("workspace-nav-config — Level 3 views", () => {
   });
 
   it("Integrations and Credentials are sibling chips, neither has views (WARP-2968)", () => {
-    expect(dest("/integrations")?.views).toEqual([]);
-    expect(dest("/integrations/credentials")?.views).toEqual([]);
+    expect(dest("/connectors")?.views).toEqual([]);
+    expect(dest("/connectors/credentials")?.views).toEqual([]);
   });
 
   it("a view row is never a single pill", () => {
@@ -269,8 +269,8 @@ describe("workspace-nav-config — locate() derives space + destination from the
     ["/files/recents", "work", "/files", "/files/recents"],
     ["/events", "ops", "/events", null],
     ["/cameras/front-door", "ops", "/cameras", null],
-    ["/integrations/credentials", "ops", "/integrations/credentials", null],
-    ["/integrations", "ops", "/integrations", null],
+    ["/connectors/credentials", "ops", "/connectors/credentials", null],
+    ["/connectors", "ops", "/connectors", null],
     ["/admin", "admin", "/admin", null],
     ["/admin/audit", "admin", "/admin/audit", null],
     ["/admin/prompt", "ai", "/admin/prompt", null],
@@ -319,7 +319,7 @@ describe("workspace-nav-config — restrictTo (WARP-2976, ADR-059 §2.3)", () =>
   });
 
   it("is an intersection: the gates still apply inside the set", () => {
-    const restrict = new Set(["/cameras", "/events", "/network", "/integrations"]);
+    const restrict = new Set(["/cameras", "/events", "/network", "/connectors"]);
     const hrefs = hrefsOf(resolveSpaces("family", ALL_CAPS, (id) => id !== "cameras", restrict));
     // cameras module off → Cameras and its Events child go; Integrations is
     // owner/admin only → gone for family. Only Network survives.

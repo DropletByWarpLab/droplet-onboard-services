@@ -145,7 +145,7 @@ describe("integrationStatusForHealthFailure — classifying a rejected probe", (
  *
  * All four mapped to `IntegrationStatus.ERROR`, which both surfaces render as
  * "Can't connect": the hub tile (`connector-visuals.tsx` `statusView`) and
- * `/integrations/credentials` (`SaasCredentialsSection.tsx` `STATE_COPY`). So a
+ * `/connectors/credentials` (`SaasCredentialsSection.tsx` `STATE_COPY`). So a
  * Basic-plan Shopify store — orders, products, inventory and fulfilment all
  * reading correctly, only customer identities withheld — and a Mailchimp
  * account whose plan excludes one resource were both drawn as broken

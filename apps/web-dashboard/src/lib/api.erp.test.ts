@@ -1,7 +1,7 @@
 /**
  * WARP-2500 — the ERP lifecycle helpers address ONE provider.
  *
- * The orchestrator's `POST /api/integrations/eaglesoft/{disconnect,
+ * The orchestrator's `POST /api/connectors/eaglesoft/{disconnect,
  * write-enable,write-disable}` were the only spellings that existed, and
  * `disconnect()` / `setWriteEnabled()` behind them took no provider at all.
  * `connect()` meanwhile admits every provider `isKnownErpProvider` allows, so
@@ -72,12 +72,12 @@ beforeEach(() => {
 describe.each(PROVIDERS)("disconnectProvider(%s)", (provider) => {
   it("POSTs to that provider's own disconnect route", async () => {
     // Mutation: restore the hardcoded
-    // `"/api/integrations/eaglesoft/disconnect"` → every row of this table
+    // `"/api/connectors/eaglesoft/disconnect"` → every row of this table
     // except `eaglesoft` goes red, which is the client-side statement of the
     // same defect the service-side table asserts.
     await disconnectProvider(provider);
 
-    expect(calledUrl()).toBe(`/api/integrations/${provider}/disconnect`);
+    expect(calledUrl()).toBe(`/api/connectors/${provider}/disconnect`);
     expect(calledInit().method).toBe("POST");
   });
 });
@@ -107,7 +107,7 @@ describe("disconnectProvider — records disposition", () => {
  * deprecated `eaglesoft` literal aliases.
  *
  * For `provider === "eaglesoft"` the parameterised URL and the alias are the
- * SAME STRING — `/api/integrations/eaglesoft/disconnect` — so no client-side
+ * SAME STRING — `/api/connectors/eaglesoft/disconnect` — so no client-side
  * assertion can tell them apart, and one that claimed to would be measuring
  * nothing. What distinguishes them is which Express layer matches, which is
  * a server-side fact and is covered by `integrations-prefix.mount.test.ts`.
@@ -119,7 +119,7 @@ describe.each(PROVIDERS)("setProviderWrites(%s, …)", (provider) => {
   it("POSTs write-enable to that provider's own route", async () => {
     await setProviderWrites(provider, true);
 
-    expect(calledUrl()).toBe(`/api/integrations/${provider}/write-enable`);
+    expect(calledUrl()).toBe(`/api/connectors/${provider}/write-enable`);
     expect(calledInit().method).toBe("POST");
   });
 
@@ -129,7 +129,7 @@ describe.each(PROVIDERS)("setProviderWrites(%s, …)", (provider) => {
     // connector's flag, which is the worse of the two directions to get wrong.
     await setProviderWrites(provider, false);
 
-    expect(calledUrl()).toBe(`/api/integrations/${provider}/write-disable`);
+    expect(calledUrl()).toBe(`/api/connectors/${provider}/write-disable`);
   });
 });
 
@@ -139,13 +139,13 @@ describe("a provider key is URL-encoded, not interpolated raw", () => {
     // registry: `isKnownErpProvider` reads a LIVE registry that an operator
     // profile can extend at runtime, so the key reaching this helper is not
     // drawn from a closed set. Raw interpolation would let one add a path
-    // segment — `a/b` posting to `/api/integrations/a/b/disconnect`, three
+    // segment — `a/b` posting to `/api/connectors/a/b/disconnect`, three
     // segments, which is the drift router's shape.
     //
     // Mutation: drop `encodeURIComponent` → red.
     await disconnectProvider("weird/key");
 
-    expect(calledUrl()).toBe("/api/integrations/weird%2Fkey/disconnect");
+    expect(calledUrl()).toBe("/api/connectors/weird%2Fkey/disconnect");
     expect(calledUrl()).not.toContain("/weird/key/");
   });
 });
@@ -161,7 +161,7 @@ describe("connectCloudProvider", () => {
     // Mutation: send `{ host: "" }` or no body → red.
     await connectCloudProvider("stripe");
 
-    expect(calledUrl()).toBe("/api/integrations/stripe/connect");
+    expect(calledUrl()).toBe("/api/connectors/stripe/connect");
     expect(calledInit().method).toBe("POST");
     expect(calledInit().body).toBe("{}");
     expect((calledInit().headers as Record<string, string>)["content-type"]).toBe(
@@ -180,6 +180,6 @@ describe("connectCloudProvider", () => {
   it("URL-encodes the provider key", async () => {
     await connectCloudProvider("weird/key");
 
-    expect(calledUrl()).toBe("/api/integrations/weird%2Fkey/connect");
+    expect(calledUrl()).toBe("/api/connectors/weird%2Fkey/connect");
   });
 });

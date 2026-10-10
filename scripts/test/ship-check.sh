@@ -90,7 +90,7 @@ set -euo pipefail
 # This script is written to the feature set of bash 3.2 -- the version macOS has
 # shipped since 2007 and, for GPLv3 licensing reasons, will never update. That
 # is a deliberate constraint, not an accident: this script IS the pre-PR gate
-# that .claude/skills/preflight/SKILL.md and docs/integrations/ADD-A-PROVIDER.md
+# that .claude/skills/preflight/SKILL.md and docs/connectors/ADD-A-PROVIDER.md
 # mandate, so it has to be runnable on the primary dev Mac. For months it was
 # not: associative arrays (the bash-4-only `-A` option to `declare`) made it die
 # at line 115 with a raw `declare: -A: invalid option`, so the documented gate

@@ -55,7 +55,7 @@ test("a static draft renders the four outputs and the checklist at the provider'
   const paths = outputPaths("acme");
   assert.deepEqual(paths, {
     profile: "services/erp-connector/src/rest/vendors/acme.ts",
-    guide: "docs/integrations/acme.md",
+    guide: "docs/connectors/acme.md",
     egress: "docs/security/allowed-egress.acme.draft.yaml",
     adr042: "docs/adr-042/acme.rows.md",
     checklist: "DRAFT-CHECKLIST.md",

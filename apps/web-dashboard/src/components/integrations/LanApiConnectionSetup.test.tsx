@@ -45,7 +45,7 @@ describe("Patterson API setup", () => {
     fireEvent.click(screen.getByRole("button", { name: "Connect" }));
     await waitFor(() => expect(onConnected).toHaveBeenCalledTimes(1));
     const [path, init] = mocks.authFetch.mock.calls[0];
-    expect(path).toBe("/api/integrations/eaglesoft/connect");
+    expect(path).toBe("/api/connectors/eaglesoft/connect");
     expect(init.method).toBe("POST");
     expect(JSON.parse(init.body)).toEqual({ provider: "eaglesoft-api", host: "practice-server.lan", port: 9991, apiCredentials: { integrationKey: "private-integration-key", userId: "private-api-user", password: "private-api-password" }, enableWrites: false, apiRouteMap: routeMap, apiCaCert: ca });
     expect(onConnected.mock.calls).toEqual([[]]);
@@ -60,7 +60,7 @@ describe("Patterson API setup", () => {
     fill();
     fireEvent.click(screen.getByRole("button", { name: "Test connection" }));
     expect(await screen.findByRole("status")).toHaveTextContent("Choose Connect to save this setup.");
-    expect(mocks.authFetch.mock.calls[0][0]).toBe("/api/integrations/eaglesoft/test");
+    expect(mocks.authFetch.mock.calls[0][0]).toBe("/api/connectors/eaglesoft/test");
     const body = JSON.parse(mocks.authFetch.mock.calls[0][1].body);
     expect(body.provider).toBe("eaglesoft-api");
     expect(body).not.toHaveProperty("port");
@@ -70,7 +70,7 @@ describe("Patterson API setup", () => {
     expect(screen.getByLabelText("Password")).toHaveValue("private-api-password");
     fireEvent.click(screen.getByRole("button", { name: "Connect" }));
     await waitFor(() => expect(onConnected).toHaveBeenCalledTimes(1));
-    expect(mocks.authFetch.mock.calls[1][0]).toBe("/api/integrations/eaglesoft/connect");
+    expect(mocks.authFetch.mock.calls[1][0]).toBe("/api/connectors/eaglesoft/connect");
   });
   it("keeps a saved but blocked HTTP200 setup pending instead of reporting success", async () => {
     mocks.authFetch.mockResolvedValue(response({ provider: "eaglesoft-api", status: "PROVISIONING" }));

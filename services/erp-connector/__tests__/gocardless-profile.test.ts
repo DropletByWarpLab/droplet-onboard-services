@@ -324,7 +324,7 @@ describe("GoCardless — the profile the track actually dispatches", () => {
     expect(d.category).toBe("Payments");
     expect(d.catalog?.order).toBe(19);
     expect(d.catalog?.availability).toBe("available");
-    expect(d.catalog?.setupGuideHref).toBe("/help/integrations/gocardless");
+    expect(d.catalog?.setupGuideHref).toBe("/help/connectors/gocardless");
   });
 
   it("🔴 paces at the LOWER of GoCardless's two published figures, and the descriptor says the same thing twice", async () => {

@@ -13,7 +13,7 @@
  * The connection surface stayed in Operations; the data surface belongs in
  * Business, next to Customers and Projects.
  *
- * The old route still resolves — see app/integrations/eaglesoft/page.tsx.
+ * The old route still resolves — see app/connectors/eaglesoft/page.tsx.
  */
 
 import { useState } from "react";

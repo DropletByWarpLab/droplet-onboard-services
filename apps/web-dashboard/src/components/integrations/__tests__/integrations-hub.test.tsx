@@ -58,7 +58,7 @@ vi.mock("@/lib/api.erp", async (importOriginal) => {
 const push = vi.fn();
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push, replace: vi.fn(), back: vi.fn() }),
-  usePathname: () => "/integrations",
+  usePathname: () => "/connectors",
   useSearchParams: () => new URLSearchParams(),
 }));
 
@@ -112,7 +112,7 @@ import {
   PROVIDER_DESCRIPTORS,
   type ProviderDescriptor,
 } from "@/components/integrations/provider-descriptors";
-import IntegrationsPage from "@/app/integrations/page";
+import IntegrationsPage from "@/app/connectors/page";
 
 /** A second connectable vendor, so dispatch is tested off data, not off a name. */
 const ACME: ProviderDescriptor = {
@@ -125,7 +125,7 @@ const ACME: ProviderDescriptor = {
   },
   providerKeys: ["acme-pms", "acme-pms-export"],
   connect: { kind: "wizard", catalogId: "acme-pms" },
-  open: { kind: "route", href: "/integrations/acme-pms" },
+  open: { kind: "route", href: "/connectors/acme-pms" },
   // A LAN-database vendor, so it syncs on a schedule like every catalog card
   // (WARP-2659); its Connected row keeps the "synced …" clause.
   syncs: true,
@@ -357,7 +357,7 @@ describe("hub dispatch", () => {
     await waitFor(() => expect(renderedNames(container)).toContain("Acme PMS"));
 
     fireEvent.click(primaryButton(tile(container, "Acme PMS")));
-    expect(push).toHaveBeenCalledWith("/integrations/acme-pms");
+    expect(push).toHaveBeenCalledWith("/connectors/acme-pms");
   });
 
   /**
@@ -415,7 +415,7 @@ describe("hub dispatch", () => {
     const button = primaryButton(card);
     expect(button.textContent).toContain("Remove credential");
     fireEvent.click(button);
-    expect(push).toHaveBeenCalledWith("/integrations/acme-pms");
+    expect(push).toHaveBeenCalledWith("/connectors/acme-pms");
     expect(screen.queryByTestId("connect-wizard")).toBeNull();
   });
 
@@ -480,7 +480,7 @@ describe("hub dispatch", () => {
     // `process.cwd()`. The walk-up this replaced did not fail on a wrong cwd,
     // it climbed until *something* matched, so a runner started outside the
     // package scraped whatever tree it landed in.
-    const page = readPackageFile("src/app/integrations/page.tsx");
+    const page = readPackageFile("src/app/connectors/page.tsx");
     const hook = readPackageFile("src/lib/hooks/useIntegrations.ts");
     for (const id of ["eaglesoft", "dentrix", "quickbooks", "opendental"]) {
       expect(page, `page.tsx names "${id}"`).not.toContain(`"${id}"`);
@@ -1278,7 +1278,7 @@ describe("a connected tile can be disconnected from the hub", () => {
   });
 
   /**
-   * The RBAC mirror. `POST /api/integrations/:provider/disconnect` is
+   * The RBAC mirror. `POST /api/connectors/:provider/disconnect` is
    * `requireRole("owner","admin")`, so a `family` session must not be shown a
    * button whose only possible outcome is a 403 — the live-button-that-cannot-
    * act failure `ConnectorCard`'s own docstring forbids.
@@ -1386,7 +1386,7 @@ describe("?connect=<provider> hand-off from chat", () => {
   });
 
   it("does what that tile's Connect does, then strips the parameter", async () => {
-    window.history.replaceState(null, "", "/integrations?connect=eaglesoft");
+    window.history.replaceState(null, "", "/connectors?connect=eaglesoft");
     vi.mocked(fetchIntegrations).mockResolvedValue([]);
     renderHub();
 
@@ -1395,7 +1395,7 @@ describe("?connect=<provider> hand-off from chat", () => {
   });
 
   it("keeps every other query parameter and the hash", async () => {
-    window.history.replaceState(null, "", "/integrations?from=chat&connect=eaglesoft#top");
+    window.history.replaceState(null, "", "/connectors?from=chat&connect=eaglesoft#top");
     vi.mocked(fetchIntegrations).mockResolvedValue([]);
     renderHub();
 
@@ -1405,7 +1405,7 @@ describe("?connect=<provider> hand-off from chat", () => {
   });
 
   it("opens nothing for a provider the catalog does not know, and still strips it", async () => {
-    window.history.replaceState(null, "", "/integrations?connect=not-a-provider");
+    window.history.replaceState(null, "", "/connectors?connect=not-a-provider");
     vi.mocked(fetchIntegrations).mockResolvedValue([]);
     const { container } = renderHub();
 
@@ -1416,7 +1416,7 @@ describe("?connect=<provider> hand-off from chat", () => {
   });
 
   it("opens the Patterson API form for that provider key, never the direct-SQL wizard", async () => {
-    window.history.replaceState(null, "", "/integrations?connect=eaglesoft-api");
+    window.history.replaceState(null, "", "/connectors?connect=eaglesoft-api");
     vi.mocked(fetchIntegrations).mockResolvedValue([]);
     renderHub();
 
@@ -1428,7 +1428,7 @@ describe("?connect=<provider> hand-off from chat", () => {
   });
 
   it("does nothing at all without the parameter", async () => {
-    window.history.replaceState(null, "", "/integrations");
+    window.history.replaceState(null, "", "/connectors");
     vi.mocked(fetchIntegrations).mockResolvedValue([]);
     const { container } = renderHub();
 

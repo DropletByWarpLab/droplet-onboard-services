@@ -258,7 +258,7 @@ async function recordWebhookFailure(
     await deps.notifyAdmins(
       `Work notifications turned off: ${name}`,
       `Droplet could not deliver to this destination ${DISABLE_AFTER_FAILURES} times in a row, so it stopped sending. ` +
-        "Check the address, then turn it back on under Settings, Integrations, Work notifications.",
+        "Check the address, then turn it back on under Settings, Connectors, Work notifications.",
     );
   } catch (err) {
     deps.logger.error({ err, webhookId: hook.id }, "pm-webhook: could not notify admins that a webhook was turned off");

@@ -350,7 +350,7 @@ describe("GET /api/connections/card", () => {
     const res = await request(app).get("/api/connections/card").query({ q: "Stripe" });
     expect(res.status).toBe(200);
     expect(res.headers["cache-control"]).toBe("no-store");
-    expect(res.body.card).toMatchObject({ mode: "credentials", provider: "stripe", post: { path: "/api/integrations/stripe/connect" } });
+    expect(res.body.card).toMatchObject({ mode: "credentials", provider: "stripe", post: { path: "/api/connectors/stripe/connect" } });
     expect(parseConnectCard(res.body.card)).toEqual(res.body.card);
     expect(Object.keys(res.body)).toEqual(["card"]);
   });

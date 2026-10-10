@@ -1157,7 +1157,7 @@ const envSchema = z.object({
   // profiles (header signature -> canonical columns). This is what lets an
   // install map a practice-management system we ship no built-in profile for,
   // or correct a built-in whose columns do not match that site's report layout,
-  // without waiting for a release. See docs/integrations/export-drop.md.
+  // without waiting for a release. See docs/connectors/export-drop.md.
   ERP_EXPORT_DROP_PROFILES: z.string().default(""),
 
   // --- Ambient web data (WARP-1436) ---

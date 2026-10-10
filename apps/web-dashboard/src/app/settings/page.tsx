@@ -22,6 +22,7 @@ import { CreationCapabilitiesCard } from "@/components/settings/CreationCapabili
 import { PersonalityCard } from "@/components/settings/PersonalityCard";
 import { EmailAccountCard } from "@/components/settings/EmailAccountCard";
 import { ConnectedAccounts } from "@/components/settings/ConnectedAccounts";
+import { McpSignInCard, mcpSignInName } from "@/components/integrations/McpSignInCard";
 import { EmailChannelSection } from "@/components/settings/EmailChannelSection";
 import { DangerZoneSection } from "@/components/settings/DangerZoneSection";
 import { PersonalDriveCard } from "@/components/settings/PersonalDriveCard";
@@ -246,7 +247,7 @@ export default function SettingsPage() {
             CLOSED (hidden until positively known) — correct here, since
             Activity and RAG eval genuinely do not exist without their backing
             integration. `medicalConnector` is the Sidebar's own
-            /api/integrations probe and no tucked item uses it (pinned in
+            /api/connectors probe and no tucked item uses it (pinned in
             nav-config.four-groups.test.ts), so this page does not run that
             second probe. The MODULE gate stays fail-OPEN via `useModuleGate`,
             which is the WARP-1807 posture: a probe blip must never hide the
@@ -508,6 +509,7 @@ export default function SettingsPage() {
         {/* WARP-3788 — each person approves their own provider account;
             administrator registrations are configured once below the cards. */}
         <ConnectedAccounts />
+        <McpSignInCard provider="atlassian" displayName={mcpSignInName("atlassian")} />
         <EmailChannelSection />
 
         {/* Device Info */}

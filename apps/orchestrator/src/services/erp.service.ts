@@ -427,7 +427,7 @@ export const CLOUD_DATASET_READS: Readonly<Record<string, string>> = {
   charge: "get_recent_charges",
   invoice: "get_open_invoices",
   // WARP-2383 — money owed BY the business. Xero is the first cloud track to
-  // serve it, and it is the half `docs/integrations/README.md` recorded as
+  // serve it, and it is the half `docs/connectors/README.md` recorded as
   // having no data source anywhere in the product. `[]` here would read as
   // "you owe nobody anything", which is why it is a dataset rather than a
   // silent omission.

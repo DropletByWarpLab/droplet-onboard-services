@@ -94,7 +94,7 @@ export const M365_OUTCOME_PARAM = "m365";
 /** The bundled customer guide. A literal rather than `integrationGuideHref()`:
  *  that module inlines every guide's markdown, and Settings should not carry
  *  them all. `Microsoft365Card.test.tsx` pins the two to each other. */
-export const SETUP_GUIDE_HREF = "/help/integrations/microsoft-365";
+export const SETUP_GUIDE_HREF = "/help/connectors/microsoft-365";
 
 /**
  * Plain-language hint for the Entra errors a mis-registered app produces.

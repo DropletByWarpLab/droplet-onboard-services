@@ -405,9 +405,9 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
       // WARP-2451 — REQUIRED by the type for an `available` cloud track: the
       // customer creates this credential in a vendor console we do not
       // control, so shipping the card without the click-path is shipping an
-      // unusable connector. Served from `docs/integrations/stripe.md`,
+      // unusable connector. Served from `docs/connectors/stripe.md`,
       // bundled at build so the link works with no internet.
-      setupGuideHref: "/help/integrations/stripe",
+      setupGuideHref: "/help/connectors/stripe",
       order: 4,
     },
   },
@@ -464,9 +464,9 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
       // WARP-2451 — REQUIRED by the type for an `available` cloud track: the
       // customer creates this credential in a vendor console we do not
       // control, so shipping the card without the click-path is shipping an
-      // unusable connector. Served from `docs/integrations/hubspot.md`,
+      // unusable connector. Served from `docs/connectors/hubspot.md`,
       // bundled at build so the link works with no internet.
-      setupGuideHref: "/help/integrations/hubspot",
+      setupGuideHref: "/help/connectors/hubspot",
       order: 5,
     },
   },
@@ -532,9 +532,9 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
       // WARP-2451 — REQUIRED by the type for an `available` cloud track: the
       // customer creates this credential in a vendor console we do not
       // control, so shipping the card without the click-path is shipping an
-      // unusable connector. Served from `docs/integrations/mailchimp.md`,
+      // unusable connector. Served from `docs/connectors/mailchimp.md`,
       // bundled at build so the link works with no internet.
-      setupGuideHref: "/help/integrations/mailchimp",
+      setupGuideHref: "/help/connectors/mailchimp",
       order: 6,
     },
   },
@@ -646,9 +646,9 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
       // WARP-2451 — REQUIRED by the type for an `available` cloud track: the
       // customer creates this credential in a vendor console we do not control,
       // so shipping the card without the click-path is shipping an unusable
-      // connector. Served from `docs/integrations/shopify.md`, bundled at build
+      // connector. Served from `docs/connectors/shopify.md`, bundled at build
       // so the link works with no internet.
-      setupGuideHref: "/help/integrations/shopify",
+      setupGuideHref: "/help/connectors/shopify",
       order: 7,
     },
   },
@@ -807,7 +807,7 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
       // Atlassian's documented maximum API-token lifetime.
       maxLifetimeDays: 365,
     },
-    setupGuideHref: "/help/integrations/atlassian",
+    setupGuideHref: "/help/connectors/atlassian",
   },
   {
     id: "brevo",
@@ -858,7 +858,7 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
       description:
         "Contacts, lists, email campaigns, companies, deals and orders — read from Brevo.",
       availability: "available",
-      setupGuideHref: "/help/integrations/brevo",
+      setupGuideHref: "/help/connectors/brevo",
       order: 8,
     },
   },
@@ -880,7 +880,7 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
         // public one would produce 401s that look like a wrong password rather
         // than the wrong KIND of credential.
         pattern: "^pk_[!-~]{8,512}$",
-        // Path kept in step with `docs/integrations/klaviyo.md`, which is the
+        // Path kept in step with `docs/connectors/klaviyo.md`, which is the
         // researched one: it is your organization name (bottom left) →
         // Settings → API keys, NOT Settings → Account → API keys. The wizard
         // shows this line and the guide shows the full path; the two
@@ -924,7 +924,7 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
       description:
         "Profiles, lists, campaigns and the events behind them — read from Klaviyo.",
       availability: "available",
-      setupGuideHref: "/help/integrations/klaviyo",
+      setupGuideHref: "/help/connectors/klaviyo",
       order: 9,
     },
   },
@@ -996,7 +996,7 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
       description:
         "People, organisations, deals, activities and products — read from your Pipedrive.",
       availability: "available",
-      setupGuideHref: "/help/integrations/pipedrive",
+      setupGuideHref: "/help/connectors/pipedrive",
       order: 10,
     },
   },
@@ -1130,8 +1130,8 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
       // WARP-2451 — REQUIRED by the type for an `available` cloud track. Xero
       // needs it more than any other card: the guide is where the customer
       // learns the connection is unavailable outside AU/NZ/UK/US and that Xero
-      // bills them per organisation. Served from `docs/integrations/xero.md`.
-      setupGuideHref: "/help/integrations/xero",
+      // bills them per organisation. Served from `docs/connectors/xero.md`.
+      setupGuideHref: "/help/connectors/xero",
       order: 11,
     },
   },
@@ -1187,7 +1187,7 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
       description:
         "Payments, refunds and payouts — read from Square, so the money side of the business is on the box.",
       availability: "available",
-      setupGuideHref: "/help/integrations/square",
+      setupGuideHref: "/help/connectors/square",
       order: 12,
     },
   },
@@ -1234,7 +1234,7 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
       category: "Scheduling",
       description: "Bookings and their times, hosts and status — read from Cal.com.",
       availability: "available",
-      setupGuideHref: "/help/integrations/calcom",
+      setupGuideHref: "/help/connectors/calcom",
       order: 13,
     },
   },
@@ -1289,7 +1289,7 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
       description:
         "Issues and pull requests, plus linked development activity from repositories you choose — read from GitHub.",
       availability: "available",
-      setupGuideHref: "/help/integrations/github",
+      setupGuideHref: "/help/connectors/github",
       order: 14,
     },
   },
@@ -1343,7 +1343,7 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
       category: "Project management",
       description: "Issues and linked development activity from projects you choose — read from gitlab.com.",
       availability: "available",
-      setupGuideHref: "/help/integrations/gitlab",
+      setupGuideHref: "/help/connectors/gitlab",
       order: 15,
     },
   },
@@ -1393,7 +1393,7 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
       description:
         "Active tasks with their project, priority, assignee and dates — read from Todoist. Completed tasks are not read.",
       availability: "available",
-      setupGuideHref: "/help/integrations/todoist",
+      setupGuideHref: "/help/connectors/todoist",
       order: 16,
     },
   },
@@ -1450,7 +1450,7 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
       category: "Point of sale",
       description: "Customers and catalogue items — read from Loyverse POS.",
       availability: "available",
-      setupGuideHref: "/help/integrations/loyverse",
+      setupGuideHref: "/help/connectors/loyverse",
       order: 17,
     },
   },
@@ -1518,7 +1518,7 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
       description:
         "Direct Debit payments, refunds and payouts — read from GoCardless. Payers, mandates and subscriptions are not read.",
       availability: "available",
-      setupGuideHref: "/help/integrations/gocardless",
+      setupGuideHref: "/help/connectors/gocardless",
       order: 19,
     },
   },
@@ -1569,7 +1569,7 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
       description:
         "Opportunities with their milestone and value, and tasks with their owner and dates — read from Capsule CRM. People and organisations are not read.",
       availability: "available",
-      setupGuideHref: "/help/integrations/capsule",
+      setupGuideHref: "/help/connectors/capsule",
       order: 20,
     },
   },

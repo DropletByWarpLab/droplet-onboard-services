@@ -37,7 +37,7 @@ WARP-2217 already diagnosed this one level up. Its module comment says adding a 
 
 ### The precedent is already in the tree
 
-This is not a new class of idea for this repo. The **export-drop track** is exactly it: one `exportDropFactory`, selected by `vendorFromExportProvider(provider)`, driven by declarative profiles — a header signature plus a column map — so a new vendor is a profile, not a connector. [`ADD-A-PROVIDER.md`](integrations/ADD-A-PROVIDER.md) §0 states the rule this ADR follows:
+This is not a new class of idea for this repo. The **export-drop track** is exactly it: one `exportDropFactory`, selected by `vendorFromExportProvider(provider)`, driven by declarative profiles — a header signature plus a column map — so a new vendor is a profile, not a connector. [`ADD-A-PROVIDER.md`](connectors/ADD-A-PROVIDER.md) §0 states the rule this ADR follows:
 
 > **Before writing a connector at all — can the export-drop track cover it?** If the product can export its reports to a file, adding it is a **declarative profile**, not a provider… No connector, no driver, no vendor enrolment.
 

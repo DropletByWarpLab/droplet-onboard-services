@@ -809,7 +809,7 @@ export function RoleBuilderSheet({
               ) : (
                 <div className="acc-consequence" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
                   <span>{ACCESS_COPY.emptyConnectors}</span>
-                  <Link href="/integrations" style={{ color: "var(--brand)", fontWeight: 600, whiteSpace: "nowrap" }}>
+                  <Link href="/connectors" style={{ color: "var(--brand)", fontWeight: 600, whiteSpace: "nowrap" }}>
                     {ACCESS_COPY.openIntegrations}
                   </Link>
                 </div>
