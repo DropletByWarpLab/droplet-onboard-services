@@ -82,6 +82,10 @@ export const ATLASSIAN_AUTH_HOST = "auth.atlassian.com";
  *  exchange, refresh, revoke) may reach. Exact match, nothing derived from a
  *  metadata document: a protected-resource document that names any other
  *  authorization server is refused before it is dialed. */
+/** The OAuth endpoint, and the RFC 8707 `resource` every Atlassian token is
+ *  requested for (WARP-2401); the session profile dials the same URL (WARP-2409). */
+export const ATLASSIAN_MCP_OAUTH_URL = "https://mcp.atlassian.com/v1/mcp/authv2";
+
 export const ATLASSIAN_ALLOWED_OAUTH_HOSTS: ReadonlySet<string> = new Set([
   ATLASSIAN_MCP_HOST,
   ATLASSIAN_AUTH_HOST,

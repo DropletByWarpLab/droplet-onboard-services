@@ -111,10 +111,11 @@ export async function refreshToken(
 }
 
 export async function revokeToken(
-  p: { revocationEndpoint: string; clientId: string; token: string; tokenTypeHint?: "access_token" | "refresh_token" },
+  p: { revocationEndpoint: string; clientId: string; clientSecret?: string; token: string; tokenTypeHint?: "access_token" | "refresh_token" },
   deps: OAuthDeps = {},
 ): Promise<void> {
   const form = new URLSearchParams({ token: p.token, client_id: p.clientId });
   if (p.tokenTypeHint) form.set("token_type_hint", p.tokenTypeHint);
+  if (p.clientSecret) form.set("client_secret", p.clientSecret);
   await postForm(deps, p.revocationEndpoint, form);
 }

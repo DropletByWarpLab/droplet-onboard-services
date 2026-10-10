@@ -28,13 +28,17 @@ export interface DiscoveredOAuth {
   clientIdMetadataDocumentSupported: boolean;
 }
 
-async function firstJson(deps: OAuthDeps, urls: string[]): Promise<Record<string, unknown>> {
+async function firstJson(
+  deps: OAuthDeps,
+  urls: string[],
+  accept: (url: string, doc: Record<string, unknown>) => boolean = () => true,
+): Promise<Record<string, unknown>> {
   for (const url of urls) {
     // A guard refusal (UnsafeMcpUrlError) propagates: only an HTTP miss or a
     // non-JSON body moves on to the next well-known form.
     const { status, json } = await fetchBounded(deps, url, { method: "GET", headers: { accept: "application/json" } });
     const doc = asRecord(json);
-    if (status >= 200 && status < 300 && doc) return doc;
+    if (status >= 200 && status < 300 && doc && accept(url, doc)) return doc;
   }
   throw new OAuthRefusedError("DISCOVERY_FAILED", "no OAuth metadata document was found");
 }
@@ -54,7 +58,11 @@ export async function discoverProtectedResource(
   const suffix = u.pathname === "/" ? "" : u.pathname;
   const candidates = [`${u.origin}/.well-known/oauth-protected-resource${suffix}`];
   if (suffix !== "") candidates.push(`${u.origin}/.well-known/oauth-protected-resource`);
-  const doc = await firstJson(deps, candidates);
+  // RFC 9728 section 3.3: the root form describes the origin itself, so a root
+  // document whose `resource` is not the origin is not ours and is skipped. For
+  // a resource with a path the final check below then refuses an origin document.
+  const rootForm = `${u.origin}/.well-known/oauth-protected-resource`;
+  const doc = await firstJson(deps, candidates, (url, d) => url !== rootForm || suffix === "" || d.resource === u.origin);
   // Exact, as RFC 9728 requires: a document that names another resource is
   // someone else's metadata and must not steer this server's sign-in.
   if (doc.resource !== mcpUrl) {

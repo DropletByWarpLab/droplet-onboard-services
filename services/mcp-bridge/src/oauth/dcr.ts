@@ -12,7 +12,8 @@ import { OAuthRefusedError, OAuthTokenError } from "./errors.js";
 import { asRecord, fetchBounded, type OAuthDeps } from "./http.js";
 import { oauthErrorOf } from "./token.js";
 
-/** https, or http on a loopback name (RFC 8252). No userinfo, no fragment. */
+/** The box callback path, over https, or http on a loopback name (RFC 8252, any
+ *  port). No userinfo, no query, no fragment. */
 export function isAllowedRedirectUri(v: unknown): v is string {
   if (typeof v !== "string" || v.length === 0 || v.length > 2048) return false;
   let u: URL;
@@ -22,6 +23,9 @@ export function isAllowedRedirectUri(v: unknown): v is string {
     return false;
   }
   if (u.username !== "" || u.password !== "" || u.hash !== "") return false;
+  // Only the box's own callback: a registered redirect to any other path or
+  // query would let a code land somewhere the box does not read it.
+  if (u.pathname !== "/api/mcp/oauth/callback" || u.search !== "") return false;
   if (u.protocol === "https:") return true;
   return u.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(u.hostname);
 }

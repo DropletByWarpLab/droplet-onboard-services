@@ -13,7 +13,7 @@ import { describe, it, expect } from "vitest";
 import { ATLASSIAN_ALLOWED_OAUTH_HOSTS } from "../src/atlassian.js";
 import { BridgeSessionStore, handleBridgeRequest, type BridgeRequest } from "../src/http-api.js";
 import { discover } from "../src/oauth/discovery.js";
-import { registerClient } from "../src/oauth/dcr.js";
+import { isAllowedRedirectUri, registerClient } from "../src/oauth/dcr.js";
 import { OAuthRefusedError, OAuthTokenError, PkceUnsupportedError } from "../src/oauth/errors.js";
 import type { OAuthDeps } from "../src/oauth/http.js";
 import { challengeOf, isValidVerifier, newVerifier } from "../src/oauth/pkce.js";
@@ -96,18 +96,37 @@ describe("discovery", () => {
     });
   });
 
-  it("falls back to the root PRM form, and to the issuer-relative AS form", async () => {
+  it("falls back to the issuer-relative AS form", async () => {
     const { deps, calls } = net({
-      [PRM_ROOT]: prm(),
+      [PRM_URL]: prm(),
       [`${ISSUER}/.well-known/oauth-authorization-server`]: asMeta(),
     });
     await discover(MCP, HOSTS, deps);
-    expect(calls.map((c) => c.url)).toEqual([
-      PRM_URL,
-      PRM_ROOT,
-      AS_URL,
-      `${ISSUER}/.well-known/oauth-authorization-server`,
-    ]);
+    expect(calls.map((c) => c.url)).toEqual([PRM_URL, AS_URL, `${ISSUER}/.well-known/oauth-authorization-server`]);
+  });
+
+  it("skips a root PRM whose resource is not the origin (RFC 9728 3.3)", async () => {
+    const { deps, calls } = net({ [PRM_ROOT]: prm() }); // resource = the path URL, not the origin
+    await expect(discover(MCP, HOSTS, deps)).rejects.toMatchObject({ reason: "DISCOVERY_FAILED" });
+    expect(calls.map((c) => c.url)).toEqual([PRM_URL, PRM_ROOT]);
+  });
+
+  it("never accepts an origin-level root PRM for a resource that has a path", async () => {
+    const { deps } = net({ [PRM_ROOT]: prm({ resource: "https://mcp.example.test" }) });
+    await expect(discover(MCP, HOSTS, deps)).rejects.toMatchObject({ reason: "RESOURCE_MISMATCH" });
+  });
+
+  it("gives every OAuth request a deadline signal", async () => {
+    const { deps, calls } = net({ [PRM_URL]: prm(), [AS_URL]: asMeta() });
+    const seen: Array<AbortSignal | null | undefined> = [];
+    const send = deps.send!;
+    deps.send = async (dest, init) => {
+      seen.push(init.signal);
+      return send(dest, init);
+    };
+    await discover(MCP, HOSTS, deps);
+    expect(calls.length).toBeGreaterThan(0);
+    expect(seen.every((s) => s instanceof AbortSignal && !s.aborted)).toBe(true);
   });
 
   it("refuses metadata without code_challenge_methods_supported (typed, not a warning)", async () => {
@@ -206,7 +225,7 @@ describe("token exchange, refresh, revoke", () => {
   it("exchange sends resource, code_verifier, grant_type and the redirect, and no scope", async () => {
     const { deps, calls } = net({ [TOKEN_URL]: TOKENS });
     const t = await exchangeCode(
-      { tokenEndpoint: TOKEN_URL, clientId: "cid", code: FAKE_CODE, codeVerifier: VERIFIER, redirectUri: "https://box.example.test/cb", resource: MCP },
+      { tokenEndpoint: TOKEN_URL, clientId: "cid", code: FAKE_CODE, codeVerifier: VERIFIER, redirectUri: "https://box.example.test/api/mcp/oauth/callback", resource: MCP },
       deps,
     );
     const f = form(calls[0]!);
@@ -215,7 +234,7 @@ describe("token exchange, refresh, revoke", () => {
     expect(Object.fromEntries(f)).toEqual({
       grant_type: "authorization_code",
       code: FAKE_CODE,
-      redirect_uri: "https://box.example.test/cb",
+      redirect_uri: "https://box.example.test/api/mcp/oauth/callback",
       client_id: "cid",
       code_verifier: VERIFIER,
       resource: MCP,
@@ -281,7 +300,7 @@ describe("token exchange, refresh, revoke", () => {
     const { deps, calls } = net({ [TOKEN_URL]: TOKENS }, { "as.example.test": "192.168.1.5" });
     await expect(
       exchangeCode(
-        { tokenEndpoint: TOKEN_URL, clientId: "c", code: FAKE_CODE, codeVerifier: VERIFIER, redirectUri: "https://box.example.test/cb", resource: MCP },
+        { tokenEndpoint: TOKEN_URL, clientId: "c", code: FAKE_CODE, codeVerifier: VERIFIER, redirectUri: "https://box.example.test/api/mcp/oauth/callback", resource: MCP },
         deps,
       ),
     ).rejects.toBeInstanceOf(UnsafeMcpUrlError);
@@ -298,16 +317,32 @@ describe("token exchange, refresh, revoke", () => {
 describe("dynamic client registration (deprecated fallback)", () => {
   it("sends application_type web and token_endpoint_auth_method none", async () => {
     const { deps, calls } = net({ "https://as.example.test/register": { status: 201, body: { client_id: "new-client", extra: 1 } } });
-    const r = await registerClient("https://as.example.test/register", { redirectUris: ["https://box.example.test/cb", "http://127.0.0.1/cb"] }, deps);
+    const r = await registerClient("https://as.example.test/register", { redirectUris: ["https://box.example.test/api/mcp/oauth/callback", "http://127.0.0.1:8080/api/mcp/oauth/callback"] }, deps);
     expect(r).toEqual({ clientId: "new-client" });
     expect(JSON.parse(calls[0]!.body)).toEqual({
-      redirect_uris: ["https://box.example.test/cb", "http://127.0.0.1/cb"],
+      redirect_uris: ["https://box.example.test/api/mcp/oauth/callback", "http://127.0.0.1:8080/api/mcp/oauth/callback"],
       client_name: "Droplet",
       application_type: "web",
       token_endpoint_auth_method: "none",
       grant_types: ["authorization_code", "refresh_token"],
       response_types: ["code"],
     });
+  });
+
+  it("refuses any redirect that is not the box callback path (https or loopback), before sending", async () => {
+    for (const bad of [
+      "https://evil.example/cb",
+      "https://box.example.test/api/mcp/oauth/callback?x=1",
+      "https://box.example.test/api/mcp/oauth/callback#f",
+      "https://box.example.test/api/mcp/oauth/callback/extra",
+      "http://box.example.test/api/mcp/oauth/callback",
+    ]) {
+      const { deps, calls } = net({});
+      await expect(registerClient("https://as.example.test/register", { redirectUris: [bad] }, deps)).rejects.toBeInstanceOf(OAuthRefusedError);
+      expect(calls).toHaveLength(0);
+    }
+    expect(isAllowedRedirectUri("http://localhost/api/mcp/oauth/callback")).toBe(true);
+    expect(isAllowedRedirectUri("http://127.0.0.1:3000/api/mcp/oauth/callback")).toBe(true);
   });
 
   it("refuses a plain-http, non-loopback redirect URI before sending", async () => {
@@ -343,7 +378,7 @@ describe("/oauth/* routes", () => {
     clientId: "cid",
     code: FAKE_CODE,
     codeVerifier: VERIFIER,
-    redirectUri: "https://box.example.test/cb",
+    redirectUri: "https://box.example.test/api/mcp/oauth/callback",
     resource: A_MCP,
   };
 
@@ -389,7 +424,7 @@ describe("/oauth/* routes", () => {
     const named = { allowedHosts: ["evil.example"], allowedIssuerHosts: ["evil.example"] };
     const bodies: Array<[string, Record<string, unknown>]> = [
       ["/oauth/discover", { mcpUrl: evil }],
-      ["/oauth/register", { registrationEndpoint: evil, redirectUris: ["https://box.example.test/cb"] }],
+      ["/oauth/register", { registrationEndpoint: evil, redirectUris: ["https://box.example.test/api/mcp/oauth/callback"] }],
       ["/oauth/exchange", { ...exchangeBody, tokenEndpoint: evil }],
       ["/oauth/refresh", { tokenEndpoint: evil, clientId: "c", refreshToken: FAKE_REFRESH, resource: A_MCP }],
       ["/oauth/revoke", { revocationEndpoint: evil, clientId: "c", token: FAKE_REFRESH }],
@@ -415,13 +450,33 @@ describe("/oauth/* routes", () => {
     expect(res.body).toMatchObject({ error: { code: "OAUTH_PKCE_UNSUPPORTED" } });
   });
 
+  it("refuses a resource other than the curated one on exchange and refresh, and never dials", async () => {
+    for (const [path, body] of [
+      ["/oauth/exchange", { ...exchangeBody, resource: "https://evil.example/" }],
+      ["/oauth/refresh", { tokenEndpoint: A_TOKEN, clientId: "c", refreshToken: FAKE_REFRESH, resource: "https://mcp.atlassian.com/v1/mcp" }],
+    ] as const) {
+      const { deps, calls } = net({ [A_TOKEN]: TOKENS });
+      const res = await call(path, body, deps);
+      expect(res.status, path).toBe(422);
+      expect(res.body, path).toMatchObject({ reason: "RESOURCE_NOT_ALLOWED" });
+      expect(calls, path).toHaveLength(0);
+    }
+  });
+
+  it("revoke sends client_secret when the client has one", async () => {
+    const { deps, calls } = net({ [A_REVOKE]: { raw: "" } });
+    const res = await call("/oauth/revoke", { revocationEndpoint: A_REVOKE, clientId: "c", clientSecret: "FAKE-SECRET", token: FAKE_REFRESH }, deps);
+    expect(res.status).toBe(200);
+    expect(form(calls[0]!).get("client_secret")).toBe("FAKE-SECRET");
+  });
+
   it("registers, refreshes and revokes through the same guard", async () => {
     const { deps, calls } = net({
       [A_REGISTER]: { status: 201, body: { client_id: "new-client" } },
       [A_TOKEN]: TOKENS,
       [A_REVOKE]: { raw: "" },
     });
-    const reg = await call("/oauth/register", { registrationEndpoint: A_REGISTER, redirectUris: ["https://box.example.test/cb"] }, deps);
+    const reg = await call("/oauth/register", { registrationEndpoint: A_REGISTER, redirectUris: ["https://box.example.test/api/mcp/oauth/callback"] }, deps);
     expect(reg).toMatchObject({ status: 200, body: { clientId: "new-client" } });
     const ref = await call("/oauth/refresh", { tokenEndpoint: A_TOKEN, clientId: "c", refreshToken: FAKE_REFRESH, resource: A_MCP }, deps);
     expect(ref.status).toBe(200);
