@@ -755,7 +755,7 @@ export type McpProviderDescriptor = Omit<ProviderDescriptorBase, "datasets"> & {
    *
    * The tile is derived from the TRACK instead (`lib/connectors.ts`
    * `hubCardFor`), keyed on the descriptor id, and both its actions route to
-   * the credential configurator at `/integrations/credentials`. So a future
+   * the credential configurator at `/connectors/credentials`. So a future
    * MCP provider gets a card for free and needs no new `ConnectorId` literal.
    */
   readonly catalog?: never;
@@ -818,7 +818,7 @@ export function credentialFieldsFor(
 
 /**
  * WARP-3434 — whether a credential saved on this track is PROBED by
- * `POST /api/integrations/:provider/connect`.
+ * `POST /api/connectors/:provider/connect`.
  *
  * `cloud` and `rest` land PROVISIONING after a save ("stored, not yet
  * checked") and have a connector the orchestrator can build from the row; `mcp`

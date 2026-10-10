@@ -2,13 +2,13 @@
  * WARP-2275 — the admin-only SaaS credential configurator.
  *
  * Routes owned by this file:
- *   GET   /api/integrations/credentials            — owner+admin. Every
+ *   GET   /api/connectors/credentials            — owner+admin. Every
  *                                                    descriptor-driven cloud
  *                                                    provider with its REDACTED
  *                                                    view (secrets collapse to
  *                                                    `hasValue` booleans).
- *   GET   /api/integrations/:provider/credentials  — owner+admin. One provider.
- *   PATCH /api/integrations/:provider/credentials  — owner+admin. Three-way
+ *   GET   /api/connectors/:provider/credentials  — owner+admin. One provider.
+ *   PATCH /api/connectors/:provider/credentials  — owner+admin. Three-way
  *                                                    secret write: omit a field
  *                                                    to keep it, "" to clear it,
  *                                                    a value to replace it.
@@ -108,9 +108,9 @@ export function createSaasCredentialsRouter(prisma: IntegrationPrisma): Router {
     return (row as SaasConnectionRow | null) ?? null;
   }
 
-  // ── GET /api/integrations/credentials ───────────────────────
+  // ── GET /api/connectors/credentials ───────────────────────
   router.get(
-    "/integrations/credentials",
+    "/connectors/credentials",
     requireRole("owner", "admin"),
     async (_req: Request, res: Response, next: NextFunction) => {
       try {
@@ -125,9 +125,9 @@ export function createSaasCredentialsRouter(prisma: IntegrationPrisma): Router {
     },
   );
 
-  // ── GET /api/integrations/:provider/credentials ─────────────
+  // ── GET /api/connectors/:provider/credentials ─────────────
   router.get(
-    "/integrations/:provider/credentials",
+    "/connectors/:provider/credentials",
     requireRole("owner", "admin"),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
@@ -142,9 +142,9 @@ export function createSaasCredentialsRouter(prisma: IntegrationPrisma): Router {
     },
   );
 
-  // ── PATCH /api/integrations/:provider/credentials ───────────
+  // ── PATCH /api/connectors/:provider/credentials ───────────
   router.patch(
-    "/integrations/:provider/credentials",
+    "/connectors/:provider/credentials",
     requireRole("owner", "admin"),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
@@ -291,7 +291,7 @@ export function createSaasCredentialsRouter(prisma: IntegrationPrisma): Router {
         // secret never reaches a log line.
         logger.warn(
           { provider: req.params.provider },
-          "PATCH /integrations/:provider/credentials failed",
+          "PATCH /connectors/:provider/credentials failed",
         );
         next(err);
       }

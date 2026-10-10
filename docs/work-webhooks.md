@@ -5,7 +5,7 @@
 
 A webhook sends one message to an address you choose each time work changes on this Droplet: a work item is created, moves to another state, is assigned, is commented on, is archived, or is otherwise changed. The same event can be rendered for Slack, Microsoft Teams, Discord or Google Chat, or sent as signed JSON to anything else, such as a local n8n or Home Assistant.
 
-Set them up under **Settings → Integrations → Work notifications** (`/integrations/work-notifications`). Owners and admins only.
+Set them up under **Settings → Integrations → Work notifications** (`/connectors/work-notifications`). Owners and admins only.
 
 ## What may leave the box
 

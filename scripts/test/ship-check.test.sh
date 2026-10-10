@@ -2026,7 +2026,7 @@ COMMENTONLY
 # =============================================================================
 #
 # Bug class this guards (WARP-2449): ship-check.sh IS the pre-PR gate that
-# .claude/skills/preflight/SKILL.md and docs/integrations/ADD-A-PROVIDER.md
+# .claude/skills/preflight/SKILL.md and docs/connectors/ADD-A-PROVIDER.md
 # mandate, and for months it could not run on the primary dev Mac at all --
 # associative arrays need bash 4, macOS ships 3.2.57, and the script died with a
 # raw `declare: -A: invalid option`. Everybody who followed the documented

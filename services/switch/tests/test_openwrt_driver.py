@@ -256,6 +256,65 @@ class TestAuth:
             await driver.connect()
 
 
+class _RebootedSwitch:
+    """rpcd after a reboot: sessions live in memory, so every session the box
+    holds is unknown and answered with the JSON-RPC-level -32002 (WARP-3883).
+    `calls_denied` stale-session calls are denied; the rest succeed."""
+
+    def __init__(self, deny_after_login: int = 0, error_code: int = -32002, deny_first: int = 1):
+        self.logins = 0
+        self.denied = 0
+        self.deny_first = deny_first
+        self.deny_after_login = deny_after_login
+        self.error_code = error_code
+        self.board_calls = 0
+
+    async def __call__(self, payload: dict) -> dict:
+        session, obj, method, _args = payload["params"]
+        rid = payload["id"]
+        if (obj, method) == ("session", "login"):
+            self.logins += 1
+            return {"jsonrpc": "2.0", "id": rid,
+                    "result": [0, {"ubus_rpc_session": TOKEN, "expires": 300}]}
+        self.board_calls += 1
+        if self.board_calls <= self.deny_first + self.deny_after_login:
+            self.denied += 1
+            return {"jsonrpc": "2.0", "id": rid,
+                    "error": {"code": self.error_code, "message": "Access denied"}}
+        return {"jsonrpc": "2.0", "id": rid, "result": [0, {"model": "Zyxel GS1900-10HP A1"}]}
+
+
+class TestForgottenSessionAfterReboot:
+    @pytest.mark.asyncio
+    async def test_jsonrpc_access_denied_relogs_in_once_and_retries(self):
+        sw = _RebootedSwitch()
+        driver = OpenWrtSwitchDriver(host="192.168.9.2", password=GOOD_PASSWORD, transport=sw)
+        await driver.connect()
+        assert sw.logins == 1
+        info = await driver.get_system_info()
+        assert info["model"] == "Zyxel GS1900-10HP A1"
+        assert sw.logins == 2 and sw.denied == 1
+
+    @pytest.mark.asyncio
+    async def test_a_second_denial_after_a_fresh_login_raises_without_looping(self):
+        sw = _RebootedSwitch(deny_after_login=1)
+        driver = OpenWrtSwitchDriver(host="192.168.9.2", password=GOOD_PASSWORD, transport=sw)
+        await driver.connect()
+        with pytest.raises(SwitchAPIError):
+            await driver.get_system_info()
+        assert sw.logins == 2 and sw.board_calls == 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("code", [-32000, -32601])
+    async def test_other_jsonrpc_errors_are_not_retried(self, code):
+        sw = _RebootedSwitch(error_code=code)
+        driver = OpenWrtSwitchDriver(host="192.168.9.2", password=GOOD_PASSWORD, transport=sw)
+        await driver.connect()
+        with pytest.raises(SwitchAPIError):
+            await driver.get_system_info()
+        assert sw.logins == 1 and sw.board_calls == 1
+
+
 # ---------------------------------------------------------------------------
 # Reads
 # ---------------------------------------------------------------------------

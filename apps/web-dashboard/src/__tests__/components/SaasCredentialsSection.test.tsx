@@ -34,6 +34,13 @@ const { disconnectProviderMock, connectCloudProviderMock } = vi.hoisted(() => ({
   // WARP-2842 — the probe the page fires after a save on a cloud / REST track.
   connectCloudProviderMock: vi.fn(),
 }));
+// WARP-3951: the card has its own tests; here only its mounting is asserted.
+vi.mock("@/components/integrations/McpSignInCard", () => ({
+  mcpSignInName: (provider: string) => `Name of ${provider}`,
+  McpSignInCard: (p: { provider: string; displayName: string; admin?: boolean }) => (
+    <div data-testid={`mcp-sign-in-${p.provider}`} data-admin={String(Boolean(p.admin))} data-name={p.displayName} />
+  ),
+}));
 vi.mock("@/lib/api.erp", () => ({
   disconnectProvider: disconnectProviderMock,
   connectCloudProvider: connectCloudProviderMock,
@@ -826,7 +833,7 @@ describe("a provider with credential variants names its path on save", () => {
  * `handleSave` used to stop at `saveSaasCredential` and show "Saved" — true,
  * and beside the point: the box had stored the key and answered PROVISIONING
  * ("stored, not yet checked"), and nothing ever asked the vendor. The page
- * now posts `/integrations/:provider/connect` after the save and renders the
+ * now posts `/connectors/:provider/connect` after the save and renders the
  * state the probe returns, in the same words `STATE_COPY` already had for it.
  *
  * The two fixture providers are registered as descriptors here because the
@@ -852,7 +859,7 @@ describe("a saved credential is checked, and the state line shows the verdict", 
     track: "mcp",
     mcpServerId: "fixture-crm",
     description: "Fixture MCP.",
-    setupGuideHref: "/help/integrations/fixture-crm",
+    setupGuideHref: "/help/connectors/fixture-crm",
     credentialFields: [],
     egressHosts: ["mcp.fixture-crm.invalid"],
     datasets: [],
@@ -1025,7 +1032,7 @@ const MCP_VIEW: SaasCredentialView = {
   ],
   values: { email: "ops@vendor.example" },
   updatedAt: null,
-  setupGuideHref: "/help/integrations/fixture-mcp",
+  setupGuideHref: "/help/connectors/fixture-mcp",
   credentialExpiry: { status: "VALID", daysRemaining: 200 },
 };
 
@@ -1036,7 +1043,7 @@ describe("the setup guide link", () => {
     render(<SaasCredentialsSection />);
 
     const link = await screen.findByTestId("guide-fixture-mcp");
-    expect(link).toHaveAttribute("href", "/help/integrations/fixture-mcp");
+    expect(link).toHaveAttribute("href", "/help/connectors/fixture-mcp");
   });
 
   it("renders no link at all for a provider that declares none", async () => {
@@ -1294,5 +1301,32 @@ describe("disconnecting a configured provider", () => {
     expect(alert.textContent).toContain("Couldn't disconnect Fixture Billing (CONFLICT)");
     expect(document.body.textContent).not.toContain("rk_live_should_never_render");
     expect(document.body.textContent).not.toContain("rk_live_leaky_message");
+  });
+});
+
+// WARP-3951 — the web sign-in leads only when the box's credential view says so.
+describe("web sign-in card (WARP-3951)", () => {
+  beforeEach(() => {
+    useAuthMock.mockReturnValue({ user: { role: "admin" } });
+  });
+
+  it("shows no sign-in card or token-fallback heading when the view has no signIn", async () => {
+    fetchSaasCredentialsMock.mockResolvedValue([BILLING]);
+    render(<SaasCredentialsSection />);
+    await screen.findByTestId("provider-fixture-billing");
+    expect(screen.queryByTestId("mcp-sign-in-fixture-billing")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Or paste an API token/)).not.toBeInTheDocument();
+  });
+
+  it("leads with the card in admin mode and moves the token form under the fallback heading", async () => {
+    fetchSaasCredentialsMock.mockResolvedValue([{ ...BILLING, signIn: { kind: "oauth" } }]);
+    render(<SaasCredentialsSection />);
+    const card = await screen.findByTestId("mcp-sign-in-fixture-billing");
+    expect(card).toHaveAttribute("data-admin", "true");
+    // The name comes from the explicit short-name helper, never from the display name.
+    expect(card).toHaveAttribute("data-name", "Name of fixture-billing");
+    const heading = screen.getByText("Or paste an API token (shared account)");
+    expect(card.compareDocumentPosition(heading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(heading.compareDocumentPosition(screen.getByLabelText(/Account id/)) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 });

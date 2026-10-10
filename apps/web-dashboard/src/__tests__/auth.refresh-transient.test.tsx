@@ -233,7 +233,7 @@ describe("authFetch — the public-page guard still suppresses navigation (WARP-
   // /setup's first-run wizard probes /api/auth/me on an unclaimed box and /help
   // is reachable anonymously; both own their own anonymous flow, so a confirmed
   // dead session must clear the cache WITHOUT a hard navigation to /login.
-  it.each(["/login", "/setup", "/setup/account", "/help", "/help/integrations/google-mail", "/help/integrations/microsoft-365"])(
+  it.each(["/login", "/setup", "/setup/account", "/help", "/help/connectors/google-mail", "/help/connectors/microsoft-365"])(
     "clears the cached user but does not navigate from %s",
     async (pathname) => {
       const assign = stubLocation(pathname);

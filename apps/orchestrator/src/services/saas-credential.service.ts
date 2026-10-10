@@ -195,7 +195,7 @@ export interface SaasCredentialView {
   hasCredentials: boolean;
   /**
    * WARP-2489 — whether this connection's credential material has actually
-   * been removed from the row, so `/integrations/credentials` can say
+   * been removed from the row, so `/connectors/credentials` can say
    * "disconnected · credential removed" only when it is true.
    *
    * Produced by `credentialsPurgedFor` — the SAME call that builds the hub's

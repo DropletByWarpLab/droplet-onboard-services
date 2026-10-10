@@ -8,7 +8,7 @@
  *
  *  1. a descriptor declares a `setupGuideHref` no page is prerendered for →
  *     the owner clicks the link the wizard shows them and gets a 404;
- *  2. a guide is added to `docs/integrations/` and not to the bundle → it is
+ *  2. a guide is added to `docs/connectors/` and not to the bundle → it is
  *     invisible to the box, and every cross-link to it degrades to plain text;
  *  3. `generateStaticParams` stops agreeing with the bundle → pages vanish
  *     from the static output with no test noticing.
@@ -32,17 +32,17 @@ import {
   integrationGuideTitle,
   internalGuideHref,
 } from "./integration-guides";
-import { generateStaticParams } from "@/app/help/integrations/[provider]/page";
+import { generateStaticParams } from "@/app/help/connectors/[provider]/page";
 
-/** The repo's `docs/integrations`.
+/** The repo's `docs/connectors`.
  *
  *  WARP-2632 — resolved from THIS FILE's location via `REPO_ROOT`, not by
  *  walking up from `process.cwd()`. The walk did not fail on a wrong cwd, it
  *  climbed until something matched: from a directory that merely contains a
- *  `docs/integrations/`, this gate compared the shipped bundle against that
+ *  `docs/connectors/`, this gate compared the shipped bundle against that
  *  directory and reported on a tree it had never read. */
 function docsDir(): string {
-  return repoPath("docs/integrations");
+  return repoPath("docs/connectors");
 }
 
 /** Slugs the ROUTE will prerender — read through the page's own
@@ -57,11 +57,11 @@ afterEach(() => {
 
 describe("every guide in the repo is bundled into the box", () => {
   /**
-   * Mutation: add a `docs/integrations/*.md` file without adding its import →
+   * Mutation: add a `docs/connectors/*.md` file without adding its import →
    * red. Delete an import → red. This is the only thing standing between "the
    * guide exists in git" and "the owner can read it on the appliance".
    */
-  it("bundles exactly the markdown files in docs/integrations", () => {
+  it("bundles exactly the markdown files in docs/connectors", () => {
     const onDisk = readdirSync(docsDir())
       .filter((f) => f.toLowerCase().endsWith(".md"))
       .map((f) => f.slice(0, -".md".length).toLowerCase())
@@ -172,7 +172,7 @@ describe("a descriptor's setupGuideHref points at a page that exists", () => {
 
     const href = providerDescriptors().find((d) => d.id === "fixture-written")?.catalog
       ?.setupGuideHref;
-    expect(href).toBe("/help/integrations/stripe");
+    expect(href).toBe("/help/connectors/stripe");
     expect(prerenderedSlugs()).toContain("stripe");
   });
 });
@@ -181,23 +181,23 @@ describe("links between guides resolve to routes, or to nothing at all", () => {
   /**
    * The four link shapes the shipped corpus actually contains — 14
    * `credential-handling.md`, 6 `SETUP.md#anchor`, 6 `README.md`, 2
-   * `../ADR-041-…`. Counted with grep over `docs/integrations/*.md`.
+   * `../ADR-041-…`. Counted with grep over `docs/connectors/*.md`.
    *
    * Mutation: return the raw href unchanged → red, because the browser would
    * then resolve `credential-handling.md` against the route.
    */
   it("rewrites a sibling guide link to its route", () => {
     expect(internalGuideHref("credential-handling.md")).toBe(
-      "/help/integrations/credential-handling",
+      "/help/connectors/credential-handling",
     );
-    expect(internalGuideHref("README.md")).toBe("/help/integrations/readme");
+    expect(internalGuideHref("README.md")).toBe("/help/connectors/readme");
   });
 
   /** Mutation: drop the anchor → red, and every `SETUP.md#…` link in the five
    *  vendor guides lands at the top of a 20k-word page instead of its section. */
   it("keeps the anchor", () => {
     expect(internalGuideHref("SETUP.md#3-track-b--a-cloud-service")).toBe(
-      "/help/integrations/setup#3-track-b--a-cloud-service",
+      "/help/connectors/setup#3-track-b--a-cloud-service",
     );
     expect(internalGuideHref("#plan-prerequisite")).toBe("#plan-prerequisite");
   });

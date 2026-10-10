@@ -86,7 +86,7 @@ export const INTEGRATION_STATUS_BY_CLOUD_STATE: Readonly<
  * ## Why the capability codes left `ERROR` (WARP-2623)
  *
  * They were here, and it was the wrong four lines in this table. `ERROR` is
- * rendered as "Can't connect" on both the hub tile and `/integrations/
+ * rendered as "Can't connect" on both the hub tile and `/connectors/
  * credentials`, so a Basic-plan Shopify store — orders, products, inventory
  * and fulfilment all reading correctly, only customer identities withheld —
  * and a Mailchimp account whose plan excludes one resource were both drawn as

@@ -6,7 +6,7 @@
  *
  * WARP-2342 made `setupGuideHref` type-required for an `available` cloud
  * provider, and the hub tile and connect wizard both render it. Nothing served
- * the guides: `/help` is one hand-written page and `docs/integrations/*.md`
+ * the guides: `/help` is one hand-written page and `docs/connectors/*.md`
  * were repo files, so every candidate href was a link to a 404.
  *
  * An external link (github.com, a docs site) is not an option. The appliance
@@ -29,7 +29,7 @@
  * The import list is hand-written because a static import is the only kind a
  * bundler can inline. It is not TRUSTED to stay complete —
  * `integration-guides.test.ts` asserts it covers exactly
- * `docs/integrations/*.md`, so a guide added without a line here goes red.
+ * `docs/connectors/*.md`, so a guide added without a line here goes red.
  *
  * ## The `?raw` imports have no fallback, deliberately
  *
@@ -45,37 +45,37 @@
  * customer's hands. Do not add a `try`/default-empty around these imports.
  */
 
-import addAProvider from "../../../../docs/integrations/ADD-A-PROVIDER.md?raw";
-import atlassian from "../../../../docs/integrations/atlassian.md?raw";
-import brevo from "../../../../docs/integrations/brevo.md?raw";
-import calcom from "../../../../docs/integrations/calcom.md?raw";
-import capsule from "../../../../docs/integrations/capsule.md?raw";
-import credentialHandling from "../../../../docs/integrations/credential-handling.md?raw";
-import eaglesoft from "../../../../docs/integrations/eaglesoft.md?raw";
-import exportDrop from "../../../../docs/integrations/export-drop.md?raw";
-import github from "../../../../docs/integrations/github.md?raw";
-import gitlab from "../../../../docs/integrations/gitlab.md?raw";
-import gocardless from "../../../../docs/integrations/gocardless.md?raw";
-import googleMail from "../../../../docs/integrations/google-mail.md?raw";
-import hubspot from "../../../../docs/integrations/hubspot.md?raw";
-import klaviyo from "../../../../docs/integrations/klaviyo.md?raw";
-import loyverse from "../../../../docs/integrations/loyverse.md?raw";
-import mailchimp from "../../../../docs/integrations/mailchimp.md?raw";
-import microsoft365 from "../../../../docs/integrations/microsoft-365.md?raw";
-import pipedrive from "../../../../docs/integrations/pipedrive.md?raw";
-import readme from "../../../../docs/integrations/README.md?raw";
-import setup from "../../../../docs/integrations/SETUP.md?raw";
-import shopify from "../../../../docs/integrations/shopify.md?raw";
-import square from "../../../../docs/integrations/square.md?raw";
-import stripe from "../../../../docs/integrations/stripe.md?raw";
-import todoist from "../../../../docs/integrations/todoist.md?raw";
-import vendorSetupTemplate from "../../../../docs/integrations/vendor-setup-template.md?raw";
-import xero from "../../../../docs/integrations/xero.md?raw";
+import addAProvider from "../../../../docs/connectors/ADD-A-PROVIDER.md?raw";
+import atlassian from "../../../../docs/connectors/atlassian.md?raw";
+import brevo from "../../../../docs/connectors/brevo.md?raw";
+import calcom from "../../../../docs/connectors/calcom.md?raw";
+import capsule from "../../../../docs/connectors/capsule.md?raw";
+import credentialHandling from "../../../../docs/connectors/credential-handling.md?raw";
+import eaglesoft from "../../../../docs/connectors/eaglesoft.md?raw";
+import exportDrop from "../../../../docs/connectors/export-drop.md?raw";
+import github from "../../../../docs/connectors/github.md?raw";
+import gitlab from "../../../../docs/connectors/gitlab.md?raw";
+import gocardless from "../../../../docs/connectors/gocardless.md?raw";
+import googleMail from "../../../../docs/connectors/google-mail.md?raw";
+import hubspot from "../../../../docs/connectors/hubspot.md?raw";
+import klaviyo from "../../../../docs/connectors/klaviyo.md?raw";
+import loyverse from "../../../../docs/connectors/loyverse.md?raw";
+import mailchimp from "../../../../docs/connectors/mailchimp.md?raw";
+import microsoft365 from "../../../../docs/connectors/microsoft-365.md?raw";
+import pipedrive from "../../../../docs/connectors/pipedrive.md?raw";
+import readme from "../../../../docs/connectors/README.md?raw";
+import setup from "../../../../docs/connectors/SETUP.md?raw";
+import shopify from "../../../../docs/connectors/shopify.md?raw";
+import square from "../../../../docs/connectors/square.md?raw";
+import stripe from "../../../../docs/connectors/stripe.md?raw";
+import todoist from "../../../../docs/connectors/todoist.md?raw";
+import vendorSetupTemplate from "../../../../docs/connectors/vendor-setup-template.md?raw";
+import xero from "../../../../docs/connectors/xero.md?raw";
 
 /** The route these guides are served under. Declared once — the descriptor's
  *  `setupGuideHref`, the route folder and the link rewriter must agree, and a
  *  second spelling of this prefix is how they would stop agreeing. */
-export const GUIDE_ROUTE_PREFIX = "/help/integrations";
+export const GUIDE_ROUTE_PREFIX = "/help/connectors";
 
 /**
  * Guide text by SLUG, where a slug is the markdown filename lowercased with

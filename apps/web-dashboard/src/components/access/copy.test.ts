@@ -32,7 +32,7 @@ describe("§12 Chrome", () => {
       "No one has this role yet — assign people to put it to work.",
     );
     expect(ACCESS_COPY.emptyConnectors).toBe(
-      "No connectors set up yet — add one in Integrations.",
+      "No connectors set up yet — add one in Connectors.",
     );
   });
 });

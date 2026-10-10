@@ -137,7 +137,7 @@ await connector.runRead("get_schedule_today", { from, to });
 
 The connector snippet above proves the transport. To rehearse the thing an
 installer actually does — configure a connection, then watch real data appear —
-`POST /api/integrations/eaglesoft/connect` with the REST provider and the three
+`POST /api/connectors/eaglesoft/connect` with the REST provider and the three
 pieces of connection material:
 
 ```jsonc

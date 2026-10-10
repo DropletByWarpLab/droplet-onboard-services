@@ -2,8 +2,8 @@
 
 - **Status:** Accepted (2026-08-19)
 - **Epic:** [WARP-2113](https://warp-lab.atlassian.net/browse/WARP-2113) · this ADR is [WARP-2114](https://warp-lab.atlassian.net/browse/WARP-2114)
-- **Amends:** [`docs/integrations/README.md`](integrations/README.md) §1 and §2, which define an integration as LAN-only ("No cloud, no vendor SaaS relay, no data egress"). That sentence was written when every provider was a database on the practice's own network. It stays true for those providers; it is no longer true of the whole framework.
-- **Answers:** [`docs/integrations/ADD-A-PROVIDER.md`](integrations/ADD-A-PROVIDER.md) §0, which routes a "radically different category (non-database, API-based)" provider to an ADR before any code.
+- **Amends:** [`docs/integrations/README.md`](connectors/README.md) §1 and §2, which define an integration as LAN-only ("No cloud, no vendor SaaS relay, no data egress"). That sentence was written when every provider was a database on the practice's own network. It stays true for those providers; it is no longer true of the whole framework.
+- **Answers:** [`docs/integrations/ADD-A-PROVIDER.md`](connectors/ADD-A-PROVIDER.md) §0, which routes a "radically different category (non-database, API-based)" provider to an ADR before any code.
 - **Builds on:** `shared_brain/FOUNDATION.md` (the air-gapped-mentality thesis), ADR-009 (no public inbound), ADR-012 (phone-home egress control), WARP-269 / WARP-268 (the default-deny egress registry and its runtime audit).
 - **First consumers:** Microsoft 365 / Graph ([WARP-2115](https://warp-lab.atlassian.net/browse/WARP-2115), [WARP-2118](https://warp-lab.atlassian.net/browse/WARP-2118)) and Salesforce ([WARP-2116](https://warp-lab.atlassian.net/browse/WARP-2116)).
 - **Amended by:** [ADR-042](ADR-042-customer-supplied-credentials.md), which adds a **third** consent model to §5 — a credential the customer mints in their own vendor account and pastes into the box — and settles which vendors require Warp Lab to register an app. §5's delegated-per-user default is narrowed, not replaced.

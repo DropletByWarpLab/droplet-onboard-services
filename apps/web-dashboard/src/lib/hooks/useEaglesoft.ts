@@ -25,7 +25,7 @@ export function useEaglesoft() {
   // `canViewPhi`). Nobody else asks, so nobody else gets a 403 every 30 s.
   const operator = user?.role === "owner" || user?.role === "admin";
   const { data, isLoading, mutate } = useSWR<EaglesoftDetail>(
-    operator ? "/api/integrations/eaglesoft" : null,
+    operator ? "/api/connectors/eaglesoft" : null,
     fetchEaglesoft,
     { refreshInterval: 30_000, shouldRetryOnError: false },
   );

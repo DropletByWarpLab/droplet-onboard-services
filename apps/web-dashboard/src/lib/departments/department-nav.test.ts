@@ -36,7 +36,7 @@ const allOn = () => true;
 const SECURITY = { name: "Security", slug: "security" };
 const securityProfile = {
   icon: "shield-check",
-  navHrefs: ["/cameras", "/events", "/network", "/devices", "/integrations"],
+  navHrefs: ["/cameras", "/events", "/network", "/devices", "/connectors"],
 };
 
 const hrefsOf = (items: NavItem[]) => items.map((i) => i.href);
@@ -73,7 +73,7 @@ describe("departmentNavGroups — intersection, never union", () => {
       "/cameras",
       "/network",
       "/devices",
-      "/integrations",
+      "/connectors",
     ]);
   });
 
@@ -147,7 +147,7 @@ describe("departmentNavGroups — the gates still apply AFTER the filter", () =>
   it("a role gate still hides Integrations from a family member of Security", () => {
     const out = gated("family", allOn);
     const hrefs = out.flatMap((g) => hrefsOf(g.items));
-    expect(hrefs).not.toContain("/integrations");
+    expect(hrefs).not.toContain("/connectors");
     expect(hrefs).toContain("/cameras");
   });
 
@@ -203,7 +203,7 @@ describe("departmentNavGroups × the WARP-2967 tuck and nesting", () => {
 
   it("IT keeps Integrations, Users and Health, though Settings owns them in the whole-business nav", () => {
     expect(render("it")).toEqual(
-      expect.arrayContaining(["/integrations", "/users", "/health"]),
+      expect.arrayContaining(["/connectors", "/users", "/health"]),
     );
   });
 
@@ -254,7 +254,7 @@ describe("navChoices — only what the editor can reach", () => {
     const hrefs = navChoices(NAV_GROUPS, "family", ALL_CAPS, (id) => id !== "cameras").map(
       (c) => c.href,
     );
-    expect(hrefs).not.toContain("/integrations");
+    expect(hrefs).not.toContain("/connectors");
     expect(hrefs).not.toContain("/cameras");
     // A child drops with its parent, exactly as `visibleItems` drops it.
     expect(hrefs).not.toContain("/events");
@@ -272,11 +272,11 @@ describe("navChoices — only what the editor can reach", () => {
 describe("mergeNavSelection — never silently drops what the editor cannot see", () => {
   it("keeps hrefs outside the editor's view, in place", () => {
     const out = mergeNavSelection(
-      ["/cameras", "/integrations", "/network"],
+      ["/cameras", "/connectors", "/network"],
       ["/cameras", "/network", "/devices"],
       new Set(["/network", "/devices"]),
     );
-    expect(out).toEqual(["/integrations", "/network", "/devices"]);
+    expect(out).toEqual(["/connectors", "/network", "/devices"]);
   });
 
   it("appends newly checked hrefs in checklist order", () => {

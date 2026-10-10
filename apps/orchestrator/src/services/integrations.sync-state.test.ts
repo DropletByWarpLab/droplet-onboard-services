@@ -1,6 +1,6 @@
 /**
  * WARP-2218 / ADR-041 — `needs_reconnect` is a ROUTINE state and must survive
- * the trip from the cursor column to the `GET /api/integrations` payload
+ * the trip from the cursor column to the `GET /api/connectors` payload
  * without being collapsed onto ERROR.
  *
  * The product response to a revoked customer credential is to ask the owner to

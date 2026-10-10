@@ -735,7 +735,7 @@ describe("ChainChip (WARP-1993)", () => {
 
 // ── Integrations · a member's summary (WARP-3374) ────────────────────────
 //
-// `GET /api/integrations` is owner/admin only: which provider is which, whether
+// `GET /api/connectors` is owner/admin only: which provider is which, whether
 // a credential is expiring and the per-provider status are the company's own
 // topology. A member's tile reads the provider-free summary instead.
 describe("IntegrationsBody for a member (WARP-3374)", () => {

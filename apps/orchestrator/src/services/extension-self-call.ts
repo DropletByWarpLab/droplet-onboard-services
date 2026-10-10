@@ -32,13 +32,13 @@ const OFF_BOX_DOMAINS: ReadonlySet<string> = new Set(["cloud", "erp"]);
 /**
  * Orchestrator routes behind which a read leaves the box: the egress screen
  * (`/api/web/`), the connectors and cloud datasets (`/api/erp/`,
- * `/api/integrations/`), the model (`/api/llm/`: the provider may be a cloud
+ * `/api/connectors/`), the model (`/api/llm/`: the provider may be a cloud
  * one) and mail accounts (`/api/email/`: a mail server is not the box).
  */
 const OFF_BOX_ROUTE_PREFIXES: readonly string[] = [
   "/api/web/",
   "/api/erp/",
-  "/api/integrations/",
+  "/api/connectors/",
   "/api/llm/",
   "/api/email/",
 ];

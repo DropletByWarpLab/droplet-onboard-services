@@ -79,7 +79,7 @@ describe("a concurrent integration change answers 409, not 500", () => {
     // and this returns the 500 the terminal handler renders.
     disconnect.mockRejectedValue(prismaError("P2034"));
 
-    const res = await request(app()).post("/api/integrations/eaglesoft/disconnect");
+    const res = await request(app()).post("/api/connectors/eaglesoft/disconnect");
 
     expect(res.status).toBe(409);
     expect(res.body.code).toBe("CONCURRENT_MUTATION");
@@ -94,7 +94,7 @@ describe("a concurrent integration change answers 409, not 500", () => {
     // from the caller's side — nothing was applied.
     disconnect.mockRejectedValue(prismaError("P2025"));
 
-    const res = await request(app()).post("/api/integrations/eaglesoft/disconnect");
+    const res = await request(app()).post("/api/connectors/eaglesoft/disconnect");
 
     expect(res.status).toBe(409);
     expect(res.body.code).toBe("CONCURRENT_MUTATION");
@@ -106,7 +106,7 @@ describe("a concurrent integration change answers 409, not 500", () => {
     // that tells the dashboard to retry forever.
     disconnect.mockRejectedValue(new Error("connector exploded"));
 
-    const res = await request(app()).post("/api/integrations/eaglesoft/disconnect");
+    const res = await request(app()).post("/api/connectors/eaglesoft/disconnect");
 
     expect(res.status).toBe(500);
     expect(res.body.code).toBeUndefined();
@@ -115,7 +115,7 @@ describe("a concurrent integration change answers 409, not 500", () => {
   it("does not swallow a successful disconnect", async () => {
     disconnect.mockResolvedValue({ provider: "eaglesoft", status: "DISCONNECTED" });
 
-    const res = await request(app()).post("/api/integrations/eaglesoft/disconnect");
+    const res = await request(app()).post("/api/connectors/eaglesoft/disconnect");
 
     expect(res.status).toBe(200);
     expect(res.body.status).toBe("DISCONNECTED");

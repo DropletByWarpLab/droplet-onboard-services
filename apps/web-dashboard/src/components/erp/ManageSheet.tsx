@@ -7,7 +7,7 @@
  *
  * WARP-2518 — the disconnect block is no longer this sheet's. It was the ONLY
  * Disconnect control in the product, which meant a cloud connection made from
- * `/integrations` or `/integrations/credentials` could be created in the
+ * `/connectors` or `/connectors/credentials` could be created in the
  * dashboard and removed only through the API. `DisconnectControl` now owns the
  * confirmation, the call and the failure, and this sheet is one of its three
  * consumers rather than the place the other two would have had to copy.

@@ -14,7 +14,7 @@
  * explicit column.
  *
  * The second fact is the expiry verdict. WARP-2650 put it on
- * `/api/integrations/credentials`; the hub needs the same one, from the same
+ * `/api/connectors/credentials`; the hub needs the same one, from the same
  * derivation, so a token twelve days from a hard stop cannot read as "expiring
  * soon" on one page and "Connected" full stop on the other.
  */

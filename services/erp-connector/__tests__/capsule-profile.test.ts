@@ -320,7 +320,7 @@ describe("Capsule — the profile the track actually dispatches", () => {
     expect(d.category).toBe("CRM");
     expect(d.catalog?.order).toBe(20);
     expect(d.catalog?.availability).toBe("available");
-    expect(d.catalog?.setupGuideHref).toBe("/help/integrations/capsule");
+    expect(d.catalog?.setupGuideHref).toBe("/help/connectors/capsule");
   });
 
   it("🔴 paces at the DOCUMENTED floor — 4,000 an hour — and the descriptor's ceiling says the same thing twice", async () => {

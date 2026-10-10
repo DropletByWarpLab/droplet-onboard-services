@@ -112,11 +112,11 @@ export async function fetchActivityRange(
   return res.json();
 }
 
-// ── GET /api/integrations ────────────────────────────────────────────────
+// ── GET /api/connectors ────────────────────────────────────────────────
 //
 // Returns a BARE ARRAY, not an envelope. `lastSyncedAt` is new in WARP-1998 —
 // before that the hub list carried no timestamp at all and the only way to
-// get one was the provider-specific /api/integrations/eaglesoft route.
+// get one was the provider-specific /api/connectors/eaglesoft route.
 
 /**
  * The nine explicit lifecycle states. A provider with no row reports
@@ -139,7 +139,7 @@ export interface IntegrationSummary {
 }
 
 export async function fetchIntegrations(): Promise<IntegrationSummary[]> {
-  const res = await authFetch("/api/integrations");
+  const res = await authFetch("/api/connectors");
   if (res.status === ACTIVITY_FORBIDDEN) throw new ForbiddenError();
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
@@ -151,7 +151,7 @@ export async function fetchIntegrations(): Promise<IntegrationSummary[]> {
 /**
  * WARP-3374 — what a MEMBER may know about the connectors: counts and the newest
  * sync time, with no provider, no per-provider status and no credential expiry.
- * `GET /api/integrations` (the full list above) is owner/admin only.
+ * `GET /api/connectors` (the full list above) is owner/admin only.
  */
 export interface IntegrationsSummary {
   connected: number;
@@ -161,7 +161,7 @@ export interface IntegrationsSummary {
 }
 
 export async function fetchIntegrationsSummary(): Promise<IntegrationsSummary> {
-  const res = await authFetch("/api/integrations/summary");
+  const res = await authFetch("/api/connectors/summary");
   if (res.status === ACTIVITY_FORBIDDEN) throw new ForbiddenError();
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));

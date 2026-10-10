@@ -1,9 +1,9 @@
 /**
  * WARP-2277 / WARP-2281 — route tests for the SaaS credential configurator.
  *
- *   GET   /api/integrations/credentials
- *   GET   /api/integrations/:provider/credentials
- *   PATCH /api/integrations/:provider/credentials
+ *   GET   /api/connectors/credentials
+ *   GET   /api/connectors/:provider/credentials
+ *   PATCH /api/connectors/:provider/credentials
  *
  * Harness mirrors `settings-email.route.test.ts`: a minimal Express app +
  * supertest, a synthetic auth middleware that stuffs `req.user`, and an
@@ -213,7 +213,7 @@ describe("RBAC — the guard is at registration, not inline", () => {
     });
 
     const res = await request(app)
-      .patch(`/api/integrations/${FIXTURE.id}/credentials`)
+      .patch(`/api/connectors/${FIXTURE.id}/credentials`)
       .send({ fields: { apiKey: "rk_live_x" } });
 
     expect(res.status).toBe(403);
@@ -235,9 +235,9 @@ describe("RBAC — the guard is at registration, not inline", () => {
       username: "visitor",
       role: "guest",
     });
-    expect((await request(app).get("/api/integrations/credentials")).status).toBe(403);
+    expect((await request(app).get("/api/connectors/credentials")).status).toBe(403);
     expect(
-      (await request(app).get(`/api/integrations/${FIXTURE.id}/credentials`)).status,
+      (await request(app).get(`/api/connectors/${FIXTURE.id}/credentials`)).status,
     ).toBe(403);
   });
 
@@ -250,7 +250,7 @@ describe("RBAC — the guard is at registration, not inline", () => {
       role: "family",
     });
     await request(app)
-      .patch(`/api/integrations/${FIXTURE.id}/credentials`)
+      .patch(`/api/connectors/${FIXTURE.id}/credentials`)
       .send({ fields: { apiKey: "rk_live_x" } });
     expect(prisma.integrationConnection.update).not.toHaveBeenCalled();
     expect(prisma._row()?.providerTokensEnc).toBe(before);
@@ -261,7 +261,7 @@ describe("validation — zod safeParse, never parse", () => {
   it("returns exactly 400 {error, details} for a malformed body", async () => {
     const app = buildApp(createPrismaStub(seededRow()));
     const res = await request(app)
-      .patch(`/api/integrations/${FIXTURE.id}/credentials`)
+      .patch(`/api/connectors/${FIXTURE.id}/credentials`)
       .send({ fields: "not-an-object" });
 
     // Mutation: swap `safeParse` for `parse` and this becomes an unhandled
@@ -278,7 +278,7 @@ describe("validation — zod safeParse, never parse", () => {
   it("rejects an unknown top-level key rather than silently ignoring it", async () => {
     const app = buildApp(createPrismaStub(seededRow()));
     const res = await request(app)
-      .patch(`/api/integrations/${FIXTURE.id}/credentials`)
+      .patch(`/api/connectors/${FIXTURE.id}/credentials`)
       .send({ fields: { accountId: "a" }, secretz: "oops" });
     expect(res.status).toBe(400);
   });
@@ -286,7 +286,7 @@ describe("validation — zod safeParse, never parse", () => {
   it("returns the SAME 400 envelope for a descriptor-pattern refusal", async () => {
     const app = buildApp(createPrismaStub(seededRow()));
     const res = await request(app)
-      .patch(`/api/integrations/${FIXTURE.id}/credentials`)
+      .patch(`/api/connectors/${FIXTURE.id}/credentials`)
       .send({ fields: { apiKey: "sk_live_wrong" } });
 
     expect(res.status).toBe(400);
@@ -297,7 +297,7 @@ describe("validation — zod safeParse, never parse", () => {
 
   it("404s an unknown provider instead of rendering an empty form", async () => {
     const app = buildApp(createPrismaStub(null));
-    const res = await request(app).get("/api/integrations/no-such-vendor/credentials");
+    const res = await request(app).get("/api/connectors/no-such-vendor/credentials");
     expect(res.status).toBe(404);
   });
 });
@@ -305,7 +305,7 @@ describe("validation — zod safeParse, never parse", () => {
 describe("GET — the redacted view", () => {
   it("returns hasValue true and no key material", async () => {
     const app = buildApp(createPrismaStub(seededRow()));
-    const res = await request(app).get(`/api/integrations/${FIXTURE.id}/credentials`);
+    const res = await request(app).get(`/api/connectors/${FIXTURE.id}/credentials`);
 
     expect(res.status).toBe(200);
     expect(res.body.fields.find((f: { name: string }) => f.name === "apiKey").hasValue).toBe(
@@ -317,7 +317,7 @@ describe("GET — the redacted view", () => {
 
   it("lists every cloud provider with an explicit state, configured or not", async () => {
     const app = buildApp(createPrismaStub(null));
-    const res = await request(app).get("/api/integrations/credentials");
+    const res = await request(app).get("/api/connectors/credentials");
     expect(res.status).toBe(200);
     const fixture = res.body.providers.find(
       (p: { provider: string }) => p.provider === FIXTURE.id,
@@ -335,7 +335,7 @@ describe("PATCH — three-way resolution against the persisted column", () => {
     const app = buildApp(prisma);
 
     const res = await request(app)
-      .patch(`/api/integrations/${FIXTURE.id}/credentials`)
+      .patch(`/api/connectors/${FIXTURE.id}/credentials`)
       .send({ fields: { accountId: "acct-2" } });
 
     expect(res.status).toBe(200);
@@ -350,7 +350,7 @@ describe("PATCH — three-way resolution against the persisted column", () => {
     const app = buildApp(prisma);
 
     const res = await request(app)
-      .patch(`/api/integrations/${FIXTURE.id}/credentials`)
+      .patch(`/api/connectors/${FIXTURE.id}/credentials`)
       .send({ fields: { apiKey: "" } });
 
     expect(res.status).toBe(200);
@@ -364,7 +364,7 @@ describe("PATCH — three-way resolution against the persisted column", () => {
     const app = buildApp(prisma);
 
     const res = await request(app)
-      .patch(`/api/integrations/${FIXTURE.id}/credentials`)
+      .patch(`/api/connectors/${FIXTURE.id}/credentials`)
       .send({ fields: { apiKey: "rk_live_new" } });
 
     expect(res.status).toBe(200);
@@ -386,7 +386,7 @@ describe("PATCH — three-way resolution against the persisted column", () => {
     const app = buildApp(prisma);
 
     const res = await request(app)
-      .patch(`/api/integrations/${FIXTURE.id}/credentials`)
+      .patch(`/api/connectors/${FIXTURE.id}/credentials`)
       .send({ fields: { apiKey: "rk_live_adr042" } });
 
     expect(res.status).toBe(200);
@@ -400,7 +400,7 @@ describe("PATCH — three-way resolution against the persisted column", () => {
     const app = buildApp(prisma);
 
     const res = await request(app)
-      .patch(`/api/integrations/${FIXTURE.id}/credentials`)
+      .patch(`/api/connectors/${FIXTURE.id}/credentials`)
       .send({ fields: { accountId: "acct-1", apiKey: "rk_test_ok" } });
 
     expect(res.status).toBe(200);
@@ -430,7 +430,7 @@ describe("PATCH — a refused first save creates nothing", () => {
   async function refusedFirstSave(fields: Record<string, string>, provider = FIXTURE.id) {
     const prisma = createPrismaStub(null);
     const res = await request(buildApp(prisma))
-      .patch(`/api/integrations/${provider}/credentials`)
+      .patch(`/api/connectors/${provider}/credentials`)
       .send({ fields });
     return { res, prisma };
   }
@@ -446,7 +446,7 @@ describe("PATCH — a refused first save creates nothing", () => {
     expect(prisma._row()).toBeNull();
 
     const view = await request(buildApp(prisma)).get(
-      `/api/integrations/${FIXTURE.id}/credentials`,
+      `/api/connectors/${FIXTURE.id}/credentials`,
     );
     expect(view.body.configured).toBe(false);
     expect(view.body.state).toBe("NOT_CONFIGURED");
@@ -483,7 +483,7 @@ describe("PATCH — a refused first save creates nothing", () => {
     prisma.integrationConnection.create.mockRejectedValueOnce(new Error("db down"));
 
     const res = await request(buildApp(prisma))
-      .patch(`/api/integrations/${FIXTURE.id}/credentials`)
+      .patch(`/api/connectors/${FIXTURE.id}/credentials`)
       .send({ fields: { accountId: "acct-1", apiKey: "rk_test_ok" } });
 
     expect(res.status).toBeGreaterThanOrEqual(500);
@@ -534,7 +534,7 @@ describe("PATCH — a first Xero credential", () => {
 
   it("the list names the path the fields belong to, before anything is saved", async () => {
     const res = await request(buildApp(createPrismaStub(null))).get(
-      "/api/integrations/xero/credentials",
+      "/api/connectors/xero/credentials",
     );
 
     expect(res.status).toBe(200);
@@ -548,7 +548,7 @@ describe("PATCH — a first Xero credential", () => {
   it("saves when the body names that path, and records it on the row", async () => {
     const prisma = createPrismaStub(null);
     const res = await request(buildApp(prisma))
-      .patch("/api/integrations/xero/credentials")
+      .patch("/api/connectors/xero/credentials")
       .send({
         fields: {
           credentialVariant: "custom-connection",
@@ -580,7 +580,7 @@ describe("PATCH — a first Xero credential", () => {
     const prisma = createPrismaStub(null);
     const app = buildApp(prisma);
     await request(app)
-      .patch("/api/integrations/xero/credentials")
+      .patch("/api/connectors/xero/credentials")
       .send({
         fields: {
           credentialVariant: "custom-connection",
@@ -590,7 +590,7 @@ describe("PATCH — a first Xero credential", () => {
       });
 
     const res = await request(app)
-      .patch("/api/integrations/xero/credentials")
+      .patch("/api/connectors/xero/credentials")
       .send({ fields: { clientId: "FAKE-XERO-CLIENT-ID-2" } });
 
     expect(res.status).toBe(200);
@@ -613,14 +613,14 @@ describe("PATCH — a positiveInteger field is a number end to end", () => {
     const app = buildApp(prisma);
 
     const res = await request(app)
-      .patch("/api/integrations/quickbooks-online/credentials")
+      .patch("/api/connectors/quickbooks-online/credentials")
       .send({ fields: { realmId: "9130350000000001", callCeiling: 5000 } });
 
     expect(res.status).toBe(200);
     expect(res.body.values.callCeiling).toBe(5000);
     expect(prisma._row()?.providerConfig).toMatchObject({ callCeiling: 5000 });
 
-    const read = await request(app).get("/api/integrations/quickbooks-online/credentials");
+    const read = await request(app).get("/api/connectors/quickbooks-online/credentials");
     expect(read.body.values.callCeiling).toBe(5000);
     expect(typeof read.body.values.callCeiling).toBe("number");
   });
@@ -629,11 +629,11 @@ describe("PATCH — a positiveInteger field is a number end to end", () => {
     const prisma = createPrismaStub(null);
     const app = buildApp(prisma);
     await request(app)
-      .patch("/api/integrations/quickbooks-online/credentials")
+      .patch("/api/connectors/quickbooks-online/credentials")
       .send({ fields: { realmId: "9130350000000001", callCeiling: 5000 } });
 
     const res = await request(app)
-      .patch("/api/integrations/quickbooks-online/credentials")
+      .patch("/api/connectors/quickbooks-online/credentials")
       .send({ fields: { realmId: "9130350000000002", callCeiling: 6000 } });
 
     expect(res.status).toBe(200);
@@ -643,7 +643,7 @@ describe("PATCH — a positiveInteger field is a number end to end", () => {
   it('refuses the text "5000" by field name, and leaves no row', async () => {
     const prisma = createPrismaStub(null);
     const res = await request(buildApp(prisma))
-      .patch("/api/integrations/quickbooks-online/credentials")
+      .patch("/api/connectors/quickbooks-online/credentials")
       .send({ fields: { realmId: "9130350000000001", callCeiling: "5000" } });
 
     expect(res.status).toBe(400);
@@ -658,7 +658,7 @@ describe("PATCH — a positiveInteger field is a number end to end", () => {
 describe("GET — the list says which kind of connector each one is", () => {
   it("carries track, probedOnConnect and variant on every entry", async () => {
     const res = await request(buildApp(createPrismaStub(null))).get(
-      "/api/integrations/credentials",
+      "/api/connectors/credentials",
     );
 
     expect(res.status).toBe(200);
@@ -693,7 +693,7 @@ describe("audit — one row per mutation, carrying hasSecret and never the value
   it("records exactly one row on an update, with hasSecret true", async () => {
     const app = buildApp(createPrismaStub(seededRow()));
     await request(app)
-      .patch(`/api/integrations/${FIXTURE.id}/credentials`)
+      .patch(`/api/connectors/${FIXTURE.id}/credentials`)
       .send({ fields: { apiKey: "rk_live_new" } });
 
     const rows = credentialRows();
@@ -705,7 +705,7 @@ describe("audit — one row per mutation, carrying hasSecret and never the value
   it("never puts the credential in the audit scope", async () => {
     const app = buildApp(createPrismaStub(seededRow()));
     await request(app)
-      .patch(`/api/integrations/${FIXTURE.id}/credentials`)
+      .patch(`/api/connectors/${FIXTURE.id}/credentials`)
       .send({ fields: { apiKey: "rk_live_new" } });
 
     // Mutation: add the raw value to `refs` and this goes red. An ActivityRow
@@ -720,7 +720,7 @@ describe("audit — one row per mutation, carrying hasSecret and never the value
   it("distinguishes a clear from an update, with hasSecret false", async () => {
     const app = buildApp(createPrismaStub(seededRow()));
     await request(app)
-      .patch(`/api/integrations/${FIXTURE.id}/credentials`)
+      .patch(`/api/connectors/${FIXTURE.id}/credentials`)
       .send({ fields: { apiKey: "" } });
 
     const rows = credentialRows();
@@ -735,7 +735,7 @@ describe("audit — one row per mutation, carrying hasSecret and never the value
     const app = buildApp(prisma);
 
     await request(app)
-      .patch(`/api/integrations/${FIXTURE.id}/credentials`)
+      .patch(`/api/connectors/${FIXTURE.id}/credentials`)
       .send({ fields: { apiKey: "rk_live_new" } });
 
     // Mutation: move `recordActivity` above the update and this goes red — the
@@ -746,7 +746,7 @@ describe("audit — one row per mutation, carrying hasSecret and never the value
   it("writes no row when validation refuses the body", async () => {
     const app = buildApp(createPrismaStub(seededRow()));
     await request(app)
-      .patch(`/api/integrations/${FIXTURE.id}/credentials`)
+      .patch(`/api/connectors/${FIXTURE.id}/credentials`)
       .send({ fields: { apiKey: "sk_live_wrong" } });
     expect(credentialRows()).toHaveLength(0);
   });
@@ -842,7 +842,7 @@ describe("PATCH also drops the Xero token minted under the PREVIOUS credential",
   async function patchCredential(fields: Record<string, string>) {
     const prisma = createPrismaStub(seededRow());
     const res = await request(buildApp(prisma))
-      .patch(`/api/integrations/${FIXTURE.id}/credentials`)
+      .patch(`/api/connectors/${FIXTURE.id}/credentials`)
       .send({ fields });
     return { res, prisma };
   }
