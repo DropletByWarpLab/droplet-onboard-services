@@ -12,7 +12,7 @@ ROCm devices, a GPU runtime, or GPU inference dependencies.
 |---|---|---|
 | Wake phrase | Bundled `vosk-model-small-en-us-0.15`, Vosk | Apache-2.0 English model; existing exact configured phrase recognition, no custom wake model training |
 | Recognition | Full Qwen3-ASR 1.7B weights, antirez native C/OpenBLAS runtime | Apache-2.0 weights, MIT runtime; strong English recognition without a GPU Python stack |
-| Speaking | Kokoro 82M v1.0, quantized ONNX CPU runtime | Apache-2.0 model and voice vectors; eight bundled US/UK voices share one model |
+| Speaking | Kokoro 82M v1.0, fp32 ONNX CPU runtime | Apache-2.0 model and voice vectors; eight bundled US/UK voices share one model. The fp32 export, not the int8 one: onnxruntime's dynamic-quantization path synthesizes at real-time speed on the appliance and ignores extra threads, the fp32 model is ~4.6x faster (RTF 0.22) |
 
 Sources: [Qwen model](https://huggingface.co/Qwen/Qwen3-ASR-1.7B),
 [native runtime](https://github.com/antirez/qwen-asr),
@@ -72,8 +72,18 @@ The documented target is a Ryzen 7 7700X, 32 GB RAM appliance. Defaults:
 | Service | CPU quota / threads | RAM ceiling |
 |---|---|---|
 | Qwen STT | 4 / 4 native and OpenBLAS | 10 GiB |
-| Kokoro TTS | 2 / 2 ONNX | 1 GiB |
+| Kokoro TTS | 4 / 4 ONNX | 1 GiB (~520 MiB resident) |
 | Voice I/O + Vosk | 1 | 512 MiB (existing) |
+
+Measured on the lab appliance (2026-10-10, through the production Wyoming
+clients): Qwen transcribes a 1-3 s command in 1.8 s median / 2.3 s p95 and a
+30 s utterance in 11.6 s, and that does not improve with 8 threads — the
+1.7B BF16 decoder is memory-bandwidth bound, so the only lever left is a
+smaller model. Kokoro synthesizes a spoken sentence in 0.3-0.7 s with the fp32
+export (2.2 s with the int8 export it replaced). A real answered turn on the
+box broke down as: wake→capture 66 ms, capture 0.96 s (0.4 s speech + the
+0.6 s end-of-speech silence), STT 1.9 s, LLM first token 0.7 s, first spoken
+audio 3.6 s after the transcript with the int8 Kokoro.
 
 Qwen requires at least 14 GiB `MemAvailable` **before loading**, and refuses
 a container RAM limit below 10 GiB. The startup check budgets the model's

@@ -2,8 +2,13 @@
 
 Offline Wyoming TTS sidecar for Droplet. It replaces the speaking half of the
 voice pipeline; speech recognition and the wake word are separate services.
-Kokoro 82M v1.0 uses the quantized ONNX export (92.4 MB) and eight bundled
+Kokoro 82M v1.0 uses the fp32 ONNX export (326 MB) and eight bundled
 English voices. No CUDA, GPU packages, device mounts or VRAM are needed.
+The fp32 export is deliberate: the int8 `model_quantized.onnx` export runs
+onnxruntime's dynamic-quantization path, which on the appliance (Ryzen 7
+7700X) synthesizes at real-time speed (RTF 1.0, ~2.2 s per spoken sentence)
+and does not scale with threads; the fp32 model runs the same sentences in
+~0.5 s (RTF 0.22) on 4 threads with ~520 MiB resident.
 
 Build from the repository root:
 
@@ -29,12 +34,14 @@ Environment:
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `TTS_VOICE` | `af_heart` | Server default; must be a bundled voice ID. |
-| `KOKORO_CPU_THREADS` | `2` | ONNX intra-op threads, 1–16; inter-op is always 1. |
+| `KOKORO_CPU_THREADS` | `4` | ONNX intra-op threads, 1–16; inter-op is always 1. Keep equal to the container's CPU quota (`KOKORO_CPUS`). |
 | `KOKORO_MODEL_DIR` | `/app/models` | Directory containing the bundled assets. |
 
-CPU latency and peak RAM depend on the processor and text. The quantized model
-size is not a runtime RAM estimate. Allow approximately 1 GB of system RAM for
-this sidecar and measure on the target box. Speech requests are serialized in
+CPU latency and peak RAM depend on the processor and text. The model file
+size is not a runtime RAM estimate: the fp32 model sits at ~520 MiB resident
+on the appliance, so the 1 GiB container ceiling stands. Measured on the
+7700X appliance at 4 threads, one spoken sentence (1-3 s of audio) takes
+0.3-0.7 s to synthesize. Speech requests are serialized in
 arrival order: a request that arrives mid-synthesis waits up to 30 s for the
 slot, then receives `error`/`busy`. At most
 16 connections are retained, idle/slow socket operations expire after 10 s,

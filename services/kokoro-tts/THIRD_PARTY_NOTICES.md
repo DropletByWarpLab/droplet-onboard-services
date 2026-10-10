@@ -4,7 +4,7 @@
   2.0. Authors: hexgrad and the Kokoro contributors.
   https://huggingface.co/hexgrad/Kokoro-82M
   Voice provenance: https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md
-- Quantized ONNX conversion: ONNX Community / Xenova, Apache License 2.0.
+- ONNX conversion (fp32 export): ONNX Community / Xenova, Apache License 2.0.
   https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX
   The exact immutable revision and file digests are recorded in
   `/app/models/assets.json` inside the image. The complete model license is

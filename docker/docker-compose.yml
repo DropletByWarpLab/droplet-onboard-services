@@ -2997,7 +2997,10 @@ services:
     expose: ["10200"]
     networks: [droplet-speech]
     environment:
-      - KOKORO_CPU_THREADS=${KOKORO_CPU_THREADS:-2}
+      # 4 ONNX threads / 4 CPUs: measured on the 7700X appliance with the
+      # fp32 export, a spoken sentence synthesizes in ~0.5 s (RTF 0.22).
+      # Keep KOKORO_CPU_THREADS equal to KOKORO_CPUS.
+      - KOKORO_CPU_THREADS=${KOKORO_CPU_THREADS:-4}
     read_only: true
     # phonemizer loads an eSpeak shared library from a temporary file.
     tmpfs: ["/tmp:rw,exec,nosuid,size=64m,mode=1777"]
@@ -3005,8 +3008,9 @@ services:
     security_opt: ["no-new-privileges:true"]
     restart: unless-stopped
     <<: *default-logging
+    # ~520 MiB resident with the fp32 model loaded.
     mem_limit: ${KOKORO_MEM_LIMIT:-1g}
-    cpus: ${KOKORO_CPUS:-2.0}
+    cpus: ${KOKORO_CPUS:-4.0}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # --- Optional Whisper STT rollback (WARP-154) ---
