@@ -49,9 +49,12 @@ after the existing end-of-speech silence detector or a 30-second hard cap.
 The exact configured wake phrase is removed only from the beginning of a
 transcript. Dictation accepts mono signed 16-bit PCM at 8–48 kHz, normalizing
 it to Qwen's 16 kHz input. Each model runs one inference at a time, with bounded
-input, connection counts, and request deadlines. STT clients default to a
-90-second transcript deadline; TTS defaults to 60 seconds. Audio/transcripts
-are not saved by either speech sidecar.
+input, connection counts, and request deadlines; a request that arrives while
+one is running queues for the slot in arrival order (up to 60 s for recognition,
+30 s for speech) before it is refused as `busy`, so appliance voice and
+dashboard dictation share each model without failing each other's turns. STT
+clients default to a 90-second transcript deadline; TTS defaults to 60
+seconds. Audio/transcripts are not saved by either speech sidecar.
 
 An owner/admin can select and preview a voice in **Voice & microphone**.
 Preview speaks through the appliance speaker and does not save the choice.

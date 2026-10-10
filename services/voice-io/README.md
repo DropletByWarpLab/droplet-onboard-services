@@ -82,10 +82,15 @@ drops off USB and re-enumerates (spontaneously, or after the WARP-1409
 `xvf_host REBOOT 1` auto-recovery), Debian's libportaudio2 19.6.0 spins
 in C on the deleted device node and the Python read loop never regains
 control - so `POST /voice/mic/restart` and the hot-plug rescan are never
-consumed. The scheduler ticks (which still run) therefore check that a
-read completed within `VOICE_CAPTURE_STALL_S` while `listening`; if not,
-voice-io logs `capture thread made no progress ...` and exits with code
-70 so the compose restart policy relaunches it on the new device.
+consumed. The scheduler ticks (which still run) therefore check how long
+the capture thread has been inside its current PortAudio call (the
+device open, each read, the close, the re-enumeration); past
+`VOICE_CAPTURE_STALL_S` voice-io logs `capture thread made no progress
+...` and exits with code 70 so the compose restart policy relaunches it
+on the new device. The check is on the call, not the pipeline state: a
+device that drops mid-capture (`transcribing`) is caught the same way,
+while a voice turn - which runs on that thread outside PortAudio - is
+never judged however long the reply takes.
 
 ## Configuration
 
@@ -106,19 +111,19 @@ voice-io logs `capture thread made no progress ...` and exits with code
 | `STT_URL` | `tcp://qwen-stt:10300` | CPU-only Qwen3-ASR 1.7B Wyoming sidecar. Both appliance voice and dashboard dictation use it. `__mock__` disables real transcription. |
 | `STT_TRANSCRIPT_TIMEOUT_S` | `90` | Absolute transcript wait budget, range 1–300 seconds. |
 | `STT_LANGUAGE` | `en` | English first; the Qwen sidecar forces English. |
-| `STT_MAX_RECORD_S` | `30.0` | Hard cap on capture after wake; existing end-of-speech VAD finishes sooner after the user stops talking. The sidecar also rejects audio longer than 30 seconds. |
+| `STT_MAX_RECORD_S` | `30.0` | Hard cap on capture after wake; existing end-of-speech VAD finishes sooner after the user stops talking. Counted in audio actually sent, so a capture that runs the full window hands the sidecar exactly this much and never a frame more - the Qwen sidecar refuses anything past its own 30-second maximum, so values above 30 fail every capped turn. |
 | `WHISPER_CPUS` | `4.0` | Optional `voice-whisper` rollback sidecar CPU quota. Keep equal to `WHISPER_CPU_THREADS`. See ../../docs/cpu-voice.md. |
 | `WHISPER_CPU_THREADS` | `4` | Optional Whisper rollback sidecar CTranslate2 threads, equal to its CPU quota. |
 | `VAD_SILENCE_S` | `0.6` | End-of-speech VAD: seconds of trailing silence that end the capture once the user has started talking, so the box stops the moment they finish rather than always holding the mic for the full `STT_MAX_RECORD_S`. Raise it if the box cuts people off during a natural mid-sentence pause. |
 | `VAD_SPEECH_RMS` | `700` | int16 frame RMS above which a frame counts as "speech" — sits between a typical room floor (~400) and normal speech (~1000+). **The per-room tuning knob**: lower it in a quiet room where speech reads soft, raise it in a loud one where the floor creeps up. |
 | `VAD_MIN_SPEECH_S` | `0.4` | Minimum cumulative speech (s) before end-of-speech may fire, so the wake-word tail plus a pause before the command doesn't end the turn early. |
 | `WAKE_VISUAL_DECAY_S` | `2.0` | How long the `wake_detected` / `transcript_ready` UI hints linger on `/voice/status` before decaying back to `listening`, so the dashboard's wake + transcript pulse animations have time to play. |
-| `TTS_URL` | `tcp://kokoro-tts:10200` | CPU-only Kokoro Wyoming server with eight bundled English voices. `__mock__` provides silent playback. Legacy Piper is an optional override. |
+| `TTS_URL` | `tcp://kokoro-tts:10200` | CPU-only Kokoro Wyoming server with eight bundled English voices. `__mock__` provides silent playback. Legacy Piper is an optional override. A `busy` answer (the sidecar's single synthesis slot is taken — a cue pre-synthesis racing a reply, a preview landing mid-sentence) is retried three times over 1.75 s before it fails the turn. |
 | `TTS_VOICE` | `af_heart` | Initial speaking voice. Owner/admin selection in Voice & microphone persists on the existing calibration volume and applies to every spoken reply and cue. Unknown legacy defaults resolve to the running server's installed default. |
 | `TTS_SYNTHESIZE_TIMEOUT_S` | `60` | Absolute synthesis response budget, range 1–300 seconds. |
 | `VOICE_FLATLINE_WINDOW_S` | `240` | Flatline watchdog (WARP-1037): seconds of at/near-digital-zero input while `state=listening` before `/health` degrades to 503. The ReSpeaker XVF3800's XMOS DSP can wedge with the USB stream still open — the pipeline keeps "listening" while every frame is pure silence. The pipeline measures a rolling input RMS inside its own frame handler (never a second stream on the same hw device) and flags the wedge so the Docker healthcheck + ops-console see it. Recovery is automatic when audio returns. `0` disables. |
 | `VOICE_FLATLINE_DBFS` | `-70.0` | Level (dBFS) below which a frame counts as "no signal" for the flatline watchdog. A healthy capture chain's noise floor sits ≈ -60…-50 dBFS; a wedged DSP emits exact zeros (-120 floor) or ±1-count dither (≈ -90). |
-| `VOICE_CAPTURE_STALL_S` | `15` | Capture-stall watchdog (WARP-3934): seconds with no completed mic read while `state=listening` before voice-io logs a CRITICAL line and exits (code 70) so Docker (`restart: always`) brings it back on the re-enumerated device. Needed because Debian's libportaudio2 19.6.0 busy-spins in C on a removed USB mic instead of raising, so no in-process reopen can run. Other states (`wake_detected` / `transcribing` / `transcript_ready` / `speaking`, where a voice turn legitimately stops draining the stream) are never judged. `0` disables; a non-numeric value warns and uses the default. |
+| `VOICE_CAPTURE_STALL_S` | `15` | Capture-stall watchdog (WARP-3934): seconds the capture thread may spend inside ONE PortAudio call (device open / read / close / re-init) before voice-io logs a CRITICAL line and exits (code 70) so Docker (`restart: always`) brings it back on the re-enumerated device. Needed because Debian's libportaudio2 19.6.0 busy-spins in C on a removed USB mic instead of raising, so no in-process reopen can run. Judged in every pipeline state - a drop mid-capture wedges `read()` just the same - but never while the thread is outside PortAudio running a voice turn (the STT finish, the LLM reply, TTS, playback), however long that takes. `0` disables; a non-numeric value warns and uses the default. |
 | `VOICE_MAX_TOKENS` | `1024` | **Voice turn shaping (WARP-1432).** Per-turn generation cap sent to the orchestrator on every reply. The box's `gpt-oss` voice model spends reasoning-channel tokens *before* visible content, so the default is deliberately generous — enough for reasoning + a short spoken sentence; too low empties the reply (WARP-854). The gateway hard-caps at 4096; a non-numeric or out-of-range value falls back to `1024`. Voice also always sends `ephemeral:true` (a constant, not an env — voice has no persisted chat session, so a per-utterance `ChatSession` would only litter the sidebar). |
 | `VOICE_MAX_ITER` | `4` | **Agent-loop step budget (WARP-3316).** Sent to the orchestrator as `max_iter` on every reply. The last iteration is the spoken answer, so the old budget of 2 died on the *second* tool call with the orchestrator's "couldn't finish… within my step limit" fallback; 4 covers up to three tool calls before answering. Clamped to 1..10 (the orchestrator's cap); a non-numeric value falls back to `4`. |
 | `VOICE_ALLOWED_TOOLS` | *(curated default)* | **Voice turn shaping (WARP-1432).** Comma-separated tool names the assistant may use on tool-enabled turns. Empty (default) sends a curated scope — box health, cameras, network, files, smart devices + `control_device`, calendar, reminders — instead of the full ~43-tool set, cutting schema prefill from ~5k to ~1–1.5k tokens/turn. Whitespace and empty segments are ignored; an all-empty value falls back to the default. The greeting fast path (`tool_choice="none"`) sends zero tools regardless. |
@@ -131,7 +136,7 @@ reach it via the Docker network).
 
 | Path | Method | Returns |
 |---|---|---|
-| `/health` | GET | `{ ok, inputAvailable, outputAvailable, state, wakeLoaded, sttLoaded, ttsLoaded, llmLoaded, inputRmsDbfs, lastAudioAt, inputFlatlined }`. Returns 503 with `ok:false` when the pipeline is stuck-and-deaf: `state` ∈ `error\|no_mic`, or `inputFlatlined` (input at/near digital zero for `VOICE_FLATLINE_WINDOW_S` while listening — the wedged-DSP signature). |
+| `/health` | GET | `{ ok, inputAvailable, outputAvailable, state, wakeLoaded, sttLoaded, ttsLoaded, llmLoaded, inputRmsDbfs, lastAudioAt, inputFlatlined }`. Returns 503 with `ok:false` when the pipeline is stuck-and-deaf: `state` ∈ `error\|no_mic`, or `inputFlatlined` (input at/near digital zero for `VOICE_FLATLINE_WINDOW_S` while listening — the wedged-DSP signature). A failed voice turn never latches `error`: an STT session that could not be opened or finished, a TTS/playback fault or a dropped LLM stream ends that turn, lands in `/voice/status.error_message`, and the box keeps listening (WARP-3199). |
 | `/audio/devices` | GET | List of all detected ALSA devices with their score + the current pick |
 | `/audio/test-tone` | POST | Play a 440 Hz sine wave through the picked output device for 1 s. For "is my speaker wired right" debug. |
 | `/audio/test-record` | POST | Capture 2 s from the picked input, return RMS + peak level. For "is my mic working" debug. |

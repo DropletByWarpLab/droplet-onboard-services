@@ -1559,7 +1559,12 @@ class TestTranscribingFlow:
         # And the transcript was still saved:
         assert pipe.status().last_transcript == "x"
 
-    def test_session_open_failure_lands_in_error_state(self):
+    def test_session_open_failure_keeps_listening_and_pauses_stt(self):
+        # A refused connection (the Qwen sidecar restarting / still loading)
+        # is a transient dependency fault: the turn fails, the reason lands
+        # on /voice/status, and the box KEEPS LISTENING. Latching 'error'
+        # here left it deaf for good - nothing cleared the latch once the
+        # periodic probe re-detected STT (WARP-3729 follow-up).
         stt = _RecordingSTT(raise_on_session=True)
         pipe = WakePipeline(
             detector=_ScriptedDetector([{"hey_jarvis": 0.9}]),
@@ -1571,15 +1576,23 @@ class TestTranscribingFlow:
         pipe._on_frame(_silence_frame())  # wake
         pipe._on_frame(_silence_frame())  # tries to open session → fails
         s = pipe.status()
-        assert s.state == "error"
+        assert s.state == "listening"
         assert "session refused" in (s.error_message or "")
         # And stt_available flipped to False so subsequent wakes don't
         # retry the same broken connection on every frame.
         assert s.stt_loaded is False
+        # The turn still ended with its one timing record.
+        assert s.last_turn_timing is not None
+        assert s.last_turn_timing["outcome"] == "error"
+        assert s.last_turn_timing["error_kind"] == "stt"
+        # The next frame is wake detection again, not a dropped frame.
+        pipe._on_frame(_silence_frame())
+        assert pipe.status().state in ("listening", "wake_detected")
 
-    def test_send_failure_aborts_transcription(self):
+    def test_send_failure_aborts_transcription_and_keeps_listening(self):
         # After a few chunks, send_chunk starts raising. Pipeline should
-        # transition to error state, drop the session, and not crash.
+        # drop the session, report the fault, go back to listening, and
+        # not crash.
         stt = _RecordingSTT(
             scripted_transcripts=["never reached"],
             raise_on_send_after=3,
@@ -1598,10 +1611,16 @@ class TestTranscribingFlow:
         pipe._on_frame(_silence_frame())  # chunk 3
         pipe._on_frame(_silence_frame())  # tries chunk 4 → raises → abort
         s = pipe.status()
-        assert s.state == "error"
+        assert s.state == "listening"
         assert "send blew up" in (s.error_message or "")
+        assert pipe._stt_session is None
+        # A dropped socket says nothing about reachability: the next wake
+        # tries a fresh session (a refused connect flips the flag then).
+        assert s.stt_loaded is True
 
-    def test_finish_failure_aborts_transcription(self):
+    def test_finish_failure_aborts_transcription_and_keeps_listening(self):
+        # The sidecar answered `error` instead of a transcript (Qwen refusing
+        # a request, or a dropped connection at finish): same contract.
         stt = _RecordingSTT(
             scripted_transcripts=["never used"],
             raise_on_finish=True,
@@ -1619,8 +1638,46 @@ class TestTranscribingFlow:
         time.sleep(0.1)
         pipe._on_frame(_silence_frame())  # tries finish → raises
         s = pipe.status()
-        assert s.state == "error"
+        assert s.state == "listening"
         assert "finish blew up" in (s.error_message or "")
+        assert s.last_turn_timing is not None
+        assert s.last_turn_timing["outcome"] == "error"
+        assert s.last_turn_timing["error_kind"] == "stt"
+
+    def test_a_capture_fault_does_not_clear_a_latched_error(self):
+        # A stuck fault that landed first keeps its state and message - the
+        # same rule _fail_turn applies on the speak side (WARP-3199).
+        stt = _RecordingSTT(raise_on_session=True)
+        pipe = WakePipeline(
+            detector=_ScriptedDetector([{"hey_jarvis": 0.9}]),
+            input_device_index=0,
+            threshold=0.5,
+            stt=stt,
+        )
+        pipe._stt_available = True
+        pipe._set_error("wake loop crashed: boom")
+        pipe._fail_capture("STT session failed: late")
+        s = pipe.status()
+        assert s.state == "error"
+        assert s.error_message == "wake loop crashed: boom"
+        assert s.last_turn_timing is None
+
+    def test_a_capture_fault_resets_the_detector_and_emits_one_feed_row(self):
+        det = _ResetCountingDetector([{"hey_jarvis": 0.9}])
+        stt = _RecordingSTT(raise_on_session=True)
+        reporter = _RecordingReporter()
+        pipe = WakePipeline(
+            detector=det,
+            input_device_index=0,
+            threshold=0.5,
+            stt=stt,
+            activity_reporter=reporter,
+        )
+        pipe._stt_available = True
+        pipe._on_frame(_silence_frame())  # wake
+        pipe._on_frame(_silence_frame())  # session refused → fault
+        assert det.reset_calls == 1
+        assert reporter.events == ["wake_heard"]
 
     def test_stt_none_keeps_pre_commit_4_behaviour(self):
         """No STT wired up → wake fires + state decays back without transcribing."""
@@ -5283,3 +5340,82 @@ class TestVolumeFastPath:
             pipe._default_on_transcript(text)
         assert pipe._volume.state().level == 45
         assert not any(text in r.getMessage() for r in caplog.records)
+
+
+# ────────────────────────────────────────────────────────────────────
+# Capture cap counted in audio sent (WARP-3729 follow-up)
+# ────────────────────────────────────────────────────────────────────
+
+class TestCaptureCapIsAudioTime:
+    """The Qwen sidecar refuses a request carrying more than its 30 s
+    input maximum. The old wall-clock cap ran AFTER each send, so a
+    capture that went the distance handed over 30.08-30.16 s of audio and
+    the whole turn failed with "Audio exceeds 30 seconds". The cap is now
+    counted in samples actually sent, checked BEFORE the send."""
+
+    def _pipe(self, stt, cap_s: float):
+        pipe = WakePipeline(
+            detector=_ScriptedDetector([{"hey_jarvis": 0.9}]),
+            input_device_index=0,
+            threshold=0.5,
+            stt=stt,
+            stt_max_record_s=cap_s,
+        )
+        pipe._stt_available = True
+        return pipe
+
+    def test_never_sends_more_audio_than_the_cap(self):
+        # 10 frames of 80 ms = 0.8 s of audio allowed; the 11th frame would
+        # cross it and must finish the capture WITHOUT being sent.
+        stt = _RecordingSTT(scripted_transcripts=["a long question"])
+        pipe = self._pipe(stt, cap_s=10 * WAKE_FRAME_SAMPLES / WAKE_SAMPLE_RATE)
+        pipe._transcribe_started_at = time.time()  # overwritten by begin
+        pipe._on_frame(_silence_frame())  # wake
+        for _ in range(12):
+            pipe._on_frame(_silence_frame())
+            if stt.finished:
+                break
+        assert stt.finished is True
+        assert len(stt.chunks_received) == 10
+        assert sum(len(c) for c in stt.chunks_received) == 10 * WAKE_FRAME_SAMPLES * 2
+        assert pipe.status().last_transcript == "a long question"
+        assert pipe.status().last_turn_timing["vad_end"] == "cap"
+
+    def test_thirty_second_default_hands_the_sidecar_exactly_thirty_seconds(self):
+        stt = _RecordingSTT(scripted_transcripts=["ok"])
+        pipe = self._pipe(stt, cap_s=DEFAULT_STT_MAX_RECORD_S)
+        pipe._on_frame(_silence_frame())  # wake
+        frames = int(DEFAULT_STT_MAX_RECORD_S * WAKE_SAMPLE_RATE / WAKE_FRAME_SAMPLES)
+        for _ in range(frames + 5):
+            pipe._on_frame(_silence_frame())
+            if stt.finished:
+                break
+        assert stt.finished is True
+        sent_bytes = sum(len(c) for c in stt.chunks_received)
+        assert sent_bytes == DEFAULT_STT_MAX_RECORD_S * WAKE_SAMPLE_RATE * 2
+        assert len(stt.chunks_received) == frames
+
+    def test_first_frame_always_goes_even_under_a_tiny_cap(self):
+        # A cap smaller than one frame still sends one frame: the sidecar
+        # never sees an empty request, and the turn still completes.
+        stt = _RecordingSTT(scripted_transcripts=["hi"])
+        pipe = self._pipe(stt, cap_s=0.01)
+        pipe._on_frame(_silence_frame())  # wake
+        pipe._on_frame(_silence_frame())  # begin + the one frame
+        assert len(stt.chunks_received) == 1
+        assert stt.finished is False
+        pipe._on_frame(_silence_frame())  # would cross the cap → finish
+        assert stt.finished is True
+        assert len(stt.chunks_received) == 1
+
+    def test_wall_clock_cap_still_backs_the_audio_cap(self):
+        # The wall-clock check stays as the backstop for a capture whose
+        # frames arrive slower than real time.
+        stt = _RecordingSTT(scripted_transcripts=["late"])
+        pipe = self._pipe(stt, cap_s=100.0)
+        pipe._on_frame(_silence_frame())  # wake
+        pipe._on_frame(_silence_frame())  # begin + chunk
+        pipe._transcribe_started_at = time.time() - 101.0
+        pipe._on_frame(_silence_frame())  # elapsed past the window
+        assert stt.finished is True
+        assert pipe.status().last_turn_timing["vad_end"] == "cap"

@@ -64,6 +64,22 @@ class TTSUnavailable(Exception):
     """Raised when the TTS server isn't reachable or returns an error."""
 
 
+class TTSBusy(TTSUnavailable):
+    """The server answered `error` with code `busy`: another synthesis holds
+    its single CPU inference slot. Transient by definition - the Kokoro
+    sidecar queues for a bounded wait first, and an older image refuses
+    outright - so `synthesize()` retries it a few times before giving up."""
+
+
+# Bounded retry on `busy` (WARP-3729 follow-up). The only concurrent
+# synthesis the pipeline ever issues is the warm-up / cue pre-synthesis
+# racing a real turn, or a dashboard preview landing mid-reply; one slot
+# frees up within a sentence. Three short waits (1.75 s in all) cover that
+# without holding a turn hostage to a stuck server.
+BUSY_RETRY_DELAYS_S: tuple[float, ...] = (0.25, 0.5, 1.0)
+_busy_sleep = time.sleep  # module-level so tests can stub the wait
+
+
 @dataclass(frozen=True)
 class SynthesizedAudio:
     """One TTS result. The caller plays this via sounddevice."""
@@ -189,6 +205,22 @@ class WyomingTTS(TextToSpeech):
         # the actual server, so no unknown model name is sent/downloaded.
         chosen_voice = (self._default_voice if voice is None else voice).strip()
 
+        # A `busy` answer is retried a few times (see BUSY_RETRY_DELAYS_S);
+        # every other failure surfaces at once.
+        for attempt, delay in enumerate((*BUSY_RETRY_DELAYS_S, None)):
+            try:
+                return self._synthesize_once(text, chosen_voice)
+            except TTSBusy as exc:
+                if delay is None:
+                    raise
+                logger.info(
+                    "wyoming TTS busy (%s) — retrying in %.2fs (attempt %d/%d)",
+                    exc, delay, attempt + 1, len(BUSY_RETRY_DELAYS_S),
+                )
+                _busy_sleep(delay)
+        raise TTSUnavailable("synthesize failed: busy")  # pragma: no cover
+
+    def _synthesize_once(self, text: str, chosen_voice: str) -> SynthesizedAudio:
         try:
             sock = socket.create_connection(
                 (self._host, self._port), timeout=self._connect_timeout_s,
@@ -207,6 +239,8 @@ class WyomingTTS(TextToSpeech):
                 data["voice"] = {"name": chosen_voice}
             self._send_event(sock, "synthesize", data)
             return self._read_audio_until_stop(sock)
+        except TTSBusy:
+            raise
         except (OSError, STTUnavailable) as exc:
             raise TTSUnavailable(f"synthesize failed: {exc}") from exc
         finally:
@@ -252,6 +286,8 @@ class WyomingTTS(TextToSpeech):
 
             if event_type == "error":
                 message = data.get("text") or data.get("code") or "TTS server rejected synthesis"
+                if data.get("code") == "busy":
+                    raise TTSBusy(str(message))
                 raise TTSUnavailable(str(message))
 
             if event_type == "audio-start":

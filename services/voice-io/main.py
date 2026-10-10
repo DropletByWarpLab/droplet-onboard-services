@@ -504,16 +504,16 @@ def _warm_up_upstreams(
 
 
 def _warm_up_tts(tts: Optional[TextToSpeech]) -> bool:
-    """Returns True when Piper answered the warm-up synth."""
-    # MockTTS has no real Piper to warm — skip so a dev box does no work.
+    """Returns True when the TTS sidecar answered the warm-up synth."""
+    # MockTTS has no real sidecar to warm — skip so a dev box does no work.
     if tts is None or isinstance(tts, MockTTS):
         return False
     try:
         if not tts.available:
-            logger.info("voice TTS warm-up skipped — Piper not reachable yet")
+            logger.info("voice TTS warm-up skipped — speech sidecar not reachable yet")
             return False
         tts.synthesize(_WARMUP_TTS_TEXT)
-        logger.info("voice TTS warm-up done — Piper voice loaded")
+        logger.info("voice TTS warm-up done — speaking voice loaded")
         return True
     except Exception as exc:  # noqa: BLE001 — warm-up is strictly best-effort
         logger.info("voice TTS warm-up skipped: %s", exc)
@@ -533,17 +533,17 @@ def _warm_up_cues(pipeline: Optional[WakePipeline]) -> None:
 
 
 def _warm_up_stt(stt: Optional[StreamingSTT]) -> None:
-    # MockSTT has no real Whisper to warm — skip.
+    # MockSTT has no real sidecar to warm — skip.
     if stt is None or isinstance(stt, MockSTT):
         return
     try:
         if not stt.available:
-            logger.info("voice STT warm-up skipped — Whisper not reachable yet")
+            logger.info("voice STT warm-up skipped — recognition sidecar not reachable yet")
             return
         with stt.session() as session:
             session.send_chunk(_WARMUP_STT_PCM)
             session.finish()
-        logger.info("voice STT warm-up done — Whisper model initialized")
+        logger.info("voice STT warm-up done — recognition model answered")
     except Exception as exc:  # noqa: BLE001 — warm-up is strictly best-effort
         logger.info("voice STT warm-up skipped: %s", exc)
 
@@ -911,7 +911,7 @@ class VoiceTurnTiming(BaseModel):
     total_ms: Optional[int] = None
     cue: Optional[str] = None             # tool_call | model_loading
     sentences: int = 0                    # answer sentences played
-    error_kind: Optional[str] = None      # tts | playback | llm | busy
+    error_kind: Optional[str] = None      # stt | tts | playback | llm | busy
     ended_at: Optional[float] = None      # wall time the turn ended
 
 

@@ -26,9 +26,12 @@ Protocol: `describe` → `info`, or `transcribe` → `audio-start` → chunks �
 `audio-stop` → `transcript`. Both Wyoming JSON framing versions are accepted.
 English is forced; signed 16-bit mono PCM at 8–48 kHz is accepted and normalized
 to 16 kHz, with a 30-second input maximum. Eight concurrent connections are
-bounded, and only one native decode can run; a busy peer receives an error.
-A disconnected/timed-out client cannot release the native inference lock
-while its worker is still running. Audio/text are kept in request memory only.
+bounded, and only one native decode runs at a time: a request that arrives
+while one is running waits for the slot in arrival order (up to 60 s), then
+receives a `busy` error. A disconnected/timed-out client cannot release the
+native inference lock while its worker is still running; a client that gives
+up while merely queued leaves the queue at once. Audio/text are kept in
+request memory only.
 
 Defaults: four native/BLAS threads, 10 GiB container cap, a pre-load 14 GiB
 host `MemAvailable` requirement. Health becomes ready only after the real

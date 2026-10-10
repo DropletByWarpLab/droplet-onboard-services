@@ -15,6 +15,12 @@ MAX_EVENT_BYTES = 16384
 MAX_TEXT_CHARS = 2000
 MAX_CONNECTIONS = 16
 IO_TIMEOUT = 10
+# One synthesis at a time; a second request WAITS this long for the slot
+# before it is answered `busy`. A cue pre-synthesis racing a reply, or a
+# dashboard preview landing mid-sentence, then queues behind the batch in
+# flight instead of failing the caller's turn. Bounded so a client's own
+# synthesis deadline (60 s by default) still wins.
+SYNTH_QUEUE_WAIT_S = 30.0
 PCM_CHUNK_BYTES = 24000 * 2 // 5  # 200 ms of mono int16 PCM
 CATALOG = json.loads(Path(__file__).with_name("voices.json").read_text())
 VOICE_NAMES = {voice["name"] for voice in CATALOG}
@@ -86,7 +92,12 @@ class WyomingServer:
         self.engine = engine
         self.default_voice = default_voice
         self.connections = 0
-        self.synthesizing = False
+        # Serialises synthesis across connections, in arrival order.
+        self._synth_slot = asyncio.Lock()
+
+    @property
+    def synthesizing(self) -> bool:
+        return self._synth_slot.locked()
 
     async def synthesize(self, data: dict, writer: asyncio.StreamWriter):
         text = data.get("text")
@@ -98,9 +109,10 @@ class WyomingServer:
         voice = (selected or {}).get("name") or self.default_voice
         if not isinstance(voice, str) or voice not in VOICE_NAMES:
             raise RequestError("invalid-voice", "Unknown Kokoro voice")
-        if self.synthesizing:
-            raise RequestError("busy", "Kokoro is already synthesizing; retry later")
-        self.synthesizing = True
+        try:
+            await asyncio.wait_for(self._synth_slot.acquire(), SYNTH_QUEUE_WAIT_S)
+        except asyncio.TimeoutError:
+            raise RequestError("busy", "Kokoro is already synthesizing; retry later") from None
         try:
             started = False
             async for pcm in self.engine.stream(text.strip(), voice):
@@ -113,7 +125,7 @@ class WyomingServer:
                 raise RequestError("synthesis-failed", "Kokoro produced no audio")
             await write_event(writer, "audio-stop")
         finally:
-            self.synthesizing = False
+            self._synth_slot.release()
 
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         if self.connections >= MAX_CONNECTIONS:

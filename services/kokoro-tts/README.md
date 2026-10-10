@@ -34,8 +34,9 @@ Environment:
 
 CPU latency and peak RAM depend on the processor and text. The quantized model
 size is not a runtime RAM estimate. Allow approximately 1 GB of system RAM for
-this sidecar and measure on the target box. Speech requests are serialized;
-another request receives `error`/`busy` without an inference queue. At most
+this sidecar and measure on the target box. Speech requests are serialized in
+arrival order: a request that arrives mid-synthesis waits up to 30 s for the
+slot, then receives `error`/`busy`. At most
 16 connections are retained, idle/slow socket operations expire after 10 s,
 event headers/data are each capped at 16 KiB, and text is capped at 2,000
 characters. Synthesis splits text at sentence/word boundaries into batches of

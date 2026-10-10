@@ -134,17 +134,39 @@ class TcpTests(unittest.IsolatedAsyncioTestCase):
             await self.assert_error_closed(reader, "invalid-request")
         self.assertEqual(self.engine.calls, [])
 
-    async def test_busy_does_not_queue_and_describe_still_works(self):
+    async def test_second_synthesis_queues_behind_the_first(self):
+        # A cue pre-synthesis racing a reply (or a preview landing
+        # mid-sentence) waits for the single slot instead of failing the
+        # caller's turn; describe keeps answering meanwhile.
         self.engine.release.clear()
         first_reader, first_writer = await self.connect()
         await self.send(first_writer, "synthesize", {"text": "First"})
         await asyncio.wait_for(self.engine.started.wait(), 2)
         reader, writer = await self.connect()
         await self.send(writer, "synthesize", {"text": "Second"})
-        await self.assert_error_closed(reader, "busy")
+        await asyncio.sleep(0.05)
+        self.assertTrue(self.service.synthesizing)
+        self.assertEqual(self.engine.calls, [("First", "af_heart")])  # queued, not started
         probe_reader, probe_writer = await self.connect()
         await self.send(probe_writer, "describe")
         self.assertEqual((await read(probe_reader))[0]["type"], "info")
+        self.engine.release.set()
+        while (await read(first_reader))[0]["type"] != "audio-stop":
+            pass
+        while (await read(reader))[0]["type"] != "audio-stop":
+            pass
+        self.assertEqual(self.engine.calls, [("First", "af_heart"), ("Second", "af_heart")])
+        self.assertFalse(self.service.synthesizing)
+
+    async def test_queue_wait_is_bounded_and_answers_busy(self):
+        self.engine.release.clear()
+        first_reader, first_writer = await self.connect()
+        await self.send(first_writer, "synthesize", {"text": "First"})
+        await asyncio.wait_for(self.engine.started.wait(), 2)
+        with patch.object(server, "SYNTH_QUEUE_WAIT_S", 0.05):
+            reader, writer = await self.connect()
+            await self.send(writer, "synthesize", {"text": "Second"})
+            await self.assert_error_closed(reader, "busy")
         self.engine.release.set()
         while (await read(first_reader))[0]["type"] != "audio-stop":
             pass
