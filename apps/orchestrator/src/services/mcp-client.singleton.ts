@@ -44,11 +44,14 @@ import {
   detachRemoteServer,
   parseRemoteMcpAllowlist,
   registeredRemoteServers,
+  repickCatalogSession,
   type AttachRemoteDeps,
   type RemoteAttachResult,
   type RemoteServerRegistration,
 } from "./remote-mcp-servers.js";
 import type { RemoteMcpReconcilerDeps } from "./remote-mcp-reconciler.service.js";
+import { catalogBackingRow, createCatalogRepicker, recordCatalog, withServerLock } from "./mcp-oauth/catalog-repick.js";
+import { remoteMcpLifecycle } from "./remote-mcp-lifecycle.service.js";
 
 const logger = createLogger("mcp-client-singleton");
 
@@ -224,7 +227,25 @@ export async function stopMcp(): Promise<void> {
  * gated attach the boot path runs, not a second implementation of "open a
  * session" that could drift from it (WARP-2651).
  */
-async function attachRegistered(
+function attachRegistered(
+  prisma: AttachRemoteDeps["prisma"],
+  server: RemoteServerRegistration,
+  knownTools?: readonly string[],
+): Promise<RemoteAttachResult> {
+  // WARP-2416: one attach (boot, reconcile re-open) or catalog re-pick per server at a time.
+  // Noted while queued or running, so the kill switch also covers a server whose attach is in flight.
+  attaching.set(server.serverId, (attaching.get(server.serverId) ?? 0) + 1);
+  return withServerLock(server.serverId, () => attachRegisteredLocked(prisma, server, knownTools)).finally(() => {
+    const n = (attaching.get(server.serverId) ?? 1) - 1;
+    if (n <= 0) attaching.delete(server.serverId);
+    else attaching.set(server.serverId, n);
+  });
+}
+
+/** Servers with an attach queued or running (count per id). */
+const attaching = new Map<string, number>();
+
+async function attachRegisteredLocked(
   prisma: AttachRemoteDeps["prisma"],
   server: RemoteServerRegistration,
   /** WARP-2651 — the catalog a previous attach vetted. Absent at boot: this
@@ -232,6 +253,7 @@ async function attachRegistered(
    *  claim as no baseline. */
   knownTools?: readonly string[],
 ): Promise<RemoteAttachResult> {
+  attachPrisma = prisma;
   const result = await attachRemoteServer({
     ...server,
     mux: mcpClient,
@@ -317,6 +339,14 @@ export async function ensureRemoteMcpAttached(
 }
 
 /**
+ * WARP-2416 — a sign-out or a dead refresh: end that connection's bridge session
+ * (not the server's). Nothing attached means nothing to close.
+ */
+export async function closeRemoteConnectionSession(serverId: string, connectionId: string): Promise<void> {
+  await attachedClients.get(serverId)?.closeConnection(connectionId);
+}
+
+/**
  * WARP-2659 — tear down one remote server: the disconnect path.
  *
  * Handed to `createIntegrationsRouter` from `app.ts` rather than imported by
@@ -325,10 +355,48 @@ export async function ensureRemoteMcpAttached(
  * shipping default — detaches nothing and dials nothing.
  */
 export async function detachRemoteMcp(serverId: string): Promise<void> {
-  const client = attachedClients.get(serverId);
-  attachedClients.delete(serverId);
-  await detachRemoteServer({ mux: mcpClient, serverId, ...(client ? { client } : {}) });
+  // Under the per-server lock: a detach (the kill switch included) never lands in the middle of
+  // an attach or a catalog re-pick, so it can never be followed by that job re-creating a session.
+  await withServerLock(serverId, async () => {
+    const client = attachedClients.get(serverId);
+    attachedClients.delete(serverId);
+    await detachRemoteServer({ mux: mcpClient, serverId, ...(client ? { client } : {}) });
+  });
 }
+
+/** The Prisma client the last attach used, so a sign-in change can run the same attach again. */
+let attachPrisma: AttachRemoteDeps["prisma"] | null = null;
+
+/**
+ * WARP-2416 - the sign-in row behind a server's catalog session refreshed or
+ * stopped working. Re-open the base session IN PLACE with the credential choice
+ * re-run (API token, Workspace, a CURRENT owner/admin); detach only when nothing
+ * qualifies. It never detaches to refresh, so no member session or in-flight call
+ * is torn down, and it does nothing at all unless the server is plainly attached:
+ * a `catalog_changed` (or rejected, or detached) server is not this code's to
+ * touch. The drift baseline is the lifecycle's `vettedTools`. Serialised with
+ * every attach of that server; an event that lands mid-run runs once more after.
+ * A row that does not back a catalog is ignored.
+ */
+export const catalogSignInChanged = createCatalogRepicker({
+  backingRow: catalogBackingRow,
+  apply: async (serverId) => {
+    const server = registeredRemoteServers().find((s) => s.serverId === serverId);
+    const prisma = attachPrisma;
+    if (!server || !prisma) return;
+    await withServerLock(serverId, async () => {
+      const client = attachedClients.get(serverId);
+      const reg = remoteMcpLifecycle.get(serverId);
+      if (!client || reg?.state !== "attached") return;
+      const outcome = await repickCatalogSession(
+        { ...server, mux: mcpClient, prisma, allowlist: remoteAllowlist },
+        client,
+        reg.vettedTools,
+      );
+      if (outcome === "detached") attachedClients.delete(serverId);
+    });
+  },
+});
 
 /**
  * WARP-3912 (ADR-043 §4) - the `remote_mcp` channel was turned off: refuse new
@@ -338,7 +406,19 @@ export async function detachRemoteMcp(serverId: string): Promise<void> {
  */
 export async function tearDownRemoteMcp(): Promise<void> {
   abortRemoteMcpInFlight();
-  await Promise.all([...attachedClients.keys()].map((id) => detachRemoteMcp(id)));
+  // Attached servers AND servers whose attach is in flight: the detach queues behind that attach
+  // on the per-server lock, so what the attach opens is closed right after, never left behind.
+  const ids = new Set([...attachedClients.keys(), ...attaching.keys()]);
+  await Promise.all(
+    [...ids].map(async (id) => {
+      await detachRemoteMcp(id);
+      // The switch is off, so the server is no longer attached; the reconciler re-attaches it
+      // once the switch is back on (its attach gate refuses until then).
+      if (remoteMcpLifecycle.get(id)?.state === "attached") {
+        remoteMcpLifecycle.record({ serverId: id, state: "detached", reason: "gate_refused" });
+      }
+    }),
+  );
 }
 
 /** One bridge client for a given server id. A factory rather than a singleton
@@ -387,6 +467,7 @@ export function remoteMcpReconcilerDeps(
     },
     detach: (serverId) => {
       mcpClient.detachRemote(serverId);
+      recordCatalog(serverId, null);
     },
     reattach: async (serverId, knownTools) => {
       const server = servers.find((s) => s.serverId === serverId);

@@ -22,6 +22,7 @@ import {
   deriveMcpOAuthTokenKey,
   encryptColumn,
   mcpOAuthAad,
+  mcpOAuthClientAad,
 } from "../column-crypto.service.js";
 import {
   McpBridgeError,
@@ -110,6 +111,10 @@ interface PendingFlow {
   /** RFC 9207: the callback MUST carry `iss` when the server advertised it. */
   issRequired: boolean;
   tokenEndpoint: string;
+  revocationEndpoint?: string;
+  /** The client this flow signs in with (from `McpOAuthClient`); written onto the row with the new tokens. */
+  clientId: string;
+  clientSecret?: string;
   scopes: string;
   /** What the row was before consent began, restored if consent fails. */
   priorState: McpOAuthStateName;
@@ -117,8 +122,12 @@ interface PendingFlow {
 }
 
 export interface McpOAuthDependencies {
-  oauth: Pick<McpBridgeOAuthClient, "discover" | "register" | "exchange">;
+  oauth: Pick<McpBridgeOAuthClient, "discover" | "register" | "exchange" | "refresh" | "revoke">;
   now: () => Date;
+  /** Closes a connection's live bridge session (sign-out). Best effort. */
+  closeSession: (provider: string, connectionId: string) => Promise<void>;
+  /** WARP-2416: a row that may back a server's catalog session just ended (disconnect). Best effort. */
+  catalogChanged?: (provider: string, connectionId: string, event: "refreshed" | "ended") => Promise<void>;
   /**
    * The rules every remote MCP call obeys before it may reach the vendor (server
    * allowlist, `remote_mcp` channel, connection not DISABLED), applied before
@@ -161,6 +170,15 @@ export function mcpOAuthDependencies(overrides: Partial<McpOAuthDependencies> = 
   return {
     now: () => new Date(),
     pending: PROCESS_PENDING,
+    // Lazy: the singleton pulls the whole MCP stack, which this module must not load with it.
+    catalogChanged: async (provider, connectionId, event) => {
+      const { catalogSignInChanged } = await import("../mcp-client.singleton.js");
+      await catalogSignInChanged(provider, connectionId, event);
+    },
+    closeSession: async (provider, connectionId) => {
+      const { closeRemoteConnectionSession } = await import("../mcp-client.singleton.js");
+      await closeRemoteConnectionSession(provider, connectionId);
+    },
     // Lazy import: remote-mcp-servers imports this module for its token reader.
     egress: async (prisma, serverId) => {
       const { parseRemoteMcpAllowlist } = await import("../remote-mcp-servers.js");
@@ -231,6 +249,8 @@ export interface McpOAuthTokenBlob {
   expiresAt: string;
   scope: string;
   tokenEndpoint: string;
+  /** The server's RFC 7009 endpoint when its metadata advertised one. */
+  revocationEndpoint?: string;
   resource: string;
   mcpUrl: string;
 }
@@ -277,9 +297,15 @@ export interface BeginResult {
   redirectUri: string;
 }
 
-function prunePending(deps: McpOAuthDependencies): void {
+/** Drops expired flows AND settles their rows: an abandoned consent must not leave a
+ *  row in PENDING_CONSENT forever (it goes back to the state it had before). */
+async function prunePending(prisma: PrismaClient, deps: McpOAuthDependencies): Promise<void> {
   const now = deps.now().getTime();
-  for (const [k, v] of deps.pending) if (v.expiresAt <= now) deps.pending.delete(k);
+  for (const [k, v] of [...deps.pending]) {
+    if (v.expiresAt > now) continue;
+    deps.pending.delete(k);
+    await settleFailure(prisma, v, null);
+  }
 }
 
 export async function beginMcpSignIn(
@@ -298,7 +324,7 @@ export async function beginMcpSignIn(
   }
   // Before discovery and registration, the first hops that dial the vendor.
   await requireEgress(prisma, deps, input.provider);
-  prunePending(deps);
+  await prunePending(prisma, deps);
   if (deps.pending.size >= MAX_PENDING) throw new McpOAuthError("too_many_pending", "Too many sign-ins are in progress. Try again shortly.");
 
   let disc: McpOAuthDiscovery;
@@ -328,25 +354,25 @@ export async function beginMcpSignIn(
       : { provider: input.provider, scope: "WORKSPACE" };
   const existing = await prisma.mcpOAuthConnection.findFirst({ where: ownerWhere });
   const id = existing?.id ?? randomUUID();
-  const owner: McpOAuthOwnerRow = { id, scope: input.scope, memberId: input.scope === "MEMBER" ? input.userId : null };
+  const ownerMemberId = input.scope === "MEMBER" ? input.userId : null;
 
   // Client identity ladder (ADR-072 §2, WARP-2401), in this order:
-  //  1. a client already held for this provider AND issuer: pasted by an admin
-  //     (PATCH /mcp/oauth/client) or registered earlier. Keyed by issuer and
-  //     never reused across servers (SEP-2352).
+  //  1. the client stored for this provider AND issuer (`McpOAuthClient`): an
+  //     admin's pasted app, or the registration the box made earlier. Keyed by
+  //     issuer and never reused across servers (SEP-2352); never read off another
+  //     person's connection row.
   //  2. CIMD: skipped in v1 (ADR-072 §10: the box hosts no client document).
-  //  3. dynamic client registration.
+  //  3. dynamic client registration, recorded in the same place so it is reused.
   // No fleet-wide Warp Lab client identity exists on any box.
   let clientId: string | undefined;
   let clientSecret: string | undefined;
-  const held = await prisma.mcpOAuthConnection.findFirst({
-    where: { provider: input.provider, issuer: disc.issuer, clientId: { not: null } },
-    orderBy: { createdAt: "asc" },
-  });
-  if (held?.clientId) {
-    clientId = held.clientId;
+  const stored = await prisma.mcpOAuthClient.findFirst({ where: { provider: input.provider, issuer: disc.issuer } });
+  if (stored) {
+    clientId = stored.clientId;
     try {
-      clientSecret = openSecret(held);
+      clientSecret = stored.clientSecretEnc
+        ? decryptColumn(deriveMcpOAuthTokenKey(), stored.clientSecretEnc, mcpOAuthClientAad(stored))
+        : undefined;
     } catch {
       // A stored secret that no longer opens is a broken registration, not a reason to register another.
       logger.warn({ provider: input.provider }, "mcp_oauth_client_secret_unreadable");
@@ -367,6 +393,7 @@ export async function beginMcpSignIn(
       logger.warn({ provider: input.provider }, "mcp_oauth_registration_failed");
       throw new McpOAuthError("sign_in_unavailable", "Sign-in could not be started. Try again shortly.");
     }
+    await recordClient(prisma, { provider: input.provider, issuer: disc.issuer, clientId, clientSecret, source: "DCR", updatedBy: null });
   }
 
   const priorState: McpOAuthStateName = existing
@@ -379,15 +406,15 @@ export async function beginMcpSignIn(
     state: "PENDING_CONSENT" as const,
     issuer: disc.issuer,
     tokenEndpointHost: token.host,
-    clientId,
-    clientSecretEnc: clientSecret ? sealSecret(owner, clientSecret) : null,
+    // The row's own client is NOT touched here: its tokens (kept while re-consenting) were issued
+    // to the client it already holds. The client used is written with the new tokens, on completion.
     lastError: null,
     ...(input.scope === "WORKSPACE" ? { workspaceAckAt: now, workspaceAckBy: input.username } : {}),
   };
   try {
     // Existing tokens are kept while re-consenting (a cancelled consent restores the prior state).
     if (existing) await prisma.mcpOAuthConnection.update({ where: { id }, data: fields });
-    else await prisma.mcpOAuthConnection.create({ data: { id, provider: input.provider, scope: input.scope, memberId: owner.memberId, ...fields } });
+    else await prisma.mcpOAuthConnection.create({ data: { id, provider: input.provider, scope: input.scope, memberId: ownerMemberId, ...fields } });
   } catch {
     logger.warn({ provider: input.provider }, "mcp_oauth_row_write_failed");
     throw new McpOAuthError("sign_in_unavailable", "Sign-in could not be started. Try again shortly.");
@@ -402,6 +429,8 @@ export async function beginMcpSignIn(
   deps.pending.set(sha256hex(state), {
     connectionId: id, provider: input.provider, userId: input.userId, scope: input.scope, codeVerifier, redirectUri,
     resource: signIn.mcpUrl, issuer: disc.issuer, issRequired: disc.issParameterSupported, tokenEndpoint: disc.tokenEndpoint,
+    ...(disc.revocationEndpoint ? { revocationEndpoint: disc.revocationEndpoint } : {}),
+    clientId, ...(clientSecret ? { clientSecret } : {}),
     scopes, priorState, expiresAt,
   });
 
@@ -488,7 +517,21 @@ export async function completeMcpSignIn(
   const row = await prisma.mcpOAuthConnection.findUnique({ where: { id: flow.connectionId } });
   const ownerOk = !!row && row.provider === flow.provider && row.state === "PENDING_CONSENT" && row.scope === flow.scope &&
     (flow.scope === "MEMBER" ? row.memberId === flow.userId : row.memberId === null);
-  if (!row || !ownerOk || !row.clientId) { await settleFailure(prisma, flow, "sign_in_failed"); return result("failed"); }
+  if (!row || !ownerOk) { await settleFailure(prisma, flow, "sign_in_failed"); return result("failed"); }
+
+  // The person who started this must STILL be allowed to: active, and a Workspace flow still
+  // needs an owner or admin (one demoted or deactivated mid-flow must not create the shared
+  // connection). Read fresh, here, for the callback and the paste alike. Unreadable = refused.
+  let starterOk = false;
+  try {
+    const starter = await prisma.user.findFirst({
+      where: { id: flow.userId },
+      select: { role: true, directoryStatus: true, deletionStatus: true },
+    });
+    starterOk = !!starter && starter.directoryStatus === "ACTIVE" && starter.deletionStatus === "NONE" &&
+      roleIn(starter.role, flow.scope === "WORKSPACE" ? ADMIN_ROLES : SIGN_IN_ROLES);
+  } catch { /* refused below */ }
+  if (!starterOk) { await settleFailure(prisma, flow, "sign_in_failed"); return result("failed"); }
 
   // The exchange hands the vendor a code: only while remote MCP may talk to it. A
   // refusal has already burned the state above and leaves the row as it was.
@@ -504,16 +547,14 @@ export async function completeMcpSignIn(
   try {
     const tokens = await deps.oauth.exchange({
       tokenEndpoint: flow.tokenEndpoint,
-      clientId: row.clientId,
-      ...(openSecret(row) ? { clientSecret: openSecret(row) } : {}),
+      clientId: flow.clientId,
+      ...(flow.clientSecret ? { clientSecret: flow.clientSecret } : {}),
       code,
       codeVerifier: flow.codeVerifier,
       redirectUri: flow.redirectUri,
       resource: flow.resource,
     });
-    // ponytail: a missing or absurd `expires_in` is refreshed in an hour at the latest.
-    const ttlS = tokens.expiresIn && tokens.expiresIn >= 60 && tokens.expiresIn <= 30 * 86_400 ? tokens.expiresIn : 3600;
-    const expiresAt = new Date(now.getTime() + ttlS * 1000);
+    const expiresAt = new Date(now.getTime() + tokenTtlSeconds(tokens.expiresIn) * 1000);
     const tokensEnc = sealTokens(row, {
       accessToken: tokens.accessToken,
       refreshToken: tokens.refreshToken ?? null,
@@ -521,12 +562,18 @@ export async function completeMcpSignIn(
       // Stored as granted. The box never asked for more than the descriptor's set.
       scope: tokens.scope ?? flow.scopes,
       tokenEndpoint: flow.tokenEndpoint,
+      ...(flow.revocationEndpoint ? { revocationEndpoint: flow.revocationEndpoint } : {}),
       resource: flow.resource,
       mcpUrl: flow.resource,
     });
     const written = await prisma.mcpOAuthConnection.updateMany({
       where: { id: row.id, state: "PENDING_CONSENT" },
-      data: { tokensEnc, state: "CONNECTED", connectedAt: now, lastRefreshOkAt: now, tokenExpiresAt: expiresAt, lastError: null },
+      data: {
+        tokensEnc, state: "CONNECTED", connectedAt: now, lastRefreshOkAt: now, tokenExpiresAt: expiresAt, lastError: null,
+        // The client that issued THESE tokens, for this row's own refresh and revoke.
+        clientId: flow.clientId,
+        clientSecretEnc: flow.clientSecret ? sealSecret(row, flow.clientSecret) : null,
+      },
     });
     if (written.count !== 1) return result("failed");
   } catch {
@@ -537,6 +584,30 @@ export async function completeMcpSignIn(
   await audit(flow, "CONNECTED");
   return result("connected");
 }
+
+/** One audit row for an administrative change to a sign-in (ids and kinds only, rule 19). */
+async function auditAdminEvent(actorId: string, what: string, refs: Record<string, string>): Promise<void> {
+  try {
+    await recordActivity({
+      kind: "auth", severity: "info", sourceIcon: "cloud", what, sub: refs.change ?? "mcp_oauth",
+      actor: { type: "user", id: actorId }, refs,
+    });
+  } catch {
+    logger.warn({ what }, "mcp_oauth_audit_failed");
+  }
+}
+
+/**
+ * Seconds an access token is good for, from the token response's `expires_in`.
+ * ponytail: a missing or absurd value is refreshed within an hour at the latest.
+ */
+export function tokenTtlSeconds(expiresIn: number | undefined): number {
+  return expiresIn && expiresIn >= 60 && expiresIn <= 30 * 86_400 ? expiresIn : 3600;
+}
+
+/** The client secret sealed on a row, if any. Throws if it does not open under that row. */
+export const openClientSecret = (row: McpOAuthOwnerRow & { clientSecretEnc: string | null }): string | undefined =>
+  openSecret(row);
 
 async function audit(flow: PendingFlow, state: McpOAuthStateName): Promise<void> {
   try {
@@ -634,29 +705,103 @@ export async function mcpSignInView(
 
 // ─── disconnect / client ─────────────────────────────────────────────────────
 
-/** Deletes the tokens and marks the row DISCONNECTED. Returns false when the
- *  caller may not (or the row is absent): both read as "not found". */
+/** Revokes at the vendor when its metadata advertised an endpoint (best effort,
+ *  never blocks the local disconnect), deletes the tokens, closes the live
+ *  session and marks the row DISCONNECTED. Returns false when the caller may
+ *  not (or the row is absent): both read as "not found". */
 export async function disconnectMcpOAuth(
   prisma: PrismaClient,
   id: string,
   caller: { id: string; role: string | undefined },
+  deps?: Pick<McpOAuthDependencies, "oauth" | "closeSession" | "egress" | "catalogChanged">,
+  /** Filled in for the caller: `revokeSkipped` when remote MCP is switched off. */
+  notes: { revokeSkipped?: boolean } = {},
 ): Promise<boolean> {
   const row = await prisma.mcpOAuthConnection.findUnique({ where: { id } });
   if (!row) return false;
   const allowed = row.scope === "MEMBER" ? row.memberId === caller.id : roleIn(caller.role, ADMIN_ROLES);
   if (!allowed) return false;
+  if (deps && row.tokensEnc && row.clientId) {
+    try {
+      const blob = openTokens(row);
+      if (blob.revocationEndpoint) {
+        // The vendor revoke is a hop like any other: not while remote MCP is off for
+        // this server. The LOCAL deletion below happens regardless; that is what matters.
+        const egress = await deps.egress(prisma, row.provider);
+        if (!egress.allowed) throw new Error("egress refused");
+        // The refresh token is the long-lived grant; revoking it ends the sign-in. A
+        // confidential client authenticates the revoke with its secret.
+        const clientSecret = openSecret(row);
+        await deps.oauth.revoke({
+          revocationEndpoint: blob.revocationEndpoint,
+          clientId: row.clientId,
+          ...(clientSecret ? { clientSecret } : {}),
+          token: blob.refreshToken ?? blob.accessToken,
+        });
+      }
+    } catch {
+      // ANY failure (off, gate unreadable, vendor error, unreadable blob): the grant may still
+      // be live at the vendor, so the answer must never claim a clean revoke.
+      notes.revokeSkipped = true;
+      logger.warn({ provider: row.provider }, "mcp_oauth_revoke_failed");
+    }
+  }
   await prisma.mcpOAuthConnection.update({
     where: { id },
     data: { state: "DISCONNECTED", tokensEnc: null, tokenExpiresAt: null, connectedAt: null, lastError: null },
   });
+  await deps?.closeSession(row.provider, row.id).catch(() => undefined);
+  // If this row backed the catalog session, re-pick it (or detach). Not awaited.
+  void deps?.catalogChanged?.(row.provider, row.id, "ended").catch(() => undefined);
+  await auditAdminEvent(
+    caller.id,
+    row.scope === "WORKSPACE" ? `Workspace sign-in to ${row.provider} disconnected` : `Sign-in to ${row.provider} disconnected`,
+    { connector: row.provider, connectionId: row.id, change: "disconnect", scope: row.scope, vendorRevoke: notes.revokeSkipped ? "not_done" : "done_or_not_offered" },
+  );
   return true;
 }
 
 /**
- * Ladder rung 1 (owner/admin): hold a pre-registered OAuth client for a
- * provider. Discovery finds the issuer it belongs to; every row of that
- * (provider, issuer) takes it, and the caller's own MEMBER row carries it when
- * none exists yet.
+ * Write the OAuth client for (provider, issuer). A pasted client (an owner/admin's own
+ * app) always replaces what is there; a registration only fills an EMPTY slot, so
+ * PASTED wins over DCR and a registration never overwrites a pasted client.
+ */
+async function recordClient(
+  prisma: PrismaClient,
+  c: { provider: string; issuer: string; clientId: string; clientSecret?: string; source: "PASTED" | "DCR"; updatedBy: string | null },
+): Promise<void> {
+  const existing = await prisma.mcpOAuthClient.findFirst({ where: { provider: c.provider, issuer: c.issuer } });
+  const seal = (id: string): string | null =>
+    c.clientSecret ? encryptColumn(deriveMcpOAuthTokenKey(), c.clientSecret, mcpOAuthClientAad({ id, provider: c.provider, issuer: c.issuer })) : null;
+  if (existing) {
+    if (c.source === "DCR") return; // never over a pasted (or earlier) client
+    await prisma.mcpOAuthClient.update({
+      where: { id: existing.id },
+      data: { clientId: c.clientId, clientSecretEnc: seal(existing.id), source: c.source, updatedBy: c.updatedBy },
+    });
+    return;
+  }
+  const id = randomUUID();
+  try {
+    await prisma.mcpOAuthClient.create({
+      data: { id, provider: c.provider, issuer: c.issuer, clientId: c.clientId, clientSecretEnc: seal(id), source: c.source, updatedBy: c.updatedBy },
+    });
+  } catch {
+    // Lost a race on (provider, issuer): the winner's record stands for a registration; a pasted client retries as an update.
+    if (c.source === "PASTED") {
+      const now = await prisma.mcpOAuthClient.findFirst({ where: { provider: c.provider, issuer: c.issuer } });
+      if (!now) throw new McpOAuthError("sign_in_unavailable", "The client could not be stored. Try again.");
+      await prisma.mcpOAuthClient.update({
+        where: { id: now.id },
+        data: { clientId: c.clientId, clientSecretEnc: seal(now.id), source: c.source, updatedBy: c.updatedBy },
+      });
+    }
+  }
+}
+
+/**
+ * Ladder rung 1 (owner/admin): store a pre-registered OAuth client for a provider.
+ * Discovery finds the issuer it belongs to. See {@link recordClient}.
  */
 export async function storeMcpOAuthClient(
   prisma: PrismaClient,
@@ -673,22 +818,14 @@ export async function storeMcpOAuthClient(
   }
   const token = httpsUrl(disc.tokenEndpoint);
   if (!token || disc.resource !== signIn.mcpUrl) throw new McpOAuthError("sign_in_unavailable", "The service could not be reached. Try again shortly.");
-  const rows = await prisma.mcpOAuthConnection.findMany({ where: { provider: input.provider, issuer: disc.issuer } });
-  for (const r of rows) {
-    await prisma.mcpOAuthConnection.update({
-      where: { id: r.id },
-      data: { clientId: input.clientId, clientSecretEnc: input.clientSecret ? sealSecret(r, input.clientSecret) : null },
-    });
-  }
-  if (rows.length === 0) {
-    // No row holds this issuer yet: the admin's own MEMBER row carries the client.
-    const own = await prisma.mcpOAuthConnection.findFirst({ where: { provider: input.provider, scope: "MEMBER", memberId: input.userId } });
-    const id = own?.id ?? randomUUID();
-    const data = {
-      issuer: disc.issuer, tokenEndpointHost: token.host, clientId: input.clientId,
-      clientSecretEnc: input.clientSecret ? sealSecret({ id, scope: "MEMBER", memberId: input.userId }, input.clientSecret) : null,
-    };
-    if (own) await prisma.mcpOAuthConnection.update({ where: { id }, data });
-    else await prisma.mcpOAuthConnection.create({ data: { id, provider: input.provider, scope: "MEMBER", memberId: input.userId, state: "DISCONNECTED", ...data } });
-  }
+  // ONE record per (provider, issuer). It never touches a connection row: signed-in rows keep the
+  // client their tokens were issued to (for their own refresh and revoke) until they sign in again.
+  await recordClient(prisma, {
+    provider: input.provider, issuer: disc.issuer, clientId: input.clientId,
+    clientSecret: input.clientSecret, source: "PASTED", updatedBy: input.userId,
+  });
+  // Ids and kinds only: never the client id value or the secret.
+  await auditAdminEvent(input.userId, `Sign-in client changed for ${input.provider}`, {
+    connector: input.provider, change: "client", hasSecret: input.clientSecret ? "yes" : "no",
+  });
 }

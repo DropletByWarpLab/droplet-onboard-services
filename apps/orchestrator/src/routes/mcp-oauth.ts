@@ -124,8 +124,18 @@ export function createMcpOAuthRouter(prisma: PrismaClient, options: Partial<McpO
     if (!id.success) return res.status(404).json({ error: "not_found" });
     try {
       // A row the caller may not touch reads as absent.
-      if (!await disconnectMcpOAuth(prisma, id.data, { id: req.user.id, role: req.user.role })) {
+      const notes: { revokeSkipped?: boolean } = {};
+      if (!await disconnectMcpOAuth(prisma, id.data, { id: req.user.id, role: req.user.role }, deps, notes)) {
         return res.status(404).json({ error: "not_found" });
+      }
+      // Signed out locally either way. While remote MCP is switched off the vendor is not
+      // contacted, so say so (the vendor-side revoke is left to the offboarding work, WARP-3924).
+      if (notes.revokeSkipped) {
+        return res.status(200).json({
+          disconnected: true,
+          revoked: false,
+          message: "Signed out here. Couldn't revoke the sign-in at the service, so it may still be active there.",
+        });
       }
       return res.status(204).send();
     } catch (err) {
@@ -140,7 +150,11 @@ export function createMcpOAuthRouter(prisma: PrismaClient, options: Partial<McpO
     if (!body.success) return res.status(400).json({ error: "invalid_request" });
     try {
       await storeMcpOAuthClient(prisma, { ...body.data, userId: req.user.id }, deps);
-      return res.status(204).send();
+      return res.status(200).json({
+        stored: true,
+        provider: body.data.provider,
+        message: "Client stored. New sign-ins use it; people already signed in keep the client they signed in with until they sign in again.",
+      });
     } catch (err) {
       return fail(res, err);
     }
@@ -168,7 +182,7 @@ export function createMcpOAuthCallbackRouter(prisma: PrismaClient, options: Part
       result = { outcome: "failed", provider: null, scope: null };
     }
     // No callback parameter becomes a destination or reflected text.
-    const returnTo = result.scope === "WORKSPACE" ? "/integrations/credentials" : "/settings";
+    const returnTo = result.scope === "WORKSPACE" ? "/connectors/credentials" : "/settings";
     return res.redirect(303, mcpOAuthOutcomeUrl(returnTo, result.provider, result.outcome));
   });
   return router;
