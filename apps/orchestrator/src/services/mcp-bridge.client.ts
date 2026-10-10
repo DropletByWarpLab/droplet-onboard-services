@@ -84,6 +84,10 @@ export const BRIDGE_ERROR_CODES = [
   "INVALID_REQUEST",
   "UNKNOWN_SERVER_ID",
   "SESSION_NOT_OPEN",
+  // WARP-2409 - added by the bridge's per-connection sessions (#2771); the
+  // boundary test needs that PR on stage before it agrees with this list.
+  "NO_SESSION",
+  "CATALOG_ONLY",
   "SESSION_NOT_READY",
   "REMOTE_CALL_FAILED",
 ] as const;
@@ -203,7 +207,7 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 const SERVER_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
 /** A connection id is the `McpOAuthConnection` uuid; refuse anything else before it reaches a body. */
-const CONNECTION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const CONNECTION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/; // lowercase only, as Prisma's uuid()
 function assertConnectionId(id: string): void {
   if (!CONNECTION_ID_PATTERN.test(id)) {
     throw new McpBridgeError("INVALID_CONNECTION_ID", "connectionId is not a valid connection id.", 0);
