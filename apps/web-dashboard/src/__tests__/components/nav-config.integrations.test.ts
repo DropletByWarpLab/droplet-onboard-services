@@ -58,8 +58,11 @@ describe("Integrations is flat (WARP-2968)", () => {
     expect(hrefs.indexOf("/connectors/credentials")).toBe(hrefs.indexOf("/connectors") + 1);
   });
 
-  it("gates both on owner/admin, mirroring the orchestrator's own guard", () => {
-    expect(integrations()?.roles).toEqual(["owner", "admin"]);
+  // WARP-3965 — members connect their own MCP accounts on /connectors, so the
+  // directory admits `family`; the credentials page (keys for business systems)
+  // stays owner/admin, mirroring the orchestrator's own guard.
+  it("gates Credentials on owner/admin and lets members into the Connectors directory", () => {
+    expect(integrations()?.roles).toEqual(["owner", "admin", "family"]);
     expect(credentials()?.roles).toEqual(["owner", "admin"]);
   });
 
@@ -74,7 +77,7 @@ describe("Integrations is flat (WARP-2968)", () => {
     );
   });
 
-  it("shows both to an owner and neither to family or guest", () => {
+  it("shows both to an owner, only Connectors to family, and neither to a guest", () => {
     const hrefsFor = (role: "owner" | "admin" | "family" | "guest") =>
       settingsHrefs(role);
 
@@ -82,10 +85,10 @@ describe("Integrations is flat (WARP-2968)", () => {
       expect(hrefsFor(role)).toContain("/connectors");
       expect(hrefsFor(role)).toContain("/connectors/credentials");
     }
-    for (const role of ["family", "guest"] as const) {
-      expect(hrefsFor(role)).not.toContain("/connectors");
-      expect(hrefsFor(role)).not.toContain("/connectors/credentials");
-    }
+    expect(hrefsFor("family")).toContain("/connectors");
+    expect(hrefsFor("family")).not.toContain("/connectors/credentials");
+    expect(hrefsFor("guest")).not.toContain("/connectors");
+    expect(hrefsFor("guest")).not.toContain("/connectors/credentials");
   });
 });
 

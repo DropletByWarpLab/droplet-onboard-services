@@ -217,8 +217,9 @@ describe("/d/<slug> — set up", () => {
     const hrefs = within(tile)
       .getAllByRole("link")
       .map((a) => a.getAttribute("href"));
-    // /cameras: module off. /integrations: owner/admin only. /gone: not a route.
-    expect(hrefs).toEqual(["/network"]);
+    // /cameras: module off. /gone: not a route. /connectors stays: members
+    // connect their own MCP accounts there (WARP-3965).
+    expect(hrefs).toEqual(["/network", "/connectors"]);
     expect(screen.queryByRole("button", { name: /customize/i })).toBeNull();
   });
 });
