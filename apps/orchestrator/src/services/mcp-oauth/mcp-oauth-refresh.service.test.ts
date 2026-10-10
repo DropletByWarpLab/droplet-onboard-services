@@ -69,7 +69,7 @@ async function setup(o: { expiresInMin?: number; refreshToken?: string | null; t
   const closeSession = vi.fn(async (_p: string, _c: string): Promise<void> => {});
   const gate: { current: Egress } = { current: { allowed: true, row: null } };
   const egress = async (): Promise<Egress> => gate.current;
-  const catalogChanged = vi.fn(async (_p: string, _c: string): Promise<void> => {});
+  const catalogChanged = vi.fn(async (_p: string, _c: string, _e: "refreshed" | "ended"): Promise<void> => {});
   const refresher = createMcpOAuthRefresher({ prisma: db.prisma, oauth, now: () => clock, closeSession, egress, catalogChanged });
   return { db, v, oauth, closeSession, catalogChanged, refresher, gate, egress, addRow, row, first, advance: (ms: number) => { clock = new Date(clock.getTime() + ms); }, now: () => clock };
 }
@@ -151,14 +151,14 @@ describe("the catalog session follows the row (WARP-2416)", () => {
   it("tells the catalog after a successful refresh, with the row's provider and id", async () => {
     const s = await setup();
     await s.refresher.refreshNow(ID);
-    expect(s.catalogChanged).toHaveBeenCalledWith("atlassian", ID);
+    expect(s.catalogChanged).toHaveBeenCalledWith("atlassian", ID, "refreshed");
   });
 
   it("tells it when the sign-in ends (invalid_grant), but not on a transient failure or when egress is refused", async () => {
     const dead = await setup();
     dead.oauth.refresh.mockRejectedValueOnce(new McpBridgeError("OAUTH_TOKEN_ERROR", "revoked", 502, undefined, "invalid_grant"));
     await dead.refresher.refreshNow(ID);
-    expect(dead.catalogChanged).toHaveBeenCalledWith("atlassian", ID);
+    expect(dead.catalogChanged).toHaveBeenCalledWith("atlassian", ID, "ended");
 
     const flaky = await setup();
     flaky.oauth.refresh.mockRejectedValueOnce(new McpBridgeError("REMOTE_CALL_FAILED", "502", 502));
@@ -320,7 +320,7 @@ describe("review fixes: leavers, ordering, cross-process races, revoke", () => {
     await s.addRow(BOB, "u-bob", 5);
     s.db.setUser({ id: "u-bob", username: "bob", directoryStatus: "DEACTIVATED" });
     await s.refresher.tick();
-    const touched = s.catalogChanged.mock.calls.map((c) => c[1]).sort();
+    const touched = s.catalogChanged.mock.calls.filter((c) => c[2] === "refreshed").map((c) => c[1]).sort();
     expect(touched).toEqual([ID, WS].sort()); // bob's row was never refreshed
     expect(s.oauth.refresh).toHaveBeenCalledTimes(2);
 
@@ -339,7 +339,7 @@ describe("review fixes: leavers, ordering, cross-process races, revoke", () => {
     s.db.setUser({ id: "u1b" });
     s.db.setUser({ id: "u1c" });
     await s.refresher.tick();
-    expect(s.catalogChanged.mock.calls.map((c) => c[1])).toEqual([A, B, ID]);
+    expect(s.catalogChanged.mock.calls.filter((c) => c[2] === "refreshed").map((c) => c[1])).toEqual([A, B, ID]);
   });
 
   it("an invalid_grant after another process already refreshed is not a sign-out", async () => {
@@ -397,5 +397,37 @@ describe("review fixes: leavers, ordering, cross-process races, revoke", () => {
     expect(rows.map((r) => r.refs.scope)).toEqual(["MEMBER", "WORKSPACE"]);
     expect(rows.every((r) => r.refs.change === "disconnect" && r.refs.connectionId)).toBe(true);
     expect(JSON.stringify(rows)).not.toMatch(/refresh-1|access-|client-secret/);
+  });
+});
+
+describe("the catalog hook covers every way a backing row changes (WARP-2416)", () => {
+  const BOB = "55555555-5555-5555-5555-555555555555";
+
+  it("a deactivated or deleting member's row, skipped by the renewal, is reported as an ended sign-in", async () => {
+    const s = await setup({ expiresInMin: 5 });
+    await s.addRow(BOB, "u-bob", 5);
+    s.db.setUser({ id: "u-bob", username: "bob", directoryStatus: "DEACTIVATED" });
+    await s.refresher.tick();
+    expect(s.catalogChanged).toHaveBeenCalledWith("atlassian", BOB, "ended");
+    expect(s.catalogChanged).not.toHaveBeenCalledWith("atlassian", BOB, "refreshed");
+    expect(s.catalogChanged).toHaveBeenCalledWith("atlassian", ID, "refreshed"); // the active member was renewed
+  });
+
+  it("a refresh that another process or a re-consent already performed still tells the catalog", async () => {
+    const raced = await setup();
+    raced.oauth.refresh.mockImplementationOnce(async () => {
+      raced.row.tokensEnc = sealTokens(raced.row, { ...openTokens(raced.row), accessToken: "theirs" });
+      return { accessToken: "ours", refreshToken: "r2", expiresIn: 3600 };
+    });
+    expect(await raced.refresher.refreshNow(ID)).toBe("refreshed");
+    expect(raced.catalogChanged).toHaveBeenCalledWith("atlassian", ID, "refreshed");
+
+    const spent = await setup();
+    spent.oauth.refresh.mockImplementationOnce(async () => {
+      spent.row.tokensEnc = sealTokens(spent.row, { ...openTokens(spent.row), accessToken: "theirs" });
+      throw new McpBridgeError("OAUTH_TOKEN_ERROR", "spent", 502, undefined, "invalid_grant");
+    });
+    expect(await spent.refresher.refreshNow(ID)).toBe("refreshed");
+    expect(spent.catalogChanged).toHaveBeenCalledWith("atlassian", ID, "refreshed");
   });
 });

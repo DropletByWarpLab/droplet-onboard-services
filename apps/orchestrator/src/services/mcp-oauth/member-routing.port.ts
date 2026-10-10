@@ -64,7 +64,7 @@ export interface MemberRoutingOptions {
   /** The port the multiplexer talked to before this one (the base session). */
   base: McpClientPort;
   /** What the base (catalog) session was opened with; "api-token" enables rung 3. */
-  baseCredential: RemoteMcpCredentialKind;
+  baseCredential: RemoteMcpCredentialKind | (() => RemoteMcpCredentialKind);
   prisma: MemberRoutingPrisma;
   now?: () => Date;
 }
@@ -89,6 +89,9 @@ export function createMemberRoutingPort(opts: MemberRoutingOptions): CredentialA
     ({ outcome: errorOutcome(refusal, tool, REFUSALS[refusal]), refusal }) as const;
 
   const usable = (row: OAuthRowLite) => usableConnection(prisma, row, now);
+  /** What backs the base session RIGHT NOW (an in-place re-pick can change it). */
+  const baseKind = (): RemoteMcpCredentialKind =>
+    typeof opts.baseCredential === "function" ? opts.baseCredential() : opts.baseCredential;
 
   /** The admin-owned connection row, read once per call: its status (an admin's
    *  off switch) and the site id every session is forced onto. */
@@ -151,7 +154,9 @@ export function createMemberRoutingPort(opts: MemberRoutingOptions): CredentialA
     get isStarted() {
       return base.isStarted;
     },
-    catalogCredential: opts.baseCredential,
+    get catalogCredential() {
+      return baseKind();
+    },
     listTools: (): Promise<McpToolDescriptor[]> => base.listTools(),
     callTool: async (name, args): Promise<McpToolCallOutcome> => (await port.callToolAttributed(name, args)).outcome,
     async callToolAttributed(name, args) {
@@ -189,7 +194,7 @@ export function createMemberRoutingPort(opts: MemberRoutingOptions): CredentialA
       const workspace = await prisma.mcpOAuthConnection.findFirst({ where: { provider: serverId, scope: "WORKSPACE" } });
       if (workspace?.state === "CONNECTED") return via(workspace, conn.site, name, args, "workspace");
 
-      if (opts.baseCredential === "api-token" && base.isStarted) {
+      if (baseKind() === "api-token" && base.isStarted) {
         try {
           return { outcome: await base.callTool(name, args), credential: "api-token" } as const;
         } catch (err) {

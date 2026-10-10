@@ -41,7 +41,7 @@ export interface McpOAuthRefreshDeps {
    * server's catalog session, that session is re-opened (or re-picked, or the
    * server detached). Not awaited: a refresh on the call path must not wait for it.
    */
-  catalogChanged?: (provider: string, connectionId: string) => Promise<void>;
+  catalogChanged?: (provider: string, connectionId: string, event: "refreshed" | "ended") => Promise<void>;
   /**
    * The rules every remote MCP call obeys (allowlist, `remote_mcp` channel, not
    * DISABLED). A refresh is a hop to the vendor like any other, so a refusal
@@ -60,8 +60,8 @@ export function createMcpOAuthRefresher(deps: McpOAuthRefreshDeps): McpOAuthRefr
   const { prisma } = deps;
   const now = deps.now ?? (() => new Date());
   const inFlight = new Map<string, Promise<McpOAuthRefreshOutcome>>();
-  const catalogChanged = (provider: string, id: string): void => {
-    void deps.catalogChanged?.(provider, id).catch(() => undefined);
+  const catalogChanged = (provider: string, id: string, event: "refreshed" | "ended"): void => {
+    void deps.catalogChanged?.(provider, id, event).catch(() => undefined);
   };
 
   async function endSignIn(
@@ -88,7 +88,7 @@ export function createMcpOAuthRefresher(deps: McpOAuthRefreshDeps): McpOAuthRefr
     }
     await deps.closeSession?.(row.provider, row.id).catch(() => undefined);
     // The catalog session may have been riding this row: re-pick or detach it.
-    catalogChanged(row.provider, row.id);
+    catalogChanged(row.provider, row.id, "ended");
   }
 
   async function run(id: string): Promise<McpOAuthRefreshOutcome> {
@@ -159,12 +159,16 @@ export function createMcpOAuthRefresher(deps: McpOAuthRefreshDeps): McpOAuthRefr
         data: { tokensEnc, tokenExpiresAt: expiresAt, lastRefreshOkAt: at, lastError: null },
       });
       if (written.count === 1) {
-        catalogChanged(row.provider, row.id);
+        catalogChanged(row.provider, row.id, "refreshed");
         return "refreshed";
       }
       // Someone else changed the row while we were at the vendor; do not overwrite it.
       const now2 = await prisma.mcpOAuthConnection.findUnique({ where: { id } });
-      return now2?.state === "CONNECTED" && now2.tokensEnc !== row.tokensEnc ? "refreshed" : "unavailable";
+      if (now2?.state === "CONNECTED" && now2.tokensEnc !== row.tokensEnc) {
+        catalogChanged(row.provider, row.id, "refreshed"); // their tokens are new to the catalog session too
+        return "refreshed";
+      }
+      return "unavailable";
     } catch (err) {
       if (isInvalidGrant(err)) {
         // A rotating server rejects the OLD refresh token once another process has spent it. Look
@@ -172,6 +176,7 @@ export function createMcpOAuthRefresher(deps: McpOAuthRefreshDeps): McpOAuthRefr
         // sign-in is fine. Only a row still holding the blob we read is really dead.
         const current = await prisma.mcpOAuthConnection.findUnique({ where: { id } });
         if (current && current.state === "CONNECTED" && current.tokensEnc !== null && current.tokensEnc !== row.tokensEnc) {
+          catalogChanged(row.provider, row.id, "refreshed");
           return "refreshed";
         }
         await endSignIn(row, "NEEDS_RECONNECT", "refresh_rejected", true);
@@ -221,6 +226,20 @@ export function createMcpOAuthRefresher(deps: McpOAuthRefreshDeps): McpOAuthRefr
         } catch (err) {
           logger.error({ err }, "mcp_oauth_refresh_row_failed");
         }
+      }
+      // A leaver's row is skipped above, but if it backs a catalog session that session is riding
+      // a grant nobody keeps alive: tell the catalog so it re-picks (a row backing nothing is ignored).
+      if (deps.catalogChanged) {
+        const leavers = await prisma.mcpOAuthConnection.findMany({
+          where: {
+            state: "CONNECTED",
+            scope: "MEMBER",
+            member: { is: { OR: [{ directoryStatus: { not: "ACTIVE" } }, { deletionStatus: { not: "NONE" } }] } },
+          },
+          select: { id: true, provider: true },
+          take: TICK_BATCH,
+        });
+        for (const l of leavers) catalogChanged(l.provider, l.id, "ended");
       }
     },
   };

@@ -35,6 +35,7 @@ export function fakeMcpOAuthDb(integration: Row | null = null) {
     // Reads return snapshots, as a database does: a row read earlier does not change under the reader.
     findFirst: async ({ where }: { where?: Row }) => snap(rows.find((r) => matches(r, where, users))),
     findUnique: async ({ where }: { where: Row }) => snap(rows.find((r) => matches(r, where, users))),
+    count: async ({ where }: { where?: Row } = {}) => rows.filter((r) => matches(r, where, users)).length,
     findMany: async ({ where, orderBy, take }: { where?: Row; orderBy?: Row; take?: number }) => {
       let hit = rows.filter((r) => matches(r, where, users)).map((r) => ({ ...r }));
       if (orderBy) {

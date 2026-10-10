@@ -44,12 +44,14 @@ import {
   detachRemoteServer,
   parseRemoteMcpAllowlist,
   registeredRemoteServers,
+  repickCatalogSession,
   type AttachRemoteDeps,
   type RemoteAttachResult,
   type RemoteServerRegistration,
 } from "./remote-mcp-servers.js";
 import type { RemoteMcpReconcilerDeps } from "./remote-mcp-reconciler.service.js";
-import { catalogBackingRow, createCatalogRepicker } from "./mcp-oauth/catalog-repick.js";
+import { catalogBackingRow, createCatalogRepicker, recordCatalog, withServerLock } from "./mcp-oauth/catalog-repick.js";
+import { remoteMcpLifecycle } from "./remote-mcp-lifecycle.service.js";
 
 const logger = createLogger("mcp-client-singleton");
 
@@ -225,7 +227,16 @@ export async function stopMcp(): Promise<void> {
  * gated attach the boot path runs, not a second implementation of "open a
  * session" that could drift from it (WARP-2651).
  */
-async function attachRegistered(
+function attachRegistered(
+  prisma: AttachRemoteDeps["prisma"],
+  server: RemoteServerRegistration,
+  knownTools?: readonly string[],
+): Promise<RemoteAttachResult> {
+  // WARP-2416: one attach (boot, reconcile re-open) or catalog re-pick per server at a time.
+  return withServerLock(server.serverId, () => attachRegisteredLocked(prisma, server, knownTools));
+}
+
+async function attachRegisteredLocked(
   prisma: AttachRemoteDeps["prisma"],
   server: RemoteServerRegistration,
   /** WARP-2651 — the catalog a previous attach vetted. Absent at boot: this
@@ -345,21 +356,32 @@ let attachPrisma: AttachRemoteDeps["prisma"] | null = null;
 
 /**
  * WARP-2416 - the sign-in row behind a server's catalog session refreshed or
- * stopped working: detach and run the ordinary gated attach again. That re-opens
- * with the new token (and `catalogOnly` exactly as before), or re-picks the
- * credential (API token, Workspace, a CURRENT owner/admin), or detaches the
- * server when nothing qualifies. The channel being off means nothing re-opens.
- * A row that does not back a catalog is ignored; one server re-attaches at a time.
+ * stopped working. Re-open the base session IN PLACE with the credential choice
+ * re-run (API token, Workspace, a CURRENT owner/admin); detach only when nothing
+ * qualifies. It never detaches to refresh, so no member session or in-flight call
+ * is torn down, and it does nothing at all unless the server is plainly attached:
+ * a `catalog_changed` (or rejected, or detached) server is not this code's to
+ * touch. The drift baseline is the lifecycle's `vettedTools`. Serialised with
+ * every attach of that server; an event that lands mid-run runs once more after.
+ * A row that does not back a catalog is ignored.
  */
 export const catalogSignInChanged = createCatalogRepicker({
   backingRow: catalogBackingRow,
-  reattach: async (serverId) => {
+  apply: async (serverId) => {
     const server = registeredRemoteServers().find((s) => s.serverId === serverId);
     const prisma = attachPrisma;
     if (!server || !prisma) return;
-    const known = attachedClients.get(serverId)?.lastAdvertisedToolNames();
-    await detachRemoteMcp(serverId);
-    await attachRegistered(prisma, server, known && known.length > 0 ? known : undefined);
+    await withServerLock(serverId, async () => {
+      const client = attachedClients.get(serverId);
+      const reg = remoteMcpLifecycle.get(serverId);
+      if (!client || reg?.state !== "attached") return;
+      const outcome = await repickCatalogSession(
+        { ...server, mux: mcpClient, prisma, allowlist: remoteAllowlist },
+        client,
+        reg.vettedTools,
+      );
+      if (outcome === "detached") attachedClients.delete(serverId);
+    });
   },
 });
 
@@ -420,6 +442,7 @@ export function remoteMcpReconcilerDeps(
     },
     detach: (serverId) => {
       mcpClient.detachRemote(serverId);
+      recordCatalog(serverId, null);
     },
     reattach: async (serverId, knownTools) => {
       const server = servers.find((s) => s.serverId === serverId);
