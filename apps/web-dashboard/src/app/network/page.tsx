@@ -46,6 +46,7 @@ import { FirewallRuleForm, ZonePolicyEditor } from "@/components/network/Firewal
 import { NetworkSimple } from "@/components/network/NetworkSimple";
 import { SwitchPanel } from "@/components/network/switch/SwitchPanel";
 import { RouterPortsPanel } from "@/components/network/router/RouterPortsPanel";
+import { TopologyPanel } from "@/components/network/TopologyPanel";
 import { describeWifi } from "@/components/network/wifi-tile-copy";
 import { PortForwardForm } from "@/components/network/PortForwardForm";
 import { DhcpReservationForm } from "@/components/network/DhcpReservationForm";
@@ -771,6 +772,17 @@ function OverviewTab({ overview }: { overview: NetworkOverview | undefined }) {
           status="ok"
         />
       </div>
+
+      {/* The wiring diagram, above the port maps it summarises: Internet →
+          router → switch → what hangs off it, including the access point —
+          which until this panel was invisible here bar the Wi-Fi tile's
+          "isn't reporting its radios". It reads the same hooks the two port
+          maps below do, so it adds no requests; `posture` is the read this tab
+          already makes for its badge, and `radios` is the rollup the Wi-Fi tile
+          uses (the one thing every role can see of the AP when per-AP radio
+          detail, owner/admin only, is out of reach). Renders its own
+          loading/unavailable states. */}
+      <TopologyPanel posture={topology?.posture ?? null} radios={overview?.wirelessRadios} />
 
       {/* The two port maps, in the order the cable runs: WARP-1866's router
           panel, then ADR-018 item 12's managed-switch panel. Both sit below

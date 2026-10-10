@@ -43,8 +43,9 @@ vi.mock("@/components/shell/ShellPage", () => ({
 vi.mock("@/components/network/NetworkSimple", () => ({
   NetworkSimple: () => <div data-testid="network-simple" />,
 }));
-// The Advanced System panel and the two always-on port maps fetch on mount —
-// stub them out, they are not what this file is about.
+// The Advanced System panel, the two always-on port maps and the topology
+// panel built from them fetch on mount — stub them out, they are not what this
+// file is about.
 for (const [mod, name] of [
   ["@/components/network/SshAccessCard", "SshAccessCard"],
   ["@/components/network/DhcpReservationForm", "DhcpReservationForm"],
@@ -58,6 +59,7 @@ for (const [mod, name] of [
   ["@/components/network/MaintenanceCards", "MaintenanceCards"],
   ["@/components/network/router/RouterPortsPanel", "RouterPortsPanel"],
   ["@/components/network/switch/SwitchPanel", "SwitchPanel"],
+  ["@/components/network/TopologyPanel", "TopologyPanel"],
 ] as const) {
   vi.doMock(mod, () => ({ [name]: () => null }));
 }
