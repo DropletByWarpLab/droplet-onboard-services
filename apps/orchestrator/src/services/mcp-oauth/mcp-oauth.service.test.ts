@@ -43,6 +43,7 @@ function setup(over: { discover?: any; disc?: Partial<typeof DISC>; egress?: Egr
     discover: vi.fn((over.discover ?? (async (_url: string) => ({ ...DISC, ...over.disc }))) as (url: string) => Promise<any>),
     register: vi.fn(async (_endpoint: string, _redirects: readonly string[]): Promise<{ clientId: string; clientSecret?: string }> => ({ clientId: "dcr-client" })),
     exchange: vi.fn(async (_input: unknown): Promise<{ accessToken: string; refreshToken?: string; expiresIn?: number; scope?: string }> => ({ ...TOKENS })),
+    refresh: vi.fn(async (_input: unknown): Promise<{ accessToken: string }> => ({ accessToken: "x" })),
     revoke: vi.fn(async (_input: unknown): Promise<void> => {}),
   };
   let now = new Date("2026-10-09T12:00:00Z");

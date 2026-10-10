@@ -118,7 +118,7 @@ interface PendingFlow {
 }
 
 export interface McpOAuthDependencies {
-  oauth: Pick<McpBridgeOAuthClient, "discover" | "register" | "exchange" | "revoke">;
+  oauth: Pick<McpBridgeOAuthClient, "discover" | "register" | "exchange" | "refresh" | "revoke">;
   now: () => Date;
   /** Closes a connection's live bridge session (sign-out). Best effort. */
   closeSession: (provider: string, connectionId: string) => Promise<void>;

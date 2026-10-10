@@ -28,6 +28,7 @@ function setup(logDest?: { write(s: string): void }) {
     })),
     register: vi.fn(async (_e: string, _r: readonly string[]) => ({ clientId: "client-1" })),
     exchange: vi.fn(async (_i: unknown) => ({ accessToken: "ACCESS-SECRET", refreshToken: "REFRESH-SECRET", expiresIn: 3600 })),
+    refresh: vi.fn(async (_i: unknown): Promise<{ accessToken: string }> => ({ accessToken: "x" })),
     revoke: vi.fn(async (_i: unknown): Promise<void> => {}),
   };
   const closeSession = vi.fn(async (_p: string, _c: string): Promise<void> => {});
