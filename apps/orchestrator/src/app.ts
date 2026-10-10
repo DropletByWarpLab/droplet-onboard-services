@@ -164,7 +164,7 @@ import { createEmailRouter, EMAIL_INGEST_PATH, wireEmailAnalysis } from "./route
 import { createEmailAnalysisFn } from "./services/email-analysis.service.js";
 import { resolveActiveModel } from "./services/active-model.service.js";
 import { createToolsRouter } from "./routes/tools.js";
-import { detachRemoteMcp, mcpClient, remoteCallPolicy } from "./services/mcp-client.singleton.js";
+import { mcpClient, remoteCallPolicy, tearDownRemoteServer } from "./services/mcp-client.singleton.js";
 import { stepResultValue, type StepDispatcher } from "./services/tool-spec-runner.service.js";
 import { createModelsRouter } from "./routes/models.js";
 import { createLlmAccessRouter, exemptLlmAccessInternalCalls } from "./routes/llm-access.js";
@@ -549,16 +549,18 @@ export function createApp(
   // a dependency (`IntegrationsServiceDeps.remoteMcp`) rather than importing
   // the singleton. The binding is read LAZILY, inside the arrow, on purpose:
   // a dozen route suites build this app with a `vi.mock` of the singleton
-  // that stubs `mcpClient` alone, and an eager `detach: detachRemoteMcp`
+  // that stubs `mcpClient` alone, and an eager `detach: tearDownRemoteServer`
   // would read a missing export at mount time in every one of them.
+  // WARP-3960 — `tearDownRemoteServer` (abort in-flight calls, then detach on the
+  // per-server lock) rather than a bare detach: Disconnect is a kill switch.
   app.use(
     "/api",
     createIntegrationsRouter(prisma, {
-      remoteMcp: { detach: (serverId) => detachRemoteMcp(serverId) },
+      remoteMcp: { detach: (serverId) => tearDownRemoteServer(serverId) },
     }),
   );
   app.use("/api", createConnectionsRouter(prisma, {
-    integrations: { remoteMcp: { detach: (serverId) => detachRemoteMcp(serverId) } },
+    integrations: { remoteMcp: { detach: (serverId) => tearDownRemoteServer(serverId) } },
   }));
   // WARP-2275 — the admin-only SaaS credential configurator. Descriptor-driven
   // (WARP-2217), so it adds no per-vendor routes: one generic surface renders
