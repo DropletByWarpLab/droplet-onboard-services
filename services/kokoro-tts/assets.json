@@ -2,7 +2,7 @@
   "repository": "onnx-community/Kokoro-82M-v1.0-ONNX",
   "revision": "1939ad2a8e416c0acfeecc08a694d14ef25f2231",
   "files": {
-    "onnx/model_quantized.onnx": "fbae9257e1e05ffc727e951ef9b9c98418e6d79f1c9b6b13bd59f5c9028a1478",
+    "onnx/model.onnx": "8fbea51ea711f2af382e88c833d9e288c6dc82ce5e98421ea61c058ce21a34cb",
     "voices/af_heart.bin": "d583ccff3cdca2f7fae535cb998ac07e9fcb90f09737b9a41fa2734ec44a8f0b",
     "voices/af_bella.bin": "f69d836209b78eb8c66e75e3cda491e26ea838a3674257e9d4e5703cbaf55c8b",
     "voices/af_sarah.bin": "4409fbc125afabacc615d94db5398d847006a737b0247d6892b7a9a0007a2f0a",

@@ -72,6 +72,15 @@ class _PiperStubHandler(socketserver.BaseRequestHandler):
                 # We only model the synthesize→audio flow. Drop the connection.
                 return
 
+            if server.busy_times > 0:
+                # A Kokoro whose single inference slot is taken answers
+                # `busy` and closes; the client is expected to retry.
+                server.busy_times -= 1
+                self._send(sock, "error", {
+                    "code": "busy", "text": "Kokoro is already synthesizing; retry later",
+                })
+                return
+
             if server.error:
                 self._send(sock, "error", server.error)
                 return
@@ -120,6 +129,7 @@ class _PiperStubServer(socketserver.ThreadingTCPServer):
         self.info = {"tts": []}
         self.error = None
         self.malformed_info = False
+        self.busy_times = 0
 
 
 @pytest.fixture
@@ -257,6 +267,52 @@ class TestWyomingTTSSynthesize:
         audio = client.synthesize("   \n\t  ")
         assert audio.pcm == b""
         assert srv.events == []
+
+
+class TestWyomingTTSBusyRetry:
+    """`busy` (the sidecar's single inference slot is taken) is retried a
+    bounded number of times; anything else is not."""
+
+    @pytest.fixture(autouse=True)
+    def _no_real_sleep(self, monkeypatch):
+        from voice import tts as tts_mod
+
+        self.waits: list[float] = []
+        monkeypatch.setattr(tts_mod, "_busy_sleep", self.waits.append)
+
+    def test_busy_then_audio_is_retried_transparently(self, piper_stub):
+        from voice.tts import BUSY_RETRY_DELAYS_S
+
+        srv, port = piper_stub
+        srv.busy_times = 2
+        audio = WyomingTTS(host="127.0.0.1", port=port).synthesize("hello")
+        assert audio.pcm == b"\xaa" * 100 + b"\xbb" * 100
+        # Three connections: two busy answers, then the audio.
+        assert [h.get("type") for h, _ in srv.events] == ["synthesize"] * 3
+        assert self.waits == list(BUSY_RETRY_DELAYS_S[:2])
+
+    def test_busy_beyond_the_retry_budget_raises(self, piper_stub):
+        from voice.tts import BUSY_RETRY_DELAYS_S, TTSBusy
+
+        srv, port = piper_stub
+        srv.busy_times = len(BUSY_RETRY_DELAYS_S) + 1
+        with pytest.raises(TTSBusy, match="already synthesizing"):
+            WyomingTTS(host="127.0.0.1", port=port).synthesize("hello")
+        assert len(srv.events) == len(BUSY_RETRY_DELAYS_S) + 1
+        assert self.waits == list(BUSY_RETRY_DELAYS_S)
+
+    def test_busy_is_a_tts_unavailable(self):
+        from voice.tts import TTSBusy
+
+        assert issubclass(TTSBusy, TTSUnavailable)
+
+    def test_other_server_errors_are_not_retried(self, piper_stub):
+        srv, port = piper_stub
+        srv.error = {"text": "Unknown voice", "code": "invalid_voice"}
+        with pytest.raises(TTSUnavailable, match="Unknown voice"):
+            WyomingTTS(host="127.0.0.1", port=port).synthesize("hello")
+        assert len(srv.events) == 1
+        assert self.waits == []
 
 
 class TestWyomingTTSErrorPaths:

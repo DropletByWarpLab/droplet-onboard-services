@@ -15,6 +15,13 @@ from typing import Protocol
 
 LOG = logging.getLogger("qwen-stt")
 MAX_CONNECTIONS = 8
+# One native decode at a time; a second request WAITS this long for the
+# slot before it is answered `busy`. Appliance voice and dashboard dictation
+# share this model, and a turn that arrives a few seconds behind a dictation
+# must queue behind it, not fail - refusing outright used to end the voice
+# turn with an error. Bounded so the client's own transcript deadline
+# (90 s by default) and the 125 s request deadline below still win.
+QUEUE_WAIT_S = 60.0
 
 
 def check_headroom() -> None:
@@ -144,6 +151,32 @@ class Server:
     def __init__(self, engine: Transcriber):
         self.engine = engine
         self.connections = 0
+        # Serialises the native decode across connections, in arrival order.
+        self._inference = asyncio.Lock()
+
+    async def transcribe(self, pcm: bytes) -> str:
+        """Run one decode on the worker thread, queued behind any decode in
+        flight (bounded by QUEUE_WAIT_S). A cancelled waiter gives its place
+        up at once; a cancelled decode keeps the slot until the native call
+        returns - a worker thread cannot be interrupted, and the engine's
+        own non-blocking lock would otherwise answer the next caller busy."""
+        try:
+            await asyncio.wait_for(self._inference.acquire(), QUEUE_WAIT_S)
+        except asyncio.TimeoutError:
+            raise BusyError("Speech recognition is busy; try again") from None
+        try:
+            future = asyncio.ensure_future(asyncio.to_thread(self.engine.transcribe, pcm))
+            try:
+                return await asyncio.shield(future)
+            except asyncio.CancelledError:
+                await future
+                raise
+        finally:
+            self._inference.release()
+
+    @property
+    def busy(self) -> bool:
+        return self._inference.locked()
 
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         if self.connections >= MAX_CONNECTIONS:
@@ -199,7 +232,7 @@ class Server:
                 # Bluetooth microphones may capture at 8 kHz. No GPU or model
                 # runtime is involved in this deterministic PCM conversion.
                 normalized = bytes(pcm) if rate == 16000 else audioop.ratecv(bytes(pcm), 2, 1, rate, 16000, None)[0]
-                text = await asyncio.to_thread(self.engine.transcribe, normalized)
+                text = await self.transcribe(normalized)
                 await send_event(writer, "transcript", {"text": text, "language": "en"})
                 return
             if event != "audio-chunk" or not payload or len(payload) % 2:

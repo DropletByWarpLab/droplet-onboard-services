@@ -69,6 +69,7 @@ import logging
 import math
 import os
 import re
+import sys
 import threading
 import time
 from collections import deque
@@ -490,10 +491,14 @@ DEFAULT_FLATLINE_DBFS = -70.0      # frames below this count as "no signal".
 # `stream.read()` - it busy-spins in C on the deleted device node, so the
 # read loop never gets control back and no in-process recovery (the reopen
 # flag, `_DeviceError`, the WARP-1409 DSP reboot budget) can ever run. The
-# read loop completes ~12x a second while healthy, so 15 s with no
-# completed read while `listening` means PortAudio is wedged. Only the
-# `listening` state is judged: a voice turn runs inside `_on_frame` on the
-# capture thread and legitimately stops draining the stream for a while.
+# capture thread stamps `_capture_io_since` right before EVERY PortAudio
+# call it makes (device probe + open, each read, the close, the
+# re-enumeration) and clears it when the call returns; a healthy read
+# returns every ~80 ms, so one call still in flight after 15 s means
+# PortAudio is wedged. The stamp - not the pipeline state - is what is
+# judged: the device can drop mid-capture (`transcribing`) as easily as
+# while `listening`, and a voice turn (which runs inside `_on_frame`,
+# outside any PortAudio call) is never judged however long it takes.
 # 0 disables. Env: VOICE_CAPTURE_STALL_S.
 DEFAULT_CAPTURE_STALL_S = 15.0
 # Exit code used when the watchdog gives up (EX_SOFTWARE); compose's
@@ -996,14 +1001,16 @@ class WakePipeline:
         self._dsp_recovery: str = "nominal"  # nominal | restarting | escalated
         self._dsp_restart_attempts: int = 0
         self._dsp_last_restart_at: Optional[float] = None
-        # WARP-3934 - capture-liveness watchdog. `_last_capture_progress_at`
-        # (monotonic) is refreshed after every completed stream.read() and on
-        # every state change; `_check_capture_liveness` (scheduler ticks)
-        # fires `_on_capture_stall` once if the capture thread stalls while
-        # `listening`. <= 0 disables.
+        # WARP-3934 - capture-liveness watchdog. `_capture_io_since`
+        # (monotonic) is set by the capture thread right before it enters a
+        # PortAudio call and cleared when that call returns - None means the
+        # thread is outside PortAudio (running a voice turn, backing off in
+        # no_mic, or not started). `_check_capture_liveness` (scheduler
+        # ticks) fires `_on_capture_stall` once if one call has been in
+        # flight for longer than `capture_stall_s`. <= 0 disables.
         self._capture_stall_s = float(capture_stall_s)
         self._on_capture_stall = on_capture_stall or _exit_for_capture_stall
-        self._last_capture_progress_at: float = time.monotonic()
+        self._capture_io_since: Optional[float] = None
         self._capture_stall_fired = False
         # WARP-3710 — in-process input self-heal. The `xvf_host` reboot
         # only means something when the ACTIVE device is an XVF3800: on
@@ -1043,6 +1050,9 @@ class WakePipeline:
         # happen under _lock so the field is coherent across threads.
         self._stt_session = None  # type: ignore[var-annotated]
         self._transcribe_started_at: float = 0.0
+        # Mono 16 kHz samples handed to the STT session this turn - the
+        # audio-time side of the capture cap (see _capture_frame_for_stt).
+        self._stt_audio_samples: int = 0
 
         # WARP-3124 — per-turn latency. `_turn_timing` is the turn in
         # flight (capture thread only); `_last_turn_timing` is the finished
@@ -1268,27 +1278,40 @@ class WakePipeline:
 
         Ticked from `_rescan_tick` (5 s) and `_probe_tick` (30 s) - both
         APScheduler jobs, so it still runs while the capture thread is stuck
-        in C. If the pipeline claims `listening` but no `stream.read()` has
-        completed for `capture_stall_s`, the ALSA host API is spinning on a
+        in C. The capture thread stamps `_capture_io_since` before every
+        PortAudio call (device probe + open, each `stream.read()`, the
+        close, the re-enumeration) and clears it when the call returns; a
+        healthy read returns every ~80 ms. If one call has been in flight
+        for more than `capture_stall_s`, the ALSA host API is spinning on a
         removed / re-enumerated USB device (libportaudio2 19.6.0 never
-        raises there), the reopen flag and `_DeviceError` path can never run,
-        and only a process restart recovers. One-shot: fires at most once.
-        Other states are not judged - wake_detected / transcribing /
-        transcript_ready / speaking run inside
-        `_on_frame` and legitimately stop draining the stream; no_mic /
-        error / idle / loading have no live stream to stall."""
+        raises there), the reopen flag and `_DeviceError` path can never
+        run, and only a process restart recovers. One-shot: fires at most
+        once.
+
+        Judged in every pipeline state: the device drops mid-capture
+        (`transcribing`, where the loop is still draining the stream for
+        the sidecar) as easily as while `listening`, and judging only
+        `listening` left that wedge deaf forever. A voice turn itself
+        (`transcript_ready` / `speaking`, and the STT finish) is never
+        judged: it runs inside `_on_frame`, outside any PortAudio call, so
+        the stamp is clear for its whole duration however long it takes.
+        no_mic / error / idle / loading hold no PortAudio call either."""
         if self._capture_stall_s <= 0:
             return
         with self._lock:
-            if self._capture_stall_fired or self._state != "listening":
+            if self._capture_stall_fired:
                 return
-            stalled_for = time.monotonic() - self._last_capture_progress_at
+            since = self._capture_io_since
+            if since is None:
+                return
+            stalled_for = time.monotonic() - since
             if stalled_for <= self._capture_stall_s:
                 return
             self._capture_stall_fired = True
+            state = self._state
         reason = (
-            f"capture thread made no progress for {stalled_for:.0f}s while "
-            "listening - PortAudio is wedged on a removed/re-enumerated "
+            f"capture thread made no progress for {stalled_for:.0f}s "
+            f"(state={state}) - PortAudio is wedged on a removed/re-enumerated "
             "device; exiting so the container supervisor restarts voice-io"
         )
         logger.error(reason)
@@ -2681,47 +2704,61 @@ class WakePipeline:
         if self._input_device_index is None:
             raise _DeviceError("no input device resolved")
 
-        # Capture at the device's NATIVE input-channel count. Many USB mic
-        # arrays — notably the ReSpeaker XVF3800 — expose ONLY a 2-channel
-        # capture interface (no mono altset) and hand back digital silence
-        # when opened as mono on the raw hw device. We open the native count
-        # (capped at 2) and downmix to a 1-D mono frame, which is what the
-        # detector + STT both expect.
-        # Best-effort channel-count probe — broad except on purpose: a
-        # failure here just falls back to mono (1 ch), it is NOT the
-        # device-disconnect trigger (the load-bearing open/read below is).
-        in_channels = 1
+        # Everything from here to the first frame is PortAudio - the channel
+        # probe, the rate negotiation, the open and the start. Stamp the
+        # window so a device that wedges while being opened trips the
+        # liveness watchdog exactly like a wedged read (WARP-3934).
+        self._capture_io_since = time.monotonic()
         try:
-            info = sd.query_devices(self._input_device_index)
-            in_channels = max(1, min(2, int(info.get("max_input_channels") or 1)))
-        except Exception:
+            # Capture at the device's NATIVE input-channel count. Many USB
+            # mic arrays — notably the ReSpeaker XVF3800 — expose ONLY a
+            # 2-channel capture interface (no mono altset) and hand back
+            # digital silence when opened as mono on the raw hw device. We
+            # open the native count (capped at 2) and downmix to a 1-D mono
+            # frame, which is what the detector + STT both expect.
+            # Best-effort channel-count probe — broad except on purpose: a
+            # failure here just falls back to mono (1 ch), it is NOT the
+            # device-disconnect trigger (the load-bearing open/read is).
             in_channels = 1
+            try:
+                info = sd.query_devices(self._input_device_index)
+                in_channels = max(
+                    1, min(2, int(info.get("max_input_channels") or 1)),
+                )
+            except Exception:
+                in_channels = 1
 
-        # Capture at a rate the device actually accepts, then resample to
-        # WAKE_SAMPLE_RATE below. See CAPTURE_RATE_CANDIDATES.
-        open_rate = self._resolve_capture_rate(sd, in_channels)
-        read_frames = WAKE_FRAME_SAMPLES * open_rate // WAKE_SAMPLE_RATE
-        # Design the polyphase filter ONCE for this session. The rate pair
-        # is fixed until the stream is reopened, and the read loop below
-        # runs ~12 times a second forever — re-deriving the ratio and
-        # re-designing a Kaiser FIR per frame is pure waste (8821 taps on
-        # a 44.1 kHz device). Returns an identity function at 16 kHz.
-        resample_to_wake_rate = make_int16_resampler(
-            open_rate, WAKE_SAMPLE_RATE,
-        )
+            # Capture at a rate the device actually accepts, then resample
+            # to WAKE_SAMPLE_RATE below. See CAPTURE_RATE_CANDIDATES.
+            open_rate = self._resolve_capture_rate(sd, in_channels)
+            read_frames = WAKE_FRAME_SAMPLES * open_rate // WAKE_SAMPLE_RATE
+            # Design the polyphase filter ONCE for this session. The rate
+            # pair is fixed until the stream is reopened, and the read loop
+            # below runs ~12 times a second forever — re-deriving the ratio
+            # and re-designing a Kaiser FIR per frame is pure waste (8821
+            # taps on a 44.1 kHz device). Identity function at 16 kHz.
+            resample_to_wake_rate = make_int16_resampler(
+                open_rate, WAKE_SAMPLE_RATE,
+            )
+
+            # Open + start explicitly rather than through `with`, so the
+            # stop/close on the way out (PortAudio calls too) can sit inside
+            # their own watchdog window below.
+            try:
+                stream_cm = sd.InputStream(
+                    samplerate=open_rate,
+                    channels=in_channels,
+                    dtype="int16",
+                    device=self._input_device_index,
+                    blocksize=read_frames,
+                )
+                stream = stream_cm.__enter__()
+            except device_errors as exc:
+                raise _DeviceError(str(exc) or exc.__class__.__name__) from exc
+        finally:
+            self._capture_io_since = None
 
         try:
-            stream_cm = sd.InputStream(
-                samplerate=open_rate,
-                channels=in_channels,
-                dtype="int16",
-                device=self._input_device_index,
-                blocksize=read_frames,
-            )
-        except device_errors as exc:
-            raise _DeviceError(str(exc) or exc.__class__.__name__) from exc
-
-        with stream_cm as stream:
             logger.info(
                 "wake pipeline: listening on device %s (%d ch @ %d Hz%s), "
                 "model=%s, threshold=%.2f",
@@ -2742,7 +2779,6 @@ class WakePipeline:
             # timestamps can't instantly flag a recovered stream.
             with self._lock:
                 self._audio_watch_started_at = time.time()
-                self._last_capture_progress_at = time.monotonic()
             self._set_state("listening")
             with self._lock:
                 # A mic restart can arrive while the supervisor is retrying
@@ -2766,13 +2802,16 @@ class WakePipeline:
                     )
                 # Tight device-I/O scope: ONLY the read is wrapped, so a
                 # re-enumeration mid-stream becomes a recoverable
-                # _DeviceError. _on_frame() runs outside this scope.
+                # _DeviceError. _on_frame() runs outside this scope - and
+                # outside the WARP-3934 watchdog window, which covers
+                # exactly the time spent inside PortAudio.
+                self._capture_io_since = time.monotonic()
                 try:
                     frames, overflowed = stream.read(read_frames)
                 except device_errors as exc:
                     raise _DeviceError(str(exc) or exc.__class__.__name__) from exc
-                # WARP-3934 - liveness heartbeat for _check_capture_liveness.
-                self._last_capture_progress_at = time.monotonic()
+                finally:
+                    self._capture_io_since = None
                 if overflowed:
                     # Capture buffer outran our predict() pace. Common
                     # on first run while ONNX kernels JIT; logs once
@@ -2796,6 +2835,14 @@ class WakePipeline:
                 # (WARP-1055 — a gained RMS compared against a raw floor
                 # read as permanent noise drift on the dashboard).
                 self._on_frame(mono)
+        finally:
+            # Stop + close are PortAudio calls as well: a close that spins
+            # on a dead device node must trip the watchdog like a read.
+            self._capture_io_since = time.monotonic()
+            try:
+                stream_cm.__exit__(*sys.exc_info())
+            finally:
+                self._capture_io_since = None
 
     # How many consecutive IDENTICAL device failures pass before the
     # supervisor restates the reason. At the 5 s backoff cap that is about
@@ -2873,13 +2920,18 @@ class WakePipeline:
         becomes visible to the next resolve/open. PortAudio snapshots the
         host's devices at first query; without a terminate+initialize the
         re-plugged reSpeaker never reappears. Defensive: a binding without
-        the private hooks (or one that raises) must not crash the loop."""
+        the private hooks (or one that raises) must not crash the loop.
+        Inside the WARP-3934 watchdog window: terminate/initialize are
+        PortAudio calls that can wedge on a half-gone device too."""
+        self._capture_io_since = time.monotonic()
         try:
             self._sd_reinit(sd)
         except Exception:
             logger.exception(
                 "wake pipeline: PortAudio re-init failed (continuing)",
             )
+        finally:
+            self._capture_io_since = None
 
     @staticmethod
     def _default_sd_reinit(sd: Any) -> None:
@@ -3147,11 +3199,13 @@ class WakePipeline:
             # clear enough to clear the gate — the §3.4 "Missed wake
             # word" feed row. Debounced like fires (one row per
             # utterance) and suppressed during the wizard's calibration
-            # mode (its deliberate wake tests aren't misses).
+            # mode (its deliberate wake tests aren't misses) and while a
+            # capture tap is armed (a scripted enrollment line isn't one).
             if (
                 score >= self._threshold * WAKE_MISS_RATIO
                 and now - self._last_miss_emit_at >= self._debounce_s
                 and not self._calibration_mode_active(now)
+                and self._capture_tap is None
             ):
                 self._last_miss_emit_at = now
                 self._emit_activity(
@@ -3174,11 +3228,16 @@ class WakePipeline:
             # three times" counter rides last_wake_at changes — but the
             # state stays 'listening', so _on_frame never routes into
             # the STT capture path and nothing gets spoken back.
+            # The same while a capture tap is armed (a mic test, an
+            # enrollment line, the echo check — WARP-1056/WARP-1410):
+            # the person is reading "Hey Droplet, ..." off a script into
+            # a capture that must keep flowing, not starting a turn.
             calibrating = self._calibration_mode_active(now)
+            capturing = self._capture_tap is not None
             self._last_wake_at = event.detected_at
             self._last_wake_score = event.score
             self._last_wake_model = event.model_name
-            if not calibrating:
+            if not (calibrating or capturing):
                 self._state = "wake_detected"
                 # A new turn starts clean: drop the last failed turn's
                 # note (WARP-3199). A latched 'error' never reaches here —
@@ -3187,10 +3246,12 @@ class WakePipeline:
                 # WARP-3124 — a handled wake starts the turn's timing.
                 self._turn_timing = _TurnTiming(wake_at=time.monotonic())
 
-        if calibrating:
+        if calibrating or capturing:
             logger.info(
-                "wake detected in calibration mode (model=%s score=%.3f) — "
-                "counted, not handled", event.model_name, event.score,
+                "wake detected %s (model=%s score=%.3f) — counted, not handled",
+                "in calibration mode" if calibrating
+                else "while a capture is in progress",
+                event.model_name, event.score,
             )
             # Same rationale as the decay path: don't carry a stateful
             # recognizer's half-decoded utterance into the next try.
@@ -3234,13 +3295,19 @@ class WakePipeline:
         try:
             session = self._stt.session()  # type: ignore[union-attr]
         except STTUnavailable as exc:
-            self._set_error(f"STT session failed: {exc}")
-            # Mark STT unavailable so subsequent wakes don't loop on
-            # the same connect-error. Status surfaces the cause.
+            # Mark STT unavailable so subsequent wakes don't loop on the
+            # same connect-error: they end at the detection (wake_heard)
+            # until the periodic probe sees the sidecar back - typically
+            # within one probe interval of a Qwen restart. The turn itself
+            # fails like a speak-side fault (WARP-3199): report why and keep
+            # listening. Latching 'error' here left the box deaf for good,
+            # because nothing ever cleared it once the probe re-detected STT.
             self._stt_available = False
+            self._fail_capture(f"STT session failed: {exc}")
             return
         self._stt_session = session
         self._transcribe_started_at = time.time()
+        self._stt_audio_samples = 0
         # WARP-3124 — capture-open stamp (a turn with no wake stamp, e.g. a
         # test driving STT directly, still gets a timing record).
         if self._turn_timing is None:
@@ -3262,11 +3329,36 @@ class WakePipeline:
         session = self._stt_session
         if session is None:
             return  # raced with abort; nothing to do
+
+        # Audio-time cap, checked BEFORE the send. The wall-clock cap below
+        # used to be the only one and ran after the send, so a capture that
+        # went the distance handed the sidecar 30.08-30.16 s of audio - and
+        # the Qwen sidecar refuses anything past its 30 s input maximum, so
+        # the whole turn failed with "Audio exceeds 30 seconds" exactly when
+        # someone had the most to say. Count the samples actually sent and
+        # finish on the frame that would cross the cap, without sending it.
+        # The first frame always goes, so the sidecar never sees an empty
+        # request.
+        frame_samples = int(frame.size)
+        cap_samples = int(self._stt_max_record_s * WAKE_SAMPLE_RATE)
+        if (
+            self._stt_audio_samples > 0
+            and self._stt_audio_samples + frame_samples > cap_samples
+        ):
+            logger.info(
+                "transcribing: max-record cap reached (%.1fs of audio)",
+                self._stt_audio_samples / WAKE_SAMPLE_RATE,
+            )
+            self._mark_capture_end("cap")
+            self._finish_transcription()
+            return
+
         try:
             session.send_chunk(frame.astype(np.int16).tobytes())
         except STTUnavailable as exc:
             self._abort_transcription(f"send_chunk: {exc}")
             return
+        self._stt_audio_samples += frame_samples
 
         elapsed = time.time() - self._transcribe_started_at
 
@@ -3362,7 +3454,52 @@ class WakePipeline:
             except Exception:
                 pass
         logger.warning("transcription aborted: %s", msg)
-        self._set_error(msg)
+        self._fail_capture(msg)
+
+    def _fail_capture(self, msg: str) -> None:
+        """The capture half of a turn failed - the STT session could not be
+        opened, a chunk could not be sent, or the sidecar answered an error
+        instead of a transcript. The capture-side twin of `_fail_turn`
+        (WARP-3199): report why on /voice/status, then keep listening.
+
+        These faults are transient by nature - the Qwen sidecar restarting
+        or still loading, a dropped socket, a request it refused - and the
+        next wake is a fresh try against a dependency that has usually
+        come back. Latching 'error' here (the pre-WARP-3729 posture, from
+        the days of a queueing Whisper sidecar) left the assistant deaf
+        until somebody restarted the container: /health went 503, but
+        nothing restarts a merely unhealthy container, and the periodic
+        probe that re-detected STT could not clear the latch. Stuck faults
+        (the detector, the capture loop) still use _set_error, and one that
+        landed mid-turn keeps its state and message.
+
+        The turn still ends with exactly ONE `voice_turn_timing` line
+        (outcome "error", error_kind "stt") and one feed row (wake_heard -
+        the user was heard, nothing was answered), like every other turn.
+        """
+        with self._lock:
+            wake_score = self._last_wake_score
+            wake_model = self._last_wake_model
+            latched = self._state == "error"
+            if not latched:
+                if self._state in ("wake_detected", "transcribing"):
+                    self._state = "listening"
+                self._error_message = msg
+        if latched:
+            return
+        # Back to listening after a wake excursion: same reset the decay
+        # path does, so a stateful recognizer (Vosk) doesn't carry the
+        # half-decoded wake into the next turn.
+        self._reset_detector()
+        timing = self._turn_timing or _TurnTiming()
+        self._turn_timing = None
+        if timing.transcript_at is None:
+            timing.transcript_at = time.monotonic()
+        self._record_turn_timing(timing, "error", {"error_kind": "stt"})
+        self._emit_activity(
+            "wake_heard",
+            score=wake_score, threshold=self._threshold, model=wake_model,
+        )
 
     # ──────────────────────────────────────────────────────────────
     # State helpers
@@ -3371,9 +3508,6 @@ class WakePipeline:
     def _set_state(self, state: PipelineState) -> None:
         with self._lock:
             self._state = state
-            # WARP-3934 - a transition (e.g. back to `listening` after a
-            # voice turn) restarts the capture-liveness clock.
-            self._last_capture_progress_at = time.monotonic()
             if state != "error":
                 self._error_message = None
 

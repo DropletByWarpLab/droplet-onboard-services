@@ -497,3 +497,70 @@ def test_profiles_listing_flags_confusable_pair(
     by_id = {r["user_id"]: r for r in rows}
     assert by_id["alice"]["confused_with"] == "twin"
     assert by_id["twin"]["confused_with"] == "alice"
+
+
+# ── endpoints: the capture reads the live pipeline stream ───────────
+#
+# A listening pipeline holds the (exclusive) mic. The enrollment / match
+# capture used to open a SECOND sounddevice.rec on it, which failed with
+# PortAudio -9985 for the whole time voice was on: every scripted line
+# came back "The microphone did not respond". It now taps the pipeline's
+# own stream (the /voice/mic/test tap) and only records directly when no
+# pipeline holds the device.
+
+class _TappablePipeline:
+    def __init__(self, pcm=None):
+        self._pcm = pcm
+        self.taps: list[float] = []
+
+    def capture_input(self, seconds: float) -> np.ndarray:
+        self.taps.append(seconds)
+        if self._pcm is None:
+            raise main.MeasurementUnavailable(
+                "No audio arrived during the test window - the microphone "
+                "stopped delivering audio."
+            )
+        return self._pcm
+
+
+def test_capture_taps_the_live_pipeline_instead_of_a_second_stream(monkeypatch):
+    pcm = np.full((16000, 1), 8000, dtype=np.int16)  # record()-shaped
+    pipe = _TappablePipeline(pcm)
+    monkeypatch.setattr(main, "_pipeline", pipe)
+    monkeypatch.setattr(main, "_resolve", lambda: _FakeResolution())
+
+    def second_stream(**kw):
+        raise AssertionError("record() opened a second stream on the exclusive mic")
+
+    monkeypatch.setattr(main, "record", second_stream)
+    out = main._capture_speaker_pcm(5.0)
+    assert out.shape == (16000,)
+    assert pipe.taps == [5.0]
+    assert not main._capture_lock.locked()
+
+
+def test_capture_maps_a_silent_tap_to_an_operational_503(monkeypatch):
+    pipe = _TappablePipeline(None)
+    monkeypatch.setattr(main, "_pipeline", pipe)
+    monkeypatch.setattr(main, "_resolve", lambda: _FakeResolution())
+    with pytest.raises(main.HTTPException) as info:
+        main._capture_speaker_pcm(5.0)
+    assert info.value.status_code == 503
+    assert "respond" in info.value.detail
+    assert "try again" in info.value.detail.lower()
+    assert not main._capture_lock.locked()
+
+
+def test_capture_records_directly_when_no_pipeline_holds_the_mic(monkeypatch):
+    monkeypatch.setattr(main, "_pipeline", None)
+    monkeypatch.setattr(main, "_resolve", lambda: _FakeResolution())
+    calls: list[dict] = []
+
+    def fake_record(**kw):
+        calls.append(kw)
+        return np.full((16000, 1), 8000, dtype=np.int16)
+
+    monkeypatch.setattr(main, "record", fake_record)
+    out = main._capture_speaker_pcm(5.0)
+    assert out.shape == (16000,)
+    assert calls and calls[0]["device"] == 0 and calls[0]["duration_s"] == 5.0

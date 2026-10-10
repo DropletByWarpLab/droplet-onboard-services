@@ -98,3 +98,106 @@ async def test_full_30_seconds_at_48khz_with_browser_chunks():
     response, engine = await exchange(events)
     assert response["type"] == "transcript"
     assert len(engine.received) == 16000 * 2 * 30
+
+
+class BlockingEngine:
+    """A decode that holds the slot until released, to drive the queue."""
+
+    def __init__(self):
+        import threading
+
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.calls = []
+
+    def transcribe(self, pcm):
+        self.calls.append(pcm)
+        self.started.set()
+        assert self.release.wait(5)
+        return "queued transcript"
+
+
+def transcribe_events(tag: bytes):
+    return [
+        ("transcribe", {"language": "en"}, b"", "v1"),
+        ("audio-start", {"rate": 16000, "width": 2, "channels": 1}, b"", "v1"),
+        ("audio-chunk", {}, tag * 800, "v1"),
+        ("audio-stop", {}, b"", "v1"),
+    ]
+
+
+async def send_events(writer, events):
+    for event, data, payload, _framing in events:
+        header = {"type": event, "data": data, "payload_length": len(payload)}
+        writer.write(json.dumps(header).encode() + b"\n" + payload)
+    await writer.drain()
+
+
+async def test_second_request_queues_behind_the_running_decode():
+    # Appliance voice arriving a few seconds behind a dashboard dictation
+    # must wait for the single decode slot, not fail the turn with busy.
+    engine = BlockingEngine()
+    service = Server(engine)
+    server = await asyncio.start_server(service.handle, "127.0.0.1", 0, limit=8192)
+    async with server:
+        port = server.sockets[0].getsockname()[1]
+        first = await asyncio.open_connection("127.0.0.1", port)
+        await send_events(first[1], transcribe_events(b"\x01\x00"))
+        assert await asyncio.to_thread(engine.started.wait, 2)
+        second = await asyncio.open_connection("127.0.0.1", port)
+        await send_events(second[1], transcribe_events(b"\x02\x00"))
+        await asyncio.sleep(0.05)
+        assert service.busy
+        assert len(engine.calls) == 1  # the second decode has not started
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(second[0].readline(), 0.1)  # still waiting, no error
+        engine.release.set()
+        for reader, writer in (first, second):
+            response = json.loads(await asyncio.wait_for(reader.readline(), 3))
+            assert response["type"] == "transcript"
+            assert response["data"]["text"] == "queued transcript"
+            writer.close()
+            await writer.wait_closed()
+    assert engine.calls == [b"\x01\x00" * 800, b"\x02\x00" * 800]
+    assert not service.busy
+
+
+async def test_queue_wait_is_bounded_and_answers_busy(monkeypatch):
+    import server as server_mod
+
+    monkeypatch.setattr(server_mod, "QUEUE_WAIT_S", 0.05)
+    engine = BlockingEngine()
+    service = Server(engine)
+    server = await asyncio.start_server(service.handle, "127.0.0.1", 0, limit=8192)
+    async with server:
+        port = server.sockets[0].getsockname()[1]
+        first = await asyncio.open_connection("127.0.0.1", port)
+        await send_events(first[1], transcribe_events(b"\x01\x00"))
+        assert await asyncio.to_thread(engine.started.wait, 2)
+        second = await asyncio.open_connection("127.0.0.1", port)
+        await send_events(second[1], transcribe_events(b"\x02\x00"))
+        response = json.loads(await asyncio.wait_for(second[0].readline(), 3))
+        assert response["type"] == "error"
+        assert response["data"]["code"] == "busy"
+        engine.release.set()
+        response = json.loads(await asyncio.wait_for(first[0].readline(), 3))
+        assert response["type"] == "transcript"
+        for _reader, writer in (first, second):
+            writer.close()
+            await writer.wait_closed()
+    assert len(engine.calls) == 1
+
+
+async def test_cancelled_request_keeps_the_slot_until_the_decode_returns():
+    engine = BlockingEngine()
+    service = Server(engine)
+    task = asyncio.create_task(service.transcribe(b"\x01\x00"))
+    assert await asyncio.to_thread(engine.started.wait, 2)
+    task.cancel()
+    await asyncio.sleep(0.01)
+    assert not task.done()
+    assert service.busy  # the worker thread is still inside the native call
+    engine.release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not service.busy
