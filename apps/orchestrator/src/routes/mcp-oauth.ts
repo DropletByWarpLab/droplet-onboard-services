@@ -13,8 +13,9 @@ import { authRateLimit, sensitiveRateLimit, standardRateLimit } from "../middlew
 import { trustedOriginUrl } from "../lib/trusted-origin.js";
 import { mcpOAuthOutcomeUrl } from "../services/account-connect-return.js";
 import {
-  beginMcpSignIn, completeMcpSignIn, disconnectMcpOAuth, mcpOAuthDependencies, mcpSignInView, parsePastedRedirect,
-  storeMcpOAuthClient, McpOAuthError, MCP_OAUTH_CALLBACK_PATH, MCP_OAUTH_FLOW_TTL_MS,
+  beginMcpSignIn, claimMcpHandoff, completeMcpSignIn, createMcpHandoff, disconnectMcpOAuth, mcpOAuthDependencies, mcpSignInView,
+  parsePastedRedirect, readMcpHandoff, storeMcpOAuthClient, McpOAuthError, MCP_OAUTH_CALLBACK_PATH, MCP_OAUTH_FLOW_TTL_MS,
+  MCP_OAUTH_LOOPBACK_REDIRECTS,
   type McpOAuthDependencies,
 } from "../services/mcp-oauth/mcp-oauth.service.js";
 
@@ -22,12 +23,14 @@ export const MCP_OAUTH_STATE_COOKIE = "droplet_mcp_oauth_state";
 const COOKIE_PATH = "/api/mcp/oauth";
 const SIGN_IN_ROLES = ["owner", "admin", "family"] as const;
 const provider = z.string().min(1).max(64);
-const startBody = z.object({
+const signInBody = z.object({
   provider,
   scope: z.enum(["MEMBER", "WORKSPACE"]),
   acknowledge: z.boolean().optional(),
-  redirectMode: z.enum(["origin", "loopback"]).optional(),
 }).strict();
+// Either name the provider and scope, or claim a handoff a native app minted; never both.
+const startBody = z.union([signInBody, z.object({ handoff: z.string().min(1).max(128) }).strict()]);
+const handoffBody = signInBody;
 const pasteBody = z.object({ redirectUrl: z.string().min(1).max(4096) }).strict();
 const clientBody = z.object({
   provider,
@@ -81,8 +84,12 @@ export function createMcpOAuthRouter(prisma: PrismaClient, options: Partial<McpO
     const body = startBody.safeParse(req.body ?? {});
     if (!body.success) return res.status(400).json({ error: "invalid_request" });
     try {
+      // A handoff is consumed here, before anything is sent to the vendor (single use).
+      const picked = "handoff" in body.data
+        ? { ...claimMcpHandoff(body.data.handoff, { id: req.user.id, role: req.user.role }, deps), returnTo: "/connectors/mcp/connected" as const }
+        : body.data;
       const started = await beginMcpSignIn(prisma, {
-        ...body.data,
+        ...picked,
         userId: req.user.id,
         username: req.user.username,
         role: req.user.role,
@@ -92,6 +99,37 @@ export function createMcpOAuthRouter(prisma: PrismaClient, options: Partial<McpO
         httpOnly: true, secure: true, sameSite: "lax", path: COOKIE_PATH, maxAge: MCP_OAUTH_FLOW_TTL_MS,
       });
       return res.json({ authorizeUrl: started.authorizeUrl, expiresAt: started.expiresAt, redirectUri: started.redirectUri });
+    } catch (err) {
+      return fail(res, err);
+    }
+  });
+
+  // WARP-3963: a native app mints a one-time link; the browser page reads it (never consuming it),
+  // then `start { handoff }` claims it. The id is a bearer: it is never logged (see request-logger).
+  router.post("/mcp/oauth/handoff", sensitiveRateLimit, requireRole(...SIGN_IN_ROLES), async (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    if (!req.user?.id) return res.status(401).json({ error: "unauthenticated" });
+    const body = handoffBody.safeParse(req.body ?? {});
+    if (!body.success) return res.status(400).json({ error: "invalid_request" });
+    try {
+      const made = await createMcpHandoff(prisma, { ...body.data, userId: req.user.id, role: req.user.role }, deps);
+      return res.json({
+        handoffId: made.id,
+        url: await trustedOriginUrl(req, `/connectors/mcp/connect?handoff=${made.id}`),
+        expiresAt: made.expiresAt,
+      });
+    } catch (err) {
+      return fail(res, err);
+    }
+  });
+
+  router.get("/mcp/oauth/handoff/:id", standardRateLimit, requireRole(...SIGN_IN_ROLES), async (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    if (!req.user?.id) return res.status(401).json({ error: "unauthenticated" });
+    try {
+      const view = readMcpHandoff(String(req.params.id), { id: req.user.id, role: req.user.role }, deps);
+      const origin = await trustedOriginUrl(req, MCP_OAUTH_CALLBACK_PATH);
+      return res.json({ ...view, callback: origin.startsWith("https://") ? origin : MCP_OAUTH_LOOPBACK_REDIRECTS[1] });
     } catch (err) {
       return fail(res, err);
     }
@@ -182,7 +220,7 @@ export function createMcpOAuthCallbackRouter(prisma: PrismaClient, options: Part
       result = { outcome: "failed", provider: null, scope: null };
     }
     // No callback parameter becomes a destination or reflected text.
-    const returnTo = result.scope === "WORKSPACE" ? "/connectors/credentials" : "/settings";
+    const returnTo = result.returnTo ?? (result.scope === "WORKSPACE" ? "/connectors/credentials" : "/settings");
     return res.redirect(303, mcpOAuthOutcomeUrl(returnTo, result.provider, result.outcome));
   });
   return router;

@@ -9,7 +9,8 @@ import { __setColumnCryptoKeyForTest, decryptColumn, deriveMcpOAuthTokenKey, mcp
 import { createMcpOAuthRefresher } from "./mcp-oauth-refresh.service.js";
 import { McpBridgeError } from "../mcp-bridge.client.js";
 import {
-  beginMcpSignIn, completeMcpSignIn, disconnectMcpOAuth, MCP_OAUTH_FLOW_TTL_MS, MCP_OAUTH_LOOPBACK_REDIRECTS,
+  beginMcpSignIn, claimMcpHandoff, completeMcpSignIn, createMcpHandoff, disconnectMcpOAuth, readMcpHandoff,
+  MCP_OAUTH_FLOW_TTL_MS, MCP_OAUTH_HANDOFF_TTL_MS, MCP_OAUTH_LOOPBACK_REDIRECTS,
   mcpOAuthDependencies, openTokens, parsePastedRedirect, storeMcpOAuthClient, McpOAuthError,
   type BeginInput, type McpOAuthDependencies,
 } from "./mcp-oauth.service.js";
@@ -320,9 +321,9 @@ describe("completeMcpSignIn", () => {
     expect((await w.complete(ws.state, { browserState: null, caller: { id: "u1", role: "family" } })).outcome).toBe("failed");
   });
 
-  it("uses the loopback redirect when asked, and the exchange carries that same redirect", async () => {
+  it("uses the loopback redirect when the box origin is not https, and the exchange carries that same redirect", async () => {
     const s = setup();
-    const r = await s.begin({ redirectMode: "loopback" });
+    const r = await s.begin({ originCallback: "http://192.168.1.5/api/mcp/oauth/callback" });
     expect(r.redirectUri).toBe("http://127.0.0.1/api/mcp/oauth/callback");
     await s.complete(r.state);
     expect((s.oauth.exchange.mock.calls[0][0] as any).redirectUri).toBe(r.redirectUri);
@@ -568,5 +569,50 @@ describe("token blob binding and disconnect", () => {
     const wid = s.db.rows.find((r) => r.scope === "WORKSPACE")!.id;
     expect(await disconnectMcpOAuth(s.db.prisma, wid, { id: "u1", role: "family" })).toBe(false);
     expect(await disconnectMcpOAuth(s.db.prisma, wid, { id: "a1", role: "admin" })).toBe(true);
+  });
+});
+
+describe("browser handoff (WARP-3963)", () => {
+  const mint = (s: ReturnType<typeof setup>, o: Record<string, unknown> = {}) =>
+    createMcpHandoff(s.db.prisma, { provider: PROVIDER, scope: "MEMBER", userId: "u1", role: "family", ...o } as any, s.deps);
+  const alice = { id: "u1", role: "family" };
+
+  it("is stored hashed, and expires after five minutes (read and claim both refuse with handoff_invalid)", async () => {
+    const s = setup();
+    const { id } = await mint(s);
+    expect([...s.deps.handoffs.keys()]).toEqual([createHash("sha256").update(id).digest("hex")]);
+    s.advance(MCP_OAUTH_HANDOFF_TTL_MS - 1);
+    expect(readMcpHandoff(id, alice, s.deps).provider).toBe(PROVIDER);
+    s.advance(1);
+    expect(() => readMcpHandoff(id, alice, s.deps)).toThrow(expect.objectContaining({ code: "handoff_invalid", status: 404 }));
+    expect(() => claimMcpHandoff(id, alice, s.deps)).toThrow(expect.objectContaining({ code: "handoff_invalid" }));
+  });
+
+  it("claim is single use; a read never consumes; another member is refused and does not burn it", async () => {
+    const s = setup();
+    const { id } = await mint(s);
+    readMcpHandoff(id, alice, s.deps);
+    expect(() => claimMcpHandoff(id, { id: "u2", role: "owner" }, s.deps)).toThrow(expect.objectContaining({ code: "handoff_wrong_member", status: 403 }));
+    expect(claimMcpHandoff(id, alice, s.deps)).toEqual({ provider: PROVIDER, scope: "MEMBER", acknowledge: false });
+    expect(() => claimMcpHandoff(id, alice, s.deps)).toThrow(expect.objectContaining({ code: "handoff_invalid" }));
+  });
+
+  it("a WORKSPACE handoff needs an owner or admin and the acknowledgement at mint time", async () => {
+    const s = setup();
+    await expect(mint(s, { scope: "WORKSPACE", role: "family", acknowledge: true })).rejects.toMatchObject({ code: "forbidden" });
+    await expect(mint(s, { scope: "WORKSPACE", role: "admin" })).rejects.toMatchObject({ code: "acknowledge_required" });
+    await expect(mint(s, { role: "guest" })).rejects.toMatchObject({ code: "forbidden" });
+    const { id } = await mint(s, { scope: "WORKSPACE", role: "admin", acknowledge: true });
+    expect(claimMcpHandoff(id, { id: "u1", role: "admin" }, s.deps)).toMatchObject({ scope: "WORKSPACE", acknowledge: true });
+  });
+
+  it("minting is refused while the server is turned off, and a returnTo is carried to the callback result", async () => {
+    const s = setup({ egress: { allowed: false, reason: "connection_disabled", message: "off" } as any });
+    await expect(mint(s)).rejects.toMatchObject({ code: "connection_disabled" });
+    s.gate.current = ALLOWED;
+    const r = await s.begin({ returnTo: "/connectors/mcp/connected" });
+    expect((await s.complete(r.state)).returnTo).toBe("/connectors/mcp/connected");
+    const r2 = await s.begin();
+    expect((await s.complete(r2.state)).returnTo).toBeNull();
   });
 });
