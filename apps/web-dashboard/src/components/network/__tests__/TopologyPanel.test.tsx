@@ -30,7 +30,7 @@ vi.mock("@/lib/hooks/useSwitch", () => ({
 const useCoverageApsMock = vi.fn();
 const useApRadiosMock = vi.fn();
 vi.mock("@/lib/hooks/useCoverageAps", () => ({
-  useCoverageAps: () => useCoverageApsMock(),
+  useCoverageAps: (opts?: unknown) => useCoverageApsMock(opts),
   useApRadios: (mac: string, enabled: boolean) => useApRadiosMock(mac, enabled),
 }));
 
@@ -179,6 +179,8 @@ function mockReads(over: {
     vlans: [],
     isLoading: false,
     error: undefined,
+    portsLoading: false,
+    portsError: undefined,
     connected: true,
     ...over.switch,
   });
@@ -213,6 +215,28 @@ describe("render paths", () => {
     expect(screen.getByTestId("topology-skeleton")).toBeInTheDocument();
     // Neither draws a half-built tree whose router cables would move.
     expect(screen.queryByRole("list")).not.toBeInTheDocument();
+  });
+
+  it("holds the skeleton while the switch's ports are still on their way", () => {
+    // Status and ports are two reads. With status in and ports not, the tree
+    // would read "No ports reported" and then re-hang every cable.
+    mockReads({ switch: { ports: [], portsLoading: true } });
+    render(<TopologyPanel />);
+
+    expect(screen.getByTestId("topology-skeleton")).toBeInTheDocument();
+    expect(screen.queryByText("No ports reported")).not.toBeInTheDocument();
+  });
+
+  it("says so when the switch's ports can't be read, rather than calling that 'no ports'", () => {
+    mockReads({ switch: { ports: [], portsError: new Error("Switch ports: 502") } });
+    render(<TopologyPanel />);
+
+    expect(screen.queryByTestId("topology-skeleton")).not.toBeInTheDocument();
+    expect(screen.getByText("Ports unavailable")).toBeInTheDocument();
+    expect(screen.queryByText("No ports reported")).not.toBeInTheDocument();
+    expect(
+      screen.getByText("We couldn't read the switch's ports, so what's plugged into it isn't shown."),
+    ).toBeInTheDocument();
   });
 
   it("says the topology is unavailable, quietly, when the router read fails", () => {
@@ -322,6 +346,7 @@ describe("the access point", () => {
   it("shows its live wireless client count and where it plugs in", () => {
     render(<TopologyPanel />);
 
+    expect(useCoverageApsMock).toHaveBeenCalledWith({ paused: false });
     expect(useApRadiosMock).toHaveBeenCalledWith(AP.mac, true);
     expect(within(apCard()).getByText("26 clients")).toBeInTheDocument();
     expect(within(apCard()).getByText("port 2 · PoE 6.2 W")).toBeInTheDocument();
@@ -369,6 +394,13 @@ describe("the access point", () => {
     );
 
     expect(within(apCard()).getByText("Radios not reporting")).toBeInTheDocument();
+  });
+
+  it("stops reading the access points while the page hides the panel", () => {
+    render(<TopologyPanel paused />);
+
+    expect(useCoverageApsMock).toHaveBeenCalledWith({ paused: true });
+    expect(useApRadiosMock).toHaveBeenCalledWith(AP.mac, false);
   });
 
   it("leaves a third-party AP at 'Online' — there are no radios to read", () => {

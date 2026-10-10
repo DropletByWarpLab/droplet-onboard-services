@@ -601,7 +601,7 @@ function NetworkPageInner() {
         tabIndex={0}
         hidden={activeTab !== "overview"}
       >
-        {activeTab === "overview" && <OverviewTab overview={overview} />}
+        {activeTab === "overview" && <OverviewTab overview={overview} paused={mode === "simple"} />}
       </div>
       <div
         role="tabpanel"
@@ -689,7 +689,7 @@ function PrivacyTab({ onManageGroups }: { onManageGroups: () => void }) {
 }
 
 // --- Overview Tab ---
-function OverviewTab({ overview }: { overview: NetworkOverview | undefined }) {
+function OverviewTab({ overview, paused }: { overview: NetworkOverview | undefined; paused: boolean }) {
   const lan = overview?.interfaces?.lan;
   const wan = overview?.interfaces?.wan;
   const system = overview?.system;
@@ -776,13 +776,16 @@ function OverviewTab({ overview }: { overview: NetworkOverview | undefined }) {
       {/* The wiring diagram, above the port maps it summarises: Internet →
           router → switch → what hangs off it, including the access point —
           which until this panel was invisible here bar the Wi-Fi tile's
-          "isn't reporting its radios". It reads the same hooks the two port
-          maps below do, so it adds no requests; `posture` is the read this tab
-          already makes for its badge, and `radios` is the rollup the Wi-Fi tile
-          uses (the one thing every role can see of the AP when per-AP radio
-          detail, owner/admin only, is out of reach). Renders its own
+          "isn't reporting its radios". The router and switch reads are the two
+          port maps' own hooks; the AP list and per-AP radios are the Wi-Fi
+          tab's keys, which this panel keeps polling while Overview is up and
+          stops while Simple mode hides this wrapper (`paused` — the panels
+          stay mounted under `hidden`, see above). `posture` is the read this
+          tab already makes for its badge, and `radios` is the rollup the Wi-Fi
+          tile uses (the one thing every role can see of the AP when per-AP
+          radio detail, owner/admin only, is out of reach). Renders its own
           loading/unavailable states. */}
-      <TopologyPanel posture={topology?.posture ?? null} radios={overview?.wirelessRadios} />
+      <TopologyPanel posture={topology?.posture ?? null} radios={overview?.wirelessRadios} paused={paused} />
 
       {/* The two port maps, in the order the cable runs: WARP-1866's router
           panel, then ADR-018 item 12's managed-switch panel. Both sit below

@@ -64,13 +64,17 @@ export interface TopologyNode {
 export interface TopologyModel {
   root: TopologyNode;
   hint: ApWifiHint;
+  /** What the tree couldn't tell apart, in the user's words, for the footnotes. */
+  notes: string[];
 }
 
 export interface TopologyInput {
   /** A usable port map: `supported` with at least one port. */
   router: RouterPortMap;
-  /** `null` when there is no reachable managed switch. */
-  switch: { status: SwitchStatus; ports: SwitchPort[] } | null;
+  /** `null` when there is no reachable managed switch. `ports: null` when the
+   *  switch answered but its port list never did (a read that failed, not one
+   *  still on its way — the panel holds the tree back for that). */
+  switch: { status: SwitchStatus; ports: SwitchPort[] | null } | null;
   /** GET /api/aps, unfiltered — this decides which rows belong in the tree. */
   aps: ApDeviceInfo[];
   posture?: DeploymentPosture | null;
@@ -238,17 +242,17 @@ function apNode(ap: ApDeviceInfo, port: SwitchPort | null, hint: ApWifiHint): To
 }
 
 /**
- * Pair AP rows with the switch's AP-role jacks that have a cable in them.
- *   1. by MAC, when the switch reports the device on the jack;
- *   2. by elimination, when exactly one row and one jack are left.
+ * Pair AP rows with the switch's jacks that have a cable in them.
+ *   1. by MAC, when the switch reports the device on the jack — whatever role
+ *      the provisioner gave that jack;
+ *   2. by elimination, when exactly one row and one cabled AP-role jack are left.
  * Anything else stays unpaired — with two of each and no MAC there is no
  * honest way to say which is which.
  */
-function pairAps(aps: ApDeviceInfo[], ports: SwitchPort[]) {
-  const apPorts = ports.filter((p) => p.role === "ap" && p.link_up);
+function pairAps(aps: ApDeviceInfo[], live: SwitchPort[]) {
   const byPort = new Map<number, ApDeviceInfo>();
   const free = new Set(aps);
-  for (const p of apPorts) {
+  for (const p of live) {
     const mac = normMac(p.device?.mac);
     const hit = mac ? aps.find((a) => free.has(a) && normMac(a.mac) === mac) : undefined;
     if (hit) {
@@ -256,9 +260,9 @@ function pairAps(aps: ApDeviceInfo[], ports: SwitchPort[]) {
       free.delete(hit);
     }
   }
-  const open = apPorts.filter((p) => !byPort.has(p.port));
-  if (free.size === 1 && open.length === 1) {
-    byPort.set(open[0].port, [...free][0]);
+  const openAp = live.filter((p) => p.role === "ap" && !byPort.has(p.port));
+  if (free.size === 1 && openAp.length === 1) {
+    byPort.set(openAp[0].port, [...free][0]);
     free.clear();
   }
   return { byPort, unplaced: aps.filter((a) => free.has(a)) };
@@ -295,12 +299,106 @@ function portLeaf(p: SwitchPort): TopologyNode {
   };
 }
 
+/** An AP-role jack with a cable and no row to name it: an AP we know nothing else about. */
+function anonymousAp(p: SwitchPort): TopologyNode {
+  return {
+    id: `switch-port-${p.port}`,
+    kind: "access-point",
+    name: leafName(p, "Access point"),
+    status: "Wi-Fi details unavailable",
+    tone: "neutral",
+    meta: portMeta(p),
+    children: [],
+  };
+}
+
+const byPortNo = (a: SwitchPort, b: SwitchPort) => a.port - b.port;
+
+/** "one of ports 2, 3, 5" / "2 of ports 2, 3, 5" — cables we can count but not place. */
+function someOf(count: number, jacks: SwitchPort[]): string {
+  const ids = jacks.map((p) => p.port).join(", ");
+  return count === 1 ? `one of ports ${ids}` : `${count} of ports ${ids}`;
+}
+
+/** Where a row the switch can't name must be: the jacks it can't explain, and
+ *  the router too when that has a spare cable. One candidate is only named
+ *  when there is nowhere else it could be. */
+function unplacedMeta(candidates: SwitchPort[], orRouter: boolean): string {
+  if (candidates.length === 1) {
+    return orRouter ? `port ${candidates[0].port} or the router` : portMeta(candidates[0]);
+  }
+  const list = someOf(1, candidates);
+  return orRouter ? `${list}, or the router` : list;
+}
+
+/** Cabled AP-role jacks beyond the rows we have: real units, still unnamed. */
+function pooledAps(count: number, jacks: SwitchPort[]): TopologyNode {
+  return {
+    id: "switch-ap-pool",
+    kind: "access-point",
+    name: count === 1 ? "Access point" : `${count} access points`,
+    status: "Wi-Fi details unavailable",
+    tone: "neutral",
+    meta: someOf(count, jacks),
+    children: [],
+  };
+}
+
+/** Unlabelled cabled jacks once the APs that must be on some of them are taken out. */
+function pooledLeaves(count: number, jacks: SwitchPort[]): TopologyNode {
+  return {
+    id: "switch-other-devices",
+    kind: "device",
+    name: count === 1 ? "Wired device" : `${count} wired devices`,
+    status: "Connected",
+    tone: "ok",
+    meta: someOf(count, jacks),
+    children: [],
+  };
+}
+
+const UNLABELLED_PORTS =
+  "This switch's ports aren't labelled, so its access points and cameras can't be told apart from other wired devices.";
+const UNLABELLED_PORTS_AND_UPLINK =
+  "This switch's ports aren't labelled, so its uplink, access points and cameras can't be told apart from other wired devices.";
+const PORTS_UNREAD = "We couldn't read the switch's ports, so what's plugged into it isn't shown.";
+
+interface SwitchBuild {
+  node: TopologyNode;
+  uplink: SwitchPort | undefined;
+  /** AP rows this switch has no cabled jack for: they hang off the router instead. */
+  overflow: ApDeviceInfo[];
+  notes: string[];
+}
+
+/**
+ * The switch and what hangs off it. Every cabled jack is drawn exactly once:
+ * as the AP row the switch names (by MAC) or the one left by elimination, as a
+ * camera or wired device by its role, or pooled — "2 wired devices · 2 of
+ * ports 1, 5, 6" — when rows the switch can't name must be on some of them.
+ * A row with no jack that could hold it isn't on this switch at all and is
+ * handed back to the router.
+ */
 function buildSwitch(
   sw: NonNullable<TopologyInput["switch"]>,
   aps: ApDeviceInfo[],
   hint: ApWifiHint,
-): { node: TopologyNode; uplink: SwitchPort | undefined } {
+  routerHasSpareCable: boolean,
+): SwitchBuild {
   const { status, ports } = sw;
+  const name = status.model?.trim() || "Switch";
+
+  if (ports === null) {
+    // The switch answered, its port list didn't. Nothing can be hung off it
+    // honestly, so its APs are the router's to place.
+    return {
+      uplink: undefined,
+      overflow: aps,
+      notes: [PORTS_UNREAD],
+      node: { id: "switch", kind: "switch", name, status: "Ports unavailable", tone: "warn", children: [] },
+    };
+  }
+
   const isUplink = (p: SwitchPort) =>
     p.role === "uplink" || (!!status.protected_port && p.port === status.protected_port);
   const uplink = ports.find(isUplink);
@@ -308,45 +406,60 @@ function buildSwitch(
     .filter((p) => p.link_up && !isUplink(p))
     .sort((a, b) => ROLE_ORDER[a.role] - ROLE_ORDER[b.role] || a.port - b.port);
 
-  const { byPort, unplaced } = pairAps(aps, ports);
-  const apNodes: TopologyNode[] = [];
-  const others: TopologyNode[] = [];
-  for (const p of live) {
-    if (p.role !== "ap") {
-      others.push(portLeaf(p));
-      continue;
-    }
-    const ap = byPort.get(p.port);
-    if (ap) {
-      apNodes.push(apNode(ap, p, hint));
-    } else if (unplaced.length === 0) {
-      // An AP-role jack with a cable and no row to name it. If rows are still
-      // unplaced they are what's plugged in there; otherwise it's an AP we
-      // know nothing else about.
-      apNodes.push({
-        id: `switch-port-${p.port}`,
-        kind: "access-point",
-        name: leafName(p, "Access point"),
-        status: "Wi-Fi details unavailable",
-        tone: "neutral",
-        meta: portMeta(p),
-        children: [],
-      });
+  const { byPort, unplaced } = pairAps(aps, live);
+  const openAp = live.filter((p) => p.role === "ap" && !byPort.has(p.port));
+  const cameras = live.filter((p) => p.role === "camera" && !byPort.has(p.port));
+  const others = live.filter((p) => p.role !== "ap" && p.role !== "camera" && !byPort.has(p.port));
+
+  const children: TopologyNode[] = live
+    .filter((p) => byPort.has(p.port))
+    .map((p) => apNode(byPort.get(p.port)!, p, hint));
+  let overflow: ApDeviceInfo[] = [];
+
+  if (unplaced.length === 0) {
+    children.push(...openAp.map(anonymousAp), ...cameras.map(portLeaf), ...others.map(portLeaf));
+  } else if (openAp.length === 0 && others.length === 0) {
+    // Every cabled jack is spoken for, so these rows aren't on this switch.
+    overflow = unplaced;
+    children.push(...cameras.map(portLeaf));
+  } else {
+    // Rows the switch can't name are on the jacks it can't explain: the
+    // AP-role ones when there are enough of those, else those and the
+    // unlabelled ones. Which is which is never guessed.
+    const onApJacks = unplaced.length <= openAp.length;
+    const candidates = (onApJacks ? openAp : [...openAp, ...others]).sort(byPortNo);
+    const where = unplacedMeta(candidates, routerHasSpareCable);
+    children.push(...unplaced.map((a) => ({ ...apNode(a, null, hint), meta: where })));
+
+    const extraAp = openAp.length - unplaced.length;
+    if (extraAp > 0) children.push(pooledAps(extraAp, openAp));
+    children.push(...cameras.map(portLeaf));
+    if (onApJacks) {
+      children.push(...others.map(portLeaf));
+    } else {
+      const spare = others.length - (unplaced.length - openAp.length);
+      if (spare > 0) children.push(pooledLeaves(spare, [...others].sort(byPortNo)));
     }
   }
-  apNodes.push(...unplaced.map((a) => apNode(a, null, hint)));
+
+  const notes: string[] = [];
+  if (ports.some((p) => p.link_up) && ports.every((p) => p.role === "unknown")) {
+    notes.push(uplink ? UNLABELLED_PORTS : UNLABELLED_PORTS_AND_UPLINK);
+  }
 
   const inUse = ports.filter((p) => p.link_up).length;
   return {
     uplink,
+    overflow,
+    notes,
     node: {
       id: "switch",
       kind: "switch",
-      name: status.model?.trim() || "Switch",
+      name,
       status: ports.length === 0 ? "No ports reported" : `${inUse} of ${ports.length} ports in use`,
       tone: ports.length === 0 ? "neutral" : "ok",
       meta: uplink ? [`uplink port ${uplink.port}`, uplink.speed].filter(Boolean).join(" · ") : undefined,
-      children: [...apNodes, ...others],
+      children,
     },
   };
 }
@@ -393,24 +506,45 @@ interface RouterEntity {
 /**
  * Hang the router's cables.
  *
- * Each entity (the switch, or an AP when there is no switch) takes exactly one
- * of the jacks that have a cable. The router doesn't say which, so a jack is
- * claimed only when it is the single candidate whose speed agrees with the far
- * end — a link has one speed. Every other cable is a plain wired device; if
- * the jack can't be settled, those are pooled with the jacks they might be on
- * rather than assigned arbitrarily.
+ * Each entity (the switch, and any AP not on it) takes exactly one of the
+ * jacks that have a cable. The router doesn't say which, so a jack is claimed
+ * only when it is the single candidate whose speed agrees with the far end —
+ * a link has one speed — and no other entity needs that same jack. Settling
+ * one can settle the next by elimination (the 1 Gb switch can only be on p2,
+ * so the AP is on p3), but only while every entity really has a jack of its
+ * own: with more entities than cables something is stale, and nothing is
+ * claimed. Every other cable is a plain wired device; if the jack can't be
+ * settled, those are pooled with the jacks they might be on rather than
+ * assigned arbitrarily.
  */
 function attachToRouter(lan: RouterPort[], entities: RouterEntity[]): TopologyNode[] {
   if (entities.length === 0) return lan.map(directDevice);
-  if (entities.length === 1) {
-    const [only] = entities;
-    const fits = lan.filter((p) => speedsAgree(p.speed, only.speed));
-    if (fits.length === 1) {
-      return [only.claim(fits[0]), ...lan.filter((p) => p !== fits[0]).map(directDevice)];
+
+  const jacks = new Set(lan);
+  const claimed = new Map<RouterEntity, RouterPort>();
+  if (entities.length <= lan.length) {
+    for (let settled = true; settled; ) {
+      settled = false;
+      const open = entities.filter((e) => !claimed.has(e));
+      const fits = new Map(open.map((e) => [e, [...jacks].filter((p) => speedsAgree(p.speed, e.speed))]));
+      for (const e of open) {
+        const only = fits.get(e)!;
+        if (only.length !== 1 || !jacks.has(only[0])) continue;
+        const rival = open.some((o) => o !== e && fits.get(o)!.length === 1 && fits.get(o)![0] === only[0]);
+        if (rival) continue;
+        claimed.set(e, only[0]);
+        jacks.delete(only[0]);
+        settled = true;
+      }
     }
   }
-  const spare = lan.length - entities.length;
-  return [...entities.map((e) => e.node), ...(spare > 0 ? [pooledDevices(lan, spare)] : [])];
+
+  const nodes = entities.map((e) => (claimed.has(e) ? e.claim(claimed.get(e)!) : e.node));
+  const left = lan.filter((p) => jacks.has(p));
+  const unsettled = entities.length - claimed.size;
+  if (unsettled === 0) return [...nodes, ...left.map(directDevice)];
+  const spare = left.length - unsettled;
+  return [...nodes, ...(spare > 0 ? [pooledDevices(left, spare)] : [])];
 }
 
 // ── The tree ──────────────────────────────────────────────────────────
@@ -431,10 +565,20 @@ export function buildTopology(input: TopologyInput): TopologyModel {
     allSilent: readable > 0 && (radios?.apsNotReporting ?? 0) >= readable,
   };
   const lan = router.ports.filter(isInUseLanPort);
+  const notes: string[] = [];
+
+  /** An AP on one of the router's own cables — which one, attachToRouter decides. */
+  const routerAp = (ap: ApDeviceInfo): RouterEntity => {
+    const node = apNode(ap, null, hint);
+    return { node, speed: null, claim: (jack) => ({ ...node, meta: `router ${jack.id}` }) };
+  };
 
   const entities: RouterEntity[] = [];
   if (input.switch) {
-    const { node, uplink } = buildSwitch(input.switch, shown, hint);
+    // The switch takes one router cable; any other cable could hold an AP.
+    const built = buildSwitch(input.switch, shown, hint, lan.length > 1);
+    const { node, uplink } = built;
+    notes.push(...built.notes);
     entities.push({
       node,
       speed: uplink?.speed ?? null,
@@ -448,16 +592,10 @@ export function buildTopology(input: TopologyInput): TopologyModel {
           .join(" · "),
       }),
     });
+    entities.push(...built.overflow.map(routerAp));
   } else {
     // No switch to hold them: each AP is a cable straight into the router.
-    for (const ap of shown) {
-      const node = apNode(ap, null, hint);
-      entities.push({
-        node,
-        speed: null,
-        claim: (jack) => ({ ...node, meta: `router ${jack.id}` }),
-      });
-    }
+    entities.push(...shown.map(routerAp));
   }
 
   const routerNode: TopologyNode = {
@@ -482,5 +620,5 @@ export function buildTopology(input: TopologyInput): TopologyModel {
         }
       : { id: "internet", kind: "internet", name: "Internet", ...wan, children: [routerNode] };
 
-  return { root, hint };
+  return { root, hint, notes };
 }

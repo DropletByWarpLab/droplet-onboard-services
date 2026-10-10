@@ -146,8 +146,14 @@ const LEGEND: { tone: TopologyTone; label: string }[] = [
  * port maps below say what each jack is doing but not what it is connected to.
  * This is the one place the pieces are drawn as a chain.
  *
- * It owns no requests of its own. Every input is a read the page already
- * makes, under the same SWR keys, so mounting it costs nothing extra:
+ * Its reads are the page's reads. The router and switch come off the same
+ * hooks, and SWR keys, as the two port maps below, so those cost nothing
+ * extra. The AP list and each AP's live radios are the Wi-Fi tab's keys
+ * (CoverageExtendersPanel, ApRadioDetail); on this tab the panel is what keeps
+ * them polling — 10 s for the list, 30 s per readable AP, and the radios only
+ * for owner/admin — and `paused` stops both while the page hides the panel
+ * (Simple mode keeps it mounted under `hidden`), so the default view never
+ * dials the access points.
  *   - the router's jacks        useRouterPorts   (GET /api/network/ports)
  *   - the switch and its ports  useSwitch        (GET /api/switch/*)
  *   - the access points         useCoverageAps   (GET /api/aps)
@@ -170,7 +176,9 @@ const LEGEND: { tone: TopologyTone; label: string }[] = [
  *   - loading            → skeleton
  *   - router unreadable  → one quiet line (we can't draw what we can't read)
  *   - otherwise          → the tree. No switch means router → devices only;
- *                          an unreachable switch or AP list says so below it.
+ *                          an unreachable switch, a switch whose ports can't
+ *                          be read, or an unreadable AP list says so below it,
+ *                          as does a switch whose ports carry no labels.
  *
  * The tree is a nested <ul>; its connector lines are CSS pseudo-elements, so
  * none of them reach the accessibility tree. Colour is never the only cue —
@@ -179,31 +187,40 @@ const LEGEND: { tone: TopologyTone; label: string }[] = [
 export function TopologyPanel({
   posture,
   radios,
+  paused = false,
 }: {
   posture?: DeploymentPosture | null;
   radios?: WirelessRadioSummary;
+  /** The page is hiding the panel (Simple mode): keep drawing, stop the AP reads. */
+  paused?: boolean;
 }) {
   const { map, isLoading: routerLoading, error: routerError } = useRouterPorts();
   const sw = useSwitch();
-  const coverage = useCoverageAps();
+  const coverage = useCoverageAps({ paused });
   const { user } = useAuth();
-  const canReadRadios = user?.role === "owner" || user?.role === "admin";
+  const canReadRadios = !paused && (user?.role === "owner" || user?.role === "admin");
 
   const router = !routerError && map && map.supported && map.ports.length > 0 ? map : null;
-  const { connected, status: switchStatus, ports: switchPorts } = sw;
+  const { connected, status: switchStatus, ports: switchPorts, portsLoading, portsError } = sw;
+  // SWR keeps the last good port list through a failed poll, so an empty list
+  // with an error means the ports read has never answered at all.
+  const portsUnread = Boolean(portsError) && switchPorts.length === 0;
   const aps = coverage.aps;
   const model = useMemo(
     () =>
       router
         ? buildTopology({
             router,
-            switch: connected && switchStatus ? { status: switchStatus, ports: switchPorts } : null,
+            switch:
+              connected && switchStatus
+                ? { status: switchStatus, ports: portsUnread ? null : switchPorts }
+                : null,
             aps,
             posture,
             radios,
           })
         : null,
-    [router, connected, switchStatus, switchPorts, aps, posture, radios],
+    [router, connected, switchStatus, switchPorts, portsUnread, aps, posture, radios],
   );
 
   if (routerLoading && !map) {
@@ -229,9 +246,12 @@ export function TopologyPanel({
     );
   }
 
-  // The rest of the tree can't be drawn until the switch and the AP list have
-  // answered once: filling them in later would redraw the router's cables.
-  if ((sw.isLoading && !switchStatus) || coverage.isLoading) {
+  // The rest of the tree can't be drawn until the switch — its status AND its
+  // ports, two separate reads — and the AP list have each answered once:
+  // filling them in later would redraw the router's cables. A read that
+  // failed has answered; its footnote is below.
+  const portsPending = connected && portsLoading && switchPorts.length === 0 && !portsError;
+  if ((sw.isLoading && !switchStatus) || portsPending || coverage.isLoading) {
     return (
       <Shell>
         <div data-testid="topology-skeleton" className="h-40 animate-pulse bg-[var(--inset)] rounded-[10px]" />
@@ -242,6 +262,7 @@ export function TopologyPanel({
   const notes = [
     sw.error && !connected ? "We can't reach the switch, so its ports aren't shown." : null,
     coverage.error ? "We couldn't read your access points, so they may be missing." : null,
+    ...model.notes,
   ].filter((n): n is string => n !== null);
 
   return (

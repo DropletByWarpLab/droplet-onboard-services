@@ -12,7 +12,8 @@
  *     already use, so the cache is shared, and they sit inside the Network
  *     page's Refresh sweep (`isNetworkSurfaceKey`) — a card whose key drifted
  *     out of it would spin the button and not move;
- *   - a failed AP read surfaces as an error, never as an empty success.
+ *   - a failed AP read surfaces as an error, never as an empty success;
+ *   - a paused list (the page is hiding the panel) makes no request at all.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
@@ -67,6 +68,15 @@ describe("useCoverageAps", () => {
 
     await waitFor(() => expect(result.current.error).toBeDefined());
     expect(result.current).toMatchObject({ aps: [], isLoading: false });
+  });
+
+  it("makes no request while the panel is hidden, and isn't 'loading'", async () => {
+    const { result } = renderHook(() => useCoverageAps({ paused: true }), { wrapper });
+
+    await new Promise((r) => setTimeout(r, 20));
+    expect(fetchApDevices).not.toHaveBeenCalled();
+    expect(result.current).toEqual({ aps: [], isLoading: false, error: undefined });
+    expect(keys()).toEqual([]);
   });
 
   it("reads under the key the Coverage Extenders panel uses, inside the Refresh sweep", async () => {

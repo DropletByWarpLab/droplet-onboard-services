@@ -63,6 +63,11 @@ export interface UseSwitchResult {
   vlans: SwitchVlan[];
   isLoading: boolean;
   error: Error | undefined;
+  /** The ports read on its own. `isLoading`/`error` above follow the status
+   *  read, so a consumer that draws from `ports` needs these to tell "no ports
+   *  yet" and "couldn't read them" from a switch that reports none. */
+  portsLoading: boolean;
+  portsError: Error | undefined;
   /** Derived from status.connected — drives the calm empty state. */
   connected: boolean;
   refresh: () => void;
@@ -152,6 +157,8 @@ export function useSwitch(): UseSwitchResult {
     // Loading is gated on status — it's the field every render path keys off.
     isLoading: statusSwr.isLoading,
     error: statusSwr.error as Error | undefined,
+    portsLoading: portsSwr.isLoading,
+    portsError: portsSwr.error as Error | undefined,
     // A failed/absent status read reads as "not connected" so the panel never
     // implies a live switch it can't actually see.
     connected: status?.connected === true,

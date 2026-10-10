@@ -26,13 +26,24 @@ export interface UseCoverageApsResult {
   error: Error | undefined;
 }
 
-export function useCoverageAps(): UseCoverageApsResult {
-  const { data, isLoading, error } = useSWR("/api/aps", fetchApDevices, {
+export interface UseCoverageApsOptions {
+  /** True while the surface that mounts the hook is hidden — the Network page
+   *  keeps the Overview panels mounted under `hidden` in Simple mode. No
+   *  request is made and nothing polls until it is shown again; whatever is
+   *  already cached is served the moment it is. */
+  paused?: boolean;
+}
+
+export function useCoverageAps({ paused = false }: UseCoverageApsOptions = {}): UseCoverageApsResult {
+  const { data, error } = useSWR(paused ? null : "/api/aps", fetchApDevices, {
     refreshInterval: AP_LIST_REFRESH_MS,
   });
   return {
     aps: data?.aps ?? [],
-    isLoading: isLoading && data === undefined,
+    // "Hasn't answered once": true until the first rows or the first failure
+    // land, and not again during SWR's retries after a failure, so a list
+    // that keeps failing doesn't flicker between skeleton and footnote.
+    isLoading: !paused && data === undefined && error === undefined,
     error: error as Error | undefined,
   };
 }

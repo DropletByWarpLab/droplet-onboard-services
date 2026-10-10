@@ -88,6 +88,8 @@ function makeHook(over: Partial<UseSwitchResult> = {}): UseSwitchResult {
     vlans: VLANS,
     isLoading: false,
     error: undefined,
+    portsLoading: false,
+    portsError: undefined,
     connected: true,
     refresh: vi.fn(),
     changeVlan: vi.fn().mockResolvedValue(undefined),

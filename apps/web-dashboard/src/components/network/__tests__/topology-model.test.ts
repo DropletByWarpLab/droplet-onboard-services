@@ -436,12 +436,30 @@ describe("buildTopology — access points", () => {
       (n) => n.kind === "access-point",
     );
 
-    // Both are drawn under the switch, neither on a jack, and the two cabled
-    // AP jacks aren't drawn a second time as anonymous APs.
+    // Both are drawn under the switch, each on "one of" the two jacks rather
+    // than on a guessed one, and the two cabled AP jacks aren't drawn a second
+    // time as anonymous APs.
     expect(nodes.map((n) => [n.name, n.meta])).toEqual([
-      ["Lobby AP", "port not identified"],
-      ["Warehouse AP", "port not identified"],
+      ["Lobby AP", "one of ports 2, 5"],
+      ["Warehouse AP", "one of ports 2, 5"],
     ]);
+  });
+
+  it("draws every cabled AP-role jack: the rows on the jacks they could be on, the rest pooled", () => {
+    // Three cabled AP jacks, two AP rows, no MACs: the third cable is a real
+    // unit too, and it used to vanish as soon as any row was unplaced.
+    const sw = lanSwitch([{ port: 5, role: "ap" }, { port: 6, role: "ap" }])!;
+    const aps = [ap({ mac: "00:00:00:00:00:a1", displayName: "Lobby AP" }), ap({ displayName: "Warehouse AP" })];
+    const nodes = routerOf(input({ aps, switch: sw })).children[0].children.filter(
+      (n) => n.kind === "access-point",
+    );
+
+    expect(nodes.map((n) => [n.name, n.status, n.meta])).toEqual([
+      ["Lobby AP", "Online", "one of ports 2, 5, 6"],
+      ["Warehouse AP", "Online", "one of ports 2, 5, 6"],
+      ["Access point", "Wi-Fi details unavailable", "one of ports 2, 5, 6"],
+    ]);
+    expect(nodes[2].id).toBe("switch-ap-pool");
   });
 
   it("draws an AP-role jack that has a cable but no AP record as an AP we know nothing else about", () => {
@@ -458,11 +476,120 @@ describe("buildTopology — access points", () => {
     expect(nodes[0].ap).toBeUndefined();
   });
 
-  it("hangs an AP with no AP-role jack off the switch, port not identified", () => {
+  it("draws an AP with no AP-role jack once: on one of the unlabelled jacks, which are pooled minus it", () => {
+    // The AP's own jack lost its label. It is on one of the three unlabelled
+    // cabled jacks; those three cables are two devices plus the AP, not three
+    // more devices beside it.
     const sw = lanSwitch([{ port: 2, role: "unknown" }]);
     const nodes = routerOf(input({ switch: sw })).children[0].children;
 
-    expect(nodes[0]).toMatchObject({ kind: "access-point", name: "Office AP", meta: "port not identified" });
+    expect(nodes.map((n) => [n.kind, n.name, n.meta])).toEqual([
+      ["access-point", "Office AP", "one of ports 2, 5, 6"],
+      ["camera", "Camera", "port 3 · PoE 4.0 W"],
+      ["camera", "Camera", "port 4 · PoE 4.5 W"],
+      ["device", "2 wired devices", "2 of ports 2, 5, 6"],
+    ]);
+    expect(nodes.filter((n) => n.kind === "access-point")).toHaveLength(1);
+  });
+
+  it("names the router as a candidate too when it has a spare cable", () => {
+    const sw = lanSwitch([{ port: 2, role: "unknown" }]);
+    const router = routerOf(input({ switch: sw, router: routerMap([up("p2", "1 Gb"), up("p3", "1 Gb")]) }));
+
+    expect(router.children[0].children[0]).toMatchObject({
+      name: "Office AP",
+      meta: "one of ports 2, 5, 6, or the router",
+    });
+    // And the router's second cable stays a cable we can't place, not the AP.
+    expect(router.children[1]).toMatchObject({ name: "Wired device", meta: "router p2 or p3" });
+  });
+
+  it("hangs an AP off the router, not the switch, when every cabled switch jack is spoken for", () => {
+    // Only the cameras are cabled on the switch, so the AP can't be on it. The
+    // 1 Gb switch can only be on p2, which leaves p3 for the AP.
+    const sw = lanSwitch([
+      { port: 2, link_up: false, status: "offline" },
+      { port: 5, link_up: false, status: "offline" },
+      { port: 6, link_up: false, status: "offline" },
+    ]);
+    const router = routerOf(input({ switch: sw, router: routerMap([up("p2", "1 Gb"), up("p3", "2.5 Gb")]) }));
+
+    expect(router.children.map((n) => [n.kind, n.name, n.meta])).toEqual([
+      ["switch", "Zyxel GS1900-10HP", "router p2 ↔ port 1 · 1 Gb"],
+      ["access-point", "Office AP", "router p3"],
+    ]);
+    expect(router.children[0].children.map((n) => n.kind)).toEqual(["camera", "camera"]);
+  });
+
+  it("pairs a row by MAC with a jack that isn't labelled as an AP's, and draws that jack once", () => {
+    const sw = lanSwitch([{ port: 6, device: { mac: "80:EA:0B:39:AE:23", name: null } }]);
+    const { root } = buildTopology(input({ switch: sw }));
+    const nodes = root.children[0].children[0].children;
+
+    expect(nodes[0]).toMatchObject({ kind: "access-point", name: "Office AP", meta: "port 6 · 1 Gb" });
+    // The cabled AP-role jack with no row is still an AP we know nothing about,
+    // and port 6 is not also a "Wired device".
+    expect(nodes[1]).toMatchObject({ name: "Access point", meta: "port 2 · PoE 6.2 W" });
+    expect(byId(root, "switch-port-6")).toBeUndefined();
+  });
+
+  it("says so when the switch answered but its ports didn't, and leaves its APs to the router", () => {
+    const { root, notes } = buildTopology(input({ switch: { status: SWITCH_STATUS, ports: null } }));
+    const router = root.children[0];
+
+    expect(router.children.map((n) => [n.kind, n.name, n.meta])).toEqual([
+      ["switch", "Zyxel GS1900-10HP", undefined],
+      ["access-point", "Office AP", "port not identified"],
+    ]);
+    expect(router.children[0]).toMatchObject({ status: "Ports unavailable", tone: "warn", children: [] });
+    expect(notes).toEqual(["We couldn't read the switch's ports, so what's plugged into it isn't shown."]);
+  });
+});
+
+describe("buildTopology — a switch whose ports carry no labels", () => {
+  // The provisioner's port roles are operator configuration; a default install
+  // has none, and no protected port either.
+  const unlabelled: TopologyInput["switch"] = {
+    status: { ...SWITCH_STATUS, protected_port: null },
+    ports: [
+      live(1, "unknown"),
+      live(2, "unknown", { poe: poe(6.2) }),
+      live(3, "unknown", { poe: poe(4) }),
+      swPort({ port: 4 }),
+    ],
+  };
+
+  it("draws the AP once, on one of the cabled jacks, and pools the rest", () => {
+    const { root, notes } = buildTopology(input({ switch: unlabelled }));
+    const sw = root.children[0].children[0];
+
+    // No uplink to name, so the switch's jack is only the router's side of it.
+    expect(sw.meta).toBe("router p2");
+    expect(sw.children.map((n) => [n.kind, n.name, n.meta])).toEqual([
+      ["access-point", "Office AP", "one of ports 1, 2, 3"],
+      ["device", "2 wired devices", "2 of ports 1, 2, 3"],
+    ]);
+    expect(notes).toEqual([
+      "This switch's ports aren't labelled, so its uplink, access points and cameras can't be told apart from other wired devices.",
+    ]);
+  });
+
+  it("leaves the uplink out of it when the protected port names that jack", () => {
+    const { root, notes } = buildTopology(
+      input({ switch: { ...unlabelled, status: { ...SWITCH_STATUS, protected_port: 1 } } }),
+    );
+    const sw = root.children[0].children[0];
+
+    expect(sw.meta).toBe("router p2 ↔ port 1 · 1 Gb");
+    expect(sw.children.map((n) => n.meta)).toEqual(["one of ports 2, 3", "one of ports 2, 3"]);
+    expect(notes[0]).toMatch(/^This switch's ports aren't labelled, so its access points and cameras/);
+  });
+
+  it("says nothing when every jack is empty", () => {
+    const { notes } = buildTopology(
+      input({ switch: { ...unlabelled, ports: unlabelled!.ports!.map((p) => ({ ...p, link_up: false })) } }),
+    );
+    expect(notes).toEqual([]);
   });
 });
 
