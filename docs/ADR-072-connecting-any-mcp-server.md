@@ -167,3 +167,15 @@ Three levels: the `remote_mcp` channel (owner, tears everything down); per-serve
 | Disconnect revokes (RFC 7009), deletes registration, offers purge | [WARP-3924](https://warp-lab.atlassian.net/browse/WARP-3924) |
 | Dashboard review screen for vendor and owner-added tool rows (today `ToolReview.tsx` is `ext-*` only) | WARP-2430 (extended 2026-10-08) |
 | Durable runs may call remote reads; remote writes park (§7) | [WARP-3925](https://warp-lab.atlassian.net/browse/WARP-3925) |
+
+## Amendments
+
+### 2026-10-10 — no owner switch, no env allowlist, no compose profile ([WARP-3960](https://warp-lab.atlassian.net/browse/WARP-3960))
+
+Romain, 2026-10-10: no owner switch; kill switches are per-server off and Disconnect. The original text above is untouched; this amendment changes exactly these clauses:
+
+- **§1 — "Prerequisite".** The `remote_mcp` channel is **not** a master switch and no longer gates anything. It stays in `OffLanChannelKey`, `OFF_LAN_CHANNEL_DEFAULTS` (`enabled: true`) and `OFF_LAN_CHANNEL_KEYS` only as a **metering label** (`egress_meter` counts bytes under it). `PATCH /api/settings/off-lan/remote_mcp` answers 400 `channel_not_switchable`. Owner-added servers are reachable as soon as a sign-in or credential is CONNECTED; no channel has to be turned on first.
+- **§9 — kill switches.** Two levels, not three: **per-server off** (`IntegrationConnection` `DISABLED`, owner or admin; refuses new calls, aborts in-flight ones, closes the server's session, audits `refused_gate`) and **Disconnect** (the member, or an admin for a Workspace connection; unchanged). The owner-wide `remote_mcp` level is removed.
+- **Curated servers (§1) and the bridge.** `REMOTE_MCP_SERVER_ALLOWLIST` (env, parsing and docs) is deleted: every server the provider registry declares may attach, and the gate (a CONNECTED sign-in or credential, and the per-server off) decides whether it does. `mcp-bridge` loses its `remote-mcp` compose profile and is default-on; it dials nothing until a sign-in exists.
+- **"What this ADR does not permit".** "Dialing an owner-added host before the `remote_mcp` channel exists and is on" no longer applies; the pinning guard, the exact-host check and the egress entry remain the controls.
+- **Egress registry.** `docs/security/allowed-egress.yaml` wording for `atlassian-mcp` and `owner-added-mcp` changed from "off by default / off unless the switch is on" to "always reachable once a member has signed in or an admin has stored a credential; an owner or admin can turn one server off". Romain signed this wording off on 2026-10-10 (WARP-3959 decisions).

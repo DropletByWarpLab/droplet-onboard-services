@@ -279,10 +279,8 @@ describe("completeMcpSignIn", () => {
   });
 });
 
-describe("the same egress rules as every remote MCP call, before every hop", () => {
+describe("the same egress rule as every remote MCP call, before every hop (WARP-3960: only the per-server off)", () => {
   const REFUSALS: [string, Egress, string][] = [
-    ["the remote_mcp channel is off", { allowed: false, reason: "channel_disabled", message: "" }, "remote_mcp_off"],
-    ["the server is not allowlisted", { allowed: false, reason: "server_not_allowlisted", message: "" }, "server_not_allowed"],
     ["an admin turned the connection off", { allowed: false, reason: "connection_disabled", message: "off" }, "connection_disabled"],
   ];
   const bridgeCalls = (s: ReturnType<typeof setup>) =>
@@ -316,6 +314,12 @@ describe("the same egress rules as every remote MCP call, before every hop", () 
     s.gate.current = egress;
     expect((await s.complete(b.state, { browserState: null, caller: { id: "u1", role: "family" } })).outcome).toBe("blocked");
     expect(s.oauth.exchange).not.toHaveBeenCalled();
+  });
+
+  it("an unreadable gate is a generic 503 sign_in_unavailable, never a switch-shaped code", async () => {
+    const s = setup({ egress: { allowed: false, reason: "gate_unavailable", message: "" } });
+    await expect(s.begin()).rejects.toMatchObject({ code: "sign_in_unavailable", status: 503 });
+    expect(bridgeCalls(s)).toBe(0);
   });
 
   it("a read failure of the rules refuses too", async () => {

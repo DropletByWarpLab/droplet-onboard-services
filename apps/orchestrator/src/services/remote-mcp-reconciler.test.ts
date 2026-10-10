@@ -224,7 +224,6 @@ function harness(over: { allowlist?: string[]; row?: RemoteMcpConnectionRow | nu
   const lifecycle = new RemoteMcpLifecycleRegistry(() => clock.now);
   const prismaState = { row: over.row === undefined ? connectedRow : over.row };
   const prisma = {
-    offLanAllowlistChannel: { findUnique: async () => ({ enabled: true }) },
     integrationConnection: { findFirst: vi.fn(async () => prismaState.row) },
   };
   const audit = vi.fn();
@@ -236,7 +235,6 @@ function harness(over: { allowlist?: string[]; row?: RemoteMcpConnectionRow | nu
     attachAtlassianRemote({
       mux,
       prisma,
-      allowlist,
       registry,
       lifecycle,
       auditLifecycle: audit,
@@ -314,32 +312,50 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
-describe("the empty allowlist is still the shipping default (gates untouched)", () => {
-  it("registers nothing and the reconciler dials NOTHING — not even GET /sessions", async () => {
-    const h = harness({ allowlist: [] });
+describe("no connection yet, then a sign-in lands (WARP-3960: no env, no switch)", () => {
+  it("registers the server detached and dials NOTHING at attach; the reconciler attaches it the tick after a connection appears", async () => {
+    const h = harness({ row: null });
 
     const attached = await h.attach();
-    expect(attached).toMatchObject({ attached: false, reason: "not_allowlisted" });
-    expect(h.lifecycle.list()).toEqual([]);
-
-    const result = await h.tick();
-    expect(result.skipped).toBe("nothing_registered");
+    expect(attached).toMatchObject({ attached: false, reason: "gate_refused" });
+    expect(h.lifecycle.get(ATLASSIAN_REMOTE_SERVER_ID)).toMatchObject({ state: "detached", reason: "gate_refused" });
     // The assertion that matters: ZERO calls, not "no session came back".
     expect(h.bridge.calls).toHaveLength(0);
-    expect(h.bridge.fetchImpl).not.toHaveBeenCalled();
     expect(await remoteToolNames(h.mux)).toEqual([]);
+
+    // A member signs in / an admin stores a credential: the very next tick attaches.
+    h.prismaState.row = connectedRow;
+    await h.tick();
+    expect(h.lifecycle.get(ATLASSIAN_REMOTE_SERVER_ID)?.state).toBe("attached");
+    expect(await remoteToolNames(h.mux)).toEqual([
+      "atlassian__getJiraIssue",
+      "atlassian__getConfluencePage",
+    ]);
   });
 
-  it("un-registers a server the operator removed from the allowlist", async () => {
-    const h = harness();
+  it("with the gate check wired (production), a refused server writes NO lifecycle audit row per tick, and attaches the tick after the gate opens", async () => {
+    const h = harness({ row: null });
     await h.attach();
-    expect(h.lifecycle.get(ATLASSIAN_REMOTE_SERVER_ID)?.state).toBe("attached");
+    h.audit.mockClear();
+    const deps = { ...h.deps, gateAllows: async () => h.prismaState.row !== null };
 
-    // The operator empties REMOTE_MCP_SERVER_ALLOWLIST and the box reboots into
-    // an attach that now refuses. Nothing is left for the reconciler to drive.
-    const off = harness({ allowlist: [] });
-    await off.attach();
-    expect(off.lifecycle.list()).toEqual([]);
+    await reconcileRemoteMcpSessions(deps);
+    await reconcileRemoteMcpSessions(deps);
+    expect(h.audit).not.toHaveBeenCalled();
+    expect(h.lifecycle.get(ATLASSIAN_REMOTE_SERVER_ID)).toMatchObject({ state: "detached", reason: "gate_refused" });
+    expect(h.bridge.calls.some((c) => c.path.endsWith("/open"))).toBe(false);
+
+    h.prismaState.row = connectedRow;
+    await reconcileRemoteMcpSessions(deps);
+    expect(h.lifecycle.get(ATLASSIAN_REMOTE_SERVER_ID)?.state).toBe("attached");
+  });
+
+  it("a server an owner or admin turned off (DISABLED) stays detached and is not re-opened", async () => {
+    const h = harness({ row: { ...connectedRow, status: "DISABLED" } });
+    expect(await h.attach()).toMatchObject({ attached: false, reason: "gate_refused" });
+    await h.tick();
+    expect(h.lifecycle.get(ATLASSIAN_REMOTE_SERVER_ID)).toMatchObject({ state: "detached", reason: "gate_refused" });
+    expect(h.bridge.calls.some((c) => c.path.endsWith("/open"))).toBe(false);
   });
 });
 

@@ -78,7 +78,7 @@ is deliberately **no separate API gateway service** in front of the orchestrator
 | **shared-types** | `packages/shared-types/` | TypeScript + Zod | Cross-package `Anchor` types + the PM filter language |
 | **fips-selftest** | `packages/fips-selftest/` | TypeScript | FIPS 140-3 boot self-test (Node services) |
 | **mcp-server** | `services/mcp-server/` | TypeScript + MCP SDK | Tool dispatch (stdio + HTTP) |
-| **mcp-bridge** | `services/mcp-bridge/` | TypeScript + MCP SDK | **Outbound** MCP sessions (ADR-043 §5) — profile `remote-mcp`, off by default |
+| **mcp-bridge** | `services/mcp-bridge/` | TypeScript + MCP SDK | **Outbound** MCP sessions (ADR-043 §5) — default-on, dials nothing until a sign-in is connected |
 | **ai-gateway** | `services/ai-gateway/` | Python + FastAPI | Inference router + gRPC embed/rerank |
 | **routing** | `services/routing/` | Python + FastAPI | OpenWrt control via ubus |
 | **switch** | `services/switch/` | Python + FastAPI | Managed-switch driver |
@@ -124,7 +124,7 @@ network. Host-published ports and host-network services are called out.
 | ai-gateway | 8000 | HTTP (REST/SSE) | internal (proxied at `/ai/`) |
 | ai-gateway | 50051 | gRPC | internal — `EmbedText` / `Rerank` / `ClassifyQuery` (chat is HTTP) |
 | mcp-server | 9090 (`MCP_PORT`) | streamable-HTTP | internal (+ stdio child of orchestrator) |
-| mcp-bridge | 9096 (`MCP_BRIDGE_PORT`) | HTTP (internal JSON) | internal only (profile `remote-mcp`) — holds the customer's vendor credential in memory |
+| mcp-bridge | 9096 (`MCP_BRIDGE_PORT`) | HTTP (internal JSON) | internal only (default-on) — holds the customer's vendor credential in memory |
 | routing | 8080 | HTTP | **host network mode** (direct router access) |
 | switch | 8081 | HTTP | host (profile `full`) |
 | oled-display | 8082 | HTTP | host network (display profile) |
@@ -401,8 +401,8 @@ network. Host-published ports and host-network services are called out.
   `web-fetch`). WARP-2300 / WARP-2316 / WARP-2627.
 - **Stack / entry point:** TypeScript, `@modelcontextprotocol/sdk` (its ONLY
   dependency — no Prisma, no `@droplet/*`), `node:http`. Boots
-  `dist/server.js` on `MCP_BRIDGE_PORT` (9096). Compose profile **`remote-mcp`,
-  off by default**; `expose:` only, never a host port.
+  `dist/server.js` on `MCP_BRIDGE_PORT` (9096). **Default-on, no compose profile**
+  (WARP-3960); `expose:` only, never a host port.
 - **Surface:** `GET /health` (no bearer — the compose healthcheck),
   `POST /sessions/:serverId/open`, `GET /sessions/:serverId/tools`,
   `POST /sessions/:serverId/call`, `GET /sessions/:serverId/state`,
@@ -421,10 +421,11 @@ network. Host-published ports and host-network services are called out.
   `apps/orchestrator/src/services/adr-043-boundary.test.ts`).
 - **Gotchas:** the customer's API token is held **in memory only**, for the life
   of the session — a container restart is a genuine teardown, which is what
-  ADR-043 §4's kill switch requires. Three independent gates must ALL pass
-  before anything is dialled: the `remote-mcp` compose profile, a non-empty
-  `REMOTE_MCP_SERVER_ALLOWLIST`, and a `CONNECTED` `IntegrationConnection` row
-  holding a sealed credential — all three are off/absent on a fresh box. The
+  ADR-043 §4's kill switch requires. Nothing is dialled until a `CONNECTED`
+  sign-in or `IntegrationConnection` row holding a sealed credential exists, and
+  never for a server an owner or admin turned off (per-server `DISABLED`; the
+  other kill switch is Disconnect). There is no env allowlist, no compose
+  profile and no owner switch (WARP-3960, Romain 2026-10-10). The
   wire contract is **duplicated** in `apps/orchestrator/src/services/mcp-bridge.client.ts`
   on purpose (importing this package would drag the transport across the §5
   line); the duplication is gated by the boundary test, not trusted.

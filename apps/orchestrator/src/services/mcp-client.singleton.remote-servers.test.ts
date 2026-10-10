@@ -16,25 +16,23 @@
  *
  * `fixture-bearer` is a TEST-ONLY bearer-only descriptor built in this file and
  * handed to the wiring through the `servers` parameter. It is not, and may never
- * be, in the production provider registry, `REMOTE_SERVER_DOMAINS`, the compose
- * allowlist or the bridge's `SESSION_PROFILES` — the allowlist below is a mock
- * of config for THIS FILE, and the shipping default is asserted, with the real
- * config, in `mcp-client.singleton.remote-default.test.ts`.
+ * be, in the production provider registry, `REMOTE_SERVER_DOMAINS` or the
+ * bridge's `SESSION_PROFILES`; the nothing-connected default is asserted, with
+ * the real config, in `mcp-client.singleton.remote-default.test.ts`.
  *
  * Credential fixtures are obviously fake and every host is RFC 2606 reserved.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { providerDescriptor, type McpProviderDescriptor } from "@droplet/shared-types";
 
-// The allowlist is read once, when the singleton loads: an operator who opted
-// two servers in.
+// No allowlist any more (WARP-3960): a registration handed to the attach wiring
+// may attach, and the gate decides. Only the bridge address is mocked.
 vi.mock("../config.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../config.js")>();
   return {
     ...actual,
     config: {
       ...actual.config,
-      REMOTE_MCP_SERVER_ALLOWLIST: "atlassian,fixture-bearer",
       MCP_BRIDGE_URL: "http://mcp-bridge.test:9096",
       MCP_BRIDGE_SERVICE_TOKEN: "bridge-token-FAKE-0000000000000000",
     },
@@ -289,7 +287,6 @@ function fixturePrisma(rows: Record<string, RemoteMcpConnectionRow | null>) {
   const keyOf = (w: { serverId_toolName: { serverId: string; toolName: string } }) =>
     `${w.serverId_toolName.serverId} ${w.serverId_toolName.toolName}`;
   const prisma = {
-    offLanAllowlistChannel: { findUnique: async () => ({ enabled: true }) },
     integrationConnection: {
       findFirst: vi.fn(async (args: { where: { provider: string } }) => rows[args.where.provider] ?? null),
     },
@@ -455,7 +452,7 @@ describe("the boot attach loops every registered server (TC-1.2)", () => {
     ]);
   });
 
-  it("skips a registered server the operator has not allowlisted — no row read, no dial — and still attaches the others", async () => {
+  it("skips a registered server with no connection — refused at the gate, no dial — and still attaches the others", async () => {
     const results = await ensureRemoteMcpAttached(db.prisma, [
       atlassianRegistration(),
       fixtureRegistration(OFF),
@@ -467,12 +464,10 @@ describe("the boot attach loops every registered server (TC-1.2)", () => {
       [OFF, false],
       [FIXTURE, true],
     ]);
-    expect(results[1]).toMatchObject({ reason: "not_allowlisted" });
-    expect(
-      db.prisma.integrationConnection.findFirst.mock.calls.some(([a]) => a.where.provider === OFF),
-    ).toBe(false);
+    expect(results[1]).toMatchObject({ reason: "gate_refused" });
     expect(bridge.calls.some((c) => c.path.startsWith(`/sessions/${OFF}`))).toBe(false);
-    expect(remoteMcpLifecycle.get(OFF)).toBeUndefined();
+    // Registered detached, so the reconciler attaches it once a sign-in connects.
+    expect(remoteMcpLifecycle.get(OFF)).toMatchObject({ state: "detached", reason: "gate_refused" });
   });
 
   it("attempts the NEXT server when one throws, then reports the failure to the caller", async () => {

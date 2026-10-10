@@ -9,7 +9,7 @@
  *
  * WARP-2395 — `mcpClient` is now an `McpToolMultiplexer` wrapping that child
  * rather than the child itself. The child is still the only session a
- * shipping box has (the remote allowlist is empty), and the exported name,
+ * box has until a remote server's sign-in connects, and the exported name,
  * type surface and behaviour are unchanged for every importer.
  *
  * The path resolution prefers an explicit `MCP_SERVER_BIN` env var (set
@@ -25,7 +25,7 @@ import { recordActivity } from "./activity.singleton.js";
 import { confirmationActivityParams } from "./confirmation-audit.js";
 import { createLogger } from "../lib/logger.js";
 import { McpBridgeClient } from "./mcp-bridge.client.js";
-import { abortRemoteMcpInFlight } from "./remote-mcp-gateway.service.js";
+import { abortRemoteMcpInFlight, remoteMcpGate } from "./remote-mcp-gateway.service.js";
 import { McpClientService } from "./mcp-client.service.js";
 import { McpToolMultiplexer } from "./mcp-multiplexer.service.js";
 import {
@@ -42,7 +42,6 @@ import { EXTENSION_SERVER_PREFIX } from "./extension-token.js";
 import {
   attachRemoteServer,
   detachRemoteServer,
-  parseRemoteMcpAllowlist,
   registeredRemoteServers,
   repickCatalogSession,
   type AttachRemoteDeps,
@@ -92,9 +91,9 @@ const localClient = new McpClientService({
  * attaching one later is a call to `attachRemote`, not a change to the twelve
  * modules that import this name.
  *
- * The allowlist is read once at module load and ships EMPTY
- * (`REMOTE_MCP_SERVER_ALLOWLIST`, config.ts), so on any box that has not been
- * configured `attachRemote` refuses every server.
+ * WARP-3960 - no env allowlist: every registered server may attach, and the
+ * gate (a CONNECTED sign-in or credential, and the per-server off) decides
+ * whether it does.
  *
  * WARP-2316 — the remote call policy is no longer the bare deny-everything
  * default. It is the compiled TABLES, layered OVER that default: a name in a
@@ -111,26 +110,26 @@ const localClient = new McpClientService({
  * exists, in this repo, reviewed as a diff on
  * `docs/security/atlassian-mcp-tool-surface.json`. Writes stay blocked.
  *
- * The observable behaviour on a shipping box is UNCHANGED, because the
- * allowlist is empty and no server can attach — the policy only matters once
- * an operator opts in.
  */
-const remoteAllowlist = parseRemoteMcpAllowlist(config.REMOTE_MCP_SERVER_ALLOWLIST);
 
 /**
  * Which server ids may attach.
  *
  * WARP-2900 — an `ext-<slug>` id is a promoted workshop extension, and ONLY
  * the extension lifecycle decides it: it must be in `installedExtensionIds`
- * (maintained from the Extension rows, never from env). The env allowlist
- * does not reach that namespace — an operator typing `ext-foo` into
- * REMOTE_MCP_SERVER_ALLOWLIST attaches nothing that was not promoted and
- * installed. Every other id is the operator allowlist, exactly as before.
+ * (maintained from the Extension rows, never from env). Every other id must be
+ * one the provider registry declares (WARP-3960: registered = allowed; the env
+ * allowlist is gone).
  */
 export function isRemoteServerAllowed(serverId: string): boolean {
   if (serverId.startsWith(EXTENSION_SERVER_PREFIX)) return installedExtensionIds.has(serverId);
-  return remoteAllowlist.has(serverId);
+  return offeredServerIds.has(serverId) || registeredRemoteServers().some((s) => s.serverId === serverId);
 }
+
+/** Ids of registrations handed to {@link attachRegistered}. In production that is
+ *  the registry itself; the injectable `servers` parameter lets a test attach one
+ *  that exists nowhere else. Never fed from env or a request. */
+const offeredServerIds = new Set<string>();
 
 // WARP-2426 — the operator-owned classification record, layered over the
 // reviewed per-server tables: the record's `denied` wins over everything; its
@@ -233,17 +232,10 @@ function attachRegistered(
   knownTools?: readonly string[],
 ): Promise<RemoteAttachResult> {
   // WARP-2416: one attach (boot, reconcile re-open) or catalog re-pick per server at a time.
-  // Noted while queued or running, so the kill switch also covers a server whose attach is in flight.
-  attaching.set(server.serverId, (attaching.get(server.serverId) ?? 0) + 1);
-  return withServerLock(server.serverId, () => attachRegisteredLocked(prisma, server, knownTools)).finally(() => {
-    const n = (attaching.get(server.serverId) ?? 1) - 1;
-    if (n <= 0) attaching.delete(server.serverId);
-    else attaching.set(server.serverId, n);
-  });
+  // The per-server off queues its detach on the same lock, so it covers an attach in flight.
+  offeredServerIds.add(server.serverId);
+  return withServerLock(server.serverId, () => attachRegisteredLocked(prisma, server, knownTools));
 }
-
-/** Servers with an attach queued or running (count per id). */
-const attaching = new Map<string, number>();
 
 async function attachRegisteredLocked(
   prisma: AttachRemoteDeps["prisma"],
@@ -258,7 +250,6 @@ async function attachRegisteredLocked(
     ...server,
     mux: mcpClient,
     prisma,
-    allowlist: remoteAllowlist,
     createClient: () => createBridgeClient(server.serverId),
     // WARP-2426 — the same client, seen through the classification surface.
     // `prisma` here is typed to the gate's narrow row shape; at runtime it is
@@ -303,10 +294,8 @@ async function attachRegisteredLocked(
  *
  * Called once from `index.ts` after the stdio child is up, and answers one
  * result per registered server (WARP-3703: it used to answer Atlassian's alone).
- * On the SHIPPING default — `REMOTE_MCP_SERVER_ALLOWLIST` empty — every server
- * is refused at the first gate, having touched no network, read no row and
- * constructed no client, so the boot path is byte-identical to before on every
- * unconfigured box.
+ * On a box nobody has signed in on, every server is refused at the first gate,
+ * having touched no network and constructed no client.
  *
  * One at a time and in registry order: an attach lists the whole multiplexer
  * catalog, so concurrent attaches would read each other's half-attached state.
@@ -389,7 +378,7 @@ export const catalogSignInChanged = createCatalogRepicker({
       const reg = remoteMcpLifecycle.get(serverId);
       if (!client || reg?.state !== "attached") return;
       const outcome = await repickCatalogSession(
-        { ...server, mux: mcpClient, prisma, allowlist: remoteAllowlist },
+        { ...server, mux: mcpClient, prisma },
         client,
         reg.vettedTools,
       );
@@ -399,26 +388,22 @@ export const catalogSignInChanged = createCatalogRepicker({
 });
 
 /**
- * WARP-3912 (ADR-043 §4) - the `remote_mcp` channel was turned off: refuse new
- * calls (the gate already does, on its next read), abort the ones in flight,
- * and close every session this process holds (the bridge closes its streams
- * with the session). Idempotent; a box that attached nothing does nothing.
+ * WARP-3912 (ADR-043 §4) / WARP-3960 - one server was turned off (the per-server
+ * off): refuse new calls (the gate already does, on its next read), abort the
+ * ones in flight, and close the session this process holds for it (the bridge
+ * closes its streams with the session). Idempotent; a server that attached
+ * nothing does nothing. The detach queues behind an in-flight attach on the
+ * per-server lock, so what the attach opens is closed right after, never left
+ * behind.
  */
-export async function tearDownRemoteMcp(): Promise<void> {
-  abortRemoteMcpInFlight();
-  // Attached servers AND servers whose attach is in flight: the detach queues behind that attach
-  // on the per-server lock, so what the attach opens is closed right after, never left behind.
-  const ids = new Set([...attachedClients.keys(), ...attaching.keys()]);
-  await Promise.all(
-    [...ids].map(async (id) => {
-      await detachRemoteMcp(id);
-      // The switch is off, so the server is no longer attached; the reconciler re-attaches it
-      // once the switch is back on (its attach gate refuses until then).
-      if (remoteMcpLifecycle.get(id)?.state === "attached") {
-        remoteMcpLifecycle.record({ serverId: id, state: "detached", reason: "gate_refused" });
-      }
-    }),
-  );
+export async function tearDownRemoteServer(serverId: string): Promise<void> {
+  abortRemoteMcpInFlight(serverId);
+  await detachRemoteMcp(serverId);
+  // Off, so no longer attached; the reconciler re-attaches it once it is turned back on
+  // (its attach gate refuses until then).
+  if (remoteMcpLifecycle.get(serverId)?.state === "attached") {
+    remoteMcpLifecycle.record({ serverId, state: "detached", reason: "gate_refused" });
+  }
 }
 
 /** One bridge client for a given server id. A factory rather than a singleton
@@ -469,6 +454,8 @@ export function remoteMcpReconcilerDeps(
       mcpClient.detachRemote(serverId);
       recordCatalog(serverId, null);
     },
+    // WARP-3960: a server refused at the gate is retried only once the gate would pass.
+    gateAllows: async (serverId) => (await remoteMcpGate(prisma, serverId)).allowed,
     reattach: async (serverId, knownTools) => {
       const server = servers.find((s) => s.serverId === serverId);
       if (!server) {

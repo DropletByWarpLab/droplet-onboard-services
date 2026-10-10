@@ -3,23 +3,17 @@
  * extensions.
  *
  *   - an `ext-*` server may attach only while the lifecycle lists it in
- *     installedExtensionIds; the env allowlist cannot reach that namespace
- *     (MUTATION: `allowlist.has(id) || installed.has(id)` → the env-listed
- *     ext id attaches → red);
- *   - every other id is still the operator allowlist;
+ *     installedExtensionIds; nothing else can reach that namespace (WARP-3960:
+ *     the env allowlist is gone; the registry never lists an `ext-*` id)
+ *     (MUTATION: `installed.has(id)` → `true` → the uninstalled ext id
+ *     attaches → red);
+ *   - every other id must be one the provider registry declares;
  *   - for `ext-*` the classification record is the whole authority: the
  *     import default is REMOTE_WRITE_NOT_PERMITTED, a reviewed read runs, a
  *     block is final (MUTATION: route ext ids through the composed vendor
  *     policy → the default reads REMOTE_TOOL_NOT_CLASSIFIED → red).
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
-
-// The allowlist is read once, when the singleton loads: an operator who listed
-// an ext id by hand, next to a vendor server.
-vi.mock("../config.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../config.js")>();
-  return { ...actual, config: { ...actual.config, REMOTE_MCP_SERVER_ALLOWLIST: "atlassian,ext-sneaky" } };
-});
 
 import {
   isRemoteServerAllowed,
@@ -72,12 +66,12 @@ describe("which servers may attach", () => {
     expect(isRemoteServerAllowed("ext-wc")).toBe(false);
   });
 
-  it("the env allowlist does not reach the ext namespace", () => {
+  it("an ext id nobody installed is refused, whatever else is registered", () => {
     expect(isRemoteServerAllowed("ext-sneaky")).toBe(false);
     expect(mcpClient.attachRemote("ext-sneaky", PORT)).toMatchObject({ code: "SERVER_NOT_ALLOWLISTED" });
   });
 
-  it("every other id is still the operator allowlist", () => {
+  it("every other id must be a registered server", () => {
     expect(isRemoteServerAllowed("atlassian")).toBe(true);
     expect(isRemoteServerAllowed("vendor")).toBe(false);
   });

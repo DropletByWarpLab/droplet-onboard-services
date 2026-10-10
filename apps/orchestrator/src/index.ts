@@ -495,9 +495,9 @@ async function main() {
   }
 
   // WARP-2627 / ADR-043 §5: attach the OUTBOUND MCP sessions, if this box is
-  // entitled to any. On the shipping default (REMOTE_MCP_SERVER_ALLOWLIST
-  // empty) this constructs nothing and dials nothing — every server answers
-  // `not_allowlisted` and the boot path is unchanged. Non-fatal either way: a
+  // entitled to any. A box nobody has signed in on constructs nothing and dials
+  // nothing — every server answers `gate_refused` (WARP-3960: no env allowlist,
+  // no owner switch; the per-server off is the kill switch). Non-fatal: a
   // vendor session that cannot be opened must not stop the appliance booting.
   try {
     for (const attached of await ensureRemoteMcpAttached(prisma)) {
@@ -561,9 +561,7 @@ async function main() {
   //
   // NO `lockKey`, deliberately: unlike the firewall reconcilers below, what this
   // converges is per-PROCESS in-memory state, so a lock would leave every
-  // replica but one permanently detached. And on the shipping default
-  // (REMOTE_MCP_SERVER_ALLOWLIST empty) the registry is empty, so a tick returns
-  // without dialling anything at all.
+  // replica but one permanently detached.
   mountRemoteMcpReconciler(cronRuntime, remoteMcpReconcilerDeps(prisma));
 
   // WARP-2416 - renew remote-MCP web sign-ins before they expire, so a call never

@@ -51,6 +51,10 @@ describe("OffLanChannelKey mirrors (WARP-3532)", () => {
     expect(KEYS).toContain("remote_mcp"); // WARP-3912
   });
 
+  it("remote_mcp is a metering label: seeded always-on (WARP-3960)", () => {
+    expect(OFF_LAN_CHANNEL_DEFAULTS.find((d) => d.key === "remote_mcp")).toMatchObject({ enabled: true });
+  });
+
   it("seeds a default row for every key, and only for real keys", () => {
     expect(OFF_LAN_CHANNEL_DEFAULTS.map((d) => d.key).sort()).toEqual([...KEYS].sort());
   });

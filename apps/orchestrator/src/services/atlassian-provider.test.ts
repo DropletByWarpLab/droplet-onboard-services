@@ -542,7 +542,6 @@ function stack(row: SaasConnectionRow | null, allowlist: string[]) {
     remoteCallPolicy: allowAllReads,
   });
   const prisma = {
-    offLanAllowlistChannel: { findUnique: async () => ({ enabled: true }) },
     integrationConnection: { findFirst: vi.fn(async () => row) },
   };
   return {
@@ -553,7 +552,6 @@ function stack(row: SaasConnectionRow | null, allowlist: string[]) {
       attachAtlassianRemote({
         mux,
         prisma,
-        allowlist: new Set(allowlist),
         registry: new RuntimeToolRegistry(),
         createClient: () =>
           new McpBridgeClient({
@@ -570,8 +568,8 @@ function stack(row: SaasConnectionRow | null, allowlist: string[]) {
 }
 
 describe("end to end — the row the connect flow wrote reaches the vendor's tools", () => {
-  it("attaches and advertises atlassian__* once the operator opts in", async () => {
-    // REMOTE_MCP_SERVER_ALLOWLIST=atlassian, and a row produced by the shipped
+  it("attaches and advertises atlassian__* once the account is connected", async () => {
+    // No env and no owner switch (WARP-3960), and a row produced by the shipped
     // credential write rather than by hand. This is the join #1964's Gap 1 said
     // did not exist.
     const row = connect(GOOD_SUBMISSION);
@@ -653,14 +651,12 @@ describe("end to end — the row the connect flow wrote reaches the vendor's too
     expect(h.bridge.fetchImpl).not.toHaveBeenCalled();
   });
 
-  it("stays empty-by-default: a CONNECTED row alone attaches nothing", async () => {
-    // The allowlist is the operator's opt-in and it is still empty on a box
-    // nobody configured, however good the credential is.
-    const h = stack(connect(GOOD_SUBMISSION), []);
+  it("a box with no connection row attaches nothing and dials nothing (no env, no switch: the row is the gate)", async () => {
+    const h = stack(null, ["atlassian"]);
 
     const result = await h.attach();
-    expect(result).toMatchObject({ attached: false, reason: "not_allowlisted" });
+    expect(result).toMatchObject({ attached: false, reason: "gate_refused" });
     expect(h.bridge.fetchImpl).not.toHaveBeenCalled();
-    expect(h.prisma.integrationConnection.findFirst).not.toHaveBeenCalled();
+    expect(h.prisma.integrationConnection.findFirst).toHaveBeenCalledTimes(1);
   });
 });

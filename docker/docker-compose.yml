@@ -2215,14 +2215,11 @@ services:
   # socket lives here, and the orchestrator reaches it through the same
   # gate -> audit shape `routes/web.ts` puts in front of web-fetch.
   #
-  # OPT-IN THREE TIMES OVER, and each gate refuses independently:
-  #   1. this `remote-mcp` compose profile (off by default);
-  #   2. REMOTE_MCP_SERVER_ALLOWLIST naming a server id (EMPTY by default);
-  #   3. a CONNECTED IntegrationConnection row holding the customer's sealed
-  #      credential (ADR-042) — no credential, no session.
-  # Deliberately NOT in the `full` profile: `full` means "real hardware and
-  # operator credentials are present", and this one needs a vendor credential
-  # the customer mints in their own tenant.
+  # DEFAULT-ON (WARP-3960, Romain 2026-10-10: no owner switch, no env allowlist,
+  # no compose profile). ONE gate: a CONNECTED sign-in or IntegrationConnection
+  # credential (ADR-042) — no credential, no session — and the per-server off
+  # (IntegrationConnection DISABLED) an owner or admin can set. An idle bridge
+  # opens nothing and dials nothing.
   #
   # Bridge-net, `expose:` only, no host ports: the orchestrator is the only
   # caller, with MCP_BRIDGE_SERVICE_TOKEN as a bearer. The container holds the
@@ -2263,7 +2260,6 @@ services:
       timeout: 5s
       start_period: 15s
       retries: 3
-    profiles: ["remote-mcp"]
     # WARP-3656: nothing in this container execs a setuid/setcap helper, so a
     # compromised process gains nothing from blocking privilege escalation on exec.
     security_opt:

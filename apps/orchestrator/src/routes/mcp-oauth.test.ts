@@ -98,41 +98,41 @@ describe("MCP OAuth routes", () => {
     expect(res.body.error).toBe("pkce_unsupported");
   });
 
-  it("start answers a fixed 409 code with the channel off, and the bridge is never called", async () => {
+  it("start answers a fixed 409 code when an owner or admin turned the server off, and the bridge is never called", async () => {
     const { app, oauth, gate } = setup();
-    gate.current = { allowed: false, reason: "channel_disabled", message: "" };
+    gate.current = { allowed: false, reason: "connection_disabled", message: "x" };
     const res = await start(app);
     expect(res.status).toBe(409);
-    expect(res.body.error).toBe("remote_mcp_off");
-    expect(res.body.message).toMatch(/switched off by the owner/);
+    expect(res.body.error).toBe("connection_disabled");
     expect(oauth.discover).not.toHaveBeenCalled();
     expect(oauth.register).not.toHaveBeenCalled();
-    gate.current = { allowed: false, reason: "server_not_allowlisted", message: "" };
-    expect((await start(app)).body.error).toBe("server_not_allowed");
-    gate.current = { allowed: false, reason: "connection_disabled", message: "x" };
-    expect((await start(app)).body.error).toBe("connection_disabled");
+    // An unreadable gate is a generic 503, never a switch-shaped code (WARP-3960: no owner switch).
+    gate.current = { allowed: false, reason: "gate_unavailable", message: "" };
+    const unreadable = await start(app);
+    expect(unreadable.status).toBe(503);
+    expect(unreadable.body.error).toBe("sign_in_unavailable");
   });
 
-  it("callback and paste answer blocked and never exchange when remote MCP was switched off meanwhile", async () => {
+  it("callback and paste answer blocked and never exchange when the server was turned off meanwhile", async () => {
     const { app, oauth, gate } = setup();
     const s = await start(app);
     const state = new URL(s.body.authorizeUrl).searchParams.get("state")!;
-    gate.current = { allowed: false, reason: "channel_disabled", message: "" };
+    gate.current = { allowed: false, reason: "connection_disabled", message: "" };
     const cb = await request(app).get("/api/mcp/oauth/callback").query({ state, code: "c" }).set("Cookie", `${MCP_OAUTH_STATE_COOKIE}=${state}`);
     expect(cb.headers.location).toBe("/settings?mcp=atlassian:blocked");
     gate.current = { allowed: true, row: null };
     const s2 = await start(app, { provider: "atlassian", scope: "MEMBER", redirectMode: "loopback" });
     const state2 = new URL(s2.body.authorizeUrl).searchParams.get("state")!;
-    gate.current = { allowed: false, reason: "channel_disabled", message: "" };
+    gate.current = { allowed: false, reason: "connection_disabled", message: "" };
     const paste = await asUser(request(app).post("/api/mcp/oauth/paste")).send({ redirectUrl: `http://127.0.0.1/api/mcp/oauth/callback?code=c&state=${state2}` });
     expect(paste.status).toBe(409);
     expect(paste.body).toEqual({ error: "sign_in_failed", outcome: "blocked" });
     expect(oauth.exchange).not.toHaveBeenCalled();
   });
 
-  it("the pre-registered client route makes no bridge call with the channel off", async () => {
+  it("the pre-registered client route makes no bridge call with the server turned off", async () => {
     const { app, oauth, gate } = setup();
-    gate.current = { allowed: false, reason: "channel_disabled", message: "" };
+    gate.current = { allowed: false, reason: "connection_disabled", message: "" };
     const res = await asUser(request(app).patch("/api/mcp/oauth/client"), "admin").send({ provider: "atlassian", clientId: "mine" });
     expect(res.status).toBe(409);
     expect(oauth.discover).not.toHaveBeenCalled();

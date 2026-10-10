@@ -12,8 +12,6 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { TOOLS, TOOL_CATALOG, TOOL_ROUTES } from "@droplet/tools-core";
 import {
   localToolNames,
-  parseRemoteMcpAllowlist,
-  REMOTE_MCP_ALLOWLIST_ENV,
   remoteServerIdOf,
   syncRemoteCatalog,
   unregisterRemoteServer,
@@ -81,29 +79,19 @@ async function attachedMux(serverId: string, tools: McpToolDescriptor[]) {
   return mux;
 }
 
-describe("the operator allowlist ships EMPTY", () => {
+describe("a multiplexer nobody wired attaches nothing (WARP-3960: no env allowlist)", () => {
   /**
-   * MUTATION: make `parseRemoteMcpAllowlist(undefined)` return a set
-   * containing anything → red. The default is what stops a box that has
-   * never been configured from advertising a vendor catalog into a context
-   * window that already does not fit the local registry (ADR-043
-   * Consequences).
+   * MUTATION: make the multiplexer's default `isServerAllowed` return true →
+   * red. The env allowlist is gone; what remains is the wiring's predicate
+   * (`isRemoteServerAllowed`: the provider registry plus installed
+   * extensions), and a multiplexer built without one still admits nothing.
    */
-  it("an unset, blank or separator-only value is the empty set", () => {
-    for (const raw of [undefined, "", "   ", ",", " , , "]) {
-      expect(parseRemoteMcpAllowlist(raw).size, JSON.stringify(raw)).toBe(0);
-    }
-  });
-
-  it("parses, trims and lowercases a real list", () => {
-    expect([...parseRemoteMcpAllowlist(" Atlassian, slack ,")].sort()).toEqual([
-      "atlassian",
-      "slack",
-    ]);
-  });
-
-  it("names the env var once, so nothing re-spells it", () => {
-    expect(REMOTE_MCP_ALLOWLIST_ENV).toBe("REMOTE_MCP_SERVER_ALLOWLIST");
+  it("the default predicate denies every server", () => {
+    const mux = new McpToolMultiplexer(portDouble([tool("list_files")]));
+    expect(mux.attachRemote("atlassian", portDouble([tool("x")]))).toMatchObject({
+      code: "SERVER_NOT_ALLOWLISTED",
+    });
+    expect(mux.remoteServerIds()).toEqual([]);
   });
 });
 

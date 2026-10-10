@@ -164,7 +164,7 @@ import { createEmailRouter, EMAIL_INGEST_PATH, wireEmailAnalysis } from "./route
 import { createEmailAnalysisFn } from "./services/email-analysis.service.js";
 import { resolveActiveModel } from "./services/active-model.service.js";
 import { createToolsRouter } from "./routes/tools.js";
-import { detachRemoteMcp, mcpClient, remoteCallPolicy, tearDownRemoteMcp } from "./services/mcp-client.singleton.js";
+import { detachRemoteMcp, mcpClient, remoteCallPolicy } from "./services/mcp-client.singleton.js";
 import { stepResultValue, type StepDispatcher } from "./services/tool-spec-runner.service.js";
 import { createModelsRouter } from "./routes/models.js";
 import { createLlmAccessRouter, exemptLlmAccessInternalCalls } from "./routes/llm-access.js";
@@ -918,7 +918,7 @@ export function createApp(
   // PATCH section with per-type validation). Mutations emit ActivityRow
   // rows via recordActivity (kind: system, severity: info — one row per
   // changed key). Reads open to owner+admin+family; writes owner+admin.
-  app.use("/api", createSettingsRouter(prisma, { onRemoteMcpDisabled: () => tearDownRemoteMcp() }));
+  app.use("/api", createSettingsRouter(prisma));
 
   // WARP-2944: the certificate lifecycle for Settings → Device information
   // (days left, when the box renews, whether renewal is failing). Owner +

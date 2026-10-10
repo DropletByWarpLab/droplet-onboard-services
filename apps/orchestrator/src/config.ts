@@ -1373,22 +1373,6 @@ const envSchema = z.object({
   // env (ORCHESTRATOR_TOKEN) in lockstep.
   SERVICE_TOKEN_MCP: z.string().default(""),
 
-  // REMOTE_MCP_SERVER_ALLOWLIST — WARP-2418 / ADR-043. Comma-separated ids of
-  // the OUTBOUND MCP servers an operator has enabled on this box (e.g.
-  // "atlassian"). EMPTY BY DEFAULT and empty means "no remote server may
-  // attach", so a box that has never been configured advertises nothing
-  // remote and can dial nothing remote.
-  //
-  // Empty is not merely the safe default, it is the only correct one today:
-  // ADR-043's Consequences record that the full LOCAL registry already
-  // exceeds the shipping context window, so an unopted-in remote catalog
-  // would degrade every turn (per-turn selection, WARP-2348, is what gates
-  // that). It is also NOT the owner's kill switch — that is the `remote_mcp`
-  // OffLanChannelKey (ADR-043 §4, WARP-3912), read by `remoteMcpGate` on every
-  // remote call. This variable says which servers MAY exist; the channel says
-  // whether any session may run.
-  REMOTE_MCP_SERVER_ALLOWLIST: z.string().default(""),
-
   // MCP_BRIDGE_URL — WARP-2627 / ADR-043 §5. Compose-internal base URL of the
   // services/mcp-bridge container, which is the ONLY component allowed to open
   // a session to a remote MCP server. The orchestrator reaches it through the
