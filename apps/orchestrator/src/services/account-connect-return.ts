@@ -13,7 +13,7 @@ export function accountConnectOutcomeUrl(returnTo: AccountConnectReturnTo, provi
 }
 
 /** WARP-2405 — where a remote-MCP sign-in lands. A fixed list, like the one above. */
-export const MCP_OAUTH_RETURN_PATHS = ["/settings", "/integrations/credentials"] as const;
+export const MCP_OAUTH_RETURN_PATHS = ["/settings", "/connectors/credentials"] as const;
 export type McpOAuthReturnTo = typeof MCP_OAUTH_RETURN_PATHS[number];
 
 /** `<destination>?mcp=<provider>:<outcome>`. `provider` is a registry id (null when the flow was never claimed). */

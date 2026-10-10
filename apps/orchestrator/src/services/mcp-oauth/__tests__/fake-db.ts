@@ -1,12 +1,23 @@
-/** In-memory stand-in for the two tables the MCP sign-in touches, with the migration's CHECKs enforced. */
+/**
+ * In-memory stand-in for the tables the MCP sign-in touches (connections, users and
+ * the admin-owned integration row), with the migration's CHECKs enforced.
+ */
 import type { PrismaClient } from "@prisma/client";
 import { randomUUID } from "node:crypto";
 
 type Row = any;
-const matches = (r: Row, where: Row = {}): boolean =>
+
+/** Evaluates the subset of Prisma `where` the sign-in code uses: equality, not, lt, in, OR, and `member: { is }`. */
+const matches = (r: Row, where: Row = {}, users: Row[] = []): boolean =>
   Object.entries(where).every(([k, v]: [string, any]) => {
+    if (k === "OR") return (v as Row[]).some((w) => matches(r, w, users));
+    if (k === "member") {
+      const u = users.find((x) => x.id === r.memberId);
+      return !!u && matches(u, v.is, users);
+    }
     if (v !== null && typeof v === "object" && "not" in v) return r[k] !== v.not;
     if (v !== null && typeof v === "object" && "lt" in v) return r[k] instanceof Date && r[k] < v.lt;
+    if (v !== null && typeof v === "object" && "in" in v) return (v.in as unknown[]).includes(r[k]);
     return r[k] === v;
   });
 
@@ -14,6 +25,7 @@ const snap = (r: Row | undefined): Row | null => (r ? { ...r } : null);
 
 export function fakeMcpOAuthDb(integration: Row | null = null) {
   const rows: Row[] = [];
+  const users: Row[] = [];
   const check = (r: Row) => {
     if ((r.scope === "MEMBER") !== (r.memberId !== null)) throw new Error("owner_check");
     if (r.scope === "WORKSPACE" && (!r.workspaceAckAt || !r.workspaceAckBy)) throw new Error("workspace_ack_check");
@@ -21,9 +33,17 @@ export function fakeMcpOAuthDb(integration: Row | null = null) {
   };
   const t = {
     // Reads return snapshots, as a database does: a row read earlier does not change under the reader.
-    findFirst: async ({ where }: { where?: Row }) => snap(rows.find((r) => matches(r, where))),
-    findUnique: async ({ where }: { where: Row }) => snap(rows.find((r) => matches(r, where))),
-    findMany: async ({ where }: { where?: Row }) => rows.filter((r) => matches(r, where)).map((r) => ({ ...r })),
+    findFirst: async ({ where }: { where?: Row }) => snap(rows.find((r) => matches(r, where, users))),
+    findUnique: async ({ where }: { where: Row }) => snap(rows.find((r) => matches(r, where, users))),
+    count: async ({ where }: { where?: Row } = {}) => rows.filter((r) => matches(r, where, users)).length,
+    findMany: async ({ where, orderBy, take }: { where?: Row; orderBy?: Row; take?: number }) => {
+      let hit = rows.filter((r) => matches(r, where, users)).map((r) => ({ ...r }));
+      if (orderBy) {
+        const [key, dir] = Object.entries(orderBy)[0] as [string, "asc" | "desc"];
+        hit = hit.sort((a, b) => (a[key] < b[key] ? -1 : a[key] > b[key] ? 1 : 0) * (dir === "desc" ? -1 : 1));
+      }
+      return take === undefined ? hit : hit.slice(0, take);
+    },
     create: async ({ data }: { data: Row }) => {
       const r: Row = {
         id: randomUUID(), state: "DISCONNECTED", memberId: null, clientId: null, clientSecretEnc: null, tokensEnc: null,
@@ -37,7 +57,7 @@ export function fakeMcpOAuthDb(integration: Row | null = null) {
       return r;
     },
     update: async ({ where, data }: { where: Row; data: Row }) => {
-      const r = rows.find((x) => matches(x, where));
+      const r = rows.find((x) => matches(x, where, users));
       if (!r) throw new Error("not_found");
       const next = { ...r, ...data };
       check(next);
@@ -45,14 +65,51 @@ export function fakeMcpOAuthDb(integration: Row | null = null) {
       return r;
     },
     updateMany: async ({ where, data }: { where: Row; data: Row }) => {
-      const hit = rows.filter((x) => matches(x, where));
+      const hit = rows.filter((x) => matches(x, where, users));
       for (const r of hit) { const next = { ...r, ...data }; check(next); Object.assign(r, next); }
       return { count: hit.length };
     },
   };
+  const setUser = (u: Row): void => {
+    const full = { role: "family", directoryStatus: "ACTIVE", deletionStatus: "NONE", username: u.id, ...u };
+    const i = users.findIndex((x) => x.id === full.id);
+    if (i >= 0) users[i] = full;
+    else users.push(full);
+  };
+  const user = {
+    // A lookup BY ID of a user nobody registered answers a permissive default (an active owner), so
+    // tests that do not care about people need no setup. A lookup by username never invents anyone.
+    findFirst: async ({ where }: { where?: Row }) => {
+      const hit = users.find((u) => matches(u, where, users));
+      if (hit) return { ...hit };
+      if (where?.id && !users.some((u) => u.id === where.id)) {
+        return { id: where.id, username: where.id, role: "owner", directoryStatus: "ACTIVE", deletionStatus: "NONE" };
+      }
+      return null;
+    },
+  };
+  // McpOAuthClient: one record per (provider, issuer), unique like the migration's index.
+  const clients: Row[] = [];
+  const clientTable = {
+    findFirst: async ({ where }: { where?: Row }) => snap(clients.find((c) => matches(c, where, users))),
+    create: async ({ data }: { data: Row }) => {
+      if (clients.some((c) => c.provider === data.provider && c.issuer === data.issuer)) throw new Error("unique");
+      const c: Row = { id: randomUUID(), clientSecretEnc: null, updatedBy: null, updatedAt: new Date(), ...data };
+      clients.push(c);
+      return c;
+    },
+    update: async ({ where, data }: { where: Row; data: Row }) => {
+      const c = clients.find((x) => matches(x, where, users));
+      if (!c) throw new Error("not_found");
+      Object.assign(c, data, { updatedAt: new Date() });
+      return c;
+    },
+  };
   const prisma = {
     mcpOAuthConnection: t,
+    mcpOAuthClient: clientTable,
+    user,
     integrationConnection: { findFirst: async () => integration },
   } as unknown as PrismaClient;
-  return { prisma, rows, seed: (r: Row) => t.create({ data: r }) };
+  return { prisma, rows, users, clients, setUser, seed: (r: Row) => t.create({ data: r }) };
 }

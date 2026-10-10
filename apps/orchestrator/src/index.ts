@@ -29,6 +29,7 @@ import {
   onHealthSnapshot,
 } from "./services/health-monitor.service.js";
 import {
+  catalogSignInChanged,
   closeRemoteConnectionSession,
   ensureMcpStarted,
   ensureRemoteMcpAttached,
@@ -574,6 +575,7 @@ async function main() {
     oauth: mcpOAuthDeps.oauth,
     egress: mcpOAuthDeps.egress,
     closeSession: closeRemoteConnectionSession,
+    catalogChanged: catalogSignInChanged,
   });
 
   // WARP-2900 (ADR-056 slice H2) — the extension reconciler, both ways. A

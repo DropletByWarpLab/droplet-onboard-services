@@ -10,6 +10,7 @@ import { createGatedRemoteMcpPort, remoteMcpGate, type RemoteMcpGatePrisma } fro
 import { registerMcpOAuthRefresher } from "./mcp-oauth-refresher.js";
 import { sealTokens } from "./mcp-oauth.service.js";
 import { catalogOAuthFields, catalogOnlyFor } from "../remote-mcp-servers.js";
+import { fakeMcpOAuthDb } from "./__tests__/fake-db.js";
 import { createMemberRoutingPort, type OAuthRowLite } from "./member-routing.port.js";
 
 vi.mock("../activity.singleton.js", () => ({ recordActivity: vi.fn(async () => null), getActivitySigner: () => null }));
@@ -37,7 +38,7 @@ function row(over: Partial<OAuthRowLite> & { id: string; scope: "MEMBER" | "WORK
 
 function setup(o: {
   member?: OAuthRowLite | null; workspace?: OAuthRowLite | null; apiToken?: boolean; baseCredential?: "member" | "workspace" | "api-token";
-  integration?: { status?: string; providerConfig: unknown } | null; user?: { id: string } | null;
+  integration?: { status?: string; providerConfig: unknown } | null; user?: { id: string; directoryStatus?: string; deletionStatus?: string } | null;
 } = {}) {
   const callToolFor = vi.fn(async (_id: string, _n: string, _a: Record<string, unknown>) => ok);
   const open = vi.fn(async (_i: Record<string, unknown>) => ({}) as never);
@@ -45,7 +46,10 @@ function setup(o: {
   const client = { open, callToolFor, lastAdvertisedToolNames: () => [] as readonly string[], closeEpoch: 0 };
   const rows = { member: o.member ?? null, workspace: o.workspace ?? null };
   const prisma = {
-    user: { findFirst: vi.fn(async () => (o.user === undefined ? { id: "user-1" } : o.user)) },
+    user: {
+      findFirst: vi.fn(async () =>
+        o.user === undefined ? { id: "user-1", directoryStatus: "ACTIVE", deletionStatus: "NONE" } : o.user),
+    },
     mcpOAuthConnection: {
       findFirst: vi.fn(async (a: { where: { scope: string } }) => (a.where.scope === "MEMBER" ? rows.member : rows.workspace)),
       findUnique: vi.fn(async (a: { where: { id: string } }) => [rows.member, rows.workspace].find((r) => r?.id === a.where.id) ?? null),
@@ -328,5 +332,90 @@ describe("catalog-only base sessions and the kill switch", () => {
     await expect(s.as(() => s.port.callToolAttributed("t", {}))).rejects.toMatchObject({ code: "REMOTE_MCP_GATE_REFUSED" });
     expect(s.open).toHaveBeenCalledTimes(1);
     expect(s.callToolFor).not.toHaveBeenCalled();
+  });
+});
+
+describe("identity binding, against a database that honours `where`", () => {
+  const ALICE_ROW = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+  const BOB_ROW = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+  const WS = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+
+  async function world(o: { bobState?: string; workspace?: boolean; apiToken?: boolean } = {}) {
+    const db = fakeMcpOAuthDb();
+    db.setUser({ id: "u-alice", username: "alice" });
+    db.setUser({ id: "u-bob", username: "bob" });
+    const seed = async (id: string, scope: "MEMBER" | "WORKSPACE", memberId: string | null, state = "CONNECTED") => {
+      const r = row({ id, scope, memberId, state });
+      await db.seed({
+        ...r, issuer: "https://auth.example/iss", tokenEndpointHost: "auth.example", clientId: "c",
+        workspaceAckAt: scope === "WORKSPACE" ? NOW : null, workspaceAckBy: scope === "WORKSPACE" ? "boss" : null,
+      });
+    };
+    await seed(ALICE_ROW, "MEMBER", "u-alice");
+    await seed(BOB_ROW, "MEMBER", "u-bob", o.bobState ?? "CONNECTED");
+    if (o.workspace) await seed(WS, "WORKSPACE", null);
+    const callToolFor = vi.fn(async (_id: string, _n: string, _a: Record<string, unknown>) => ok);
+    const open = vi.fn(async (_i: Record<string, unknown>) => ({}) as never);
+    const baseCall = vi.fn(async (_n: string, _a: Record<string, unknown>) => ok);
+    const port = createMemberRoutingPort({
+      serverId: SERVER, now: () => NOW,
+      client: { open, callToolFor, lastAdvertisedToolNames: () => [], closeEpoch: 0 },
+      base: { isStarted: true, listTools: async () => [], callTool: baseCall },
+      baseCredential: o.apiToken ? "api-token" : "workspace",
+      prisma: {
+        user: db.prisma.user as never,
+        mcpOAuthConnection: db.prisma.mcpOAuthConnection as never,
+        integrationConnection: { findFirst: async () => ({ status: "CONNECTED", providerConfig: { cloudId: CLOUD } }) },
+      },
+    });
+    const as = <T,>(username: string, fn: () => Promise<T>) => withRemoteCallAttribution({ userId: username }, fn);
+    return { db, port, as, callToolFor, open, baseCall };
+  }
+
+  it("alice's call uses alice's sign-in and bob's call uses bob's", async () => {
+    const w = await world();
+    await w.as("alice", () => w.port.callToolAttributed("t", {}));
+    await w.as("bob", () => w.port.callToolAttributed("t", {}));
+    expect(w.callToolFor.mock.calls.map((c) => c[0])).toEqual([ALICE_ROW, BOB_ROW]);
+    expect(w.open.mock.calls.map((c) => c[0].connectionId)).toEqual([ALICE_ROW, BOB_ROW]);
+    expect(w.open.mock.calls[0][0].accessToken).toBe(`access-${ALICE_ROW}`);
+  });
+
+  it("an unknown username falls through to the Workspace connection, never to someone's row", async () => {
+    const w = await world({ workspace: true });
+    const r = await w.as("mallory", () => w.port.callToolAttributed("t", {}));
+    expect("credential" in r && r.credential).toBe("workspace");
+    expect(w.callToolFor.mock.calls.map((c) => c[0])).toEqual([WS]);
+  });
+
+  it("a deactivated member is refused, with zero bridge calls, and never falls through to the Workspace or API token", async () => {
+    const w = await world({ workspace: true, apiToken: true });
+    w.db.setUser({ id: "u-bob", username: "bob", directoryStatus: "DEACTIVATED" });
+    const r = await w.as("bob", () => w.port.callToolAttributed("t", {}));
+    expect(r).toMatchObject({ refusal: "REMOTE_SIGN_IN_REQUIRED" });
+    expect(w.open).not.toHaveBeenCalled();
+    expect(w.callToolFor).not.toHaveBeenCalled();
+    expect(w.baseCall).not.toHaveBeenCalled();
+    // a user being deleted is a leaver too
+    w.db.setUser({ id: "u-bob", username: "bob", deletionStatus: "PENDING" });
+    expect(await w.as("bob", () => w.port.callToolAttributed("t", {}))).toMatchObject({ refusal: "REMOTE_SIGN_IN_REQUIRED" });
+    expect(w.callToolFor).not.toHaveBeenCalled();
+  });
+
+  it.each(["PENDING_CONSENT", "ERROR", "NEEDS_RECONNECT"])(
+    "a member row in %s answers sign-in-expired and never falls through to another identity",
+    async (state) => {
+      const w = await world({ bobState: state, workspace: true, apiToken: true });
+      const r = await w.as("bob", () => w.port.callToolAttributed("t", {}));
+      expect(r).toMatchObject({ refusal: "REMOTE_SIGN_IN_EXPIRED" });
+      expect(w.callToolFor).not.toHaveBeenCalled();
+      expect(w.baseCall).not.toHaveBeenCalled();
+    },
+  );
+
+  it("a DISCONNECTED member row means 'never signed in': it falls through to the Workspace", async () => {
+    const w = await world({ bobState: "DISCONNECTED", workspace: true });
+    await w.as("bob", () => w.port.callToolAttributed("t", {}));
+    expect(w.callToolFor.mock.calls.map((c) => c[0])).toEqual([WS]);
   });
 });

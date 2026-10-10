@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { REPO_ROOT } from "../../__tests__/helpers/test-paths.js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { __setColumnCryptoKeyForTest } from "../column-crypto.service.js";
+import { __setColumnCryptoKeyForTest, deriveMcpOAuthTokenKey, encryptColumn, mcpOAuthAad } from "../column-crypto.service.js";
 import { McpBridgeError } from "../mcp-bridge.client.js";
 import { disconnectMcpOAuth, openTokens, sealTokens } from "./mcp-oauth.service.js";
 import { mountMcpOAuthRefresh, createMcpOAuthRefresher } from "./mcp-oauth-refresh.service.js";
@@ -36,6 +36,7 @@ function vendor() {
 
 async function setup(o: { expiresInMin?: number; refreshToken?: string | null; tokenEndpoint?: string; hostPin?: string; secret?: string } = {}) {
   const db = fakeMcpOAuthDb();
+  db.setUser({ id: "u1", username: "alice" });
   const v = vendor();
   let clock = new Date(T0);
   const first = v.issue(T0, (o.expiresInMin ?? 5) * 60);
@@ -50,6 +51,17 @@ async function setup(o: { expiresInMin?: number; refreshToken?: string | null; t
     revocationEndpoint: "https://auth.example/oauth/revoke", resource: "res", mcpUrl: "res",
   };
   row.tokensEnc = sealTokens(row, blob);
+  if (o.secret) row.clientSecretEnc = encryptColumn(deriveMcpOAuthTokenKey(), o.secret, mcpOAuthAad(row));
+  /** Another signed-in row (a member, or the Workspace when memberId is null), expiring in `min` minutes. */
+  const addRow = async (id: string, memberId: string | null, min: number) => {
+    const r = await db.seed({
+      id, provider: "atlassian", scope: memberId ? "MEMBER" : "WORKSPACE", memberId, state: "CONNECTED",
+      issuer: "https://auth.example/iss", tokenEndpointHost: "auth.example", clientId: "client-1", tokensEnc: "x",
+      tokenExpiresAt: new Date(T0.getTime() + min * MIN), workspaceAckAt: T0, workspaceAckBy: "boss",
+    });
+    r.tokensEnc = sealTokens(r, { ...blob, expiresAt: r.tokenExpiresAt.toISOString() });
+    return r;
+  };
   const oauth = {
     refresh: vi.fn(async (_i: unknown): Promise<{ accessToken: string; refreshToken?: string; expiresIn?: number; scope?: string }> =>
       ({ accessToken: v.issue(clock, 3600), refreshToken: "refresh-2", expiresIn: 3600 })),
@@ -57,8 +69,9 @@ async function setup(o: { expiresInMin?: number; refreshToken?: string | null; t
   const closeSession = vi.fn(async (_p: string, _c: string): Promise<void> => {});
   const gate: { current: Egress } = { current: { allowed: true, row: null } };
   const egress = async (): Promise<Egress> => gate.current;
-  const refresher = createMcpOAuthRefresher({ prisma: db.prisma, oauth, now: () => clock, closeSession, egress });
-  return { db, v, oauth, closeSession, refresher, gate, egress, row, first, advance: (ms: number) => { clock = new Date(clock.getTime() + ms); }, now: () => clock };
+  const catalogChanged = vi.fn(async (_p: string, _c: string, _e: "refreshed" | "ended"): Promise<void> => {});
+  const refresher = createMcpOAuthRefresher({ prisma: db.prisma, oauth, now: () => clock, closeSession, egress, catalogChanged });
+  return { db, v, oauth, closeSession, catalogChanged, refresher, gate, egress, addRow, row, first, advance: (ms: number) => { clock = new Date(clock.getTime() + ms); }, now: () => clock };
 }
 
 beforeEach(() => {
@@ -131,6 +144,37 @@ describe("single flight", () => {
     });
     expect(await s.refresher.refreshNow(ID)).toBe("refreshed");
     expect(openTokens(s.row).accessToken).toBe("someone-elses");
+  });
+});
+
+describe("the catalog session follows the row (WARP-2416)", () => {
+  it("tells the catalog after a successful refresh, with the row's provider and id", async () => {
+    const s = await setup();
+    await s.refresher.refreshNow(ID);
+    expect(s.catalogChanged).toHaveBeenCalledWith("atlassian", ID, "refreshed");
+  });
+
+  it("tells it when the sign-in ends (invalid_grant), but not on a transient failure or when egress is refused", async () => {
+    const dead = await setup();
+    dead.oauth.refresh.mockRejectedValueOnce(new McpBridgeError("OAUTH_TOKEN_ERROR", "revoked", 502, undefined, "invalid_grant"));
+    await dead.refresher.refreshNow(ID);
+    expect(dead.catalogChanged).toHaveBeenCalledWith("atlassian", ID, "ended");
+
+    const flaky = await setup();
+    flaky.oauth.refresh.mockRejectedValueOnce(new McpBridgeError("REMOTE_CALL_FAILED", "502", 502));
+    await flaky.refresher.refreshNow(ID);
+    expect(flaky.catalogChanged).not.toHaveBeenCalled();
+
+    const off = await setup();
+    off.gate.current = { allowed: false, reason: "channel_disabled", message: "" };
+    await off.refresher.refreshNow(ID);
+    expect(off.catalogChanged).not.toHaveBeenCalled();
+  });
+
+  it("a failing hook never fails the refresh", async () => {
+    const s = await setup();
+    s.catalogChanged.mockRejectedValueOnce(new Error("boom"));
+    expect(await s.refresher.refreshNow(ID)).toBe("refreshed");
   });
 });
 
@@ -263,5 +307,141 @@ describe("refresh obeys the same egress rules as every remote MCP call", () => {
     const r = createMcpOAuthRefresher({ prisma: s.db.prisma, oauth: s.oauth, now: () => s.now(), egress: async () => { throw new Error("db"); } });
     expect(await r.refreshNow(ID)).toBe("unavailable");
     expect(s.oauth.refresh).not.toHaveBeenCalled();
+  });
+});
+
+describe("review fixes: leavers, ordering, cross-process races, revoke", () => {
+  const WS = "44444444-4444-4444-4444-444444444444";
+  const BOB = "55555555-5555-5555-5555-555555555555";
+
+  it("the tick renews the Workspace row and active members, but not a deactivated or deleted member's grant", async () => {
+    const s = await setup({ expiresInMin: 5 });
+    await s.addRow(WS, null, 5);
+    await s.addRow(BOB, "u-bob", 5);
+    s.db.setUser({ id: "u-bob", username: "bob", directoryStatus: "DEACTIVATED" });
+    await s.refresher.tick();
+    const touched = s.catalogChanged.mock.calls.filter((c) => c[2] === "refreshed").map((c) => c[1]).sort();
+    expect(touched).toEqual([ID, WS].sort()); // bob's row was never refreshed
+    expect(s.oauth.refresh).toHaveBeenCalledTimes(2);
+
+    const gone = await setup({ expiresInMin: 5 });
+    gone.db.setUser({ id: "u1", deletionStatus: "PENDING" });
+    await gone.refresher.tick();
+    expect(gone.oauth.refresh).not.toHaveBeenCalled();
+  });
+
+  it("the tick works through the soonest-to-expire rows first", async () => {
+    const s = await setup({ expiresInMin: 9 });
+    const A = "66666666-6666-6666-6666-666666666666";
+    const B = "77777777-7777-7777-7777-777777777777";
+    await s.addRow(A, "u1b", 2);
+    await s.addRow(B, "u1c", 6);
+    s.db.setUser({ id: "u1b" });
+    s.db.setUser({ id: "u1c" });
+    await s.refresher.tick();
+    expect(s.catalogChanged.mock.calls.filter((c) => c[2] === "refreshed").map((c) => c[1])).toEqual([A, B, ID]);
+  });
+
+  it("an invalid_grant after another process already refreshed is not a sign-out", async () => {
+    const s = await setup();
+    s.oauth.refresh.mockImplementationOnce(async () => {
+      // the other process spent the old refresh token and stored new tokens
+      s.row.tokensEnc = sealTokens(s.row, { ...openTokens(s.row), accessToken: "from-the-other-process", refreshToken: "rotated" });
+      throw new McpBridgeError("OAUTH_TOKEN_ERROR", "old token spent", 502, undefined, "invalid_grant");
+    });
+    expect(await s.refresher.refreshNow(ID)).toBe("refreshed");
+    expect(s.row.state).toBe("CONNECTED");
+    expect(openTokens(s.row).accessToken).toBe("from-the-other-process");
+    expect(recordActivity).not.toHaveBeenCalled();
+  });
+
+  it("a genuinely dead grant (tokens unchanged) still ends the sign-in", async () => {
+    const s = await setup();
+    s.oauth.refresh.mockRejectedValueOnce(new McpBridgeError("OAUTH_TOKEN_ERROR", "revoked", 502, undefined, "invalid_grant"));
+    expect(await s.refresher.refreshNow(ID)).toBe("needs_reconnect");
+  });
+
+  it("disconnect revokes with the client secret when the client has one", async () => {
+    const s = await setup({ secret: "client-secret-1" });
+    const oauth = { revoke: vi.fn(async (_i: unknown): Promise<void> => {}) };
+    const deps = { oauth: oauth as never, closeSession: s.closeSession, egress: s.egress };
+    expect(await disconnectMcpOAuth(s.db.prisma, ID, { id: "u1", role: "family" }, deps)).toBe(true);
+    expect(oauth.revoke).toHaveBeenCalledWith({
+      revocationEndpoint: "https://auth.example/oauth/revoke", clientId: "client-1", clientSecret: "client-secret-1", token: "refresh-1",
+    });
+  });
+
+  it("any revoke failure, or an unreadable gate, is reported (never a clean sign-out)", async () => {
+    for (const failure of ["vendor", "gate"] as const) {
+      const s = await setup();
+      const oauth = { revoke: vi.fn(async (_i: unknown): Promise<void> => { if (failure === "vendor") throw new Error("down"); }) };
+      const egress = failure === "gate" ? async (): Promise<Egress> => { throw new Error("db"); } : s.egress;
+      const notes: { revokeSkipped?: boolean } = {};
+      expect(await disconnectMcpOAuth(s.db.prisma, ID, { id: "u1", role: "family" }, { oauth: oauth as never, closeSession: s.closeSession, egress }, notes)).toBe(true);
+      expect(notes.revokeSkipped, failure).toBe(true);
+      expect(s.row).toMatchObject({ state: "DISCONNECTED", tokensEnc: null });
+    }
+    const ok = await setup();
+    const notes: { revokeSkipped?: boolean } = {};
+    await disconnectMcpOAuth(ok.db.prisma, ID, { id: "u1", role: "family" }, { oauth: { revoke: async () => {} } as never, closeSession: ok.closeSession, egress: ok.egress }, notes);
+    expect(notes.revokeSkipped).toBeUndefined();
+  });
+
+  it("a member's sign-out and a Workspace disconnect each write an audit row with ids and kinds only", async () => {
+    const s = await setup();
+    await s.addRow(WS, null, 30);
+    const deps = { oauth: { revoke: async () => {} } as never, closeSession: s.closeSession, egress: s.egress };
+    await disconnectMcpOAuth(s.db.prisma, ID, { id: "u1", role: "family" }, deps);
+    await disconnectMcpOAuth(s.db.prisma, WS, { id: "a1", role: "admin" }, deps);
+    const rows = recordActivity.mock.calls.map((c) => c[0] as { what: string; refs: Record<string, string> });
+    expect(rows.map((r) => r.refs.scope)).toEqual(["MEMBER", "WORKSPACE"]);
+    expect(rows.every((r) => r.refs.change === "disconnect" && r.refs.connectionId)).toBe(true);
+    expect(JSON.stringify(rows)).not.toMatch(/refresh-1|access-|client-secret/);
+  });
+});
+
+describe("the catalog hook covers every way a backing row changes (WARP-2416)", () => {
+  const BOB = "55555555-5555-5555-5555-555555555555";
+
+  it("a deactivated or deleting member's row, skipped by the renewal, is reported as an ended sign-in", async () => {
+    const s = await setup({ expiresInMin: 5 });
+    await s.addRow(BOB, "u-bob", 5);
+    s.db.setUser({ id: "u-bob", username: "bob", directoryStatus: "DEACTIVATED" });
+    await s.refresher.tick();
+    expect(s.catalogChanged).toHaveBeenCalledWith("atlassian", BOB, "ended");
+    expect(s.catalogChanged).not.toHaveBeenCalledWith("atlassian", BOB, "refreshed");
+    expect(s.catalogChanged).toHaveBeenCalledWith("atlassian", ID, "refreshed"); // the active member was renewed
+    // the leaver's sign-in is ended like any other: marked, tokens cleared, bridge session closed
+    expect(s.db.rows.find((r) => r.id === BOB)).toMatchObject({ state: "NEEDS_RECONNECT", lastError: "member_inactive", tokensEnc: null, tokenExpiresAt: null });
+    expect(s.closeSession).toHaveBeenCalledWith("atlassian", BOB);
+  });
+
+  it("a leaver's row is reported once, not on every tick", async () => {
+    const s = await setup({ expiresInMin: 30 });
+    await s.addRow(BOB, "u-bob", 30);
+    s.db.setUser({ id: "u-bob", username: "bob", deletionStatus: "PENDING" });
+    await s.refresher.tick();
+    await s.refresher.tick();
+    await s.refresher.tick();
+    expect(s.catalogChanged.mock.calls.filter((c) => c[1] === BOB && c[2] === "ended")).toHaveLength(1);
+    expect(recordActivity.mock.calls.filter((c) => (c[0] as { refs: { connectionId?: string } }).refs.connectionId === BOB)).toHaveLength(1);
+  });
+
+  it("a refresh that another process or a re-consent already performed still tells the catalog", async () => {
+    const raced = await setup();
+    raced.oauth.refresh.mockImplementationOnce(async () => {
+      raced.row.tokensEnc = sealTokens(raced.row, { ...openTokens(raced.row), accessToken: "theirs" });
+      return { accessToken: "ours", refreshToken: "r2", expiresIn: 3600 };
+    });
+    expect(await raced.refresher.refreshNow(ID)).toBe("refreshed");
+    expect(raced.catalogChanged).toHaveBeenCalledWith("atlassian", ID, "refreshed");
+
+    const spent = await setup();
+    spent.oauth.refresh.mockImplementationOnce(async () => {
+      spent.row.tokensEnc = sealTokens(spent.row, { ...openTokens(spent.row), accessToken: "theirs" });
+      throw new McpBridgeError("OAUTH_TOKEN_ERROR", "spent", 502, undefined, "invalid_grant");
+    });
+    expect(await spent.refresher.refreshNow(ID)).toBe("refreshed");
+    expect(spent.catalogChanged).toHaveBeenCalledWith("atlassian", ID, "refreshed");
   });
 });
