@@ -346,9 +346,13 @@ export async function closeRemoteConnectionSession(serverId: string, connectionI
  * shipping default — detaches nothing and dials nothing.
  */
 export async function detachRemoteMcp(serverId: string): Promise<void> {
-  const client = attachedClients.get(serverId);
-  attachedClients.delete(serverId);
-  await detachRemoteServer({ mux: mcpClient, serverId, ...(client ? { client } : {}) });
+  // Under the per-server lock: a detach (the kill switch included) never lands in the middle of
+  // an attach or a catalog re-pick, so it can never be followed by that job re-creating a session.
+  await withServerLock(serverId, async () => {
+    const client = attachedClients.get(serverId);
+    attachedClients.delete(serverId);
+    await detachRemoteServer({ mux: mcpClient, serverId, ...(client ? { client } : {}) });
+  });
 }
 
 /** The Prisma client the last attach used, so a sign-in change can run the same attach again. */
@@ -393,7 +397,16 @@ export const catalogSignInChanged = createCatalogRepicker({
  */
 export async function tearDownRemoteMcp(): Promise<void> {
   abortRemoteMcpInFlight();
-  await Promise.all([...attachedClients.keys()].map((id) => detachRemoteMcp(id)));
+  await Promise.all(
+    [...attachedClients.keys()].map(async (id) => {
+      await detachRemoteMcp(id);
+      // The switch is off, so the server is no longer attached; the reconciler re-attaches it
+      // once the switch is back on (its attach gate refuses until then).
+      if (remoteMcpLifecycle.get(id)?.state === "attached") {
+        remoteMcpLifecycle.record({ serverId: id, state: "detached", reason: "gate_refused" });
+      }
+    }),
+  );
 }
 
 /** One bridge client for a given server id. A factory rather than a singleton

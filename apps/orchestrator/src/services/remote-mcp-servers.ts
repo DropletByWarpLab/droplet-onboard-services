@@ -907,7 +907,9 @@ export async function resolveCatalogCredential(
   deps: Pick<AttachRemoteServerDeps, "serverId" | "descriptor" | "prisma" | "openCredentials">,
   row: RemoteMcpConnectionRow | null,
 ): Promise<{ ok: true; credential: CatalogCredential } | { ok: false; message: string }> {
-  const apiRead = row?.providerTokensEnc
+  // The API token is a rung only while its connection is CONNECTED: a sealed token on a
+  // NEEDS_RECONNECT / ERROR row is not a credential to dial with (the gate may still pass on a sign-in).
+  const apiRead = row?.providerTokensEnc && row.status === "CONNECTED"
     ? readRemoteCredential(row, deps.descriptor, deps.openCredentials ?? openSaasCredentials)
     : null;
   if (apiRead?.ok) return { ok: true, credential: { fields: apiRead.fields, kind: "api-token", rowId: null } };
@@ -950,15 +952,8 @@ export async function repickCatalogSession(
   vettedTools: readonly string[],
 ): Promise<"reopened" | "detached" | "skipped"> {
   const { serverId } = deps;
-  const gate = await remoteMcpGate(deps.prisma, serverId, deps.allowlist);
-  if (!gate.allowed && NOT_NOW.has(gate.reason)) return "skipped";
-  const row = await deps.prisma.integrationConnection.findFirst({
-    where: { provider: serverId },
-    select: { id: true, status: true, providerTokensEnc: true, providerConfig: true },
-  });
-  const picked = await resolveCatalogCredential(deps, row);
-  if (!picked.ok) {
-    // The one legitimate detach: nothing qualifies to back the catalog any more.
+  /** The one legitimate detach: nothing qualifies to back the catalog any more. */
+  const detachNoCredential = async (): Promise<"detached"> => {
     await detachRemoteServer({ mux: deps.mux, serverId, client, ...(deps.registry ? { registry: deps.registry } : {}) });
     const t = (deps.lifecycle ?? remoteMcpLifecycle).record({ serverId, state: "detached", reason: "credential_incomplete" });
     if (t.changed) {
@@ -967,7 +962,20 @@ export async function repickCatalogSession(
       });
     }
     return "detached";
+  };
+  const gate = await remoteMcpGate(deps.prisma, serverId, deps.allowlist);
+  if (!gate.allowed) {
+    // Never reach the credential read or the open after a refusal. "Not now" (the switch, the
+    // allowlist, an admin's off, an unreadable gate) leaves the session as it is; any other
+    // refusal means nothing is left to dial with, so the server detaches.
+    return NOT_NOW.has(gate.reason) ? "skipped" : detachNoCredential();
   }
+  const row = await deps.prisma.integrationConnection.findFirst({
+    where: { provider: serverId },
+    select: { id: true, status: true, providerTokensEnc: true, providerConfig: true },
+  });
+  const picked = await resolveCatalogCredential(deps, row);
+  if (!picked.ok) return detachNoCredential();
   try {
     await client.open({
       ...picked.credential.fields,

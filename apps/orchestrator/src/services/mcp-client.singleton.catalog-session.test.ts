@@ -51,6 +51,7 @@ import {
   detachRemoteMcp,
   ensureRemoteMcpAttached,
   mcpClient,
+  tearDownRemoteMcp,
 } from "./mcp-client.singleton.js";
 import { recordCatalog, catalogBackingRow } from "./mcp-oauth/catalog-repick.js";
 import { createMcpOAuthRefresher } from "./mcp-oauth/mcp-oauth-refresh.service.js";
@@ -85,6 +86,7 @@ function bridgeModel() {
   const memberSessions = new Set<string>(["a-member-session"]);
   let barrier: Promise<void> | null = null;
   let release: (() => void) | null = null;
+  let advertised: McpToolDescriptor[] = TOOLS;
   const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
     const path = String(url).replace(BRIDGE_URL, "");
     const method = init?.method ?? "GET";
@@ -108,7 +110,7 @@ function bridgeModel() {
     }
     if (path === `/sessions/${ATLASSIAN}/tools`) {
       return json(200, {
-        tools: TOOLS.map((t) => ({
+        tools: advertised.map((t) => ({
           ...t, definitionHash: Buffer.from(`${t.name}:${t.description}`).toString("hex").padEnd(64, "0").slice(0, 64),
         })),
         state: health,
@@ -123,10 +125,16 @@ function bridgeModel() {
     fetchImpl: fetchImpl as unknown as typeof fetch,
     opens: () => calls.filter((c) => c.method === "POST" && c.path === `/sessions/${ATLASSIAN}/open`).map((c) => c.body ?? {}),
     deletes: () => calls.filter((c) => c.method === "DELETE"),
+    hasBase: () => baseSessions.size > 0,
+    /** What the vendor advertises from now on (a listing then updates the client's last-advertised names). */
+    advertise: (list: McpToolDescriptor[]) => { advertised = list; },
     hold: () => { barrier = new Promise<void>((r) => { release = r; }); },
     letGo: () => { release?.(); barrier = null; },
   };
 }
+
+/** The admin-owned connection row; a sign-in-only box holds no API token. Tests may change it. */
+let integrationRow: { id: string; status: string; providerTokensEnc: string | null; providerConfig: unknown };
 
 let bridge: ReturnType<typeof bridgeModel>;
 let fdb: ReturnType<typeof fakeMcpOAuthDb>;
@@ -139,7 +147,7 @@ function makePrisma() {
     offLanAllowlistChannel: { findUnique: async () => ({ enabled: true }) },
     // A sign-in-only box: the admin saved the site id and no API token.
     integrationConnection: {
-      findFirst: vi.fn(async () => ({ id: "conn_atlassian_0000000001", status: "CONNECTED", providerTokensEnc: null, providerConfig: { cloudId: CLOUD } })),
+      findFirst: vi.fn(async () => ({ ...integrationRow })),
     },
     mcpOAuthConnection: fdb.prisma.mcpOAuthConnection,
     user: fdb.prisma.user,
@@ -189,6 +197,7 @@ beforeEach(async () => {
   bridge = bridgeModel();
   vi.stubGlobal("fetch", bridge.fetchImpl);
   fdb = fakeMcpOAuthDb();
+  integrationRow = { id: "conn_atlassian_0000000001", status: "CONNECTED", providerTokensEnc: null, providerConfig: { cloudId: CLOUD } };
   prisma = makePrisma() as never;
   for (const id of mcpClient.remoteServerIds()) mcpClient.detachRemote(id);
   runtimeToolRegistry.unregisterServer(ATLASSIAN);
@@ -334,6 +343,60 @@ describe("when the backing sign-in stops working the choice is re-run", () => {
     expect(bridge.opens()).toHaveLength(0); // never re-opened on a regular member's token
     expect(bridge.deletes()).toHaveLength(1);
     expect(remoteMcpLifecycle.get(ATLASSIAN)).toMatchObject({ state: "detached", reason: "credential_incomplete" });
+  });
+});
+
+describe("the re-open never widens what was vetted, never dials after a refusal, and loses to the kill switch", () => {
+  it("the open's knownTools is the VETTED list even when the vendor now advertises more", async () => {
+    await seedMember(OWNER_ROW, "u-owner", "token-1");
+    await attach();
+    const vetted = [...remoteMcpLifecycle.get(ATLASSIAN)!.vettedTools].sort();
+    // The vendor adds a tool and a listing happens: the client's last-advertised names now differ from the vetted ones.
+    bridge.advertise([...TOOLS, { name: "deleteEverything", description: "new and unreviewed", inputSchema: { type: "object" } }]);
+    await mcpClient.listTools();
+    expect(bridge.calls.some((c) => c.path === `/sessions/${ATLASSIAN}/tools`)).toBe(true); // the listing really happened
+    expect([...remoteMcpLifecycle.get(ATLASSIAN)!.vettedTools].sort()).toEqual(vetted); // the vetted baseline did not move
+    bridge.calls.length = 0;
+
+    reseal(OWNER_ROW, "token-2");
+    await catalogSignInChanged(ATLASSIAN, OWNER_ROW, "refreshed");
+
+    const known = bridge.opens()[0]!.knownTools as string[];
+    expect([...known].sort()).toEqual(vetted);
+    expect(known).not.toContain("deleteEverything");
+  });
+
+  it("any gate refusal other than 'not now' detaches without reading a credential or opening: a NEEDS_RECONNECT API-token row is not dialled", async () => {
+    await seedMember(OWNER_ROW, "u-owner", "token-1");
+    await attach();
+    // The API connection died but still holds its sealed token; the only sign-in then ends.
+    integrationRow.status = "NEEDS_RECONNECT";
+    integrationRow.providerTokensEnc = "dcv1:still-sealed-but-not-connected";
+    Object.assign(fdb.rows.find((r) => r.id === OWNER_ROW)!, { state: "DISCONNECTED", tokensEnc: null });
+    await catalogSignInChanged(ATLASSIAN, OWNER_ROW, "ended");
+
+    expect(bridge.opens()).toHaveLength(0);
+    expect(bridge.deletes()).toHaveLength(1);
+    expect(remoteMcpLifecycle.get(ATLASSIAN)).toMatchObject({ state: "detached", reason: "credential_incomplete" });
+    expect(mcpClient.remoteServerIds()).not.toContain(ATLASSIAN);
+  });
+
+  it("a kill switch issued while a re-pick awaits its open waits for it and then leaves no base session and no 'attached'", async () => {
+    await seedMember(OWNER_ROW, "u-owner", "token-1");
+    await attach();
+    bridge.hold();
+    reseal(OWNER_ROW, "token-2");
+    const repick = catalogSignInChanged(ATLASSIAN, OWNER_ROW, "refreshed");
+    await vi.waitFor(() => expect(bridge.opens()).toHaveLength(1)); // parked inside the bridge open
+
+    const teardown = tearDownRemoteMcp(); // the owner switches remote MCP off right now
+    bridge.letGo();
+    await Promise.all([repick, teardown]);
+
+    expect(bridge.hasBase()).toBe(false); // the open's session was closed by the teardown that came after it
+    expect(remoteMcpLifecycle.get(ATLASSIAN)?.state).not.toBe("attached");
+    expect(mcpClient.remoteServerIds()).not.toContain(ATLASSIAN);
+    expect(bridge.deletes().length).toBeGreaterThanOrEqual(1);
   });
 });
 
