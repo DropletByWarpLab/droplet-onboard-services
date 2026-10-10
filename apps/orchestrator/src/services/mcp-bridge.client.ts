@@ -84,8 +84,7 @@ export const BRIDGE_ERROR_CODES = [
   "INVALID_REQUEST",
   "UNKNOWN_SERVER_ID",
   "SESSION_NOT_OPEN",
-  // WARP-2409 - added by the bridge's per-connection sessions (#2771); the
-  // boundary test needs that PR on stage before it agrees with this list.
+  // WARP-2409 - the bridge's per-connection sessions (gated by adr-043-boundary.test.ts).
   "NO_SESSION",
   "CATALOG_ONLY",
   "SESSION_NOT_READY",
