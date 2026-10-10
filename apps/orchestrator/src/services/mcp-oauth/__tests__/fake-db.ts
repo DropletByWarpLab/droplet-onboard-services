@@ -48,7 +48,7 @@ export function fakeMcpOAuthDb(integration: Row | null = null) {
       const r: Row = {
         id: randomUUID(), state: "DISCONNECTED", memberId: null, clientId: null, clientSecretEnc: null, tokensEnc: null,
         workspaceAckAt: null, workspaceAckBy: null, connectedAt: null, lastRefreshOkAt: null, tokenExpiresAt: null,
-        lastError: null, createdAt: new Date(), ...data,
+        lastError: null, siteId: null, siteUrl: null, siteName: null, sites: null, createdAt: new Date(), ...data,
       };
       check(r);
       if (rows.some((x) => x.provider === r.provider && x.scope === "WORKSPACE" && r.scope === "WORKSPACE")) throw new Error("unique");

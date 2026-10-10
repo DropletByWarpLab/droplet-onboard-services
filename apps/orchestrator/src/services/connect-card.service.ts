@@ -501,7 +501,7 @@ async function integrationCard(prisma: PrismaClient, actor: ConnectionsActor, pr
     card = {
       ...base,
       mode: "wizard",
-      steps: ["Choose the account and access Droplet may use", "Add the requested credentials in the setup form", "Check and connect"],
+      steps: ["Choose Connect and sign in with your account", "Approve the access Droplet asks for", "Droplet reads which site you picked and connects"],
       wizardHref: "/connectors/credentials",
     };
   } else {

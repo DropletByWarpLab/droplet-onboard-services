@@ -10042,6 +10042,9 @@ export interface McpOAuthSide {
   state: McpOAuthState;
   /** Workspace connection only: who acknowledged it. */
   ackBy?: string | null;
+  /** The site the sign-in is pinned to (read from the token), when the server has one. */
+  siteName?: string | null;
+  siteUrl?: string | null;
 }
 
 export interface McpSignInView {
@@ -10050,8 +10053,6 @@ export interface McpSignInView {
   workspace: McpOAuthSide | null;
   redirectUri: string;
   callbackSupported: boolean;
-  /** Whether a shared API token is also stored. */
-  apiToken: boolean;
 }
 
 export async function fetchMcpOAuthConnections(): Promise<McpSignInView[]> {

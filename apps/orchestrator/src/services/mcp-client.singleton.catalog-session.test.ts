@@ -60,7 +60,6 @@ import { remoteMcpLifecycle } from "./remote-mcp-lifecycle.service.js";
 import { registeredRemoteServers, type RemoteServerRegistration } from "./remote-mcp-servers.js";
 import { remoteToolClassificationCache, type RemoteToolClassificationRow } from "./remote-tool-classification.service.js";
 import { runtimeToolRegistry } from "./runtime-tool-registry.service.js";
-import { sealSaasCredentials } from "./saas-credential.service.js";
 
 const BRIDGE_URL = "http://mcp-bridge.test:9096";
 const BRIDGE_TOKEN = "bridge-token-FAKE-0000000000000000";
@@ -133,8 +132,8 @@ function bridgeModel() {
   };
 }
 
-/** The admin-owned connection row; a sign-in-only box holds no API token. Tests may change it. */
-let integrationRow: { id: string; status: string; providerTokensEnc: string | null; providerConfig: unknown };
+/** The admin-owned connection row: only its status matters now (DISABLED = the per-server off). Tests may change it. */
+let integrationRow: { id: string; status: string; providerTokensEnc: string | null };
 
 let bridge: ReturnType<typeof bridgeModel>;
 let fdb: ReturnType<typeof fakeMcpOAuthDb>;
@@ -144,7 +143,7 @@ function makePrisma() {
   const record = new Map<string, RemoteToolClassificationRow>();
   const keyOf = (w: { serverId_toolName: { serverId: string; toolName: string } }) => `${w.serverId_toolName.serverId} ${w.serverId_toolName.toolName}`;
   return {
-    // A sign-in-only box: the admin saved the site id and no API token.
+    // A sign-in-only box: the site id lives on each sign-in row (WARP-3961), not here.
     integrationConnection: {
       findFirst: vi.fn(async () => ({ ...integrationRow })),
     },
@@ -169,6 +168,7 @@ async function seedMember(id: string, memberId: string, token: string): Promise<
   const r = await fdb.seed({
     id, provider: ATLASSIAN, scope: "MEMBER", memberId, state: "CONNECTED", issuer: "https://auth.example/iss",
     tokenEndpointHost: "auth.example", clientId: "c", tokensEnc: "x", tokenExpiresAt: new Date("2100-01-01T00:00:00Z"),
+    siteId: CLOUD,
   });
   r.tokensEnc = blobFor(r, token);
 }
@@ -176,7 +176,7 @@ async function seedWorkspace(id: string, token: string): Promise<void> {
   const r = await fdb.seed({
     id, provider: ATLASSIAN, scope: "WORKSPACE", memberId: null, state: "CONNECTED", issuer: "https://auth.example/iss",
     tokenEndpointHost: "auth.example", clientId: "c", tokensEnc: "x", tokenExpiresAt: new Date("2100-01-01T00:00:00Z"),
-    workspaceAckAt: new Date(), workspaceAckBy: "boss",
+    workspaceAckAt: new Date(), workspaceAckBy: "boss", siteId: CLOUD,
   });
   r.tokensEnc = blobFor(r, token);
 }
@@ -196,7 +196,7 @@ beforeEach(async () => {
   bridge = bridgeModel();
   vi.stubGlobal("fetch", bridge.fetchImpl);
   fdb = fakeMcpOAuthDb();
-  integrationRow = { id: "conn_atlassian_0000000001", status: "CONNECTED", providerTokensEnc: null, providerConfig: { cloudId: CLOUD } };
+  integrationRow = { id: "conn_atlassian_0000000001", status: "CONNECTED", providerTokensEnc: null };
   prisma = makePrisma() as never;
   for (const id of mcpClient.remoteServerIds()) mcpClient.detachRemote(id);
   runtimeToolRegistry.unregisterServer(ATLASSIAN);
@@ -207,13 +207,6 @@ beforeEach(async () => {
   bridge.calls.length = 0;
 });
 afterEach(() => vi.unstubAllGlobals());
-
-/** The admin's API-token connection died (NEEDS_RECONNECT) but still holds a token sealed with the REAL ADR-042 seal. */
-const deadApiConnection = (): void => {
-  integrationRow.status = "NEEDS_RECONNECT";
-  integrationRow.providerTokensEnc = sealSaasCredentials(integrationRow.id, { apiToken: "ATATT-FAKE-REAL-SEAL-000000" });
-  integrationRow.providerConfig = { email: "ops@vendor.example", cloudId: CLOUD };
-};
 
 const attach = async () => {
   const [r] = await ensureRemoteMcpAttached(prisma, [registration()]);
@@ -371,12 +364,9 @@ describe("the re-open never widens what was vetted, never dials after a refusal,
     expect(known).not.toContain("deleteEverything");
   });
 
-  it("any gate refusal other than 'not now' detaches without reading a credential or opening: a NEEDS_RECONNECT API-token row is not dialled", async () => {
+  it("any gate refusal other than 'not now' detaches without reading a credential or opening: the only sign-in ends, nothing is dialled", async () => {
     await seedMember(OWNER_ROW, "u-owner", "token-1");
     await attach();
-    // The API connection died but still holds a REAL sealed token (the real seal, so it would open
-    // and be used if anything read it); the only sign-in then ends.
-    deadApiConnection();
     Object.assign(fdb.rows.find((r) => r.id === OWNER_ROW)!, { state: "DISCONNECTED", tokensEnc: null });
     await catalogSignInChanged(ATLASSIAN, OWNER_ROW, "ended");
 
@@ -386,7 +376,7 @@ describe("the re-open never widens what was vetted, never dials after a refusal,
     expect(mcpClient.remoteServerIds()).not.toContain(ATLASSIAN);
   });
 
-  it("a connected sign-in lets the gate pass, but a NEEDS_RECONNECT API row's real token is still never used", async () => {
+  it("a regular member's connected sign-in lets the gate pass, but it cannot back the shared catalog", async () => {
     await seedMember(OWNER_ROW, "u-owner", "token-1");
     await attach();
     // A regular member's sign-in is CONNECTED: the gate passes (a credential exists), but it cannot back the catalog.
@@ -394,13 +384,12 @@ describe("the re-open never widens what was vetted, never dials after a refusal,
     await fdb.seed({
       id: "44444444-4444-4444-8444-444444444444", provider: ATLASSIAN, scope: "MEMBER", memberId: "u-fam", state: "CONNECTED",
       issuer: "https://auth.example/iss", tokenEndpointHost: "auth.example", clientId: "c", tokensEnc: "x",
-      tokenExpiresAt: new Date("2100-01-01T00:00:00Z"),
+      tokenExpiresAt: new Date("2100-01-01T00:00:00Z"), siteId: CLOUD,
     });
-    deadApiConnection();
     Object.assign(fdb.rows.find((r) => r.id === OWNER_ROW)!, { state: "DISCONNECTED", tokensEnc: null });
     await catalogSignInChanged(ATLASSIAN, OWNER_ROW, "ended");
 
-    expect(bridge.opens()).toHaveLength(0); // neither the dead API token nor the family member's token
+    expect(bridge.opens()).toHaveLength(0); // not the family member's token
     expect(remoteMcpLifecycle.get(ATLASSIAN)).toMatchObject({ state: "detached", reason: "credential_incomplete" });
   });
 

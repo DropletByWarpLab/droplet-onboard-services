@@ -27,7 +27,8 @@ const fetchSpy = vi.fn(async () => {
 });
 const findFirst = vi.fn(async () => null);
 // No `offLanAllowlistChannel` and no env: neither exists any more.
-const prisma = { integrationConnection: { findFirst } };
+// Nobody has signed in (WARP-3961: a CONNECTED sign-in is the only credential).
+const prisma = { integrationConnection: { findFirst }, mcpOAuthConnection: { count: vi.fn(async () => 0) } };
 
 beforeEach(() => {
   vi.clearAllMocks();

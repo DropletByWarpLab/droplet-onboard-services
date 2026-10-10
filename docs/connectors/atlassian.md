@@ -2,8 +2,10 @@
 
 Connecting Atlassian lets Droplet **read** your Jira issues and Confluence pages so it can answer questions about your team's work without you going and looking. It cannot change anything — see [What Droplet can and cannot do with this](#what-droplet-can-and-cannot-do-with-this) below, which is a shorter list than you might expect and deliberately so.
 
-> **What Droplet does with what you paste:** [`credential-handling.md`](credential-handling.md).
-> **Sources checked 2026-09-02** — against Atlassian's own documentation for API tokens and the Rovo MCP server, and the credential facts recorded in ADR-042 §2 (pinned to WARP-2316). **Not yet walked through a live Atlassian admin console by us**, so treat the screen and button names below as a close guide rather than a screenshot. Atlassian moved the Rovo controls into the admin console during 2026; anything you read elsewhere describing a per-user toggle is out of date.
+There is **nothing to copy and paste.** You sign in with your Atlassian account, approve access on Atlassian's own screen, and Droplet reads which site you picked from that sign-in. There is no API token, no email address and no site id to type.
+
+> **What Droplet does with what you approve:** [`credential-handling.md`](credential-handling.md).
+> **Sources checked 2026-10-10** — against Atlassian's own documentation for the Rovo MCP server and its OAuth sign-in. **Not yet walked through a live Atlassian admin console by us**, so treat the screen and button names below as a close guide rather than a screenshot. Atlassian moved the Rovo controls into the admin console during 2026; anything you read elsewhere describing a per-user toggle is out of date.
 
 ## Two things have to be true before this works, and only one of them is yours
 
@@ -12,13 +14,7 @@ This is the connector where a setup most often fails for a reason the person doi
 1. **The site has to be on a paid plan.** Rovo — and therefore the MCP server Droplet talks to — is not available on the **Free plan**.
 2. **Somebody with Atlassian org admin has to switch the MCP server on.** It is off by default and it is an organisation-level setting, not a per-user one. If you are not an org admin, you will need one for about a minute.
 
-If either is missing, you can still create the token in step 1 below and it will look perfectly valid — it just will not be able to reach anything. That is the failure this section exists to prevent.
-
-## Signing in with Atlassian instead of pasting a token
-
-Where Droplet offers it, **Sign in with Atlassian** lets each member approve access with their own Atlassian account, so Droplet acts as that person and sees only what they can see. An owner or admin can also create a **Workspace connection**, which makes everyone allowed to use the server act as one shared account; Droplet asks you to acknowledge that first. The API token below stays available as the shared-account fallback.
-
-One step needs an Atlassian org admin. In **Atlassian Administration → Rovo → Rovo MCP server → Domain settings**, add your Droplet's callback address (for example `https://droplet-ai.lan/**`, or your box's own name) and `http://localhost:*/**`. Until that is done Atlassian refuses the sign-in with "Your organization admin must authorize access from this redirect URL". If the browser ends on a page that does not load, copy the full address from its address bar and paste it into the box on the card.
+If either is missing, the sign-in will be refused by Atlassian. That is the failure this section exists to prevent.
 
 ## Plan prerequisite
 
@@ -30,86 +26,72 @@ One step needs an Atlassian org admin. In **Atlassian Administration → Rovo �
 
 ## Cost
 
-**Droplet charges nothing for this connector, and Atlassian charges nothing extra for the API token.** An API token is free to create and free to use.
+**Droplet charges nothing for this connector, and Atlassian charges nothing extra for signing in.**
 
 What it *depends on* costs money: the paid plan above. If your site is on the Free plan, the cost of connecting Atlassian is the cost of upgrading it, and that is a decision to make before you start rather than after. Atlassian prices per user per month and the current figure is on their pricing page — we deliberately do not quote a number here that would be stale by the time you read it.
 
 ## Click-path
 
-### 1. Create the API token
+### 1. Let your Droplet's address sign in (org admin, once)
 
-1. Sign in to Atlassian as **the account whose access you want Droplet to have**. This matters: the token inherits exactly that person's permissions, no more and no less. A token made by someone who can only see two Jira projects gives Droplet two Jira projects.
-2. Go to **id.atlassian.com → Security → API tokens** (reachable from your profile menu as *Account settings → Security → Create and manage API tokens*).
-3. Click **Create API token**, give it a name you will recognise in a year — `Droplet` is a good one — and set an expiry.
-4. **Copy it now.** Atlassian shows the token exactly once. If you lose it, you delete it and make another; there is no way to view it again.
+In **Atlassian Administration → Rovo → Rovo MCP server → Domain settings**, add your Droplet's callback address (for example `https://droplet-ai.lan/**`, or your box's own name) and `http://localhost:*/**`. Until that is done Atlassian refuses the sign-in with "Your organization admin must authorize access from this redirect URL".
 
-### 2. Find your site id (`cloudId`)
+### 2. Sign in
 
-Droplet needs to know **which** Atlassian site to read, because one token can reach every site your account belongs to and we will not guess.
+In Droplet: **Connectors → Atlassian → Connect**. Atlassian opens in your browser. Sign in as **the account whose access you want Droplet to have**, choose the site, and approve. Droplet then acts as that person and sees only what they can see.
 
-The simplest way: open `https://<your-site>.atlassian.net/_edge/tenant_info` in a browser while signed in. It returns a single value labelled `cloudId`. Copy it.
+An owner or admin can also create a **Workspace connection**, which makes everyone allowed to use the server act as one shared account; Droplet asks you to acknowledge that first.
 
-If you only have one Atlassian site, this is still required — Droplet asks for it explicitly rather than picking for you, so that adding a second site later cannot silently change what the box is reading.
+If the browser ends on a page that does not load, copy the full address from its address bar and paste it into the box on the card.
 
-### 3. Paste all three into Droplet
+### 3. Which site Droplet reads
 
-In Droplet: **Connectors → Atlassian → Connect**, and supply
-
-- the **email address** of the account that created the token,
-- the **API token** itself,
-- the **site id** from step 2,
-- and the **expiry date** you chose in step 1.
-
-The expiry date is not decoration. It is the only way Droplet can warn you before the token stops working — see [Rotation and expiry](#rotation-and-expiry).
+Atlassian lets you choose **one site** on its consent screen. Droplet asks Atlassian which site you chose, remembers it, and sends **every** request to that site and no other — the name of the site is shown next to your sign-in in Droplet. If you belong to several sites and want a different one, sign in again and choose it on Atlassian's screen. If Atlassian grants no site at all, the sign-in ends with an error and nothing is stored: sign in again and tick a site on the consent screen.
 
 ## Scopes and permissions
 
-**There are no scopes to tick, and that is worth understanding rather than glossing over.** An Atlassian API token is not scoped. It carries the full permissions of the person who created it, across every Atlassian product that person can reach on every site they belong to.
+**What Droplet asks Atlassian for** is the smallest set that reads Jira and Confluence: your profile and account, Jira work items, Confluence pages, comments and spaces, plus `offline_access` so the sign-in can renew itself without asking you again. You see the full list on Atlassian's consent screen.
 
-So the way you limit what Droplet can see is **by choosing whose account creates the token**. If you want the box restricted to one team's projects, have someone whose access is already restricted to those projects create it. There is no setting inside Droplet, and none inside Atlassian, that can narrow it afterwards.
+**Droplet acts as the person who signed in.** It can see exactly what that account can see — no more and no less. To limit what the box can see, sign in with an account that is already limited to the projects you want.
 
 **What Droplet can and cannot do with this**
 
-Even though the token could do more, the box will not. Droplet holds an explicit list of the Atlassian operations it is allowed to perform, that list is in the product rather than in a setting you could change by accident, and in this release **it contains reads only**:
+Even though the account could do more, the box will not. Droplet holds an explicit list of the Atlassian operations it is allowed to perform, that list is in the product rather than in a setting you could change by accident, and in this release **it contains reads only**:
 
 - **Reads run automatically** — fetching an issue, searching Jira with JQL, reading a Confluence page or its comments, searching, and looking up who someone is.
-- **Writes are blocked entirely in this release.** Droplet will not create a Jira issue, comment, transition a ticket, log work, or create a Confluence page — even though your token permits all of those.
+- **Writes are blocked entirely in this release.** Droplet will not create a Jira issue, comment, transition a ticket, log work, or create a Confluence page — even though your account permits all of those.
 - **Editing an existing Confluence page is blocked outright and separately**, because Atlassian's own tool for it replaces the whole page body rather than editing part of it. An automated "add a paragraph" would delete everything else on the page, and Confluence would record that as a perfectly normal successful edit. We would rather not offer it than offer it with a warning.
 
-**A caveat about which tools exist at all.** Atlassian gates some of its own tools on *how* you signed in, not on what you can access. Jira Service Management and Bitbucket tools are reachable only with an API token, and Compass tools only with the browser sign-in flow that Droplet deliberately does not use. If you ask Droplet for something in Compass, it will tell you the connection cannot reach it — it will not tell you there is nothing there.
+**The model can never choose a different site.** The site is fixed when you sign in and is added to every call by Droplet itself, after the model has spoken; a request that names another site is overwritten.
+
+**A caveat about which tools exist at all.** Atlassian gates some of its own tools on *how* you signed in. Jira Service Management and Bitbucket tools are not reachable with a browser sign-in. If you ask Droplet for something there, it will tell you the connection cannot reach it — it will not tell you there is nothing there.
 
 ## Rotation and expiry
 
-**An Atlassian API token lasts at most 365 days.** This is the single most important thing on this page, because unlike most of the other connectors there is a hard stop: on the expiry day, every request starts failing and the box looks broken.
+**There is no token to rotate.** Atlassian gives Droplet short-lived access that Droplet renews on its own. If the renewal ever stops working (you changed your password, an admin removed your access, or Atlassian ended the grant), the connection shows *Sign in again* and Droplet stops using it until you do. It never keeps trying with a dead sign-in.
 
-Droplet handles this the only honest way available to it:
+**If the person who signed in leaves**, or loses access to a project, the connection loses that access with them — on the next call. For a shared **Workspace connection**, use an account that will outlive any one individual.
 
-- It records the expiry date **you type in**, because Atlassian does not tell the box when a token expires.
-- From **30 days out** it shows the connection as *expiring soon* rather than as connected, with the number of days left. It keeps working the whole time — the status is a warning, not a fault.
-- If you did not supply an expiry date, the connection shows *expiry unknown* rather than a reassuring green tick. Droplet will not imply it can warn you when it cannot.
-
-**There is no grace period and no automatic renewal.** To rotate: create a new token, paste it into Droplet with its new expiry, and then delete the old one. Doing it in that order means no gap.
-
-**If the person who created the token leaves**, or loses access to a project, the token loses that access with them — silently, on the next call. Prefer a token created by an account that will outlive the individual.
+**A connection made with an old API token no longer works.** Earlier versions of Droplet asked for an API token. After the update that connection is switched to *Sign in with Atlassian to reconnect*; nothing is lost except the old token, which Droplet deletes. You can delete it on Atlassian's side too (**id.atlassian.com → Security → API tokens**).
 
 ## Revocation
 
-**You revoke it, and you can do it without telling us.** At **id.atlassian.com → Security → API tokens**, find the token and delete it. It stops working immediately, everywhere.
+**You revoke it, and you can do it without telling us.** At **id.atlassian.com**, open your account's connected apps and remove Droplet. It stops working immediately, everywhere.
 
-Droplet finds out on its next call, not before — see [`credential-handling.md`](credential-handling.md). The connection will show as needing a new credential rather than as an error you have to interpret.
+Droplet finds out on its next call, not before — see [`credential-handling.md`](credential-handling.md). The connection will show as needing a new sign-in rather than as an error you have to interpret.
 
 Two other ways the connection can end, both outside Droplet:
 
 - **An org admin turns the Rovo MCP server off.** Every Droplet Atlassian call stops, for everyone, immediately.
-- **The account is deactivated.** Its tokens go with it.
+- **The account is deactivated.** Its sign-in goes with it.
 
-And from Droplet's side: **Disconnect** on the Atlassian integration purges the stored token from the box. It never changes anything in your Atlassian site.
+And from Droplet's side: **Disconnect** on the Atlassian connection asks Atlassian to end the grant and deletes the stored sign-in from the box. It never changes anything in your Atlassian site.
 
 ## One thing your network team should know
 
 If your organisation restricts Atlassian access by network, be aware that Atlassian's **domain allowlist does not cover this**. The MCP server is reached over Atlassian's own hosted endpoint, and the control that applies to it is the **IP allowlist**, which is a separate Atlassian feature on a separate screen. A domain allowlist that looks like it should permit this will not, and the failure looks like a network timeout rather than a permission error.
 
-Droplet itself dials exactly one Atlassian address and nothing else. It never accepts an incoming connection from Atlassian, and there is no webhook or callback to open a hole for.
+Droplet itself dials only Atlassian's MCP server and its sign-in service, and nothing else. It never accepts an incoming connection from Atlassian, and there is no webhook or callback to open a hole for.
 
 ---
 

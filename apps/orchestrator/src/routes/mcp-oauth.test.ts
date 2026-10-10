@@ -30,6 +30,7 @@ function setup(logDest?: { write(s: string): void }) {
     exchange: vi.fn(async (_i: unknown) => ({ accessToken: "ACCESS-SECRET", refreshToken: "REFRESH-SECRET", expiresIn: 3600 })),
     refresh: vi.fn(async (_i: unknown): Promise<{ accessToken: string }> => ({ accessToken: "x" })),
     revoke: vi.fn(async (_i: unknown): Promise<void> => {}),
+    sites: vi.fn(async (_t: string) => [{ id: "cloud-1", url: "https://acme.atlassian.net", name: "Acme" }]),
   };
   const closeSession = vi.fn(async (_p: string, _c: string): Promise<void> => {});
   const gate: { current: Awaited<ReturnType<McpOAuthDependencies["egress"]>> } = { current: { allowed: true, row: null } };
@@ -203,11 +204,13 @@ describe("MCP OAuth routes", () => {
     expect(Object.keys(list.body)).toEqual(["providers"]);
     expect(list.body.providers[0]).toEqual({
       provider: "atlassian",
-      member: { id: db.rows[0].id, state: "CONNECTED", connectedAt: expect.any(String), lastRefreshOkAt: expect.any(String) },
+      member: {
+        id: db.rows[0].id, state: "CONNECTED", connectedAt: expect.any(String), lastRefreshOkAt: expect.any(String),
+        siteName: "Acme", siteUrl: "https://acme.atlassian.net",
+      },
       workspace: null,
       redirectUri: "https://box.customer.com/api/mcp/oauth/callback",
       callbackSupported: true,
-      apiToken: false,
     });
     expect(list.text).not.toMatch(/ACCESS-SECRET|tokensEnc|clientSecret|auth\.example/);
     const id = db.rows[0].id;
@@ -334,6 +337,7 @@ describe("production wiring: the callback and the start route share one set of i
       exchange: vi.fn(async (_i: unknown) => ({ accessToken: "ACCESS-SECRET", refreshToken: "REFRESH-SECRET", expiresIn: 3600 })),
       refresh: vi.fn(async (_i: unknown): Promise<{ accessToken: string }> => ({ accessToken: "x" })),
       revoke: vi.fn(async (_i: unknown): Promise<void> => {}),
+      sites: vi.fn(async (_t: string) => [{ id: "cloud-1", url: "https://acme.atlassian.net", name: "Acme" }]),
     };
     // Exactly one call, as in app.ts: no deps object is shared by hand.
     const routers = createMcpOAuthRouters(db.prisma, { oauth, egress: async () => ({ allowed: true, row: null }) });

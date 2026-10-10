@@ -18,8 +18,13 @@
  * derivation, so a token twelve days from a hard stop cannot read as "expiring
  * soon" on one page and "Connected" full stop on the other.
  */
-import { describe, it, expect, vi } from "vitest";
-import { mcpProviderIds, providerDescriptor } from "@droplet/shared-types";
+import { afterAll, beforeAll, describe, it, expect, vi } from "vitest";
+import {
+  __resetRegisteredProvidersForTest,
+  mcpProviderIds,
+  registerProviderDescriptor,
+  type ProviderDescriptor,
+} from "@droplet/shared-types";
 
 import {
   createIntegrationsService,
@@ -30,27 +35,35 @@ import {
  *  per-provider literal and neither does this suite. */
 const MCP_ID = mcpProviderIds()[0]!;
 
-/** The `providerConfig` field the descriptor names as carrying the expiry. */
-const EXPIRY_FIELD = providerDescriptor(MCP_ID)!.credentialExpiry!.field;
-
 /**
- * A COMPLETE stored config, built from the descriptor's own required
- * `providerConfig` fields.
- *
- * Completeness is load-bearing rather than tidiness: `credentialExpiryFor`
- * parses the config with `parseProviderConfigWith` before classifying, and a
- * config missing a required field fails that parse and reports EXPIRY_UNKNOWN.
- * A hand-written partial fixture would therefore have passed the UNKNOWN case
- * for the wrong reason and made the EXPIRING_SOON case unreachable — which is
- * exactly what the first draft of this suite did.
+ * WARP-3961: the shipped MCP track (Atlassian) is sign-in only, so it has no
+ * expiry policy. The generic expiry derivation is still the hub's, so it is
+ * exercised through a registered FIXTURE descriptor that declares one.
  */
+const EXPIRING_ID = "fixture-expiring";
+const EXPIRY_FIELD = "expiresOn";
+const fixtureDescriptor = {
+  id: EXPIRING_ID,
+  displayName: "Fixture expiring vendor",
+  category: "Fixture",
+  track: "cloud",
+  credentialFields: [
+    { name: "site", label: "Site", type: "string", required: true, secret: false, storage: "providerConfig" },
+    {
+      name: EXPIRY_FIELD, label: "Expires on", type: "string", required: false, secret: false,
+      storage: "providerConfig", pattern: "^\\d{4}-\\d{2}-\\d{2}$",
+    },
+  ],
+  egressHosts: [],
+  datasets: [],
+  credentialExpiry: { field: EXPIRY_FIELD, warningDays: 30, maxLifetimeDays: 365 },
+} as unknown as ProviderDescriptor;
+
+/** A COMPLETE stored config for the fixture: `credentialExpiryFor` parses it
+ *  before classifying, and a config missing a required field reports
+ *  EXPIRY_UNKNOWN for the wrong reason. */
 function configWith(extra: Record<string, string> = {}): Record<string, string> {
-  const required = Object.fromEntries(
-    providerDescriptor(MCP_ID)!
-      .credentialFields.filter((f) => f.required && f.storage === "providerConfig")
-      .map((f) => [f.name, `fixture-${f.name}`]),
-  );
-  return { provider: MCP_ID, ...required, ...extra };
+  return { provider: EXPIRING_ID, site: "fixture-site", ...extra };
 }
 
 function serviceWith(rows: Array<Record<string, unknown>>) {
@@ -83,7 +96,7 @@ function row(over: Record<string, unknown> = {}) {
     lastHealthyAt: null,
     apiCredentialsEnc: null,
     providerTokensEnc: "sealed",
-    providerConfig: configWith(),
+    providerConfig: { provider: MCP_ID },
     ...over,
   };
 }
@@ -146,21 +159,33 @@ describe("an MCP track is always listed, so the hub never infers its state", () 
 });
 
 describe("the hub row carries the same expiry verdict the configurator shows", () => {
+  // Registered only for this block, so the listing tests above see the shipped registry.
+  beforeAll(() => registerProviderDescriptor(fixtureDescriptor));
+  afterAll(() => __resetRegisteredProvidersForTest());
+
   /**
    * Mutation: return `null` unconditionally from `credentialExpiryFor` → red.
    * Mutation: `Math.round` instead of `Math.floor` in `credentialExpiryVerdict`
    * → 12 becomes 13 → red.
    */
-  it("classifies a date inside the warning window as EXPIRING_SOON", async () => {
+  it("classifies a date inside the warning window as EXPIRING_SOON", () => {
     const now = new Date();
-    const mcp = await listed(
-      [row({ providerConfig: configWith({ [EXPIRY_FIELD]: dateIn(13, now) }) })],
-      MCP_ID,
+    const verdict = credentialExpiryFor(
+      EXPIRING_ID,
+      configWith({ [EXPIRY_FIELD]: dateIn(13, now) }),
+      now,
     );
-    expect(mcp.credentialExpiry?.status).toBe("EXPIRING_SOON");
+    expect(verdict?.status).toBe("EXPIRING_SOON");
     // Floored, and a bare date parses as midnight UTC — the START of the
     // stated day — so the count is 12 whole days, never 13.
-    expect(mcp.credentialExpiry?.daysRemaining).toBe(12);
+    expect(verdict?.daysRemaining).toBe(12);
+  });
+
+  /** WARP-3961: the shipped MCP track declares no expiry policy, so its hub row
+   *  never carries a verdict, stored credential or not. */
+  it("gives the sign-in-only MCP track no verdict", async () => {
+    const mcp = await listed([row()], MCP_ID);
+    expect(mcp.credentialExpiry).toBeNull();
   });
 
   /**
@@ -169,9 +194,8 @@ describe("the hub row carries the same expiry verdict the configurator shows", (
    *
    * Mutation: treat a missing date as VALID → red.
    */
-  it("reports EXPIRY_UNKNOWN for a stored credential with no date", async () => {
-    const mcp = await listed([row()], MCP_ID);
-    expect(mcp.credentialExpiry).toEqual({
+  it("reports EXPIRY_UNKNOWN for a stored credential with no date", () => {
+    expect(credentialExpiryFor(EXPIRING_ID, configWith(), new Date())).toEqual({
       status: "EXPIRY_UNKNOWN",
       daysRemaining: null,
     });
@@ -193,12 +217,13 @@ describe("the hub row carries the same expiry verdict the configurator shows", (
   /** Generic by construction: the descriptor names the field, so the service
    *  never compares `provider` against a vendor key — the doctrine
    *  `saas-credential.service.ts`'s header makes explicit. */
-  it("reads the field the descriptor names, not a hardcoded one", async () => {
+  it("reads the field the descriptor names, not a hardcoded one", () => {
     const now = new Date();
-    const wrongField = await listed(
-      [row({ providerConfig: configWith({ someOtherField: dateIn(2, now) }) })],
-      MCP_ID,
+    const wrongField = credentialExpiryFor(
+      EXPIRING_ID,
+      configWith({ someOtherField: dateIn(2, now) }),
+      now,
     );
-    expect(wrongField.credentialExpiry?.status).toBe("EXPIRY_UNKNOWN");
+    expect(wrongField?.status).toBe("EXPIRY_UNKNOWN");
   });
 });

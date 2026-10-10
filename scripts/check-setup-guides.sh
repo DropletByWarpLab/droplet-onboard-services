@@ -191,11 +191,10 @@ fact_pins() {
       printf '%s\n' '-us14' 'full account access'
       ;;
     atlassian)
-      # Four facts a customer acts on, and every one of them is a way the
-      # setup fails for a reason Droplet cannot fix (WARP-2316):
-      #  - 365 days is a HARD stop with no grace period and no auto-renewal.
-      #    It is the only connector on this list with an expiry the customer
-      #    must diary, and softening it produces a silent outage a year later.
+      # Three facts a customer acts on, and every one of them is a way the
+      # setup fails for a reason Droplet cannot fix (WARP-2316). WARP-3961
+      # retired the API token, and with it the '365 days' pin: a sign-in has no
+      # expiry date for the customer to diary.
       #  - The Rovo MCP server toggle is an ORG ADMIN action in a console the
       #    person doing the setup often cannot open. Naming the exact screen
       #    is the difference between a one-minute ask and a support ticket.
@@ -205,7 +204,7 @@ fact_pins() {
       #    control that governs this. Getting that backwards presents as a
       #    network timeout rather than as a permission error, which is why
       #    the distinction has to survive a copy pass.
-      printf '%s\n' '365 days' 'Rovo MCP server' 'Free plan' 'IP allowlist'
+      printf '%s\n' 'Rovo MCP server' 'Free plan' 'IP allowlist'
       ;;
     brevo)
       # Brevo is the EXCEPTION to credential-handling.md's "these do not

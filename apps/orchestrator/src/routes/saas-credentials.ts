@@ -38,7 +38,7 @@ import { randomUUID } from "node:crypto";
 import { Router, type Request, type Response, type NextFunction } from "express";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
-import { providerDescriptors } from "@droplet/shared-types";
+import { providerDescriptors, type ProviderDescriptor } from "@droplet/shared-types";
 import { forgetXeroToken } from "@droplet/erp-connector";
 
 import { requireRole } from "../middleware/auth.js";
@@ -94,8 +94,20 @@ function configurableDescriptors() {
   // never renders and its PATCH 404s, so the owner has no way to enter the key
   // for any of the twenty-eight vendors the track was built to carry.
   return providerDescriptors().filter(
-    (d) => d.track === "cloud" || d.track === "rest" || d.track === "mcp",
+    (d) => (d.track === "cloud" || d.track === "rest" || d.track === "mcp") && hasCredentialForm(d),
   );
+}
+
+/** WARP-3961 — a provider with no credential fields (Atlassian: sign-in only) has
+ *  no form: it is left out of the list and its PATCH is a 404. */
+function hasCredentialForm(d: ProviderDescriptor): boolean {
+  return d.credentialFields.length > 0 || (d.credentialVariants?.length ?? 0) > 0;
+}
+
+function noCredentialsForProvider(res: Response) {
+  return res
+    .status(404)
+    .json({ error: "This provider is signed in to, not configured with a credential", code: "no_credentials_for_provider" });
 }
 
 type IntegrationPrisma = Pick<PrismaClient, "integrationConnection">;
@@ -132,6 +144,7 @@ export function createSaasCredentialsRouter(prisma: IntegrationPrisma): Router {
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         const descriptor = requireDescriptor(req.params.provider);
+        if (!hasCredentialForm(descriptor)) return noCredentialsForProvider(res);
         res.json(buildCredentialView(descriptor, await findRow(descriptor.id)));
       } catch (err) {
         if (err instanceof UnknownProviderError) {
@@ -149,6 +162,7 @@ export function createSaasCredentialsRouter(prisma: IntegrationPrisma): Router {
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         const descriptor = requireDescriptor(req.params.provider);
+        if (!hasCredentialForm(descriptor)) return noCredentialsForProvider(res);
 
         const parsed = patchSchema.safeParse(req.body);
         if (!parsed.success) {

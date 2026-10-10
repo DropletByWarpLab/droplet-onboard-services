@@ -9,7 +9,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ATLASSIAN_MCP_OAUTH_URL,
-  ATLASSIAN_MCP_URL,
   ATLASSIAN_REQUIRED_FIELDS,
   ATLASSIAN_REQUIRED_FIELD_SETS,
 } from "../src/atlassian.js";
@@ -71,7 +70,8 @@ const send = (store: BridgeSessionStore, method: string, path: string, body?: un
     store,
   });
 
-const API_BODY = { email: "ops@vendor.example", apiToken: "ATATT-FAKE-0000", cloudId: CLOUD };
+/** The server-level (Workspace / catalog) session: a bearer and a site, no connectionId. */
+const API_BODY = { accessToken: "FAKE-WORKSPACE-ACCESS-0000", cloudId: CLOUD };
 const bearerBody = (connectionId?: string) => ({
   accessToken: FAKE_ACCESS,
   cloudId: CLOUD,
@@ -80,25 +80,24 @@ const bearerBody = (connectionId?: string) => ({
 
 afterEach(() => vi.useRealTimers());
 
-describe("open: either field set, never a mix", () => {
-  it("accepts the API-token set and the bearer set", async () => {
+describe("open: the bearer set is the only set", () => {
+  it("accepts the bearer set with or without a connectionId", async () => {
     const { factory, conns } = harness();
     const store = storeOf(factory);
     expect((await send(store, "POST", "/sessions/atlassian/open", API_BODY)).status).toBe(200);
     expect((await send(store, "POST", "/sessions/atlassian/open", bearerBody(CONN_A))).status).toBe(200);
-    expect(Object.keys(conns[0]!.input).sort()).toEqual(["apiToken", "cloudId", "email"]);
+    expect(Object.keys(conns[0]!.input).sort()).toEqual(["accessToken", "cloudId"]);
     expect(Object.keys(conns[1]!.input).sort()).toEqual(["accessToken", "cloudId"]);
   });
 
-  it("refuses partial and mixed bodies, naming the field and building nothing", async () => {
+  it("refuses partial bodies and the removed API-token fields, naming the field and building nothing", async () => {
     const { factory, conns } = harness();
     const store = storeOf(factory);
     const cases: Array<[Record<string, unknown>, string]> = [
       [{ accessToken: FAKE_ACCESS }, "Missing or empty: cloudId."],
-      [{ email: "a@b.example", cloudId: CLOUD }, "Missing or empty: apiToken."],
-      [{}, "Missing or empty: email, apiToken, cloudId."],
-      [{ ...API_BODY, accessToken: FAKE_ACCESS }, "Not allowed with this credential: accessToken."],
-      [{ accessToken: FAKE_ACCESS, cloudId: CLOUD, email: "a@b.example" }, "Not allowed with this credential: email."],
+      [{ email: "a@b.example", cloudId: CLOUD }, "Missing or empty: accessToken."],
+      [{}, "Missing or empty: accessToken, cloudId."],
+      [{ email: "a@b.example", apiToken: "ATATT-FAKE-0000", cloudId: CLOUD }, "Missing or empty: accessToken."],
     ];
     for (const [body, message] of cases) {
       const res = await send(store, "POST", "/sessions/atlassian/open", body);
@@ -115,15 +114,13 @@ describe("open: either field set, never a mix", () => {
     expect(conns).toHaveLength(0);
   });
 
-  it("the production factory presents a bearer on the OAuth endpoint, and Basic on the old one", () => {
+  it("the production factory presents a bearer on the OAuth endpoint, and has no Basic path", () => {
     const factory = SESSION_PROFILES.atlassian!.factory;
     const oauth = factory({ accessToken: FAKE_ACCESS, cloudId: CLOUD });
     expect(oauth.url).toBe(ATLASSIAN_MCP_OAUTH_URL);
     expect(oauth.describeCredential()).toBe("bearer");
     expect(oauth.describeCredential()).not.toContain(FAKE_ACCESS);
-    const basic = factory({ email: "ops@vendor.example", apiToken: "ATATT-FAKE-0000", cloudId: CLOUD });
-    expect(basic.url).toBe(ATLASSIAN_MCP_URL);
-    expect(basic.describeCredential()).toBe("basic(ops@vendor.example)");
+    expect(() => factory({ email: "ops@vendor.example", apiToken: "ATATT-FAKE-0000", cloudId: CLOUD })).toThrow();
   });
 });
 
@@ -311,13 +308,6 @@ describe("credential and key hygiene", () => {
     expect((await send(store, "POST", "/sessions/atlassian/open", bearerBody(upper))).status).toBe(400);
     expect((await send(store, "POST", "/sessions/atlassian/call", { name: "x", connectionId: upper })).status).toBe(400);
     expect((await send(store, "POST", "/sessions/atlassian/close", { connectionId: upper })).status).toBe(400);
-    expect(conns).toHaveLength(0);
-  });
-
-  it("never opens the shared API-token credential under a member key", async () => {
-    const { factory, conns } = harness();
-    const res = await send(storeOf(factory), "POST", "/sessions/atlassian/open", { ...API_BODY, connectionId: CONN_A });
-    expect(res.status).toBe(400);
     expect(conns).toHaveLength(0);
   });
 });

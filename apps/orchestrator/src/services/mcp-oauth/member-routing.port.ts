@@ -5,8 +5,9 @@
  * call. Order, never reordered:
  *   1. the asking member's own sign-in,
  *   2. the Workspace connection,
- *   3. the shared API token (the base session),
- *   4. otherwise a sentence asking them to sign in.
+ *   3. otherwise a sentence asking them to sign in.
+ * (WARP-3961 removed the shared API-token rung.) Every session is pinned to the
+ * site stored on the sign-in row (`siteId`), never to anything the model sends.
  *
  * Fail closed on identity: a failed lookup throws (the gate reports a provider
  * error) rather than falling through to a broader credential, and a member whose
@@ -41,6 +42,8 @@ export interface OAuthRowLite {
   state: string;
   tokensEnc: string | null;
   tokenExpiresAt: Date | null;
+  /** WARP-3961: the site this sign-in is pinned to (null on a row that predates it). */
+  siteId: string | null;
 }
 
 /** The slice of Prisma this port reads. */
@@ -53,7 +56,7 @@ export interface MemberRoutingPrisma {
     findUnique(args: unknown): Promise<OAuthRowLite | null>;
   };
   integrationConnection: {
-    findFirst(args: unknown): Promise<{ status?: string; providerConfig: unknown } | null>;
+    findFirst(args: unknown): Promise<{ status?: string } | null>;
   };
 }
 
@@ -63,7 +66,7 @@ export interface MemberRoutingOptions {
   client: Pick<McpBridgeClient, "open" | "callToolFor" | "lastAdvertisedToolNames" | "closeEpoch">;
   /** The port the multiplexer talked to before this one (the base session). */
   base: McpClientPort;
-  /** What the base (catalog) session was opened with; "api-token" enables rung 3. */
+  /** What the base (catalog) session was opened with. */
   baseCredential: RemoteMcpCredentialKind | (() => RemoteMcpCredentialKind);
   prisma: MemberRoutingPrisma;
   now?: () => Date;
@@ -71,9 +74,9 @@ export interface MemberRoutingOptions {
 
 const REFUSALS: Record<RemoteMcpSignInRefusal, string> = {
   REMOTE_SIGN_IN_REQUIRED:
-    "You haven't signed in to Atlassian yet. Open Settings › Connected services (or Connectors › Connector credentials) and choose Sign in with Atlassian, then ask again.",
+    "You haven't signed in to Atlassian yet. Open Connectors › Atlassian and choose Connect, then ask again.",
   REMOTE_SIGN_IN_EXPIRED:
-    "Your Atlassian sign-in has expired. Open Settings › Connected services (or Connectors › Connector credentials) and choose Sign in with Atlassian again, then ask again.",
+    "Your Atlassian sign-in has expired. Open Connectors › Atlassian and choose Connect again, then ask again.",
   REMOTE_CONNECTION_DISABLED: "An owner or admin turned this connection off. Nothing was sent.",
 };
 
@@ -93,18 +96,16 @@ export function createMemberRoutingPort(opts: MemberRoutingOptions): CredentialA
   const baseKind = (): RemoteMcpCredentialKind =>
     typeof opts.baseCredential === "function" ? opts.baseCredential() : opts.baseCredential;
 
-  /** The admin-owned connection row, read once per call: its status (an admin's
-   *  off switch) and the site id every session is forced onto. */
-  async function connection(): Promise<{ disabled: boolean; site: string | null }> {
+  /** The admin-owned connection row, read once per call: only its status (an admin's off switch). */
+  async function connection(): Promise<{ disabled: boolean }> {
     const c = await prisma.integrationConnection.findFirst({
       where: { provider: serverId },
-      select: { status: true, providerConfig: true },
+      select: { status: true },
     });
-    const v = (c?.providerConfig as Record<string, unknown> | null | undefined)?.cloudId;
-    return { disabled: c?.status === "DISABLED", site: typeof v === "string" && v.trim() ? v.trim() : null };
+    return { disabled: c?.status === "DISABLED" };
   }
 
-  async function ensureSession(row: OAuthRowLite, site: string | null): Promise<void> {
+  async function ensureSession(row: OAuthRowLite): Promise<void> {
     if (client.closeEpoch !== epoch) {
       openedWith.clear();
       opening.clear();
@@ -115,11 +116,12 @@ export function createMemberRoutingPort(opts: MemberRoutingOptions): CredentialA
     if (inflight) return inflight;
     const p = (async () => {
       const tokens = openTokens({ id: row.id, scope: row.scope, memberId: row.memberId, tokensEnc: row.tokensEnc });
-      if (!site) throw new McpBridgeError("REMOTE_CALL_FAILED", `The ${serverId} connection has no site id.`, 0);
+      if (!row.siteId) throw new McpBridgeError("REMOTE_CALL_FAILED", `The ${serverId} sign-in has no site id.`, 0);
       const known = client.lastAdvertisedToolNames();
       await client.open({
         accessToken: tokens.accessToken,
-        cloudId: site,
+        // The site this sign-in was pinned to, never anything the model supplied.
+        cloudId: row.siteId,
         connectionId: row.id,
         ...(known.length > 0 ? { knownTools: known } : {}),
       });
@@ -131,21 +133,21 @@ export function createMemberRoutingPort(opts: MemberRoutingOptions): CredentialA
 
   async function via(
     row: OAuthRowLite,
-    site: string | null,
     name: string,
     args: Record<string, unknown>,
     kind: RemoteMcpCredentialKind,
   ) {
     const live = await usable(row);
-    if (!live) return refuse(name, "REMOTE_SIGN_IN_EXPIRED");
+    // No pinned site (a sign-in that predates WARP-3961): fail closed, ask to sign in again.
+    if (!live || !live.siteId) return refuse(name, "REMOTE_SIGN_IN_EXPIRED");
     try {
-      await ensureSession(live, site);
+      await ensureSession(live);
       return { outcome: await client.callToolFor(live.id, name, args), credential: kind } as const;
     } catch (err) {
       if (!(err instanceof McpBridgeError && err.code === "NO_SESSION")) throw err;
       // The bridge restarted or evicted it: open once more and retry once.
       openedWith.delete(live.id);
-      await ensureSession(live, site);
+      await ensureSession(live);
       return { outcome: await client.callToolFor(live.id, name, args), credential: kind } as const;
     }
   }
@@ -189,19 +191,11 @@ export function createMemberRoutingPort(opts: MemberRoutingOptions): CredentialA
       if (member && member.state !== "CONNECTED" && member.state !== "DISCONNECTED") {
         return refuse(name, "REMOTE_SIGN_IN_EXPIRED");
       }
-      if (member?.state === "CONNECTED") return via(member, conn.site, name, args, "member");
+      if (member?.state === "CONNECTED") return via(member, name, args, "member");
 
       const workspace = await prisma.mcpOAuthConnection.findFirst({ where: { provider: serverId, scope: "WORKSPACE" } });
-      if (workspace?.state === "CONNECTED") return via(workspace, conn.site, name, args, "workspace");
+      if (workspace?.state === "CONNECTED") return via(workspace, name, args, "workspace");
 
-      if (baseKind() === "api-token" && base.isStarted) {
-        try {
-          return { outcome: await base.callTool(name, args), credential: "api-token" } as const;
-        } catch (err) {
-          // The bridge says this base session is catalog-only: never a fallback, ask for a sign-in.
-          if (!(err instanceof McpBridgeError && err.code === "CATALOG_ONLY")) throw err;
-        }
-      }
       logger.info({ serverId, hasMember: !!member, hasWorkspace: !!workspace }, "remote_mcp_sign_in_required");
       return refuse(name, workspace?.state === "NEEDS_RECONNECT" ? "REMOTE_SIGN_IN_EXPIRED" : "REMOTE_SIGN_IN_REQUIRED");
     },

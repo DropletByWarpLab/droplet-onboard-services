@@ -641,6 +641,13 @@ export type ProviderDescriptor =
 /** WARP-2405 — a remote MCP server's web sign-in (see {@link McpProviderDescriptor.signIn}). */
 export interface McpSignIn {
   readonly kind: "oauth";
+  /**
+   * WARP-3961 — the sign-in is bound to ONE site (Atlassian's cloud id): right
+   * after the code exchange the box asks the server which sites the token
+   * reaches, stores the chosen one on the connection row and pins every call to
+   * it. Absent = the server needs no site.
+   */
+  readonly pinsSite?: true;
   /** The OAuth-protected MCP endpoint: discovery starts here, and it is the RFC 8707 `resource`. */
   readonly mcpUrl: string;
   /** The scopes asked for at sign-in. The box never requests a wider set on its own. */

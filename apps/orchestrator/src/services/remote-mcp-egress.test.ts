@@ -34,9 +34,19 @@ describe("remoteMcpEgressAllowed", () => {
     expect(await remoteMcpEgressAllowed(prisma({ row: row("NEEDS_RECONNECT") }), S)).toMatchObject({ allowed: true });
   });
 
-  it("is the first half of the tool-call gate, with no behaviour change", async () => {
-    expect(await remoteMcpGate(prisma({ row: row("DISABLED") }), S)).toMatchObject({ reason: "connection_disabled" });
-    expect(await remoteMcpGate(prisma({ row: null }), S)).toMatchObject({ reason: "no_connection_row" });
-    expect(await remoteMcpGate(prisma({ row: row("CONNECTED") }), S)).toEqual({ allowed: true });
+  it("is the first half of the tool-call gate; the second half is a CONNECTED sign-in (WARP-3961)", async () => {
+    const withSignIns = (n: number, o: { row?: Row | "throw" } = {}) => ({
+      ...prisma(o),
+      mcpOAuthConnection: { count: vi.fn(async () => n) },
+    });
+    // The per-server off wins over any sign-in.
+    expect(await remoteMcpGate(withSignIns(3, { row: row("DISABLED") }), S)).toMatchObject({ reason: "connection_disabled" });
+    // No sign-in (or no model to read them with) is "no credential", whatever the integration row says.
+    expect(await remoteMcpGate(withSignIns(0), S)).toMatchObject({ reason: "no_credential" });
+    expect(await remoteMcpGate(withSignIns(0, { row: row("CONNECTED") }), S)).toMatchObject({ reason: "no_credential" });
+    expect(await remoteMcpGate(prisma({ row: row("CONNECTED") }), S)).toMatchObject({ reason: "no_credential" });
+    // A CONNECTED sign-in alone opens it, even with a dead (NEEDS_RECONNECT) or absent integration row.
+    expect(await remoteMcpGate(withSignIns(1), S)).toEqual({ allowed: true });
+    expect(await remoteMcpGate(withSignIns(1, { row: row("NEEDS_RECONNECT") }), S)).toEqual({ allowed: true });
   });
 });

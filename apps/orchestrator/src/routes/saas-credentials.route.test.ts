@@ -683,6 +683,39 @@ describe("GET — the list says which kind of connector each one is", () => {
   });
 });
 
+/**
+ * WARP-3961 — Atlassian is signed in to, never pasted: its descriptor declares no
+ * credential fields, so it has no form. Mutation: drop `hasCredentialForm` from
+ * the route → the list shows an empty Atlassian card and the PATCH answers 200.
+ */
+describe("a sign-in-only provider (Atlassian) has no credential form", () => {
+  it("is left out of GET /connectors/credentials", async () => {
+    const res = await request(buildApp(createPrismaStub(null))).get("/api/connectors/credentials");
+    expect(res.status).toBe(200);
+    const ids = res.body.providers.map((p: { provider: string }) => p.provider);
+    expect(ids).not.toContain("atlassian");
+    expect(ids).toContain(FIXTURE.id);
+  });
+
+  it("answers 404 no_credentials_for_provider to PATCH and writes nothing", async () => {
+    const prisma = createPrismaStub(null);
+    const res = await request(buildApp(prisma))
+      .patch("/api/connectors/atlassian/credentials")
+      .send({ fields: { apiToken: "ATATT-FAKE" } });
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe("no_credentials_for_provider");
+    expect(prisma.integrationConnection.create).not.toHaveBeenCalled();
+    expect(prisma.integrationConnection.update).not.toHaveBeenCalled();
+    expect(JSON.stringify(res.body)).not.toContain("ATATT-FAKE");
+  });
+
+  it("answers 404 no_credentials_for_provider to GET of its single view", async () => {
+    const res = await request(buildApp(createPrismaStub(null))).get("/api/connectors/atlassian/credentials");
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe("no_credentials_for_provider");
+  });
+});
+
 describe("audit — one row per mutation, carrying hasSecret and never the value", () => {
   function credentialRows() {
     return recordActivityMock.mock.calls

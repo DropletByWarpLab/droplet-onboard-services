@@ -61,7 +61,7 @@ const START_BLOCKED: Record<string, (name: string) => string> = {
 
 function statusText(side: McpOAuthSide | null): string {
   switch (side?.state) {
-    case "CONNECTED": return "Signed in · refreshes automatically";
+    case "CONNECTED": return `Signed in${side?.siteName ? ` to ${side.siteName}` : ""} · refreshes automatically`;
     case "NEEDS_RECONNECT":
     case "ERROR": return "Needs sign-in again";
     case "PENDING_CONSENT": return "Waiting for approval…";
