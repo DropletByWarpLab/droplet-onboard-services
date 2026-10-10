@@ -1,0 +1,235 @@
+/*
+ * Scoped layout for the Network → Overview topology tree.
+ *
+ * Only what has no Tailwind-utility equivalent lives here: the connector
+ * lines (CSS-only, so nothing of them reaches the accessibility tree) and the
+ * two layouts. Type, ink and the card chrome are the shell's own utilities and
+ * tokens on the components, like the router and switch panels. Tokens only —
+ * no literal colours — so the whole tree re-themes with `.dark`.
+ *
+ * Two layouts off one markup, switched by the width of the box the tree is in
+ * (a container query, not the viewport: the page sits beside a sidebar):
+ *   - narrow  top-to-bottom, indented, like a file tree;
+ *   - wide    left-to-right, each level a column, children centred on their
+ *             parent. A tree deeper than the box scrolls inside it.
+ */
+
+.scroller {
+  --topo-line: color-mix(in srgb, var(--text-muted) 40%, transparent);
+  --topo-gap: 24px; /* run between a parent card and its column of children */
+  --topo-card-w: 208px;
+  --topo-stub-y: 32px; /* narrow layout: connector height = pad (8) + half a card (24) */
+  container: topology / inline-size;
+  overflow-x: auto;
+}
+
+.tree,
+.children {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.item {
+  position: relative;
+}
+
+/* ── Narrow: top-to-bottom ───────────────────────────────────────── */
+
+/* 36px of indent per level: a phone has room for four levels and a card that
+   can still say "Radios not reporting". The trunk drops from under the parent's
+   icon chip. */
+.children {
+  margin-left: 20px;
+}
+.children > .item {
+  padding: 8px 0 0 16px;
+}
+/* trunk */
+.children > .item::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  border-left: 1px solid var(--topo-line);
+}
+.children > .item:last-child::before {
+  bottom: auto;
+  height: var(--topo-stub-y);
+}
+/* stub into the card */
+.children > .item::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: var(--topo-stub-y);
+  width: 16px;
+  border-top: 1px solid var(--topo-line);
+}
+
+/* ── Cards ───────────────────────────────────────────────────────── */
+
+.node {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 360px;
+  min-height: 52px;
+  padding: 9px 12px;
+  border: 1px solid var(--card-bd);
+  border-radius: 10px;
+  background: var(--card-inner);
+}
+/* The access point is the thing this panel was added to show. */
+.node[data-kind="access-point"] {
+  border-color: color-mix(in srgb, var(--brand) 32%, var(--card-bd));
+}
+
+.chip {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  background: var(--inset);
+  color: var(--text-muted);
+}
+.chipInfra {
+  background: var(--brand-subtle);
+  color: var(--brand);
+}
+
+.text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* A state ("Radios not reporting") is the one thing a card must not truncate,
+   so the status wraps; the dot stays on its first line (caption-1 is 16px
+   tall, the dot 8px). */
+.status {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+.status > .dot {
+  margin-top: 4px;
+}
+.statusText {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.meta {
+  overflow-wrap: anywhere;
+}
+
+/* ── Link dots — the faceplate legend's colours ──────────────────── */
+
+.dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+.ok {
+  background: var(--color-system-green);
+  box-shadow: 0 0 5px color-mix(in srgb, var(--color-system-green) 70%, transparent);
+}
+.warn {
+  background: var(--color-system-orange);
+}
+.err {
+  background: var(--color-system-red);
+}
+/* "No cable" is --text-muted, not --text-faint: the faint ink is ~1.7:1 on the
+   dark card, which the router faceplate's legend already had to work around. */
+.neutral {
+  background: var(--text-muted);
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin-top: 14px;
+}
+.legendItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ── Wide: left-to-right ─────────────────────────────────────────── */
+
+/* Four levels (Internet, router, switch, what hangs off it) take 4 × 208 + 3 × 24
+   = 904px; below this the tree stacks rather than scrolling in its box. */
+@container topology (min-width: 920px) {
+  .tree {
+    width: max-content;
+  }
+  .item {
+    display: flex;
+    align-items: center;
+  }
+  .node {
+    flex: none;
+    width: var(--topo-card-w);
+    max-width: none;
+  }
+
+  .children {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    margin-left: 0;
+    padding-left: var(--topo-gap);
+  }
+  /* parent card → trunk */
+  .children::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 50%;
+    width: calc(var(--topo-gap) / 2);
+    border-top: 1px solid var(--topo-line);
+  }
+
+  .children > .item {
+    padding: 5px 0;
+  }
+  /* trunk: runs between the first and last child's centres */
+  .children > .item::before {
+    left: calc(var(--topo-gap) / -2);
+    top: 0;
+    bottom: 0;
+    height: auto;
+  }
+  .children > .item:first-child::before {
+    top: 50%;
+  }
+  .children > .item:last-child::before {
+    top: 0;
+    bottom: 50%;
+    height: auto;
+  }
+  .children > .item:first-child:last-child::before {
+    display: none;
+  }
+  /* trunk → child card */
+  .children > .item::after {
+    left: calc(var(--topo-gap) / -2);
+    top: 50%;
+    width: calc(var(--topo-gap) / 2);
+  }
+}
