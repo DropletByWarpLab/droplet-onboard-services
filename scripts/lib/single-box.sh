@@ -1562,18 +1562,21 @@ EOF
       upsert_env OPENWRT_HOST        127.0.0.1
       upsert_env OPENWRT_PORT        8181
       upsert_env OPENWRT_USERNAME    root
+      # Warning-free droplet.local: only the BUNDLED OpenWrt is this box's
+      # router, so only its dnsmasq answers the split-horizon FQDN for every
+      # DHCP client and the gateway may 307 droplet.local → the trusted FQDN.
+      # EXPLICIT, never derived.
+      upsert_env DROPLET_LAN_DNS_AUTHORITY 1
       ;;
     *)
       log_info "single-box env: external edge router configured (OPENWRT_HOST=$_current_openwrt_host) — preserving OPENWRT_HOST/PORT/USERNAME instead of re-pointing at the bundled container"
+      # An external router's DNS does not answer the FQDN (NXDOMAIN), so the
+      # 307 to it strands every client. Write 0 explicitly rather than omit
+      # it, so a box that already has 1 is healed when setup re-runs.
+      upsert_env DROPLET_LAN_DNS_AUTHORITY 0
       ;;
   esac
   upsert_env ROUTING_MODE        real
-  # Warning-free droplet.local: on the single-box shape this box IS the
-  # router — its dnsmasq answers the split-horizon FQDN for every DHCP
-  # client, so the gateway may 307 droplet.local → the trusted FQDN. On any
-  # other shape the FQDN is client-unresolvable and the knob stays 0 (compose
-  # default), keeping today's behavior. EXPLICIT, never derived.
-  upsert_env DROPLET_LAN_DNS_AUTHORITY 1
   # WARP-815 (K4): the routing service resolves the Wi-Fi scan radio from
   # DROPLET_WIFI_SCAN_DEVICE (the orchestrator no longer hardcodes wlan0 on the
   # wire). The single-box AP radio is phy0 → wlp14s0 inside the openwrt

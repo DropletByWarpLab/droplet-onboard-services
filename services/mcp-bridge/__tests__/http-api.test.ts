@@ -224,7 +224,7 @@ describe("GET /sessions — the inventory, behind the bearer (WARP-2300)", () =>
     const h = harness();
     const res = await handleBridgeRequest(req({ method: "GET", path: "/sessions" }), h.opts);
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ knownServers: ["atlassian"], sessions: [] });
+    expect(res.body).toEqual({ knownServers: ["atlassian"], sessions: [], connectionSessions: {} });
   });
 
   it("401s an unauthenticated reader — this is the route the leak moved to", async () => {

@@ -55,13 +55,16 @@ fi
 
 host_after() {
   # $1 = OPENWRT_HOST already in .env ('' = key absent). Echoes host|port|user.
-  local existing="$1"
+  # Optional $2 = DROPLET_LAN_DNS_AUTHORITY already in .env. Optional $3 = 'dns'
+  # echoes the resulting DROPLET_LAN_DNS_AUTHORITY instead.
+  local existing="$1" dns_seed="${2:-}" want="${3:-}"
   local tmp; tmp="$(mktemp -d)"
   local env_target="$tmp/.env"
   : > "$env_target"
   [ -n "$existing" ] && printf 'OPENWRT_HOST=%s\n' "$existing" >> "$env_target"
   # Seed the companions so "preserved" is distinguishable from "never written".
   printf 'OPENWRT_PORT=80\nOPENWRT_USERNAME=droplet-ai\n' >> "$env_target"
+  [ -n "$dns_seed" ] && printf 'DROPLET_LAN_DNS_AUTHORITY=%s\n' "$dns_seed" >> "$env_target"
 
   local block
   block="$(awk '/^  # WARP-1980/,/^  esac$/' "$LIB")"
@@ -76,6 +79,11 @@ host_after() {
     eval "$block"
   ) >/dev/null 2>&1
 
+  if [ "$want" = dns ]; then
+    printf '%s' "$(grep -E '^DROPLET_LAN_DNS_AUTHORITY=' "$env_target" | tail -1 | cut -d= -f2-)"
+    rm -rf "$tmp"
+    return
+  fi
   printf '%s|%s|%s' \
     "$(grep -E '^OPENWRT_HOST='     "$env_target" | tail -1 | cut -d= -f2-)" \
     "$(grep -E '^OPENWRT_PORT='     "$env_target" | tail -1 | cut -d= -f2-)" \
@@ -129,6 +137,25 @@ if [ "$got" = "127.0.0.1|8181|root" ]; then
 else
   bad "localhost not normalised to the bundled container (got '$got')"
 fi
+
+# DROPLET_LAN_DNS_AUTHORITY: 1 only when the bundled OpenWrt is the router.
+# Behind an external router the FQDN is NXDOMAIN, so nginx's 307 to it breaks
+# clients; 0 must be written explicitly so an existing 1 is healed.
+got="$(host_after '127.0.0.1' '' dns)"
+[ "$got" = "1" ] && ok "loopback host gets DROPLET_LAN_DNS_AUTHORITY=1" \
+                 || bad "loopback host got DROPLET_LAN_DNS_AUTHORITY='$got' (want 1)"
+
+got="$(host_after '' '' dns)"
+[ "$got" = "1" ] && ok "unset host (fresh provision) gets DROPLET_LAN_DNS_AUTHORITY=1" \
+                 || bad "unset host got DROPLET_LAN_DNS_AUTHORITY='$got' (want 1)"
+
+got="$(host_after '192.168.9.1' '' dns)"
+[ "$got" = "0" ] && ok "external host gets DROPLET_LAN_DNS_AUTHORITY=0" \
+                 || bad "external host got DROPLET_LAN_DNS_AUTHORITY='$got' (want 0)"
+
+got="$(host_after 'droplet-edge.lan' 1 dns)"
+[ "$got" = "0" ] && ok "external host with a pre-existing 1 is healed to 0" \
+                 || bad "external host kept DROPLET_LAN_DNS_AUTHORITY='$got' (want 0)"
 
 printf '\n  %d passed, %d failed\n\n' "$pass" "$fail"
 [ "$fail" -eq 0 ] || exit 1
