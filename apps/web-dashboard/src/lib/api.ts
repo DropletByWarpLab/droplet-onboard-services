@@ -10096,7 +10096,10 @@ export async function fetchMcpOAuthConnections(): Promise<McpSignInView[]> {
 async function mcpOAuthError(res: Response, fallback: string): Promise<Error> {
   // The box answers with a short code (e.g. `bare_code_rejected`); never a value.
   const body = await res.json().catch(() => null);
-  return new Error(typeof body?.error === "string" ? body.error : fallback);
+  // `error` is a short code, or `{ code, message }` on a 409; only the code is kept.
+  const e = body?.error;
+  const code = typeof e === "string" ? e : typeof e?.code === "string" ? e.code : fallback;
+  return new Error(code);
 }
 
 export async function startMcpSignIn(args: {

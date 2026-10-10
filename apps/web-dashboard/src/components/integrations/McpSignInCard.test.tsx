@@ -73,6 +73,33 @@ describe("McpSignInCard", () => {
     await waitFor(() => expect(api.startMcpSignIn).toHaveBeenCalledWith({ provider: "atlassian", scope: "MEMBER", redirectMode: "loopback" }));
   });
 
+  it.each([
+    ["remote_mcp_off", "Remote MCP is switched off for this Workspace. An owner or admin can turn it on in Integrations › Connector credentials."],
+    ["server_not_allowed", "This Droplet isn't set up to reach Atlassian."],
+    ["connection_disabled", "An owner or admin turned Atlassian off for this Workspace."],
+  ])("a 409 %s shows the fixed sentence and never navigates", async (code, sentence) => {
+    const navigate = vi.fn();
+    api.startMcpSignIn.mockRejectedValue(new Error(code));
+    render(<McpSignInCard provider="atlassian" displayName="Atlassian" navigate={navigate} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Sign in with Atlassian" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(sentence);
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("links the remote MCP switch for an admin only", async () => {
+    session.role = "admin";
+    api.startMcpSignIn.mockRejectedValue(new Error("remote_mcp_off"));
+    render(<McpSignInCard provider="atlassian" displayName="Atlassian" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Sign in with Atlassian" }));
+    expect(await screen.findByRole("link", { name: "Open the remote MCP switch" })).toHaveAttribute("href", "/integrations/credentials");
+  });
+
+  it("shows the blocked outcome copy for ?mcp=atlassian:blocked", async () => {
+    window.history.replaceState(null, "", "/settings?mcp=atlassian:blocked");
+    render(<McpSignInCard provider="atlassian" displayName="Atlassian" />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Sign-in was blocked because remote MCP was switched off. Nothing was sent to Atlassian.");
+  });
+
   it("refuses a non-http authorize URL", async () => {
     const navigate = vi.fn();
     api.startMcpSignIn.mockResolvedValue({ authorizeUrl: "javascript:void(0)", expiresAt: "t", redirectUri: "r" });

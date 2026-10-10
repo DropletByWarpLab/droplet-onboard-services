@@ -32,6 +32,7 @@ const OUTCOMES = {
   cancelled: { error: false, text: "Sign-in was cancelled. Try again when you’re ready." },
   expired: { error: true, text: "That sign-in expired. Start again when you’re ready." },
   failed: { error: true, text: "Sign-in could not be completed. Try again, or paste the address you landed on." },
+  blocked: { error: true, text: "Sign-in was blocked because remote MCP was switched off. Nothing was sent to Atlassian." },
 } as const;
 
 /** `?mcp=<provider>:<outcome>`: consumed only by the card whose provider matches. */
@@ -45,6 +46,13 @@ function takeOutcome(provider: string): keyof typeof OUTCOMES | null {
   window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
   return Object.hasOwn(OUTCOMES, outcome ?? "") ? (outcome as keyof typeof OUTCOMES) : "failed";
 }
+
+/** Fixed sentences for the box's 409 codes; the box's own message is never shown. */
+const START_BLOCKED: Record<string, (name: string) => string> = {
+  remote_mcp_off: () => "Remote MCP is switched off for this Workspace. An owner or admin can turn it on in Integrations › Connector credentials.",
+  server_not_allowed: (name) => `This Droplet isn't set up to reach ${name}.`,
+  connection_disabled: (name) => `An owner or admin turned ${name} off for this Workspace.`,
+};
 
 function statusText(side: McpOAuthSide | null): string {
   switch (side?.state) {
@@ -85,6 +93,7 @@ export function McpSignInCard({
   const [error, setError] = useState<string | null>(null);
   const [pasted, setPasted] = useState("");
   const [ack, setAck] = useState(false);
+  const [blockedCode, setBlockedCode] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -106,7 +115,9 @@ export function McpSignInCard({
   const start = async (scope: "MEMBER" | "WORKSPACE") => {
     if (busy || (scope === "WORKSPACE" && !ack)) return;
     setBusy(true);
+    setBlockedCode(null);
     setError(null);
+    setBlockedCode(null);
     setOutcome(null);
     try {
       const body = await startMcpSignIn({
@@ -120,7 +131,14 @@ export function McpSignInCard({
       if (target.protocol !== "https:" && target.protocol !== "http:") throw new Error("bad_url");
       navigate(body.authorizeUrl);
       return;
-    } catch {
+    } catch (err) {
+      const blocked = err instanceof Error && Object.hasOwn(START_BLOCKED, err.message) ? START_BLOCKED[err.message] : undefined;
+      if (blocked) {
+        setBlockedCode(err instanceof Error ? err.message : null);
+        setError(blocked(displayName));
+        setBusy(false);
+        return;
+      }
       setError(`Droplet could not start the ${displayName} sign-in. Try again, or ask your Droplet administrator.`);
     }
     setBusy(false);
@@ -243,6 +261,9 @@ export function McpSignInCard({
         </div>
       )}
       {error && <p role="alert" className="type-footnote text-system-red">{error}</p>}
+      {blockedCode === "remote_mcp_off" && isAdmin && (
+        <a className="type-caption-1 underline" style={{ color: "var(--brand)" }} href="/integrations/credentials">Open the remote MCP switch</a>
+      )}
     </section>
   );
 }
