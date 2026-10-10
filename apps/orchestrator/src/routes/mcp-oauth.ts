@@ -217,7 +217,7 @@ export function createMcpOAuthCallbackRouter(prisma: PrismaClient, options: Part
         browserState: typeof cookie === "string" ? cookie : null, caller: null,
       }, deps);
     } catch {
-      result = { outcome: "failed", provider: null, scope: null };
+      result = { outcome: "failed", provider: null, scope: null, returnTo: null };
     }
     // No callback parameter becomes a destination or reflected text.
     const returnTo = result.returnTo ?? (result.scope === "WORKSPACE" ? "/connectors/credentials" : "/settings");
