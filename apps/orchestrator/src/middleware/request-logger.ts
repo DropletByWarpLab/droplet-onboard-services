@@ -19,6 +19,10 @@ export const REQUEST_LOG_REDACT_PATHS: readonly string[] = [
   "req.query.iss",
   "req.body.redirectUrl",
   "req.body.clientSecret",
+  // WARP-3963: the browser-handoff id is a bearer for one sign-in start.
+  "req.body.handoff",
+  "res.body.handoffId",
+  "res.body.url",
 ];
 
 /** pino-http req serializer (receives the std-serialized req). */
@@ -26,6 +30,8 @@ function scrubReq(req: { url?: string } & Record<string, unknown>) {
   const out = { ...req };
   // WARP-3193 SEC-DATA-4: log the path only, never the query string.
   if (typeof out.url === "string") out.url = out.url.split("?", 1)[0];
+  // WARP-3963: the browser-handoff id is a path segment (`GET /mcp/oauth/handoff/:id`).
+  if (typeof out.url === "string") out.url = out.url.replace(/(\/mcp\/oauth\/handoff\/)[^/]+/, "$1:id");
   // WARP-3622: nor the parsed copies of it. `query` (file paths, search terms,
   // recipients, feed and segment tokens) and `params` (path segments such as a
   // username or share id) are personal data that would ride into container logs

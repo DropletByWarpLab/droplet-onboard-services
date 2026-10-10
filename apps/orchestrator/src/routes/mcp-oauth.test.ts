@@ -14,6 +14,12 @@ vi.mock("../config.js", () => ({ config: {
   corsAllowedOrigins: ["https://droplet-ai.local"], agentMaxIter: { defaultIter: 5, capIter: 10 },
   MCP_BRIDGE_URL: "http://bridge.invalid", MCP_BRIDGE_SERVICE_TOKEN: "t",
 } }));
+// The presets share one in-memory budget per process; this file makes far more than 60 requests.
+vi.mock("../middleware/rate-limit.js", () => ({
+  authRateLimit: (_q: unknown, _s: unknown, n: () => void) => n(),
+  sensitiveRateLimit: (_q: unknown, _s: unknown, n: () => void) => n(),
+  standardRateLimit: (_q: unknown, _s: unknown, n: () => void) => n(),
+}));
 vi.mock("../services/activity.singleton.js", () => ({ recordActivity: vi.fn(async () => {}) }));
 
 const MCP_URL: string = (providerDescriptor("atlassian") as unknown as { signIn: { mcpUrl: string } }).signIn.mcpUrl;
@@ -122,7 +128,7 @@ describe("MCP OAuth routes", () => {
     const cb = await request(app).get("/api/mcp/oauth/callback").query({ state, code: "c" }).set("Cookie", `${MCP_OAUTH_STATE_COOKIE}=${state}`);
     expect(cb.headers.location).toBe("/settings?mcp=atlassian:blocked");
     gate.current = { allowed: true, row: null };
-    const s2 = await start(app, { provider: "atlassian", scope: "MEMBER", redirectMode: "loopback" });
+    const s2 = await start(app, { provider: "atlassian", scope: "MEMBER" });
     const state2 = new URL(s2.body.authorizeUrl).searchParams.get("state")!;
     gate.current = { allowed: false, reason: "connection_disabled", message: "" };
     const paste = await asUser(request(app).post("/api/mcp/oauth/paste")).send({ redirectUrl: `http://127.0.0.1/api/mcp/oauth/callback?code=c&state=${state2}` });
@@ -176,7 +182,7 @@ describe("MCP OAuth routes", () => {
 
   it("paste: rejects a bare code with 400, accepts the full address, and only for the person who started it", async () => {
     const { app, db } = setup();
-    const s = await start(app, { provider: "atlassian", scope: "MEMBER", redirectMode: "loopback" });
+    const s = await start(app, { provider: "atlassian", scope: "MEMBER" });
     const state = new URL(s.body.authorizeUrl).searchParams.get("state")!;
     const bare = await asUser(request(app).post("/api/mcp/oauth/paste")).send({ redirectUrl: "just-a-code" });
     expect(bare.status).toBe(400);
@@ -185,9 +191,9 @@ describe("MCP OAuth routes", () => {
       .send({ redirectUrl: `http://127.0.0.1/api/mcp/oauth/callback?code=c&state=${state}` });
     expect(other.status).toBe(400);
     expect(db.rows[0].state).not.toBe("CONNECTED");
-    const s2 = await start(app, { provider: "atlassian", scope: "MEMBER", redirectMode: "loopback" });
+    const s2 = await start(app, { provider: "atlassian", scope: "MEMBER" });
     const state2 = new URL(s2.body.authorizeUrl).searchParams.get("state")!;
-    const ok = await asUser(request(app).post("/api/mcp/oauth/paste")).send({ redirectUrl: `http://127.0.0.1/api/mcp/oauth/callback?code=c&state=${state2}` });
+    const ok =await asUser(request(app).post("/api/mcp/oauth/paste")).send({ redirectUrl: `http://127.0.0.1/api/mcp/oauth/callback?code=c&state=${state2}` });
     expect(ok.status).toBe(200);
     expect(ok.body).toEqual({ outcome: "connected" });
     expect(db.rows[0].state).toBe("CONNECTED");
@@ -244,6 +250,118 @@ describe("MCP OAuth routes", () => {
     const next = await start(app, { provider: "atlassian", scope: "MEMBER" }, "family");
     expect(new URL(next.body.authorizeUrl).searchParams.get("client_id")).toBe("mine");
     expect(oauth.register).toHaveBeenCalledTimes(1);
+  });
+
+  const mint = (app: express.Express, body: object = { provider: "atlassian", scope: "MEMBER" }, role = "family", id = "u1") =>
+    asUser(request(app).post("/api/mcp/oauth/handoff"), role, id).send(body);
+
+  it("handoff: mint answers the id, an absolute https url on the box origin and a 5 minute expiry", async () => {
+    const { app } = setup();
+    const res = await mint(app);
+    expect(res.status).toBe(200);
+    expect(Object.keys(res.body).sort()).toEqual(["expiresAt", "handoffId", "url"]);
+    expect(res.body.handoffId).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(res.body.url).toBe(`https://box.customer.com/connectors/mcp/connect?handoff=${res.body.handoffId}`);
+    const ttl = new Date(res.body.expiresAt).getTime() - Date.now();
+    expect(ttl).toBeGreaterThan(4 * 60_000);
+    expect(ttl).toBeLessThanOrEqual(5 * 60_000);
+    expect(res.headers["cache-control"]).toBe("no-store");
+  });
+
+  it("handoff: guests and services cannot mint; a WORKSPACE handoff needs an admin and the acknowledgement at mint time", async () => {
+    const { app } = setup();
+    expect((await mint(app, undefined, "guest")).status).toBe(403);
+    expect((await mint(app, undefined, "service")).status).toBe(403);
+    const member = await mint(app, { provider: "atlassian", scope: "WORKSPACE", acknowledge: true }, "family");
+    expect(member.status).toBe(403);
+    const noAck = await mint(app, { provider: "atlassian", scope: "WORKSPACE" }, "admin");
+    expect(noAck.status).toBe(400);
+    expect(noAck.body.error).toBe("acknowledge_required");
+    expect((await mint(app, { provider: "atlassian", scope: "WORKSPACE", acknowledge: true }, "admin")).status).toBe(200);
+    expect((await mint(app, { provider: "stripe", scope: "MEMBER" })).status).toBe(404);
+    expect((await mint(app, { provider: "atlassian", scope: "MEMBER", extra: 1 })).status).toBe(400);
+  });
+
+  it("handoff: reading never consumes it; another member, owners included, gets 403 handoff_wrong_member", async () => {
+    const { app } = setup();
+    const { handoffId } = (await mint(app)).body;
+    for (let i = 0; i < 2; i++) {
+      const read = await asUser(request(app).get(`/api/mcp/oauth/handoff/${handoffId}`));
+      expect(read.status).toBe(200);
+      expect(read.body).toMatchObject({
+        provider: "atlassian", scope: "MEMBER", callback: "https://box.customer.com/api/mcp/oauth/callback",
+        destinationHost: new URL(MCP_URL).hostname,
+      });
+      expect(typeof read.body.displayName).toBe("string");
+      expect(typeof read.body.expiresAt).toBe("string");
+    }
+    for (const role of ["family", "admin", "owner"]) {
+      const other = await asUser(request(app).get(`/api/mcp/oauth/handoff/${handoffId}`), role, "u2");
+      expect(other.status).toBe(403);
+      expect(other.body.error).toBe("handoff_wrong_member");
+    }
+    // The wrong member's attempts neither consumed it nor let them start with it.
+    const stolen = await asUser(request(app).post("/api/mcp/oauth/start"), "owner", "u2").send({ handoff: handoffId });
+    expect(stolen.status).toBe(403);
+    expect(stolen.body.error).toBe("handoff_wrong_member");
+    expect((await asUser(request(app).get(`/api/mcp/oauth/handoff/${handoffId}`))).status).toBe(200);
+    const unknown = await asUser(request(app).get("/api/mcp/oauth/handoff/not-a-real-id"));
+    expect(unknown.status).toBe(404);
+    expect(unknown.body.error).toBe("handoff_invalid");
+  });
+
+  it("handoff: start { handoff } sets the state cookie without any redirect mode, is single use, and the callback lands on the connected page", async () => {
+    const { app, db } = setup();
+    const { handoffId } = (await mint(app)).body;
+    const s = await asUser(request(app).post("/api/mcp/oauth/start")).send({ handoff: handoffId });
+    expect(s.status).toBe(200);
+    expect(cookieOf(s)).toMatch(/HttpOnly/);
+    expect(s.body.redirectUri).toBe("https://box.customer.com/api/mcp/oauth/callback");
+    const replay = await asUser(request(app).post("/api/mcp/oauth/start")).send({ handoff: handoffId });
+    expect(replay.status).toBe(404);
+    expect(replay.body.error).toBe("handoff_invalid");
+    expect((await asUser(request(app).get(`/api/mcp/oauth/handoff/${handoffId}`))).status).toBe(404);
+    const state = new URL(s.body.authorizeUrl).searchParams.get("state")!;
+    const cb = await request(app).get("/api/mcp/oauth/callback").query({ state, code: "c" }).set("Cookie", `${MCP_OAUTH_STATE_COOKIE}=${state}`);
+    expect(cb.status).toBe(303);
+    expect(cb.headers.location).toBe("/connectors/mcp/connected?mcp=atlassian:connected");
+    expect(db.rows[0].state).toBe("CONNECTED");
+  });
+
+  it("handoff: a WORKSPACE handoff starts without the acknowledgement being resent, and a flow started on the web keeps its return path", async () => {
+    const { app } = setup();
+    const { handoffId } = (await mint(app, { provider: "atlassian", scope: "WORKSPACE", acknowledge: true }, "admin")).body;
+    const s = await asUser(request(app).post("/api/mcp/oauth/start"), "admin").send({ handoff: handoffId });
+    expect(s.status).toBe(200);
+    const state = new URL(s.body.authorizeUrl).searchParams.get("state")!;
+    const cb = await request(app).get("/api/mcp/oauth/callback").query({ state, code: "c" }).set("Cookie", `${MCP_OAUTH_STATE_COOKIE}=${state}`);
+    expect(cb.headers.location).toBe("/connectors/mcp/connected?mcp=atlassian:connected");
+    const web = await start(app);
+    const webState = new URL(web.body.authorizeUrl).searchParams.get("state")!;
+    const webCb = await request(app).get("/api/mcp/oauth/callback").query({ state: webState, code: "c" }).set("Cookie", `${MCP_OAUTH_STATE_COOKIE}=${webState}`);
+    expect(webCb.headers.location).toBe("/settings?mcp=atlassian:connected");
+  });
+
+  it("start: redirectMode is gone, and a body naming both a provider and a handoff is refused", async () => {
+    const { app } = setup();
+    expect((await start(app, { provider: "atlassian", scope: "MEMBER", redirectMode: "loopback" })).status).toBe(400);
+    expect((await start(app, { provider: "atlassian", scope: "MEMBER", handoff: "x" })).status).toBe(400);
+  });
+
+  it("handoff: a server turned off cannot be minted for (409) and the id never reaches the request log", async () => {
+    const lines: string[] = [];
+    const { app, gate } = setup({ write: (s) => { lines.push(s); } });
+    gate.current = { allowed: false, reason: "connection_disabled", message: "x" };
+    expect((await mint(app)).status).toBe(409);
+    gate.current = { allowed: true, row: null };
+    const { handoffId, url } = (await mint(app)).body;
+    await asUser(request(app).get(`/api/mcp/oauth/handoff/${handoffId}`));
+    await asUser(request(app).post("/api/mcp/oauth/start")).send({ handoff: handoffId });
+    await asUser(request(app).get(`/api/mcp/oauth/handoff/${handoffId}`), "family", "u2");
+    expect(lines.length).toBeGreaterThan(0);
+    const all = lines.join("\n");
+    expect(all).not.toContain(handoffId);
+    expect(all).not.toContain(url);
   });
 
   it("never writes the code, state or pasted address to the request log", async () => {

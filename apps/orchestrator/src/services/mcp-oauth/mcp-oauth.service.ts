@@ -33,6 +33,7 @@ import {
   type McpOAuthDiscovery,
   type McpOAuthSite,
 } from "../mcp-bridge.client.js";
+import type { McpOAuthReturnTo } from "../account-connect-return.js";
 import { remoteMcpEgressAllowed, type RemoteMcpEgressDecision, type RemoteMcpGatePrisma } from "../remote-mcp-gateway.service.js";
 
 const logger = createLogger("mcp-oauth");
@@ -71,7 +72,10 @@ export type McpOAuthErrorCode =
   | "too_many_pending"
   | "sign_in_unavailable"
   | "bare_code_rejected"
-  | "invalid_redirect_url";
+  | "invalid_redirect_url"
+  // WARP-3963: unknown, expired or already-used handoff; and one minted by another member.
+  | "handoff_invalid"
+  | "handoff_wrong_member";
 
 const ERROR_STATUS: Record<McpOAuthErrorCode, number> = {
   unknown_provider: 404,
@@ -85,6 +89,8 @@ const ERROR_STATUS: Record<McpOAuthErrorCode, number> = {
   sign_in_unavailable: 503,
   bare_code_rejected: 400,
   invalid_redirect_url: 400,
+  handoff_invalid: 404,
+  handoff_wrong_member: 403,
 };
 
 export class McpOAuthError extends Error {
@@ -116,6 +122,17 @@ interface PendingFlow {
   /** What the row was before consent began, restored if consent fails. */
   priorState: McpOAuthStateName;
   expiresAt: number;
+  returnTo?: McpOAuthReturnTo;
+}
+
+/** WARP-3963: a native app's request to finish a sign-in in the browser. Held by sha256(id). */
+interface PendingHandoff {
+  userId: string;
+  provider: string;
+  scope: McpOAuthScopeName;
+  /** The Workspace acknowledgement, given at mint time by an owner or admin. */
+  acknowledge: boolean;
+  expiresAt: number;
 }
 
 export interface McpOAuthDependencies {
@@ -137,6 +154,8 @@ export interface McpOAuthDependencies {
    * Upgrade to a sealed row column only if restarts mid-consent become common.
    */
   pending: Map<string, PendingFlow>;
+  /** Browser handoffs, keyed by sha256(id). ponytail: in memory; a restart means the person taps Connect again. */
+  handoffs: Map<string, PendingHandoff>;
 }
 
 /**
@@ -163,11 +182,13 @@ function lazyBridgeOAuthClient(): Pick<McpBridgeOAuthClient, "discover" | "regis
  * maps: a fresh `new Map()` per call made every real browser redirect fail.
  */
 const PROCESS_PENDING = new Map<string, PendingFlow>();
+const PROCESS_HANDOFFS = new Map<string, PendingHandoff>();
 
 export function mcpOAuthDependencies(overrides: Partial<McpOAuthDependencies> = {}): McpOAuthDependencies {
   return {
     now: () => new Date(),
     pending: PROCESS_PENDING,
+    handoffs: PROCESS_HANDOFFS,
     // Lazy: the singleton pulls the whole MCP stack, which this module must not load with it.
     catalogChanged: async (provider, connectionId, event) => {
       const { catalogSignInChanged } = await import("../mcp-client.singleton.js");
@@ -275,7 +296,8 @@ export interface BeginInput {
   acknowledge?: boolean;
   /** `<trusted origin>/api/mcp/oauth/callback`, built by the route. */
   originCallback: string;
-  redirectMode?: "origin" | "loopback";
+  /** Where the callback lands; set for a browser-handoff flow, else the route picks by scope. */
+  returnTo?: McpOAuthReturnTo;
 }
 export interface BeginResult {
   authorizeUrl: string;
@@ -410,7 +432,8 @@ export async function beginMcpSignIn(
   for (const [k, v] of deps.pending) if (v.connectionId === id) deps.pending.delete(k);
   const state = b64url(randomBytes(32));
   const codeVerifier = b64url(randomBytes(48));
-  const redirectUri = input.redirectMode === "loopback" ? MCP_OAUTH_LOOPBACK_REDIRECTS[1] : input.originCallback;
+  // The box origin when it is https; otherwise loopback (RFC 8252 §7.3), completed by paste.
+  const redirectUri = input.originCallback.startsWith("https://") ? input.originCallback : MCP_OAUTH_LOOPBACK_REDIRECTS[1];
   const scopes = signIn.scopes.join(" ");
   const expiresAt = now.getTime() + MCP_OAUTH_FLOW_TTL_MS;
   deps.pending.set(sha256hex(state), {
@@ -418,7 +441,7 @@ export async function beginMcpSignIn(
     resource: signIn.mcpUrl, issuer: disc.issuer, issRequired: disc.issParameterSupported, tokenEndpoint: disc.tokenEndpoint,
     ...(disc.revocationEndpoint ? { revocationEndpoint: disc.revocationEndpoint } : {}),
     clientId, ...(clientSecret ? { clientSecret } : {}),
-    scopes, priorState, expiresAt,
+    scopes, priorState, expiresAt, ...(input.returnTo ? { returnTo: input.returnTo } : {}),
   });
 
   authorize.searchParams.set("response_type", "code");
@@ -431,6 +454,83 @@ export async function beginMcpSignIn(
   // RFC 8707: the resource on the authorize request, and again on the token request.
   authorize.searchParams.set("resource", signIn.mcpUrl);
   return { authorizeUrl: authorize.toString(), state, expiresAt: new Date(expiresAt).toISOString(), redirectUri };
+}
+
+// ─── browser handoff (WARP-3963) ─────────────────────────────────────────────
+
+export const MCP_OAUTH_HANDOFF_TTL_MS = 5 * 60_000;
+
+export interface HandoffCaller { id: string; role: string | undefined }
+export interface HandoffView {
+  provider: string;
+  displayName: string;
+  scope: McpOAuthScopeName;
+  /** The server being connected (the descriptor's MCP host). A read makes no vendor call, so the
+   *  authorization server, discovered at start, is not known yet. */
+  destinationHost: string;
+  expiresAt: string;
+}
+
+/**
+ * A native app asks the box for a one-time link that finishes a sign-in in the browser (where the
+ * state cookie lives). Same authorisation as `start`, decided at mint time: a WORKSPACE handoff
+ * needs an owner or admin and the acknowledgement. Bound to the minting member.
+ */
+export async function createMcpHandoff(
+  prisma: PrismaClient,
+  input: { provider: string; scope: McpOAuthScopeName; acknowledge?: boolean; userId: string; role: string | undefined },
+  deps: McpOAuthDependencies,
+): Promise<{ id: string; expiresAt: string }> {
+  signInFor(input.provider);
+  if (input.scope === "WORKSPACE") {
+    if (!roleIn(input.role, ADMIN_ROLES)) throw new McpOAuthError("forbidden", "Only an owner or admin can create a Workspace connection.");
+    if (input.acknowledge !== true) throw new McpOAuthError("acknowledge_required", "Confirm that everyone allowed to use this server acts as this account.");
+  } else if (!roleIn(input.role, SIGN_IN_ROLES)) {
+    throw new McpOAuthError("forbidden", "Your role cannot sign in to this service.");
+  }
+  await requireEgress(prisma, deps, input.provider);
+  const now = deps.now().getTime();
+  for (const [k, v] of [...deps.handoffs]) if (v.expiresAt <= now) deps.handoffs.delete(k);
+  if (deps.handoffs.size >= MAX_PENDING) throw new McpOAuthError("too_many_pending", "Too many sign-ins are in progress. Try again shortly.");
+  const id = b64url(randomBytes(32));
+  const expiresAt = now + MCP_OAUTH_HANDOFF_TTL_MS;
+  deps.handoffs.set(sha256hex(id), {
+    userId: input.userId, provider: input.provider, scope: input.scope, acknowledge: input.scope === "WORKSPACE", expiresAt,
+  });
+  return { id, expiresAt: new Date(expiresAt).toISOString() };
+}
+
+/** Unknown, expired and used all read the same (404); someone else's is 403, owners included. Never consumes. */
+function peekHandoff(id: string, caller: HandoffCaller, deps: McpOAuthDependencies): { key: string; h: PendingHandoff } {
+  if (id.length === 0 || id.length > MAX_STATE_LEN) throw new McpOAuthError("handoff_invalid", "This link has expired or was already used.");
+  const key = sha256hex(id);
+  const h = deps.handoffs.get(key);
+  if (!h || h.expiresAt <= deps.now().getTime()) {
+    deps.handoffs.delete(key);
+    throw new McpOAuthError("handoff_invalid", "This link has expired or was already used.");
+  }
+  if (h.userId !== caller.id) throw new McpOAuthError("handoff_wrong_member", "This link was made for another member's account.");
+  return { key, h };
+}
+
+export function readMcpHandoff(id: string, caller: HandoffCaller, deps: McpOAuthDependencies): HandoffView {
+  const { h } = peekHandoff(id, caller, deps);
+  const { displayName, signIn } = signInFor(h.provider);
+  return {
+    provider: h.provider, displayName, scope: h.scope,
+    destinationHost: new URL(signIn.mcpUrl).hostname, expiresAt: new Date(h.expiresAt).toISOString(),
+  };
+}
+
+/** Single use: removed on first valid claim. A wrong member's attempt does not burn it. */
+export function claimMcpHandoff(
+  id: string,
+  caller: HandoffCaller,
+  deps: McpOAuthDependencies,
+): { provider: string; scope: McpOAuthScopeName; acknowledge: boolean } {
+  const { key, h } = peekHandoff(id, caller, deps);
+  deps.handoffs.delete(key);
+  return { provider: h.provider, scope: h.scope, acknowledge: h.acknowledge };
 }
 
 // ─── complete ────────────────────────────────────────────────────────────────
@@ -450,9 +550,11 @@ export interface CompleteResult {
   /** Known only once the flow was claimed. */
   provider: string | null;
   scope: McpOAuthScopeName | null;
+  /** Set when the flow was started from a browser handoff; otherwise the route picks by scope. */
+  returnTo: McpOAuthReturnTo | null;
 }
 
-const FAILED: CompleteResult = { outcome: "failed", provider: null, scope: null };
+const FAILED: CompleteResult = { outcome: "failed", provider: null, scope: null, returnTo: null };
 
 async function settleFailure(prisma: PrismaClient, flow: PendingFlow, lastError: string | null): Promise<void> {
   try {
@@ -515,7 +617,7 @@ export async function completeMcpSignIn(
   const flow = deps.pending.get(key);
   deps.pending.delete(key);
   if (!flow) return FAILED;
-  const result = (outcome: McpOAuthOutcome): CompleteResult => ({ outcome, provider: flow.provider, scope: flow.scope });
+  const result = (outcome: McpOAuthOutcome): CompleteResult => ({ outcome, provider: flow.provider, scope: flow.scope, returnTo: flow.returnTo ?? null });
   if (flow.expiresAt <= deps.now().getTime()) {
     await settleFailure(prisma, flow, null);
     return result("expired");
@@ -745,9 +847,9 @@ export async function mcpSignInView(
       siteName: workspace.siteName, siteUrl: workspace.siteUrl,
     },
     redirectUri,
-    // True when the box has an https origin to call back to; otherwise clients start with
-    // redirectMode "loopback" and show the paste field first. The authorization server
-    // decides in the end; paste is the guaranteed path.
+    // True when the box has an https origin to call back to; otherwise the box itself starts
+    // with the loopback redirect and clients show the paste field first. The authorization
+    // server decides in the end; paste is the guaranteed path.
     callbackSupported: redirectUri.startsWith("https://"),
   };
 }
