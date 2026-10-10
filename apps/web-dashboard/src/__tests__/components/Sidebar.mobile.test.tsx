@@ -219,13 +219,13 @@ describe("<Sidebar> mobile branch (WARP-290)", () => {
   //
   // The list shrinks as surfaces MOVE, never as they vanish, and each move
   // brings its new door in the same change:
-  //   · Drives links through /files/drives to Settings → Storage.
+  //   · Drives → the /files toolbar's Drives menu, which opens Settings →
+  //     Storage. A side-nav row must not redirect out of its section.
   //   · WARP-2966 — Sync devices → Settings → Advanced (addendum §2.3), and
   //     Favorites → the /files toolbar (it is a filter over the places below,
   //     not a place). Settings is itself a drawer row, so both stay reachable
   //     on a phone; neither is a Files sub-view any more, which is the point.
   const FILES_SUBVIEWS: Array<[string, RegExp, string]> = [
-    ["Drives", /^drives$/i, "/files/drives"],
     ["Recent", /^recent$/i, "/files/recents"],
     ["Shared", /^shared$/i, "/files/shared"],
     ["Trash", /^trash$/i, "/files/trash"],

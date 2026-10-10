@@ -15,6 +15,8 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
 
 const redirect = vi.fn();
 vi.mock("next/navigation", () => ({
@@ -65,31 +67,31 @@ describe("the old /files/drives address keeps working", () => {
   });
 });
 
-describe("Files offers a shortcut to physical drive management", () => {
-  function filesChildren() {
-    for (const group of NAV_GROUPS) {
-      const files = group.items.find((i) => i.href === "/files");
-      if (files) return files.children ?? [];
-    }
-    throw new Error("the Files nav item is gone");
-  }
-
-  it("restores Drives alongside the existing Files sub-nav", () => {
-    const hrefs = filesChildren().map((c) => c.href);
-    // …and the rest of the sub-nav is untouched.
-    // WARP-2966 re-cut the rest of the sub-nav to three places: the "All
-    // files" row repeated the parent href, Favorites is a filter reached from
-    // the browser's toolbar, and Sync devices left Files for Settings.
-    expect(hrefs).toEqual([
-      "/files/drives",
+describe("Drives is not a side-nav row", () => {
+  // It was a Files child pointing at the /files/drives redirect, so clicking
+  // it under Files landed in Settings and swapped the sidebar to the Settings
+  // panel. The /files toolbar's Drives menu is its door now (page.test.tsx).
+  it("leaves Recent, Shared and Trash as the Files sub-nav", () => {
+    const files = NAV_GROUPS.flatMap((g) => g.items).find((i) => i.href === "/files");
+    expect(files?.children?.map((c) => c.href)).toEqual([
       "/files/recents",
       "/files/shared",
       "/files/trash",
     ]);
   });
 
-  it("offers one Drives shortcut using the working redirect", () => {
-    const every = NAV_GROUPS.flatMap((g) => g.items.flatMap((i) => [i, ...(i.children ?? [])]));
-    expect(every.filter((i) => i.href === "/files/drives").map((i) => i.label)).toEqual(["Drives"]);
+  // The rule, for every row on every nav surface (sidebar, Settings panel,
+  // More drawer, Workspace chips): a row opens the page it names. A row whose
+  // page is a server redirect lands somewhere else, usually another section.
+  it("points no nav row at a redirect page", () => {
+    const appDir = path.join(__dirname, "..", "app");
+    const hrefs = NAV_GROUPS.flatMap((g) =>
+      g.items.flatMap((i) => [i.href, ...(i.children ?? []).map((c) => c.href)]),
+    );
+    const redirecting = hrefs.filter((href) => {
+      const page = path.join(appDir, href, "page.tsx");
+      return existsSync(page) && /\b(?:permanentRedirect|redirect)\(/.test(readFileSync(page, "utf-8"));
+    });
+    expect(redirecting).toEqual([]);
   });
 });
