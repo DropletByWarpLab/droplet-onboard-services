@@ -76,6 +76,7 @@ SFP_PORT_MAX = 10
 NULL_SESSION = "0" * 32
 UBUS_NO_DATA = 5
 UBUS_PERMISSION_DENIED = 6
+JSONRPC_ACCESS_DENIED = -32002  # uhttpd-mod-ubus: unknown/revoked session
 
 # Rollback window for `uci apply` (WARP-1730). Mirrors services/routing
 # ``safe_apply``'s 60s, which matches the WARP-41 confirmation-token TTL —
@@ -271,8 +272,16 @@ class OpenWrtSwitchDriver(SwitchDriver):
             "params": [session, obj, method, args or {}],
         })
         if "error" in resp:
-            message = resp["error"].get("message", str(resp["error"]))
-            raise SwitchAPIError(code=0, message=f"ubus error on {obj}.{method}: {message}")
+            err = resp["error"]
+            message = f"ubus error on {obj}.{method}: {err.get('message', str(err))}"
+            # A session the switch no longer knows (rpcd keeps sessions in memory,
+            # so a reboot forgets ours) is answered at the JSON-RPC level with
+            # -32002 "Access denied", not a ubus status 6. Same meaning, so map it
+            # and let _ubus() re-login once. On session.login itself it classifies
+            # as AuthenticationError too - fine, the switch refused us. Other
+            # JSON-RPC codes stay code=0 (not retried).
+            code = UBUS_PERMISSION_DENIED if err.get("code") == JSONRPC_ACCESS_DENIED else 0
+            raise SwitchAPIError(code=code, message=message)
         result = resp.get("result", [])
         if not result:
             raise SwitchAPIError(code=0, message=f"Empty ubus result for {obj}.{method}")
