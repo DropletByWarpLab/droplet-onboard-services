@@ -133,6 +133,23 @@ export interface McpOAuthDependencies {
   pending: Map<string, PendingFlow>;
 }
 
+/**
+ * The bridge client, built on first use: routers are created at app start (and in
+ * tests that never sign in), long before any hop needs the bridge's address.
+ */
+function lazyBridgeOAuthClient(): Pick<McpBridgeOAuthClient, "discover" | "register" | "exchange" | "refresh" | "revoke"> {
+  let client: McpBridgeOAuthClient | null = null;
+  const get = (): McpBridgeOAuthClient =>
+    (client ??= new McpBridgeOAuthClient({ baseUrl: config.MCP_BRIDGE_URL, serviceToken: config.MCP_BRIDGE_SERVICE_TOKEN }));
+  return {
+    discover: (mcpUrl) => get().discover(mcpUrl),
+    register: (endpoint, redirects) => get().register(endpoint, redirects),
+    exchange: (input) => get().exchange(input),
+    refresh: (input) => get().refresh(input),
+    revoke: (input) => get().revoke(input),
+  };
+}
+
 export function mcpOAuthDependencies(overrides: Partial<McpOAuthDependencies> = {}): McpOAuthDependencies {
   return {
     now: () => new Date(),
@@ -147,7 +164,7 @@ export function mcpOAuthDependencies(overrides: Partial<McpOAuthDependencies> = 
       );
     },
     ...overrides,
-    oauth: overrides.oauth ?? new McpBridgeOAuthClient({ baseUrl: config.MCP_BRIDGE_URL, serviceToken: config.MCP_BRIDGE_SERVICE_TOKEN }),
+    oauth: overrides.oauth ?? lazyBridgeOAuthClient(),
   };
 }
 
