@@ -561,6 +561,7 @@ export interface McpOAuthRefreshInput {
 export interface McpOAuthRevokeInput {
   revocationEndpoint: string;
   clientId: string;
+  clientSecret?: string;
   token: string;
 }
 

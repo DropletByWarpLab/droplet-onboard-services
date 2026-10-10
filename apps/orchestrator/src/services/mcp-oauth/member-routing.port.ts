@@ -45,7 +45,9 @@ export interface OAuthRowLite {
 
 /** The slice of Prisma this port reads. */
 export interface MemberRoutingPrisma {
-  user: { findFirst(args: unknown): Promise<{ id: string } | null> };
+  user: {
+    findFirst(args: unknown): Promise<{ id: string; directoryStatus?: string; deletionStatus?: string } | null>;
+  };
   mcpOAuthConnection: {
     findFirst(args: unknown): Promise<OAuthRowLite | null>;
     findUnique(args: unknown): Promise<OAuthRowLite | null>;
@@ -161,15 +163,27 @@ export function createMemberRoutingPort(opts: MemberRoutingOptions): CredentialA
       const username = remoteCallAttribution()?.userId;
       let member: OAuthRowLite | null = null;
       if (username) {
-        const user = await prisma.user.findFirst({ where: { username }, select: { id: true } });
+        const user = await prisma.user.findFirst({
+          where: { username },
+          select: { id: true, directoryStatus: true, deletionStatus: true },
+        });
         if (user) {
+          // A leaver (deactivated or being deleted) is refused outright: their durable and
+          // scheduled runs must not keep acting as them, and must not fall through to the
+          // Workspace or API-token identity either.
+          if (user.directoryStatus !== "ACTIVE" || user.deletionStatus !== "NONE") {
+            return refuse(name, "REMOTE_SIGN_IN_REQUIRED");
+          }
           member = await prisma.mcpOAuthConnection.findFirst({
             where: { provider: serverId, scope: "MEMBER", memberId: user.id },
           });
         }
       }
-      // A member whose own sign-in died is told so: no silent switch to another identity.
-      if (member?.state === "NEEDS_RECONNECT") return refuse(name, "REMOTE_SIGN_IN_EXPIRED");
+      // A member whose own sign-in is anything but connected (died, mid re-consent, in error) is
+      // told so: no silent switch to another identity. Only "never signed in" falls through.
+      if (member && member.state !== "CONNECTED" && member.state !== "DISCONNECTED") {
+        return refuse(name, "REMOTE_SIGN_IN_EXPIRED");
+      }
       if (member?.state === "CONNECTED") return via(member, conn.site, name, args, "member");
 
       const workspace = await prisma.mcpOAuthConnection.findFirst({ where: { provider: serverId, scope: "WORKSPACE" } });

@@ -134,7 +134,7 @@ export function createMcpOAuthRouter(prisma: PrismaClient, options: Partial<McpO
         return res.status(200).json({
           disconnected: true,
           revoked: false,
-          message: "Signed out here. Couldn't revoke at the service while remote MCP is switched off.",
+          message: "Signed out here. Couldn't revoke the sign-in at the service, so it may still be active there.",
         });
       }
       return res.status(204).send();

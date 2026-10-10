@@ -293,9 +293,15 @@ export interface BeginResult {
   redirectUri: string;
 }
 
-function prunePending(deps: McpOAuthDependencies): void {
+/** Drops expired flows AND settles their rows: an abandoned consent must not leave a
+ *  row in PENDING_CONSENT forever (it goes back to the state it had before). */
+async function prunePending(prisma: PrismaClient, deps: McpOAuthDependencies): Promise<void> {
   const now = deps.now().getTime();
-  for (const [k, v] of deps.pending) if (v.expiresAt <= now) deps.pending.delete(k);
+  for (const [k, v] of [...deps.pending]) {
+    if (v.expiresAt > now) continue;
+    deps.pending.delete(k);
+    await settleFailure(prisma, v, null);
+  }
 }
 
 export async function beginMcpSignIn(
@@ -314,7 +320,7 @@ export async function beginMcpSignIn(
   }
   // Before discovery and registration, the first hops that dial the vendor.
   await requireEgress(prisma, deps, input.provider);
-  prunePending(deps);
+  await prunePending(prisma, deps);
   if (deps.pending.size >= MAX_PENDING) throw new McpOAuthError("too_many_pending", "Too many sign-ins are in progress. Try again shortly.");
 
   let disc: McpOAuthDiscovery;
@@ -507,6 +513,20 @@ export async function completeMcpSignIn(
     (flow.scope === "MEMBER" ? row.memberId === flow.userId : row.memberId === null);
   if (!row || !ownerOk || !row.clientId) { await settleFailure(prisma, flow, "sign_in_failed"); return result("failed"); }
 
+  // The person who started this must STILL be allowed to: active, and a Workspace flow still
+  // needs an owner or admin (one demoted or deactivated mid-flow must not create the shared
+  // connection). Read fresh, here, for the callback and the paste alike. Unreadable = refused.
+  let starterOk = false;
+  try {
+    const starter = await prisma.user.findFirst({
+      where: { id: flow.userId },
+      select: { role: true, directoryStatus: true, deletionStatus: true },
+    });
+    starterOk = !!starter && starter.directoryStatus === "ACTIVE" && starter.deletionStatus === "NONE" &&
+      roleIn(starter.role, flow.scope === "WORKSPACE" ? ADMIN_ROLES : SIGN_IN_ROLES);
+  } catch { /* refused below */ }
+  if (!starterOk) { await settleFailure(prisma, flow, "sign_in_failed"); return result("failed"); }
+
   // The exchange hands the vendor a code: only while remote MCP may talk to it. A
   // refusal has already burned the state above and leaves the row as it was.
   let egress: RemoteMcpEgressDecision;
@@ -552,6 +572,18 @@ export async function completeMcpSignIn(
   }
   await audit(flow, "CONNECTED");
   return result("connected");
+}
+
+/** One audit row for an administrative change to a sign-in (ids and kinds only, rule 19). */
+async function auditAdminEvent(actorId: string, what: string, refs: Record<string, string>): Promise<void> {
+  try {
+    await recordActivity({
+      kind: "auth", severity: "info", sourceIcon: "cloud", what, sub: refs.change ?? "mcp_oauth",
+      actor: { type: "user", id: actorId }, refs,
+    });
+  } catch {
+    logger.warn({ what }, "mcp_oauth_audit_failed");
+  }
 }
 
 /**
@@ -685,18 +717,21 @@ export async function disconnectMcpOAuth(
         // The vendor revoke is a hop like any other: not while remote MCP is off for
         // this server. The LOCAL deletion below happens regardless; that is what matters.
         const egress = await deps.egress(prisma, row.provider);
-        if (!egress.allowed) {
-          notes.revokeSkipped = true;
-          throw new Error("egress refused");
-        }
-        // The refresh token is the long-lived grant; revoking it ends the sign-in.
+        if (!egress.allowed) throw new Error("egress refused");
+        // The refresh token is the long-lived grant; revoking it ends the sign-in. A
+        // confidential client authenticates the revoke with its secret.
+        const clientSecret = openSecret(row);
         await deps.oauth.revoke({
           revocationEndpoint: blob.revocationEndpoint,
           clientId: row.clientId,
+          ...(clientSecret ? { clientSecret } : {}),
           token: blob.refreshToken ?? blob.accessToken,
         });
       }
     } catch {
+      // ANY failure (off, gate unreadable, vendor error, unreadable blob): the grant may still
+      // be live at the vendor, so the answer must never claim a clean revoke.
+      notes.revokeSkipped = true;
       logger.warn({ provider: row.provider }, "mcp_oauth_revoke_failed");
     }
   }
@@ -707,6 +742,11 @@ export async function disconnectMcpOAuth(
   await deps?.closeSession(row.provider, row.id).catch(() => undefined);
   // If this row backed the catalog session, re-pick it (or detach). Not awaited.
   void deps?.catalogChanged?.(row.provider, row.id).catch(() => undefined);
+  await auditAdminEvent(
+    caller.id,
+    row.scope === "WORKSPACE" ? `Workspace sign-in to ${row.provider} disconnected` : `Sign-in to ${row.provider} disconnected`,
+    { connector: row.provider, connectionId: row.id, change: "disconnect", scope: row.scope, vendorRevoke: notes.revokeSkipped ? "not_done" : "done_or_not_offered" },
+  );
   return true;
 }
 
@@ -732,21 +772,32 @@ export async function storeMcpOAuthClient(
   const token = httpsUrl(disc.tokenEndpoint);
   if (!token || disc.resource !== signIn.mcpUrl) throw new McpOAuthError("sign_in_unavailable", "The service could not be reached. Try again shortly.");
   const rows = await prisma.mcpOAuthConnection.findMany({ where: { provider: input.provider, issuer: disc.issuer } });
+  // Only rows that hold NO tokens take the new client. A signed-in row's tokens were issued to
+  // its current client, so changing it would break the next refresh and sign people out.
+  let stored = 0;
   for (const r of rows) {
+    if (r.tokensEnc) continue;
     await prisma.mcpOAuthConnection.update({
       where: { id: r.id },
       data: { clientId: input.clientId, clientSecretEnc: input.clientSecret ? sealSecret(r, input.clientSecret) : null },
     });
+    stored++;
   }
-  if (rows.length === 0) {
-    // No row holds this issuer yet: the admin's own MEMBER row carries the client.
+  if (stored === 0) {
+    // No token-less row holds this issuer: the admin's own MEMBER row carries the client.
     const own = await prisma.mcpOAuthConnection.findFirst({ where: { provider: input.provider, scope: "MEMBER", memberId: input.userId } });
-    const id = own?.id ?? randomUUID();
-    const data = {
-      issuer: disc.issuer, tokenEndpointHost: token.host, clientId: input.clientId,
-      clientSecretEnc: input.clientSecret ? sealSecret({ id, scope: "MEMBER", memberId: input.userId }, input.clientSecret) : null,
-    };
-    if (own) await prisma.mcpOAuthConnection.update({ where: { id }, data });
-    else await prisma.mcpOAuthConnection.create({ data: { id, provider: input.provider, scope: "MEMBER", memberId: input.userId, state: "DISCONNECTED", ...data } });
+    if (!own?.tokensEnc) {
+      const id = own?.id ?? randomUUID();
+      const data = {
+        issuer: disc.issuer, tokenEndpointHost: token.host, clientId: input.clientId,
+        clientSecretEnc: input.clientSecret ? sealSecret({ id, scope: "MEMBER", memberId: input.userId }, input.clientSecret) : null,
+      };
+      if (own) await prisma.mcpOAuthConnection.update({ where: { id }, data });
+      else await prisma.mcpOAuthConnection.create({ data: { id, provider: input.provider, scope: "MEMBER", memberId: input.userId, state: "DISCONNECTED", ...data } });
+    }
   }
+  // Ids and kinds only: never the client id value or the secret.
+  await auditAdminEvent(input.userId, `Sign-in client changed for ${input.provider}`, {
+    connector: input.provider, change: "client", hasSecret: input.clientSecret ? "yes" : "no",
+  });
 }

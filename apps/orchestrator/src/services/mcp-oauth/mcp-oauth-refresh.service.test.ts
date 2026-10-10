@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { REPO_ROOT } from "../../__tests__/helpers/test-paths.js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { __setColumnCryptoKeyForTest } from "../column-crypto.service.js";
+import { __setColumnCryptoKeyForTest, deriveMcpOAuthTokenKey, encryptColumn, mcpOAuthAad } from "../column-crypto.service.js";
 import { McpBridgeError } from "../mcp-bridge.client.js";
 import { disconnectMcpOAuth, openTokens, sealTokens } from "./mcp-oauth.service.js";
 import { mountMcpOAuthRefresh, createMcpOAuthRefresher } from "./mcp-oauth-refresh.service.js";
@@ -36,6 +36,7 @@ function vendor() {
 
 async function setup(o: { expiresInMin?: number; refreshToken?: string | null; tokenEndpoint?: string; hostPin?: string; secret?: string } = {}) {
   const db = fakeMcpOAuthDb();
+  db.setUser({ id: "u1", username: "alice" });
   const v = vendor();
   let clock = new Date(T0);
   const first = v.issue(T0, (o.expiresInMin ?? 5) * 60);
@@ -50,6 +51,17 @@ async function setup(o: { expiresInMin?: number; refreshToken?: string | null; t
     revocationEndpoint: "https://auth.example/oauth/revoke", resource: "res", mcpUrl: "res",
   };
   row.tokensEnc = sealTokens(row, blob);
+  if (o.secret) row.clientSecretEnc = encryptColumn(deriveMcpOAuthTokenKey(), o.secret, mcpOAuthAad(row));
+  /** Another signed-in row (a member, or the Workspace when memberId is null), expiring in `min` minutes. */
+  const addRow = async (id: string, memberId: string | null, min: number) => {
+    const r = await db.seed({
+      id, provider: "atlassian", scope: memberId ? "MEMBER" : "WORKSPACE", memberId, state: "CONNECTED",
+      issuer: "https://auth.example/iss", tokenEndpointHost: "auth.example", clientId: "client-1", tokensEnc: "x",
+      tokenExpiresAt: new Date(T0.getTime() + min * MIN), workspaceAckAt: T0, workspaceAckBy: "boss",
+    });
+    r.tokensEnc = sealTokens(r, { ...blob, expiresAt: r.tokenExpiresAt.toISOString() });
+    return r;
+  };
   const oauth = {
     refresh: vi.fn(async (_i: unknown): Promise<{ accessToken: string; refreshToken?: string; expiresIn?: number; scope?: string }> =>
       ({ accessToken: v.issue(clock, 3600), refreshToken: "refresh-2", expiresIn: 3600 })),
@@ -59,7 +71,7 @@ async function setup(o: { expiresInMin?: number; refreshToken?: string | null; t
   const egress = async (): Promise<Egress> => gate.current;
   const catalogChanged = vi.fn(async (_p: string, _c: string): Promise<void> => {});
   const refresher = createMcpOAuthRefresher({ prisma: db.prisma, oauth, now: () => clock, closeSession, egress, catalogChanged });
-  return { db, v, oauth, closeSession, catalogChanged, refresher, gate, egress, row, first, advance: (ms: number) => { clock = new Date(clock.getTime() + ms); }, now: () => clock };
+  return { db, v, oauth, closeSession, catalogChanged, refresher, gate, egress, addRow, row, first, advance: (ms: number) => { clock = new Date(clock.getTime() + ms); }, now: () => clock };
 }
 
 beforeEach(() => {
@@ -295,5 +307,95 @@ describe("refresh obeys the same egress rules as every remote MCP call", () => {
     const r = createMcpOAuthRefresher({ prisma: s.db.prisma, oauth: s.oauth, now: () => s.now(), egress: async () => { throw new Error("db"); } });
     expect(await r.refreshNow(ID)).toBe("unavailable");
     expect(s.oauth.refresh).not.toHaveBeenCalled();
+  });
+});
+
+describe("review fixes: leavers, ordering, cross-process races, revoke", () => {
+  const WS = "44444444-4444-4444-4444-444444444444";
+  const BOB = "55555555-5555-5555-5555-555555555555";
+
+  it("the tick renews the Workspace row and active members, but not a deactivated or deleted member's grant", async () => {
+    const s = await setup({ expiresInMin: 5 });
+    await s.addRow(WS, null, 5);
+    await s.addRow(BOB, "u-bob", 5);
+    s.db.setUser({ id: "u-bob", username: "bob", directoryStatus: "DEACTIVATED" });
+    await s.refresher.tick();
+    const touched = s.catalogChanged.mock.calls.map((c) => c[1]).sort();
+    expect(touched).toEqual([ID, WS].sort()); // bob's row was never refreshed
+    expect(s.oauth.refresh).toHaveBeenCalledTimes(2);
+
+    const gone = await setup({ expiresInMin: 5 });
+    gone.db.setUser({ id: "u1", deletionStatus: "PENDING" });
+    await gone.refresher.tick();
+    expect(gone.oauth.refresh).not.toHaveBeenCalled();
+  });
+
+  it("the tick works through the soonest-to-expire rows first", async () => {
+    const s = await setup({ expiresInMin: 9 });
+    const A = "66666666-6666-6666-6666-666666666666";
+    const B = "77777777-7777-7777-7777-777777777777";
+    await s.addRow(A, "u1b", 2);
+    await s.addRow(B, "u1c", 6);
+    s.db.setUser({ id: "u1b" });
+    s.db.setUser({ id: "u1c" });
+    await s.refresher.tick();
+    expect(s.catalogChanged.mock.calls.map((c) => c[1])).toEqual([A, B, ID]);
+  });
+
+  it("an invalid_grant after another process already refreshed is not a sign-out", async () => {
+    const s = await setup();
+    s.oauth.refresh.mockImplementationOnce(async () => {
+      // the other process spent the old refresh token and stored new tokens
+      s.row.tokensEnc = sealTokens(s.row, { ...openTokens(s.row), accessToken: "from-the-other-process", refreshToken: "rotated" });
+      throw new McpBridgeError("OAUTH_TOKEN_ERROR", "old token spent", 502, undefined, "invalid_grant");
+    });
+    expect(await s.refresher.refreshNow(ID)).toBe("refreshed");
+    expect(s.row.state).toBe("CONNECTED");
+    expect(openTokens(s.row).accessToken).toBe("from-the-other-process");
+    expect(recordActivity).not.toHaveBeenCalled();
+  });
+
+  it("a genuinely dead grant (tokens unchanged) still ends the sign-in", async () => {
+    const s = await setup();
+    s.oauth.refresh.mockRejectedValueOnce(new McpBridgeError("OAUTH_TOKEN_ERROR", "revoked", 502, undefined, "invalid_grant"));
+    expect(await s.refresher.refreshNow(ID)).toBe("needs_reconnect");
+  });
+
+  it("disconnect revokes with the client secret when the client has one", async () => {
+    const s = await setup({ secret: "client-secret-1" });
+    const oauth = { revoke: vi.fn(async (_i: unknown): Promise<void> => {}) };
+    const deps = { oauth: oauth as never, closeSession: s.closeSession, egress: s.egress };
+    expect(await disconnectMcpOAuth(s.db.prisma, ID, { id: "u1", role: "family" }, deps)).toBe(true);
+    expect(oauth.revoke).toHaveBeenCalledWith({
+      revocationEndpoint: "https://auth.example/oauth/revoke", clientId: "client-1", clientSecret: "client-secret-1", token: "refresh-1",
+    });
+  });
+
+  it("any revoke failure, or an unreadable gate, is reported (never a clean sign-out)", async () => {
+    for (const failure of ["vendor", "gate"] as const) {
+      const s = await setup();
+      const oauth = { revoke: vi.fn(async (_i: unknown): Promise<void> => { if (failure === "vendor") throw new Error("down"); }) };
+      const egress = failure === "gate" ? async (): Promise<Egress> => { throw new Error("db"); } : s.egress;
+      const notes: { revokeSkipped?: boolean } = {};
+      expect(await disconnectMcpOAuth(s.db.prisma, ID, { id: "u1", role: "family" }, { oauth: oauth as never, closeSession: s.closeSession, egress }, notes)).toBe(true);
+      expect(notes.revokeSkipped, failure).toBe(true);
+      expect(s.row).toMatchObject({ state: "DISCONNECTED", tokensEnc: null });
+    }
+    const ok = await setup();
+    const notes: { revokeSkipped?: boolean } = {};
+    await disconnectMcpOAuth(ok.db.prisma, ID, { id: "u1", role: "family" }, { oauth: { revoke: async () => {} } as never, closeSession: ok.closeSession, egress: ok.egress }, notes);
+    expect(notes.revokeSkipped).toBeUndefined();
+  });
+
+  it("a member's sign-out and a Workspace disconnect each write an audit row with ids and kinds only", async () => {
+    const s = await setup();
+    await s.addRow(WS, null, 30);
+    const deps = { oauth: { revoke: async () => {} } as never, closeSession: s.closeSession, egress: s.egress };
+    await disconnectMcpOAuth(s.db.prisma, ID, { id: "u1", role: "family" }, deps);
+    await disconnectMcpOAuth(s.db.prisma, WS, { id: "a1", role: "admin" }, deps);
+    const rows = recordActivity.mock.calls.map((c) => c[0] as { what: string; refs: Record<string, string> });
+    expect(rows.map((r) => r.refs.scope)).toEqual(["MEMBER", "WORKSPACE"]);
+    expect(rows.every((r) => r.refs.change === "disconnect" && r.refs.connectionId)).toBe(true);
+    expect(JSON.stringify(rows)).not.toMatch(/refresh-1|access-|client-secret/);
   });
 });

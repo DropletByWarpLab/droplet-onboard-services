@@ -13,13 +13,14 @@ import {
   type BeginInput, type McpOAuthDependencies,
 } from "./mcp-oauth.service.js";
 import { fakeMcpOAuthDb } from "./__tests__/fake-db.js";
+import { recordActivity } from "../activity.singleton.js";
 
 const logged = vi.hoisted(() => [] as unknown[]);
 vi.mock("../../lib/logger.js", () => {
   const sink = (...a: unknown[]) => { logged.push(a); };
   return { createLogger: () => ({ info: sink, warn: sink, error: sink, debug: sink }) };
 });
-vi.mock("../activity.singleton.js", () => ({ recordActivity: vi.fn(async () => {}) }));
+vi.mock("../activity.singleton.js", () => ({ recordActivity: vi.fn(async (_p: Record<string, unknown>) => {}) }));
 vi.mock("../../config.js", () => ({ config: { MCP_BRIDGE_URL: "http://bridge.invalid", MCP_BRIDGE_SERVICE_TOKEN: "t" } }));
 
 const PROVIDER = "atlassian";
@@ -321,6 +322,68 @@ describe("the same egress rules as every remote MCP call, before every hop", () 
     s.deps.egress = async () => { throw new Error("db down"); };
     expect((await s.complete(a.state)).outcome).toBe("blocked");
     expect(s.oauth.exchange).not.toHaveBeenCalled();
+  });
+});
+
+describe("review fixes: abandoned consent, the starter's current standing, client changes", () => {
+  it("an abandoned re-consent is settled when its flow expires, never stranded in PENDING_CONSENT", async () => {
+    const s = await (async () => {
+      const x = setup();
+      const first = await x.begin();
+      await x.complete(first.state); // u1 is CONNECTED
+      return x;
+    })();
+    await s.begin(); // re-consent begins: the row is PENDING_CONSENT and the person walks away
+    expect(s.db.rows[0].state).toBe("PENDING_CONSENT");
+    s.advance(MCP_OAUTH_FLOW_TTL_MS + 1);
+    await s.begin({ userId: "u2" }); // any later start prunes the expired flow
+    expect(s.db.rows.find((r) => r.memberId === "u1")!.state).toBe("CONNECTED"); // back to what it was, tokens intact
+    expect(openTokens(s.db.rows.find((r) => r.memberId === "u1")!).accessToken).toBe("ACCESS-SECRET");
+  });
+
+  it("a Workspace flow started by an admin who was demoted mid-flow is refused, on callback and on paste", async () => {
+    const s = setup();
+    s.db.setUser({ id: "a1", role: "admin" });
+    const a = await s.begin({ scope: "WORKSPACE", role: "admin", acknowledge: true, userId: "a1" });
+    s.db.setUser({ id: "a1", role: "family" });
+    expect((await s.complete(a.state)).outcome).toBe("failed");
+    expect(s.oauth.exchange).not.toHaveBeenCalled();
+    expect(s.db.rows.find((r) => r.scope === "WORKSPACE")!.state).not.toBe("CONNECTED");
+
+    s.db.setUser({ id: "a1", role: "admin" });
+    const b = await s.begin({ scope: "WORKSPACE", role: "admin", acknowledge: true, userId: "a1" });
+    s.db.setUser({ id: "a1", role: "family" });
+    // the paste caller's session still says admin; the database is what counts
+    expect((await s.complete(b.state, { browserState: null, caller: { id: "a1", role: "admin" } })).outcome).toBe("failed");
+    expect(s.oauth.exchange).not.toHaveBeenCalled();
+  });
+
+  it("a starter who was deactivated, or is being deleted, is refused before the exchange", async () => {
+    for (const patch of [{ directoryStatus: "DEACTIVATED" }, { deletionStatus: "PENDING" }]) {
+      const s = setup();
+      const a = await s.begin();
+      s.db.setUser({ id: "u1", role: "family", ...patch });
+      expect((await s.complete(a.state)).outcome, JSON.stringify(patch)).toBe("failed");
+      expect(s.oauth.exchange).not.toHaveBeenCalled();
+    }
+  });
+
+  it("a pre-registered client change fills only rows that hold no tokens, and is audited without secrets", async () => {
+    const s = setup();
+    const connected = await s.begin();
+    await s.complete(connected.state); // u1 holds tokens, issued to "dcr-client"
+    await s.db.seed({ provider: PROVIDER, scope: "MEMBER", memberId: "u9", issuer: ISSUER, tokenEndpointHost: "auth.example", clientId: "old" });
+    vi.mocked(recordActivity).mockClear();
+    await storeMcpOAuthClient(s.db.prisma, { provider: PROVIDER, clientId: "new-client", clientSecret: "SECRET-X", userId: "admin1" }, s.deps);
+    const u1 = s.db.rows.find((r) => r.memberId === "u1")!;
+    const u9 = s.db.rows.find((r) => r.memberId === "u9")!;
+    expect(u1.clientId).toBe("dcr-client"); // signed-in row untouched: its next refresh still works
+    expect(u1.state).toBe("CONNECTED");
+    expect(u9.clientId).toBe("new-client");
+    const rows = vi.mocked(recordActivity).mock.calls.map((c) => c[0]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ kind: "auth", refs: expect.objectContaining({ connector: PROVIDER, change: "client" }) });
+    expect(JSON.stringify(rows)).not.toMatch(/SECRET-X|new-client/);
   });
 });
 

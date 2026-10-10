@@ -259,6 +259,47 @@ describe("GET /mcp/oauth/connections visibility", () => {
   });
 });
 
+describe("disconnect answers honestly about the vendor-side revoke (F7)", () => {
+  beforeEach(() => __setColumnCryptoKeyForTest(Buffer.alloc(32, 9).toString("base64")));
+  afterEach(() => __setColumnCryptoKeyForTest(null));
+
+  async function connected() {
+    const w = setup();
+    w.oauth.discover.mockResolvedValue({
+      resource: MCP_URL, issuer: ISSUER, authorizationEndpoint: "https://auth.example/authorize",
+      tokenEndpoint: "https://auth.example/token", registrationEndpoint: "https://auth.example/dcr",
+      revocationEndpoint: "https://auth.example/revoke", issParameterSupported: false,
+    } as never);
+    const s = await start(w.app);
+    const state = new URL(s.body.authorizeUrl).searchParams.get("state")!;
+    await request(w.app).get("/api/mcp/oauth/callback").query({ state, code: "c" }).set("Cookie", `${MCP_OAUTH_STATE_COOKIE}=${state}`);
+    return { ...w, id: w.db.rows[0].id as string };
+  }
+
+  it("a failed vendor revoke is 200 revoked:false, never a 204 that claims success; a clean one is 204", async () => {
+    const w = await connected();
+    w.oauth.revoke.mockRejectedValueOnce(new Error("vendor down"));
+    const failed = await asUser(request(w.app).delete(`/api/mcp/oauth/connections/${w.id}`));
+    expect(failed.status).toBe(200);
+    expect(failed.body).toMatchObject({ disconnected: true, revoked: false });
+    expect(w.db.rows[0]).toMatchObject({ state: "DISCONNECTED", tokensEnc: null });
+
+    const again = await connected();
+    const ok = await asUser(request(again.app).delete(`/api/mcp/oauth/connections/${again.id}`));
+    expect(ok.status).toBe(204);
+    expect(again.oauth.revoke).toHaveBeenCalledTimes(1);
+  });
+
+  it("an unreadable gate is reported the same way", async () => {
+    const w = await connected();
+    w.gate.current = { allowed: false, reason: "gate_unavailable", message: "" };
+    const res = await asUser(request(w.app).delete(`/api/mcp/oauth/connections/${w.id}`));
+    expect(res.status).toBe(200);
+    expect(res.body.revoked).toBe(false);
+    expect(w.oauth.revoke).not.toHaveBeenCalled();
+  });
+});
+
 describe("production wiring: the callback and the start route share one set of in-flight sign-ins", () => {
   beforeEach(() => __setColumnCryptoKeyForTest(Buffer.alloc(32, 9).toString("base64")));
   afterEach(() => __setColumnCryptoKeyForTest(null));

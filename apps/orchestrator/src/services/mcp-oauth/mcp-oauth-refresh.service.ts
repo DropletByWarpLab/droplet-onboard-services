@@ -167,6 +167,13 @@ export function createMcpOAuthRefresher(deps: McpOAuthRefreshDeps): McpOAuthRefr
       return now2?.state === "CONNECTED" && now2.tokensEnc !== row.tokensEnc ? "refreshed" : "unavailable";
     } catch (err) {
       if (isInvalidGrant(err)) {
+        // A rotating server rejects the OLD refresh token once another process has spent it. Look
+        // at the row again: if its tokens changed under us, that other refresh won and the
+        // sign-in is fine. Only a row still holding the blob we read is really dead.
+        const current = await prisma.mcpOAuthConnection.findUnique({ where: { id } });
+        if (current && current.state === "CONNECTED" && current.tokensEnc !== null && current.tokensEnc !== row.tokensEnc) {
+          return "refreshed";
+        }
         await endSignIn(row, "NEEDS_RECONNECT", "refresh_rejected", true);
         return "needs_reconnect";
       }
@@ -194,8 +201,18 @@ export function createMcpOAuthRefresher(deps: McpOAuthRefreshDeps): McpOAuthRefr
     refreshNow,
     async tick() {
       const due = await prisma.mcpOAuthConnection.findMany({
-        where: { state: "CONNECTED", tokenExpiresAt: { lt: new Date(now().getTime() + MCP_OAUTH_REFRESH_AHEAD_MS) } },
+        where: {
+          state: "CONNECTED",
+          tokenExpiresAt: { lt: new Date(now().getTime() + MCP_OAUTH_REFRESH_AHEAD_MS) },
+          // A leaver's grant is not kept alive: only the Workspace connection and ACTIVE members' rows renew.
+          OR: [
+            { scope: "WORKSPACE" },
+            { scope: "MEMBER", member: { is: { directoryStatus: "ACTIVE", deletionStatus: "NONE" } } },
+          ],
+        },
         select: { id: true },
+        // Soonest-to-expire first, so a batch limit never starves the rows closest to dying.
+        orderBy: { tokenExpiresAt: "asc" },
         take: TICK_BATCH,
       });
       for (const { id } of due) {
