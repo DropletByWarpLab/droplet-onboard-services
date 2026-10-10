@@ -555,6 +555,8 @@ export async function attachRemoteServer(
       ...(deps.knownTools && deps.knownTools.length > 0
         ? { knownTools: deps.knownTools }
         : {}),
+      // WARP-2409 - a personal sign-in backing the catalog never answers calls.
+      ...catalogOnlyFor(baseCredential),
     });
   } catch (err) {
     logger.warn(
@@ -893,6 +895,11 @@ async function readSessionState(
 type RemoteCredentialRead =
   | { ok: true; fields: McpBridgeOpenInput }
   | { ok: false; missing: string[] };
+
+/** `catalogOnly` for a base session backed by a personal (owner/admin member) sign-in, else nothing. */
+export function catalogOnlyFor(kind: RemoteMcpCredentialKind): { catalogOnly: true } | Record<string, never> {
+  return kind === "member" ? { catalogOnly: true } : {};
+}
 
 /**
  * WARP-2409 - the catalog session's sign-in credential when there is no usable

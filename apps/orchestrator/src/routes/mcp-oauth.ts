@@ -95,7 +95,8 @@ export function createMcpOAuthRouter(prisma: PrismaClient, options: Partial<McpO
       }, deps);
       res.clearCookie(MCP_OAUTH_STATE_COOKIE, { httpOnly: true, secure: true, sameSite: "lax", path: COOKIE_PATH });
       if (result.outcome === "connected") return res.json({ outcome: "connected" });
-      return res.status(400).json({ error: "sign_in_failed", outcome: result.outcome });
+      // `blocked`: remote MCP is off for this server right now (nothing was sent).
+      return res.status(result.outcome === "blocked" ? 409 : 400).json({ error: "sign_in_failed", outcome: result.outcome });
     } catch (err) {
       return fail(res, err);
     }

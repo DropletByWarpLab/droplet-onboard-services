@@ -28,8 +28,10 @@ import {
   McpBridgeOAuthClient,
   OAUTH_HOST_NOT_ALLOWED,
   OAUTH_PKCE_UNSUPPORTED,
+  OAUTH_REFUSED,
   type McpOAuthDiscovery,
 } from "../mcp-bridge.client.js";
+import { remoteMcpEgressAllowed, type RemoteMcpEgressDecision, type RemoteMcpGatePrisma } from "../remote-mcp-gateway.service.js";
 
 const logger = createLogger("mcp-oauth");
 
@@ -50,7 +52,7 @@ export const MCP_OAUTH_LOOPBACK_REDIRECTS = [
 export type McpOAuthScopeName = "MEMBER" | "WORKSPACE";
 export type McpOAuthStateName = "DISCONNECTED" | "PENDING_CONSENT" | "CONNECTED" | "NEEDS_RECONNECT" | "ERROR";
 /** The only things a callback can tell the browser. */
-export type McpOAuthOutcome = "connected" | "cancelled" | "expired" | "failed";
+export type McpOAuthOutcome = "connected" | "cancelled" | "expired" | "failed" | "blocked";
 const SIGN_IN_ROLES = ["owner", "admin", "family"] as const;
 const ADMIN_ROLES = ["owner", "admin"] as const;
 const roleIn = (role: string | undefined, set: readonly string[]): boolean => !!role && set.includes(role);
@@ -61,6 +63,10 @@ export type McpOAuthErrorCode =
   | "acknowledge_required"
   | "pkce_unsupported"
   | "host_not_allowed"
+  // The same pre-credential rules every remote MCP call obeys (remoteMcpEgressAllowed).
+  | "remote_mcp_off"
+  | "server_not_allowed"
+  | "connection_disabled"
   | "client_required"
   | "too_many_pending"
   | "sign_in_unavailable"
@@ -73,6 +79,9 @@ const ERROR_STATUS: Record<McpOAuthErrorCode, number> = {
   acknowledge_required: 400,
   pkce_unsupported: 400,
   host_not_allowed: 422,
+  remote_mcp_off: 409,
+  server_not_allowed: 409,
+  connection_disabled: 409,
   client_required: 400,
   too_many_pending: 503,
   sign_in_unavailable: 503,
@@ -114,6 +123,12 @@ export interface McpOAuthDependencies {
   /** Closes a connection's live bridge session (sign-out). Best effort. */
   closeSession: (provider: string, connectionId: string) => Promise<void>;
   /**
+   * The rules every remote MCP call obeys before it may reach the vendor (server
+   * allowlist, `remote_mcp` channel, connection not DISABLED), applied before
+   * EVERY OAuth hop so a switched-off box never talks to the vendor to sign in.
+   */
+  egress: (prisma: PrismaClient, serverId: string) => Promise<RemoteMcpEgressDecision>;
+  /**
    * In-flight sign-ins, keyed by sha256(state).
    * ponytail: in memory; a restart mid-consent means the person tries again.
    * Upgrade to a sealed row column only if restarts mid-consent become common.
@@ -130,6 +145,15 @@ export function mcpOAuthDependencies(overrides: Partial<McpOAuthDependencies> = 
       const { closeRemoteConnectionSession } = await import("../mcp-client.singleton.js");
       await closeRemoteConnectionSession(provider, connectionId);
     },
+    // Lazy import: remote-mcp-servers imports this module for its token reader.
+    egress: async (prisma, serverId) => {
+      const { parseRemoteMcpAllowlist } = await import("../remote-mcp-servers.js");
+      return remoteMcpEgressAllowed(
+        prisma as unknown as Pick<RemoteMcpGatePrisma, "offLanAllowlistChannel" | "integrationConnection">,
+        serverId,
+        parseRemoteMcpAllowlist(config.REMOTE_MCP_SERVER_ALLOWLIST),
+      );
+    },
     ...overrides,
     oauth: overrides.oauth ?? new McpBridgeOAuthClient({ baseUrl: config.MCP_BRIDGE_URL, serviceToken: config.MCP_BRIDGE_SERVICE_TOKEN }),
   };
@@ -141,6 +165,27 @@ const b64url = (b: Buffer): string => b.toString("base64url");
 /** Timing-safe string equality that never throws on a length difference. */
 function safeEqual(a: string, b: string): boolean {
   return timingSafeEqual(createHash("sha256").update(a).digest(), createHash("sha256").update(b).digest());
+}
+
+/** Refuses (409, a fixed code) when the box may not talk to this server right now. */
+async function requireEgress(prisma: PrismaClient, deps: McpOAuthDependencies, serverId: string): Promise<void> {
+  let decision: RemoteMcpEgressDecision;
+  try {
+    decision = await deps.egress(prisma, serverId);
+  } catch {
+    throw new McpOAuthError("sign_in_unavailable", "Sign-in could not be started. Try again shortly.");
+  }
+  if (decision.allowed) return;
+  switch (decision.reason) {
+    case "channel_disabled":
+      throw new McpOAuthError("remote_mcp_off", "Remote MCP is switched off by the owner. Nothing was sent.");
+    case "server_not_allowlisted":
+      throw new McpOAuthError("server_not_allowed", "This server is not enabled on this box. Nothing was sent.");
+    case "connection_disabled":
+      throw new McpOAuthError("connection_disabled", decision.message);
+    default:
+      throw new McpOAuthError("sign_in_unavailable", "Sign-in could not be started. Try again shortly.");
+  }
 }
 
 function signInFor(provider: string): { displayName: string; signIn: McpSignIn } {
@@ -237,6 +282,8 @@ export async function beginMcpSignIn(
   } else if (!roleIn(input.role, SIGN_IN_ROLES)) {
     throw new McpOAuthError("forbidden", "Your role cannot sign in to this service.");
   }
+  // Before discovery and registration, the first hops that dial the vendor.
+  await requireEgress(prisma, deps, input.provider);
   prunePending(deps);
   if (deps.pending.size >= MAX_PENDING) throw new McpOAuthError("too_many_pending", "Too many sign-ins are in progress. Try again shortly.");
 
@@ -247,10 +294,10 @@ export async function beginMcpSignIn(
     if (err instanceof McpBridgeError && err.code === OAUTH_PKCE_UNSUPPORTED) {
       throw new McpOAuthError("pkce_unsupported", "This service's sign-in does not support PKCE S256, so Droplet will not use it.");
     }
-    if (err instanceof McpBridgeError && err.code === OAUTH_HOST_NOT_ALLOWED) {
+    if (err instanceof McpBridgeError && err.code === OAUTH_REFUSED && err.reason === OAUTH_HOST_NOT_ALLOWED) {
       throw new McpOAuthError("host_not_allowed", "This service's sign-in uses a host Droplet does not allow.");
     }
-    logger.warn({ provider: input.provider }, "mcp_oauth_discovery_failed");
+    logger.warn({ provider: input.provider, reason: err instanceof McpBridgeError ? err.reason : undefined }, "mcp_oauth_discovery_failed");
     throw new McpOAuthError("sign_in_unavailable", "Sign-in could not be started. Try again shortly.");
   }
   // The bridge vetted these; the box re-checks what it is about to act on.
@@ -430,6 +477,16 @@ export async function completeMcpSignIn(
     (flow.scope === "MEMBER" ? row.memberId === flow.userId : row.memberId === null);
   if (!row || !ownerOk || !row.clientId) { await settleFailure(prisma, flow, "sign_in_failed"); return result("failed"); }
 
+  // The exchange hands the vendor a code: only while remote MCP may talk to it. A
+  // refusal has already burned the state above and leaves the row as it was.
+  let egress: RemoteMcpEgressDecision;
+  try {
+    egress = await deps.egress(prisma, flow.provider);
+  } catch {
+    egress = { allowed: false, reason: "gate_unavailable", message: "" };
+  }
+  if (!egress.allowed) { await settleFailure(prisma, flow, null); return result("blocked"); }
+
   const now = deps.now();
   try {
     const tokens = await deps.oauth.exchange({
@@ -463,7 +520,7 @@ export async function completeMcpSignIn(
     await settleFailure(prisma, flow, "sign_in_failed");
     return result("failed");
   }
-  await audit(flow, "connected");
+  await audit(flow, "CONNECTED");
   return result("connected");
 }
 
@@ -624,6 +681,7 @@ export async function storeMcpOAuthClient(
   deps: McpOAuthDependencies,
 ): Promise<void> {
   const { signIn } = signInFor(input.provider);
+  await requireEgress(prisma, deps, input.provider);
   let disc: McpOAuthDiscovery;
   try {
     disc = await deps.oauth.discover(signIn.mcpUrl);

@@ -9,7 +9,7 @@ import { withRemoteCallAttribution } from "../remote-call-attribution.js";
 import { createGatedRemoteMcpPort, remoteMcpGate, type RemoteMcpGatePrisma } from "../remote-mcp-gateway.service.js";
 import { registerMcpOAuthRefresher } from "./mcp-oauth-refresher.js";
 import { sealTokens } from "./mcp-oauth.service.js";
-import { catalogOAuthFields } from "../remote-mcp-servers.js";
+import { catalogOAuthFields, catalogOnlyFor } from "../remote-mcp-servers.js";
 import { createMemberRoutingPort, type OAuthRowLite } from "./member-routing.port.js";
 
 vi.mock("../activity.singleton.js", () => ({ recordActivity: vi.fn(async () => null), getActivitySigner: () => null }));
@@ -303,5 +303,28 @@ describe("catalog credential: only an API token, a Workspace connection, or a cu
     const ws = row({ id: WS_ID, scope: "WORKSPACE" });
     const { deps } = catalogDeps([{ id: "owner-1", role: "owner" }], [ownerRow(), ws]);
     expect(await catalogOAuthFields(deps, siteRow)).toMatchObject({ kind: "workspace" });
+  });
+});
+
+describe("catalog-only base sessions and the kill switch", () => {
+  it("opens the base session catalog-only exactly when a personal sign-in backs it", () => {
+    expect(catalogOnlyFor("member")).toEqual({ catalogOnly: true });
+    expect(catalogOnlyFor("workspace")).toEqual({});
+    expect(catalogOnlyFor("api-token")).toEqual({});
+  });
+
+  it("a catalog-only refusal from the bridge never falls back: the member is asked to sign in", async () => {
+    const s = setup({ apiToken: true });
+    s.baseCall.mockRejectedValueOnce(new McpBridgeError("CATALOG_ONLY", "catalog only", 409));
+    const r = await s.as(() => s.port.callToolAttributed("t", {}));
+    expect(r).toMatchObject({ refusal: "REMOTE_SIGN_IN_REQUIRED" });
+  });
+
+  it("a 409 from a switched-off bridge on open is not retried", async () => {
+    const s = setup({ member: row({ id: MEMBER_ID, scope: "MEMBER" }) });
+    s.open.mockRejectedValueOnce(new McpBridgeError("REMOTE_MCP_GATE_REFUSED", "off", 409));
+    await expect(s.as(() => s.port.callToolAttributed("t", {}))).rejects.toMatchObject({ code: "REMOTE_MCP_GATE_REFUSED" });
+    expect(s.open).toHaveBeenCalledTimes(1);
+    expect(s.callToolFor).not.toHaveBeenCalled();
   });
 });

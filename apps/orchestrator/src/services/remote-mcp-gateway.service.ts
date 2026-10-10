@@ -142,20 +142,28 @@ export interface RemoteMcpGatePrisma {
   };
 }
 
+export type RemoteMcpEgressDecision =
+  | { allowed: true; row: { id: string; status: string; providerTokensEnc: string | null } | null }
+  | { allowed: false; reason: RemoteMcpGateReason; message: string };
+
 /**
- * Read the gate for one server.
- *
- * Both halves are explicit reads. `status === "CONNECTED"` is the enum column,
- * not "a row exists"; `providerTokensEnc !== null` is the credential column,
- * not "the status looks fine". The repo rule is that persistent state is a
- * declared value, and a connection whose credential was purged while the status
- * column still said CONNECTED is precisely the row this catches.
+ * WARP-2405 - the gate's pre-credential rules, shared by EVERY hop that makes the
+ * box talk to a remote MCP vendor: a tool call, and each step of a web sign-in
+ * (discovery, client registration, code exchange, refresh, revoke). Nothing dials
+ * a remote MCP host while any of these refuses:
+ *   1. the operator allowlist names the server,
+ *   2. the `remote_mcp` channel is explicitly `enabled`,
+ *   3. an owner or admin has not turned the connection off (DISABLED), whatever
+ *      sign-ins exist - any other status describes the shared token, not an
+ *      admin's decision, and does not block a member's own sign-in.
+ * Any read failure refuses. Whether a CREDENTIAL exists is {@link remoteMcpGate}'s
+ * extra rule, not this one.
  */
-export async function remoteMcpGate(
-  prisma: RemoteMcpGatePrisma,
+export async function remoteMcpEgressAllowed(
+  prisma: Pick<RemoteMcpGatePrisma, "offLanAllowlistChannel" | "integrationConnection">,
   serverId: string,
   allowlist: ReadonlySet<string>,
-): Promise<RemoteMcpGateDecision> {
+): Promise<RemoteMcpEgressDecision> {
   if (!allowlist.has(serverId)) {
     return {
       allowed: false,
@@ -201,11 +209,6 @@ export async function remoteMcpGate(
       message: "The remote MCP gate could not be read. Refusing egress.",
     };
   }
-  // WARP-2409 — an owner's or admin's Disconnect is DISABLED, and it wins over
-  // every sign-in: one member's token must never reopen egress an admin closed.
-  // Any OTHER status the API-token path refuses (NEEDS_RECONNECT, ERROR, ...)
-  // describes the shared token, not an admin decision, so it does not block a
-  // member's own sign-in below.
   if (row?.status === "DISABLED") {
     return {
       allowed: false,
@@ -213,9 +216,33 @@ export async function remoteMcpGate(
       message: "An owner or admin turned this connection off. Nothing was sent.",
     };
   }
-  // A CONNECTED sign-in (a member's or the Workspace's) satisfies rule 3 when the
-  // API-token connection does not. Which one a CALL uses is decided per call
-  // (member-routing.port.ts); this only says the server may be dialled.
+  return { allowed: true, row };
+}
+
+/**
+ * Read the gate for one server: {@link remoteMcpEgressAllowed}, then the
+ * credential rule.
+ *
+ * Both halves are explicit reads. `status === "CONNECTED"` is the enum column,
+ * not "a row exists"; `providerTokensEnc !== null` is the credential column,
+ * not "the status looks fine". The repo rule is that persistent state is a
+ * declared value, and a connection whose credential was purged while the status
+ * column still said CONNECTED is precisely the row this catches.
+ */
+export async function remoteMcpGate(
+  prisma: RemoteMcpGatePrisma,
+  serverId: string,
+  allowlist: ReadonlySet<string>,
+): Promise<RemoteMcpGateDecision> {
+  const egress = await remoteMcpEgressAllowed(prisma, serverId, allowlist);
+  if (!egress.allowed) return egress;
+  const row = egress.row;
+  // WARP-2409 - rule 3 (a credential exists): a CONNECTED sign-in, a member's or
+  // the Workspace's, satisfies it when the API-token connection does not. Which
+  // one a CALL uses is decided per call (member-routing.port.ts); this only says
+  // the server may be dialled. An admin's DISABLED was already refused above, and
+  // any other status the API-token path refuses (NEEDS_RECONNECT, ERROR, ...)
+  // describes the shared token, so it does not block a member's own sign-in.
   if (!(row?.status === "CONNECTED" && row.providerTokensEnc !== null) && prisma.mcpOAuthConnection) {
     try {
       if ((await prisma.mcpOAuthConnection.count({ where: { provider: serverId, state: "CONNECTED" } })) > 0) {
