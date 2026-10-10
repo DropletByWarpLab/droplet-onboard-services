@@ -25,7 +25,7 @@
 | Layer | Component | Why |
 |---|---|---|
 | Wake word | Vosk small English (Apache-2.0) | Exact configured Hey Droplet grammar; bundled at build time, CPU-only. |
-| Streaming STT | Qwen3-ASR 1.7B (Apache-2.0), native C/OpenBLAS runtime (MIT) | Full model on CPU/RAM, shared with dashboard dictation; pinned offline assets. |
+| Streaming STT | Qwen3-ASR 0.6B (Apache-2.0), native C/OpenBLAS runtime (MIT) | Full model on CPU/RAM, shared with dashboard dictation; pinned offline assets. |
 | TTS | Kokoro 82M (Apache-2.0), ONNX CPU runtime | Eight installed English voices with saved selection and temporary preview. Phonemizer/eSpeak carry GPL obligations. |
 | Protocol | Wyoming (Apache 2.0) | TCP-based. Lets each component be a separate container, swappable. Home Assistant Voice's protocol — biggest OSS ecosystem in this space. |
 | Audio I/O | sounddevice (MIT) + PortAudio | Cross-platform, clean shutdown, native numpy. Better API than PyAudio. |

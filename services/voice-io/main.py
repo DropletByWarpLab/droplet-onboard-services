@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import logging
+import math
 import os
 import threading
 import time
@@ -91,7 +92,9 @@ from voice.pipeline import (
     DEFAULT_STT_MAX_RECORD_S,
     DEFAULT_THRESHOLD,
     DEFAULT_VAD_MIN_SPEECH_S,
+    DEFAULT_VAD_NO_SPEECH_S,
     DEFAULT_VAD_SILENCE_S,
+    DEFAULT_VAD_SILENCE_SHORT_S,
     DEFAULT_VAD_SPEECH_RMS,
     DEFAULT_VISUAL_DECAY_S,
     DspRestartSkipped,
@@ -148,8 +151,20 @@ def _env_float(name: str, default: float) -> float:
     passthrough. Compose ships these as `NAME=${NAME:-}`, so an unset knob
     arrives as "" — `float("")` would crash, so empty/whitespace selects the
     default (same posture as the VOICE_INPUT_GAIN / VOICE_FLATLINE_* reads
-    below). An explicit "0" is a real value and is kept."""
-    return float((os.environ.get(name) or "").strip() or str(default))
+    below). An explicit "0" is a real value and is kept. "nan" / "inf"
+    parse but are no knob value at all — the VAD turns seconds into whole
+    frames (WARP-3729) and a NaN used to silently disable it — so they are
+    logged and the default is used."""
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    value = float(raw)
+    if not math.isfinite(value):
+        logger.warning(
+            "%s=%r is not a finite number; using the default %s", name, raw, default,
+        )
+        return default
+    return value
 
 
 def resolve_vad_config() -> dict[str, float]:
@@ -161,11 +176,24 @@ def resolve_vad_config() -> dict[str, float]:
     `WAKE_VISUAL_DECAY_S` decay window were unfollowable — the constructor
     defaults were the only reachable values. Returned as a dict spread
     straight into `WakePipeline(**resolve_vad_config())` so a mis-key would
-    fail loudly rather than silently ignore a knob."""
+    fail loudly rather than silently ignore a knob.
+
+    WARP-3729: a box whose operator already raised VAD_SILENCE_S (the
+    documented remedy for cut-offs) keeps that tail on EVERY utterance —
+    the short tail is opt-in there, through an explicit VAD_SILENCE_SHORT_S."""
+    vad_silence_s = _env_float("VAD_SILENCE_S", DEFAULT_VAD_SILENCE_S)
+    long_tuned = bool((os.environ.get("VAD_SILENCE_S") or "").strip())
+    short_tuned = bool((os.environ.get("VAD_SILENCE_SHORT_S") or "").strip())
+    vad_silence_short_s = (
+        vad_silence_s if long_tuned and not short_tuned
+        else _env_float("VAD_SILENCE_SHORT_S", DEFAULT_VAD_SILENCE_SHORT_S)
+    )
     return {
-        "vad_silence_s": _env_float("VAD_SILENCE_S", DEFAULT_VAD_SILENCE_S),
+        "vad_silence_s": vad_silence_s,
+        "vad_silence_short_s": vad_silence_short_s,
         "vad_speech_rms": _env_float("VAD_SPEECH_RMS", DEFAULT_VAD_SPEECH_RMS),
         "vad_min_speech_s": _env_float("VAD_MIN_SPEECH_S", DEFAULT_VAD_MIN_SPEECH_S),
+        "vad_no_speech_s": _env_float("VAD_NO_SPEECH_S", DEFAULT_VAD_NO_SPEECH_S),
         "visual_decay_s": _env_float("WAKE_VISUAL_DECAY_S", DEFAULT_VISUAL_DECAY_S),
     }
 
@@ -905,14 +933,18 @@ class VoiceTurnTiming(BaseModel):
     wake_to_capture_ms: Optional[int] = None
     speech_ms: Optional[int] = None       # voiced audio the VAD counted
     capture_ms: Optional[int] = None      # capture-open → end of speech
-    vad_end: Optional[str] = None         # silence | cap
+    vad_end: Optional[str] = None         # silence | short_speech | no_speech | cap
+    vad_tail: Optional[str] = None        # short | long | fallback (WARP-3729)
     stt_ms: Optional[int] = None          # end of speech → transcript
     first_delta_ms: Optional[int] = None  # → first content delta
     first_audio_ms: Optional[int] = None  # → first audio (cue or answer)
     first_answer_audio_ms: Optional[int] = None
     total_ms: Optional[int] = None
     cue: Optional[str] = None             # tool_call | model_loading
-    sentences: int = 0                    # answer sentences played
+    # Answer chunks played — a first clause split off under WARP-3729
+    # counts as one, so a one-sentence reply may read 2.
+    sentences: int = 0
+    first_chunk_chars: Optional[int] = None  # length of the first answer chunk
     error_kind: Optional[str] = None      # stt | tts | playback | llm | busy
     ended_at: Optional[float] = None      # wall time the turn ended
 

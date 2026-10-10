@@ -19,7 +19,7 @@ record; this table is the current state. Wave 2 is the last section.
 | B — streaming + sentence-chunked TTS | WARP-626 | #1187 | Shipped. |
 | C — voice turn shaping | WARP-1432 | #1185 | Shipped: `max_tokens`, `allowed_tools`, `ephemeral`. The reasoning-effort hint never shipped in voice-io; WARP-3123 sends it from ai-gateway. |
 | D — connection reuse + warm-up | WARP-1433 | #1190 | Shipped. |
-| E — capture/VAD tuning + config hygiene | WARP-1434 | #1190 | Shipped: `VAD_SILENCE_S` 0.6 s, VAD knobs env-wired, Whisper threads aligned to its `cpus` quota (2 / 2.0). WARP-3126 raises both to 4. |
+| E — capture/VAD tuning + config hygiene | WARP-1434 | #1190 | Shipped: `VAD_SILENCE_S` 0.6 s, VAD knobs env-wired, Whisper threads aligned to its `cpus` quota (2 / 2.0). WARP-3126 raises both to 4. WARP-3729 follow-up: frame-quantized counters, adaptive 0.48 / 0.6 s tail, no-speech and min-speech guards (see the Wave E section). |
 | Wave 2 | WARP-3123..3127 | — | In progress (see the Wave 2 section). |
 
 ## Where the time actually goes
@@ -149,6 +149,50 @@ accepts `max_tokens` (`llm.ts:156`), `ephemeral` (`:176`), and `allowed_tools`.
 - Align Whisper `--cpu-threads` to the container `cpus` quota (4 vs 2.0 today).
 - Remove the dead `WHISPER_DEVICE` / `WAKE_VISUAL_DECAY_S` knobs or wire them.
 
+### Follow-up (WARP-3729): adaptive tail, frame-quantized counters, cliff guards
+
+- The tail was never 600 ms: the counters accumulated 0.08 s floats, so
+  `VAD_SILENCE_S=0.6` needed 8 frames = 640 ms (the measured turn: 5 loud + 8
+  silent frames = 960 ms of capture). Every seconds knob is now converted once
+  to whole frames (`_vad_frames`, ceil of the exact ratio — 0.2/0.4/0.48/0.5/0.6
+  are 3/5/6/7/8 frames as before; 0.8 is 10 where the accumulation gave 11) and
+  the per-turn counters are integers.
+- Adaptive tail: a short, pause-free command (voiced span up to 1.2 s, no gap of
+  240 ms or more inside it) ends after `VAD_SILENCE_SHORT_S` = 0.48 s (6 frames);
+  longer utterances and anyone who already paused keep `VAD_SILENCE_S`. 0.48
+  rather than 0.4 because a first hesitation inside a short command is the
+  exposure and there is no on-box pause data yet. Setting `VAD_SILENCE_S` alone
+  keeps one tail (short = long), so tuned rooms keep their tuning.
+- The speech threshold stays in the post-gain domain (`raw RMS × input_gain ≥
+  VAD_SPEECH_RMS`, i.e. relative to the calibrated −12 dBFS peak): a box
+  calibrated to gain 8 speaks at ~100–200 raw and a raw-domain bar would never
+  see it. The RMS is computed once per frame (`_track_input_level` stashes it).
+- Cliff guards: the first two capture frames are the wake tail by construction
+  and never count; the min-speech gate is 0.24 s (3 counted frames), so a
+  one-word command after a pause ends on the normal tail; a capture whose
+  counted speech never meets the gate ends `short_speech` (still transcribed)
+  after `VAD_NO_SPEECH_S` of silence; a capture with no speech at all ends
+  `no_speech` after `VAD_NO_SPEECH_S` = 6 s and is NOT transcribed (the session
+  closes without audio-stop; outcome `empty`). Before, all three ran to the 30 s
+  cap and handed Qwen 30 s of room noise (~11.6 s of decode on the box).
+- Expected gain: ~160 ms of capture plus ~50–70 ms of STT on short commands;
+  0 on long or paused ones. Nothing was measured on the box yet.
+- On-box verification (default log level, no code): from `docker logs` of
+  voice-io over a day, count the `end-of-speech (... short tail)`, `long tail`
+  and `fallback tail` lines and the `vad_end` / `vad_tail` values on the
+  `voice_turn_timing` lines — expect most short commands to end on the short
+  tail and `cap` near zero. Read the tail from `vad_tail`, not from
+  `capture_ms − speech_ms`: that difference also holds the wake-tail window
+  (up to 160 ms that `speech_ms` no longer counts) and any pause before or
+  inside the command. INFO does not carry transcripts (SEC-DATA-9), so
+  false-cut suspects are counted either with `LOG_LEVEL=DEBUG` for the day
+  (transcripts ending in a function word: to / for / the / a / at / on / and /
+  in / of / my) or by proxy: a short-tail turn whose outcome is `fragment` or
+  `empty`, or that is followed by a re-wake within 5 s. If suspects exceed
+  ~2 % of short-tail turns, set `VAD_SILENCE_SHORT_S=0.56` (7 frames) or equal
+  to `VAD_SILENCE_S` to disable; only once they sit well under 2 % is 0.4
+  (5 frames) worth trying.
+
 ## Sequencing & verification
 
 Waves B/C/D/E all touch `voice/llm.py` and/or `pipeline.py`, so they sequence
@@ -198,10 +242,15 @@ WARP-3124 in detail:
 - **`voice_turn_timing`.** Exactly one INFO line per turn, JSON, whole ms from
   `time.monotonic()`, null where a stage didn't happen: `outcome`,
   `wake_to_capture_ms`, `speech_ms`, `capture_ms`, `vad_end`
-  (`silence`/`cap`), `stt_ms`, `first_delta_ms`, `first_audio_ms`,
+  (`silence`/`short_speech`/`no_speech`/`cap`), since WARP-3729 `vad_tail`
+  (`short`/`long`/`fallback`, null when no VAD tail ended the capture),
+  `stt_ms`, `first_delta_ms`, `first_audio_ms`,
   `first_answer_audio_ms`, `total_ms`, `cue`, `sentences`, `error_kind`,
-  `ended_at`. The `first_*` fields count from the transcript and `total_ms`
-  counts from the wake. The last turn is also on `/voice/status` as
+  `ended_at`, and since WARP-3729 `first_chunk_chars`. The `first_*` fields
+  count from the transcript and `total_ms` counts from the wake; `sentences`
+  counts the answer chunks played (a first clause split off under WARP-3729
+  counts as one) and `first_chunk_chars` is the length of the chunk behind
+  `first_answer_audio_ms`. The last turn is also on `/voice/status` as
   `last_turn_timing`.
 - **Persona stale-while-revalidate.** `PersonaFetcher.get_block()` returns the
   cached block at once and refreshes in the background once the 60 s TTL
@@ -211,3 +260,25 @@ WARP-3124 in detail:
 Still on the hot path, left for a follow-up: `OrchestratorLLM._current_model()`
 (WARP-3047) makes a synchronous `GET /api/llm/models` (2 s timeout) once per
 30 s TTL, inside the chat-body build.
+
+## First-clause chunking (WARP-3729)
+
+The persona pins one short spoken sentence per reply, so after Wave B the
+first chunk was usually the whole reply: first audio waited for every token
+of it plus the synthesis of the full sentence (Kokoro synthesizes a whole
+`[.!?;:]`-delimited part before it writes any audio). `SentenceChunker` now
+also ends a chunk at `;` or `:` followed by whitespace (the same parts Kokoro
+already synthesizes separately, so the audio is unchanged), and ends the
+FIRST chunk of an utterance at a `, ` once the clause is at least 24
+characters long, the next word is not a number and at least 12 characters of
+tail have arrived with no sentence end among them (so "The kitchen light is
+on, yes." stays whole). The chunk after a clause cut is cut at its last comma
+once 80 characters are buffered, so the remainder is synthesized before the
+clause before it has finished playing. Expected gain, to be read from
+`first_answer_audio_ms` on the box: about 0.3-0.4 s on a one-sentence reply
+with a leading clause, 1.5-2 s on a long `:`/`;` sentence, nothing on a
+comma-free sentence. The comma join is a standalone synthesis (a pitch reset
+and a 150-250 ms pause); if it sounds wrong on the box, raise
+`DEFAULT_FIRST_CLAUSE_MIN_CHARS` in `voice/text_chunk.py` to 30-40, or pass
+`first_clause_min_chars=None` in `_speak_reply_stream` to go back to
+sentence-only first chunks. No env var.

@@ -2857,19 +2857,35 @@ services:
       # user starts talking, the capture ends after a short run of trailing
       # silence instead of always holding the mic for the full
       # STT_MAX_RECORD_S. Empty passthrough: effective defaults live in
-      # services/voice-io/voice/pipeline.py (single source of truth).
-      #   VAD_SILENCE_S    — trailing silence (s) that ends the turn (default
-      #                      0.6). Raise if the box cuts people off mid-pause.
+      # services/voice-io/voice/pipeline.py (single source of truth). Every
+      # seconds knob rounds UP to whole 80 ms capture frames (WARP-3729:
+      # 0.6 s = 8 frames = 640 ms, 0.5 s = 7 = 560 ms, 0.8 s = 10 = 800 ms).
+      #   VAD_SILENCE_S    — trailing silence (s) that ends the turn after a
+      #                      longer utterance (over ~1.2 s of speech) or one
+      #                      with a mid-sentence pause (default 0.6). Raise if
+      #                      the box cuts people off mid-pause. Set on its own
+      #                      (no VAD_SILENCE_SHORT_S) it applies to every
+      #                      utterance, so a tuned room keeps its tuning.
+      #   VAD_SILENCE_SHORT_S — tail after a short, pause-free command
+      #                      (default 0.48). Never longer than VAD_SILENCE_S;
+      #                      0 disables the short tail (short = long).
       #   VAD_SPEECH_RMS   — int16 frame RMS above which a frame counts as
-      #                      speech (default 700; between a ~400 room floor and
+      #                      speech, compared AFTER the calibration input gain
+      #                      (default 700; between a ~400 room floor and
       #                      ~1000+ speech). Tune per room — this is the knob
       #                      the pipeline docstring points operators at.
       #   VAD_MIN_SPEECH_S — min cumulative speech before end-of-speech may
-      #                      fire (default 0.4), so the wake-word tail + a pause
-      #                      before the command don't end the turn early.
+      #                      fire (default 0.24; the first 160 ms of a capture
+      #                      are the wake-word tail and never count), so a
+      #                      pause before the command doesn't end the turn early.
+      #   VAD_NO_SPEECH_S  — nothing over VAD_SPEECH_RMS this long after the
+      #                      wake ends the capture without transcribing it
+      #                      (default 6.0; 0 disables, i.e. wait for the cap).
       - VAD_SILENCE_S=${VAD_SILENCE_S:-}
+      - VAD_SILENCE_SHORT_S=${VAD_SILENCE_SHORT_S:-}
       - VAD_SPEECH_RMS=${VAD_SPEECH_RMS:-}
       - VAD_MIN_SPEECH_S=${VAD_MIN_SPEECH_S:-}
+      - VAD_NO_SPEECH_S=${VAD_NO_SPEECH_S:-}
       # WARP-1434 — how long (s) the wake_detected / transcript_ready UI hints
       # linger before decaying back to 'listening' so the dashboard's pulse
       # animation has time to play (default 2.0). Empty passthrough.
@@ -2966,7 +2982,7 @@ services:
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # CPU-only speech services. No GPU runtime, device grants or shared .env.
-  # Qwen refuses startup below 14 GiB MemAvailable (10 GiB ceiling +
+  # Qwen refuses startup below 8 GiB MemAvailable (4 GiB ceiling +
   # 4 GiB appliance reserve). See docs/cpu-voice.md for on-box qualification.
   qwen-stt:
     build:
@@ -2979,13 +2995,13 @@ services:
       - QWEN_CPU_THREADS=${QWEN_CPU_THREADS:-4}
       - OPENBLAS_NUM_THREADS=${QWEN_CPU_THREADS:-4}
       - OMP_NUM_THREADS=${QWEN_CPU_THREADS:-4}
-      - QWEN_MIN_AVAILABLE_GIB=${QWEN_MIN_AVAILABLE_GIB:-14}
+      - QWEN_MIN_AVAILABLE_GIB=${QWEN_MIN_AVAILABLE_GIB:-8}
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     restart: unless-stopped
     <<: *default-logging
-    mem_limit: ${QWEN_MEM_LIMIT:-10g}
+    mem_limit: ${QWEN_MEM_LIMIT:-4g}
     cpus: ${QWEN_CPUS:-4.0}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 

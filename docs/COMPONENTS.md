@@ -87,7 +87,7 @@ is deliberately **no separate API gateway service** in front of the orchestrator
 | **camera-discovery** | `services/camera-discovery/` | Python + FastAPI | ONVIF/RTSP discovery → Frigate |
 | **erp-sql-bridge** | `services/erp-sql-bridge/` | Python + FastAPI + pyodbc | Direct-SQL ERP bridge (SAP SQL Anywhere) |
 | **voice-io** | `services/voice-io/` | Python + FastAPI | Wake → STT → agent → TTS |
-| **qwen-stt** | `services/qwen-stt/` | Python + native C/OpenBLAS | Offline English Qwen3-ASR 1.7B, CPU-only Wyoming :10300 |
+| **qwen-stt** | `services/qwen-stt/` | Python + native C/OpenBLAS | Offline English Qwen3-ASR 0.6B, CPU-only Wyoming :10300 |
 | **kokoro-tts** | `services/kokoro-tts/` | Python + ONNX Runtime | Offline Kokoro speech, eight selectable English voices, CPU-only Wyoming :10200 |
 | **oled-display** | `services/oled-display/` | Python + FastAPI | Front-panel TFT screen |
 | **ops-console** | `services/ops-console/` | Python + FastAPI | Support "what's running" console |

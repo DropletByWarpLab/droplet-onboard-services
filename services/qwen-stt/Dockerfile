@@ -23,7 +23,7 @@ WORKDIR /app
 COPY --from=native /src/libqwen_asr.so /app/libqwen_asr.so
 COPY --from=native /src/LICENSE /app/licenses/qwen-asr-LICENSE
 COPY --from=model /models /models
-COPY services/qwen-stt/MODEL-LICENSE /models/qwen3-asr-1.7b/LICENSE
+COPY services/qwen-stt/MODEL-LICENSE /models/qwen3-asr-0.6b/LICENSE
 COPY services/qwen-stt/README.md /app/README.md
 COPY services/qwen-stt/server.py services/qwen-stt/healthcheck.py /app/
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 OPENBLAS_NUM_THREADS=4 OMP_NUM_THREADS=4

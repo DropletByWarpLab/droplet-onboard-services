@@ -90,7 +90,11 @@ from voice.audio_io import (
 from voice.intents import VolumeIntent, classify_volume_intent
 from voice.llm import LLMClient, LLMUnavailable, SpokenCue, ToolChoice
 from voice.stt import STTUnavailable, StreamingSTT
-from voice.text_chunk import SentenceChunker
+from voice.text_chunk import (
+    DEFAULT_CLAUSE_SOFT_MAX_CHARS,
+    DEFAULT_FIRST_CLAUSE_MIN_CHARS,
+    SentenceChunker,
+)
 from voice.tts import SynthesizedAudio, TextToSpeech, TTSUnavailable
 from voice.volume import VolumeController, apply_gain
 from voice.wake import (
@@ -355,19 +359,78 @@ DEFAULT_LLM_WARM_DEBOUNCE_S = 60.0
 # their statement instead of always holding the mic for the full
 # max-record window. Energy-based on frame RMS; the max-record window
 # stays the hard cap for noisy rooms where a clean silence never arrives.
-DEFAULT_VAD_SILENCE_S = 0.6       # trailing silence (s) that ends the turn.
-                                  # WARP-1434: trimmed 1.0 → 0.6 — a full
-                                  # second of dead air used to end every turn;
-                                  # 0.6 s still rides out a natural pause but
-                                  # stops promptly once the speaker finishes.
-                                  # Overridable per-room via VAD_SILENCE_S.
-DEFAULT_VAD_SPEECH_RMS = 700.0    # int16 frame RMS above which a frame = "speech"
-                                  # (sits between a typical room floor ~400
-                                  # and normal speech ~1000+; tune per-room
-                                  # via VAD_SPEECH_RMS).
-DEFAULT_VAD_MIN_SPEECH_S = 0.4    # min CUMULATIVE speech before end-of-speech
-                                  # may fire — keeps the wake-word tail + a
-                                  # pause before the command from ending early
+#
+# WARP-3729: every seconds knob here is quantized to whole 80 ms capture
+# frames at construction (`_vad_frames`: ceil of the exact ratio, so 0.6 s
+# is 8 frames = 640 ms, 0.5 s is 7 = 560 ms, 0.8 s is 10 = 800 ms) and the
+# per-turn counters are integers, so a tail is the same number of frames
+# on every box instead of depending on float accumulation.
+DEFAULT_VAD_SILENCE_S = 0.6       # trailing silence (s) that ends the turn
+                                  # after a longer utterance (voiced span over
+                                  # VAD_SHORT_UTTERANCE_S) or one with a
+                                  # mid-sentence pause. WARP-1434: trimmed
+                                  # 1.0 → 0.6 — a full second of dead air used
+                                  # to end every turn; 0.6 s still rides out a
+                                  # natural pause but stops promptly once the
+                                  # speaker finishes. Per-room via VAD_SILENCE_S.
+DEFAULT_VAD_SILENCE_SHORT_S = 0.48  # WARP-3729: tail after a SHORT, pause-free
+                                  # command (6 frames = 480 ms, 160 ms sooner
+                                  # than the long tail). A hesitation inside a
+                                  # short command is the exposure, so 0.48
+                                  # ships (not 0.4) until the box data says
+                                  # otherwise. <= 0 disables (short = long);
+                                  # never longer than VAD_SILENCE_S.
+VAD_SHORT_UTTERANCE_S = 1.2       # voiced span (first → last speech frame) up
+                                  # to which the short tail applies.
+VAD_PAUSE_S = 0.24                # a silence run this long INSIDE the utterance
+                                  # means the speaker pauses mid-sentence: the
+                                  # long tail applies for the rest of the turn.
+VAD_WAKE_TAIL_S = 0.16            # the first two capture frames. Vosk fires on
+                                  # the partial hypothesis and the capture opens
+                                  # on the next frame, so the end of the wake
+                                  # phrase lands here by construction: it never
+                                  # starts the VAD or counts toward the gate
+                                  # (WARP-3729), so a pause before the command
+                                  # is judged like a capture with no speech.
+DEFAULT_VAD_SPEECH_RMS = 700.0    # int16 frame RMS above which a frame = "speech",
+                                  # compared AFTER the calibration input gain —
+                                  # relative to the calibrated -12 dBFS speech
+                                  # peak, like the detector (sits between a
+                                  # typical room floor ~400 and normal speech
+                                  # ~1000+; tune per-room via VAD_SPEECH_RMS).
+DEFAULT_VAD_MIN_SPEECH_S = 0.24   # min CUMULATIVE speech before end-of-speech
+                                  # may fire. WARP-3729: 0.4 → 0.24 (3 frames)
+                                  # now that the wake tail is excluded by the
+                                  # window above — speech straight after the
+                                  # wake still needs five loud frames from
+                                  # capture-open, and a one-word command after
+                                  # a pause ("stop") ends on the normal tail
+                                  # instead of running to the cap.
+DEFAULT_VAD_NO_SPEECH_S = 6.0     # WARP-3729: nothing over the threshold this
+                                  # long after capture-open ends the capture
+                                  # (vad_end "no_speech", NOT transcribed) — a
+                                  # false wake or nobody speaking used to hold
+                                  # the mic for the 30 s cap and hand 30 s of
+                                  # room noise to STT. Also the patience after
+                                  # the last loud frame when the min-speech
+                                  # gate was never met ("short_speech", still
+                                  # transcribed). Trade-off: the box gives no
+                                  # audible wake cue, so someone who waits
+                                  # longer than this before speaking gets an
+                                  # empty turn; shorter = quicker recovery from
+                                  # false wakes. 0 disables both (cap only).
+
+
+def _vad_frames(seconds: float, frame_s: float) -> int:
+    """Whole capture frames for a VAD seconds knob (WARP-3729): ceil of the
+    exact ratio, so 0.2/0.4/0.48/0.5/0.6 s are 3/5/6/7/8 frames — the counts
+    the old float accumulation produced — and 0.8 s is 10 (it used to be 11).
+    Never raises: a non-finite or non-positive value is 0 frames, and each
+    caller decides what 0 means (disabled, or the floor of one frame)."""
+    if not math.isfinite(seconds) or seconds <= 0.0:
+        return 0
+    return math.ceil(round(seconds / frame_s, 6))
+
 
 # Spoken cues (WARP-3124). A tool question is two serial generations plus a
 # dispatch — 8-15 s of silence on the box — and a cold model load can be
@@ -643,7 +706,9 @@ class _TurnTiming:
     capture_open_at: Optional[float] = None
     capture_end_at: Optional[float] = None
     speech_s: Optional[float] = None
-    vad_end: Optional[str] = None  # "silence" | "cap"
+    vad_end: Optional[str] = None  # "silence" | "short_speech" | "no_speech" | "cap"
+    vad_tail: Optional[str] = None  # "short" | "long" | "fallback"; None when no
+                                    # VAD tail ended the capture (WARP-3729)
     transcript_at: Optional[float] = None
 
     def summary(
@@ -658,6 +723,7 @@ class _TurnTiming:
             ),
             "capture_ms": _ms(self.capture_open_at, self.capture_end_at),
             "vad_end": self.vad_end,
+            "vad_tail": self.vad_tail,
             "stt_ms": _ms(self.capture_end_at, self.transcript_at),
             "first_delta_ms": _ms(self.transcript_at, speak.get("first_delta_at")),
             "first_audio_ms": _ms(self.transcript_at, speak.get("first_audio_at")),
@@ -667,6 +733,7 @@ class _TurnTiming:
             "total_ms": _ms(self.wake_at, ended_at),
             "cue": speak.get("cue"),
             "sentences": speak.get("sentences", 0),
+            "first_chunk_chars": speak.get("first_chunk_chars"),
             "error_kind": speak.get("error_kind"),
         }
 
@@ -829,6 +896,8 @@ class WakePipeline:
         vad_silence_s: float = DEFAULT_VAD_SILENCE_S,
         vad_speech_rms: float = DEFAULT_VAD_SPEECH_RMS,
         vad_min_speech_s: float = DEFAULT_VAD_MIN_SPEECH_S,
+        vad_silence_short_s: float = DEFAULT_VAD_SILENCE_SHORT_S,
+        vad_no_speech_s: float = DEFAULT_VAD_NO_SPEECH_S,
         sd_module: Any = None,
         resolve_input_device: Optional[Callable[[], Optional[int]]] = None,
         recover_backoff_initial_s: float = DEFAULT_RECOVER_BACKOFF_INITIAL_S,
@@ -888,14 +957,37 @@ class WakePipeline:
         self._post_speak_cooldown_s = post_speak_cooldown_s
         self._speak_ended_at: Optional[float] = None
         # End-of-speech (VAD) config + per-utterance state (reset each turn
-        # in _begin_transcription).
+        # in _begin_transcription). The seconds knobs are kept as given
+        # (tests and status read them) and quantized once to whole frames
+        # (WARP-3729); every per-turn counter below is an integer.
         self._vad_silence_s = vad_silence_s
+        self._vad_silence_short_s = vad_silence_short_s
         self._vad_speech_rms = vad_speech_rms
         self._vad_min_speech_s = vad_min_speech_s
+        self._vad_no_speech_s = vad_no_speech_s
         self._frame_s = WAKE_FRAME_SAMPLES / float(WAKE_SAMPLE_RATE)
+        self._vad_silence_frames = max(1, _vad_frames(vad_silence_s, self._frame_s))
+        # <= 0 (or a malformed value) means no short tail: short = long.
+        short_frames = _vad_frames(vad_silence_short_s, self._frame_s)
+        self._vad_silence_short_frames = (
+            self._vad_silence_frames if short_frames <= 0
+            else min(short_frames, self._vad_silence_frames)
+        )
+        self._vad_min_speech_frames = _vad_frames(vad_min_speech_s, self._frame_s)
+        self._vad_no_speech_frames = _vad_frames(vad_no_speech_s, self._frame_s)  # 0 = off
+        self._vad_short_utterance_frames = _vad_frames(VAD_SHORT_UTTERANCE_S, self._frame_s)
+        self._vad_pause_frames = max(1, _vad_frames(VAD_PAUSE_S, self._frame_s))
+        self._vad_wake_tail_frames = _vad_frames(VAD_WAKE_TAIL_S, self._frame_s)
+        # Pre-gain RMS of the frame in flight, stashed by _track_input_level
+        # for the VAD so the level is computed once per frame (capture
+        # thread only: written and read inside the same _on_frame call).
+        self._raw_frame_rms = 0.0
         self._stt_speech_started = False
-        self._stt_silence_s = 0.0
-        self._stt_speech_s = 0.0
+        self._stt_capture_frames = 0   # frames sent this capture
+        self._stt_speech_frames = 0    # loud frames the gate counted
+        self._stt_silence_frames = 0   # run since the last counted loud frame
+        self._stt_voiced_frames = 0    # frames since the first counted loud frame
+        self._stt_pause_seen = False   # a >= VAD_PAUSE_S gap inside the utterance
         self._sd_module = sd_module  # dependency injection for tests
         # Device self-heal hooks (fix/voice-wake-loop-resilience).
         # `resolve_input_device` recomputes the input index after a mic
@@ -1978,7 +2070,8 @@ class WakePipeline:
         / error / error_kind (tts | playback | llm, or busy when another
         utterance holds the speaker), plus the turn-timing fields
         first_audio_at / first_answer_audio_at (time.monotonic) / cue /
-        sentences.
+        sentences (answer chunks played — a first clause split off under
+        WARP-3729 counts as one) / first_chunk_chars.
         """
         if self._tts is None or not self._tts_available:
             return {
@@ -2126,7 +2219,12 @@ class WakePipeline:
         first_audio_at: Optional[float] = None
         first_answer_audio_at: Optional[float] = None
         cue: Optional[str] = None
+        # Answer CHUNKS played. Since WARP-3729 the chunker may split the
+        # first clause off, so a one-sentence reply can count 2 here;
+        # first_chunk_chars (length of the chunk behind the first answer
+        # audio) lets the box timing be read by whether that happened.
         sentences = 0
+        first_chunk_chars: Optional[int] = None
         for item in channel:
             if isinstance(item, _SpeakFailure):
                 first_error, error_kind = item.error, item.kind
@@ -2154,6 +2252,7 @@ class WakePipeline:
                 cue = item.cue
             elif first_answer_audio_at is None:
                 first_answer_audio_at = started
+                first_chunk_chars = len(item.text or "")
             try:
                 self._play_pcm(item.audio)
             except Exception as exc:  # noqa: BLE001 — surfaced below
@@ -2169,6 +2268,7 @@ class WakePipeline:
             "first_answer_audio_at": first_answer_audio_at,
             "cue": cue,
             "sentences": sentences,
+            "first_chunk_chars": first_chunk_chars,
         }
         if first_error is None:
             # Success (possibly empty — nothing streamed). Restore state +
@@ -2274,9 +2374,12 @@ class WakePipeline:
         single utterance (WARP-626). The generator pulls SSE deltas lazily
         and feeds them through a SentenceChunker, so sentence 1 is
         synthesized + played while later sentences are still arriving. When
-        the LLM delivers the whole reply in one delta (today's reality),
-        the chunker still splits it into sentences so playback of sentence 1
-        starts before the rest is synthesized.
+        the LLM delivers the whole reply in one delta, the chunker still
+        splits it into sentences so playback of sentence 1 starts before the
+        rest is synthesized. WARP-3729: the first chunk may be the first
+        CLAUSE of the answer (', ' at >= 24 chars; ';'/':' at >= 12) —
+        the persona's one-sentence replies otherwise make the first chunk
+        the whole reply, so first audio waited for all of it.
 
         WARP-3124: reads `reply_events`, so `SpokenCue` markers pass through
         in order — straight to the speak path, never into the chunker — and
@@ -2287,7 +2390,14 @@ class WakePipeline:
         first_delta: list[float] = []
 
         def _chunks() -> Iterator[Union[str, SpokenCue]]:
-            chunker = SentenceChunker()
+            # WARP-3729: passed explicitly so the only knob — a code
+            # constant, no env var — is visible where it takes effect.
+            # first_clause_min_chars=None is the one-line rollback to
+            # sentence-only first chunks.
+            chunker = SentenceChunker(
+                first_clause_min_chars=DEFAULT_FIRST_CLAUSE_MIN_CHARS,
+                soft_max_chars=DEFAULT_CLAUSE_SOFT_MAX_CHARS,
+            )
             stream = self._llm.reply_events(transcript, tool_choice=tool_choice)  # type: ignore[union-attr]
             try:
                 for item in stream:
@@ -2995,13 +3105,19 @@ class WakePipeline:
         dashboard can compare the live RMS against the calibrated floor
         without gain math. Flatline semantics are unaffected: a wedged
         DSP emits digital zeros, which are zeros in any gain domain.
+
+        The end-of-speech VAD (_capture_frame_for_stt) reads the per-frame
+        RMS stashed here, scaled by the gain, later in the same _on_frame
+        call — one RMS pass per frame, threshold still post-gain (WARP-3729).
         """
         n = int(frame.size)
         if n == 0:
+            self._raw_frame_rms = 0.0
             return
         # Sum of squares in float64 (int16² overflows int16/int32 sums).
         sumsq = float(np.einsum("i,i->", frame, frame, dtype=np.float64))
         frame_rms = math.sqrt(sumsq / n)
+        self._raw_frame_rms = frame_rms  # pre-gain level for the VAD
         # WARP-1410 — feed an in-flight windowed measurement from this same
         # already-open stream (never a second one). `list.append` is atomic
         # under the GIL, so the pipeline thread needs no lock here; the
@@ -3315,8 +3431,11 @@ class WakePipeline:
         self._turn_timing.capture_open_at = time.monotonic()
         # Reset end-of-speech (VAD) state for this turn.
         self._stt_speech_started = False
-        self._stt_silence_s = 0.0
-        self._stt_speech_s = 0.0
+        self._stt_capture_frames = 0
+        self._stt_speech_frames = 0
+        self._stt_silence_frames = 0
+        self._stt_voiced_frames = 0
+        self._stt_pause_seen = False
         with self._lock:
             self._state = "transcribing"
         logger.info("transcribing: capture window opened")
@@ -3359,37 +3478,87 @@ class WakePipeline:
             self._abort_transcription(f"send_chunk: {exc}")
             return
         self._stt_audio_samples += frame_samples
+        self._stt_capture_frames += 1
 
         elapsed = time.time() - self._transcribe_started_at
 
         # End-of-speech (VAD): once the user has actually started talking,
         # finish as soon as we see a short run of trailing silence — so the
         # box stops listening the moment they finish their statement rather
-        # than holding the mic for the whole max-record window.
-        rms = (
-            float(np.sqrt(np.mean(np.square(frame.astype(np.float64)))))
-            if frame.size
-            else 0.0
-        )
-        if rms >= self._vad_speech_rms:
+        # than holding the mic for the whole max-record window. Decided on
+        # the pre-gain RMS _track_input_level stashed for this frame, times
+        # the input gain: the same post-calibration level the detector
+        # hears (a box calibrated to gain 8 speaks at ~100-200 raw), without
+        # a second RMS pass over the gained frame (WARP-3729).
+        loud = self._raw_frame_rms * self._input_gain >= self._vad_speech_rms
+        if loud and self._stt_capture_frames <= self._vad_wake_tail_frames:
+            loud = False  # the wake phrase's own tail (VAD_WAKE_TAIL_S)
+        if loud:
+            if (
+                self._stt_speech_started
+                and self._stt_silence_frames >= self._vad_pause_frames
+            ):
+                self._stt_pause_seen = True
             self._stt_speech_started = True
-            self._stt_speech_s += self._frame_s
-            self._stt_silence_s = 0.0
+            self._stt_speech_frames += 1
+            self._stt_silence_frames = 0
         elif self._stt_speech_started:
-            self._stt_silence_s += self._frame_s
-        # End only once we've heard enough ACTUAL speech (so the brief
-        # wake-word tail + any pause before the command don't end the turn
-        # prematurely) followed by a run of trailing silence.
-        if (
-            self._stt_speech_s >= self._vad_min_speech_s
-            and self._stt_silence_s >= self._vad_silence_s
-        ):
-            logger.info(
-                "transcribing: end-of-speech (%.1fs speech, %.1fs trailing silence)",
-                self._stt_speech_s, self._stt_silence_s,
+            self._stt_silence_frames += 1
+        if self._stt_speech_started:
+            self._stt_voiced_frames += 1
+            # A short, fluent command (voiced span up to 1.2 s, no pause
+            # inside it) ends after the short tail; anything longer, or a
+            # speaker who already paused mid-sentence, keeps the long one.
+            voiced_span = self._stt_voiced_frames - self._stt_silence_frames
+            short = (
+                self._vad_silence_short_frames < self._vad_silence_frames
+                and voiced_span <= self._vad_short_utterance_frames
+                and not self._stt_pause_seen
             )
-            self._mark_capture_end("silence")
-            self._finish_transcription()
+            tail = self._vad_silence_short_frames if short else self._vad_silence_frames
+            if self._stt_speech_frames >= self._vad_min_speech_frames:
+                # Enough ACTUAL speech that a pause before the command can't
+                # be mistaken for its end, followed by the trailing run.
+                if self._stt_silence_frames >= tail:
+                    logger.info(
+                        "transcribing: end-of-speech (%.2fs speech, %.2fs trailing silence, %s tail)",
+                        self._stt_speech_frames * self._frame_s,
+                        self._stt_silence_frames * self._frame_s,
+                        "short" if short else "long",
+                    )
+                    self._mark_capture_end("silence", "short" if short else "long")
+                    self._finish_transcription()
+                    return
+            elif (
+                self._vad_no_speech_frames
+                and self._stt_silence_frames >= self._vad_no_speech_frames
+            ):
+                # A loud frame or two that never grew into a command (a
+                # blip, a word too soft to count): the same patience as a
+                # capture with no speech, then transcribe what there is.
+                # This used to run to the 30 s cap.
+                logger.info(
+                    "transcribing: end-of-speech below min speech (%.2fs speech) after %.2fs silence (fallback tail)",
+                    self._stt_speech_frames * self._frame_s,
+                    self._stt_silence_frames * self._frame_s,
+                )
+                self._mark_capture_end("short_speech", "fallback")
+                self._finish_transcription()
+                return
+        elif (
+            self._vad_no_speech_frames
+            and self._stt_capture_frames >= self._vad_no_speech_frames
+        ):
+            # Nothing crossed the threshold since the wake (a false wake,
+            # nobody spoke): end the capture and skip STT — the sidecar
+            # would only decode room noise, and the detector was paused
+            # the whole time. The turn ends "empty" like a blank transcript.
+            logger.info(
+                "transcribing: no speech within %.1fs of the wake, not transcribing",
+                self._stt_capture_frames * self._frame_s,
+            )
+            self._mark_capture_end("no_speech")
+            self._discard_transcription()
             return
 
         # Hard cap so a noisy room (VAD never sees a clean silence) or a
@@ -3399,14 +3568,18 @@ class WakePipeline:
             self._mark_capture_end("cap")
             self._finish_transcription()
 
-    def _mark_capture_end(self, vad_end: str) -> None:
-        """WARP-3124 — stamp why and when the capture window closed."""
+    def _mark_capture_end(
+        self, vad_end: str, vad_tail: Optional[str] = None,
+    ) -> None:
+        """WARP-3124 — stamp why and when the capture window closed, and
+        which VAD tail ended it (WARP-3729; None when none did)."""
         timing = self._turn_timing
         if timing is None:
             return
         timing.capture_end_at = time.monotonic()
-        timing.speech_s = self._stt_speech_s
+        timing.speech_s = self._stt_speech_frames * self._frame_s
         timing.vad_end = vad_end
+        timing.vad_tail = vad_tail
 
     def _finish_transcription(self) -> None:
         """Send audio-stop, block for transcript, transition state."""
@@ -3421,6 +3594,28 @@ class WakePipeline:
             self._abort_transcription(f"finish: {exc}")
             return
         session.close()
+        self._deliver_transcript(transcript)
+
+    def _discard_transcription(self) -> None:
+        """A capture with no speech in it (WARP-3729): close the session
+        WITHOUT audio-stop, so the sidecar drops the connection instead of
+        decoding seconds of room noise (and never answers nobody), and end
+        the turn on an empty transcript through the same path a blank
+        sidecar result takes — outcome "empty", one feed row,
+        transcript_ready and its decay back to listening."""
+        session = self._stt_session
+        self._stt_session = None
+        if session is None:
+            return
+        try:
+            session.close()
+        except Exception:
+            pass
+        self._deliver_transcript("")
+
+    def _deliver_transcript(self, transcript: str) -> None:
+        """Publish the capture's transcript and hand it to on_transcript
+        (the tail of _finish_transcription, shared with the no-speech path)."""
         wake_words = getattr(self._detector, "requested_wake_word", None)
         transcript = strip_wake_prefix(
             transcript, wake_words or self._detector.model_name,

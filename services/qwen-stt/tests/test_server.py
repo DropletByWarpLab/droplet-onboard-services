@@ -53,6 +53,9 @@ async def test_describe_advertises_installed_english_model():
     response, _ = await exchange([("describe", {}, b"", "v1")])
     assert response["type"] == "info"
     assert response["data"]["asr"][0]["models"][0]["languages"] == ["en"]
+    # WARP-3729: pins the shipped model so a stale 1.7B label cannot ship.
+    assert response["data"]["asr"][0]["models"][0]["name"] == "qwen3-asr-0.6b"
+    assert response["data"]["asr"][0]["version"] == "0.6B"
 
 
 @pytest.mark.parametrize("rate,width,channels", [(6000, 2, 1), (16000, 4, 1), (16000, 2, 2)])

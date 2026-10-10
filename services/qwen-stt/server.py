@@ -25,8 +25,10 @@ QUEUE_WAIT_S = 60.0
 
 
 def check_headroom() -> None:
-    """Reserve RAM for the rest of the appliance before loading the full model."""
-    minimum = float(os.environ.get("QWEN_MIN_AVAILABLE_GIB", "14"))
+    """Reserve RAM for the rest of the appliance before loading the model."""
+    # WARP-3729: the 0.6B budget. Its 4 GiB ceiling plus the 4 GiB appliance
+    # reserve the docs promise (the 1.7B was 10 + 4 = 14).
+    minimum = float(os.environ.get("QWEN_MIN_AVAILABLE_GIB", "8"))
     if not 0 <= minimum <= 1024:
         raise ValueError("QWEN_MIN_AVAILABLE_GIB must be between 0 and 1024")
     available = next(int(line.split()[1]) * 1024 for line in Path("/proc/meminfo").read_text().splitlines() if line.startswith("MemAvailable:"))
@@ -36,8 +38,13 @@ def check_headroom() -> None:
         path = Path(name)
         if path.is_file():
             limit = path.read_text().strip()
-            if limit != "max" and int(limit) < 10 * 1024**3:
-                raise RuntimeError("Full Qwen speech recognition requires a container RAM limit of at least 10 GiB")
+            # The floor equals the default cap. Measured with the weights
+            # charged to the container: ~2.9 GiB after a 30 s decode (~1.5 GiB
+            # anonymous float32 encoder, fused gate/up copy and KV cache, plus
+            # ~1.5 GiB of mapped BF16 weight pages). A 3 GiB cap ran at its
+            # limit with reclaim already starting; 4 GiB leaves ~1.1 GiB.
+            if limit != "max" and int(limit) < 4 * 1024**3:
+                raise RuntimeError("Qwen speech recognition requires a container RAM limit of at least 4 GiB")
 
 
 class RequestError(ValueError):
@@ -138,13 +145,27 @@ async def send_event(writer: asyncio.StreamWriter, event: str, data: dict) -> No
 
 
 def info() -> dict:
-    return {"asr": [{"name": "qwen3-asr", "description": "Qwen3-ASR 1.7B (CPU)",
-                     "attribution": {"name": "Qwen", "url": "https://huggingface.co/Qwen/Qwen3-ASR-1.7B"},
-                     "installed": True, "version": "1.7B",
-                     "models": [{"name": "qwen3-asr-1.7b", "description": "English",
-                                 "attribution": {"name": "Qwen", "url": "https://huggingface.co/Qwen/Qwen3-ASR-1.7B"},
-                                 "version": "1.7B",
+    return {"asr": [{"name": "qwen3-asr", "description": "Qwen3-ASR 0.6B (CPU)",
+                     "attribution": {"name": "Qwen", "url": "https://huggingface.co/Qwen/Qwen3-ASR-0.6B"},
+                     "installed": True, "version": "0.6B",
+                     "models": [{"name": "qwen3-asr-0.6b", "description": "English",
+                                 "attribution": {"name": "Qwen", "url": "https://huggingface.co/Qwen/Qwen3-ASR-0.6B"},
+                                 "version": "0.6B",
                                  "installed": True, "languages": ["en"]}]}]}
+
+
+# WARP-3729: qwen_load maps the weights but touches only ~0.7 GiB of them, so
+# the first decode after a (re)start paid the page-in of the other ~0.8 GiB
+# while the healthcheck already reported ready: 3.1 s instead of 1.9 s for a
+# 1 s clip with the weights on the workstation VM's disk, 5-10 s through a
+# slow mount. One second of silence through the real decode path before the
+# port opens (4-6 s cold on that VM) makes ready mean resident weights.
+WARM_UP_PCM = bytes(16000 * 2)
+
+
+def warm_up(engine: Transcriber) -> None:
+    """One decode of silence so readiness implies the decoder pages are resident."""
+    engine.transcribe(WARM_UP_PCM)
 
 
 class Server:
@@ -247,7 +268,9 @@ class Server:
 
 async def main() -> None:
     check_headroom()
-    engine = Qwen(os.environ.get("QWEN_MODEL_DIR", "/models/qwen3-asr-1.7b"))
+    engine = Qwen(os.environ.get("QWEN_MODEL_DIR", "/models/qwen3-asr-0.6b"))
+    LOG.info("Model loaded; decoding one second of silence before listening")
+    warm_up(engine)
     server = await asyncio.start_server(Server(engine).handle, "0.0.0.0", 10300, limit=8192)
     LOG.info("English CPU speech recognition ready on port 10300")
     async with server:

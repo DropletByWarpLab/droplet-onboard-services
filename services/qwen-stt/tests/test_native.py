@@ -20,20 +20,59 @@ def memory_files(monkeypatch, available_gib, limit_gib):
 
 
 def test_model_is_refused_when_appliance_headroom_is_insufficient(monkeypatch):
-    memory_files(monkeypatch, 13, 10)
+    memory_files(monkeypatch, 7, 4)
     with pytest.raises(RuntimeError, match="available RAM"):
         check_headroom()
 
 
 def test_small_container_limit_is_refused_even_on_a_large_host(monkeypatch):
-    memory_files(monkeypatch, 32, 8)
-    with pytest.raises(RuntimeError, match="at least 10 GiB"):
+    # WARP-3729: 3 GiB is where the measured 0.6B footprint ran at the limit.
+    memory_files(monkeypatch, 32, 3)
+    with pytest.raises(RuntimeError, match="at least 4 GiB"):
         check_headroom()
 
 
 def test_supported_memory_budget_passes(monkeypatch):
-    memory_files(monkeypatch, 16, 10)
+    # Exactly the documented defaults: 8 GiB available, 4 GiB cap.
+    memory_files(monkeypatch, 8, 4)
     check_headroom()
+
+
+async def test_startup_warms_the_decoder_before_the_port_opens(monkeypatch):
+    # WARP-3729: ready must mean resident weights, so one second of silence
+    # goes through the real decode path after load and before listening.
+    import server as server_mod
+
+    order = []
+
+    class Engine:
+        def __init__(self, model_dir):
+            order.append(("load", model_dir))
+
+        def transcribe(self, pcm):
+            order.append(("decode", pcm))
+            return ""
+
+    class Listener:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return None
+
+        async def serve_forever(self):
+            order.append("serve")
+
+    async def start_server(*args, **kwargs):
+        order.append("listen")
+        return Listener()
+
+    monkeypatch.setattr(server_mod, "check_headroom", lambda: order.append("headroom"))
+    monkeypatch.setattr(server_mod, "Qwen", Engine)
+    monkeypatch.setattr(server_mod.asyncio, "start_server", start_server)
+    monkeypatch.delenv("QWEN_MODEL_DIR", raising=False)
+    await server_mod.main()
+    assert order == ["headroom", ("load", "/models/qwen3-asr-0.6b"), ("decode", bytes(16000 * 2)), "listen", "serve"]
 
 
 async def test_cancelled_client_keeps_native_inference_exclusive():

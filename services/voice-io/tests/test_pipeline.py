@@ -42,7 +42,10 @@ from voice.pipeline import (
     DEFAULT_FLATLINE_WINDOW_S,
     DEFAULT_STT_MAX_RECORD_S,
     DEFAULT_THRESHOLD,
+    DEFAULT_VAD_MIN_SPEECH_S,
+    DEFAULT_VAD_NO_SPEECH_S,
     DEFAULT_VAD_SILENCE_S,
+    DEFAULT_VAD_SILENCE_SHORT_S,
     DEFAULT_VISUAL_DECAY_S,
     RMS_DBFS_FLOOR,
     DspRestartSkipped,
@@ -1382,8 +1385,10 @@ class TestTranscribingFlow:
         speech = np.full(WAKE_FRAME_SAMPLES, 6000, dtype=np.int16)
 
         pipe._on_frame(_silence_frame())   # wake (scripted; content irrelevant)
-        pipe._on_frame(speech)             # begin transcription + first speech chunk
-        assert pipe.status().state == "transcribing"
+        pipe._on_frame(_silence_frame())   # begin transcription. The first two
+        pipe._on_frame(_silence_frame())   # capture frames are the wake-tail
+        assert pipe.status().state == "transcribing"  # window (WARP-3729)
+        pipe._on_frame(speech)             # the command
         pipe._on_frame(speech)             # more speech
         for _ in range(4):                 # trailing silence trips VAD
             pipe._on_frame(_silence_frame())
@@ -1726,6 +1731,15 @@ class TestTranscribingFlow:
     def test_default_vad_silence_constant(self):
         # The longer hard cap preserves the existing end-of-speech timing.
         assert DEFAULT_VAD_SILENCE_S == 0.6
+
+    def test_default_vad_tail_policy_constants(self):
+        # WARP-3729 drift detectors: the short tail ships at 0.48 s (6 frames,
+        # not the 0.4 first proposed), the no-speech guard at 6 s, and the
+        # min-speech gate at 0.24 s (3 counted frames) now that the wake-tail
+        # window is excluded from the count.
+        assert DEFAULT_VAD_SILENCE_SHORT_S == 0.48
+        assert DEFAULT_VAD_NO_SPEECH_S == 6.0
+        assert DEFAULT_VAD_MIN_SPEECH_S == 0.24
 
 
 @pytest.mark.parametrize(("transcript", "wake_words", "expected"), [
@@ -2429,6 +2443,40 @@ class TestStreamingChunkedSpeak:
         ]
         assert llm.requests == ["status please"]  # streamed, not blocking-replied
 
+    def test_first_clause_is_spoken_before_the_rest_of_the_sentence(self, monkeypatch):
+        # WARP-3729: the persona pins one sentence per reply, so the first
+        # chunk used to be the whole reply. A leading clause of >= 24 chars
+        # is now synthesized + played on its own while the rest arrives;
+        # the spoken text is still the whole reply.
+        llm = _StreamingLLM(
+            deltas=["The front camera is online", ", and the network looks healthy."],
+        )
+        tts = _RecordingTTS()
+        pipe = self._wire(monkeypatch, llm, tts)
+        pipe._default_on_transcript("status please")
+        assert tts.texts_received == [
+            "The front camera is online,",
+            "and the network looks healthy.",
+        ]
+        assert pipe.status().last_response == (
+            "The front camera is online, and the network looks healthy."
+        )
+
+    def test_semicolon_parts_are_synthesized_separately(self, monkeypatch):
+        # WARP-3729: Kokoro already synthesizes the two parts of "A; B" on
+        # their own — splitting here only lets part 2 synthesize while
+        # part 1 plays.
+        llm = _RecordingLLM(
+            scripted_replies=["The camera is online; the network is fine."],
+        )
+        tts = _RecordingTTS()
+        pipe = self._wire(monkeypatch, llm, tts)
+        pipe._default_on_transcript("status please")
+        assert tts.texts_received == [
+            "The camera is online;",
+            "the network is fine.",
+        ]
+
     def test_single_speak_lock_and_speaking_state_across_sentences(self, monkeypatch):
         tts = _ProbingTTS()
         llm = _RecordingLLM(
@@ -3116,6 +3164,7 @@ class TestVoiceTurnTiming:
         "speech_ms",
         "capture_ms",
         "vad_end",
+        "vad_tail",
         "stt_ms",
         "first_delta_ms",
         "first_audio_ms",
@@ -3123,6 +3172,7 @@ class TestVoiceTurnTiming:
         "total_ms",
         "cue",
         "sentences",
+        "first_chunk_chars",
         "error_kind",
         "ended_at",
     }
@@ -3177,6 +3227,7 @@ class TestVoiceTurnTiming:
         assert t["vad_end"] == "cap"
         assert t["cue"] == "tool_call"
         assert t["sentences"] == 1
+        assert t["first_chunk_chars"] == len("The front camera is online.")
         assert t["error_kind"] is None
         for key in (
             "wake_to_capture_ms", "speech_ms", "capture_ms", "stt_ms",
@@ -3201,15 +3252,41 @@ class TestVoiceTurnTiming:
         )
         speech = np.full(WAKE_FRAME_SAMPLES, 6000, dtype=np.int16)
         pipe._on_frame(_silence_frame())  # wake
-        pipe._on_frame(speech)            # begin + speech
+        pipe._on_frame(_silence_frame())  # begin: the first two capture frames
+        pipe._on_frame(_silence_frame())  # are the wake-tail window (WARP-3729)
+        pipe._on_frame(speech)
         pipe._on_frame(speech)
         for _ in range(4):                # trailing silence trips VAD
             pipe._on_frame(_silence_frame())
         (t,) = self._timing_lines(caplog)
         assert t["vad_end"] == "silence"
+        assert t["vad_tail"] == "long"    # 0.2 s: the short tail clamps to it
         assert t["speech_ms"] == 160  # two 80 ms speech frames
         assert t["cue"] is None
         assert t["first_audio_ms"] == t["first_answer_audio_ms"]
+
+    def test_no_speech_turn_logs_empty_outcome_without_stt(self, caplog):
+        # WARP-3729: a capture with nothing over the threshold ends on the
+        # no-speech guard, is never sent to STT, and still ends with its one
+        # timing line (outcome "empty", like a blank transcript).
+        caplog.set_level("INFO", logger="voice.pipeline")
+        pipe, _ = self._pipe(
+            _EventLLM(["unused"]),
+            transcripts=("never decoded",),
+            stt_max_record_s=100.0,
+            vad_no_speech_s=0.4,  # 5 frames
+        )
+        pipe._on_frame(_silence_frame())  # wake
+        for _ in range(5):
+            pipe._on_frame(_silence_frame())
+        (t,) = self._timing_lines(caplog)
+        assert t["outcome"] == "empty"
+        assert t["vad_end"] == "no_speech"
+        assert t["vad_tail"] is None
+        assert t["speech_ms"] == 0
+        assert t["stt_ms"] is not None
+        assert pipe._stt.finished is False
+        assert pipe.status().last_transcript == ""
 
     def test_fragment_turn_logs_with_nulls_for_skipped_stages(self, caplog):
         caplog.set_level("INFO", logger="voice.pipeline")
@@ -3222,7 +3299,26 @@ class TestVoiceTurnTiming:
         for key in ("first_delta_ms", "first_audio_ms", "first_answer_audio_ms", "cue"):
             assert t[key] is None, key
         assert t["sentences"] == 0
+        assert t["first_chunk_chars"] is None
         assert llm.requests == []
+
+    def test_clause_split_reply_counts_chunks_and_the_first_chunk_length(self, caplog):
+        # WARP-3729: `sentences` counts answer CHUNKS (clauses included), so
+        # a one-sentence reply split at its first clause reports 2, and
+        # `first_chunk_chars` is the length of the chunk behind
+        # first_answer_audio_ms — the box before/after read can be split
+        # by whether a clause cut happened.
+        caplog.set_level("INFO", logger="voice.pipeline")
+        llm = _EventLLM(["The front camera is online, and the network looks healthy."])
+        pipe, player = self._pipe(llm)
+        self._drive_capped_turn(pipe)
+        (t,) = self._timing_lines(caplog)
+        assert player.played == [
+            "The front camera is online,",
+            "and the network looks healthy.",
+        ]
+        assert t["sentences"] == 2
+        assert t["first_chunk_chars"] == len("The front camera is online,")
 
     def test_no_llm_turn_logs(self, caplog):
         caplog.set_level("INFO", logger="voice.pipeline")
@@ -5360,6 +5456,9 @@ class TestCaptureCapIsAudioTime:
             threshold=0.5,
             stt=stt,
             stt_max_record_s=cap_s,
+            # WARP-3729: the all-silent drives below must reach the cap, not
+            # the no-speech guard (which would end them at 6 s).
+            vad_no_speech_s=0.0,
         )
         pipe._stt_available = True
         return pipe
@@ -5419,6 +5518,284 @@ class TestCaptureCapIsAudioTime:
         pipe._on_frame(_silence_frame())  # elapsed past the window
         assert stt.finished is True
         assert pipe.status().last_turn_timing["vad_end"] == "cap"
+        assert pipe.status().last_turn_timing["vad_tail"] is None
+
+
+# ────────────────────────────────────────────────────────────────────
+# End-of-speech tail policy (WARP-3729)
+# ────────────────────────────────────────────────────────────────────
+
+class TestVadTailPolicy:
+    """Frame-quantized VAD counters, the adaptive short/long tail, the
+    post-gain speech threshold and the cliff guards (wake-tail window,
+    min-speech fallback, no-speech guard) of WARP-3729. Unless a test says
+    otherwise, every capture opens with its two wake-tail-window frames
+    silent, so the loud frames that follow are the command."""
+
+    LOUD = 6000
+
+    def _pipe(self, stt=None, **kw):
+        pipe = WakePipeline(
+            detector=_ScriptedDetector([{"hey_jarvis": 0.9}]),
+            input_device_index=0,
+            threshold=0.5,
+            stt=stt if stt is not None else _RecordingSTT(scripted_transcripts=["ok"]),
+            stt_max_record_s=kw.pop("stt_max_record_s", 100.0),
+            **kw,
+        )
+        pipe._stt_available = True
+        return pipe
+
+    def _open(self, pipe, wake_tail_loud: int = 0) -> None:
+        """Wake, then the two wake-tail-window frames (`wake_tail_loud` of
+        them over the threshold)."""
+        pipe._on_frame(_silence_frame())  # wake fires; the capture opens next frame
+        for i in range(2):
+            pipe._on_frame(
+                _audio_frame(self.LOUD) if i < wake_tail_loud else _silence_frame()
+            )
+        assert pipe.status().state == "transcribing"
+
+    def _feed(self, pipe, loud: int = 0, silent: int = 0) -> None:
+        for _ in range(loud):
+            pipe._on_frame(_audio_frame(self.LOUD))
+        for _ in range(silent):
+            pipe._on_frame(_silence_frame())
+
+    def test_silence_tail_is_whole_frames(self):
+        # 0.6 s is 8 frames = 640 ms, the count the float accumulation
+        # produced (7 × 0.08 = 0.56 never reached 0.6); a 20-frame utterance
+        # (1.6 s voiced span) takes the long tail.
+        stt = _RecordingSTT(scripted_transcripts=["a long request"])
+        pipe = self._pipe(stt, vad_min_speech_s=0.0)
+        self._open(pipe)
+        self._feed(pipe, loud=20, silent=7)
+        assert stt.finished is False
+        pipe._on_frame(_silence_frame())  # the 8th silent frame
+        assert stt.finished is True
+        t = pipe.status().last_turn_timing
+        assert t["vad_end"] == "silence"
+        assert t["vad_tail"] == "long"
+        assert len(stt.chunks_received) == 2 + 20 + 8
+
+    def test_short_command_ends_after_short_tail(self):
+        # A fluent 400 ms command ends 480 ms after its last loud frame (6
+        # frames) instead of 640 ms.
+        stt = _RecordingSTT(scripted_transcripts=["turn on the lights"])
+        pipe = self._pipe(stt)
+        self._open(pipe)
+        self._feed(pipe, loud=5, silent=5)
+        assert stt.finished is False
+        pipe._on_frame(_silence_frame())  # the 6th silent frame = 480 ms
+        assert stt.finished is True
+        t = pipe.status().last_turn_timing
+        assert t["vad_end"] == "silence"
+        assert t["vad_tail"] == "short"
+        assert t["speech_ms"] == 400
+        assert len(stt.chunks_received) == 2 + 5 + 6
+        assert pipe.status().last_transcript == "turn on the lights"
+
+    def test_long_utterance_keeps_long_tail(self):
+        stt = _RecordingSTT(scripted_transcripts=["x"])
+        pipe = self._pipe(stt)
+        self._open(pipe)
+        self._feed(pipe, loud=16, silent=7)  # 1.28 s voiced span > 1.2 s
+        assert stt.finished is False
+        pipe._on_frame(_silence_frame())
+        assert stt.finished is True
+        assert pipe.status().last_turn_timing["vad_tail"] == "long"
+
+    def test_mid_utterance_pause_switches_to_long_tail(self):
+        # A 240 ms gap inside the utterance: the speaker pauses mid-sentence,
+        # so the rest of the turn gets the long tail.
+        stt = _RecordingSTT(scripted_transcripts=["x"])
+        pipe = self._pipe(stt)
+        self._open(pipe)
+        self._feed(pipe, loud=5, silent=3)
+        self._feed(pipe, loud=2, silent=7)
+        assert stt.finished is False
+        pipe._on_frame(_silence_frame())
+        assert stt.finished is True
+        assert pipe.status().last_turn_timing["vad_tail"] == "long"
+
+    def test_two_frame_pause_does_not_switch_tail(self):
+        # A 160 ms gap is a soft word boundary, not a pause.
+        stt = _RecordingSTT(scripted_transcripts=["x"])
+        pipe = self._pipe(stt)
+        self._open(pipe)
+        self._feed(pipe, loud=5, silent=2)
+        self._feed(pipe, loud=2, silent=5)
+        assert stt.finished is False
+        pipe._on_frame(_silence_frame())
+        assert stt.finished is True
+        assert pipe.status().last_turn_timing["vad_tail"] == "short"
+
+    def test_speech_threshold_is_compared_after_the_input_gain(self):
+        # Today's semantics, pinned: the bar is post-calibration-gain, i.e.
+        # relative to the calibrated -12 dBFS speech peak (a box at gain 8
+        # speaks at ~100-200 raw). Raw 800 at gain 0.5 is 400: not speech.
+        stt = _RecordingSTT(scripted_transcripts=["x"])
+        pipe = self._pipe(stt, input_gain=0.5, vad_no_speech_s=0.0)
+        self._open(pipe)
+        for _ in range(5):
+            pipe._on_frame(_audio_frame(800))
+        self._feed(pipe, silent=20)
+        assert pipe._stt_speech_started is False
+        assert stt.finished is False
+        # Raw 500 at gain 2.0 is 1000: speech, and the short tail applies.
+        stt = _RecordingSTT(scripted_transcripts=["x"])
+        pipe = self._pipe(stt, input_gain=2.0)
+        self._open(pipe)
+        for _ in range(5):
+            pipe._on_frame(_audio_frame(500))
+        self._feed(pipe, silent=5)
+        assert stt.finished is False
+        pipe._on_frame(_silence_frame())
+        assert stt.finished is True
+        t = pipe.status().last_turn_timing
+        assert t["vad_end"] == "silence"
+        assert t["vad_tail"] == "short"
+
+    def test_wake_tail_frames_never_start_the_vad(self):
+        # The first two capture frames carry the end of the wake phrase by
+        # construction. Loud there must not start the VAD, so a person who
+        # pauses before the command gets the full no-speech window — the
+        # same patience as a capture with no speech at all.
+        stt = _RecordingSTT(scripted_transcripts=["never decoded"])
+        pipe = self._pipe(stt)
+        self._open(pipe, wake_tail_loud=2)
+        self._feed(pipe, silent=30)
+        assert pipe._stt_speech_started is False
+        assert stt.finished is False
+        assert pipe.status().state == "transcribing"
+        window = pipe._vad_no_speech_frames
+        assert window == 75  # 6 s
+        self._feed(pipe, silent=window - 2 - 30 - 1)
+        assert pipe.status().state == "transcribing"
+        pipe._on_frame(_silence_frame())  # the 75th capture frame
+        s = pipe.status()
+        assert s.state == "transcript_ready"
+        assert s.last_turn_timing["vad_end"] == "no_speech"
+        assert s.last_turn_timing["vad_tail"] is None
+        assert s.last_turn_timing["speech_ms"] == 0
+        assert stt.finished is False  # closed without audio-stop: no decode
+        assert len(stt.chunks_received) == window
+
+    def test_one_word_command_after_a_pause_ends_on_the_short_tail(self):
+        # "stop" after a 400 ms pause: three counted loud frames meet the
+        # 0.24 s gate. It used to need five and ran to the 30 s cap.
+        stt = _RecordingSTT(scripted_transcripts=["stop"])
+        pipe = self._pipe(stt)
+        self._open(pipe)
+        self._feed(pipe, silent=5)
+        self._feed(pipe, loud=3, silent=5)
+        assert stt.finished is False
+        pipe._on_frame(_silence_frame())
+        assert stt.finished is True
+        t = pipe.status().last_turn_timing
+        assert t["vad_end"] == "silence"
+        assert t["vad_tail"] == "short"
+        assert t["speech_ms"] == 240
+        assert pipe.status().last_transcript == "stop"
+
+    def test_below_min_speech_ends_on_the_fallback_tail(self):
+        # Three loud frames straight from capture-open: two are the wake-tail
+        # window, so one counted frame never meets the gate. The capture
+        # waits the no-speech window after it (not 1.6 s), then IS
+        # transcribed, with its own end reason so the box data can tell it
+        # from a normal end of speech.
+        stt = _RecordingSTT(scripted_transcripts=["stop"])
+        pipe = self._pipe(stt)
+        pipe._on_frame(_silence_frame())  # wake
+        self._feed(pipe, loud=3, silent=20)  # 1.6 s of silence: still open
+        assert pipe._stt_speech_started is True
+        assert stt.finished is False
+        window = pipe._vad_no_speech_frames
+        self._feed(pipe, silent=window - 20 - 1)
+        assert stt.finished is False
+        pipe._on_frame(_silence_frame())
+        assert stt.finished is True
+        t = pipe.status().last_turn_timing
+        assert t["vad_end"] == "short_speech"
+        assert t["vad_tail"] == "fallback"
+        assert t["speech_ms"] == 80
+        assert pipe.status().last_transcript == "stop"
+        assert len(stt.chunks_received) == 3 + window
+
+    def test_no_speech_after_wake_ends_before_the_cap(self):
+        # Nobody spoke after the wake: the capture ends on the guard, the
+        # session is closed without audio-stop (the sidecar never decodes the
+        # room noise), the turn ends "empty", and the box decays back to
+        # listening like after any transcript.
+        stt = _RecordingSTT(scripted_transcripts=["never decoded"])
+        pipe = self._pipe(stt, vad_no_speech_s=0.8)  # 10 frames
+        pipe._on_frame(_silence_frame())  # wake
+        self._feed(pipe, silent=9)
+        assert pipe.status().state == "transcribing"
+        pipe._on_frame(_silence_frame())  # the 10th capture frame
+        s = pipe.status()
+        assert s.state == "transcript_ready"
+        assert s.last_transcript == ""
+        assert stt.finished is False
+        assert len(stt.chunks_received) == 10
+        assert s.last_turn_timing["vad_end"] == "no_speech"
+        assert s.last_turn_timing["vad_tail"] is None
+        assert s.last_turn_timing["outcome"] == "empty"
+        pipe._last_transcript_at = time.time() - DEFAULT_VISUAL_DECAY_S - 1.0
+        pipe._on_frame(_silence_frame())  # decay (the re-fire is debounced)
+        assert pipe.status().state == "listening"
+
+    def test_no_speech_guard_can_be_disabled(self):
+        # VAD_NO_SPEECH_S=0: a silent capture waits for the cap, as before.
+        stt = _RecordingSTT(scripted_transcripts=["x"])
+        pipe = self._pipe(stt, vad_no_speech_s=0.0)
+        pipe._on_frame(_silence_frame())  # wake
+        self._feed(pipe, silent=80)  # 6.4 s of audio, past the default guard
+        assert stt.finished is False
+        assert pipe.status().state == "transcribing"
+
+    def test_silence_short_is_clamped_to_silence_s_and_zero_disables(self):
+        # The short tail can never exceed the long one; <= 0 (or a malformed
+        # value) means no short tail, and then every end reports "long".
+        pipe = self._pipe(vad_silence_s=0.4, vad_silence_short_s=0.8)
+        assert pipe._vad_silence_frames == 5
+        assert pipe._vad_silence_short_frames == 5
+        pipe = self._pipe(vad_silence_short_s=0.0)
+        assert pipe._vad_silence_short_frames == pipe._vad_silence_frames == 8
+        pipe = self._pipe(vad_silence_short_s=float("nan"))
+        assert pipe._vad_silence_short_frames == 8
+        stt = _RecordingSTT(scripted_transcripts=["x"])
+        pipe = self._pipe(stt, vad_silence_short_s=0.0)
+        self._open(pipe)
+        self._feed(pipe, loud=5, silent=7)
+        assert stt.finished is False
+        pipe._on_frame(_silence_frame())
+        assert stt.finished is True
+        assert pipe.status().last_turn_timing["vad_tail"] == "long"
+
+    def test_existing_values_keep_their_frame_counts(self):
+        def frames(seconds: float) -> int:
+            return self._pipe(vad_silence_s=seconds)._vad_silence_frames
+
+        assert [frames(s) for s in (0.2, 0.4, 0.48, 0.5, 0.6)] == [3, 5, 6, 7, 8]
+        # The rounding rule, explicit: ceil of the exact ratio. 0.8 s is 10
+        # frames (the float accumulation needed 11: 10 × 0.08 < 0.8).
+        assert frames(0.8) == 10
+        assert self._pipe(vad_min_speech_s=0.4)._vad_min_speech_frames == 5
+        assert self._pipe(vad_min_speech_s=0.24)._vad_min_speech_frames == 3
+        assert self._pipe(vad_min_speech_s=0.0)._vad_min_speech_frames == 0
+        pipe = self._pipe()
+        assert pipe._vad_min_speech_frames == 3
+        assert pipe._vad_silence_short_frames == 6
+        assert pipe._vad_no_speech_frames == 75
+        assert pipe._vad_wake_tail_frames == 2
+        assert pipe._vad_pause_frames == 3
+        assert pipe._vad_short_utterance_frames == 15
+        # Never raises: a malformed knob is 0 frames.
+        assert pipeline_module._vad_frames(float("nan"), 0.08) == 0
+        assert pipeline_module._vad_frames(float("inf"), 0.08) == 0
+        assert pipeline_module._vad_frames(-1.0, 0.08) == 0
+        self._pipe(vad_silence_s=float("nan"), vad_no_speech_s=float("inf"))
 
 
 

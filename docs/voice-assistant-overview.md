@@ -20,10 +20,12 @@ confidence, so TV and ambient speech rarely false-fire). The bare one-word
 "droplet" is off by default: ambient speech gets forced into it at full
 confidence (WARP-3128).
 
-On wake, the next utterance streams to a local Whisper container
-(wyoming-faster-whisper, small.en, int8 CPU) with an energy-based
-voice-activity detector that ends capture after 0.6 s of trailing silence
-(hard cap 5 s). The transcript passes two local gates: an actionability
+On wake, the next utterance streams to the local Qwen3-ASR sidecar
+(`qwen-stt`, CPU only) with an energy-based voice-activity detector that
+ends the capture after 0.48 s of trailing silence following a short command
+and 0.6 s after a longer one or a mid-sentence pause (hard cap 30 s); a
+capture with no speech in it ends after 6 s and is not transcribed
+(WARP-3729). The transcript passes two local gates: an actionability
 filter (drops fragments like "uh" from residual false wakes) and an intent
 gate (a regex classifier — greetings, "what time is it", "who are you",
 "can you hear me" get `tool_choice: "none"` so the LLM answers instantly
@@ -38,9 +40,9 @@ dedicated service-principal bearer token — the same ReAct agent loop and
 snappiness and RBAC-restricted to read-only tools (voice can check cameras,
 network and devices but cannot change anything in v1 through the agent loop;
 its own speaker volume is changed locally, see below). The reply text goes
-to a local Piper TTS container (voice `en_US-ryan-medium`) and plays out the
-ReSpeaker's speaker output at the persisted speaker volume. A 2 s post-speak
-cooldown suppresses wake detection so the box doesn't hear itself.
+to the local Kokoro TTS container (default voice `af_heart`) and plays out
+the ReSpeaker's speaker output at the persisted speaker volume. A 2 s
+post-speak cooldown suppresses wake detection so the box doesn't hear itself.
 
 ## Speaker volume
 
@@ -134,13 +136,17 @@ closest bundled phonetic shape, and `/voice/status` exposes
 ## Latency character
 
 - Wake: near-instant (sub-second, per-frame scoring).
-- Capture: your utterance plus a 0.6 s silence tail (`VAD_SILENCE_S`, max
-  5 s).
-- STT: about 1 s (small.en int8).
+- Capture: your utterance plus a 0.48 s silence tail after a short command
+  (`VAD_SILENCE_SHORT_S`) or 0.6 s after a longer one or a mid-sentence pause
+  (`VAD_SILENCE_S`), max 30 s; a capture with no speech ends after 6 s
+  (`VAD_NO_SPEECH_S`) without transcription.
+- STT: about 1–2 s for a short command (Qwen3-ASR 0.6B, CPU).
 - LLM: the dominant cost — each agent iteration is a full local-model round
   trip (roughly 2–4 s on the box), max 2 iterations; intent-gated small talk
   skips tools entirely and is fastest. The reply streams (WARP-626): speech
-  starts once the first sentence has arrived, not after the whole reply.
+  starts once the first sentence has arrived, not after the whole reply —
+  or once its first clause has, when that clause is at least 24 characters
+  long (WARP-3729), so a one-sentence answer with a comma starts sooner.
 - TTS and playback: each sentence is synthesized as it completes, and the
   next one is synthesized while the current one plays (synth-ahead,
   WARP-3124), so there's no synthesis gap between sentences.
@@ -159,15 +165,17 @@ separate thinking state).
 
 To see where a turn's time goes, every turn logs one `voice_turn_timing` line
 (wake to capture, capture, STT, first reply text, first audio, first answer
-audio and total, in ms, plus the cue, sentence count and error kind).
+audio and total, in ms, plus the cue, the chunk count — `sentences`, which
+counts a split-off first clause too since WARP-3729 — the first chunk's
+length in characters and the error kind).
 `/voice/status` carries the same fields for the last turn as
 `last_turn_timing`. The plan and history are in
 `services/voice-io/docs/voice-latency-plan.md`.
 
 ## Privacy story
 
-Wake detection, speech to text (Whisper), the LLM (Ollama on-box) and TTS
-(Piper) all run locally in containers. Audio never leaves the appliance and
+Wake detection, speech to text (Qwen3-ASR), the LLM (Ollama on-box) and TTS
+(Kokoro) all run locally in containers. Audio never leaves the appliance and
 is never written to disk — frames live in memory only, and only the latest
 transcript and reply strings are held for status display. Voice
 authenticates to the control plane with a dedicated service token and is
@@ -214,7 +222,7 @@ the device rather than opening a second stream on it.
 3. Read-only tools — voice cannot control devices in v1.
 4. Almost no user-facing surface: the wizard step (WARP-1036) is the first;
    there is still no settings page and no status indicator.
-5. English-only defaults (small.en STT, English wake grammar).
+5. English-only defaults (Qwen3-ASR forced to English, English wake grammar).
 6. Single wake phrase, env-configured only.
 7. Stateless turns — each wake is a fresh anonymous conversation; no
    follow-up context.
@@ -235,9 +243,10 @@ the device rather than opening a second stream on it.
 | `VOICE_INPUT_DEVICE` / `VOICE_OUTPUT_DEVICE` | pin specific hardware |
 | `VOICE_INPUT_DOWNMIX` | `first` or `mean` channel downmix |
 | `VOICE_INPUT_GAIN` | software input gain |
-| `STT_URL` / `STT_LANGUAGE` / `STT_MAX_RECORD_S` | Whisper sidecar (5.0 s cap via compose) |
+| `STT_URL` / `STT_LANGUAGE` / `STT_MAX_RECORD_S` | Qwen3-ASR sidecar (30 s cap via compose) |
+| `VAD_SILENCE_S` / `VAD_SILENCE_SHORT_S` / `VAD_NO_SPEECH_S` | end-of-speech tails (0.6 s long / 0.48 s short) and the 6 s no-speech guard (WARP-3729) |
 | `WHISPER_CPUS` / `WHISPER_CPU_THREADS` | Whisper sidecar CPU quota and decode threads, default 4 / 4 (WARP-3126, was 2 / 2). Keep them equal (WARP-1434). STT is CPU-only |
-| `TTS_URL` / `TTS_VOICE` | Piper sidecar; `en_US-ryan-medium` default, other voices download on demand |
+| `TTS_URL` / `TTS_VOICE` | Kokoro sidecar; `af_heart` default, eight bundled English voices; legacy Piper is an optional override |
 | `LLM_MODEL` | model the reply call requests |
 | `DROPLET_LOCATION` / `TZ` | pin geo/timezone; removes the ipapi.co startup lookup |
 | `DEVICE_RESCAN_INTERVAL` | hot-plug rescan cadence |

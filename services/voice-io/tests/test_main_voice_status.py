@@ -87,4 +87,6 @@ def test_voice_status_carries_last_turn_timing(client, monkeypatch):
     assert timing == pipe.status().last_turn_timing
     assert timing["outcome"] == "no_llm"
     assert "first_audio_ms" in timing and timing["first_audio_ms"] is None
+    # WARP-3729: the first-chunk length rides along (null: nothing spoken).
+    assert "first_chunk_chars" in timing and timing["first_chunk_chars"] is None
     assert isinstance(timing["ended_at"], float)
