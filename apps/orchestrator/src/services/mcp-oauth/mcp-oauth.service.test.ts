@@ -34,7 +34,10 @@ const DISC = {
 };
 const TOKENS = { accessToken: "ACCESS-SECRET", refreshToken: "REFRESH-SECRET", expiresIn: 3600, scope: "read:me" };
 
-function setup(over: { discover?: any; disc?: Partial<typeof DISC> } = {}) {
+type Egress = Awaited<ReturnType<McpOAuthDependencies["egress"]>>;
+const ALLOWED: Egress = { allowed: true, row: null };
+
+function setup(over: { discover?: any; disc?: Partial<typeof DISC>; egress?: Egress } = {}) {
   const db = fakeMcpOAuthDb();
   const oauth = {
     discover: vi.fn((over.discover ?? (async (_url: string) => ({ ...DISC, ...over.disc }))) as (url: string) => Promise<any>),
@@ -42,14 +45,16 @@ function setup(over: { discover?: any; disc?: Partial<typeof DISC> } = {}) {
     exchange: vi.fn(async (_input: unknown): Promise<{ accessToken: string; refreshToken?: string; expiresIn?: number; scope?: string }> => ({ ...TOKENS })),
   };
   let now = new Date("2026-10-09T12:00:00Z");
-  const deps: McpOAuthDependencies = mcpOAuthDependencies({ oauth, now: () => now });
+  // The egress verdict is switchable mid-test: `gate.current = { allowed: false, ... }`.
+  const gate = { current: over.egress ?? ALLOWED };
+  const deps: McpOAuthDependencies = mcpOAuthDependencies({ oauth, now: () => now, egress: async () => gate.current });
   const begin = (o: Partial<BeginInput> = {}) => beginMcpSignIn(db.prisma, {
     provider: PROVIDER, scope: "MEMBER", userId: "u1", username: "alice", role: "family", originCallback: ORIGIN_CB, ...o,
   }, deps);
   const complete = (state: string | null, o: Record<string, unknown> = {}) => completeMcpSignIn(db.prisma, {
     state, code: "the-code", error: null, iss: null, browserState: state, caller: null, ...o,
   } as any, deps);
-  return { db, oauth, deps, begin, complete, advance: (ms: number) => { now = new Date(now.getTime() + ms); } };
+  return { db, oauth, deps, gate, begin, complete, advance: (ms: number) => { now = new Date(now.getTime() + ms); } };
 }
 const qs = (url: string) => new URL(url).searchParams;
 
@@ -107,7 +112,7 @@ describe("beginMcpSignIn", () => {
   });
 
   it("refuses a server without PKCE S256 and writes nothing", async () => {
-    const s = setup({ discover: async () => { throw new McpBridgeError("PKCE_UNSUPPORTED", "no S256", 400); } });
+    const s = setup({ discover: async () => { throw new McpBridgeError("OAUTH_PKCE_UNSUPPORTED", "no S256", 422); } });
     await expect(s.begin()).rejects.toMatchObject({ code: "pkce_unsupported", status: 400 });
     expect(s.db.rows).toHaveLength(0);
     expect(s.oauth.register).not.toHaveBeenCalled();
@@ -266,6 +271,54 @@ describe("completeMcpSignIn", () => {
     for (const secret of [a.state, b.state, c.state, "LEAKY-CODE-1", "LEAKY-CODE-2", "LEAKY-CODE-3", "ACCESS-SECRET", "REFRESH-SECRET", "LEAKY-ERR"]) {
       expect(flat).not.toContain(secret);
     }
+  });
+});
+
+describe("the same egress rules as every remote MCP call, before every hop", () => {
+  const REFUSALS: [string, Egress, string][] = [
+    ["the remote_mcp channel is off", { allowed: false, reason: "channel_disabled", message: "" }, "remote_mcp_off"],
+    ["the server is not allowlisted", { allowed: false, reason: "server_not_allowlisted", message: "" }, "server_not_allowed"],
+    ["an admin turned the connection off", { allowed: false, reason: "connection_disabled", message: "off" }, "connection_disabled"],
+  ];
+  const bridgeCalls = (s: ReturnType<typeof setup>) =>
+    s.oauth.discover.mock.calls.length + s.oauth.register.mock.calls.length + s.oauth.exchange.mock.calls.length;
+
+  it.each(REFUSALS)("start makes ZERO bridge calls when %s, and answers a fixed 409 code", async (_n, egress, code) => {
+    const s = setup({ egress });
+    await expect(s.begin()).rejects.toMatchObject({ code, status: 409 });
+    expect(bridgeCalls(s)).toBe(0);
+    expect(s.db.rows).toHaveLength(0);
+  });
+
+  it.each(REFUSALS)("the pre-registered client setup makes ZERO bridge calls when %s", async (_n, egress, code) => {
+    const s = setup({ egress });
+    await expect(storeMcpOAuthClient(s.db.prisma, { provider: PROVIDER, clientId: "c", userId: "a1" }, s.deps)).rejects.toMatchObject({ code });
+    expect(bridgeCalls(s)).toBe(0);
+  });
+
+  it.each(REFUSALS)("callback and paste make ZERO exchange calls when %s, burn the state and answer blocked", async (_n, egress) => {
+    const s = setup();
+    const a = await s.begin();
+    s.gate.current = egress; // switched off between start and callback
+    expect(await s.complete(a.state)).toMatchObject({ outcome: "blocked", provider: PROVIDER });
+    expect(s.oauth.exchange).not.toHaveBeenCalled();
+    expect(s.db.rows[0].state).toBe("DISCONNECTED"); // prior state restored, tokens untouched
+    s.gate.current = ALLOWED;
+    expect((await s.complete(a.state)).outcome).toBe("failed"); // burned: cannot be retried
+
+    s.gate.current = ALLOWED;
+    const b = await s.begin();
+    s.gate.current = egress;
+    expect((await s.complete(b.state, { browserState: null, caller: { id: "u1", role: "family" } })).outcome).toBe("blocked");
+    expect(s.oauth.exchange).not.toHaveBeenCalled();
+  });
+
+  it("a read failure of the rules refuses too", async () => {
+    const s = setup();
+    const a = await s.begin();
+    s.deps.egress = async () => { throw new Error("db down"); };
+    expect((await s.complete(a.state)).outcome).toBe("blocked");
+    expect(s.oauth.exchange).not.toHaveBeenCalled();
   });
 });
 

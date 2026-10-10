@@ -7,22 +7,39 @@ const sent = (f: ReturnType<typeof vi.fn>) => JSON.parse((f.mock.calls[0][1] as 
 
 describe("McpBridgeOAuthClient (WARP-2401 contract)", () => {
   it("sends discover as exactly { mcpUrl }: no host list from the box", async () => {
-    const f = vi.fn(async () => json(200, { resource: "r", issuer: "i", authorizationEndpoint: "a", tokenEndpoint: "t" }));
+    const f = vi.fn(async () => json(200, {
+      resource: "r", issuer: "i", authorizationEndpoint: "a", tokenEndpoint: "t", registrationEndpoint: "d",
+      tokenEndpointAuthMethods: ["none"], scopesSupported: ["x"], authorizationResponseIssParameterSupported: true,
+      clientIdMetadataDocumentSupported: true,
+    }));
     const d = await make(f as unknown as typeof fetch).discover("https://mcp.example/x");
     expect(sent(f)).toEqual({ mcpUrl: "https://mcp.example/x" });
     expect((f.mock.calls[0] as unknown[])[0]).toBe("http://bridge.invalid/oauth/discover");
-    expect(d.issParameterSupported).toBe(false);
+    expect(d).toEqual({ resource: "r", issuer: "i", authorizationEndpoint: "a", tokenEndpoint: "t", registrationEndpoint: "d", issParameterSupported: true });
   });
 
-  it("maps a 422 HOST_NOT_ALLOWED to a typed refusal and does not retry", async () => {
-    const f = vi.fn(async () => json(422, { reason: "HOST_NOT_ALLOWED" }));
-    await expect(make(f as unknown as typeof fetch).discover("https://mcp.example/x")).rejects.toMatchObject({ code: "HOST_NOT_ALLOWED", httpStatus: 422 });
+  it("reads an absent RFC 9207 flag as false, explicitly", async () => {
+    const f = vi.fn(async () => json(200, { resource: "r", issuer: "i", authorizationEndpoint: "a", tokenEndpoint: "t" }));
+    expect((await make(f as unknown as typeof fetch).discover("u")).issParameterSupported).toBe(false);
+  });
+
+  it("surfaces a 422 OAUTH_REFUSED with its reason, and does not retry", async () => {
+    const f = vi.fn(async () => json(422, { error: { code: "OAUTH_REFUSED", message: "m" }, reason: "HOST_NOT_ALLOWED" }));
+    await expect(make(f as unknown as typeof fetch).discover("https://mcp.example/x")).rejects.toMatchObject({
+      code: "OAUTH_REFUSED", reason: "HOST_NOT_ALLOWED", httpStatus: 422,
+    });
     expect(f).toHaveBeenCalledTimes(1);
   });
 
   it("passes the PKCE refusal code through", async () => {
-    const f = vi.fn(async () => json(400, { error: { code: "PKCE_UNSUPPORTED", message: "x" } }));
-    await expect(make(f as unknown as typeof fetch).discover("u")).rejects.toMatchObject({ code: "PKCE_UNSUPPORTED" });
+    const f = vi.fn(async () => json(422, { error: { code: "OAUTH_PKCE_UNSUPPORTED", message: "x" } }));
+    await expect(make(f as unknown as typeof fetch).discover("u")).rejects.toMatchObject({ code: "OAUTH_PKCE_UNSUPPORTED" });
+  });
+
+  it("carries the authorization server's oauth error on a 502 OAUTH_TOKEN_ERROR", async () => {
+    const f = vi.fn(async () => json(502, { error: { code: "OAUTH_TOKEN_ERROR", message: "m" }, oauthError: "invalid_grant", httpStatus: 400 }));
+    await expect(make(f as unknown as typeof fetch).refresh({ tokenEndpoint: "te", clientId: "c", refreshToken: "r", resource: "x" }))
+      .rejects.toMatchObject({ code: "OAUTH_TOKEN_ERROR", reason: "invalid_grant", httpStatus: 502 });
   });
 
   it("carries resource and the verifier on exchange, resource on refresh, and keeps only four token fields", async () => {

@@ -99,6 +99,10 @@ export class McpBridgeError extends Error {
     message: string,
     readonly httpStatus: number,
     readonly state?: RemoteMcpSessionHealth,
+    /** `/oauth/*` only: why the bridge refused (e.g. `HOST_NOT_ALLOWED`), or the
+     *  authorization server's own `error` (e.g. `invalid_grant`). Both come off
+     *  the wire as short codes, never as server text. */
+    readonly reason?: string,
   ) {
     super(message);
     this.code = code;
@@ -417,15 +421,17 @@ async function bridgeRequest<T>(t: BridgeTransport, method: string, path: string
     | null;
 
   if (!res.ok) {
-    // A host outside the bridge's curated set: a typed refusal, never retried.
-    if (res.status === 422 && (parsed?.reason === OAUTH_HOST_NOT_ALLOWED || parsed?.error?.code === OAUTH_HOST_NOT_ALLOWED)) {
-      throw new McpBridgeError(OAUTH_HOST_NOT_ALLOWED, "The bridge refused a host outside its curated set.", 422);
-    }
+    // `/oauth/*`: 422 `OAUTH_PKCE_UNSUPPORTED` / `OAUTH_REFUSED` carry a top-level
+    // `reason` (e.g. HOST_NOT_ALLOWED); 502 `OAUTH_TOKEN_ERROR` carries the
+    // authorization server's `oauthError` (e.g. invalid_grant). A short code only.
+    const raw = parsed?.reason ?? parsed?.oauthError;
+    const reason = typeof raw === "string" && /^[A-Za-z0-9_.-]{1,64}$/.test(raw) ? raw : undefined;
     throw new McpBridgeError(
       parsed?.error?.code ?? "REMOTE_CALL_FAILED",
       parsed?.error?.message ?? `mcp-bridge answered ${res.status}.`,
       res.status,
       parsed?.state,
+      reason,
     );
   }
   if (parsed === null) {
@@ -441,10 +447,18 @@ async function bridgeRequest<T>(t: BridgeTransport, method: string, path: string
 // `guardedFetch`. The orchestrator never dials an authorization server. These
 // bodies are the plan's contract with `services/mcp-bridge/src/oauth/`.
 
-/** The bridge's refusal when the authorization server does not advertise PKCE S256. */
-export const OAUTH_PKCE_UNSUPPORTED = "PKCE_UNSUPPORTED";
+/** 422 `error.code`: the authorization server does not advertise PKCE S256. */
+export const OAUTH_PKCE_UNSUPPORTED = "OAUTH_PKCE_UNSUPPORTED";
 
-/** 422 from `/oauth/*`: an endpoint host the bridge's curated registry does not allow. */
+/** 422 `error.code`: any other refusal; `reason` says which (HOST_NOT_ALLOWED,
+ *  RESOURCE_MISMATCH, ISSUER_MISMATCH, UNSAFE_URL, DISCOVERY_FAILED). */
+export const OAUTH_REFUSED = "OAUTH_REFUSED";
+
+/** 502 `error.code`: the authorization server answered a token request with an
+ *  OAuth error; `reason` carries its `error` (e.g. `invalid_grant`). */
+export const OAUTH_TOKEN_ERROR = "OAUTH_TOKEN_ERROR";
+
+/** `reason` on a 422 `OAUTH_REFUSED`: an endpoint host the bridge's curated registry does not allow. */
 export const OAUTH_HOST_NOT_ALLOWED = "HOST_NOT_ALLOWED";
 
 /** What `POST /oauth/discover` answers: the vetted metadata of the server's authorization server. */
@@ -536,7 +550,9 @@ export class McpBridgeOAuthClient {
   /** The bridge decides which hosts are allowed from its own curated registry;
    *  the box never sends a host list. */
   async discover(mcpUrl: string): Promise<McpOAuthDiscovery> {
-    const d = await bridgeRequest<Partial<McpOAuthDiscovery>>(this.#t, "POST", "/oauth/discover", { mcpUrl });
+    const d = await bridgeRequest<Partial<McpOAuthDiscovery> & { authorizationResponseIssParameterSupported?: unknown }>(
+      this.#t, "POST", "/oauth/discover", { mcpUrl },
+    );
     if (!isStr(d.resource) || !isStr(d.issuer) || !isStr(d.authorizationEndpoint) || !isStr(d.tokenEndpoint)) {
       throw new McpBridgeError("REMOTE_CALL_FAILED", "mcp-bridge answered discovery with incomplete metadata.", 502);
     }
@@ -548,7 +564,7 @@ export class McpBridgeOAuthClient {
       ...(isStr(d.registrationEndpoint) ? { registrationEndpoint: d.registrationEndpoint } : {}),
       ...(isStr(d.revocationEndpoint) ? { revocationEndpoint: d.revocationEndpoint } : {}),
       // Explicit true or false, never absence read as false by a caller.
-      issParameterSupported: d.issParameterSupported === true,
+      issParameterSupported: d.authorizationResponseIssParameterSupported === true,
     };
   }
 

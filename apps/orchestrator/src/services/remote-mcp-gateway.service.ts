@@ -83,6 +83,7 @@ export type RemoteMcpGateReason =
   | "server_not_allowlisted"
   | "no_connection_row"
   | "channel_disabled"
+  | "connection_disabled"
   | "connection_not_connected"
   | "no_credential"
   | "gate_unavailable";
@@ -106,20 +107,28 @@ export interface RemoteMcpGatePrisma {
   };
 }
 
+export type RemoteMcpEgressDecision =
+  | { allowed: true; row: { id: string; status: string; providerTokensEnc: string | null } | null }
+  | { allowed: false; reason: RemoteMcpGateReason; message: string };
+
 /**
- * Read the gate for one server.
- *
- * Both halves are explicit reads. `status === "CONNECTED"` is the enum column,
- * not "a row exists"; `providerTokensEnc !== null` is the credential column,
- * not "the status looks fine". The repo rule is that persistent state is a
- * declared value, and a connection whose credential was purged while the status
- * column still said CONNECTED is precisely the row this catches.
+ * WARP-2405 - the gate's pre-credential rules, shared by EVERY hop that makes the
+ * box talk to a remote MCP vendor: a tool call, and each step of a web sign-in
+ * (discovery, client registration, code exchange, refresh, revoke). Nothing dials
+ * a remote MCP host while any of these refuses:
+ *   1. the operator allowlist names the server,
+ *   2. the `remote_mcp` channel is explicitly `enabled`,
+ *   3. an owner or admin has not turned the connection off (DISABLED), whatever
+ *      sign-ins exist - any other status describes the shared token, not an
+ *      admin's decision, and does not block a member's own sign-in.
+ * Any read failure refuses. Whether a CREDENTIAL exists is {@link remoteMcpGate}'s
+ * extra rule, not this one.
  */
-export async function remoteMcpGate(
-  prisma: RemoteMcpGatePrisma,
+export async function remoteMcpEgressAllowed(
+  prisma: Pick<RemoteMcpGatePrisma, "offLanAllowlistChannel" | "integrationConnection">,
   serverId: string,
   allowlist: ReadonlySet<string>,
-): Promise<RemoteMcpGateDecision> {
+): Promise<RemoteMcpEgressDecision> {
   if (!allowlist.has(serverId)) {
     return {
       allowed: false,
@@ -165,6 +174,34 @@ export async function remoteMcpGate(
       message: "The remote MCP gate could not be read. Refusing egress.",
     };
   }
+  if (row?.status === "DISABLED") {
+    return {
+      allowed: false,
+      reason: "connection_disabled",
+      message: "An owner or admin turned this connection off. Nothing was sent.",
+    };
+  }
+  return { allowed: true, row };
+}
+
+/**
+ * Read the gate for one server: {@link remoteMcpEgressAllowed}, then the
+ * credential rule.
+ *
+ * Both halves are explicit reads. `status === "CONNECTED"` is the enum column,
+ * not "a row exists"; `providerTokensEnc !== null` is the credential column,
+ * not "the status looks fine". The repo rule is that persistent state is a
+ * declared value, and a connection whose credential was purged while the status
+ * column still said CONNECTED is precisely the row this catches.
+ */
+export async function remoteMcpGate(
+  prisma: RemoteMcpGatePrisma,
+  serverId: string,
+  allowlist: ReadonlySet<string>,
+): Promise<RemoteMcpGateDecision> {
+  const egress = await remoteMcpEgressAllowed(prisma, serverId, allowlist);
+  if (!egress.allowed) return egress;
+  const row = egress.row;
   if (!row) {
     return {
       allowed: false,
