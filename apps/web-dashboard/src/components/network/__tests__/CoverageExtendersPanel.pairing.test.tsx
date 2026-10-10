@@ -1,7 +1,8 @@
 /**
  * CoverageExtendersPanel x DevicePairingCard (ADR-071 slice C): a discovered
  * Droplet-image AP whose own pairing window is open offers Pair next to Approve.
- * Vendor-managed APs and APs past approval never ask.
+ * An approved (ONLINE) AP asks again only while its own window is open, after a
+ * reflash or a reset-button press. Vendor-managed and removed APs never ask.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
@@ -118,8 +119,30 @@ describe("CoverageExtendersPanel pairing", () => {
     expect(fetchApPairing).not.toHaveBeenCalled();
   });
 
-  it("never reads the pairing state of an AP that is already ONLINE", async () => {
+  it("offers Pair for an ONLINE AP whose window is open again (reflashed or reset button)", async () => {
     (fetchApDevices as ReturnType<typeof vi.fn>).mockResolvedValue({ aps: [ap({ status: "ONLINE" })] });
+    (fetchApPairing as ReturnType<typeof vi.fn>).mockResolvedValue(openWindow);
+    renderPanel();
+    expect(
+      await screen.findByText(/Access point Zyxel NWA50BE at 192\.168\.9\.42 is ready to pair\./),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Pair" })).toBeInTheDocument();
+    expect(fetchApPairing).toHaveBeenCalledWith("B8:27:EB:00:00:01");
+  });
+
+  it("offers nothing for an ONLINE AP whose window is closed", async () => {
+    (fetchApDevices as ReturnType<typeof vi.fn>).mockResolvedValue({ aps: [ap({ status: "ONLINE" })] });
+    (fetchApPairing as ReturnType<typeof vi.fn>).mockResolvedValue({ ...openWindow, state: "closed" });
+    renderPanel();
+    expect(await screen.findByText("Upstairs")).toBeInTheDocument();
+    await waitFor(() => expect(fetchApPairing).toHaveBeenCalled());
+    expect(screen.queryByText(/ready to pair/)).toBeNull();
+  });
+
+  it("never reads the pairing state of a removed AP", async () => {
+    (fetchApDevices as ReturnType<typeof vi.fn>).mockResolvedValue({
+      aps: [ap({ status: "DECOMMISSIONED" })],
+    });
     renderPanel();
     expect(await screen.findByText("Upstairs")).toBeInTheDocument();
     expect(fetchApPairing).not.toHaveBeenCalled();

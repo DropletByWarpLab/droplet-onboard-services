@@ -110,7 +110,7 @@
  * organisational (mint it from a dedicated user in a restricted permission
  * set), and that mitigation is PLAN-GATED — custom permission sets are a
  * higher-tier feature, so a customer on an entry plan cannot scope the token at
- * all. `docs/integrations/pipedrive.md` says this plainly rather than as a
+ * all. `docs/connectors/pipedrive.md` says this plainly rather than as a
  * formality.
  *
  * Two consequences in code:

@@ -6,14 +6,14 @@ import { Dialog } from "@/components/Dialog";
 import { authFetch, useAuth } from "@/lib/auth";
 
 // WARP-3904 - the Patterson API track. A connect card for it hands off to
-// `/integrations?connect=<this provider>`, and the hub mounts this form (never
+// `/connectors?connect=<this provider>`, and the hub mounts this form (never
 // chat does). The hub's generic Connect cannot serve it: this provider key
 // resolves to the direct-SQL tile, whose wizard provisions a database account.
 // This transport uses the shipped legacy endpoint; its provider key cannot use
 // the SQL provisioning wizard or the parameterised LAN connect route.
 const PROVIDER = "eaglesoft-api";
 const descriptor = providerDescriptor(PROVIDER)!;
-const paths = { test: "/api/integrations/eaglesoft/test", connect: "/api/integrations/eaglesoft/connect" } as const;
+const paths = { test: "/api/connectors/eaglesoft/test", connect: "/api/connectors/eaglesoft/connect" } as const;
 
 /** True for the one provider key whose setup is this form rather than the hub's wizard. */
 export function isLanApiProvider(providerKey: string): boolean {

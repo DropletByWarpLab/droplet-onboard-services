@@ -35,13 +35,13 @@ describe("cross-guide links", () => {
   /**
    * Mutation: render `<a href={href}>` unchanged → red. The browser would
    * resolve `credential-handling.md` to
-   * `/help/integrations/credential-handling.md` — a 404 on the one link the
+   * `/help/connectors/credential-handling.md` — a 404 on the one link the
    * corpus uses 14 times.
    */
   it("rewrites a sibling link to its route", () => {
     renderGuide("See [handling](credential-handling.md) for the rules.");
     const link = screen.getByRole("link", { name: "handling" });
-    expect(link.getAttribute("href")).toBe("/help/integrations/credential-handling");
+    expect(link.getAttribute("href")).toBe("/help/connectors/credential-handling");
   });
 
   /**
@@ -103,7 +103,7 @@ describe("a real shipped guide", () => {
     // Every link the guide draws points somewhere this dashboard serves.
     for (const a of screen.getAllByRole("link")) {
       expect(a.getAttribute("href"), a.textContent ?? "").toMatch(
-        /^(\/help\/integrations\/|#)/,
+        /^(\/help\/connectors\/|#)/,
       );
     }
   });

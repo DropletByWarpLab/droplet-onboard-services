@@ -12,9 +12,9 @@
  * ## Credentials (catalog providers) — the hub's two calls, not one
  *
  * `ConnectWizard` does not post credentials to `/connect`. It saves them with
- * `PATCH /api/integrations/:provider/credentials` (`{ fields }`, plus the
+ * `PATCH /api/connectors/:provider/credentials` (`{ fields }`, plus the
  * reserved `credentialVariant` when a variant was picked) and then asks the box
- * to CHECK them with `POST /api/integrations/:provider/connect` and an EMPTY
+ * to CHECK them with `POST /api/connectors/:provider/connect` and an EMPTY
  * body. The orchestrator's cloud connect schema is strict: a credential in the
  * connect body is a 400. So the card does the same two calls, and the PATCH
  * target is derived from the descriptor's allowlisted `post.path` (same
@@ -137,12 +137,12 @@ function networkFailure(): ConnectFailure {
 
 // ── Credentials ──────────────────────────────────────────────────────────
 
-const CONNECT_PATH_RE = /^\/api\/integrations\/([a-z0-9][a-z0-9-]{0,63})\/connect$/;
+const CONNECT_PATH_RE = /^\/api\/connectors\/([a-z0-9][a-z0-9-]{0,63})\/connect$/;
 
 /** The save target for a card's allowlisted connect path: same provider, `/credentials`. */
 export function credentialsPathFor(connectPath: string): string | null {
   const m = CONNECT_PATH_RE.exec(connectPath);
-  return m ? `/api/integrations/${m[1]}/credentials` : null;
+  return m ? `/api/connectors/${m[1]}/credentials` : null;
 }
 
 /** One plain sentence per verdict the box can return, in the hub's words. */

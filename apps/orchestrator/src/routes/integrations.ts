@@ -1,25 +1,25 @@
 /**
  * WARP-1137 — the integrations control-plane API (brief §13).
  *
- *   GET  /api/integrations                       Hub list (no PHI, no secret).
- *   GET  /api/integrations/eaglesoft             Connection detail + status.
- *   POST /api/integrations/eaglesoft/connect     Run/verify provisioning.
- *   POST /api/integrations/eaglesoft/test        Reachability test (no save).
+ *   GET  /api/connectors                       Hub list (no PHI, no secret).
+ *   GET  /api/connectors/eaglesoft             Connection detail + status.
+ *   POST /api/connectors/eaglesoft/connect     Run/verify provisioning.
+ *   POST /api/connectors/eaglesoft/test        Reachability test (no save).
  *
  * WARP-2500 — the lifecycle verbs are provider-scoped:
  *
- *   POST /api/integrations/:provider/disconnect     Purge credentials+cursors.
+ *   POST /api/connectors/:provider/disconnect     Purge credentials+cursors.
  *                                                   WARP-3375: body `{ records:
  *                                                   "keep" | "delete" }` (default
  *                                                   keep) says what becomes of the
  *                                                   records the connector landed.
- *   POST /api/integrations/:provider/write-enable   Per-practice write opt-in.
- *   POST /api/integrations/:provider/write-disable  Kill-switch (default off).
+ *   POST /api/connectors/:provider/write-enable   Per-practice write opt-in.
+ *   POST /api/connectors/:provider/write-disable  Kill-switch (default off).
  *
  * WARP-2520 — and so are the LAN provisioning verbs:
  *
- *   POST /api/integrations/:provider/connect        Run/verify provisioning.
- *   POST /api/integrations/:provider/test           Reachability test (no save).
+ *   POST /api/connectors/:provider/connect        Run/verify provisioning.
+ *   POST /api/connectors/:provider/test           Reachability test (no save).
  *
  * WARP-2842 — the SAME connect URL admits a cloud / REST track, with an empty
  * body: it probes the credential `PATCH /:provider/credentials` already sealed
@@ -28,14 +28,14 @@
  * "check again". Until this, nothing could move a pasted key out of
  * PROVISIONING: the only connect admission was `lanProvisioning`.
  *
- * The five `/api/integrations/eaglesoft/{connect,test,disconnect,write-enable,
+ * The five `/api/connectors/eaglesoft/{connect,test,disconnect,write-enable,
  * write-disable}` spellings remain as DEPRECATED aliases for one release, so a
  * dashboard bundle cached from before this deploy keeps working. See the
  * comment above their registration for the removal condition. They were the
  * only spellings until now, which is the bug: `connect()` admits every
  * provider `isKnownErpProvider` allows, so WARP-2466 could create a Stripe /
  * HubSpot / Mailchimp / QuickBooks row that no URL could ever purge — and the
- * descriptor-driven wizard already posts `/integrations/${provider}/connect`
+ * descriptor-driven wizard already posts `/connectors/${provider}/connect`
  * for whichever provider its tile is for, so a second LAN vendor's four-step
  * flow ended at a 404 the moment WARP-2451 made the wizard generic.
  *
@@ -196,7 +196,7 @@ export function createIntegrationsRouter(
   // Native clients cannot import the TypeScript registry. This is a projection
   // of static setup metadata only: never connection rows, credential values,
   // generated passwords, tokens, or persisted providerConfig.
-  router.get("/integrations/catalog", requireRole("owner", "admin"), (_req, res) => {
+  router.get("/connectors/catalog", requireRole("owner", "admin"), (_req, res) => {
     res.json({ providers: providerDescriptors().map((descriptor) => {
       const lan = descriptor.lanProvisioning;
       const probed = isProbedOnConnect(descriptor);
@@ -204,7 +204,7 @@ export function createIntegrationsRouter(
       // this track. Keep this server routing fact out of native vendor logic.
       const lanApi = descriptor.id === "eaglesoft-api";
       const connectInput = lan ? "lan" : lanApi ? "lan_api" : probed ? "credentials" : null;
-      const path = lanApi ? "/api/integrations/eaglesoft" : `/api/integrations/${descriptor.id}`;
+      const path = lanApi ? "/api/connectors/eaglesoft" : `/api/connectors/${descriptor.id}`;
       return {
         provider: descriptor.id,
         displayName: descriptor.displayName,
@@ -228,12 +228,12 @@ export function createIntegrationsRouter(
   });
 
   router.get(
-    "/integrations",
+    "/connectors",
     // WARP-3374 (Romain, 2026-09-30). Which business systems are connected, when
     // they last synced, whether a credential is expiring or being refused, and
     // which provider is which, is the company's own topology: owner and admin
     // only. An external guest gets nothing of it, and a member gets the
-    // provider-free `/integrations/summary` below. `service` keeps the read it
+    // provider-free `/connectors/summary` below. `service` keeps the read it
     // already had.
     requireRole("owner", "admin", "service"),
     async (_req, res, next) => {
@@ -255,7 +255,7 @@ export function createIntegrationsRouter(
    * list above; an external guest reads neither.
    */
   router.get(
-    "/integrations/summary",
+    "/connectors/summary",
     requireRole("owner", "admin", "family"),
     async (_req, res, next) => {
       try {
@@ -267,12 +267,12 @@ export function createIntegrationsRouter(
   );
 
   router.get(
-    "/integrations/eaglesoft",
+    "/connectors/eaglesoft",
     // WARP-3374 (Romain, 2026-09-30: integrations detail is owner/admin only).
     // The connection detail carries the host, database, account, schema hash and
     // credential expiry: the same topology the list withholds from a member.
     // The Practice page (owner/admin) is its only reader; the member-facing
-    // signal is the provider-free `/integrations/summary`.
+    // signal is the provider-free `/connectors/summary`.
     requireRole("owner", "admin"),
     async (_req, res, next) => {
       try {
@@ -294,7 +294,7 @@ export function createIntegrationsRouter(
    * "stripe", host: "x" }` used to reach `connect()` with a ConnectInput and
    * no row material, the probe rejected CONNECTOR_BLOCKED, and a Stripe row
    * holding a perfectly good key was driven PROVISIONING → NOT_CONFIGURED.
-   * Cloud and REST tracks have `/integrations/:provider/connect` below.
+   * Cloud and REST tracks have `/connectors/:provider/connect` below.
    *
    * Only a provider WITH a descriptor is judged: the export-drop keys
    * (`<vendor>-export`) declare none and are still connected through this
@@ -309,8 +309,8 @@ export function createIntegrationsRouter(
     // connect; an MCP track's paste IS its connection and has no connect at all.
     const door =
       descriptor.track === "mcp"
-        ? `PATCH /api/integrations/${provider}/credentials`
-        : `POST /api/integrations/${provider}/connect with an empty body`;
+        ? `PATCH /api/connectors/${provider}/credentials`
+        : `POST /api/connectors/${provider}/connect with an empty body`;
     return (
       `provider "${provider}" is a ${descriptor.track} track — it is connected by ` +
       `${door}, not through this alias`
@@ -466,7 +466,7 @@ export function createIntegrationsRouter(
   /**
    * ## The `eaglesoft` literal connect/test routes — DEPRECATED, one release
    *
-   * Registered FIRST so `/integrations/eaglesoft/{connect,test}` keeps matching
+   * Registered FIRST so `/connectors/eaglesoft/{connect,test}` keeps matching
    * the literal, exactly as the lifecycle aliases below do. They are NOT a
    * behavioural no-op the way those are: the literal handler takes its provider
    * from the BODY (defaulting to `EAGLESOFT_PROVIDER`), which is how the REST
@@ -479,7 +479,7 @@ export function createIntegrationsRouter(
    * lifecycle aliases' schedule would drop a live capability.
    */
   router.post(
-    "/integrations/eaglesoft/connect",
+    "/connectors/eaglesoft/connect",
     requireRole("owner", "admin"),
     // WARP-2283: the actor is threaded through so `connect()`'s consent record
     // names who connected, not just that something did.
@@ -488,7 +488,7 @@ export function createIntegrationsRouter(
     ),
   );
   router.post(
-    "/integrations/eaglesoft/test",
+    "/connectors/eaglesoft/test",
     requireRole("owner", "admin"),
     provisionBody((input) => svc.test(input)),
   );
@@ -538,7 +538,7 @@ export function createIntegrationsRouter(
    * ## The `eaglesoft` literal aliases — DEPRECATED, one release
    *
    * These three routes predate the parameterised ones and are registered
-   * FIRST, so `/integrations/eaglesoft/disconnect` keeps matching the literal.
+   * FIRST, so `/connectors/eaglesoft/disconnect` keeps matching the literal.
    * That is a no-op in behaviour — the literal handler passes the same
    * `EAGLESOFT_PROVIDER` string the parameterised one would extract — and the
    * point of keeping them is purely that a dashboard bundle cached from before
@@ -556,17 +556,17 @@ export function createIntegrationsRouter(
   const EAGLESOFT_ALIAS = () => "eaglesoft";
 
   router.post(
-    "/integrations/eaglesoft/write-enable",
+    "/connectors/eaglesoft/write-enable",
     requireRole("owner", "admin"),
     toggleWrites(EAGLESOFT_ALIAS, true),
   );
   router.post(
-    "/integrations/eaglesoft/write-disable",
+    "/connectors/eaglesoft/write-disable",
     requireRole("owner", "admin"),
     toggleWrites(EAGLESOFT_ALIAS, false),
   );
   router.post(
-    "/integrations/eaglesoft/disconnect",
+    "/connectors/eaglesoft/disconnect",
     requireRole("owner", "admin"),
     disconnectHandler(EAGLESOFT_ALIAS),
   );
@@ -576,7 +576,7 @@ export function createIntegrationsRouter(
    *
    * ### Why `:provider` cannot shadow `credentials` or `drift`
    *
-   * Three routers share the `/api/integrations` prefix (`app.ts`), so a
+   * Three routers share the `/api/connectors` prefix (`app.ts`), so a
    * pattern here that could match one of THEIR URLs would silently take it
    * over — the failure `integrations-prefix.mount.test.ts` (WARP-2485, PR
    * #1834) exists to catch. These three are safe by construction because the
@@ -592,7 +592,7 @@ export function createIntegrationsRouter(
    *                 PATCH /integrations/:provider/credentials
    *   drift         GET   /integrations/:connectionId/drift
    *
-   * `/integrations/credentials` has a different ARITY, so no concrete URL
+   * `/connectors/credentials` has a different ARITY, so no concrete URL
    * reaches both. The three-segment neighbours agree on the parameter but
    * differ on the final literal (`credentials` / `drift` vs the five verbs),
    * and no URL can end in two different literals at once. They also differ on
@@ -607,17 +607,17 @@ export function createIntegrationsRouter(
    * detail route stays a literal for exactly that reason.
    */
   router.post(
-    "/integrations/:provider/disconnect",
+    "/connectors/:provider/disconnect",
     requireRole("owner", "admin"),
     disconnectHandler(providerFromParams),
   );
   router.post(
-    "/integrations/:provider/write-enable",
+    "/connectors/:provider/write-enable",
     requireRole("owner", "admin"),
     toggleWrites(providerFromParams, true),
   );
   router.post(
-    "/integrations/:provider/write-disable",
+    "/connectors/:provider/write-disable",
     requireRole("owner", "admin"),
     toggleWrites(providerFromParams, false),
   );
@@ -634,7 +634,7 @@ export function createIntegrationsRouter(
   const lanConnect = lanProvisionBody(connectHandler);
   const cloudConnect = cloudProbeBody(connectHandler);
   router.post(
-    "/integrations/:provider/connect",
+    "/connectors/:provider/connect",
     requireRole("owner", "admin"),
     (req: Request, res: Response, next: (e?: unknown) => void) =>
       isCloudProvider(String(req.params.provider))
@@ -642,7 +642,7 @@ export function createIntegrationsRouter(
         : lanConnect(req, res, next),
   );
   router.post(
-    "/integrations/:provider/test",
+    "/connectors/:provider/test",
     requireRole("owner", "admin"),
     lanProvisionBody((input) => svc.test(input)),
   );

@@ -81,7 +81,7 @@ const CATALOG_WARP_2214 = [
     description:
       "Payments, refunds and payouts read straight from Stripe — never money movement.",
     availability: "available",
-    setupGuideHref: "/help/integrations/stripe",
+    setupGuideHref: "/help/connectors/stripe",
   },
   {
     id: "hubspot",
@@ -89,7 +89,7 @@ const CATALOG_WARP_2214 = [
     category: "CRM",
     description: "Contacts, companies, deals and tickets from your CRM — read on request.",
     availability: "available",
-    setupGuideHref: "/help/integrations/hubspot",
+    setupGuideHref: "/help/connectors/hubspot",
   },
   {
     id: "mailchimp",
@@ -98,7 +98,7 @@ const CATALOG_WARP_2214 = [
     description:
       "Audiences, campaign performance and attributed orders — read from Mailchimp.",
     availability: "available",
-    setupGuideHref: "/help/integrations/mailchimp",
+    setupGuideHref: "/help/connectors/mailchimp",
   },
   {
     // WARP-2296 — the fourth SaaS card, at catalog.order 7.
@@ -107,7 +107,7 @@ const CATALOG_WARP_2214 = [
     category: "Commerce",
     description: "Orders, catalogue and inventory read straight from your store — never a write.",
     availability: "available",
-    setupGuideHref: "/help/integrations/shopify",
+    setupGuideHref: "/help/connectors/shopify",
   },
   {
     // WARP-2708 — wave 1, at catalog.order 8.
@@ -117,7 +117,7 @@ const CATALOG_WARP_2214 = [
     description:
       "Contacts, lists, email campaigns, companies, deals and orders — read from Brevo.",
     availability: "available",
-    setupGuideHref: "/help/integrations/brevo",
+    setupGuideHref: "/help/connectors/brevo",
   },
   {
     // WARP-2709 — wave 1, at catalog.order 9.
@@ -127,7 +127,7 @@ const CATALOG_WARP_2214 = [
     description:
       "Profiles, lists, campaigns and the events behind them — read from Klaviyo.",
     availability: "available",
-    setupGuideHref: "/help/integrations/klaviyo",
+    setupGuideHref: "/help/connectors/klaviyo",
   },
   {
     // WARP-2710 — wave 1, at catalog.order 10.
@@ -137,7 +137,7 @@ const CATALOG_WARP_2214 = [
     description:
       "People, organisations, deals, activities and products — read from your Pipedrive.",
     availability: "available",
-    setupGuideHref: "/help/integrations/pipedrive",
+    setupGuideHref: "/help/connectors/pipedrive",
   },
   {
     // WARP-2383 — Xero, at catalog.order 11 — after the wave-1 cards, which shipped first.
@@ -147,7 +147,7 @@ const CATALOG_WARP_2214 = [
     description:
       "Invoices, bills and contacts read from one Xero organisation — never written to.",
     availability: "available",
-    setupGuideHref: "/help/integrations/xero",
+    setupGuideHref: "/help/connectors/xero",
   },
 ];
 
@@ -175,7 +175,7 @@ const CATALOG_WARP_2707 = [
     description:
       "Payments, refunds and payouts — read from Square, so the money side of the business is on the box.",
     availability: "available",
-    setupGuideHref: "/help/integrations/square",
+    setupGuideHref: "/help/connectors/square",
   },
   {
     // WARP-2707 — the REST track's second vendor, at catalog.order 13.
@@ -184,7 +184,7 @@ const CATALOG_WARP_2707 = [
     category: "Scheduling",
     description: "Bookings and their times, hosts and status — read from Cal.com.",
     availability: "available",
-    setupGuideHref: "/help/integrations/calcom",
+    setupGuideHref: "/help/connectors/calcom",
   },
   {
     // WARP-2916 — the REST track's third vendor, at catalog.order 14.
@@ -194,7 +194,7 @@ const CATALOG_WARP_2707 = [
     description:
       "Issues and pull requests, plus linked development activity from repositories you choose — read from GitHub.",
     availability: "available",
-    setupGuideHref: "/help/integrations/github",
+    setupGuideHref: "/help/connectors/github",
   },
   {
     // WARP-2917 — the REST track's fourth vendor, at catalog.order 15.
@@ -203,7 +203,7 @@ const CATALOG_WARP_2707 = [
     category: "Project management",
     description: "Issues and linked development activity from projects you choose — read from gitlab.com.",
     availability: "available",
-    setupGuideHref: "/help/integrations/gitlab",
+    setupGuideHref: "/help/connectors/gitlab",
   },
   {
     // WARP-2918 — the REST track's fifth vendor, at catalog.order 16. The
@@ -216,7 +216,7 @@ const CATALOG_WARP_2707 = [
     description:
       "Active tasks with their project, priority, assignee and dates — read from Todoist. Completed tasks are not read.",
     availability: "available",
-    setupGuideHref: "/help/integrations/todoist",
+    setupGuideHref: "/help/connectors/todoist",
   },
   {
     // WARP-2919 — the REST track's sixth vendor, at catalog.order 17.
@@ -225,7 +225,7 @@ const CATALOG_WARP_2707 = [
     category: "Point of sale",
     description: "Customers and catalogue items — read from Loyverse POS.",
     availability: "available",
-    setupGuideHref: "/help/integrations/loyverse",
+    setupGuideHref: "/help/connectors/loyverse",
   },
   {
     // WARP-3697 — the REST track's seventh vendor, at catalog.order 19. Wave 3
@@ -238,7 +238,7 @@ const CATALOG_WARP_2707 = [
     description:
       "Direct Debit payments, refunds and payouts — read from GoCardless. Payers, mandates and subscriptions are not read.",
     availability: "available",
-    setupGuideHref: "/help/integrations/gocardless",
+    setupGuideHref: "/help/connectors/gocardless",
   },
   {
     // WARP-3698 — the REST track's eighth vendor, at catalog.order 20. The copy
@@ -251,7 +251,7 @@ const CATALOG_WARP_2707 = [
     description:
       "Opportunities with their milestone and value, and tasks with their owner and dates — read from Capsule CRM. People and organisations are not read.",
     availability: "available",
-    setupGuideHref: "/help/integrations/capsule",
+    setupGuideHref: "/help/connectors/capsule",
   },
 ];
 
@@ -765,11 +765,11 @@ describe("the setup guide travels with the card", () => {
         category: "Payments",
         description: "Offered, with a guide.",
         availability: "available",
-        setupGuideHref: "/help/integrations/fixture-offered",
+        setupGuideHref: "/help/connectors/fixture-offered",
         order: 99,
       },
     };
-    expect(offered.catalog?.setupGuideHref).toBe("/help/integrations/fixture-offered");
+    expect(offered.catalog?.setupGuideHref).toBe("/help/connectors/fixture-offered");
 
     // And the property over the SHIPPED catalog — every card on a
     // guide-requiring track that is offered carries a guide. No longer vacuous:

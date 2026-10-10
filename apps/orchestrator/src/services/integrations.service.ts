@@ -45,7 +45,7 @@ import {
 import {
   providerDescriptor,
   // WARP-2659 — the hub renders an MCP track's expiry warning off the same
-  // verdict `/integrations/credentials` shows, so one credential cannot be
+  // verdict `/connectors/credentials` shows, so one credential cannot be
   // described two ways on two pages.
   credentialExpiryVerdict,
   mcpProviderIds,
@@ -109,7 +109,7 @@ export { credentialsPurgedFor };
  */
 export type { IntegrationStatusName };
 
-/** Hub row (brief §13 `GET /api/integrations`). No PHI, no secret. */
+/** Hub row (brief §13 `GET /api/connectors`). No PHI, no secret. */
 export interface IntegrationSummary {
   provider: string;
   status: IntegrationStatusName;
@@ -121,7 +121,7 @@ export interface IntegrationSummary {
    * same source `toDetail` uses; no new state, no migration.
    *
    * It lives on the SUMMARY (not just the detail) because the only detail
-   * route is `/api/integrations/eaglesoft` — provider-specific — so any
+   * route is `/api/connectors/eaglesoft` — provider-specific — so any
    * surface listing N connectors previously had no way to say how stale each
    * one is. Reports needs it twice: the connector sub-line and the money
    * tile's staleness chip, which is what stops a stale figure being shown as
@@ -184,7 +184,7 @@ export interface IntegrationSummary {
    * WARP-2659 — the credential's expiry verdict, or `null` for a provider that
    * declares no {@link CredentialExpiryPolicy}.
    *
-   * The same read `/api/integrations/credentials` already returns
+   * The same read `/api/connectors/credentials` already returns
    * (`saas-credential.service.ts`), moved onto the hub row so the tile and the
    * configurator cannot disagree about the same credential. That is the WARP-2489
    * rule applied to a second field: the box owns the derivation, both surfaces
@@ -211,7 +211,7 @@ export type ErpSyncStateName =
   | "RESYNC_REQUIRED"
   | "FAILED";
 
-/** Connection detail (brief §13 `GET /api/integrations/eaglesoft`). Shaped to
+/** Connection detail (brief §13 `GET /api/connectors/eaglesoft`). Shaped to
  *  the dashboard's IntegrationConnection type; the route nests it under
  *  `connection`. */
 export interface IntegrationDetail extends IntegrationSummary {
@@ -448,7 +448,7 @@ function requireConnectionProvider(provider: string): string {
  *    permission describing a capability that does not exist.
  *  • The audit row records a `write-enable` against Square as a
  *    security-relevant event that never happened.
- *  • `docs/integrations/square.md` tells the customer, in as many words, that
+ *  • `docs/connectors/square.md` tells the customer, in as many words, that
  *    "writes are off" is not a setting anyone could turn back on. That was
  *    false while this was accepted, and a setup guide the code contradicts is
  *    worse than one that says nothing.
@@ -461,7 +461,7 @@ function requireConnectionProvider(provider: string): string {
  * `connect()` carries its own `enableWrites` off the wizard body and commits it
  * in `persistBase()` before the connector is constructed or probed — reachable
  * today through the still-live deprecated alias `POST
- * /api/integrations/eaglesoft/connect`, which takes its provider from the BODY
+ * /api/connectors/eaglesoft/connect`, which takes its provider from the BODY
  * and is not gated by `requireLanProvider`, so `{ provider: "square",
  * enableWrites: true }` posted there used to persist the flag. A guard living
  * at one call site is a guard the sibling site can be written past; this is why

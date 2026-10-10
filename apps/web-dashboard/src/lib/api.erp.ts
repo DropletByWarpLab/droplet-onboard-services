@@ -2,7 +2,7 @@
  * Typed API client for the Integrations / ERP surfaces (WARP-1101).
  *
  * Wraps the shared {@link apiFetch} helper against the orchestrator endpoints
- * defined in the architecture brief (§13): /api/integrations/* and /api/erp/*.
+ * defined in the architecture brief (§13): /api/connectors/* and /api/erp/*.
  * The backend lands in Phases 1–4 (WARP-1095/1097/1098); until then these
  * resolve to a 404 and the hooks translate that into the honest
  * "Not connected" state — no crash, no fake data.
@@ -21,12 +21,12 @@ import type {
 
 /** Hub: every provider's live connection status (the catalog is client-side). */
 export function fetchIntegrations(): Promise<IntegrationConnection[]> {
-  return apiFetch<IntegrationConnection[]>("/api/integrations");
+  return apiFetch<IntegrationConnection[]>("/api/connectors");
 }
 
 /** ERP detail: connection + (when connected) the at-a-glance snapshot. */
 export function fetchEaglesoft(): Promise<EaglesoftDetail> {
-  return apiFetch<EaglesoftDetail>("/api/integrations/eaglesoft");
+  return apiFetch<EaglesoftDetail>("/api/connectors/eaglesoft");
 }
 
 interface ScheduleEnvelope {
@@ -104,7 +104,7 @@ export async function testLanConnection(
 ): Promise<ConnectionTestResult> {
   // Backend returns { ok, reason, message } — adapt to { reachable, message }.
   const r = await apiFetch<{ ok: boolean; reason?: string; message?: string }>(
-    `/api/integrations/${encodeURIComponent(provider)}/test`,
+    `/api/connectors/${encodeURIComponent(provider)}/test`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -120,7 +120,7 @@ export function connectLanProvider(
   input: LanConnectInput,
 ): Promise<EaglesoftDetail> {
   return apiFetch<EaglesoftDetail>(
-    `/api/integrations/${encodeURIComponent(provider)}/connect`,
+    `/api/connectors/${encodeURIComponent(provider)}/connect`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -146,7 +146,7 @@ export function connectLanProvider(
  */
 export function connectCloudProvider(provider: string): Promise<IntegrationConnection> {
   return apiFetch<IntegrationConnection>(
-    `/api/integrations/${encodeURIComponent(provider)}/connect`,
+    `/api/connectors/${encodeURIComponent(provider)}/connect`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -160,7 +160,7 @@ export function connectCloudProvider(provider: string): Promise<IntegrationConne
  *
  * WARP-2500 — `provider` is a required parameter and the URL is
  * provider-scoped. This used to be `setEaglesoftWrites(enabled)` posting to a
- * hardcoded `/api/integrations/eaglesoft/…`, which is the client half of the
+ * hardcoded `/api/connectors/eaglesoft/…`, which is the client half of the
  * same defect: the orchestrator could only flip the Eaglesoft row, and the
  * dashboard could only ask it to.
  *
@@ -175,7 +175,7 @@ export function setProviderWrites(
   enabled: boolean,
 ): Promise<IntegrationConnection> {
   return apiFetch<IntegrationConnection>(
-    `/api/integrations/${encodeURIComponent(provider)}/${
+    `/api/connectors/${encodeURIComponent(provider)}/${
       enabled ? "write-enable" : "write-disable"
     }`,
     { method: "POST" },
@@ -203,7 +203,7 @@ export function disconnectProvider(
   records: LandedRecordsChoice = "keep",
 ): Promise<IntegrationConnection> {
   return apiFetch<IntegrationConnection>(
-    `/api/integrations/${encodeURIComponent(provider)}/disconnect`,
+    `/api/connectors/${encodeURIComponent(provider)}/disconnect`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },

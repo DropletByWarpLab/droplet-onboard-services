@@ -183,7 +183,7 @@ export function buildHubEntries(
 
 /**
  * The Integrations hub model. Merges the connector catalog with live connection
- * status from GET /api/integrations.
+ * status from GET /api/connectors.
  *
  * A failed read is reported as a failure rather than smoothed into an empty
  * hub: `shouldRetryOnError: false` means one failure stands until the next
@@ -196,7 +196,7 @@ export function buildHubEntries(
  */
 export function useIntegrations(enabled = true) {
   const { data, error, isLoading, mutate } = useSWR<IntegrationConnection[]>(
-    enabled ? "/api/integrations" : null,
+    enabled ? "/api/connectors" : null,
     fetchIntegrations,
     { refreshInterval: 30_000, shouldRetryOnError: false },
   );

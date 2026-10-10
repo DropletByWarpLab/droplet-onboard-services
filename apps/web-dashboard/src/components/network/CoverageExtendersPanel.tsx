@@ -353,8 +353,11 @@ function ApCard({ ap, onApprove, onRequestRemove, busy }: ApCardProps) {
               offers Pair next to Approve (credential first, then the Wi-Fi
               approval). Self-gating: renders nothing unless the AP's own
               `droplet.pair status` has something to offer. One AP secret per
-              box (ADR-071 section 2.3): pairing another AP replaces this one's. */}
-          {ap.backend === "DROPLET_IMAGE" && (showApprove || isFailed) ? (
+              box (ADR-071 section 2.3): pairing another AP replaces this one's.
+              An ONLINE AP is included: once approved it stays ONLINE in the
+              list, so a reflash (section 7 accept) or a reset-button press (the
+              only re-pair path) would otherwise never surface Pair. */}
+          {ap.backend === "DROPLET_IMAGE" && (showApprove || isFailed || ap.status === "ONLINE") ? (
             <DevicePairingCard role="ap" mac={ap.mac} model={ap.model} variant="inline" />
           ) : null}
         </div>

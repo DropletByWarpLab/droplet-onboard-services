@@ -1,7 +1,7 @@
 /**
  * WARP-2463 — the admin read surface over stored reconciliation drift.
  *
- *   GET /api/integrations/:connectionId/drift?days=30
+ *   GET /api/connectors/:connectionId/drift?days=30
  *
  * The hub's connection detail page asks one question of this route: has the
  * incremental path been trustworthy for this connection lately, and is it
@@ -25,7 +25,7 @@
  *
  * ## Mounted separately from `createIntegrationsRouter`
  *
- * Its own factory, under the same `/api/integrations` prefix — because the
+ * Its own factory, under the same `/api/connectors` prefix — because the
  * integrations router's floor is family-and-up and this surface is owner/admin,
  * and a guard narrower than its neighbours' is safer as its own registration
  * than as an exception inside someone else's file.
@@ -34,17 +34,17 @@
  * ## LOAD-BEARING
  *
  * The trailing segment is the literal `drift`, and no other route under
- * `/api/integrations` ends in it:
+ * `/api/connectors` ends in it:
  *
- *   `/integrations`                            2 segments
- *   `/integrations/eaglesoft`                  2 segments
- *   `/integrations/credentials`                2 segments
- *   `/integrations/eaglesoft/connect`          `connect`
- *   `/integrations/eaglesoft/test`             `test`
- *   `/integrations/eaglesoft/write-enable`     `write-enable`
- *   `/integrations/eaglesoft/write-disable`    `write-disable`
- *   `/integrations/eaglesoft/disconnect`       `disconnect`
- *   `/integrations/:provider/credentials`      `credentials`   (WARP-2275)
+ *   `/connectors`                            2 segments
+ *   `/connectors/eaglesoft`                  2 segments
+ *   `/connectors/credentials`                2 segments
+ *   `/connectors/eaglesoft/connect`          `connect`
+ *   `/connectors/eaglesoft/test`             `test`
+ *   `/connectors/eaglesoft/write-enable`     `write-enable`
+ *   `/connectors/eaglesoft/write-disable`    `write-disable`
+ *   `/connectors/eaglesoft/disconnect`       `disconnect`
+ *   `/connectors/:provider/credentials`      `credentials`   (WARP-2275)
  *
  * So no `:provider` value can shadow this route and this route can shadow
  * none of them: a concrete path cannot end in both `drift` and `credentials`,
@@ -53,9 +53,9 @@
  * on where it was mounted breaks the moment someone reorders `app.ts`, which
  * is exactly what WARP-2485 adds a test for.
  *
- * An earlier revision used `/integrations/drift/:connectionId`, which DID
- * overlap `/integrations/:provider/credentials` on the single concrete path
- * `/integrations/drift/credentials` and leaned on mount order to resolve it.
+ * An earlier revision used `/connectors/drift/:connectionId`, which DID
+ * overlap `/connectors/:provider/credentials` on the single concrete path
+ * `/connectors/drift/credentials` and leaned on mount order to resolve it.
  * Do not reintroduce a leading literal here.
  */
 import { Router, type Request, type Response } from "express";
@@ -84,7 +84,7 @@ export function createErpDriftRouter(prisma: PrismaClient): Router {
   const router = Router();
 
   router.get(
-    "/integrations/:connectionId/drift",
+    "/connectors/:connectionId/drift",
     requireRole("owner", "admin"),
     async (req: Request, res: Response, next) => {
       try {

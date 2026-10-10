@@ -26,7 +26,7 @@ import { CONNECT_RETURN_KEY } from "./connect-return";
 // ── Fixtures, built through the real parser so they can not drift from the contract ──
 
 function card(raw: Record<string, unknown>): ConnectCardData {
-  const parsed = parseConnectCard({ kind: "connect_card", scope: "box", manageHref: "/integrations", ...raw });
+  const parsed = parseConnectCard({ kind: "connect_card", scope: "box", manageHref: "/connectors", ...raw });
   if (!parsed) throw new Error("fixture is not a valid connect card");
   return parsed;
 }
@@ -38,13 +38,13 @@ const stripe = (over: Record<string, unknown> = {}) =>
     displayName: "Stripe",
     summary: "Reads payouts, charges, customers · polled every 15 min",
     safety: "setup-internet",
-    helpHref: "/help/integrations/stripe",
+    helpHref: "/help/connectors/stripe",
     mode: "credentials",
     fields: [
       { name: "apiKey", label: "Restricted key", type: "password", required: true, secret: true, help: "Starts with rk_live_ or rk_test_." },
       { name: "accountLabel", label: "Account label", type: "text", required: false, secret: false },
     ],
-    post: { path: "/api/integrations/stripe/connect" },
+    post: { path: "/api/connectors/stripe/connect" },
     ...over,
   });
 
@@ -57,7 +57,7 @@ const atlassian = () =>
     safety: "setup-internet",
     mode: "credentials",
     fields: [{ name: "apiToken", label: "API token", type: "password", required: true, secret: true }],
-    post: { path: "/api/integrations/atlassian/connect" },
+    post: { path: "/api/connectors/atlassian/connect" },
   });
 
 const xero = () =>
@@ -84,7 +84,7 @@ const xero = () =>
         fields: [{ name: "clientId", label: "Client ID", type: "text", required: true, secret: false }],
       },
     ],
-    post: { path: "/api/integrations/xero/connect" },
+    post: { path: "/api/connectors/xero/connect" },
   });
 
 const google = () =>
@@ -171,7 +171,7 @@ const wizard = () =>
     mode: "wizard",
     steps: ["Find the server on your network", "Create Droplet's read-only database account", "Confirm and connect"],
     estimate: "about 10 minutes",
-    wizardHref: "/integrations?connect=eaglesoft",
+    wizardHref: "/connectors?connect=eaglesoft",
   });
 
 // ── Harness ──────────────────────────────────────────────────────────────
@@ -257,7 +257,7 @@ describe("ConnectCard — credentials form", () => {
     expect(screen.getByText("Reads payouts, charges, customers · polled every 15 min")).toBeInTheDocument();
     expect(screen.getByText("Setup · uses your internet")).toBeInTheDocument();
     expect(screen.getByText("This form posts to the box directly. Nothing you type here enters the conversation.")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /setup guide/i })).toHaveAttribute("href", "/help/integrations/stripe");
+    expect(screen.getByRole("link", { name: /setup guide/i })).toHaveAttribute("href", "/help/connectors/stripe");
     expect(screen.getByRole("button", { name: "Not now" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Connect Stripe" })).toBeDisabled();
   });
@@ -308,8 +308,8 @@ describe("ConnectCard — credentials form", () => {
 
     await waitFor(() => expect(onOutcome).toHaveBeenCalledTimes(1));
     expect(sent()).toEqual([
-      { url: "/api/integrations/stripe/credentials", method: "PATCH", body: JSON.stringify({ fields: { apiKey: SECRET } }) },
-      { url: "/api/integrations/stripe/connect", method: "POST", body: "{}" },
+      { url: "/api/connectors/stripe/credentials", method: "PATCH", body: JSON.stringify({ fields: { apiKey: SECRET } }) },
+      { url: "/api/connectors/stripe/connect", method: "POST", body: "{}" },
     ]);
     // The JSON headers the hub sends, on both calls.
     for (const [, init] of authFetch.mock.calls) expect((init as RequestInit).headers).toEqual({ "Content-Type": "application/json" });
@@ -319,7 +319,7 @@ describe("ConnectCard — credentials form", () => {
     // The parser itself now refuses a mismatched post.path (WARP-3904 hardening), so this
     // tampers with an already-parsed card to exercise submitCredentials' own second lock —
     // the same defense-in-depth submitInline already has for mailbox/calendar.
-    const tampered = { ...stripe(), post: { path: "/api/integrations/hubspot/connect" } };
+    const tampered = { ...stripe(), post: { path: "/api/connectors/hubspot/connect" } };
     const { onOutcome } = setup(tampered);
     type(/restricted key/i, SECRET);
     click("Connect Stripe");
@@ -356,7 +356,7 @@ describe("ConnectCard — credentials form", () => {
     click("Connect Stripe");
 
     expect(await screen.findByText("Connected to Stripe")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Manage in Integrations" })).toHaveAttribute("href", "/integrations");
+    expect(screen.getByRole("link", { name: "Manage in Connectors" })).toHaveAttribute("href", "/connectors");
     expect(document.querySelectorAll("input")).toHaveLength(0);
     expect(document.body.innerHTML).not.toContain(SECRET);
     expect(logged()).not.toContain(SECRET);
@@ -378,7 +378,7 @@ describe("ConnectCard — credentials form", () => {
     click("Connect Atlassian");
 
     await waitFor(() => expect(onOutcome).toHaveBeenCalledWith("Atlassian is connected now."));
-    expect(sent()).toEqual([{ url: "/api/integrations/atlassian/credentials", method: "PATCH", body: JSON.stringify({ fields: { apiToken: SECRET } }) }]);
+    expect(sent()).toEqual([{ url: "/api/connectors/atlassian/credentials", method: "PATCH", body: JSON.stringify({ fields: { apiToken: SECRET } }) }]);
   });
 
   it("shows a rejected key as an alert, clears the secret, and does not call onOutcome", async () => {
@@ -540,11 +540,11 @@ describe("ConnectCard — Not now", () => {
 
 describe("ConnectCard — interactive=false", () => {
   it.each([
-    ["credentials", stripe, "Stripe", "/integrations", "Manage in Integrations"],
+    ["credentials", stripe, "Stripe", "/connectors", "Manage in Connectors"],
     ["oauth", google, "Google", "/settings#connected-accounts", "Manage in Settings"],
     ["mailbox", mailbox, "Email account", "/settings#email", "Manage in Settings"],
     ["calendar", calendar, "Calendar feed", "/calendar", "Manage"],
-    ["wizard", wizard, "Eaglesoft", "/integrations", "Manage in Integrations"],
+    ["wizard", wizard, "Eaglesoft", "/connectors", "Manage in Connectors"],
   ])("renders a %s card as a compact row with no inputs and no buttons", (_mode, make, name, href, linkText) => {
     const { onOutcome } = setup(make(), { interactive: false });
     const row = screen.getByTestId("connect-card-compact");
@@ -585,7 +585,7 @@ describe("ConnectCard — blocked", () => {
     expect(panel).toHaveAttribute("data-reason", "role");
     expect(panel).toHaveTextContent("Ask an owner or admin");
     expect(panel).toHaveTextContent(message);
-    expect(screen.getByRole("link", { name: "Open Integrations" })).toHaveAttribute("href", "/integrations");
+    expect(screen.getByRole("link", { name: "Open Connectors" })).toHaveAttribute("href", "/connectors");
     expect(document.querySelectorAll("input, textarea, select")).toHaveLength(0);
     expect(screen.queryByRole("button", { name: /connect stripe/i })).toBeNull();
     expect(onOutcome).not.toHaveBeenCalled();
@@ -858,7 +858,7 @@ describe("ConnectCard — wizard hand-off", () => {
     expect(screen.getByText("Setup · stays on your box")).toBeInTheDocument();
     expect(within(screen.getByRole("list", { name: "Steps" })).getAllByRole("listitem")).toHaveLength(3);
     expect(screen.getByText("Takes about 10 minutes.")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Open the wizard" })).toHaveAttribute("href", "/integrations?connect=eaglesoft");
+    expect(screen.getByRole("link", { name: "Open the wizard" })).toHaveAttribute("href", "/connectors?connect=eaglesoft");
     expect(document.querySelectorAll("input, textarea, select")).toHaveLength(0);
     expect(onOutcome).not.toHaveBeenCalled();
     expect(authFetch).not.toHaveBeenCalled();

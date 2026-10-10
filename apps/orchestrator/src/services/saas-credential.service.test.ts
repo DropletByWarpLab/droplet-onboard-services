@@ -337,7 +337,7 @@ describe("saasConnectionState — honesty", () => {
 });
 
 /**
- * WARP-2489 — the purge fact `/integrations/credentials` renders.
+ * WARP-2489 — the purge fact `/connectors/credentials` renders.
  *
  * WARP-2483 gave that page its "credential removed" line and fed it
  * `!hasCredentials`. Those are different questions. `hasCredentials` is an
@@ -948,7 +948,7 @@ describe("buildCredentialView — the connector kind", () => {
     track: "mcp",
     mcpServerId: "fixture-mcp",
     description: "Fixture MCP.",
-    setupGuideHref: "/help/integrations/fixture-mcp",
+    setupGuideHref: "/help/connectors/fixture-mcp",
     credentialFields: [],
     egressHosts: ["mcp.fixture-mcp.invalid"],
     datasets: [],

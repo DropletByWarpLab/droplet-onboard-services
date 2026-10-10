@@ -342,7 +342,7 @@ function integrationSummary(descriptor: ProviderDescriptor): string {
 
 function integrationHelpHref(descriptor: ProviderDescriptor): string {
   const guide = setupGuideHrefFor(descriptor);
-  return guide && isSafeDashboardHref(guide) ? guide : `/help/integrations/${descriptor.id}`;
+  return guide && isSafeDashboardHref(guide) ? guide : `/help/connectors/${descriptor.id}`;
 }
 
 function safetyFor(descriptor: ProviderDescriptor): ConnectSafety {
@@ -483,7 +483,7 @@ async function integrationCard(prisma: PrismaClient, actor: ConnectionsActor, pr
       ...(variants.length > 0
         ? { variants: variants.map((v) => ({ id: v.id, label: v.label, ...(v.description ? { description: v.description } : {}), fields: v.fields.map(toConnectField) })) }
         : {}),
-      post: { path: `/api/integrations/${descriptor.id}/connect` },
+      post: { path: `/api/connectors/${descriptor.id}/connect` },
     };
   } else if (input === "lan_api") {
     card = {
@@ -495,14 +495,14 @@ async function integrationCard(prisma: PrismaClient, actor: ConnectionsActor, pr
         "Supply the route map from the server's /help page or Patterson SDK",
         "Add the server's CA certificate if needed, then test and connect read-only",
       ],
-      wizardHref: `/integrations?connect=${descriptor.id}`,
+      wizardHref: `/connectors?connect=${descriptor.id}`,
     };
   } else if (input === "mcp") {
     card = {
       ...base,
       mode: "wizard",
       steps: ["Choose the account and access Droplet may use", "Add the requested credentials in the setup form", "Check and connect"],
-      wizardHref: "/integrations/credentials",
+      wizardHref: "/connectors/credentials",
     };
   } else {
     // LAN providers hand off to the hub wizard; a provider with no connect path
@@ -512,7 +512,7 @@ async function integrationCard(prisma: PrismaClient, actor: ConnectionsActor, pr
       mode: "wizard",
       steps: input ? [...WIZARD_STEPS] : [],
       ...(input ? { estimate: "about 10 minutes" } : {}),
-      wizardHref: input ? `/integrations?connect=${descriptor.id}` : MANAGE_HREF.integration,
+      wizardHref: input ? `/connectors?connect=${descriptor.id}` : MANAGE_HREF.integration,
     };
     if (!input) {
       unavailable = {
@@ -530,8 +530,8 @@ async function integrationCard(prisma: PrismaClient, actor: ConnectionsActor, pr
   if (row && STANDING_INTEGRATION_STATUSES.has(row.status)) {
     const message =
       row.status === "PROVISIONING"
-        ? `A ${descriptor.displayName} connection is already being set up. Check its status in Integrations.`
-        : `${descriptor.displayName} is already connected. Manage it in Integrations.`;
+        ? `A ${descriptor.displayName} connection is already being set up. Check its status in Connectors.`
+        : `${descriptor.displayName} is already connected. Manage it in Connectors.`;
     return { ...card, blocked: { reason: "already_connected", message } };
   }
   return card;

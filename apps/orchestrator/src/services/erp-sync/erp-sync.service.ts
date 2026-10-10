@@ -445,7 +445,7 @@ function asSyncFailure(err: unknown): {
     // `CLAIMABLE_ERP_SYNC_STATES`, `upsertErpCursor`'s `update: {}` never
     // revives it, and `foldSyncState` ranks `FAILED` highest — so ONE refused
     // dataset renders the WHOLE connection's sync as failed on
-    // `GET /api/integrations`, forever, including after the owner buys the
+    // `GET /api/connectors`, forever, including after the owner buys the
     // plan. `entities.ts:80-102` documents that exact chain as a known hazard.
     //
     // 429/TRANSIENT is the honest classification, for the same reason

@@ -263,7 +263,7 @@ export const CORE_TOOL_NAMES: ReadonlySet<string> = new Set([
  */
 const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = [
   { pattern: /\b(host(ed|ing)?|web[ -]?apps?|website|app logs|my apps|published app|serve my ui)\b/i, domains: ["hosted_apps", "agent_runs"] },
-  { pattern: /\b(connect|disconnect|reconnect|connections?|integrations?|link|unlink|hook up|sign in|set up|add|available services)\b/i, domains: ["connections"] },
+  { pattern: /\b(connect|disconnect|reconnect|connections?|connectors?|integrations?|link|unlink|hook up|sign in|set up|add|available services)\b/i, domains: ["connections"] },
   // `rename`/`relabel` claims files AND cameras (below): "rename Blue Eye
   // to Kitchen" names the target only by its label, so the verb is the
   // ONLY signal. A false-positive domain is cheap (see the rule comment).
