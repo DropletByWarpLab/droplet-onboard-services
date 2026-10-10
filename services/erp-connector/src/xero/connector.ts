@@ -305,7 +305,7 @@ export class UnknownXeroVariantError extends Error {
     super(
       `this Xero connection does not say which authentication path it is on. ` +
         `Expected one of: ${XERO_CREDENTIAL_VARIANTS.join(", ")}. Re-connect it from the ` +
-        `Integrations page so the choice is recorded.`,
+        `Connectors page so the choice is recorded.`,
     );
     this.name = "UnknownXeroVariantError";
   }

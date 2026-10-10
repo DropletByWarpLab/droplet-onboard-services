@@ -239,7 +239,7 @@ describe("parseConnectCard", () => {
   it("accepts a valid credentials card unchanged", () => {
     const card = credentialsCard({
       variants: [{ id: "custom-connection", label: "Custom connection", description: "For a Xero Custom Connection", fields: [{ name: "clientId", label: "Client id", type: "text", required: true, secret: false }] }],
-      blocked: { reason: "already_connected", message: "Stripe is already connected. Manage it in Integrations." },
+      blocked: { reason: "already_connected", message: "Stripe is already connected. Manage it in Connectors." },
     });
     const parsed = parseConnectCard(card);
     expect(parsed).toEqual(card);

@@ -297,12 +297,12 @@ describe("already connected", () => {
 
   it.each(["CONNECTED", "CAPABILITY_LIMITED", "DEGRADED", "DRIFT_LOCKED"])("a %s catalog connection is not offered to overwrite", async (status) => {
     const card = await cardFor(owner, integration("stripe"), { integrations: [integrationRow("stripe", status)] });
-    expect(card.blocked).toEqual({ reason: "already_connected", message: "Stripe is already connected. Manage it in Integrations." });
+    expect(card.blocked).toEqual({ reason: "already_connected", message: "Stripe is already connected. Manage it in Connectors." });
   });
 
   it("one that is still being set up says so", async () => {
     const card = await cardFor(owner, integration("stripe"), { integrations: [integrationRow("stripe", "PROVISIONING")] });
-    expect(card.blocked).toEqual({ reason: "already_connected", message: "A Stripe connection is already being set up. Check its status in Integrations." });
+    expect(card.blocked).toEqual({ reason: "already_connected", message: "A Stripe connection is already being set up. Check its status in Connectors." });
   });
 
   it.each(["NEEDS_RECONNECT", "ERROR", "DISABLED", "NOT_CONFIGURED"])("a %s catalog connection may take a new key", async (status) => {

@@ -530,8 +530,8 @@ async function integrationCard(prisma: PrismaClient, actor: ConnectionsActor, pr
   if (row && STANDING_INTEGRATION_STATUSES.has(row.status)) {
     const message =
       row.status === "PROVISIONING"
-        ? `A ${descriptor.displayName} connection is already being set up. Check its status in Integrations.`
-        : `${descriptor.displayName} is already connected. Manage it in Integrations.`;
+        ? `A ${descriptor.displayName} connection is already being set up. Check its status in Connectors.`
+        : `${descriptor.displayName} is already connected. Manage it in Connectors.`;
     return { ...card, blocked: { reason: "already_connected", message } };
   }
   return card;

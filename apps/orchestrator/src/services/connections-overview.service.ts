@@ -77,7 +77,7 @@ const STATUS_LINE = {
   limited: "Connected — your plan or permissions withhold one kind of record",
   drift: "The system's data layout changed — an admin needs to review it",
   keyStopped: "The key stopped working — paste a new one to resume",
-  integrationError: "Droplet cannot connect — check the setup in Integrations",
+  integrationError: "Droplet cannot connect — check the setup in Connectors",
 } as const;
 
 /** A fresh object per call: a spread copies the top level only, so a caller that appended to one guest's arrays would change the next guest's. */

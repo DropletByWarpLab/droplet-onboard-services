@@ -108,7 +108,7 @@ export const googleCard = {
   scope: "personal",
   summary: "Reads mail, calendar and files you tick · you sign in with Google",
   safety: "setup-internet",
-  manageHref: "/settings/integrations",
+  manageHref: "/settings#connected-accounts",
   mode: "oauth",
   providerLabel: "Google",
   options: [
