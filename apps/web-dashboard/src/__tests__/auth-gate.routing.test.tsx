@@ -143,6 +143,23 @@ describe("AuthGate — routes off /setup/state (PR #372)", () => {
     render(<AuthGate>child</AuthGate>);
     expect(replaceMock).toHaveBeenCalledWith("/login");
   });
+
+  // WARP-3965 — the browser half of a native sign-in is a link; signing in
+  // first must bring the person back to it, and only to it.
+  it("carries the handoff link through login, and no other page", () => {
+    pathnameValue = "/connectors/mcp/connect";
+    window.history.replaceState(null, "", "/connectors/mcp/connect?handoff=abc");
+    setAuth({
+      user: null,
+      isLoading: false,
+      setupState: { appliance: "ready", setupStep: "done", userTourCompleted: true },
+    });
+    render(<AuthGate>child</AuthGate>);
+    expect(replaceMock).toHaveBeenCalledWith(
+      `/login?next=${encodeURIComponent("/connectors/mcp/connect?handoff=abc")}`,
+    );
+    window.history.replaceState(null, "", "/");
+  });
 });
 
 /**

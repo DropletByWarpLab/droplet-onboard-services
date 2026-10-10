@@ -207,10 +207,11 @@ describe("gap (b) — the Integrations item is gated", () => {
     ).toBeNull();
   });
 
-  it("a staff (family) member does NOT — the orchestrator gates erp.ts owner/admin", () => {
+  it("a staff (family) member sees the Connectors directory but not the owner/admin pages beside it", () => {
     authRef.current = { ...authRef.current, role: "family" };
     render(<Sidebar />);
-    expect(document.querySelector("a[href='/connectors']")).toBeNull();
+    // WARP-3965 — members connect their own MCP accounts there.
+    expect(document.querySelector("a[href='/connectors']")).not.toBeNull();
     // Its child must not be orphaned into the drawer either — the gap-(a) fix
     // is what stops the flattened child outliving its hidden parent.
     expect(document.querySelector("a[href='/connectors/credentials']")).toBeNull();

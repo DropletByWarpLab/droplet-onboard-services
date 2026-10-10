@@ -73,13 +73,21 @@ describe("McpSignInCard", () => {
     expect(api.startMcpSignIn).toHaveBeenCalledWith({ provider: "atlassian", scope: "MEMBER" });
   });
 
-  it("without a registered address, shows the paste field first and starts in loopback mode", async () => {
+  it("without a registered address, shows the paste field first and sends no client-side mode", async () => {
     api.fetchMcpOAuthConnections.mockResolvedValue([view({ callbackSupported: false })]);
     api.startMcpSignIn.mockResolvedValue({ authorizeUrl: "https://auth.example/a", expiresAt: "t", redirectUri: "r" });
     render(<McpSignInCard provider="atlassian" displayName="Atlassian" navigate={vi.fn()} />);
     expect(await screen.findByLabelText(/paste its full address/i)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Sign in with Atlassian" }));
-    await waitFor(() => expect(api.startMcpSignIn).toHaveBeenCalledWith({ provider: "atlassian", scope: "MEMBER", redirectMode: "loopback" }));
+    // The box picks loopback itself when its address is not https (WARP-3965).
+    await waitFor(() => expect(api.startMcpSignIn).toHaveBeenCalledWith({ provider: "atlassian", scope: "MEMBER" }));
+  });
+
+  it("with an https address, never shows the paste field, even while a sign-in is pending", async () => {
+    api.fetchMcpOAuthConnections.mockResolvedValue([view({ member: { id: "m1", state: "PENDING_CONSENT" } })]);
+    render(<McpSignInCard provider="atlassian" displayName="Atlassian" />);
+    expect(await screen.findByText("Waiting for approval…")).toBeInTheDocument();
+    expect(screen.queryByLabelText(/paste its full address/i)).toBeNull();
   });
 
   it.each([
@@ -119,7 +127,7 @@ describe("McpSignInCard", () => {
   });
 
   it("paste sends the full address", async () => {
-    api.fetchMcpOAuthConnections.mockResolvedValue([view({ member: { id: "m1", state: "PENDING_CONSENT" } })]);
+    api.fetchMcpOAuthConnections.mockResolvedValue([view({ callbackSupported: false, member: { id: "m1", state: "PENDING_CONSENT" } })]);
     api.pasteMcpRedirect.mockResolvedValue(undefined);
     render(<McpSignInCard provider="atlassian" displayName="Atlassian" />);
     const full = "http://localhost/api/mcp/oauth/callback?code=abc&state=xyz";
@@ -129,7 +137,7 @@ describe("McpSignInCard", () => {
   });
 
   it("explains a refused bare code", async () => {
-    api.fetchMcpOAuthConnections.mockResolvedValue([view({ member: { id: "m1", state: "PENDING_CONSENT" } })]);
+    api.fetchMcpOAuthConnections.mockResolvedValue([view({ callbackSupported: false, member: { id: "m1", state: "PENDING_CONSENT" } })]);
     api.pasteMcpRedirect.mockRejectedValue(new Error("bare_code_rejected"));
     render(<McpSignInCard provider="atlassian" displayName="Atlassian" />);
     fireEvent.change(await screen.findByLabelText(/paste its full address/i), { target: { value: "abc" } });

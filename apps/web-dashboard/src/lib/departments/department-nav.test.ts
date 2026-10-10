@@ -144,10 +144,12 @@ describe("departmentNavGroups — the gates still apply AFTER the filter", () =>
     expect(hrefs).toContain("/network");
   });
 
-  it("a role gate still hides Integrations from a family member of Security", () => {
+  it("a role gate still hides owner/admin pages from a family member of Security", () => {
     const out = gated("family", allOn);
     const hrefs = out.flatMap((g) => hrefsOf(g.items));
-    expect(hrefs).not.toContain("/connectors");
+    // Connectors admits members since WARP-3965; Credentials stays owner/admin.
+    expect(hrefs).toContain("/connectors");
+    expect(hrefs).not.toContain("/connectors/credentials");
     expect(hrefs).toContain("/cameras");
   });
 
@@ -254,7 +256,7 @@ describe("navChoices — only what the editor can reach", () => {
     const hrefs = navChoices(NAV_GROUPS, "family", ALL_CAPS, (id) => id !== "cameras").map(
       (c) => c.href,
     );
-    expect(hrefs).not.toContain("/connectors");
+    expect(hrefs).not.toContain("/connectors/credentials");
     expect(hrefs).not.toContain("/cameras");
     // A child drops with its parent, exactly as `visibleItems` drops it.
     expect(hrefs).not.toContain("/events");

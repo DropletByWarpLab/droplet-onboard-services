@@ -319,9 +319,9 @@ describe("workspace-nav-config — restrictTo (WARP-2976, ADR-059 §2.3)", () =>
   });
 
   it("is an intersection: the gates still apply inside the set", () => {
-    const restrict = new Set(["/cameras", "/events", "/network", "/connectors"]);
+    const restrict = new Set(["/cameras", "/events", "/network", "/connectors/credentials"]);
     const hrefs = hrefsOf(resolveSpaces("family", ALL_CAPS, (id) => id !== "cameras", restrict));
-    // cameras module off → Cameras and its Events child go; Integrations is
+    // cameras module off → Cameras and its Events child go; Credentials is
     // owner/admin only → gone for family. Only Network survives.
     expect(hrefs).toEqual(["/network"]);
   });

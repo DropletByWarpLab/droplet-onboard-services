@@ -639,7 +639,9 @@ export const NAV_GROUPS: NavGroup[] = [
         // The old name stays searchable (WARP-3956).
         keywords: ["integrations"],
         icon: Blocks,
-        roles: ["owner", "admin"],
+        // WARP-3965 — members connect their own MCP accounts here; system
+        // connects and tool permissions stay owner/admin on the page itself.
+        roles: ["owner", "admin", "family"],
         hidden: true,
         settingsSection: "Workspace",
         settingsBlurb: "Connect the services this business already uses",

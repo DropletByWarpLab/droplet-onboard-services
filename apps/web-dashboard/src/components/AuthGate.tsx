@@ -111,7 +111,13 @@ export function AuthGate({ children }: { children: ReactNode }) {
 
     // If not authenticated and not on a public page, redirect to login
     if (!user && !isPublicPage && !applianceUnclaimed) {
-      router.replace("/login");
+      // WARP-3965 — the browser half of a native sign-in arrives as a link; sign
+      // in first, then come back to it (login re-validates `next` as same-origin).
+      router.replace(
+        pathname === "/connectors/mcp/connect"
+          ? `/login?next=${encodeURIComponent(pathname + window.location.search)}`
+          : "/login",
+      );
       return;
     }
 
