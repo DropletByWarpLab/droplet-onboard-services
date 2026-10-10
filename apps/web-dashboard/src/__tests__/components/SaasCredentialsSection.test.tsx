@@ -36,8 +36,9 @@ const { disconnectProviderMock, connectCloudProviderMock } = vi.hoisted(() => ({
 }));
 // WARP-3951: the card has its own tests; here only its mounting is asserted.
 vi.mock("@/components/integrations/McpSignInCard", () => ({
-  McpSignInCard: (p: { provider: string; admin?: boolean }) => (
-    <div data-testid={`mcp-sign-in-${p.provider}`} data-admin={String(Boolean(p.admin))} />
+  mcpSignInName: (provider: string) => `Name of ${provider}`,
+  McpSignInCard: (p: { provider: string; displayName: string; admin?: boolean }) => (
+    <div data-testid={`mcp-sign-in-${p.provider}`} data-admin={String(Boolean(p.admin))} data-name={p.displayName} />
   ),
 }));
 vi.mock("@/lib/api.erp", () => ({
@@ -1322,6 +1323,8 @@ describe("web sign-in card (WARP-3951)", () => {
     render(<SaasCredentialsSection />);
     const card = await screen.findByTestId("mcp-sign-in-fixture-billing");
     expect(card).toHaveAttribute("data-admin", "true");
+    // The name comes from the explicit short-name helper, never from the display name.
+    expect(card).toHaveAttribute("data-name", "Name of fixture-billing");
     const heading = screen.getByText("Or paste an API token (shared account)");
     expect(card.compareDocumentPosition(heading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(heading.compareDocumentPosition(screen.getByLabelText(/Account id/)) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();

@@ -10088,9 +10088,14 @@ export interface McpSignInView {
 
 export async function fetchMcpOAuthConnections(): Promise<McpSignInView[]> {
   const res = await authFetch(`${BASE}/api/mcp/oauth/connections`);
+  // 404: this box has no sign-in routes yet. The card renders nothing for it.
+  if (res.status === 404) throw new Error("mcp_oauth_absent");
   if (!res.ok) throw new Error(`Failed to load sign-in status: ${res.status}`);
-  const body = await res.json();
-  return Array.isArray(body?.providers) ? body.providers : [];
+  const body = await res.json().catch(() => null);
+  // The contract is `{ providers: [...] }` (orchestrator #2770). A 200 without it is drift,
+  // not "nothing to show", so it is surfaced rather than swallowed.
+  if (!Array.isArray(body?.providers)) throw new Error("mcp_oauth_shape");
+  return body.providers;
 }
 
 async function mcpOAuthError(res: Response, fallback: string): Promise<Error> {

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useAuth } from "@/lib/auth";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import {
   disconnectMcpOAuth,
   fetchMcpOAuthConnections,
@@ -27,12 +28,18 @@ import {
 export const WORKSPACE_ACK_TEXT =
   "Everyone allowed to use this server acts as this account and sees what it sees.";
 
+/** The short name a sign-in surface uses; falls back to the provider id. */
+const SHORT_NAMES: Record<string, string> = { atlassian: "Atlassian" };
+export function mcpSignInName(provider: string): string {
+  return Object.hasOwn(SHORT_NAMES, provider) ? SHORT_NAMES[provider]! : provider;
+}
+
 const OUTCOMES = {
-  connected: { error: false, text: "You are signed in." },
-  cancelled: { error: false, text: "Sign-in was cancelled. Try again when you’re ready." },
-  expired: { error: true, text: "That sign-in expired. Start again when you’re ready." },
-  failed: { error: true, text: "Sign-in could not be completed. Try again, or paste the address you landed on." },
-  blocked: { error: true, text: "Sign-in was blocked because remote MCP was switched off. Nothing was sent to Atlassian." },
+  connected: { error: false, text: () => "You are signed in." },
+  cancelled: { error: false, text: () => "Sign-in was cancelled. Try again when you’re ready." },
+  expired: { error: true, text: () => "That sign-in expired. Start again when you’re ready." },
+  failed: { error: true, text: () => "Sign-in could not be completed. Try again, or paste the address you landed on." },
+  blocked: { error: true, text: (name: string) => `Sign-in was blocked because remote MCP was switched off. Nothing was sent to ${name}.` },
 } as const;
 
 /** `?mcp=<provider>:<outcome>`: consumed only by the card whose provider matches. */
@@ -94,13 +101,19 @@ export function McpSignInCard({
   const [pasted, setPasted] = useState("");
   const [ack, setAck] = useState(false);
   const [blockedCode, setBlockedCode] = useState<string | null>(null);
+  const [unreadable, setUnreadable] = useState(false);
+  const [confirming, setConfirming] = useState<"member" | "workspace" | null>(null);
 
   const load = useCallback(async () => {
     try {
       const all = await fetchMcpOAuthConnections();
+      setUnreadable(false);
       setView(all.find((v) => v.provider === provider) ?? null);
-    } catch {
-      setView(null); // no view means no card: a box without the routes shows nothing
+    } catch (err) {
+      setView(null);
+      // Only a 404 (a box without the routes) is silent; anything else, such as a
+      // body that breaks the `{ providers }` contract, is shown.
+      setUnreadable(!(err instanceof Error && err.message === "mcp_oauth_absent"));
     }
   }, [provider]);
 
@@ -110,14 +123,18 @@ export function McpSignInCard({
     void load();
   }, [allowed, provider, load]);
 
-  if (!allowed || !view) return null;
+  if (!allowed) return null;
+  if (!view) {
+    return unreadable ? (
+      <p className="type-footnote text-system-red" role="alert">Couldn&rsquo;t read your sign-in status</p>
+    ) : null;
+  }
 
   const start = async (scope: "MEMBER" | "WORKSPACE") => {
     if (busy || (scope === "WORKSPACE" && !ack)) return;
     setBusy(true);
     setBlockedCode(null);
     setError(null);
-    setBlockedCode(null);
     setOutcome(null);
     try {
       const body = await startMcpSignIn({
@@ -178,7 +195,8 @@ export function McpSignInCard({
     setBusy(false);
   };
 
-  const note = outcome ? OUTCOMES[outcome] : null;
+  const note = outcome ? { error: OUTCOMES[outcome].error, text: OUTCOMES[outcome].text(displayName) } : null;
+  const confirmSide = confirming === "workspace" ? view.workspace : confirming === "member" ? view.member : null;
   const pending = view.member?.state === "PENDING_CONSENT";
   const signedIn = view.member?.state === "CONNECTED";
   const wsConnected = view.workspace?.state === "CONNECTED";
@@ -214,7 +232,7 @@ export function McpSignInCard({
           {pending || signedIn || view.member?.state === "NEEDS_RECONNECT" ? `Sign in with ${displayName} again` : `Sign in with ${displayName}`}
         </button>
         {view.member?.id && view.member.state !== "DISCONNECTED" && (
-          <button type="button" className="btn" disabled={busy} onClick={() => void disconnect(view.member)}>Disconnect</button>
+          <button type="button" className="btn" disabled={busy} aria-label={`Disconnect your ${displayName} sign-in`} onClick={() => setConfirming("member")}>Disconnect</button>
         )}
       </div>
       {(pending || !view.callbackSupported) && (
@@ -253,7 +271,7 @@ export function McpSignInCard({
               Create a Workspace connection
             </button>
             {view.workspace?.id && view.workspace.state !== "DISCONNECTED" && (
-              <button type="button" className="btn" disabled={busy} onClick={() => void disconnect(view.workspace)}>
+              <button type="button" className="btn" disabled={busy} aria-label={`Disconnect the Workspace's ${displayName} connection`} onClick={() => setConfirming("workspace")}>
                 Disconnect Workspace connection
               </button>
             )}
@@ -264,6 +282,19 @@ export function McpSignInCard({
       {blockedCode === "remote_mcp_off" && isAdmin && (
         <a className="type-caption-1 underline" style={{ color: "var(--brand)" }} href="/integrations/credentials">Open the remote MCP switch</a>
       )}
+      <ConfirmDialog
+        open={confirming !== null}
+        title={confirming === "workspace" ? `Disconnect the Workspace's ${displayName} connection?` : `Disconnect your ${displayName} sign-in?`}
+        description={
+          confirming === "workspace"
+            ? `Everyone who uses ${displayName} through the Workspace connection loses it until an owner or admin connects it again. Members who signed in themselves keep their own sign-in.`
+            : `Droplet will stop acting as you in ${displayName}. You can sign in again any time.`
+        }
+        confirmLabel="Disconnect"
+        onConfirm={() => disconnect(confirmSide)}
+        onCancel={() => setConfirming(null)}
+      />
+    </section>
     </section>
   );
 }

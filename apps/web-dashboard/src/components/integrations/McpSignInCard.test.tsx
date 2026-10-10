@@ -11,6 +11,15 @@ const api = vi.hoisted(() => ({
   disconnectMcpOAuth: vi.fn(),
 }));
 vi.mock("@/lib/api", () => api);
+vi.mock("@/components/ConfirmDialog", () => ({
+  ConfirmDialog: (props: { open: boolean; title: string; description: string; confirmLabel: string; onConfirm: () => void | Promise<void>; onCancel: () => void }) =>
+    props.open ? (
+      <div role="dialog"><h2>{props.title}</h2><p>{props.description}</p>
+        <button onClick={props.onCancel}>Cancel</button>
+        <button onClick={() => void Promise.resolve(props.onConfirm()).then(props.onCancel, () => {})}>Confirm disconnect</button>
+      </div>
+    ) : null,
+}));
 
 import { McpSignInCard, WORKSPACE_ACK_TEXT } from "./McpSignInCard";
 
@@ -34,8 +43,8 @@ describe("McpSignInCard", () => {
     expect(api.fetchMcpOAuthConnections).not.toHaveBeenCalled();
   });
 
-  it("renders nothing when the box has no sign-in view (no dead button)", async () => {
-    api.fetchMcpOAuthConnections.mockRejectedValue(new Error("404"));
+  it("renders nothing when the box has no entry for this provider (no dead button)", async () => {
+    api.fetchMcpOAuthConnections.mockResolvedValue([]);
     const { container } = render(<McpSignInCard provider="atlassian" displayName="Atlassian" />);
     await waitFor(() => expect(api.fetchMcpOAuthConnections).toHaveBeenCalled());
     expect(container).toBeEmptyDOMElement();
@@ -128,12 +137,66 @@ describe("McpSignInCard", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(/whole address/i);
   });
 
-  it("disconnects the member's own sign-in by id", async () => {
+  it("sends nothing until the member's own disconnect is confirmed, then disconnects by id", async () => {
     api.fetchMcpOAuthConnections.mockResolvedValue([view({ member: { id: "m1", state: "CONNECTED" } })]);
     api.disconnectMcpOAuth.mockResolvedValue(undefined);
     render(<McpSignInCard provider="atlassian" displayName="Atlassian" />);
-    fireEvent.click(await screen.findByRole("button", { name: "Disconnect" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Disconnect your Atlassian sign-in" }));
+    expect(await screen.findByRole("dialog")).toHaveTextContent("Droplet will stop acting as you in Atlassian.");
+    expect(api.disconnectMcpOAuth).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Confirm disconnect" }));
     await waitFor(() => expect(api.disconnectMcpOAuth).toHaveBeenCalledWith("m1"));
+  });
+
+  it("cancelling the member's disconnect sends nothing", async () => {
+    api.fetchMcpOAuthConnections.mockResolvedValue([view({ member: { id: "m1", state: "CONNECTED" } })]);
+    render(<McpSignInCard provider="atlassian" displayName="Atlassian" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Disconnect your Atlassian sign-in" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(api.disconnectMcpOAuth).not.toHaveBeenCalled();
+  });
+
+  it("Workspace disconnect names who is affected, sends nothing until confirmed, and nothing on cancel", async () => {
+    session.role = "admin";
+    api.fetchMcpOAuthConnections.mockResolvedValue([view({ workspace: { id: "w1", state: "CONNECTED", ackBy: "romain" } })]);
+    api.disconnectMcpOAuth.mockResolvedValue(undefined);
+    render(<McpSignInCard provider="atlassian" displayName="Atlassian" admin />);
+    const open = await screen.findByRole("button", { name: "Disconnect the Workspace's Atlassian connection" });
+    fireEvent.click(open);
+    expect(await screen.findByRole("dialog")).toHaveTextContent(
+      "Everyone who uses Atlassian through the Workspace connection loses it until an owner or admin connects it again. Members who signed in themselves keep their own sign-in.",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(api.disconnectMcpOAuth).not.toHaveBeenCalled();
+    fireEvent.click(open);
+    fireEvent.click(await screen.findByRole("button", { name: "Confirm disconnect" }));
+    await waitFor(() => expect(api.disconnectMcpOAuth).toHaveBeenCalledWith("w1"));
+  });
+
+  it("an unknown ?mcp= outcome shows the failure copy", async () => {
+    window.history.replaceState(null, "", "/settings?mcp=atlassian:weird");
+    render(<McpSignInCard provider="atlassian" displayName="Atlassian" />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Sign-in could not be completed.");
+  });
+
+  it("uses the display name in the blocked outcome", async () => {
+    window.history.replaceState(null, "", "/settings?mcp=atlassian:blocked");
+    render(<McpSignInCard provider="atlassian" displayName="Acme Cloud" />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Nothing was sent to Acme Cloud.");
+  });
+
+  it("a 404 (no routes on this box) renders nothing", async () => {
+    api.fetchMcpOAuthConnections.mockRejectedValue(new Error("mcp_oauth_absent"));
+    const { container } = render(<McpSignInCard provider="atlassian" displayName="Atlassian" />);
+    await waitFor(() => expect(api.fetchMcpOAuthConnections).toHaveBeenCalled());
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it("a 200 that breaks the { providers } contract shows a fixed line, not nothing", async () => {
+    api.fetchMcpOAuthConnections.mockRejectedValue(new Error("mcp_oauth_shape"));
+    render(<McpSignInCard provider="atlassian" displayName="Atlassian" />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Couldn’t read your sign-in status");
   });
 
   it("Workspace button stays disabled until the verbatim acknowledgement is ticked", async () => {

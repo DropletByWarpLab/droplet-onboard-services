@@ -5,7 +5,7 @@ import { AlertCircle, Check, KeyRound, Loader2 } from "lucide-react";
 import { Sect } from "@/components/shell/primitives";
 import { useAuth } from "@/lib/auth";
 import { DisconnectControl } from "@/components/integrations/DisconnectControl";
-import { McpSignInCard } from "@/components/integrations/McpSignInCard";
+import { McpSignInCard, mcpSignInName } from "@/components/integrations/McpSignInCard";
 import { disconnectedCredentialView } from "@/lib/credential-purge";
 import { credentialExpiryCopy, type ExpiryCopy } from "@/lib/credential-expiry";
 import {
@@ -356,7 +356,7 @@ function ProviderForm({
       {/* WARP-3951: the web sign-in leads; the API token form is the fallback. */}
       {view.signIn && (
         <>
-          <McpSignInCard provider={view.provider} displayName={view.displayName.replace(/ \(.*\)$/, "")} admin />
+          <McpSignInCard provider={view.provider} displayName={mcpSignInName(view.provider)} admin />
           <p className="type-headline" data-testid={`token-fallback-${view.provider}`}>Or paste an API token (shared account)</p>
         </>
       )}
