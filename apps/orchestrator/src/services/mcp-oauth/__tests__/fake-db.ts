@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 
 type Row = any;
 const matches = (r: Row, where: Row = {}): boolean =>
-  Object.entries(where).every(([k, v]) => {
+  Object.entries(where).every(([k, v]: [string, any]) => {
     if (v !== null && typeof v === "object" && "not" in v) return r[k] !== v.not;
     if (v !== null && typeof v === "object" && "lt" in v) return r[k] instanceof Date && r[k] < v.lt;
     return r[k] === v;

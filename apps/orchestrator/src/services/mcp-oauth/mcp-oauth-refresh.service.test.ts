@@ -3,6 +3,8 @@
  * a dead sign-in becomes NEEDS_RECONNECT with an audit row.
  */
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { REPO_ROOT } from "../../__tests__/helpers/test-paths.js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { __setColumnCryptoKeyForTest } from "../column-crypto.service.js";
 import { McpBridgeError } from "../mcp-bridge.client.js";
@@ -49,7 +51,7 @@ async function setup(o: { expiresInMin?: number; refreshToken?: string | null; t
   };
   row.tokensEnc = sealTokens(row, blob);
   const oauth = {
-    refresh: vi.fn(async (_i: Record<string, unknown>): Promise<{ accessToken: string; refreshToken?: string; expiresIn?: number; scope?: string }> =>
+    refresh: vi.fn(async (_i: unknown): Promise<{ accessToken: string; refreshToken?: string; expiresIn?: number; scope?: string }> =>
       ({ accessToken: v.issue(clock, 3600), refreshToken: "refresh-2", expiresIn: 3600 })),
   };
   const closeSession = vi.fn(async (_p: string, _c: string): Promise<void> => {});
@@ -188,7 +190,10 @@ describe("scheduling", () => {
   });
 
   it("has no timer or loop of its own", () => {
-    const src = readFileSync(new URL("./mcp-oauth-refresh.service.ts", import.meta.url), "utf-8");
+    const src = readFileSync(
+      join(REPO_ROOT, "apps", "orchestrator", "src", "services", "mcp-oauth", "mcp-oauth-refresh.service.ts"),
+      "utf-8",
+    );
     expect(src).not.toMatch(/setInterval|setTimeout|while\s*\(\s*true/);
   });
 });
