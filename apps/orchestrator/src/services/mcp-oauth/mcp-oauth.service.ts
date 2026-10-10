@@ -510,7 +510,7 @@ export async function completeMcpSignIn(
     await settleFailure(prisma, flow, "sign_in_failed");
     return result("failed");
   }
-  await audit(flow, "connected");
+  await audit(flow, "CONNECTED");
   return result("connected");
 }
 
