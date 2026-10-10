@@ -10,7 +10,7 @@
  * (rule 19). A refusal names a FIELD or our own reason, never a value.
  */
 import type { BridgeResponse } from "../http-api.js";
-import { ATLASSIAN_ALLOWED_OAUTH_HOSTS } from "../atlassian.js";
+import { ATLASSIAN_ALLOWED_OAUTH_HOSTS, ATLASSIAN_MCP_OAUTH_URL } from "../atlassian.js";
 import { UnsafeMcpUrlError } from "../safe-url.js";
 import { isAllowedRedirectUri, registerClient } from "./dcr.js";
 import { discover } from "./discovery.js";
@@ -103,7 +103,7 @@ export async function handleOAuthRoute(
       if (!endpoint || !token) return missing(...(!endpoint ? ["revocationEndpoint"] : []), ...(!token ? ["token"] : []));
       if (rawHint !== undefined && hint === undefined) return missing("tokenTypeHint");
       const url = await vetUrl(endpoint, allowedFor(endpoint), deps);
-      await revokeToken({ revocationEndpoint: url, clientId, token, ...(hint ? { tokenTypeHint: hint } : {}) }, deps);
+      await revokeToken({ revocationEndpoint: url, clientId, ...secret, token, ...(hint ? { tokenTypeHint: hint } : {}) }, deps);
       return { status: 200, body: { revoked: true } };
     }
 
@@ -113,6 +113,12 @@ export async function handleOAuthRoute(
       return missing(...(!tokenEndpoint ? ["tokenEndpoint"] : []), ...(!resource ? ["resource"] : []));
     }
     const url = await vetUrl(tokenEndpoint, allowedFor(tokenEndpoint), deps);
+    // `resource` (RFC 8707) is the audience of the token we ask for; it is never
+    // whatever the caller says. The hosts above are Atlassian-only, so the one
+    // curated resource is the OAuth endpoint.
+    if (resource !== ATLASSIAN_MCP_OAUTH_URL) {
+      return fail(422, "OAUTH_REFUSED", "the resource is not one this server may be signed in to.", { reason: "RESOURCE_NOT_ALLOWED" });
+    }
 
     if (action === "exchange") {
       const code = str(body, "code", 4096);

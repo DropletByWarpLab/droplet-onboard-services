@@ -1032,9 +1032,11 @@ entries:
       the tool arguments the request needs, and the session's `_meta` is
       deliberately NOT forwarded — the caller's Nextcloud session token,
       username and confirmation token stay on this side of the boundary
-      (mcp-multiplexer.service.ts). Dial-out only, per ADR-043 §1: no inbound
-      path, no webhook, no callback URL, and the appliance accepts no inbound
-      connections in any case.
+      (mcp-multiplexer.service.ts). Dial-out only, per ADR-043 §1: no webhook and
+      no inbound path from Atlassian. The one inbound request is the member's
+      own browser returning to the box's OAuth callback on the LAN (the box is
+      the OAuth client); nothing Atlassian initiates ever reaches the
+      appliance.
       KIND IS `egress`, NOT `dynamic`, and the distinction is real rather than
       bookkeeping. Atlassian's MCP is HOSTED-ONLY — there is no self-hosted
       build and no per-tenant subdomain — so the endpoint is a fixed repo
@@ -1069,10 +1071,13 @@ entries:
       updateConfluencePage is excluded outright (upstream #210/#217/#60,
       whole-body replacement). Off by default twice over: the server must be
       named in REMOTE_MCP_SERVER_ALLOWLIST, which ships empty, AND the customer
-      must have supplied a token their own org admin enabled Rovo MCP for.
-      The credential is the customer's, created in their tenant, revocable by
-      them, and expires within 365 days (surfaced as an explicit status, never
-      as a green CONNECTED inside 30 days).
+      must have connected an account their own org admin enabled Rovo MCP for.
+      Two credential paths, both the customer's and revocable by them: a
+      member's web sign-in (OAuth 2.1 with PKCE; short-lived access tokens plus
+      a refresh token the box rotates and can revoke), and the customer-created
+      API token (Basic), still accepted, which expires within 365 days
+      (surfaced as an explicit status, never as a green CONNECTED inside 30
+      days).
     ticket: WARP-2316
     added: 2026-09-02
     review_by: 2027-09-02
