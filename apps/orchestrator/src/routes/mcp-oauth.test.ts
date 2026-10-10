@@ -14,6 +14,12 @@ vi.mock("../config.js", () => ({ config: {
   corsAllowedOrigins: ["https://droplet-ai.local"], agentMaxIter: { defaultIter: 5, capIter: 10 },
   MCP_BRIDGE_URL: "http://bridge.invalid", MCP_BRIDGE_SERVICE_TOKEN: "t",
 } }));
+// The presets share one in-memory budget per process; this file makes far more than 60 requests.
+vi.mock("../middleware/rate-limit.js", () => ({
+  authRateLimit: (_q: unknown, _s: unknown, n: () => void) => n(),
+  sensitiveRateLimit: (_q: unknown, _s: unknown, n: () => void) => n(),
+  standardRateLimit: (_q: unknown, _s: unknown, n: () => void) => n(),
+}));
 vi.mock("../services/activity.singleton.js", () => ({ recordActivity: vi.fn(async () => {}) }));
 
 const MCP_URL: string = (providerDescriptor("atlassian") as unknown as { signIn: { mcpUrl: string } }).signIn.mcpUrl;
