@@ -176,7 +176,12 @@ export function createMemberRoutingPort(opts: MemberRoutingOptions): CredentialA
       if (workspace?.state === "CONNECTED") return via(workspace, conn.site, name, args, "workspace");
 
       if (opts.baseCredential === "api-token" && base.isStarted) {
-        return { outcome: await base.callTool(name, args), credential: "api-token" } as const;
+        try {
+          return { outcome: await base.callTool(name, args), credential: "api-token" } as const;
+        } catch (err) {
+          // The bridge says this base session is catalog-only: never a fallback, ask for a sign-in.
+          if (!(err instanceof McpBridgeError && err.code === "CATALOG_ONLY")) throw err;
+        }
       }
       logger.info({ serverId, hasMember: !!member, hasWorkspace: !!workspace }, "remote_mcp_sign_in_required");
       return refuse(name, workspace?.state === "NEEDS_RECONNECT" ? "REMOTE_SIGN_IN_EXPIRED" : "REMOTE_SIGN_IN_REQUIRED");
