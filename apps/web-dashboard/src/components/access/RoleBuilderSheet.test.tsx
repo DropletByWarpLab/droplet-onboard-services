@@ -505,7 +505,7 @@ describe("AI tools & connectors (axis 4)", () => {
     // so this asserts what the reader actually gets — an anchor, pointing at
     // Connectors.
     const link = screen.getByRole("link", { name: /Open Connectors/ });
-    expect(link).toHaveAttribute("href", "/integrations");
+    expect(link).toHaveAttribute("href", "/connectors");
   });
 });
 

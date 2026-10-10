@@ -111,7 +111,7 @@ export function AccountProviderSetup({ onSaved }: { onSaved?: () => void } = {})
           <h3 className="type-title-3">Google setup</h3>
           <p className="type-caption-1" role="status">{view.google.configured ? "Registration saved" : "Registration needed"}</p>
           <p className="type-caption-1">Create a Google OAuth client for a Web application, configure its consent screen for the Gmail and read-only Google Calendar features you want to offer, then register this exact callback URI. Google may require app verification before other people can connect.</p>
-          <a href="/help/integrations/google-mail" target="_blank" rel="noopener noreferrer" className="type-caption-1 underline">Google registration and permissions guide</a>
+          <a href="/help/connectors/google-mail" target="_blank" rel="noopener noreferrer" className="type-caption-1 underline">Google registration and permissions guide</a>
           <CallbackField provider="Google" value={view.google.redirectUri} />
           {!view.google.callbackSupported && <p className="type-footnote text-system-red" role="alert">Google requires an HTTPS address with a registered hostname. A local hostname, IP address or HTTP address cannot be used. Configure Droplet&apos;s public HTTPS address, reload this setup, and register the updated callback URI.</p>}
           <label className="flex flex-col gap-1.5">Google client ID<input className="form-input" value={googleClientId} onChange={(event) => setGoogleClientId(event.target.value)} autoComplete="off" spellCheck={false} disabled={Boolean(saving)} /></label>
@@ -124,7 +124,7 @@ export function AccountProviderSetup({ onSaved }: { onSaved?: () => void } = {})
           <h3 className="type-title-3">Microsoft setup</h3>
           <p className="type-caption-1" role="status">{view.microsoft.configured ? "Registration saved" : "Registration needed"}</p>
           <p className="type-caption-1">Register a single-tenant Microsoft Entra application under “Mobile and desktop applications” with this exact callback URI. Enable the required delegated permissions and have your Microsoft administrator grant consent.</p>
-          <a href="/help/integrations/microsoft-365" target="_blank" rel="noopener noreferrer" className="type-caption-1 underline">Microsoft registration and permissions guide</a>
+          <a href="/help/connectors/microsoft-365" target="_blank" rel="noopener noreferrer" className="type-caption-1 underline">Microsoft registration and permissions guide</a>
           <CallbackField provider="Microsoft" value={view.microsoft.redirectUri} />
           <label className="flex flex-col gap-1.5">Microsoft application (client) ID<input className="form-input" value={microsoftClientId} onChange={(event) => setMicrosoftClientId(event.target.value)} autoComplete="off" spellCheck={false} disabled={Boolean(saving)} /></label>
           <label className="flex flex-col gap-1.5">Microsoft directory (tenant) ID<input className="form-input" value={tenantId} onChange={(event) => setTenantId(event.target.value)} autoComplete="off" spellCheck={false} disabled={Boolean(saving)} /></label>

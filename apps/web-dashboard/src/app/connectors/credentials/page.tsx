@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * WARP-2275 — `/integrations/credentials`, the admin-only credential
+ * WARP-2275 — `/connectors/credentials`, the admin-only credential
  * configurator.
  *
  * Its own route rather than a card on the hub: the hub is a catalog every

@@ -888,7 +888,7 @@ function MoneyOutHalf() {
           <>
             <div className="rp-money-note">No accounting system connected</div>
             <div className="rp-money-sub">Connect one to see money going out.</div>
-            <a href="/integrations" className="rp-state-link">
+            <a href="/connectors" className="rp-state-link">
               Browse connectors →
             </a>
           </>
@@ -1019,7 +1019,7 @@ export function MoneyBody({
           <>
             <div className="rp-money-note">No practice system connected</div>
             <div className="rp-money-sub">Connect one to see money coming in.</div>
-            <a href="/integrations" className="rp-state-link">
+            <a href="/connectors" className="rp-state-link">
               Browse connectors →
             </a>
             <span className="rp-money-bar is-inert" />
@@ -1051,7 +1051,7 @@ const PILL_ICON = {
 /**
  * The connectors tile. Owner and admin read the full list; a member reads a
  * summary with no provider, no per-provider status and no credential expiry
- * (WARP-3374: `GET /api/integrations` is owner/admin only). `isAdminTier`
+ * (WARP-3374: `GET /api/connectors` is owner/admin only). `isAdminTier`
  * defaults to true because it only chooses WHICH read to make: the box decides
  * who may read what, and answers 403 to the wrong one.
  */
@@ -1133,7 +1133,7 @@ function IntegrationsList({ now }: { now: Date | null }) {
   if (rows.length === 0) {
     return (
       <EmptyBody icon={<Blocks size={28} aria-hidden="true" />} text="Nothing connected yet">
-        <a href="/integrations" className="rp-state-link">
+        <a href="/connectors" className="rp-state-link">
           Connect a system →
         </a>
       </EmptyBody>

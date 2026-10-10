@@ -102,7 +102,7 @@ describe("test path resolution is anchored to the owning file", () => {
       "@droplet/web-dashboard",
     );
     // The repo root is the one that owns the guides the dashboard bundles.
-    expect(statSync(repoPath("docs/integrations")).isDirectory()).toBe(true);
+    expect(statSync(repoPath("docs/connectors")).isDirectory()).toBe(true);
     expect(relative(REPO_ROOT, PACKAGE_ROOT)).toBe(join("apps", "web-dashboard"));
   });
 
@@ -130,7 +130,7 @@ describe("test path resolution is anchored to the owning file", () => {
     expect(() => repoPath(`${REPO_ROOT}-evil/x`)).toThrow(/outside the monorepo root/);
 
     // The paths the suites actually ask for are unaffected.
-    expect(repoPath("docs/integrations")).toBe(join(REPO_ROOT, "docs", "integrations"));
+    expect(repoPath("docs/connectors")).toBe(join(REPO_ROOT, "docs", "connectors"));
     expect(packagePath("src/app/globals.css")).toBe(
       join(PACKAGE_ROOT, "src", "app", "globals.css"),
     );

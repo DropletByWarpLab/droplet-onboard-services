@@ -182,11 +182,11 @@ describe("every tucked destination has a way back in (WARP-2967)", () => {
         "/files/devices",
         "/health",
         "/help",
-        "/integrations",
-        "/integrations/credentials",
+        "/connectors",
+        "/connectors/credentials",
         // WARP-3532 — webhooks and chat-app updates for work, a Settings sibling of
         // the two above.
-        "/integrations/work-notifications",
+        "/connectors/work-notifications",
         "/knowledge",
         "/models",
         "/routines",
@@ -217,7 +217,7 @@ describe("every tucked destination has a way back in (WARP-2967)", () => {
 
   it("gates no tucked item on the medical connector", () => {
     // The Settings page resolves capabilities from /api/admin/capabilities
-    // alone; `medicalConnector` is the Sidebar's own /api/integrations probe
+    // alone; `medicalConnector` is the Sidebar's own /api/connectors probe
     // (WARP-2880) and only /practice — a VISIBLE Business row — uses it. A
     // tucked item gating on it would silently lose its Settings row, so this
     // is the pin rather than a comment nobody reads.

@@ -285,7 +285,7 @@ function ProvenanceStrip({ at }: { at: Date | null }) {
 function trailLink(id: string, isAdminTier: boolean): ReactNode {
   const to: Record<string, [string, string]> = {
     c1: ["/admin/files", "Manage"],
-    c2: ["/integrations", "All connectors"],
+    c2: ["/connectors", "All connectors"],
   };
   const hit = to[id];
   if (!hit || !isAdminTier) return null;

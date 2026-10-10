@@ -1,10 +1,10 @@
 /**
- * /help/integrations/<provider> — WARP-2490.
+ * /help/connectors/<provider> — WARP-2490.
  *
  * The destination for the `setupGuideHref` WARP-2342 plumbed onto every
  * `available` cloud provider. A SERVER component on purpose: only a server
  * component can carry `generateStaticParams`, and that is what makes these
- * pages prerender into the static output next to `/integrations` rather than
+ * pages prerender into the static output next to `/connectors` rather than
  * being rendered on demand.
  *
  * `dynamicParams = false` is the 404: a slug outside `generateStaticParams`

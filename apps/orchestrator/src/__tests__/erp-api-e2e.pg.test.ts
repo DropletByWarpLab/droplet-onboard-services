@@ -201,7 +201,7 @@ describe.skipIf(!RUN)("ERP REST track — HTTP → Postgres → live Eaglesoft b
   }
 
   const connect = (body: Record<string, unknown>) =>
-    http.post("/api/integrations/eaglesoft/connect", body);
+    http.post("/api/connectors/eaglesoft/connect", body);
 
   it("connects: the box answers, and the row lands CONNECTED", async () => {
     const res = await connect(connectBody());
@@ -240,7 +240,7 @@ describe.skipIf(!RUN)("ERP REST track — HTTP → Postgres → live Eaglesoft b
     expect(body).not.toContain(box.credentials.password);
     expect(body).not.toContain(box.credentials.integrationKey);
 
-    const detail = await http.get("/api/integrations/eaglesoft");
+    const detail = await http.get("/api/connectors/eaglesoft");
     expect(JSON.stringify(detail.body)).not.toContain(box.credentials.password);
   });
 

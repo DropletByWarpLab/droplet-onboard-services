@@ -39,8 +39,8 @@ const settingsHrefs = (role: Parameters<typeof visibleItems>[1]) =>
     g.items.map((i) => i.href),
   );
 
-const integrations = () => operationsItems().find((i) => i.href === "/integrations");
-const credentials = () => operationsItems().find((i) => i.href === "/integrations/credentials");
+const integrations = () => operationsItems().find((i) => i.href === "/connectors");
+const credentials = () => operationsItems().find((i) => i.href === "/connectors/credentials");
 
 describe("Integrations is flat (WARP-2968)", () => {
   it("has no children, so nothing hides behind an opened section", () => {
@@ -55,7 +55,7 @@ describe("Integrations is flat (WARP-2968)", () => {
 
   it("puts Credentials immediately after Integrations", () => {
     const hrefs = operationsItems().map((i) => i.href);
-    expect(hrefs.indexOf("/integrations/credentials")).toBe(hrefs.indexOf("/integrations") + 1);
+    expect(hrefs.indexOf("/connectors/credentials")).toBe(hrefs.indexOf("/connectors") + 1);
   });
 
   it("gates both on owner/admin, mirroring the orchestrator's own guard", () => {
@@ -69,8 +69,8 @@ describe("Integrations is flat (WARP-2968)", () => {
     expect(integrations()?.settingsSection).toBe("Workspace");
     expect(credentials()?.settingsSection).toBe(integrations()?.settingsSection);
     const rows = settingsHrefs("owner");
-    expect(rows.indexOf("/integrations/credentials")).toBe(
-      rows.indexOf("/integrations") + 1,
+    expect(rows.indexOf("/connectors/credentials")).toBe(
+      rows.indexOf("/connectors") + 1,
     );
   });
 
@@ -79,19 +79,19 @@ describe("Integrations is flat (WARP-2968)", () => {
       settingsHrefs(role);
 
     for (const role of ["owner", "admin"] as const) {
-      expect(hrefsFor(role)).toContain("/integrations");
-      expect(hrefsFor(role)).toContain("/integrations/credentials");
+      expect(hrefsFor(role)).toContain("/connectors");
+      expect(hrefsFor(role)).toContain("/connectors/credentials");
     }
     for (const role of ["family", "guest"] as const) {
-      expect(hrefsFor(role)).not.toContain("/integrations");
-      expect(hrefsFor(role)).not.toContain("/integrations/credentials");
+      expect(hrefsFor(role)).not.toContain("/connectors");
+      expect(hrefsFor(role)).not.toContain("/connectors/credentials");
     }
   });
 });
 
 // ── WARP-3532 — Work notifications joins the pair ────────────────────────────
 
-const workNotifications = () => operationsItems().find((i) => i.href === "/integrations/work-notifications");
+const workNotifications = () => operationsItems().find((i) => i.href === "/connectors/work-notifications");
 
 describe("Work notifications is a third flat sibling (WARP-3532)", () => {
   it("is its own top-level item, right after Credentials, tucked behind Settings", () => {
@@ -103,24 +103,24 @@ describe("Work notifications is a third flat sibling (WARP-3532)", () => {
     expect(item?.settingsSection).toBe("Workspace");
     expect(item?.settingsBlurb).toBeTruthy();
     const hrefs = operationsItems().map((i) => i.href);
-    expect(hrefs.indexOf("/integrations/work-notifications")).toBe(hrefs.indexOf("/integrations/credentials") + 1);
+    expect(hrefs.indexOf("/connectors/work-notifications")).toBe(hrefs.indexOf("/connectors/credentials") + 1);
   });
 
   it("is owner/admin only, like the server routes behind it", () => {
     expect(workNotifications()?.roles).toEqual(["owner", "admin"]);
-    expect(settingsHrefs("owner")).toContain("/integrations/work-notifications");
-    expect(settingsHrefs("admin")).toContain("/integrations/work-notifications");
-    expect(settingsHrefs("family")).not.toContain("/integrations/work-notifications");
-    expect(settingsHrefs("guest")).not.toContain("/integrations/work-notifications");
+    expect(settingsHrefs("owner")).toContain("/connectors/work-notifications");
+    expect(settingsHrefs("admin")).toContain("/connectors/work-notifications");
+    expect(settingsHrefs("family")).not.toContain("/connectors/work-notifications");
+    expect(settingsHrefs("guest")).not.toContain("/connectors/work-notifications");
   });
 
   it("follows the Projects module: hidden exactly when /api/pm would answer module_disabled", () => {
     expect(workNotifications()?.requiresModule).toBe("projects");
     const projectsOff = (id: string) => id !== "projects";
     const hrefs = settingsGroups("owner", openCapabilities, projectsOff).flatMap((g) => g.items.map((i) => i.href));
-    expect(hrefs).not.toContain("/integrations/work-notifications");
+    expect(hrefs).not.toContain("/connectors/work-notifications");
     // …while the two plumbing pages it sits beside stay (no module of their own).
-    expect(hrefs).toContain("/integrations");
-    expect(hrefs).toContain("/integrations/credentials");
+    expect(hrefs).toContain("/connectors");
+    expect(hrefs).toContain("/connectors/credentials");
   });
 });

@@ -3,7 +3,7 @@
 # check-setup-guides.sh — WARP-2351.
 #
 # Fails when the customer-facing cloud/SaaS setup guides under
-# docs/integrations/ stop being complete, stop being true, or stop resolving.
+# docs/connectors/ stop being complete, stop being true, or stop resolving.
 #
 # WHY THIS EXISTS
 # ---------------
@@ -19,7 +19,7 @@
 #
 #   1. A new cloud provider ships with no guide.
 #      -> COVERAGE. Every provider in CLOUD_PROVIDERS must have
-#         docs/integrations/<id>.md, and SETUP.md's cloud index (§3.3) must
+#         docs/connectors/<id>.md, and SETUP.md's cloud index (§3.3) must
 #         list exactly that set — checked in BOTH directions, so adding a
 #         provider to one place and forgetting the other goes red.
 #
@@ -32,7 +32,7 @@
 #         away cannot pass review silently.
 #
 #   3. A link rots.
-#      -> LINKS. Every relative markdown link under docs/integrations/ is
+#      -> LINKS. Every relative markdown link under docs/connectors/ is
 #         resolved against the tree. Checking link *text* rather than the
 #         resolved path would pass a near-miss like `stripe-setup.md`, which
 #         is exactly the failure this is for.
@@ -46,7 +46,7 @@
 #         (WARP-2498).
 #
 #   4. A guide ships that the box cannot serve.
-#      -> ROUTE. `/help/integrations/<id>` renders the guide from a bundled
+#      -> ROUTE. `/help/connectors/<id>` renders the guide from a bundled
 #         `?raw` import (WARP-2490). The import list is hand-written — a
 #         static import is the only kind a bundler can inline — so a new
 #         guide can pass checks 1-3 and still be unreachable from the tile
@@ -81,7 +81,7 @@ set -euo pipefail
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-DOCS_DIR="docs/integrations"
+DOCS_DIR="docs/connectors"
 SETUP_MD="$DOCS_DIR/SETUP.md"
 SHARED_PAGE="$DOCS_DIR/credential-handling.md"
 
@@ -475,7 +475,7 @@ EOF
 done
 
 # --- 4. Link integrity -----------------------------------------------------
-# Resolve every relative markdown link under docs/integrations/ against the
+# Resolve every relative markdown link under docs/connectors/ against the
 # tree. Text-only checking would pass a near-miss filename and is not enough.
 
 hdr "slug rule — this script and the dashboard route agree"
@@ -562,7 +562,7 @@ ok "checked $link_count relative link(s), $anchor_count of them with a #fragment
 
 hdr "route — every cloud guide is bundled into the dashboard"
 
-GUIDE_ROUTE="apps/web-dashboard/src/app/help/integrations/[provider]/page.tsx"
+GUIDE_ROUTE="apps/web-dashboard/src/app/help/connectors/[provider]/page.tsx"
 GUIDE_BUNDLE="apps/web-dashboard/src/lib/integration-guides.ts"
 
 if [ ! -f "$GUIDE_ROUTE" ]; then
@@ -575,8 +575,8 @@ if [ ! -f "$GUIDE_BUNDLE" ]; then
   note "the guide bundle is missing ($GUIDE_BUNDLE)"
 else
   for provider in $CLOUD_PROVIDERS; do
-    if grep -q "docs/integrations/$provider.md?raw" "$GUIDE_BUNDLE"; then
-      ok "$provider is bundled, reachable at /help/integrations/$provider"
+    if grep -q "docs/connectors/$provider.md?raw" "$GUIDE_BUNDLE"; then
+      ok "$provider is bundled, reachable at /help/connectors/$provider"
     else
       note "$provider has a guide but is not imported in $GUIDE_BUNDLE — the link would 404 on the box"
     fi

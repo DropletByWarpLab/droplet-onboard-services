@@ -100,7 +100,7 @@ describe("McpSignInCard", () => {
     api.startMcpSignIn.mockRejectedValue(new Error("remote_mcp_off"));
     render(<McpSignInCard provider="atlassian" displayName="Atlassian" />);
     fireEvent.click(await screen.findByRole("button", { name: "Sign in with Atlassian" }));
-    expect(await screen.findByRole("link", { name: "Open the remote MCP switch" })).toHaveAttribute("href", "/integrations/credentials");
+    expect(await screen.findByRole("link", { name: "Open the remote MCP switch" })).toHaveAttribute("href", "/connectors/credentials");
   });
 
   it("shows the blocked outcome copy for ?mcp=atlassian:blocked", async () => {

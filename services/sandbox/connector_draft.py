@@ -86,7 +86,7 @@ def output_paths(provider: str) -> dict[str, str]:
     """The rendered files, by role. Only ever called with a validated id."""
     return {
         "profile": f"services/erp-connector/src/rest/vendors/{provider}.ts",
-        "guide": f"docs/integrations/{provider}.md",
+        "guide": f"docs/connectors/{provider}.md",
         "egress": f"docs/security/allowed-egress.{provider}.draft.yaml",
         "adr042": "docs/adr-042/" + provider + ".rows" + ".md",
     }

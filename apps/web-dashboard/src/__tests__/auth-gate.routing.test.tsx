@@ -81,7 +81,7 @@ describe("AuthGate — routes off /setup/state (PR #372)", () => {
     expect(replaceMock).toHaveBeenCalledWith("/login?from=setup");
   });
 
-  it.each(["/help", "/help/integrations/google-mail", "/help/integrations/microsoft-365"])("renders %s during setup instead of bouncing to /setup", (path) => {
+  it.each(["/help", "/help/connectors/google-mail", "/help/connectors/microsoft-365"])("renders %s during setup instead of bouncing to /setup", (path) => {
     pathnameValue = path;
     setAuth({
       user: null,

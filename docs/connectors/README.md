@@ -7,7 +7,7 @@
 >
 > **Per-vendor customer setup guides (cloud/SaaS/REST):** [`stripe.md`](stripe.md) · [`hubspot.md`](hubspot.md) · [`mailchimp.md`](mailchimp.md) · [`shopify.md`](shopify.md) · [`xero.md`](xero.md) · [`brevo.md`](brevo.md) · [`klaviyo.md`](klaviyo.md) · [`pipedrive.md`](pipedrive.md) · [`square.md`](square.md) · [`calcom.md`](calcom.md) · [`github.md`](github.md) · [`gitlab.md`](gitlab.md) · [`todoist.md`](todoist.md) · [`loyverse.md`](loyverse.md) · [`gocardless.md`](gocardless.md) · [`capsule.md`](capsule.md) · [`atlassian.md`](atlassian.md) · [`microsoft-365.md`](microsoft-365.md) (per person; signs in with Microsoft rather than taking a pasted key).
 >
-> ⚠️ **This line is not gated in either direction.** `scripts/check-setup-guides.sh` skips `README` by name (its reverse-coverage pass reads `SETUP.md` only), so a twelfth vendor can ship with every check green and be invisible from the page that is the repo's own entry point — and which the box serves at `/help/integrations/readme`. It was six vendors stale until WARP-2833. **Add your vendor here by hand.**
+> ⚠️ **This line is not gated in either direction.** `scripts/check-setup-guides.sh` skips `README` by name (its reverse-coverage pass reads `SETUP.md` only), so a twelfth vendor can ship with every check green and be invisible from the page that is the repo's own entry point — and which the box serves at `/help/connectors/readme`. It was six vendors stale until WARP-2833. **Add your vendor here by hand.**
 
 ---
 
@@ -43,8 +43,8 @@ The call path is **one-directional and never inverted** (see `CLAUDE.md` — "Ol
 
 ```
 ┌──────────────── Dashboard (apps/web-dashboard) ─────────────────────────────┐
-│  /integrations  (hub — every connector)   /integrations/eaglesoft  (per-provider) │
-│         │  REST: GET/POST /api/integrations/*   /api/erp/*                     │
+│  /connectors  (hub — every connector)   /connectors/eaglesoft  (per-provider)     │
+│         │  REST: GET/POST /api/connectors/*   /api/erp/*                     │
 └─────────┼─────────────────────────────────────────────────────────────────────┘
           ▼
 ┌──────────────── Orchestrator (apps/orchestrator) ───────────────────────────┐
@@ -131,11 +131,11 @@ DISABLED (turned off)
 
 "Sync keeps running" is a claim about the CURSORS, and it has a specific mechanism. A `CAPABILITY_LIMITED` connection is polled (`POLLABLE_CONNECTION_STATUSES`), so the refused dataset's cursor still ticks and still throws. `asSyncFailure` classifies both vendor capability errors — Mailchimp's `CAPABILITY_MISSING`, HubSpot's `CAPABILITY_NOT_AVAILABLE` — as transient, so that ONE cursor parks in `BACKOFF` at the maximum retry interval, keeps its watermark, and does **not** set `needsReconnect`. Every other cursor on the connection is untouched.
 
-The state it must never take is `FAILED`, and the reason is that `FAILED` is terminal by construction rather than by policy: it is absent from `CLAIMABLE_ERP_SYNC_STATES`, `upsertErpCursor` never revives an existing row, and `foldSyncState` ranks it highest — so one refused dataset would report the whole connection's sync as failed on `GET /api/integrations` forever, including after the owner buys the plan. `BACKOFF` is claimable, which is what makes the recovery automatic: when the plan or the scope grant changes, the next tick after the backoff window simply succeeds. Nobody has to touch the box.
+The state it must never take is `FAILED`, and the reason is that `FAILED` is terminal by construction rather than by policy: it is absent from `CLAIMABLE_ERP_SYNC_STATES`, `upsertErpCursor` never revives an existing row, and `foldSyncState` ranks it highest — so one refused dataset would report the whole connection's sync as failed on `GET /api/connectors` forever, including after the owner buys the plan. `BACKOFF` is claimable, which is what makes the recovery automatic: when the plan or the scope grant changes, the next tick after the backoff window simply succeeds. Nobody has to touch the box.
 
 A connect attempt that can't reach the external system lands in **`PROVISIONING`**, never a fake `CONNECTED`. This is honest degradation — the dashboard shows "connecting / not connected", which is the truth.
 
-For a **cloud or REST track** the transition out of `PROVISIONING` is a two-step contract (WARP-2842). `PATCH /api/integrations/:provider/credentials` seals the pasted credential onto the row and writes `PROVISIONING` — *stored, not yet checked* — and nothing else. `POST /api/integrations/:provider/connect` (empty body, owner/admin, idempotent) then builds the connector **from the row** — `connectionId`, `providerConfig`, and the AAD-bound `providerTokensEnc` via `cloudMaterialFromRow` — probes the vendor, and writes the verdict: `CONNECTED` (+ `lastHealthyAt`) on success, or `NEEDS_RECONNECT` / `DEGRADED` / `CAPABILITY_LIMITED` / `ERROR` per `cloud-connection-state.ts`. The PATCH deliberately does not probe: a credential write and a network call are two consent events, and the credential route's Prisma surface cannot reach the connector. Only `CONNECTED`, `CAPABILITY_LIMITED` and `DEGRADED` are in `POLLABLE_CONNECTION_STATUSES`, so a row that never takes the second step is never synced — which is why the wizard and the credentials page both call it after every save.
+For a **cloud or REST track** the transition out of `PROVISIONING` is a two-step contract (WARP-2842). `PATCH /api/connectors/:provider/credentials` seals the pasted credential onto the row and writes `PROVISIONING` — *stored, not yet checked* — and nothing else. `POST /api/connectors/:provider/connect` (empty body, owner/admin, idempotent) then builds the connector **from the row** — `connectionId`, `providerConfig`, and the AAD-bound `providerTokensEnc` via `cloudMaterialFromRow` — probes the vendor, and writes the verdict: `CONNECTED` (+ `lastHealthyAt`) on success, or `NEEDS_RECONNECT` / `DEGRADED` / `CAPABILITY_LIMITED` / `ERROR` per `cloud-connection-state.ts`. The PATCH deliberately does not probe: a credential write and a network call are two consent events, and the credential route's Prisma surface cannot reach the connector. Only `CONNECTED`, `CAPABILITY_LIMITED` and `DEGRADED` are in `POLLABLE_CONNECTION_STATUSES`, so a row that never takes the second step is never synced — which is why the wizard and the credentials page both call it after every save.
 
 ### `WriteStatus` (write-request outbox lifecycle)
 
@@ -176,12 +176,12 @@ All endpoints are auth-gated; PHI endpoints enforce RBAC and audit.
 
 | Method + path | Purpose |
 |---|---|
-| `GET /api/integrations` | Hub list (all providers + status). No PHI, no secret. |
-| `GET /api/integrations/eaglesoft` | Connection detail + status. |
-| `POST /api/integrations/eaglesoft/connect` | Run / verify provisioning; land `CONNECTED` (or honest `PROVISIONING`). Deprecated LAN-only alias: a body naming a cloud / REST / MCP track is refused (400). |
-| `POST /api/integrations/:provider/connect` | LAN track: the same, provider from the URL (body: host, port, …). Cloud / REST track: **empty body** — probe the credential already on the row and write the verdict (WARP-2842). |
-| `POST /api/integrations/eaglesoft/test` | Reachability test (no save). |
-| `POST /api/integrations/eaglesoft/write-enable` \| `/write-disable` | The write opt-in / kill-switch. |
+| `GET /api/connectors` | Hub list (all providers + status). No PHI, no secret. |
+| `GET /api/connectors/eaglesoft` | Connection detail + status. |
+| `POST /api/connectors/eaglesoft/connect` | Run / verify provisioning; land `CONNECTED` (or honest `PROVISIONING`). Deprecated LAN-only alias: a body naming a cloud / REST / MCP track is refused (400). |
+| `POST /api/connectors/:provider/connect` | LAN track: the same, provider from the URL (body: host, port, …). Cloud / REST track: **empty body** — probe the credential already on the row and write the verdict (WARP-2842). |
+| `POST /api/connectors/eaglesoft/test` | Reachability test (no save). |
+| `POST /api/connectors/eaglesoft/write-enable` \| `/write-disable` | The write opt-in / kill-switch. |
 | `GET /api/erp/schedule?date=…` · `/api/erp/patients?query=…` · `/api/erp/patient/:id` · `/api/erp/ar-summary` · `/api/erp/recall-due` | Read surfaces (paginated, audited). |
 | `POST /api/erp/write-requests` · `GET /api/erp/write-requests/:id` · `POST /api/erp/write-requests/:id/confirm` | The write outbox: stage → read status → human-confirm. |
 
@@ -195,7 +195,7 @@ The framework is built and buildable **without** any live external system. What'
 
 | Piece | State |
 |---|---|
-| Dashboard (`/integrations` hub + `/integrations/eaglesoft`) | **Built** — renders honest "Not connected" until a connection exists (PR #900). |
+| Dashboard (`/connectors` hub + `/connectors/eaglesoft`) | **Built** — renders honest "Not connected" until a connection exists (PR #900). |
 | Connector foundation (`erp-connector`: interface, registries, schema-map/fingerprint, provisioning SQL, tools) | **Merged** (PR #901). Every live I/O path throws `ConnectorBlockedError` until a driver is wired. |
 | Orchestrator API + service layer (this document's §6) | **Built** (PR #916) — endpoints return honest status/empty; the write outbox works end-to-end with the connector stubbed. |
 | **Live driver** (the provider's real DB connection + introspection + read/write execution) | **Blocked** — needs the provider's client + a data source. For Eaglesoft that's the SAP SQL Anywhere client + a copy of `PattersonPM.db` on an x86_64 host (see [`eaglesoft.md`](eaglesoft.md)). Wiring it live only replaces the connector's stubbed methods. |
@@ -211,7 +211,7 @@ The framework is built and buildable **without** any live external system. What'
 
 | Concern | Location (repo `droplet-onboard-services`) |
 |---|---|
-| Dashboard surfaces | `apps/web-dashboard/src/app/integrations/` + `src/components/erp/` + `src/components/integrations/` |
+| Dashboard surfaces | `apps/web-dashboard/src/app/connectors/` + `src/components/erp/` + `src/components/integrations/` |
 | Orchestrator services | `apps/orchestrator/src/services/{integrations,erp}.service.ts` + `erp-error.ts` |
 | Orchestrator routes | `apps/orchestrator/src/routes/{integrations,erp}.ts` (mounted in `app.ts`) |
 | Connector framework | `services/erp-connector/` |

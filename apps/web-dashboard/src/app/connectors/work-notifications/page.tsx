@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * WARP-3532 — `/integrations/work-notifications`, the owner/admin surface for
+ * WARP-3532 — `/connectors/work-notifications`, the owner/admin surface for
  * sending work updates to Slack, Teams, Discord, Google Chat or any webhook.
  *
  * A sibling of Integrations and Credentials rather than a card on the hub, for

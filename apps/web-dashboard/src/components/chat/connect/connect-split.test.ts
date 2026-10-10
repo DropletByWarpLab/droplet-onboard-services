@@ -21,10 +21,10 @@ const STRIPE_CARD = {
   scope: "box",
   summary: "Reads payouts, charges, customers · polled every 15 min",
   safety: "setup-internet",
-  manageHref: "/integrations",
+  manageHref: "/connectors",
   mode: "credentials",
   fields: [{ name: "apiKey", label: "Restricted key", type: "password", required: true, secret: true }],
-  post: { path: "/api/integrations/stripe/connect" },
+  post: { path: "/api/connectors/stripe/connect" },
 };
 
 const OVERVIEW = {
@@ -38,7 +38,7 @@ const OVERVIEW = {
       scope: "box",
       status: "connected",
       capabilities: ["payouts"],
-      manageHref: "/integrations",
+      manageHref: "/connectors",
       canDisconnect: true,
       canReconnect: false,
     },
@@ -69,9 +69,9 @@ describe("connectResultOf", () => {
 
   it.each([
     ["an upload route", "/api/files/upload"],
-    ["the credentials save route (the card derives that one itself)", "/api/integrations/stripe/credentials"],
-    ["another provider's path with a traversal", "/api/integrations/../admin/connect"],
-    ["an absolute URL on another host", "https://evil.example/api/integrations/stripe/connect"],
+    ["the credentials save route (the card derives that one itself)", "/api/connectors/stripe/credentials"],
+    ["another provider's path with a traversal", "/api/connectors/../admin/connect"],
+    ["an absolute URL on another host", "https://evil.example/api/connectors/stripe/connect"],
     ["a protocol-relative URL", "//evil.example/api/email/accounts"],
     ["the mailbox route with a query string", "/api/email/accounts?next=https://evil.example"],
   ])("yields nothing when post.path is %s", (_label, path) => {

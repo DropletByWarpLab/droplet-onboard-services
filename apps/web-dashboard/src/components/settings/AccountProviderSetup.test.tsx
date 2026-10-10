@@ -53,8 +53,8 @@ describe("administrator account registration", () => {
     openSetup();
     await screen.findByLabelText("Google client ID");
     for (const [name, href] of [
-      ["Google registration and permissions guide", "/help/integrations/google-mail"],
-      ["Microsoft registration and permissions guide", "/help/integrations/microsoft-365"],
+      ["Google registration and permissions guide", "/help/connectors/google-mail"],
+      ["Microsoft registration and permissions guide", "/help/connectors/microsoft-365"],
     ]) {
       const guide = screen.getByRole("link", { name });
       expect(guide).toHaveAttribute("href", href);

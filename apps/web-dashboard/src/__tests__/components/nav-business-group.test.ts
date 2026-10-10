@@ -243,13 +243,13 @@ describe("Practice is gated by role, matching the server (WARP-2560)", () => {
     const reached = (ops?.items ?? [])
       .flatMap((i) => [i, ...(i.children ?? [])])
       .map((i) => i.href)
-      .filter((href) => href.startsWith("/integrations"));
+      .filter((href) => href.startsWith("/connectors"));
     // WARP-3532 added Work notifications as a third sibling; like the other two it
     // is plumbing (where work updates GO), not a practice data surface.
     expect(reached).toEqual([
-      "/integrations",
-      "/integrations/credentials",
-      "/integrations/work-notifications",
+      "/connectors",
+      "/connectors/credentials",
+      "/connectors/work-notifications",
     ]);
   });
 });

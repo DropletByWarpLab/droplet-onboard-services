@@ -4,7 +4,7 @@
  *
  * WARP-2650 shipped the Atlassian descriptor with `catalog?: never` and
  * recorded the consequence as its first gap: the provider was invisible on
- * `/integrations`, reachable only from `/integrations/credentials`. A customer
+ * `/connectors`, reachable only from `/connectors/credentials`. A customer
  * looking for "connect Jira" looks at the hub.
  *
  * Two halves are proved here, and the second matters as much as the first:
@@ -57,7 +57,7 @@ vi.mock("@/lib/api.erp", () => ({
 const push = vi.fn();
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push, replace: vi.fn(), back: vi.fn() }),
-  usePathname: () => "/integrations",
+  usePathname: () => "/connectors",
   useSearchParams: () => new URLSearchParams(),
 }));
 
@@ -79,7 +79,7 @@ vi.mock("@/components/integrations/ConnectWizard", () => ({
 }));
 
 import { fetchIntegrations } from "@/lib/api.erp";
-import IntegrationsPage from "@/app/integrations/page";
+import IntegrationsPage from "@/app/connectors/page";
 
 /**
  * The shipped MCP provider, read from the registry rather than typed as a
@@ -92,7 +92,7 @@ import IntegrationsPage from "@/app/integrations/page";
  * provider without being edited.
  */
 const MCP_ID = MCP_CONNECTORS[0]?.id ?? "";
-const CREDENTIALS_ROUTE = "/integrations/credentials";
+const CREDENTIALS_ROUTE = "/connectors/credentials";
 
 const conn = (
   provider: string,

@@ -126,7 +126,7 @@ export function ConnectionsOverviewCard({ overview, onOutcome }: ConnectionsOver
               <Pill key={`${item.family}:${item.provider}`} item={item} onOutcome={onOutcome} />
             ))}
             {more > 0 && (
-              <Link className="cc-pill" href="/integrations">
+              <Link className="cc-pill" href="/connectors">
                 {more} more
               </Link>
             )}
@@ -136,7 +136,7 @@ export function ConnectionsOverviewCard({ overview, onOutcome }: ConnectionsOver
 
       <div className="cc-foot">
         <p>Box-wide connections need an owner or admin. Personal accounts are yours.</p>
-        <Link className="cc-link" href="/integrations">
+        <Link className="cc-link" href="/connectors">
           Open Connectors
         </Link>
       </div>

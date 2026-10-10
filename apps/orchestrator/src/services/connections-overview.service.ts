@@ -60,7 +60,7 @@ export const MANAGE_HREF = {
   m365: "/settings#connected-accounts",
   mailbox: "/settings#email",
   calendar: "/calendar",
-  integration: "/integrations",
+  integration: "/connectors",
 } as const;
 
 /** CalendarSource.authMode values a person creates by hand; `google_oauth` / `m365_oauth` belong to those families. */
@@ -122,7 +122,7 @@ export function isCatalogAvailable(descriptor: ProviderDescriptor): boolean {
   return descriptor.catalog?.availability !== "coming-soon";
 }
 
-/** Same rule as GET /api/integrations/catalog's `connectInput`: how a card collects what the provider needs. */
+/** Same rule as GET /api/connectors/catalog's `connectInput`: how a card collects what the provider needs. */
 export type ConnectInputKind = "lan" | "lan_api" | "credentials" | "mcp" | null;
 export function connectInputFor(descriptor: ProviderDescriptor): ConnectInputKind {
   if (descriptor.lanProvisioning) return "lan";

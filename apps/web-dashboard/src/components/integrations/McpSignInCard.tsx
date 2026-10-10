@@ -280,7 +280,7 @@ export function McpSignInCard({
       )}
       {error && <p role="alert" className="type-footnote text-system-red">{error}</p>}
       {blockedCode === "remote_mcp_off" && isAdmin && (
-        <a className="type-caption-1 underline" style={{ color: "var(--brand)" }} href="/integrations/credentials">Open the remote MCP switch</a>
+        <a className="type-caption-1 underline" style={{ color: "var(--brand)" }} href="/connectors/credentials">Open the remote MCP switch</a>
       )}
       <ConfirmDialog
         open={confirming !== null}

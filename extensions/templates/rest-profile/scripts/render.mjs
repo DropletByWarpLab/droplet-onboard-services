@@ -7,7 +7,7 @@
 // edits ONE file, connector-draft.json, and this renders:
 //
 //   services/erp-connector/src/rest/vendors/<provider>.ts   the REST profile
-//   docs/integrations/<provider>.md                         the setup guide
+//   docs/connectors/<provider>.md                         the setup guide
 //   docs/security/allowed-egress.<provider>.draft.yaml      the egress entry
 //   docs/adr-042/<provider>.rows.md                         the ADR-042 rows
 //   DRAFT-CHECKLIST.md                                      what the PR still needs
@@ -251,7 +251,7 @@ function renderChecklist(draft) {
     `- [ ] Add a ProviderDescriptor in packages/shared-types/src/provider-registry.ts.`,
     `- [ ] Add ${p} to CLOUD_PROVIDERS and its fact_pins in scripts/check-setup-guides.sh.`,
     `- [ ] Index the guide in SETUP.md §3.3 and import it (?raw) in apps/web-dashboard integration-guides.ts.`,
-    `- [ ] Wire every dataset through the four lists in docs/integrations/ADD-A-PROVIDER.md §7b.`,
+    `- [ ] Wire every dataset through the four lists in docs/connectors/ADD-A-PROVIDER.md §7b.`,
     `- [ ] Write the vendor test (host guard, fieldMap paths, pagination) in services/erp-connector/__tests__.`,
     `- [ ] Paste the egress entries into docs/security/allowed-egress.yaml, under security review.`,
     `- [ ] Paste the three ADR-042 rows, with the Verified cell filled by whoever verified them.`,

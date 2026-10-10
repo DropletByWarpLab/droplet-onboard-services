@@ -148,9 +148,9 @@ export const SPACES: SpaceDef[] = [
       "/devices",
       "/voice",
       "/remote-access",
-      "/integrations",
-      "/integrations/credentials",
-      "/integrations/work-notifications",
+      "/connectors",
+      "/connectors/credentials",
+      "/connectors/work-notifications",
     ],
   },
   {

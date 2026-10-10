@@ -83,6 +83,19 @@ const nextConfig = {
     // so a generated artifact cannot navigate its frame to a remote site.
     return [{ source: "/:path*", headers: [{ key: "Content-Security-Policy", value: "frame-src 'self' blob:" }] }];
   },
+  // WARP-3956 — the section was renamed Integrations → Connectors. The old
+  // page URLs stay alive as permanent redirects (bookmarks, emailed links,
+  // OAuth return URLs from an older box). Next preserves the query string,
+  // so `/integrations/credentials?mcp=atlassian:connected` lands on
+  // `/connectors/credentials?mcp=atlassian:connected`. Page paths only: the
+  // API (`/api/integrations/*`) was a hard cut with no alias.
+  async redirects() {
+    return [
+      { source: "/integrations", destination: "/connectors", permanent: true },
+      { source: "/integrations/:path*", destination: "/connectors/:path*", permanent: true },
+      { source: "/help/integrations/:path*", destination: "/help/connectors/:path*", permanent: true },
+    ];
+  },
 };
 
 module.exports = nextConfig;

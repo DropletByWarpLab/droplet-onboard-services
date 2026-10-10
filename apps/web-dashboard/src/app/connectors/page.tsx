@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Integrations hub (/integrations) — every system Droplet can connect to, in
+ * Integrations hub (/connectors) — every system Droplet can connect to, in
  * one place (design brief §3). WARP-1101.
  *
  * WARP-2291: dispatch is data, not a vendor name. Both handlers used to be a
@@ -140,7 +140,7 @@ export default function IntegrationsPage() {
       {/* Connected strip */}
       <div className="card" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, marginBottom: 14 }}>
         <span className="type-footnote text-label-secondary">Link pull requests, commits, and branches to project work items.</span>
-        <Link className="btn secondary" href="/integrations/development">Configure development links</Link>
+        <Link className="btn secondary" href="/connectors/development">Configure development links</Link>
       </div>
       {connected.length > 0 && (
         <>

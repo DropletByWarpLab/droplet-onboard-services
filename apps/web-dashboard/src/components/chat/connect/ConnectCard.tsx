@@ -65,7 +65,7 @@ function initialOf(name: string): string {
 
 /** Where `href` lives, for link text: "Connectors", "Settings", or null. */
 function placeOf(href: string): "Connectors" | "Settings" | null {
-  if (href === "/integrations" || href.startsWith("/integrations/") || href.startsWith("/integrations?")) return "Connectors";
+  if (href === "/connectors" || href.startsWith("/connectors/") || href.startsWith("/connectors?")) return "Connectors";
   if (href === "/settings" || href.startsWith("/settings/") || href.startsWith("/settings?") || href.startsWith("/settings#")) return "Settings";
   return null;
 }

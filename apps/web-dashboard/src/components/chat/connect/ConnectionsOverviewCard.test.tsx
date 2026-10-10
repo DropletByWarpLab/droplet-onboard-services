@@ -37,7 +37,7 @@ function row(over: RawRow = {}): RawRow {
     scope: "box",
     status: "connected",
     capabilities: ["payouts", "charges"],
-    manageHref: "/integrations",
+    manageHref: "/connectors",
     canDisconnect: true,
     canReconnect: false,
     ...over,
@@ -85,9 +85,9 @@ describe("ConnectionsOverviewCard — counts and rows", () => {
   });
 
   it("names the row, links it to where it is managed, and shows what it reads", () => {
-    setup(overview([row({ manageHref: "/integrations", statusDetail: undefined })]));
+    setup(overview([row({ manageHref: "/connectors", statusDetail: undefined })]));
     const item = screen.getByTestId("connection-row");
-    expect(within(item).getByRole("link", { name: "Stripe" })).toHaveAttribute("href", "/integrations");
+    expect(within(item).getByRole("link", { name: "Stripe" })).toHaveAttribute("href", "/connectors");
     expect(item).toHaveTextContent("acct_1A2B · payouts, charges · box-wide");
   });
 
@@ -123,7 +123,7 @@ describe("ConnectionsOverviewCard — counts and rows", () => {
 
   it("always offers the way into the Connectors hub", () => {
     setup(overview([row()]));
-    expect(screen.getByRole("link", { name: "Open Connectors" })).toHaveAttribute("href", "/integrations");
+    expect(screen.getByRole("link", { name: "Open Connectors" })).toHaveAttribute("href", "/connectors");
   });
 });
 
@@ -180,7 +180,7 @@ describe("ConnectionsOverviewCard — Available to connect", () => {
     const many = Array.from({ length: 12 }, (_, i) => available(i + 1));
     setup(overview([], many));
     expect(screen.getAllByRole("button", { name: /^Provider \d+$/ })).toHaveLength(MAX_AVAILABLE_PILLS);
-    expect(screen.getByRole("link", { name: "3 more" })).toHaveAttribute("href", "/integrations");
+    expect(screen.getByRole("link", { name: "3 more" })).toHaveAttribute("href", "/connectors");
     expect(screen.queryByRole("button", { name: "Provider 10" })).toBeNull();
   });
 

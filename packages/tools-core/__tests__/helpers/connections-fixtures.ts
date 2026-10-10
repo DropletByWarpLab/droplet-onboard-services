@@ -29,7 +29,7 @@ export const stripeRow = {
   status: "connected",
   capabilities: ["payouts", "charges"],
   lastSyncAt: "2026-10-08T09:00:00.000Z",
-  manageHref: "/integrations/stripe",
+  manageHref: "/connectors/stripe",
   canDisconnect: true,
   canReconnect: false,
 } as const;
@@ -83,8 +83,8 @@ export const stripeCard = {
   scope: "box",
   summary: "Reads payouts, charges, customers · polled every 15 min",
   safety: "setup-internet",
-  helpHref: "/help/integrations/stripe",
-  manageHref: "/integrations/stripe",
+  helpHref: "/help/connectors/stripe",
+  manageHref: "/connectors/stripe",
   mode: "credentials",
   fields: [
     {
@@ -97,7 +97,7 @@ export const stripeCard = {
       help: "Create a restricted key with read access in the Stripe dashboard.",
     },
   ],
-  post: { path: "/api/integrations/stripe/connect" },
+  post: { path: "/api/connectors/stripe/connect" },
 } as const;
 
 export const googleCard = {
@@ -126,10 +126,10 @@ export const blockedCard = {
   scope: "box",
   summary: "Reads payouts, charges, customers · polled every 15 min",
   safety: "setup-internet",
-  manageHref: "/integrations/stripe",
+  manageHref: "/connectors/stripe",
   mode: "credentials",
   fields: [],
-  post: { path: "/api/integrations/stripe/connect" },
+  post: { path: "/api/connectors/stripe/connect" },
   blocked: {
     reason: "role",
     message: "Stripe is shared by the whole box, so an owner or admin has to connect it.",

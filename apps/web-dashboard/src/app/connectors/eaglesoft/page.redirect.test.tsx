@@ -16,7 +16,7 @@ vi.mock("next/navigation", () => ({
 
 import EaglesoftRedirect from "./page";
 
-describe("/integrations/eaglesoft", () => {
+describe("/connectors/eaglesoft", () => {
   beforeEach(() => {
     redirect.mockClear();
   });

@@ -1547,7 +1547,7 @@ export class XeroConnector implements Connector {
    * which would let an arithmetic run on columns that mean something else.
    *
    * Consequently NOT a sync dataset and NOT promised on the customer page
-   * (`docs/integrations/xero.md`): nothing in the product calls this today.
+   * (`docs/connectors/xero.md`): nothing in the product calls this today.
    * It is kept, tested, as the one journal read a Custom Connection can be
    * granted, so the day WARP-2414 names a dataset the endpoint and its
    * `If-Modified-Since` handling are already right.
@@ -1622,7 +1622,7 @@ export class XeroConnector implements Connector {
    * one thing ADR-042 §6 says we generally cannot do — *"we cannot rotate what
    * we did not mint"* — and Xero is the exception worth taking: the customer's
    * Custom Connection is BILLED MONTHLY, per organisation, so one left behind
-   * on a decommissioned box keeps charging them. `docs/integrations/xero.md`
+   * on a decommissioned box keeps charging them. `docs/connectors/xero.md`
    * says exactly that under Revocation.
    *
    * Deliberately NOT wired into the generic `disconnect()` route, and that is a

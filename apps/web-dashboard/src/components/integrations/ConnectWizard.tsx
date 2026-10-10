@@ -28,7 +28,7 @@
  * credential flow, which asks for exactly the fields the descriptor declares
  * and nothing that cannot be answered for a cloud API. No vendor id appears in
  * this file, and a test asserts that — matching what WARP-2291 achieved for
- * `app/integrations/page.tsx`.
+ * `app/connectors/page.tsx`.
  *
  * A new provider therefore needs NO change here. Registering a descriptor with
  * `credentialFields` is the whole of it, which is what the runtime-registered

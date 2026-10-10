@@ -64,7 +64,7 @@ Tick the data scopes Droplet may read (all on by default; each labelled where it
 
 Review the summary (server, database, account, version, scopes, mode) and **Connect**. Droplet starts reading the data you chose. Nothing leaves your network.
 
-**Result:** the connection goes green ("Connected"), and the provider's dashboard surface (e.g. `/integrations/eaglesoft`) populates — schedule, patients, financials — each time-stamped ("synced N min ago").
+**Result:** the connection goes green ("Connected"), and the provider's dashboard surface (e.g. `/connectors/eaglesoft`) populates — schedule, patients, financials — each time-stamped ("synced N min ago").
 
 > While the live driver for a provider is still being finished, a successful setup lands the connection in **"connecting / not connected"** rather than green — Droplet never shows a fake "connected". See [`README.md`](README.md) §7.
 

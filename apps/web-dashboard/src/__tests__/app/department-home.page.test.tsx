@@ -185,7 +185,7 @@ describe("/d/<slug> — set up", () => {
     departmentId: "sec",
     template: "it" as const,
     icon: "shield-check",
-    navHrefs: ["/cameras", "/network", "/integrations", "/gone"],
+    navHrefs: ["/cameras", "/network", "/connectors", "/gone"],
     homeWidgets: [
       { widget: "quick-links", size: "m" as const },
       { widget: "mystery-widget", size: "m" as const },

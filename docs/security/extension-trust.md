@@ -204,7 +204,7 @@ statement alone.
   data off the box. A tool whose domain is a connector (`cloud`, `erp`), or
   whose route goes through the egress screen (`/api/web/`, so
   `get_weather`, `currency_convert`), a connector (`/api/erp/`, so
-  `cloud_query_dataset`; `/api/integrations/`), the model (`/api/llm/`: the
+  `cloud_query_dataset`; `/api/connectors/`), the model (`/api/llm/`: the
   provider may be a cloud one) or a mail account (`/api/email/`), or that
   has no route entry, is a `403 off_box_tool_refused` whatever the
   allowlist says, and the allowlist's test refuses such an entry. Writes

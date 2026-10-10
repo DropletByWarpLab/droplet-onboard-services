@@ -14,7 +14,7 @@ import { redirect } from "next/navigation";
  *
  * Server-side redirect on the `/clips` → `/events` precedent: the page holds
  * no state worth preserving, and Next renders the redirect at request time.
- * The ORCHESTRATOR path `/api/integrations/eaglesoft/*` is untouched — it is
+ * The ORCHESTRATOR path `/api/connectors/eaglesoft/*` is untouched — it is
  * the provider's API namespace, not a human destination, and moving it would
  * be a breaking API change for no reason.
  */

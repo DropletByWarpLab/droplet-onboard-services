@@ -1,6 +1,6 @@
 # `<Vendor>` — getting your credential
 
-> **Template, not a guide.** Copy this file to `docs/integrations/<vendor>.md` when a cloud connector ships, replace every angle-bracket placeholder, and add a link to it in [`SETUP.md`](SETUP.md) §8. Delete this blockquote.
+> **Template, not a guide.** Copy this file to `docs/connectors/<vendor>.md` when a cloud connector ships, replace every angle-bracket placeholder, and add a link to it in [`SETUP.md`](SETUP.md) §8. Delete this blockquote.
 >
 > **Audience:** the business owner or office manager who has an account with `<Vendor>` and is being asked, by the Droplet dashboard, to paste something they do not have yet.
 >

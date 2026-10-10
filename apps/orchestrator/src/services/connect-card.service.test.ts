@@ -382,7 +382,7 @@ describe("unavailable", () => {
   it("an MCP provider hands off to the credentials page in Integrations, with nothing to post from the card", async () => {
     const card = await cardFor(owner, integration("atlassian"));
     expect(card.blocked).toBeUndefined();
-    expect(card).toMatchObject({ mode: "wizard", provider: "atlassian", wizardHref: "/integrations/credentials", safety: "setup-internet" });
+    expect(card).toMatchObject({ mode: "wizard", provider: "atlassian", wizardHref: "/connectors/credentials", safety: "setup-internet" });
     expect(card).not.toHaveProperty("post");
     expect(card).not.toHaveProperty("fields");
     if (card.mode === "wizard") expect(card.steps.length).toBeGreaterThan(0);
@@ -407,9 +407,9 @@ describe("credentials cards", () => {
       category: "Payments",
       scope: "box",
       safety: "setup-internet",
-      helpHref: "/help/integrations/stripe",
-      manageHref: "/integrations",
-      post: { path: "/api/integrations/stripe/connect" },
+      helpHref: "/help/connectors/stripe",
+      manageHref: "/connectors",
+      post: { path: "/api/connectors/stripe/connect" },
     });
     expect(card.summary).toBe("Reads invoices, charges · read-only by default");
     if (card.mode !== "credentials") throw new Error("expected credentials");
@@ -445,7 +445,7 @@ describe("credentials cards", () => {
       expect(variant.fields.map((f) => f.name)).toEqual(expected.fields.map((f) => f.name));
       for (const field of variant.fields) if (field.secret) expect(field.type).toBe("password");
     }
-    expect(card.post.path).toBe("/api/integrations/xero/connect");
+    expect(card.post.path).toBe("/api/connectors/xero/connect");
   });
 
   it("the fields are the descriptor's, in order, with every descriptor secret masked", async () => {
@@ -472,8 +472,8 @@ describe("wizard cards", () => {
       safety: "setup-lan",
       scope: "box",
       estimate: "about 10 minutes",
-      wizardHref: "/integrations?connect=eaglesoft",
-      manageHref: "/integrations",
+      wizardHref: "/connectors?connect=eaglesoft",
+      manageHref: "/connectors",
     });
     if (card.mode !== "wizard") throw new Error("expected wizard");
     expect(card.steps).toHaveLength(4);
@@ -484,7 +484,7 @@ describe("wizard cards", () => {
 
   it("the Patterson API transport also goes through the wizard, never a form on this card", async () => {
     const card = await cardFor(owner, integration("eaglesoft-api"));
-    expect(card).toMatchObject({ mode: "wizard", safety: "setup-lan", wizardHref: "/integrations?connect=eaglesoft-api" });
+    expect(card).toMatchObject({ mode: "wizard", safety: "setup-lan", wizardHref: "/connectors?connect=eaglesoft-api" });
     expect(card).not.toHaveProperty("fields");
   });
 
@@ -513,7 +513,7 @@ describe("wizard cards", () => {
       if (input === "credentials") expect(card.mode, descriptor.id).toBe("credentials");
       else expect(card.mode, descriptor.id).toBe("wizard");
       if (input === "lan") expect(card.safety, descriptor.id).toBe("setup-lan");
-      if (input === "lan" || input === "lan_api") expect(card.mode === "wizard" && card.wizardHref, descriptor.id).toBe(`/integrations?connect=${descriptor.id}`);
+      if (input === "lan" || input === "lan_api") expect(card.mode === "wizard" && card.wizardHref, descriptor.id).toBe(`/connectors?connect=${descriptor.id}`);
       if (!input) expect(card.blocked?.reason, descriptor.id).toBe("unavailable");
     }
   });
@@ -675,7 +675,7 @@ describe.each([
     for (const target of allTargets()) {
       const card = await cardFor(actor, target);
       if (card.mode === "oauth") expect(CONNECT_OAUTH_START_PATHS).toContain(card.start.path);
-      if (card.mode === "credentials") expect(card.post.path).toBe(`/api/integrations/${card.provider}/connect`);
+      if (card.mode === "credentials") expect(card.post.path).toBe(`/api/connectors/${card.provider}/connect`);
       if (card.mode === "mailbox") expect(card.post.path).toBe("/api/email/accounts");
       if (card.mode === "calendar") expect(card.post.path).toBe("/api/calendar/sources");
       if (card.mode === "credentials" || card.mode === "mailbox" || card.mode === "calendar") expect(isAllowedConnectPostPath(card.post.path)).toBe(true);
@@ -743,7 +743,7 @@ describe("setup descriptors", () => {
       else expect(card.blocked?.reason, descriptor.id).toBe("unavailable");
       if (descriptor.track === "mcp" && isCatalogAvailable(descriptor)) {
         expect(card.mode).toBe("wizard");
-        expect(card).toMatchObject({ wizardHref: "/integrations/credentials" });
+        expect(card).toMatchObject({ wizardHref: "/connectors/credentials" });
       }
     }
   });

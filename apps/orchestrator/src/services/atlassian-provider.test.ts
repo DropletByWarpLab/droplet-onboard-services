@@ -170,7 +170,7 @@ describe("the atlassian descriptor is an mcp track, not a cloud one", () => {
   });
 
   it("carries the setup guide the customer cannot connect without", () => {
-    expect(setupGuideHrefFor(atlassian())).toBe("/help/integrations/atlassian");
+    expect(setupGuideHrefFor(atlassian())).toBe("/help/connectors/atlassian");
   });
 
   it("registers the ONE host the integration dials, and only that one", () => {
@@ -409,7 +409,7 @@ describe("the connect flow writes the row #1964's third gate looks for", () => {
     // The one thing the browser learns about the secret.
     expect(view.fields.find((f) => f.name === "apiToken")?.hasValue).toBe(true);
     expect(view.state).toBe("CONNECTED");
-    expect(view.setupGuideHref).toBe("/help/integrations/atlassian");
+    expect(view.setupGuideHref).toBe("/help/connectors/atlassian");
     expect(view.credentialExpiry).toEqual({ status: "VALID", daysRemaining: 272 });
   });
 

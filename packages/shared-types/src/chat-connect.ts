@@ -161,7 +161,7 @@ interface ConnectCardBase {
   /** What Droplet will read, one line: "Reads payouts, charges, customers · polled every 15 min". */
   summary: string;
   safety: ConnectSafety;
-  /** Same-origin help page, usually `/help/integrations/<provider>`. */
+  /** Same-origin help page, usually `/help/connectors/<provider>`. */
   helpHref?: string;
   /** Same-origin page where the connection is managed afterwards. */
   manageHref: string;
@@ -241,7 +241,7 @@ export interface ConnectionDisconnected {
  * the parser, so a persisted or model-shaped card cannot redirect a secret.
  */
 export const CONNECT_POST_PATH_RES: readonly RegExp[] = [
-  /^\/api\/integrations\/[a-z0-9][a-z0-9-]{0,63}\/connect$/,
+  /^\/api\/connectors\/[a-z0-9][a-z0-9-]{0,63}\/connect$/,
   /^\/api\/email\/accounts$/,
   /^\/api\/calendar\/sources$/,
 ];
@@ -265,7 +265,7 @@ export function isSafeDashboardHref(u: unknown): u is string {
 
 /** The one connect route a credentials card for `provider` may post to. */
 export function credentialsConnectPath(provider: string): string {
-  return `/api/integrations/${provider}/connect`;
+  return `/api/connectors/${provider}/connect`;
 }
 
 export function isAllowedConnectPostPath(p: unknown): p is string {

@@ -11,12 +11,12 @@
  *   - The walk-up loops this file replaces (`let dir = process.cwd(); for …`)
  *     did not fail when cwd was wrong — they kept climbing until SOME
  *     directory matched. Given a cwd inside a different checkout, or any
- *     unrelated directory that happens to contain a `docs/integrations/`, they
+ *     unrelated directory that happens to contain a `docs/connectors/`, they
  *     resolve to that tree and the suite then asserts a source contract about
  *     files it never read. That is the failure mode the comments on those
  *     loops said they were guarding against, and it is the one the loop
  *     created. Proven: with cwd in a scratch directory holding nothing but
- *     `docs/integrations/totally-not-a-provider.md`, the guide-bundling gate
+ *     `docs/connectors/totally-not-a-provider.md`, the guide-bundling gate
  *     compared the shipped bundle against that scratch directory.
  *
  * A test file's location relative to its package is a fact the repo already
@@ -139,7 +139,7 @@ export function packagePath(relative: string): string {
   );
 }
 
-/** An absolute path inside the monorepo, e.g. `"docs/integrations"`. */
+/** An absolute path inside the monorepo, e.g. `"docs/connectors"`. */
 export function repoPath(relative: string): string {
   return contain(REPO_ROOT, resolve(REPO_ROOT, relative), "monorepo root", relative);
 }

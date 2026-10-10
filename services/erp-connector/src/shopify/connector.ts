@@ -66,7 +66,7 @@
  *
  * Both are detected from the GRANTED SCOPE LIST the token mint returns, plus a
  * probe, rather than guessed. WARP-2299's spike record — what a live store must
- * show, and what to check on day one — is in `docs/integrations/shopify.md`.
+ * show, and what to check on day one — is in `docs/connectors/shopify.md`.
  *
  * ## The ADR-041 conditions, as they land here
  *
@@ -917,7 +917,7 @@ export interface ShopifyConnectorDeps {
  * fulfilment all read correctly, and only the customer identities are withheld.
  * Rendering that as a broken integration would send a merchant to re-paste
  * credentials that are fine, and would hide the one thing they can act on — the
- * plan. `docs/integrations/shopify.md` makes the same promise to the customer:
+ * plan. `docs/connectors/shopify.md` makes the same promise to the customer:
  * a Basic store "still gets a genuinely useful connection".
  */
 export type ShopifyConnectionState =

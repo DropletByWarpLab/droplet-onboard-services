@@ -100,7 +100,7 @@ Direct database access is powerful and **not sanctioned by Patterson** — clear
 | Piece | State |
 |---|---|
 | Connector foundation (interface, registries, schema-map/fingerprint, provisioning SQL, version/catalog detect, tools) | **Merged** — PR #901 + corrections (`9f50018e`). Live I/O throws `ConnectorBlockedError`. |
-| Dashboard (`/integrations` + `/integrations/eaglesoft`) | **Built** — PR #900 (design-reconciled). |
+| Dashboard (`/connectors` + `/connectors/eaglesoft`) | **Built** — PR #900 (design-reconciled). |
 | Orchestrator API + service layer | **Built** — PR #916. |
 | Copy-DB harness (Postgres mock runs in CI; real dbsrv17 template documented) | **Merged** — PR #909. |
 | **Python/ODBC driver bridge + Dockerfile** (WARP-1106) | **Built** — `services/erp-sql-bridge` (FastAPI + unixODBC + pyodbc), the `erp` compose profile, and `SqlBridgeClient` on the TS side. `scripts/test-erp-sql-bridge.sh` proves the whole path — real connector → real bridge → real database — against a Postgres stand-in (psqlODBC), because the SAP client cannot exist in CI. |

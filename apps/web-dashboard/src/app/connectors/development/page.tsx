@@ -106,7 +106,7 @@ export default function DevelopmentSettingsPage() {
         <button type="button" className="btn secondary" onClick={() => void discover()} disabled={loading}>
           <RefreshCw size={14} aria-hidden /> {loading ? "Discovering…" : "Discover repositories"}
         </button>
-        <Link href="/integrations" className="type-footnote">Manage integration credentials</Link>
+        <Link href="/connectors" className="type-footnote">Manage integration credentials</Link>
       </div>
       {error && <div className="card" role="alert" style={{ marginTop: 12, color: "var(--danger-ink)" }}>{error}</div>}
       {notice && <div className="card" role="status" style={{ marginTop: 12 }}>{notice}</div>}

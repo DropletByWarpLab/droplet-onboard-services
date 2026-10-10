@@ -195,25 +195,25 @@ describe("gap (b) — the Integrations item is gated", () => {
     render(<Sidebar />);
     expect(
       within(desktopAside()).getByRole("link", { name: /^integrations$/i }),
-    ).toHaveAttribute("href", "/integrations");
+    ).toHaveAttribute("href", "/connectors");
   });
 
   it("never offers it from the main tree — Settings owns the way in", () => {
     pathnameRef.current = "/";
     render(<Sidebar />);
-    expect(document.querySelector("a[href='/integrations']")).toBeNull();
+    expect(document.querySelector("a[href='/connectors']")).toBeNull();
     expect(
-      document.querySelector("a[href='/integrations/credentials']"),
+      document.querySelector("a[href='/connectors/credentials']"),
     ).toBeNull();
   });
 
   it("a staff (family) member does NOT — the orchestrator gates erp.ts owner/admin", () => {
     authRef.current = { ...authRef.current, role: "family" };
     render(<Sidebar />);
-    expect(document.querySelector("a[href='/integrations']")).toBeNull();
+    expect(document.querySelector("a[href='/connectors']")).toBeNull();
     // Its child must not be orphaned into the drawer either — the gap-(a) fix
     // is what stops the flattened child outliving its hidden parent.
-    expect(document.querySelector("a[href='/integrations/credentials']")).toBeNull();
+    expect(document.querySelector("a[href='/connectors/credentials']")).toBeNull();
     // WARP-2560 (ADR-044) — the practice surface is no longer a child of
     // Integrations; it is /practice in the Business group, carrying the SAME
     // owner/admin gate. Moving a destination between groups must not widen
@@ -224,7 +224,7 @@ describe("gap (b) — the Integrations item is gated", () => {
   it("a guest does NOT", () => {
     authRef.current = { ...authRef.current, role: "guest" };
     render(<Sidebar />);
-    expect(document.querySelector("a[href='/integrations']")).toBeNull();
+    expect(document.querySelector("a[href='/connectors']")).toBeNull();
   });
 });
 

@@ -27,8 +27,8 @@ const BASE = {
   scope: "box",
   summary: "Reads invoices, charges · read-only by default",
   safety: "setup-internet",
-  helpHref: "/help/integrations/stripe",
-  manageHref: "/integrations",
+  helpHref: "/help/connectors/stripe",
+  manageHref: "/connectors",
 } as const;
 
 const KEY_FIELD = { name: "apiKey", label: "Stripe restricted key", type: "password", required: true, secret: true, pattern: "^rk_(live|test)_" };
@@ -37,7 +37,7 @@ const credentialsCard = (over: Record<string, unknown> = {}) => ({
   ...BASE,
   mode: "credentials",
   fields: [KEY_FIELD],
-  post: { path: "/api/integrations/stripe/connect" },
+  post: { path: "/api/connectors/stripe/connect" },
   ...over,
 });
 
@@ -97,7 +97,7 @@ const wizardCard = (over: Record<string, unknown> = {}) => ({
   mode: "wizard",
   steps: ["Find the server on your network", "Confirm and connect"],
   estimate: "about 10 minutes",
-  wizardHref: "/integrations?connect=eaglesoft",
+  wizardHref: "/connectors?connect=eaglesoft",
   ...over,
 });
 
@@ -109,7 +109,7 @@ const row = (over: Record<string, unknown> = {}) => ({
   scope: "box",
   status: "connected",
   capabilities: ["invoices", "charges"],
-  manageHref: "/integrations",
+  manageHref: "/connectors",
   canDisconnect: true,
   canReconnect: false,
   ...over,
@@ -119,11 +119,11 @@ const row = (over: Record<string, unknown> = {}) => ({
 
 describe("isSafeDashboardHref", () => {
   it.each([
-    "/integrations",
+    "/connectors",
     "/settings#connected-accounts",
-    "/integrations?connect=eaglesoft",
-    "/help/integrations/stripe",
-    "/integrations?next=../x", // `..` in a query value is data, not a path segment
+    "/connectors?connect=eaglesoft",
+    "/help/connectors/stripe",
+    "/connectors?next=../x", // `..` in a query value is data, not a path segment
   ])("accepts %s", (u) => expect(isSafeDashboardHref(u)).toBe(true));
 
   it.each([
@@ -150,19 +150,19 @@ describe("isSafeDashboardHref", () => {
 
 describe("post and oauth path allowlists", () => {
   it.each([
-    "/api/integrations/stripe/connect",
-    "/api/integrations/quickbooks-online/connect",
+    "/api/connectors/stripe/connect",
+    "/api/connectors/quickbooks-online/connect",
     "/api/email/accounts",
     "/api/calendar/sources",
   ])("allows posting to %s", (p) => expect(isAllowedConnectPostPath(p)).toBe(true));
 
   it.each([
-    "/api/integrations/stripe/disconnect",
-    "/api/integrations/stripe/credentials",
-    "/api/integrations/Stripe/connect",
-    "/api/integrations/../email/accounts/connect",
-    "/api/integrations//connect",
-    "/api/integrations/stripe/connect/extra",
+    "/api/connectors/stripe/disconnect",
+    "/api/connectors/stripe/credentials",
+    "/api/connectors/Stripe/connect",
+    "/api/connectors/../email/accounts/connect",
+    "/api/connectors//connect",
+    "/api/connectors/stripe/connect/extra",
     "/api/email/accounts/abc",
     "/api/email/accounts?x=1",
     "/api/files/upload",
@@ -254,7 +254,7 @@ describe("parseConnectCard", () => {
   it("accepts a valid mailbox card, a valid calendar card and a valid wizard card", () => {
     expect(parseConnectCard(mailboxCard())).toMatchObject({ mode: "mailbox", post: { path: "/api/email/accounts" } });
     expect(parseConnectCard(calendarCard())).toMatchObject({ mode: "calendar", post: { path: "/api/calendar/sources" } });
-    expect(parseConnectCard(wizardCard())).toMatchObject({ mode: "wizard", wizardHref: "/integrations?connect=eaglesoft", estimate: "about 10 minutes" });
+    expect(parseConnectCard(wizardCard())).toMatchObject({ mode: "wizard", wizardHref: "/connectors?connect=eaglesoft", estimate: "about 10 minutes" });
   });
 
   it("is idempotent: parsing a parsed card changes nothing", () => {
@@ -273,20 +273,20 @@ describe("parseConnectCard", () => {
 
   describe("credentials cards", () => {
     it.each([
-      "/api/integrations/stripe/disconnect",
+      "/api/connectors/stripe/disconnect",
       "/api/files/upload",
-      "https://evil.example/api/integrations/stripe/connect",
-      "//evil.example/api/integrations/stripe/connect",
-      "/api/integrations/../email/accounts",
-      "/api/integrations/stripe/connect/extra",
-      "/api/integrations/Stripe/connect",
+      "https://evil.example/api/connectors/stripe/connect",
+      "//evil.example/api/connectors/stripe/connect",
+      "/api/connectors/../email/accounts",
+      "/api/connectors/stripe/connect/extra",
+      "/api/connectors/Stripe/connect",
     ])("rejects a post.path of %s that is off the allowlist", (path) => {
       expect(parseConnectCard(credentialsCard({ post: { path } }))).toBeNull();
     });
 
     it("rejects a card with no post at all", () => {
       expect(parseConnectCard(credentialsCard({ post: undefined }))).toBeNull();
-      expect(parseConnectCard(credentialsCard({ post: "/api/integrations/stripe/connect" }))).toBeNull();
+      expect(parseConnectCard(credentialsCard({ post: "/api/connectors/stripe/connect" }))).toBeNull();
     });
 
     it("strips a default off a secret field and coerces it to a password field", () => {
@@ -342,7 +342,7 @@ describe("parseConnectCard", () => {
   });
 
   describe("oauth cards", () => {
-    it.each(["/api/google/callback", "/api/integrations/stripe/connect", "/api/m365/connect/", "https://accounts.google.com/o/oauth2/auth", "/api/google/connect?x=1", ""])(
+    it.each(["/api/google/callback", "/api/connectors/stripe/connect", "/api/m365/connect/", "https://accounts.google.com/o/oauth2/auth", "/api/google/connect?x=1", ""])(
       "rejects start.path %j",
       (path) => expect(parseConnectCard(oauthCard({ start: { path } }))).toBeNull(),
     );
@@ -370,7 +370,7 @@ describe("parseConnectCard", () => {
   describe("mailbox and calendar cards", () => {
     it.each([
       "/api/calendar/sources",
-      "/api/integrations/stripe/connect",
+      "/api/connectors/stripe/connect",
       "/api/email/accounts/abc",
       "https://evil.example/api/email/accounts",
       "//evil.example/api/email/accounts",
@@ -379,7 +379,7 @@ describe("parseConnectCard", () => {
       expect(parseConnectCard(mailboxCard({ post: { path } }))).toBeNull();
     });
 
-    it.each(["/api/email/accounts", "/api/integrations/stripe/connect", "https://evil.example/api/calendar/sources"])(
+    it.each(["/api/email/accounts", "/api/connectors/stripe/connect", "https://evil.example/api/calendar/sources"])(
       "rejects a calendar card whose post.path is %j",
       (path) => {
         expect(parseConnectCard(calendarCard({ post: { path } }))).toBeNull();
@@ -557,16 +557,16 @@ describe("connectOutcomeTurn", () => {
 
 describe("a credentials card posts to its OWN provider's connect route", () => {
   it("names the route from the provider", () => {
-    expect(credentialsConnectPath("stripe")).toBe("/api/integrations/stripe/connect");
+    expect(credentialsConnectPath("stripe")).toBe("/api/connectors/stripe/connect");
   });
 
   it("accepts the matching route", () => {
-    const card = parseConnectCard(credentialsCard({ provider: "stripe", post: { path: "/api/integrations/stripe/connect" } }));
+    const card = parseConnectCard(credentialsCard({ provider: "stripe", post: { path: "/api/connectors/stripe/connect" } }));
     expect(card?.mode).toBe("credentials");
   });
 
   it.each([
-    "/api/integrations/hubspot/connect", // another provider's allowlisted route
+    "/api/connectors/hubspot/connect", // another provider's allowlisted route
     "/api/email/accounts", // an allowlisted route of a different family
     "/api/calendar/sources",
   ])("refuses an allowlisted route that is not this provider's (%s)", (path) => {
