@@ -1,5 +1,5 @@
 /**
- * WARP-2485 — the `/api/integrations` prefix is shared by more than one
+ * WARP-2485 — the `/api/connectors` prefix is shared by more than one
  * router, so "which router answers this URL?" is decided by mount order in
  * `app.ts`. That made the mount-order comment there load-bearing, and it was
  * wrong: it claimed the SaaS credential router is mounted *after* the ERP
@@ -23,9 +23,9 @@
  * `router.stack` is read off the real Express instances the app mounts.
  *
  * When PR #1829 (WARP-2463) lands it adds a third router under this prefix,
- * `createErpDriftRouter` (`/integrations/drift/:connectionId`). Add it to
- * ROUTERS below. It overlaps `/integrations/:provider/credentials` on the
- * single URL `/integrations/drift/credentials`, so that change must either
+ * `createErpDriftRouter` (`/connectors/drift/:connectionId`). Add it to
+ * ROUTERS below. It overlaps `/connectors/:provider/credentials` on the
+ * single URL `/connectors/drift/credentials`, so that change must either
  * make the patterns disjoint or record the exception here deliberately —
  * which is exactly the decision this file exists to force into the open.
  */
@@ -41,8 +41,8 @@ import { createSaasCredentialsRouter } from "./saas-credentials.js";
 import { createErpRouter } from "./erp.js";
 // WARP-2500 — the third router under this prefix, which the header above asks
 // the lander of PR #1829 to add. It is here now because WARP-2500 introduces
-// the first `/integrations/:provider/<verb>` patterns, and `:provider` is
-// exactly the shape that could swallow `/integrations/:connectionId/drift`.
+// the first `/connectors/:provider/<verb>` patterns, and `:provider` is
+// exactly the shape that could swallow `/connectors/:connectionId/drift`.
 // Enumerating it is what turns "they don't overlap" from a claim into a check.
 import { createErpDriftRouter } from "./erp-drift.js";
 
@@ -128,7 +128,7 @@ const PAIRS = ROUTES.flatMap((a, i) =>
     .map((b) => [a, b] as const),
 );
 
-describe("routers sharing the /api/integrations prefix", () => {
+describe("routers sharing the /api/connectors prefix", () => {
   /**
    * Guards against a vacuous pass. If a factory were refactored to register
    * nothing — or this file's stack reader stopped matching Express's shape —
@@ -140,38 +140,38 @@ describe("routers sharing the /api/integrations prefix", () => {
 
     expect(byOwner("createIntegrationsRouter")).toEqual(
       expect.arrayContaining([
-        "get /integrations",
-        "get /integrations/eaglesoft",
+        "get /connectors",
+        "get /connectors/eaglesoft",
         // WARP-2500 — the provider-scoped lifecycle verbs. Pinned by NAME as
         // well as swept by the pairwise checks below: the sweep can only find
         // a collision among routes that exist, so a refactor that dropped
         // these would make the disjointness checks pass by having nothing
         // left to collide.
-        "post /integrations/:provider/disconnect",
-        "post /integrations/:provider/write-enable",
-        "post /integrations/:provider/write-disable",
+        "post /connectors/:provider/disconnect",
+        "post /connectors/:provider/write-enable",
+        "post /connectors/:provider/write-disable",
         // WARP-2520 — the LAN provisioning verbs, parameterised for the same
         // reason and pinned by name for the same reason.
-        "post /integrations/:provider/connect",
-        "post /integrations/:provider/test",
+        "post /connectors/:provider/connect",
+        "post /connectors/:provider/test",
         // The deprecated Eaglesoft literal aliases, kept for one release.
         // Listed so their eventual REMOVAL is a deliberate edit to this
         // expectation rather than a silent deletion nothing notices.
-        "post /integrations/eaglesoft/disconnect",
-        "post /integrations/eaglesoft/write-enable",
-        "post /integrations/eaglesoft/write-disable",
-        "post /integrations/eaglesoft/connect",
-        "post /integrations/eaglesoft/test",
+        "post /connectors/eaglesoft/disconnect",
+        "post /connectors/eaglesoft/write-enable",
+        "post /connectors/eaglesoft/write-disable",
+        "post /connectors/eaglesoft/connect",
+        "post /connectors/eaglesoft/test",
       ]),
     );
     expect(byOwner("createErpDriftRouter")).toEqual([
-      "get /integrations/:connectionId/drift",
+      "get /connectors/:connectionId/drift",
     ]);
     expect(byOwner("createSaasCredentialsRouter")).toEqual(
       expect.arrayContaining([
-        "get /integrations/credentials",
-        "get /integrations/:provider/credentials",
-        "patch /integrations/:provider/credentials",
+        "get /connectors/credentials",
+        "get /connectors/:provider/credentials",
+        "patch /connectors/:provider/credentials",
       ]),
     );
     expect(byOwner("createErpRouter")).toEqual(
@@ -217,11 +217,11 @@ describe("routers sharing the /api/integrations prefix", () => {
    * would make any rename fail the list check before the collision check ever
    * ran, so the collision check itself would never be shown to work.
    *
-   * Mutation: change `/integrations/:provider/disconnect`'s last segment to
+   * Mutation: change `/connectors/:provider/disconnect`'s last segment to
    * `credentials`. All three parameterised routes are still registered, so the
    * non-vacuity guard below still passes, and the method-scoped sweep above
    * stays green because the credential routes are GET/PATCH and this one is
-   * POST. This test goes red, naming `/integrations/<provider>/credentials` as
+   * POST. This test goes red, naming `/connectors/<provider>/credentials` as
    * the URL that now matches two routers — which is the real-world failure:
    * a POST to it would reach the ERP router, and a later attempt to add
    * `POST /integrations/:provider/credentials` would be dead on arrival.

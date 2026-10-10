@@ -52,12 +52,12 @@ COPY packages/auth-policy ./packages/auth-policy
 COPY apps/web-dashboard ./apps/web-dashboard
 
 # WARP-2490: the customer integration guides are `?raw`-imported by
-# src/lib/integration-guides.ts as `../../../../docs/integrations/*.md` —
+# src/lib/integration-guides.ts as `../../../../docs/connectors/*.md` —
 # four levels up from apps/web-dashboard/src/lib is /app, so the markdown
-# must sit at /app/docs/integrations for `next build` to inline it into
+# must sit at /app/docs/connectors for `next build` to inline it into
 # the bundle. Build-time only: the text ships inside the JS, so the run
 # stage needs no copy of its own.
-COPY docs/integrations ./docs/integrations
+COPY docs/connectors ./docs/connectors
 
 # shared-types is type-only for web-dashboard, but build it so the
 # require() condition has a dist too (harmless, matches orchestrator).

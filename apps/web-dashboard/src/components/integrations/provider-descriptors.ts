@@ -142,14 +142,14 @@ const DIRECT_PROVIDER_KEYS: Readonly<Record<string, readonly string[]>> = {
  *  WARP-2560 (ADR-044) — Eaglesoft's detail surface is `/practice`, in the
  *  Business group. The hub tile still opens it from here; only the address
  *  changed. The old route redirects, so a stale cached bundle pointing at
- *  `/integrations/eaglesoft` still lands somewhere real. */
+ *  `/connectors/eaglesoft` still lands somewhere real. */
 const DETAIL_ROUTES: Readonly<Record<string, string>> = {
   eaglesoft: "/practice",
 };
 
 /** The descriptor-driven credential configurator — an MCP track's only connect
  *  surface (WARP-2275 / WARP-2659). */
-const CREDENTIALS_ROUTE = "/integrations/credentials";
+const CREDENTIALS_ROUTE = "/connectors/credentials";
 
 const COMING_SOON_REASON = "Available in a future update.";
 const NO_CONNECT_FLOW_REASON =
@@ -244,7 +244,7 @@ function descriptorFor(meta: ConnectorMeta): ProviderDescriptor {
  *    a form whose every step is a promise this track cannot keep.
  *  • **`connect` and `open` are the SAME route, deliberately.** WARP-2483's
  *    lesson is that a second "Connect" path alongside a stored credential can
- *    write a second one over a working one. `/integrations/credentials` renders
+ *    write a second one over a working one. `/connectors/credentials` renders
  *    one form per provider whose secret input says "Saved — replace to change",
  *    so first-run and re-entry are the same act on the same row. Splitting them
  *    would invent the double-store this avoids.

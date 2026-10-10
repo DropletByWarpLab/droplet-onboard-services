@@ -18,26 +18,26 @@ function appAs(role: string | null) {
 
 describe("native integration descriptor catalog", () => {
   it.each(["owner", "admin"])("%s sees every registered setup descriptor without a database lookup", async role => {
-    const response = await request(appAs(role)).get("/api/integrations/catalog");
+    const response = await request(appAs(role)).get("/api/connectors/catalog");
     expect(response.status).toBe(200);
     expect(response.body.providers.map((p: { provider: string }) => p.provider)).toEqual(providerDescriptors().map(p => p.id));
     expect(list).not.toHaveBeenCalled();
     const eaglesoft = response.body.providers.find((p: { provider: string }) => p.provider === "eaglesoft");
     expect(eaglesoft.connectInput).toBe("lan");
-    expect(eaglesoft.connectPath).toBe("/api/integrations/eaglesoft/connect");
+    expect(eaglesoft.connectPath).toBe("/api/connectors/eaglesoft/connect");
     expect(eaglesoft.lanProvisioning.script).toContain("CREATE USER droplet_ro IDENTIFIED BY '<GENERATED_BY_DROPLET>';");
     const api = response.body.providers.find((p: { provider: string }) => p.provider === "eaglesoft-api");
-    expect(api.connectInput).toBe("lan_api"); expect(api.testPath).toBe("/api/integrations/eaglesoft/test");
+    expect(api.connectInput).toBe("lan_api"); expect(api.testPath).toBe("/api/connectors/eaglesoft/test");
     const xero = response.body.providers.find((p: { provider: string }) => p.provider === "xero");
     expect(xero.credentialVariants.length).toBeGreaterThan(1);
     expect(xero.connectInput).toBe("credentials"); expect(xero.probedOnConnect).toBe(true);
   });
   it.each([null, "family", "guest", "service"])("%s cannot read administrative setup metadata", async role => {
-    const response = await request(appAs(role)).get("/api/integrations/catalog");
+    const response = await request(appAs(role)).get("/api/connectors/catalog");
     expect(response.status).toBe(403); expect(response.body.providers).toBeUndefined();
   });
   it("read-only and unsupported tracks expose no false write or connect controls", async () => {
-    const response = await request(appAs("owner")).get("/api/integrations/catalog");
+    const response = await request(appAs("owner")).get("/api/connectors/catalog");
     for (const provider of response.body.providers) {
       if (["rest", "mcp", "catalog-only"].includes(provider.track)) expect(provider.canEnableWrites).toBe(false);
       if (["mcp", "catalog-only"].includes(provider.track)) { expect(provider.connectPath).toBeNull(); expect(provider.testPath).toBeNull(); }

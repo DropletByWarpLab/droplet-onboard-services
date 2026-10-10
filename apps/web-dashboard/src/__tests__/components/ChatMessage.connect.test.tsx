@@ -24,10 +24,10 @@ const STRIPE_CARD = {
   scope: "box",
   summary: "Reads payouts, charges, customers · polled every 15 min",
   safety: "setup-internet",
-  manageHref: "/integrations",
+  manageHref: "/connectors",
   mode: "credentials",
   fields: [{ name: "apiKey", label: "Restricted key", type: "password", required: true, secret: true }],
-  post: { path: "/api/integrations/stripe/connect" },
+  post: { path: "/api/connectors/stripe/connect" },
 };
 
 const OVERVIEW = {
@@ -41,7 +41,7 @@ const OVERVIEW = {
       scope: "box",
       status: "connected",
       capabilities: ["payouts"],
-      manageHref: "/integrations",
+      manageHref: "/connectors",
       canDisconnect: true,
       canReconnect: false,
     },
@@ -131,7 +131,7 @@ describe("ChatMessage — connect cards", () => {
       expect(screen.queryByTestId("connect-card")).toBeNull();
       expect(document.querySelectorAll("input")).toHaveLength(0);
       expect(screen.queryByRole("button", { name: /connect stripe|not now/i })).toBeNull();
-      expect(screen.getByRole("link", { name: "Manage in Integrations" })).toHaveAttribute("href", "/integrations");
+      expect(screen.getByRole("link", { name: "Manage in Connectors" })).toHaveAttribute("href", "/connectors");
     });
 
     it("an older assistant message (not the last) is a compact row", () => {
@@ -163,8 +163,8 @@ describe("ChatMessage — connect cards", () => {
     await waitFor(() => expect(onConnectOutcome).toHaveBeenCalledTimes(1));
     expect(onConnectOutcome).toHaveBeenCalledWith("Stripe is connected now.");
     expect(authFetch.mock.calls.map(([url]) => url)).toEqual([
-      "/api/integrations/stripe/credentials",
-      "/api/integrations/stripe/connect",
+      "/api/connectors/stripe/credentials",
+      "/api/connectors/stripe/connect",
     ]);
   });
 });

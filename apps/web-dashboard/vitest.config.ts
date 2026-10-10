@@ -13,7 +13,7 @@ import path from "path";
 // can never match an absolute file path. Everything the dashboard imports from
 // outside its own package is then refused mid-transform:
 //
-//   Error: Denied ID <repo>/docs/integrations/ADD-A-PROVIDER.md?raw
+//   Error: Denied ID <repo>/docs/connectors/ADD-A-PROVIDER.md?raw
 //
 // which takes out `src/lib/integration-guides.test.ts` and
 // `src/components/help/__tests__/IntegrationGuideView.test.tsx` — the two

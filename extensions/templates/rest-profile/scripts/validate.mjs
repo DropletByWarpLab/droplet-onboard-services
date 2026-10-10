@@ -42,7 +42,7 @@ export function providerConst(provider) {
 export function outputPaths(provider) {
   return {
     profile: `services/erp-connector/src/rest/vendors/${provider}.ts`,
-    guide: `docs/integrations/${provider}.md`,
+    guide: `docs/connectors/${provider}.md`,
     egress: `docs/security/allowed-egress.${provider}.draft.yaml`,
     adr042: `docs/adr-042/${provider}.rows.md`,
     checklist: "DRAFT-CHECKLIST.md",
@@ -52,7 +52,7 @@ export function outputPaths(provider) {
 /** The directories the generator writes into (and cleans its own files out of). */
 export const OUTPUT_DIRS = [
   "services/erp-connector/src/rest/vendors",
-  "docs/integrations",
+  "docs/connectors",
   "docs/security",
   "docs/adr-042",
 ];

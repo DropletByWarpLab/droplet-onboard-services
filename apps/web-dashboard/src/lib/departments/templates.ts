@@ -153,7 +153,7 @@ export const DEPARTMENT_TEMPLATES: readonly DepartmentTemplateDef[] = [
     label: "IT",
     description: "The network, devices, connections, people and the box's health.",
     icon: "server-cog",
-    navHrefs: ["/network", "/devices", "/integrations", "/users", "/health"],
+    navHrefs: ["/network", "/devices", "/connectors", "/users", "/health"],
     homeWidgets: [
       { widget: "quick-links", size: "m" },
       { widget: "members", size: "s" },

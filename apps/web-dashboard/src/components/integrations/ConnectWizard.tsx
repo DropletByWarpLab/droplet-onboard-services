@@ -28,7 +28,7 @@
  * credential flow, which asks for exactly the fields the descriptor declares
  * and nothing that cannot be answered for a cloud API. No vendor id appears in
  * this file, and a test asserts that — matching what WARP-2291 achieved for
- * `app/integrations/page.tsx`.
+ * `app/connectors/page.tsx`.
  *
  * A new provider therefore needs NO change here. Registering a descriptor with
  * `credentialFields` is the whole of it, which is what the runtime-registered
@@ -145,7 +145,7 @@ function verdictCopy(status: IntegrationStatus, name: string): string {
     case "CAPABILITY_LIMITED":
       return `Droplet is reading ${name}, but one dataset needs a plan or permission change at the vendor.`;
     case "NOT_CONFIGURED":
-      return `The key is stored, but Droplet couldn't use it to reach ${name}. Try connecting again from the Integrations page.`;
+      return `The key is stored, but Droplet couldn't use it to reach ${name}. Try connecting again from the Connectors page.`;
     default:
       return `Droplet is still checking this connection. Look at the ${name} card in a moment.`;
   }

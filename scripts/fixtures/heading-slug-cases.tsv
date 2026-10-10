@@ -8,7 +8,7 @@
 #
 # TWO implementations depend on it, in two languages:
 #   • `headingSlug()` — apps/web-dashboard/src/lib/integration-guides.ts, used
-#     by the /help/integrations/<provider> route to give headings their ids;
+#     by the /help/connectors/<provider> route to give headings their ids;
 #   • `slugify()` — scripts/check-setup-guides.sh, used to prove every
 #     `#fragment` in the docs resolves to a heading that exists.
 #

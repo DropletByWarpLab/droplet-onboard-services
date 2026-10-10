@@ -1,6 +1,6 @@
 /**
  * WARP-3374 (Romain, 2026-09-30) — integrations detail is owner/admin only.
- * `GET /api/integrations/eaglesoft` (host, account, credential expiry) answers
+ * `GET /api/connectors/eaglesoft` (host, account, credential expiry) answers
  * 403 to a member, so the hook that reads it must not ask on a member's behalf:
  * it would 403 every 30 s for a surface the member never sees.
  */

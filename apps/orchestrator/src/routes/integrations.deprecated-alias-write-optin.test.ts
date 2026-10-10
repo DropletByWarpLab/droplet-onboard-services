@@ -16,14 +16,14 @@
  *
  * When WARP-2833 landed, the parameterised route was gated by
  * `requireLanProvider`, so a REST vendor 404'd there and the DEPRECATED alias
- * `POST /api/integrations/eaglesoft/connect` — provider from the BODY — was
+ * `POST /api/connectors/eaglesoft/connect` — provider from the BODY — was
  * the only way to connect one, and the way `{ provider: "square",
  * enableWrites: true }` reached `persistBase()`. The literal in the URL was
  * Eaglesoft; the row that got written was Square's.
  *
  * WARP-2842 re-drew that map. The alias now refuses a body naming a described
  * non-LAN track at the ROUTE, before the service — it could also drive a
- * credentialed cloud row to NOT_CONFIGURED — and `/integrations/:provider/
+ * credentialed cloud row to NOT_CONFIGURED — and `/connectors/:provider/
  * connect` admits the REST track with an EMPTY body: no `enableWrites`, so
  * the connect-time opt-in has no route that can carry it to a REST vendor at
  * all. The service guard (`requireWritableTrack`) stays, pinned at the
@@ -160,11 +160,11 @@ describe("the deprecated /integrations/eaglesoft/connect alias and the write opt
       // 400 here, but the READ-ONLY case below goes 200 and writes a row.
       const prisma = stubPrisma();
       const res = await request(app(prisma))
-        .post("/api/integrations/eaglesoft/connect")
+        .post("/api/connectors/eaglesoft/connect")
         .send({ provider, host: "connect.example", enableWrites: true });
 
       expect(res.status).toBe(400);
-      expect(res.body.details).toMatch(new RegExp(`POST /api/integrations/${provider}/connect`));
+      expect(res.body.details).toMatch(new RegExp(`POST /api/connectors/${provider}/connect`));
       // Nothing reached the database, and nothing reached the activity feed —
       // a guard that ran AFTER `persistBase()` would satisfy the status
       // assertion above and fail these three.
@@ -185,7 +185,7 @@ describe("the deprecated /integrations/eaglesoft/connect alias and the write opt
       // from the body, which carries no row material.
       const prisma = stubPrisma();
       const res = await request(app(prisma))
-        .post("/api/integrations/eaglesoft/connect")
+        .post("/api/connectors/eaglesoft/connect")
         .send({ provider, host: "connect.example" });
 
       expect(res.status).toBe(400);
@@ -203,7 +203,7 @@ describe("the deprecated /integrations/eaglesoft/connect alias and the write opt
       // REST connector's connect path.
       const prisma = stubPrisma();
       const res = await request(app(prisma))
-        .post(`/api/integrations/${provider}/connect`)
+        .post(`/api/connectors/${provider}/connect`)
         .send({});
 
       expect(res.status).toBe(200);
@@ -233,7 +233,7 @@ describe("the deprecated /integrations/eaglesoft/connect alias and the write opt
       // Mutation: loosen `cloudConnectSchema` to accept `enableWrites` → red.
       const prisma = stubPrisma();
       const res = await request(app(prisma))
-        .post(`/api/integrations/${provider}/connect`)
+        .post(`/api/connectors/${provider}/connect`)
         .send({ enableWrites: true });
 
       expect(res.status).toBe(400);
@@ -248,7 +248,7 @@ describe("the deprecated /integrations/eaglesoft/connect alias and the write opt
     // into "no connect may ever enable writes".
     const prisma = stubPrisma();
     const res = await request(app(prisma))
-      .post("/api/integrations/eaglesoft/connect")
+      .post("/api/connectors/eaglesoft/connect")
       .send({ host: "10.0.0.5", enableWrites: true });
 
     expect(res.status).toBe(200);

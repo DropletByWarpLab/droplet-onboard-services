@@ -107,7 +107,7 @@ describe("the Xero descriptor", () => {
     const d = providerDescriptor(XERO_PROVIDER);
     expect(d?.track).toBe("cloud");
     expect(cloudProviderIds()).toContain(XERO_PROVIDER);
-    expect(d?.catalog?.setupGuideHref).toBe("/help/integrations/xero");
+    expect(d?.catalog?.setupGuideHref).toBe("/help/connectors/xero");
     expect(d?.catalog?.availability).toBe("available");
     expect(d?.pollIntervalFloorMs).toBe(XERO_POLL_INTERVAL_FLOOR_MS);
   });

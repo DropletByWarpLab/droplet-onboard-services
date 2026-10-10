@@ -1211,7 +1211,7 @@ entries:
     data_class: user-content-on-request
     purpose: >-
       The webhook and chat-app destinations an owner or admin registers under
-      Settings, Integrations, Work notifications (WARP-3532, ADR-069 §9): an
+      Settings, Connectors, Work notifications (WARP-3532, ADR-069 §9): an
       HTTPS or HTTP endpoint on the LAN or the internet, or a Slack, Teams,
       Discord or Google Chat incoming-webhook address. Each delivery carries one
       work event: the work item's key, title, state, priority, due date, the

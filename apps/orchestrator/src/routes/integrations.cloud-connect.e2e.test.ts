@@ -1,9 +1,9 @@
 /**
  * WARP-2842 — the paste-then-connect flow, end to end over the wire.
  *
- *   PATCH /api/integrations/stripe/credentials { fields: { apiKey } }   → PROVISIONING
- *   POST  /api/integrations/stripe/connect     {}                       → probe
- *   GET   /api/integrations                                             → the verdict
+ *   PATCH /api/connectors/stripe/credentials { fields: { apiKey } }   → PROVISIONING
+ *   POST  /api/connectors/stripe/connect     {}                       → probe
+ *   GET   /api/connectors                                             → the verdict
  *
  * Both routers are mounted on ONE in-memory Prisma stub, exactly as `app.ts`
  * shares the real client between them, so the row the credential route
@@ -147,7 +147,7 @@ afterEach(() => {
 });
 
 async function stripeStatus(a: express.Express): Promise<string | undefined> {
-  const list = await request(a).get("/api/integrations");
+  const list = await request(a).get("/api/connectors");
   expect(list.status).toBe(200);
   return (list.body as Array<{ provider: string; status: string }>).find(
     (c) => c.provider === "stripe",
@@ -158,20 +158,20 @@ describe("PATCH credentials → POST connect → GET list, for a cloud provider"
   it("lands CONNECTED when the vendor accepts the key — and dialed the vendor with it", async () => {
     // The whole ticket in one case. Against `origin/stage` the POST is a 404
     // and the GET still says PROVISIONING. Mutation: remove the cloud branch
-    // from `/integrations/:provider/connect` → 404 on the POST; remove the
+    // from `/connectors/:provider/connect` → 404 on the POST; remove the
     // `cloudMaterialFromRow` merge → the POST answers 200 with
     // NOT_CONFIGURED and `fetch` is never called.
     const prisma = stubPrisma();
     const a = app(prisma);
 
     const patched = await request(a)
-      .patch("/api/integrations/stripe/credentials")
+      .patch("/api/connectors/stripe/credentials")
       .send({ fields: { apiKey: FAKE_STRIPE_KEY } });
     expect(patched.status).toBe(200);
     expect(patched.body.state).toBe("PROVISIONING");
     expect(await stripeStatus(a)).toBe("PROVISIONING");
 
-    const probed = await request(a).post("/api/integrations/stripe/connect").send({});
+    const probed = await request(a).post("/api/connectors/stripe/connect").send({});
     expect(probed.status).toBe(200);
     expect(probed.body).toMatchObject({ provider: "stripe", status: "CONNECTED" });
 
@@ -194,9 +194,9 @@ describe("PATCH credentials → POST connect → GET list, for a cloud provider"
     const a = app(prisma);
 
     await request(a)
-      .patch("/api/integrations/stripe/credentials")
+      .patch("/api/connectors/stripe/credentials")
       .send({ fields: { apiKey: FAKE_STRIPE_KEY } });
-    const probed = await request(a).post("/api/integrations/stripe/connect").send({});
+    const probed = await request(a).post("/api/connectors/stripe/connect").send({});
 
     expect(probed.status).toBe(200);
     expect(probed.body.status).toBe("NEEDS_RECONNECT");
@@ -207,12 +207,12 @@ describe("PATCH credentials → POST connect → GET list, for a cloud provider"
     const prisma = stubPrisma();
     const a = app(prisma);
     await request(a)
-      .patch("/api/integrations/stripe/credentials")
+      .patch("/api/connectors/stripe/credentials")
       .send({ fields: { apiKey: FAKE_STRIPE_KEY } });
-    await request(a).post("/api/integrations/stripe/connect").send({});
+    await request(a).post("/api/connectors/stripe/connect").send({});
     const sealed = prisma.rows[0].providerTokensEnc;
 
-    const again = await request(a).post("/api/integrations/stripe/connect").send({});
+    const again = await request(a).post("/api/connectors/stripe/connect").send({});
 
     expect(again.status).toBe(200);
     expect(again.body.status).toBe("CONNECTED");
@@ -227,11 +227,11 @@ describe("PATCH credentials → POST connect → GET list, for a cloud provider"
     const prisma = stubPrisma();
     const a = app(prisma);
     await request(a)
-      .patch("/api/integrations/stripe/credentials")
+      .patch("/api/connectors/stripe/credentials")
       .send({ fields: { apiKey: FAKE_STRIPE_KEY } });
     recordActivityMock.mockClear();
 
-    await request(a).post("/api/integrations/stripe/connect").send({});
+    await request(a).post("/api/connectors/stripe/connect").send({});
 
     const connected = recordActivityMock.mock.calls
       .map((c) => c[0] as { what: string; sub: string; actor: { id: string | null }; refs: Record<string, unknown> })
@@ -256,18 +256,18 @@ describe("PATCH credentials → POST connect → GET list, for a cloud provider"
     const prisma = stubPrisma();
     const a = app(prisma);
     await request(a)
-      .patch("/api/integrations/stripe/credentials")
+      .patch("/api/connectors/stripe/credentials")
       .send({ fields: { apiKey: FAKE_STRIPE_KEY } });
     fetchMock.mockImplementationOnce(async () => {
       const cleared = await request(a)
-        .patch("/api/integrations/stripe/credentials")
+        .patch("/api/connectors/stripe/credentials")
         .send({ fields: { apiKey: "" } });
       expect(cleared.status).toBe(200);
       expect(cleared.body.state).toBe("NOT_CONFIGURED");
       return stripeOk();
     });
 
-    const probed = await request(a).post("/api/integrations/stripe/connect").send({});
+    const probed = await request(a).post("/api/connectors/stripe/connect").send({});
 
     expect(probed.status).toBe(200);
     expect(probed.body.status).toBe("NOT_CONFIGURED");
@@ -286,12 +286,12 @@ describe("PATCH credentials → POST connect → GET list, for a cloud provider"
     const prisma = stubPrisma();
     const a = app(prisma);
     await request(a)
-      .patch("/api/integrations/stripe/credentials")
+      .patch("/api/connectors/stripe/credentials")
       .send({ fields: { apiKey: FAKE_STRIPE_KEY } });
     fetchMock.mockClear();
 
     const res = await request(a)
-      .post("/api/integrations/stripe/connect")
+      .post("/api/connectors/stripe/connect")
       .send({ host: "10.0.0.5", databaseName: "PattersonPM" });
 
     expect(res.status).toBe(400);
@@ -306,13 +306,13 @@ describe("PATCH credentials → POST connect → GET list, for a cloud provider"
   it("403s a family caller on the connect, with the credential untouched", async () => {
     const prisma = stubPrisma();
     await request(app(prisma))
-      .patch("/api/integrations/stripe/credentials")
+      .patch("/api/connectors/stripe/credentials")
       .send({ fields: { apiKey: FAKE_STRIPE_KEY } });
 
     const res = await request(
       app(prisma, { id: "22222222-2222-4222-8222-222222222222", username: "sam", role: "family" }),
     )
-      .post("/api/integrations/stripe/connect")
+      .post("/api/connectors/stripe/connect")
       .send({});
 
     expect(res.status).toBe(403);

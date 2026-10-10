@@ -10,7 +10,7 @@
  * credentialsPurged apps/web-dashboard/src` returned nothing.
  *
  * Two surfaces have to say the same sentence — the hub tile's status pill
- * (WARP-2291) and `/integrations/credentials` (WARP-2275) — and they arrive
+ * (WARP-2291) and `/connectors/credentials` (WARP-2275) — and they arrive
  * carrying two different payloads (`IntegrationSummary` and
  * `SaasCredentialView`). Copy that has to match across two payloads is copy
  * that drifts, so both call {@link disconnectedCredentialView} and neither

@@ -9,7 +9,7 @@
  * bundled into a route the box can serve. What it could not prove is that the
  * provider the guide is FOR is a provider this appliance knows how to connect.
  *
- * That is not hypothetical. #1956 added `docs/integrations/atlassian.md` and put
+ * That is not hypothetical. #1956 added `docs/connectors/atlassian.md` and put
  * `atlassian` into `CLOUD_PROVIDERS` (`scripts/check-setup-guides.sh:91`); every
  * check above passed; and there was no `atlassian` descriptor, so
  * `requireDescriptor()` 404'd the only route that can write the credential and
@@ -114,15 +114,15 @@ describe("check-setup-guides.sh's CLOUD_PROVIDERS agrees with the provider regis
     expect(GUIDE_AHEAD_OF_DESCRIPTOR).not.toHaveProperty("atlassian");
   });
 
-  it("a declared guide href follows the /help/integrations/<id> convention", () => {
-    // The route serves `docs/integrations/<id>.md` from the id in the path, so
+  it("a declared guide href follows the /help/connectors/<id> convention", () => {
+    // The route serves `docs/connectors/<id>.md` from the id in the path, so
     // a href that does not match its own descriptor id renders another
     // vendor's guide — which the script cannot see, because it only checks
     // that the FILE exists.
     for (const d of providerDescriptors()) {
       const href = setupGuideHrefFor(d);
       if (href === undefined) continue;
-      expect(href, `${d.id} setup guide href`).toBe(`/help/integrations/${d.id}`);
+      expect(href, `${d.id} setup guide href`).toBe(`/help/connectors/${d.id}`);
     }
   });
 });

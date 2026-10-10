@@ -89,7 +89,7 @@ export const EXPORT_PROVIDER_SUFFIX = "-export";
 export const EXPORT_DROP_TRACK_REMEDIATION =
   "needs ERP_EXPORT_DROP_ROOT pointing at a readable export folder on the practice " +
   "LAN, and at least one exported report whose column headers match a profile for " +
-  "this vendor (an operator profile can map any product — see docs/integrations/export-drop.md)";
+  "this vendor (an operator profile can map any product — see docs/connectors/export-drop.md)";
 
 /** Provider key for a vendor on this track, e.g. `eaglesoft-export`. */
 export function exportProviderFor(vendor: string): string {

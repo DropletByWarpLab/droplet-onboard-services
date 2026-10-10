@@ -1280,7 +1280,7 @@ describe("WARP-2848 — the sweep lands what it found", () => {
  *   `nextAttemptAt: null` → `FAILED` is absent from
  *   `CLAIMABLE_ERP_SYNC_STATES` → `upsertErpCursor`'s `update: {}` never
  *   revives it → `foldSyncState` ranks `FAILED` highest and
- *   `GET /api/integrations` reports the WHOLE connection as a failed sync,
+ *   `GET /api/connectors` reports the WHOLE connection as a failed sync,
  *   permanently — including after the owner buys the plan.
  *
  * `entities.ts:80-102` documents that exact chain as a known hazard, and this
