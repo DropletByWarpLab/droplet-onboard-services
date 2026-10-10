@@ -51,6 +51,7 @@ import {
   remoteToolReviewHash,
   type ClassificationPrisma,
 } from "./remote-tool-classification.service.js";
+import { remoteToolGradeOf } from "./remote-tool-tables.js";
 import {
   parseNamespacedToolName,
   type McpToolMultiplexer,
@@ -649,7 +650,9 @@ export async function attachRemoteServer(
               ...(t.definitionHash ? { inputSchemaHash: t.definitionHash } : {}),
             })),
             new Date(),
-            { baselineUnpinned: true },
+            // WARP-3962 — new tools start at the contract's default for the
+            // grade the reviewed table gives them (none listed = a write).
+            { baselineUnpinned: true, gradeOf: remoteToolGradeOf },
           )
       : undefined);
   /** Record, tell the owners about any tool just switched off, refresh dispatch. */

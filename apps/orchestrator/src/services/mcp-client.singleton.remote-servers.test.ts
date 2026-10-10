@@ -498,12 +498,11 @@ describe("a vendor with no compiled table is DENIED until an owner has reviewed 
     expect(JSON.parse(notListed.content[0]!.text!)).toMatchObject({ error: "REMOTE_TOOL_NOT_ALLOWLISTED" });
     await allowlist(FIXTURE, ["get_thing", "list_things"]);
 
-    // No table speaks for this server, so the answer is the table's own
-    // refusal — NOT_CLASSIFIED — even though the record holds every advertised
-    // tool (as a confirming write). Nothing is dialled.
+    // WARP-3962 — no table speaks for this server, so its record governs: the
+    // allowlisted (owner chose Ask) unreviewed write asks for a thumbs-up
+    // instead of running. Nothing is dialled.
     const denied = await mcpClient.callTool("fixture-bearer__get_thing", {});
-    expect(denied.isError).toBe(true);
-    expect(JSON.parse(denied.content[0]!.text!)).toMatchObject({ error: "REMOTE_TOOL_NOT_CLASSIFIED" });
+    expect(JSON.parse(denied.content[0]!.text!)).toMatchObject({ status: "confirmation_required" });
     expect(bridge.callsTo(FIXTURE, "call")).toHaveLength(0);
 
     // Atlassian's reviewed table allows its reads once allowlisted.
@@ -516,9 +515,9 @@ describe("a vendor with no compiled table is DENIED until an owner has reviewed 
     const reviewed = await mcpClient.callTool("fixture-bearer__get_thing", {});
     expect(reviewed.isError).toBe(false);
     expect(JSON.parse(reviewed.content[0]!.text!)).toEqual({ answeredBy: FIXTURE, name: "get_thing" });
-    // …and an unreviewed sibling is still refused.
+    // …and an unreviewed sibling still asks first, never runs.
     const sibling = await mcpClient.callTool("fixture-bearer__list_things", {});
-    expect(sibling.isError).toBe(true);
+    expect(JSON.parse(sibling.content[0]!.text!)).toMatchObject({ status: "confirmation_required" });
   });
 });
 
@@ -729,10 +728,10 @@ describe("the singleton's call policy speaks through the table registry (TC-1.3)
 
   it("is Atlassian's reviewed table for Atlassian: a read runs, a write is blocked, a Compass tool is refused for the credential it needs", () => {
     expect(decide(ATLASSIAN, "getJiraIssue")).toEqual({ kind: "allow" });
-    expect(decide(ATLASSIAN, "createJiraIssue")).toMatchObject({
-      kind: "deny",
-      code: "REMOTE_WRITE_NOT_PERMITTED",
-    });
+    // WARP-3962 — the table grades createJiraIssue a write; the record's "ask"
+    // (the beforeEach rows are write+confirm) lifts the block through the
+    // thumbs-up, never to a plain allow.
+    expect(decide(ATLASSIAN, "createJiraIssue")).toEqual({ kind: "allow", requiresConfirmation: true, grade: "write" });
     expect(decide(ATLASSIAN, "getCompassComponents")).toMatchObject({
       kind: "deny",
       code: "ATLASSIAN_TOOL_UNAVAILABLE_IN_AUTH_MODE",
@@ -740,9 +739,11 @@ describe("the singleton's call policy speaks through the table registry (TC-1.3)
     expect(decide(ATLASSIAN, "notATool")).toMatchObject({ kind: "deny", code: "REMOTE_TOOL_NOT_CLASSIFIED" });
   });
 
-  it("is the shipping deny-all for every server no table speaks for — even one named like an Atlassian read", () => {
-    expect(decide(FIXTURE, "getJiraIssue")).toMatchObject({ kind: "deny", code: "REMOTE_TOOL_NOT_CLASSIFIED" });
-    expect(decide("constructor", "getJiraIssue")).toMatchObject({ kind: "deny" });
+  it("a server no table speaks for is governed by its record alone — a tool with no row is denied, even one named like an Atlassian read", () => {
+    expect(decide(FIXTURE, "unlisted")).toMatchObject({ kind: "deny", code: "REMOTE_TOOL_NOT_ALLOWLISTED" });
+    expect(decide("constructor", "unlisted")).toMatchObject({ kind: "deny", code: "REMOTE_TOOL_NOT_ALLOWLISTED" });
+    // WARP-3962 — a classified write there asks first (the Atlassian table's reads do not leak across).
+    expect(decide(FIXTURE, "getJiraIssue")).toEqual({ kind: "allow", requiresConfirmation: true, grade: "write" });
   });
 });
 

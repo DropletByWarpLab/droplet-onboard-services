@@ -87,7 +87,9 @@ describe("seed migration for the allowlist", () => {
               lookup: () => row,
               table: (i) => (i.serverId === ATLASSIAN_SERVER_ID ? authPolicy(i) : DENY_ALL_REMOTE_TOOLS(i)),
             });
-            const today = policy({ serverId, wireName: toolName, namespacedName: `${serverId}__${toolName}`, args: {} }).kind === "allow";
+            // WARP-3962 — "runs without a thumbs-up": an `ask` write is a separate state.
+            const d = policy({ serverId, wireName: toolName, namespacedName: `${serverId}__${toolName}`, args: {} });
+            const today = d.kind === "allow" && d.requiresConfirmation !== true;
             expect(seeds(row), JSON.stringify({ serverId, toolName, denied, requiresWrite, reviewed })).toBe(today);
             checked++;
           }
