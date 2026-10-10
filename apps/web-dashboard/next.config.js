@@ -91,7 +91,6 @@ const nextConfig = {
   // API (`/api/integrations/*`) was a hard cut with no alias.
   async redirects() {
     return [
-      { source: "/integrations", destination: "/connectors", permanent: true },
       { source: "/integrations/:path*", destination: "/connectors/:path*", permanent: true },
       { source: "/help/integrations/:path*", destination: "/help/connectors/:path*", permanent: true },
     ];

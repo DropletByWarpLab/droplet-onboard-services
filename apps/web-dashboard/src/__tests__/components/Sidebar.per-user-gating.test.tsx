@@ -194,7 +194,7 @@ describe("gap (b) — the Integrations item is gated", () => {
   it("an owner sees Integrations", () => {
     render(<Sidebar />);
     expect(
-      within(desktopAside()).getByRole("link", { name: /^integrations$/i }),
+      within(desktopAside()).getByRole("link", { name: /^connectors$/i }),
     ).toHaveAttribute("href", "/connectors");
   });
 

@@ -140,38 +140,38 @@ describe("routers sharing the /api/connectors prefix", () => {
 
     expect(byOwner("createIntegrationsRouter")).toEqual(
       expect.arrayContaining([
-        "get /integrations",
-        "get /integrations/eaglesoft",
+        "get /connectors",
+        "get /connectors/eaglesoft",
         // WARP-2500 — the provider-scoped lifecycle verbs. Pinned by NAME as
         // well as swept by the pairwise checks below: the sweep can only find
         // a collision among routes that exist, so a refactor that dropped
         // these would make the disjointness checks pass by having nothing
         // left to collide.
-        "post /integrations/:provider/disconnect",
-        "post /integrations/:provider/write-enable",
-        "post /integrations/:provider/write-disable",
+        "post /connectors/:provider/disconnect",
+        "post /connectors/:provider/write-enable",
+        "post /connectors/:provider/write-disable",
         // WARP-2520 — the LAN provisioning verbs, parameterised for the same
         // reason and pinned by name for the same reason.
-        "post /integrations/:provider/connect",
-        "post /integrations/:provider/test",
+        "post /connectors/:provider/connect",
+        "post /connectors/:provider/test",
         // The deprecated Eaglesoft literal aliases, kept for one release.
         // Listed so their eventual REMOVAL is a deliberate edit to this
         // expectation rather than a silent deletion nothing notices.
-        "post /integrations/eaglesoft/disconnect",
-        "post /integrations/eaglesoft/write-enable",
-        "post /integrations/eaglesoft/write-disable",
-        "post /integrations/eaglesoft/connect",
-        "post /integrations/eaglesoft/test",
+        "post /connectors/eaglesoft/disconnect",
+        "post /connectors/eaglesoft/write-enable",
+        "post /connectors/eaglesoft/write-disable",
+        "post /connectors/eaglesoft/connect",
+        "post /connectors/eaglesoft/test",
       ]),
     );
     expect(byOwner("createErpDriftRouter")).toEqual([
-      "get /integrations/:connectionId/drift",
+      "get /connectors/:connectionId/drift",
     ]);
     expect(byOwner("createSaasCredentialsRouter")).toEqual(
       expect.arrayContaining([
-        "get /integrations/credentials",
-        "get /integrations/:provider/credentials",
-        "patch /integrations/:provider/credentials",
+        "get /connectors/credentials",
+        "get /connectors/:provider/credentials",
+        "patch /connectors/:provider/credentials",
       ]),
     );
     expect(byOwner("createErpRouter")).toEqual(

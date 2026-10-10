@@ -4,10 +4,11 @@
  * (Next preserves the query string on its own).
  */
 import { createRequire } from "node:module";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
-const require = createRequire(import.meta.url);
-const config = require("../../next.config.js") as {
+const require = createRequire(join(__dirname, "noop.js"));
+const config = require(join(__dirname, "..", "..", "next.config.js")) as {
   redirects: () => Promise<{ source: string; destination: string; permanent: boolean }[]>;
 };
 
