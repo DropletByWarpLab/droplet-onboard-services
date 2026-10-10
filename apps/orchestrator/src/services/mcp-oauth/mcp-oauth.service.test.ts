@@ -47,7 +47,7 @@ function setup(over: { discover?: any; disc?: Partial<typeof DISC>; egress?: Egr
   let now = new Date("2026-10-09T12:00:00Z");
   // The egress verdict is switchable mid-test: `gate.current = { allowed: false, ... }`.
   const gate = { current: over.egress ?? ALLOWED };
-  const deps: McpOAuthDependencies = mcpOAuthDependencies({ oauth, now: () => now, egress: async () => gate.current });
+  const deps: McpOAuthDependencies = mcpOAuthDependencies({ oauth, now: () => now, pending: new Map(), egress: async () => gate.current });
   const begin = (o: Partial<BeginInput> = {}) => beginMcpSignIn(db.prisma, {
     provider: PROVIDER, scope: "MEMBER", userId: "u1", username: "alice", role: "family", originCallback: ORIGIN_CB, ...o,
   }, deps);
