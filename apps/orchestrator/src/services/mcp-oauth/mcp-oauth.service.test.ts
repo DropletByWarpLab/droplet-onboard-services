@@ -40,7 +40,7 @@ const SITE = { id: "00000000-0000-4000-8000-00000000aaaa", url: "https://acme.at
 type Egress = Awaited<ReturnType<McpOAuthDependencies["egress"]>>;
 const ALLOWED: Egress = { allowed: true, row: null };
 
-function setup(over: { discover?: any; disc?: Partial<typeof DISC>; egress?: Egress } = {}) {
+function setup(over: { discover?: any; disc?: Partial<typeof DISC> & { revocationEndpoint?: string }; egress?: Egress } = {}) {
   const db = fakeMcpOAuthDb();
   const oauth = {
     discover: vi.fn((over.discover ?? (async (_url: string) => ({ ...DISC, ...over.disc }))) as (url: string) => Promise<any>),
