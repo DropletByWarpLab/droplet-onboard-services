@@ -171,7 +171,8 @@ export function createAtlassianSessionFactory(
       ...(bearer
         ? {
             credential: bearerCredential(requireField(input, "accessToken")),
-            url: input.url ?? ATLASSIAN_MCP_OAUTH_URL,
+            // Forced: a bearer is never presented anywhere but the OAuth endpoint.
+            url: ATLASSIAN_MCP_OAUTH_URL,
           }
         : {
             email: requireField(input, "email"),

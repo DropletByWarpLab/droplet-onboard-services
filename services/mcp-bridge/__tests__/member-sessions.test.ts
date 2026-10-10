@@ -247,3 +247,91 @@ describe("idle eviction", () => {
     expect(h.conns[0]!.close).not.toHaveBeenCalled();
   });
 });
+
+describe("catalog-only base session", () => {
+  async function catalog() {
+    const h = harness();
+    const store = storeOf(h.factory);
+    const opened = await send(store, "POST", "/sessions/atlassian/open", { ...bearerBody(), catalogOnly: true });
+    expect(opened.status).toBe(200);
+    return { ...h, store };
+  }
+
+  it("lists tools but refuses every call without a connectionId, never reaching the session", async () => {
+    const { store, conns } = await catalog();
+    expect((await send(store, "GET", "/sessions/atlassian/tools")).status).toBe(200);
+    const res = await send(store, "POST", "/sessions/atlassian/call", { name: "getJiraIssue" });
+    expect(res.status).toBe(409);
+    expect((res.body as { error: { code: string } }).error.code).toBe("CATALOG_ONLY");
+    expect(conns[0]!.callTool).not.toHaveBeenCalled();
+    expect((await send(store, "GET", "/sessions/atlassian/state")).body).toMatchObject({ catalogOnly: true });
+  });
+
+  it("member sessions still call normally beside it", async () => {
+    const { store, conns } = await catalog();
+    await send(store, "POST", "/sessions/atlassian/open", bearerBody(CONN_A));
+    const res = await send(store, "POST", "/sessions/atlassian/call", { name: "getJiraIssue", connectionId: CONN_A });
+    expect(res.status).toBe(200);
+    expect(conns[1]!.callTool).toHaveBeenCalledTimes(1);
+  });
+
+  it("a re-open without catalogOnly lifts it; the kill switch clears it", async () => {
+    const { store } = await catalog();
+    await send(store, "POST", "/sessions/atlassian/open", API_BODY);
+    expect(store.isCatalogOnly("atlassian")).toBe(false);
+    await send(store, "POST", "/sessions/atlassian/open", { ...bearerBody(), catalogOnly: true });
+    await send(store, "DELETE", "/sessions/atlassian");
+    expect(store.isCatalogOnly("atlassian")).toBe(false);
+  });
+
+  it("refuses catalogOnly with a connectionId, and a non-boolean catalogOnly", async () => {
+    const { factory, conns } = harness();
+    const store = storeOf(factory);
+    expect((await send(store, "POST", "/sessions/atlassian/open", { ...bearerBody(CONN_A), catalogOnly: true })).status).toBe(400);
+    expect((await send(store, "POST", "/sessions/atlassian/open", { ...bearerBody(), catalogOnly: "yes" })).status).toBe(400);
+    expect(conns).toHaveLength(0);
+  });
+});
+
+describe("credential and key hygiene", () => {
+  it("refuses a url together with an accessToken, and the factory forces the OAuth endpoint anyway", async () => {
+    const { factory, conns } = harness();
+    const res = await send(storeOf(factory), "POST", "/sessions/atlassian/open", { ...bearerBody(), url: "https://mcp.atlassian.com/v1/mcp" });
+    expect(res.status).toBe(400);
+    expect((res.body as { error: { message: string } }).error.message).toBe("Not allowed with this credential: url.");
+    expect(conns).toHaveLength(0);
+    const s = SESSION_PROFILES.atlassian!.factory({ accessToken: FAKE_ACCESS, cloudId: CLOUD, url: "https://mcp.atlassian.com/v1/mcp" });
+    expect(s.url).toBe(ATLASSIAN_MCP_OAUTH_URL);
+  });
+
+  it("accepts a lowercase connection id only, so one id cannot be two sessions", async () => {
+    const { factory, conns } = harness();
+    const store = storeOf(factory);
+    const upper = CONN_A.toUpperCase();
+    expect((await send(store, "POST", "/sessions/atlassian/open", bearerBody(upper))).status).toBe(400);
+    expect((await send(store, "POST", "/sessions/atlassian/call", { name: "x", connectionId: upper })).status).toBe(400);
+    expect((await send(store, "POST", "/sessions/atlassian/close", { connectionId: upper })).status).toBe(400);
+    expect(conns).toHaveLength(0);
+  });
+
+  it("never opens the shared API-token credential under a member key", async () => {
+    const { factory, conns } = harness();
+    const res = await send(storeOf(factory), "POST", "/sessions/atlassian/open", { ...API_BODY, connectionId: CONN_A });
+    expect(res.status).toBe(400);
+    expect(conns).toHaveLength(0);
+  });
+});
+
+describe("member session cap", () => {
+  it("refuses a new connection past the cap, but a replacement of an existing one is fine", async () => {
+    const { factory } = harness();
+    const store = storeOf(factory, { maxConnectionSessions: 2 });
+    expect((await send(store, "POST", "/sessions/atlassian/open", bearerBody(CONN_A))).status).toBe(200);
+    expect((await send(store, "POST", "/sessions/atlassian/open", bearerBody(CONN_B))).status).toBe(200);
+    const over = await send(store, "POST", "/sessions/atlassian/open", bearerBody("cccccccc-cccc-4ccc-8ccc-cccccccccccc"));
+    expect(over.status).toBe(400);
+    expect(store.connectionSessionCounts()).toEqual({ atlassian: 2 });
+    expect((await send(store, "POST", "/sessions/atlassian/open", bearerBody(CONN_A))).status).toBe(200);
+    expect(store.connectionSessionCounts()).toEqual({ atlassian: 2 });
+  });
+});

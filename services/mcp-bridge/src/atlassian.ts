@@ -158,11 +158,6 @@ export const ATLASSIAN_REQUIRED_FIELDS: readonly string[] = Object.freeze([
   "cloudId",
 ]);
 
-/** WARP-2409 — the OAuth endpoint (the one the reviewed tool catalog was
- *  recorded from). A member's bearer is presented here, never on
- *  {@link ATLASSIAN_MCP_URL}. Same host, so the egress registry is unchanged. */
-export const ATLASSIAN_MCP_OAUTH_URL = "https://mcp.atlassian.com/v1/mcp/authv2";
-
 /** WARP-2409 — the accepted open bodies: the API-token set, or a member's
  *  bearer plus the site. Exactly one set; fields of the other are refused. */
 export const ATLASSIAN_REQUIRED_FIELD_SETS: readonly (readonly string[])[] = Object.freeze([

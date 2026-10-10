@@ -91,6 +91,7 @@ export type BridgeErrorCode =
   | "UNKNOWN_SERVER_ID"
   | "SESSION_NOT_OPEN"
   | "NO_SESSION"
+  | "CATALOG_ONLY"
   | "SESSION_NOT_READY"
   | "REMOTE_CALL_FAILED";
 
@@ -113,6 +114,8 @@ export interface BridgeCallBody {
 
 export interface BridgeStateBody {
   state: RemoteMcpSessionHealth;
+  /** WARP-2409 — present (true) when the session may list tools but not run them. */
+  catalogOnly?: true;
 }
 
 /**
@@ -133,7 +136,8 @@ export interface BridgeSessionsBody {
 }
 
 /** WARP-2409 — a member connection id is a UUID (McpOAuthConnection.id). */
-const CONNECTION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// Lowercase only: one id, one session (an upper-case twin would be a second key).
+const CONNECTION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export function isConnectionId(v: unknown): v is string {
   return typeof v === "string" && CONNECTION_ID_PATTERN.test(v);
 }
@@ -183,9 +187,10 @@ export class BridgeSessionStore {
    */
   constructor(
     registry: Readonly<Record<string, SessionProfile | SessionFactory>> = SESSION_PROFILES,
-    options: { idleMs?: number; now?: () => number } = {},
+    options: { idleMs?: number; now?: () => number; maxConnectionSessions?: number } = {},
   ) {
     this.#idleMs = options.idleMs ?? CONNECTION_IDLE_MS;
+    this.#maxConnections = options.maxConnectionSessions ?? MAX_CONNECTION_SESSIONS;
     this.#now = options.now ?? Date.now;
     this.#profiles = new Map(
       Object.entries(registry).map(
@@ -225,6 +230,12 @@ export class BridgeSessionStore {
     return profile.requiredFieldSets ?? [profile.requiredFields];
   }
 
+  /** True when the server-level session was opened `catalogOnly`: it may list
+   *  tools but never dispatch a call (it carries one person's sign-in). */
+  isCatalogOnly(serverId: string): boolean {
+    return this.#catalogOnly.has(serverId);
+  }
+
   /** The session for a server, or for one member connection of it. */
   get(serverId: string, connectionId?: string): RemoteMcpSession | undefined {
     const key = keyOf(serverId, connectionId);
@@ -261,6 +272,7 @@ export class BridgeSessionStore {
     serverId: string,
     input: OpenSessionInput,
     connectionId?: string,
+    catalogOnly = false,
   ): Promise<RemoteMcpSessionHealth> {
     const key = keyOf(serverId, connectionId);
     // Read synchronously on entry, before waiting on the chain (kill switch).
@@ -274,7 +286,7 @@ export class BridgeSessionStore {
         // Bounded: a replacement frees its own slot first (above), so only a
         // genuinely new connection can hit the cap.
         const held = this.connectionSessionCounts()[serverId] ?? 0;
-        if (held >= MAX_CONNECTION_SESSIONS) {
+        if (held >= this.#maxConnections) {
           throw Object.assign(new Error("too many member sessions are open for this server."), {
             code: "TOO_MANY_SESSIONS",
           });
@@ -282,6 +294,7 @@ export class BridgeSessionStore {
       }
       const session = profile.factory(input);
       this.#sessions.set(key, session);
+      if (catalogOnly) this.#catalogOnly.add(key);
       if (connectionId) {
         this.#lastUsed.set(key, this.#now());
         this.#armSweep();
@@ -293,6 +306,7 @@ export class BridgeSessionStore {
         if (this.#sessions.get(key) === session) {
           this.#sessions.delete(key);
           this.#lastUsed.delete(key);
+          this.#catalogOnly.delete(key);
         }
         await session.close();
         throw killSwitchError();
@@ -331,6 +345,9 @@ export class BridgeSessionStore {
   readonly #lastUsed = new Map<string, number>();
   readonly #now: () => number;
   readonly #idleMs: number;
+  readonly #maxConnections: number;
+  /** Base sessions opened for listing tools only (see `catalogOnly`). */
+  readonly #catalogOnly = new Set<string>();
   #sweepTimer: ReturnType<typeof setTimeout> | undefined;
 
   // ponytail: one self-rearming timer for all connection sessions, scanning a
@@ -371,6 +388,7 @@ export class BridgeSessionStore {
   async #closeNow(serverId: string): Promise<boolean> {
     const session = this.#sessions.get(serverId);
     this.#lastUsed.delete(serverId);
+    this.#catalogOnly.delete(serverId);
     if (!session) return false;
     this.#sessions.delete(serverId);
     await session.close();
@@ -654,6 +672,22 @@ async function openSession(
   if (connectionId === null) {
     return err(400, "INVALID_REQUEST", "connectionId must be a UUID.");
   }
+  // The shared credential (the profile's own `requiredFields`) never lives
+  // under a member key, or a member's calls would run as the shared account.
+  if (connectionId !== undefined && chosen === opts.store.requiredFieldsOf(serverId)) {
+    return err(400, "INVALID_REQUEST", "connectionId is not allowed with this credential.");
+  }
+  // A bearer is only ever presented to the profile's own OAuth endpoint.
+  if (chosen.includes("accessToken") && body.url !== undefined) {
+    return err(400, "INVALID_REQUEST", "Not allowed with this credential: url.");
+  }
+  const catalogOnly = body.catalogOnly;
+  if (catalogOnly !== undefined && typeof catalogOnly !== "boolean") {
+    return err(400, "INVALID_REQUEST", "catalogOnly must be a boolean.");
+  }
+  if (catalogOnly === true && connectionId !== undefined) {
+    return err(400, "INVALID_REQUEST", "catalogOnly is only allowed on the server-level session.");
+  }
   const url = requiredString(body, "url");
   // WARP-2651 — the caller's vetted catalog, carried across a restart of THIS
   // container. Validated to the same shape a tool name can have rather than
@@ -675,6 +709,7 @@ async function openSession(
         ...(knownTools !== undefined ? { knownTools } : {}),
       },
       connectionId,
+      catalogOnly === true,
     );
     return { status: 200, body: { state } satisfies BridgeStateBody };
   } catch (e) {
@@ -719,6 +754,11 @@ async function callTool(
       ? err(409, "NO_SESSION", `No session is open for that connection. POST /sessions/${serverId}/open with it first.`)
       : notOpen(serverId);
   }
+  // A catalog-only session lists tools and nothing else: refused before the
+  // session is touched, so no call can run as the person whose sign-in it holds.
+  if (!rawConnection && opts.store.isCatalogOnly(serverId)) {
+    return err(409, "CATALOG_ONLY", "This session can list tools but not run them. Call with a connectionId.", session.health());
+  }
   if (typeof rawBody !== "object" || rawBody === null || Array.isArray(rawBody)) {
     return err(400, "INVALID_REQUEST", "Body must be a JSON object.", session.health());
   }
@@ -761,7 +801,13 @@ async function closeConnection(
 function sessionState(serverId: string, opts: BridgeApiOptions): BridgeResponse {
   const session = opts.store.get(serverId);
   if (!session) return notOpen(serverId);
-  return { status: 200, body: { state: session.health() } satisfies BridgeStateBody };
+  return {
+    status: 200,
+    body: {
+      state: session.health(),
+      ...(opts.store.isCatalogOnly(serverId) ? { catalogOnly: true } : {}),
+    } satisfies BridgeStateBody,
+  };
 }
 
 function acknowledgeCatalog(serverId: string, opts: BridgeApiOptions): BridgeResponse {
