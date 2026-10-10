@@ -182,7 +182,7 @@ export function createMcpOAuthCallbackRouter(prisma: PrismaClient, options: Part
       result = { outcome: "failed", provider: null, scope: null };
     }
     // No callback parameter becomes a destination or reflected text.
-    const returnTo = result.scope === "WORKSPACE" ? "/integrations/credentials" : "/settings";
+    const returnTo = result.scope === "WORKSPACE" ? "/connectors/credentials" : "/settings";
     return res.redirect(303, mcpOAuthOutcomeUrl(returnTo, result.provider, result.outcome));
   });
   return router;

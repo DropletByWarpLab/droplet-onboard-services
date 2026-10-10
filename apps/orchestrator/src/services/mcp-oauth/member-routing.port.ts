@@ -71,9 +71,9 @@ export interface MemberRoutingOptions {
 
 const REFUSALS: Record<RemoteMcpSignInRefusal, string> = {
   REMOTE_SIGN_IN_REQUIRED:
-    "You haven't signed in to Atlassian yet. Open Settings › Connected services (or Integrations › Connector credentials) and choose Sign in with Atlassian, then ask again.",
+    "You haven't signed in to Atlassian yet. Open Settings › Connected services (or Connectors › Connector credentials) and choose Sign in with Atlassian, then ask again.",
   REMOTE_SIGN_IN_EXPIRED:
-    "Your Atlassian sign-in has expired. Open Settings › Connected services (or Integrations › Connector credentials) and choose Sign in with Atlassian again, then ask again.",
+    "Your Atlassian sign-in has expired. Open Settings › Connected services (or Connectors › Connector credentials) and choose Sign in with Atlassian again, then ask again.",
   REMOTE_CONNECTION_DISABLED: "An owner or admin turned this connection off. Nothing was sent.",
 };
 

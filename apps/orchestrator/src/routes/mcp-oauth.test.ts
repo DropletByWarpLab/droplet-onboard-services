@@ -156,7 +156,7 @@ describe("MCP OAuth routes", () => {
     const s = await start(app, { provider: "atlassian", scope: "WORKSPACE", acknowledge: true }, "admin");
     const state = new URL(s.body.authorizeUrl).searchParams.get("state")!;
     const res = await request(app).get("/api/mcp/oauth/callback").query({ state, code: "c" }).set("Cookie", `${MCP_OAUTH_STATE_COOKIE}=${state}`);
-    expect(res.headers.location).toBe("/integrations/credentials?mcp=atlassian:connected");
+    expect(res.headers.location).toBe("/connectors/credentials?mcp=atlassian:connected");
   });
 
   it("callback: a missing cookie, a forged state and a replay all end at failed", async () => {
