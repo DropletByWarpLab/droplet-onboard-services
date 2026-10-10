@@ -127,7 +127,15 @@ export class McpBridgeError extends Error {
  * profile declares; and `adr-043-boundary.test.ts` gates that the two agree.
  */
 export interface McpBridgeOpenInput {
-  readonly [field: string]: string | readonly string[] | undefined;
+  readonly [field: string]: string | boolean | readonly string[] | undefined;
+  /**
+   * WARP-2409 - set when the base (catalog) session is opened with a PERSONAL
+   * sign-in (an owner or admin's): the bridge then answers 409 `CATALOG_ONLY` to
+   * any `/call` on it, so that person's token can list tools but never answer
+   * another member's call. Unset for the API token and the Workspace connection,
+   * the shared credentials meant to answer calls.
+   */
+  catalogOnly?: boolean;
   /** Test-only override; the bridge screens it against its own host set. */
   url?: string;
   /**
@@ -161,6 +169,10 @@ export interface BridgeSessionsBody {
   /** Every session the BRIDGE currently holds — including ones this process
    *  does not own, which is the whole point of reading it (WARP-2651). */
   sessions: RemoteMcpSessionHealth[];
+  /** WARP-2409 - per server id, how many per-connection (member or Workspace)
+   *  sessions the bridge holds. A count only: no ids, no members. The orphan
+   *  sweep reads `sessions` (base sessions) and ignores this. */
+  connectionSessions?: Record<string, number>;
 }
 
 export interface McpBridgeClientOptions {
@@ -193,6 +205,14 @@ const DEFAULT_TIMEOUT_MS = 30_000;
  */
 const SERVER_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
+/** A connection id is the `McpOAuthConnection` uuid; refuse anything else before it reaches a body. */
+const CONNECTION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/; // lowercase only, as Prisma's uuid()
+function assertConnectionId(id: string): void {
+  if (!CONNECTION_ID_PATTERN.test(id)) {
+    throw new McpBridgeError("INVALID_CONNECTION_ID", "connectionId is not a valid connection id.", 0);
+  }
+}
+
 export class McpBridgeClient implements McpClientPort {
   readonly serverId: string;
   readonly #baseUrl: string;
@@ -208,6 +228,7 @@ export class McpBridgeClient implements McpClientPort {
    * bridge's own session state and is never conflated with it.
    */
   #opened = false;
+  #closeEpoch = 0;
 
   /**
    * The tool names the BRIDGE advertised on the last successful `listTools`.
@@ -251,8 +272,36 @@ export class McpBridgeClient implements McpClientPort {
       `/sessions/${this.serverId}/open`,
       input,
     );
-    this.#opened = true;
+    // A per-connection session (WARP-2409) is not THIS client's base session.
+    if (typeof input.connectionId !== "string") this.#opened = true;
     return body.state;
+  }
+
+  /**
+   * WARP-2409 — dispatch one call on a member's or the Workspace's own
+   * bridge session (keyed by the `McpOAuthConnection` id). A 409 `NO_SESSION`
+   * means the bridge no longer holds it; the caller re-opens and retries once.
+   */
+  async callToolFor(connectionId: string, name: string, args: Record<string, unknown>): Promise<McpToolCallOutcome> {
+    assertConnectionId(connectionId);
+    const body = await this.#send<{ result: McpToolCallOutcome }>(
+      "POST",
+      `/sessions/${this.serverId}/call`,
+      { name, args, connectionId },
+    );
+    return body.result;
+  }
+
+  /** WARP-2409 — close one per-connection session (sign-out, refresh failure). */
+  async closeConnection(connectionId: string): Promise<void> {
+    assertConnectionId(connectionId);
+    await this.#send("POST", `/sessions/${this.serverId}/close`, { connectionId });
+  }
+
+  /** Bumps on every {@link close}: the bridge tears down every per-connection
+   *  session with the base one, so a cache keyed on this knows to drop its own. */
+  get closeEpoch(): number {
+    return this.#closeEpoch;
   }
 
   async listTools(): Promise<McpToolDescriptor[]> {
@@ -360,6 +409,7 @@ export class McpBridgeClient implements McpClientPort {
       // leaving `#opened` true would let a later call dial a session this
       // process has already disowned.
       this.#opened = false;
+      this.#closeEpoch++;
     }
   }
 
@@ -511,6 +561,7 @@ export interface McpOAuthRefreshInput {
 export interface McpOAuthRevokeInput {
   revocationEndpoint: string;
   clientId: string;
+  clientSecret?: string;
   token: string;
 }
 

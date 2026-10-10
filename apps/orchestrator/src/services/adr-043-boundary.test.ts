@@ -189,7 +189,9 @@ describe("wire-contract drift gate (the duplication §5 forces)", () => {
     const actions = [...client.matchAll(/\/sessions\/\$\{this\.serverId\}\/([a-z-]+)/g)].map(
       (m) => m[1]!,
     );
-    expect(actions.sort()).toEqual(["acknowledge-catalog", "call", "open", "state", "tools"]);
+    // `call` twice (the base session and `callToolFor` on a per-connection one) and
+    // `close` (one connection's session), WARP-2409.
+    expect(actions.sort()).toEqual(["acknowledge-catalog", "call", "call", "close", "open", "state", "tools"]);
     for (const action of actions) {
       expect(api, `bridge has no "${action}" route`).toContain(`case "${action}":`);
     }

@@ -5,7 +5,8 @@
 import { createHash } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { providerDescriptor } from "@droplet/shared-types";
-import { __setColumnCryptoKeyForTest } from "../column-crypto.service.js";
+import { __setColumnCryptoKeyForTest, decryptColumn, deriveMcpOAuthTokenKey, mcpOAuthClientAad } from "../column-crypto.service.js";
+import { createMcpOAuthRefresher } from "./mcp-oauth-refresh.service.js";
 import { McpBridgeError } from "../mcp-bridge.client.js";
 import {
   beginMcpSignIn, completeMcpSignIn, disconnectMcpOAuth, MCP_OAUTH_FLOW_TTL_MS, MCP_OAUTH_LOOPBACK_REDIRECTS,
@@ -13,13 +14,14 @@ import {
   type BeginInput, type McpOAuthDependencies,
 } from "./mcp-oauth.service.js";
 import { fakeMcpOAuthDb } from "./__tests__/fake-db.js";
+import { recordActivity } from "../activity.singleton.js";
 
 const logged = vi.hoisted(() => [] as unknown[]);
 vi.mock("../../lib/logger.js", () => {
   const sink = (...a: unknown[]) => { logged.push(a); };
   return { createLogger: () => ({ info: sink, warn: sink, error: sink, debug: sink }) };
 });
-vi.mock("../activity.singleton.js", () => ({ recordActivity: vi.fn(async () => {}) }));
+vi.mock("../activity.singleton.js", () => ({ recordActivity: vi.fn(async (_p: Record<string, unknown>) => {}) }));
 vi.mock("../../config.js", () => ({ config: { MCP_BRIDGE_URL: "http://bridge.invalid", MCP_BRIDGE_SERVICE_TOKEN: "t" } }));
 
 const PROVIDER = "atlassian";
@@ -43,6 +45,8 @@ function setup(over: { discover?: any; disc?: Partial<typeof DISC>; egress?: Egr
     discover: vi.fn((over.discover ?? (async (_url: string) => ({ ...DISC, ...over.disc }))) as (url: string) => Promise<any>),
     register: vi.fn(async (_endpoint: string, _redirects: readonly string[]): Promise<{ clientId: string; clientSecret?: string }> => ({ clientId: "dcr-client" })),
     exchange: vi.fn(async (_input: unknown): Promise<{ accessToken: string; refreshToken?: string; expiresIn?: number; scope?: string }> => ({ ...TOKENS })),
+    refresh: vi.fn(async (_input: unknown): Promise<{ accessToken: string }> => ({ accessToken: "x" })),
+    revoke: vi.fn(async (_input: unknown): Promise<void> => {}),
   };
   let now = new Date("2026-10-09T12:00:00Z");
   // The egress verdict is switchable mid-test: `gate.current = { allowed: false, ... }`.
@@ -80,7 +84,7 @@ describe("beginMcpSignIn", () => {
 
   it("walks the identity ladder in order: a held client beats dynamic registration; DCR only when none is held", async () => {
     const held = setup();
-    await held.db.seed({ provider: PROVIDER, scope: "MEMBER", memberId: "u9", issuer: ISSUER, tokenEndpointHost: "auth.example", clientId: "held-client" });
+    await held.db.prisma.mcpOAuthClient.create({ data: { provider: PROVIDER, issuer: ISSUER, clientId: "held-client", source: "PASTED" } });
     const a = await held.begin();
     expect(qs(a.authorizeUrl).get("client_id")).toBe("held-client");
     expect(held.oauth.register).not.toHaveBeenCalled();
@@ -94,7 +98,7 @@ describe("beginMcpSignIn", () => {
 
     // A client for a DIFFERENT issuer is never reused across servers.
     const other = setup();
-    await other.db.seed({ provider: PROVIDER, scope: "MEMBER", memberId: "u9", issuer: "https://elsewhere.example/iss", tokenEndpointHost: "x", clientId: "other-issuer" });
+    await other.db.prisma.mcpOAuthClient.create({ data: { provider: PROVIDER, issuer: "https://elsewhere.example/iss", clientId: "other-issuer", source: "PASTED" } });
     await other.begin();
     expect(other.oauth.register).toHaveBeenCalledTimes(1);
   });
@@ -105,7 +109,8 @@ describe("beginMcpSignIn", () => {
     const r = await s.begin();
     expect(qs(r.authorizeUrl).get("client_id")).toBe("pasted");
     expect(s.oauth.register).not.toHaveBeenCalled();
-    expect(s.db.rows[0].clientSecretEnc).toMatch(/^dcv1:/);
+    expect(s.db.clients[0].clientSecretEnc).toMatch(/^dcv1:/);
+    expect(s.db.clients[0]).toMatchObject({ source: "PASTED", updatedBy: "admin1" });
 
     const noReg = setup({ disc: { registrationEndpoint: undefined } });
     await expect(noReg.begin()).rejects.toMatchObject({ code: "client_required" });
@@ -319,6 +324,129 @@ describe("the same egress rules as every remote MCP call, before every hop", () 
     s.deps.egress = async () => { throw new Error("db down"); };
     expect((await s.complete(a.state)).outcome).toBe("blocked");
     expect(s.oauth.exchange).not.toHaveBeenCalled();
+  });
+});
+
+describe("review fixes: abandoned consent, the starter's current standing, client changes", () => {
+  it("an abandoned re-consent is settled when its flow expires, never stranded in PENDING_CONSENT", async () => {
+    const s = await (async () => {
+      const x = setup();
+      const first = await x.begin();
+      await x.complete(first.state); // u1 is CONNECTED
+      return x;
+    })();
+    await s.begin(); // re-consent begins: the row is PENDING_CONSENT and the person walks away
+    expect(s.db.rows[0].state).toBe("PENDING_CONSENT");
+    s.advance(MCP_OAUTH_FLOW_TTL_MS + 1);
+    await s.begin({ userId: "u2" }); // any later start prunes the expired flow
+    expect(s.db.rows.find((r) => r.memberId === "u1")!.state).toBe("CONNECTED"); // back to what it was, tokens intact
+    expect(openTokens(s.db.rows.find((r) => r.memberId === "u1")!).accessToken).toBe("ACCESS-SECRET");
+  });
+
+  it("a Workspace flow started by an admin who was demoted mid-flow is refused, on callback and on paste", async () => {
+    const s = setup();
+    s.db.setUser({ id: "a1", role: "admin" });
+    const a = await s.begin({ scope: "WORKSPACE", role: "admin", acknowledge: true, userId: "a1" });
+    s.db.setUser({ id: "a1", role: "family" });
+    expect((await s.complete(a.state)).outcome).toBe("failed");
+    expect(s.oauth.exchange).not.toHaveBeenCalled();
+    expect(s.db.rows.find((r) => r.scope === "WORKSPACE")!.state).not.toBe("CONNECTED");
+
+    s.db.setUser({ id: "a1", role: "admin" });
+    const b = await s.begin({ scope: "WORKSPACE", role: "admin", acknowledge: true, userId: "a1" });
+    s.db.setUser({ id: "a1", role: "family" });
+    // the paste caller's session still says admin; the database is what counts
+    expect((await s.complete(b.state, { browserState: null, caller: { id: "a1", role: "admin" } })).outcome).toBe("failed");
+    expect(s.oauth.exchange).not.toHaveBeenCalled();
+  });
+
+  it("a starter who was deactivated, or is being deleted, is refused before the exchange", async () => {
+    for (const patch of [{ directoryStatus: "DEACTIVATED" }, { deletionStatus: "PENDING" }]) {
+      const s = setup();
+      const a = await s.begin();
+      s.db.setUser({ id: "u1", role: "family", ...patch });
+      expect((await s.complete(a.state)).outcome, JSON.stringify(patch)).toBe("failed");
+      expect(s.oauth.exchange).not.toHaveBeenCalled();
+    }
+  });
+
+  it("an admin changes the client while members are signed in: it is stored once, the next start uses it, signed-in rows are untouched, and re-consent writes it into the row", async () => {
+    const s = setup();
+    const first = await s.begin();
+    await s.complete(first.state); // u1 holds tokens, issued to the registered "dcr-client"
+    vi.mocked(recordActivity).mockClear();
+    await storeMcpOAuthClient(s.db.prisma, { provider: PROVIDER, clientId: "new-client", clientSecret: "SECRET-X", userId: "admin1" }, s.deps);
+
+    expect(s.db.clients).toHaveLength(1);
+    expect(s.db.clients[0]).toMatchObject({ clientId: "new-client", source: "PASTED" }); // PASTED replaced the DCR record
+    const u1 = s.db.rows.find((r) => r.memberId === "u1")!;
+    expect(u1).toMatchObject({ clientId: "dcr-client", state: "CONNECTED" }); // untouched: its refresh still works
+    const audit = vi.mocked(recordActivity).mock.calls.map((c) => c[0]);
+    expect(audit).toHaveLength(1);
+    expect(audit[0]).toMatchObject({ kind: "auth", refs: expect.objectContaining({ connector: PROVIDER, change: "client" }) });
+    expect(JSON.stringify(audit)).not.toMatch(/SECRET-X|new-client/);
+
+    // The NEXT start uses the new client (not the oldest row's)...
+    const second = await s.begin({ userId: "u2" });
+    expect(qs(second.authorizeUrl).get("client_id")).toBe("new-client");
+    await s.complete(second.state);
+    expect((s.oauth.exchange.mock.calls[1]![0] as { clientId: string; clientSecret?: string })).toMatchObject({ clientId: "new-client", clientSecret: "SECRET-X" });
+    expect(s.db.rows.find((r) => r.memberId === "u2")).toMatchObject({ clientId: "new-client" });
+
+    // ...and a re-consent writes the client it used into the row with the new tokens.
+    const again = await s.begin();
+    expect(s.db.rows.find((r) => r.memberId === "u1")!.clientId).toBe("dcr-client"); // not yet: the old tokens are still held
+    await s.complete(again.state);
+    expect(s.db.rows.find((r) => r.memberId === "u1")!.clientId).toBe("new-client");
+  });
+
+  it("a signed-in row's refresh uses ITS OWN client, whatever the provider's client is now", async () => {
+    const s = setup();
+    const first = await s.begin();
+    await s.complete(first.state);
+    await storeMcpOAuthClient(s.db.prisma, { provider: PROVIDER, clientId: "new-client", userId: "admin1" }, s.deps);
+    const refresh = vi.fn(async (_i: unknown) => ({ accessToken: "renewed", refreshToken: "r2", expiresIn: 3600 }));
+    const refresher = createMcpOAuthRefresher({
+      prisma: s.db.prisma, oauth: { refresh } as never, egress: async () => ({ allowed: true, row: null }),
+    });
+    expect(await refresher.refreshNow(s.db.rows[0].id)).toBe("refreshed");
+    expect(refresh.mock.calls[0]![0]).toMatchObject({ clientId: "dcr-client" });
+  });
+
+  it("a leaver's old CONNECTED row does not decide the client new sign-ins get", async () => {
+    const s = setup();
+    const first = await s.begin();
+    await s.complete(first.state); // u1, registered "dcr-client"
+    s.db.setUser({ id: "u1", directoryStatus: "DEACTIVATED" }); // the oldest row now belongs to a leaver and never leaves CONNECTED
+    await storeMcpOAuthClient(s.db.prisma, { provider: PROVIDER, clientId: "new-client", userId: "admin1" }, s.deps);
+    const next = await s.begin({ userId: "u3" });
+    expect(qs(next.authorizeUrl).get("client_id")).toBe("new-client");
+  });
+
+  it("a registration is stored once and reused, and never overwrites a pasted client", async () => {
+    const s = setup();
+    const a = await s.begin();
+    const b = await s.begin({ userId: "u2" });
+    expect(s.oauth.register).toHaveBeenCalledTimes(1); // the second start reuses the stored registration
+    expect(s.db.clients).toHaveLength(1);
+    expect(s.db.clients[0]).toMatchObject({ clientId: "dcr-client", source: "DCR", updatedBy: null });
+    expect(qs(a.authorizeUrl).get("client_id")).toBe(qs(b.authorizeUrl).get("client_id"));
+
+    await storeMcpOAuthClient(s.db.prisma, { provider: PROVIDER, clientId: "pasted", userId: "admin1" }, s.deps);
+    expect(s.db.clients[0]).toMatchObject({ clientId: "pasted", source: "PASTED", updatedBy: "admin1" });
+    const c = await s.begin({ userId: "u3" });
+    expect(qs(c.authorizeUrl).get("client_id")).toBe("pasted"); // PASTED wins; no new registration
+    expect(s.oauth.register).toHaveBeenCalledTimes(1);
+  });
+
+  it("the client secret is sealed under its own record: it opens nowhere else", async () => {
+    const s = setup();
+    await storeMcpOAuthClient(s.db.prisma, { provider: PROVIDER, clientId: "c", clientSecret: "SECRET-Y", userId: "admin1" }, s.deps);
+    const rec = s.db.clients[0];
+    expect(rec.clientSecretEnc).toMatch(/^dcv1:/);
+    expect(rec.clientSecretEnc).not.toContain("SECRET-Y");
+    expect(() => decryptColumn(deriveMcpOAuthTokenKey(), rec.clientSecretEnc, mcpOAuthClientAad({ ...rec, id: "another-record" }))).toThrow();
+    expect(decryptColumn(deriveMcpOAuthTokenKey(), rec.clientSecretEnc, mcpOAuthClientAad(rec))).toBe("SECRET-Y");
   });
 });
 

@@ -28,9 +28,12 @@ function setup(logDest?: { write(s: string): void }) {
     })),
     register: vi.fn(async (_e: string, _r: readonly string[]) => ({ clientId: "client-1" })),
     exchange: vi.fn(async (_i: unknown) => ({ accessToken: "ACCESS-SECRET", refreshToken: "REFRESH-SECRET", expiresIn: 3600 })),
+    refresh: vi.fn(async (_i: unknown): Promise<{ accessToken: string }> => ({ accessToken: "x" })),
+    revoke: vi.fn(async (_i: unknown): Promise<void> => {}),
   };
+  const closeSession = vi.fn(async (_p: string, _c: string): Promise<void> => {});
   const gate: { current: Awaited<ReturnType<McpOAuthDependencies["egress"]>> } = { current: { allowed: true, row: null } };
-  const deps: McpOAuthDependencies = mcpOAuthDependencies({ oauth, egress: async () => gate.current });
+  const deps: McpOAuthDependencies = mcpOAuthDependencies({ oauth, closeSession, catalogChanged: async () => {}, egress: async () => gate.current });
   const app = express();
   app.use(express.json());
   app.use(cookieParser());
@@ -43,7 +46,7 @@ function setup(logDest?: { write(s: string): void }) {
     next();
   });
   app.use("/api", createMcpOAuthRouter(db.prisma, deps));
-  return { app, db, oauth, gate };
+  return { app, db, oauth, closeSession, gate };
 }
 const asUser = (call: Test, role = "family", id = "u1") => call.set("x-test-role", role).set("x-test-id", id);
 const start = (app: express.Express, body: object = { provider: "atlassian", scope: "MEMBER" }, role = "family") =>
@@ -153,7 +156,7 @@ describe("MCP OAuth routes", () => {
     const s = await start(app, { provider: "atlassian", scope: "WORKSPACE", acknowledge: true }, "admin");
     const state = new URL(s.body.authorizeUrl).searchParams.get("state")!;
     const res = await request(app).get("/api/mcp/oauth/callback").query({ state, code: "c" }).set("Cookie", `${MCP_OAUTH_STATE_COOKIE}=${state}`);
-    expect(res.headers.location).toBe("/integrations/credentials?mcp=atlassian:connected");
+    expect(res.headers.location).toBe("/connectors/credentials?mcp=atlassian:connected");
   });
 
   it("callback: a missing cookie, a forged state and a replay all end at failed", async () => {
@@ -215,10 +218,29 @@ describe("MCP OAuth routes", () => {
   });
 
   it("client: only owner/admin can store a pre-registered client", async () => {
-    const { app } = setup();
+    const { app, db } = setup();
     const body = { provider: "atlassian", clientId: "mine" };
     expect((await asUser(request(app).patch("/api/mcp/oauth/client"), "family").send(body)).status).toBe(403);
-    expect((await asUser(request(app).patch("/api/mcp/oauth/client"), "admin").send(body)).status).toBe(204);
+    const ok = await asUser(request(app).patch("/api/mcp/oauth/client"), "admin").send(body);
+    expect(ok.status).toBe(200);
+    expect(ok.body).toMatchObject({ stored: true, provider: "atlassian" });
+    expect(ok.body.message).toMatch(/already signed in keep the client they signed in with/);
+    expect(db.clients).toHaveLength(1); // stored once, per provider and issuer; no connection row was written
+    expect(db.rows).toHaveLength(0);
+  });
+
+  it("an admin changing the client while someone is signed in is answered and applied to the next start only", async () => {
+    const { app, db, oauth } = setup();
+    const s = await start(app);
+    const state = new URL(s.body.authorizeUrl).searchParams.get("state")!;
+    await request(app).get("/api/mcp/oauth/callback").query({ state, code: "c" }).set("Cookie", `${MCP_OAUTH_STATE_COOKIE}=${state}`);
+    expect(db.rows[0]).toMatchObject({ state: "CONNECTED", clientId: "client-1" });
+    const patch = await asUser(request(app).patch("/api/mcp/oauth/client"), "admin").send({ provider: "atlassian", clientId: "mine" });
+    expect(patch.status).toBe(200);
+    expect(db.rows[0]).toMatchObject({ state: "CONNECTED", clientId: "client-1" }); // untouched
+    const next = await start(app, { provider: "atlassian", scope: "MEMBER" }, "family");
+    expect(new URL(next.body.authorizeUrl).searchParams.get("client_id")).toBe("mine");
+    expect(oauth.register).toHaveBeenCalledTimes(1);
   });
 
   it("never writes the code, state or pasted address to the request log", async () => {
@@ -256,6 +278,47 @@ describe("GET /mcp/oauth/connections visibility", () => {
   });
 });
 
+describe("disconnect answers honestly about the vendor-side revoke (F7)", () => {
+  beforeEach(() => __setColumnCryptoKeyForTest(Buffer.alloc(32, 9).toString("base64")));
+  afterEach(() => __setColumnCryptoKeyForTest(null));
+
+  async function connected() {
+    const w = setup();
+    w.oauth.discover.mockResolvedValue({
+      resource: MCP_URL, issuer: ISSUER, authorizationEndpoint: "https://auth.example/authorize",
+      tokenEndpoint: "https://auth.example/token", registrationEndpoint: "https://auth.example/dcr",
+      revocationEndpoint: "https://auth.example/revoke", issParameterSupported: false,
+    } as never);
+    const s = await start(w.app);
+    const state = new URL(s.body.authorizeUrl).searchParams.get("state")!;
+    await request(w.app).get("/api/mcp/oauth/callback").query({ state, code: "c" }).set("Cookie", `${MCP_OAUTH_STATE_COOKIE}=${state}`);
+    return { ...w, id: w.db.rows[0].id as string };
+  }
+
+  it("a failed vendor revoke is 200 revoked:false, never a 204 that claims success; a clean one is 204", async () => {
+    const w = await connected();
+    w.oauth.revoke.mockRejectedValueOnce(new Error("vendor down"));
+    const failed = await asUser(request(w.app).delete(`/api/mcp/oauth/connections/${w.id}`));
+    expect(failed.status).toBe(200);
+    expect(failed.body).toMatchObject({ disconnected: true, revoked: false });
+    expect(w.db.rows[0]).toMatchObject({ state: "DISCONNECTED", tokensEnc: null });
+
+    const again = await connected();
+    const ok = await asUser(request(again.app).delete(`/api/mcp/oauth/connections/${again.id}`));
+    expect(ok.status).toBe(204);
+    expect(again.oauth.revoke).toHaveBeenCalledTimes(1);
+  });
+
+  it("an unreadable gate is reported the same way", async () => {
+    const w = await connected();
+    w.gate.current = { allowed: false, reason: "gate_unavailable", message: "" };
+    const res = await asUser(request(w.app).delete(`/api/mcp/oauth/connections/${w.id}`));
+    expect(res.status).toBe(200);
+    expect(res.body.revoked).toBe(false);
+    expect(w.oauth.revoke).not.toHaveBeenCalled();
+  });
+});
+
 describe("production wiring: the callback and the start route share one set of in-flight sign-ins", () => {
   beforeEach(() => __setColumnCryptoKeyForTest(Buffer.alloc(32, 9).toString("base64")));
   afterEach(() => __setColumnCryptoKeyForTest(null));
@@ -269,6 +332,8 @@ describe("production wiring: the callback and the start route share one set of i
       })),
       register: vi.fn(async (_e: string, _r: readonly string[]) => ({ clientId: "client-1" })),
       exchange: vi.fn(async (_i: unknown) => ({ accessToken: "ACCESS-SECRET", refreshToken: "REFRESH-SECRET", expiresIn: 3600 })),
+      refresh: vi.fn(async (_i: unknown): Promise<{ accessToken: string }> => ({ accessToken: "x" })),
+      revoke: vi.fn(async (_i: unknown): Promise<void> => {}),
     };
     // Exactly one call, as in app.ts: no deps object is shared by hand.
     const routers = createMcpOAuthRouters(db.prisma, { oauth, egress: async () => ({ allowed: true, row: null }) });
