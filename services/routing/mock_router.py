@@ -274,6 +274,11 @@ class _MockDhcp:
     def active_leases(self) -> list[dict[str, Any]]:
         return _DHCP_LEASES
 
+    def host_hints(self) -> dict[str, dict[str, Any]]:
+        # No neighbour table in the mock: mock-mode APs resolve from the
+        # `_test_seed` discovery record (WARP-3883 resolver, last source).
+        return {}
+
     def get_lan_pool(self) -> dict[str, Any]:
         return dict(self._lan_pool)
 

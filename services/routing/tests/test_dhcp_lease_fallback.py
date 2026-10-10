@@ -129,3 +129,30 @@ class TestGetLanPool:
     def test_non_dict_response_is_survived(self) -> None:
         api = self._pool_api(None)
         assert api.get_lan_pool() == {"start": None, "limit": None, "leasetime": None}
+
+
+class TestHostHints:
+    """WARP-3883: the neighbour/lease/ethers view that finds a static-IP AP."""
+
+    HINTS = {"80:EA:0B:39:AE:23": {"ipaddrs": ["192.168.9.7"], "ip6addrs": [], "name": "droplet-ap"}}
+
+    def test_returns_the_luci_rpc_map(self) -> None:
+        api, router = _api(lambda obj, method, *a, **k: self.HINTS)
+        assert api.host_hints() == self.HINTS
+        assert router._call.call_args_list[0][0][:2] == ("luci-rpc", "getHostHints")
+
+    def test_acl_denied_or_missing_luci_rpc_is_empty(self) -> None:
+        api, _ = _api(lambda *_a, **_k: _method_not_found())
+        assert api.host_hints() == {}
+
+    def test_a_non_dict_answer_is_empty(self) -> None:
+        api, _ = _api(lambda *_a, **_k: None)
+        assert api.host_hints() == {}
+
+    def test_transport_errors_propagate(self) -> None:
+        def side_effect(*_a, **_k):
+            raise ConnectionError("router unreachable")
+
+        api, _ = _api(side_effect)
+        with pytest.raises(ConnectionError):
+            api.host_hints()
