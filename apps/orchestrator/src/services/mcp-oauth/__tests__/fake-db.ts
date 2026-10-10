@@ -10,6 +10,8 @@ const matches = (r: Row, where: Row = {}): boolean =>
     return r[k] === v;
   });
 
+const snap = (r: Row | undefined): Row | null => (r ? { ...r } : null);
+
 export function fakeMcpOAuthDb(integration: Row | null = null) {
   const rows: Row[] = [];
   const check = (r: Row) => {
@@ -18,9 +20,10 @@ export function fakeMcpOAuthDb(integration: Row | null = null) {
     if (r.state === "CONNECTED" && !r.tokensEnc) throw new Error("connected_token_check");
   };
   const t = {
-    findFirst: async ({ where }: { where?: Row }) => rows.find((r) => matches(r, where)) ?? null,
-    findUnique: async ({ where }: { where: Row }) => rows.find((r) => matches(r, where)) ?? null,
-    findMany: async ({ where }: { where?: Row }) => rows.filter((r) => matches(r, where)),
+    // Reads return snapshots, as a database does: a row read earlier does not change under the reader.
+    findFirst: async ({ where }: { where?: Row }) => snap(rows.find((r) => matches(r, where))),
+    findUnique: async ({ where }: { where: Row }) => snap(rows.find((r) => matches(r, where))),
+    findMany: async ({ where }: { where?: Row }) => rows.filter((r) => matches(r, where)).map((r) => ({ ...r })),
     create: async ({ data }: { data: Row }) => {
       const r: Row = {
         id: randomUUID(), state: "DISCONNECTED", memberId: null, clientId: null, clientSecretEnc: null, tokensEnc: null,

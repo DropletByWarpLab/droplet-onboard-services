@@ -116,7 +116,8 @@ describe("single flight", () => {
     });
     const a = s.refresher.refreshNow(ID);
     const b = s.refresher.refreshNow(ID);
-    await Promise.resolve();
+    // The refresh runs after the row is read; wait until the bridge call is actually in flight.
+    await vi.waitFor(() => expect(s.oauth.refresh).toHaveBeenCalled());
     release();
     expect(await Promise.all([a, b])).toEqual(["refreshed", "refreshed"]);
     expect(s.oauth.refresh).toHaveBeenCalledTimes(1);

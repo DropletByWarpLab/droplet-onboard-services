@@ -153,10 +153,17 @@ function lazyBridgeOAuthClient(): Pick<McpBridgeOAuthClient, "discover" | "regis
   };
 }
 
+/**
+ * The process-wide in-flight sign-ins. The DEFAULT for every dependency set, so
+ * `start` (one router) and the callback (another) can never end up with separate
+ * maps: a fresh `new Map()` per call made every real browser redirect fail.
+ */
+const PROCESS_PENDING = new Map<string, PendingFlow>();
+
 export function mcpOAuthDependencies(overrides: Partial<McpOAuthDependencies> = {}): McpOAuthDependencies {
   return {
     now: () => new Date(),
-    pending: new Map(),
+    pending: PROCESS_PENDING,
     // Lazy: the singleton pulls the whole MCP stack, which this module must not load with it.
     closeSession: async (provider, connectionId) => {
       const { closeRemoteConnectionSession } = await import("../mcp-client.singleton.js");

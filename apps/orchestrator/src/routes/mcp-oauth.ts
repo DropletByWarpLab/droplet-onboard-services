@@ -41,6 +41,21 @@ function fail(res: Response, err: unknown): Response {
   return res.status(503).json({ error: "sign_in_unavailable", message: "Sign-in is unavailable. Try again shortly." });
 }
 
+/**
+ * Both halves of the sign-in, wired the way `app.ts` wires them: the public
+ * callback (mounted before session auth) and the session-authenticated routes.
+ * They MUST share one dependency set: `start` writes the in-flight flow that the
+ * callback later claims, so two independently built sets would make every real
+ * browser redirect fail.
+ */
+export function createMcpOAuthRouters(
+  prisma: PrismaClient,
+  options: Partial<McpOAuthDependencies> = {},
+): { callback: Router; session: Router } {
+  const deps = mcpOAuthDependencies(options);
+  return { callback: createMcpOAuthCallbackRouter(prisma, deps), session: createMcpOAuthRouter(prisma, deps) };
+}
+
 export function createMcpOAuthRouter(prisma: PrismaClient, options: Partial<McpOAuthDependencies> = {}): Router {
   const router = Router();
   const deps = mcpOAuthDependencies(options);
