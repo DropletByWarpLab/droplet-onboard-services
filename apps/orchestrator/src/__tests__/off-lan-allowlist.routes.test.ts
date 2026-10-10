@@ -102,7 +102,6 @@ function mkUser(role: AuthUser["role"], username = "stefan"): AuthUser {
 function buildApp(
   prismaMock: ReturnType<typeof createPrismaMock>,
   user: AuthUser,
-  deps: { onRemoteMcpDisabled?: () => Promise<void> } = {},
 ) {
   const app = express();
   app.use(express.json());
@@ -110,7 +109,7 @@ function buildApp(
     (req as Request & { user: AuthUser }).user = user;
     next();
   });
-  app.use("/api", createSettingsRouter(prismaMock as unknown as import("@prisma/client").PrismaClient, deps));
+  app.use("/api", createSettingsRouter(prismaMock as unknown as import("@prisma/client").PrismaClient));
   return app;
 }
 
@@ -388,9 +387,10 @@ describe("WARP-467 — PATCH /api/settings/off-lan/:key", () => {
   });
 });
 
-// ADR-043 §4 / ADR-072 §1: the owner's master switch over outbound MCP. Turning
-// it OFF must tear remote sessions down, not merely decline the next call.
-describe("WARP-3912 — remote_mcp teardown on turn-off", () => {
+// WARP-3960 (Romain, 2026-10-10): `remote_mcp` is a metering label, not a switch.
+// Connected MCP servers are always available; the kill switches are per-server off
+// and Disconnect.
+describe("WARP-3960 — remote_mcp is not switchable", () => {
   const mcpRow = (enabled: boolean): MockChannelRow => ({
     key: "remote_mcp",
     enabled,
@@ -400,34 +400,38 @@ describe("WARP-3912 — remote_mcp teardown on turn-off", () => {
     reason: null,
   });
 
-  it("turning it off runs the teardown once; turning it on does not", async () => {
-    const teardown = vi.fn(async () => undefined);
-    const off = createPrismaMock([mcpRow(true)]);
-    const resOff = await request(buildApp(off, mkUser("admin"), { onRemoteMcpDisabled: teardown }))
-      .patch("/api/settings/off-lan/remote_mcp")
-      .send({ enabled: false, reason: "No outbound MCP" });
-    expect(resOff.status).toBe(200);
-    expect(teardown).toHaveBeenCalledTimes(1);
-
-    const on = createPrismaMock([mcpRow(false)]);
-    await request(buildApp(on, mkUser("admin"), { onRemoteMcpDisabled: teardown }))
-      .patch("/api/settings/off-lan/remote_mcp")
-      .send({ enabled: true, reason: "Back on" });
-    expect(teardown).toHaveBeenCalledTimes(1);
+  it.each(["owner", "admin"] as const)("PATCH remote_mcp as %s -> 400 channel_not_switchable, nothing written", async (role) => {
+    for (const enabled of [false, true]) {
+      const prisma = createPrismaMock([mcpRow(true)]);
+      const res = await request(buildApp(prisma, mkUser(role)))
+        .patch("/api/settings/off-lan/remote_mcp")
+        .send({ enabled, reason: "x" });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe("channel_not_switchable");
+      expect(prisma.offLanAllowlistChannel.update).not.toHaveBeenCalled();
+      expect(prisma.rows.get("remote_mcp")?.enabled).toBe(true);
+    }
   });
 
-  it("a teardown that throws does not fail the PATCH (the switch is already persisted)", async () => {
-    const prisma = createPrismaMock([mcpRow(true)]);
-    const res = await request(
-      buildApp(prisma, mkUser("owner"), {
-        onRemoteMcpDisabled: async () => {
-          throw new Error("bridge down");
-        },
-      }),
-    )
+  it("refuses even a body that would otherwise be invalid (the key itself is not switchable)", async () => {
+    const res = await request(buildApp(createPrismaMock([mcpRow(true)]), mkUser("owner")))
       .patch("/api/settings/off-lan/remote_mcp")
+      .send({});
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("channel_not_switchable");
+  });
+
+  it("still lists remote_mcp (the metering label stays visible)", async () => {
+    const res = await request(buildApp(createPrismaMock([mcpRow(true)]), mkUser("owner"))).get("/api/settings/off-lan");
+    expect(res.status).toBe(200);
+    expect(res.body.channels.map((c: { key: string }) => c.key)).toContain("remote_mcp");
+  });
+
+  it("other channels are unaffected", async () => {
+    const prisma = createPrismaMock();
+    const res = await request(buildApp(prisma, mkUser("admin")))
+      .patch("/api/settings/off-lan/telemetry")
       .send({ enabled: false, reason: "x" });
     expect(res.status).toBe(200);
-    expect(prisma.rows.get("remote_mcp")?.enabled).toBe(false);
   });
 });

@@ -5260,9 +5260,10 @@ enum OffLanChannelKey {
   /// destinations never need it (they still pass the SSRF guard). One key, not
   /// one per integration: an owner decides this once.
   work_integrations
-  /// WARP-3912 (ADR-043 §4, ADR-072 §1) — the owner's master switch over every
-  /// outbound MCP session (curated Atlassian today, owner-added servers later).
-  /// Read fail-closed by `remoteMcpGate` on every remote call; off tears down.
+  /// WARP-3912 (ADR-043 §4, ADR-072 §1) — outbound MCP (curated Atlassian today,
+  /// owner-added servers later). WARP-3960 (Romain, 2026-10-10): a metering
+  /// label only, always enabled, never read as a switch; the PATCH refuses it.
+  /// The kill switches are the per-server off and Disconnect.
   remote_mcp
 }
 

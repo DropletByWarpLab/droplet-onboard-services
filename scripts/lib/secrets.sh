@@ -654,10 +654,9 @@ generate_env() {
   sandbox_service_token=$(openssl rand -hex 32)
   # WARP-2627: bearer the orchestrator presents to the services/mcp-bridge
   # container — the one component allowed to open an outbound MCP session
-  # (ADR-043 §5). Minted unconditionally even though the `remote-mcp` compose
-  # profile is off by default: the alternative is an operator who enables the
-  # profile and gets a service that 503s every route with nothing in the logs
-  # pointing at a missing secret. Both ends fail CLOSED when it is empty.
+  # (ADR-043 §5). Minted unconditionally (the bridge is default-on since
+  # WARP-3960): without it the service would 503 every route with nothing in the
+  # logs pointing at a missing secret. Both ends fail CLOSED when it is empty.
   mcp_bridge_service_token=$(openssl rand -hex 32)
   # >>> WARP-3625 inbound bearers (voice-io, rag-eval, file-indexer) >>>
   # The orchestrator presents these to three internal APIs that used to rely on

@@ -12,7 +12,7 @@
  *   1. **The orchestrator crashes, the bridge stays up.** The bridge holds an
  *      authenticated vendor connection that nothing is driving, until the
  *      orchestrator's next `open` happens to replace it. If the operator
- *      meanwhile removed the server from the allowlist or disconnected the
+ *      meanwhile turned the server off or disconnected the
  *      account, *nothing ever replaces it* and the connection simply stays open.
  *   2. **The bridge restarts, the orchestrator stays up.** The bridge's session
  *      store is memory-only (correct — a restart must tear sessions down), so
@@ -73,8 +73,6 @@ export type RemoteMcpAttachState = (typeof REMOTE_MCP_ATTACH_STATES)[number];
  * observed from the outside; the rest are this reconciler's own findings.
  */
 export type RemoteMcpAttachReason =
-  /** The operator has not named this server in REMOTE_MCP_SERVER_ALLOWLIST. */
-  | "not_allowlisted"
   /** The connection row is missing, not CONNECTED, or has no credential. */
   | "gate_refused"
   /** The row's credential does not carry every field a session needs. */
@@ -104,8 +102,6 @@ export type RemoteMcpRemediation =
   | "none"
   /** It clears on its own; the next tick retries. */
   | "wait"
-  /** Add the server to REMOTE_MCP_SERVER_ALLOWLIST. */
-  | "enable_server"
   /** Reconnect the account on the credentials page. */
   | "reconnect_account"
   /** The credential is stored but incomplete — finish it. */
@@ -120,7 +116,6 @@ export type RemoteMcpRemediation =
 const REMEDIATION_BY_REASON: Readonly<
   Record<RemoteMcpAttachReason, RemoteMcpRemediation>
 > = {
-  not_allowlisted: "enable_server",
   gate_refused: "reconnect_account",
   credential_incomplete: "complete_credential",
   bridge_unavailable: "check_bridge",
@@ -240,8 +235,7 @@ export class RemoteMcpLifecycleRegistry {
     return [...this.#byServer.keys()].sort().map((id) => this.#byServer.get(id)!);
   }
 
-  /** Drop a server entirely — the "the operator removed it from the allowlist"
-   *  path. Nothing is left behind to reconcile. */
+  /** Drop a server entirely. Nothing is left behind to reconcile. */
   unregister(serverId: string): boolean {
     return this.#byServer.delete(serverId);
   }

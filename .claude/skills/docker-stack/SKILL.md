@@ -37,7 +37,7 @@ description: |
 | camera-discovery | —   | `full`, `single-box` | ONVIF/RTSP scanner           |
 | web-fetch      | —     | `web`  | Ambient-data fetcher (weather/rates) for LLM tools (WARP-1436) |
 | erp-sql-bridge | —     | `erp`  | Direct-SQL Eaglesoft bridge (unixODBC + pyodbc); needs an operator-vendored SAP client (WARP-1106) |
-| mcp-bridge     | —     | `remote-mcp` | OUTBOUND MCP sessions — the only component allowed to dial a vendor's MCP server (ADR-043 §5, WARP-2627). Also gated by `REMOTE_MCP_SERVER_ALLOWLIST` (empty) and a CONNECTED `IntegrationConnection` row |
+| mcp-bridge     | —     | — | OUTBOUND MCP sessions — the only component allowed to dial a vendor's MCP server (ADR-043 §5, WARP-2627). Default-on since WARP-3960; it dials nothing until a CONNECTED sign-in or `IntegrationConnection` row exists, and an owner or admin can turn a single server off |
 | email-indexer  | —     | — | Mailbox indexer for RAG (default-on since WARP-2970) |
 | ollama         | 127.0.0.1:11434 | `single-box` | Local LLM inference on the single-box shape |
 | openwrt        | 127.0.0.1:8181→80 | `single-box` | In-container OpenWrt (router UI/ubus) |
@@ -46,8 +46,7 @@ description: |
 
 ## Profiles (`COMPOSE_PROFILES`)
 
-Profiles: `linux`, `display`, `full`, `single-box`, `eval`, `ops`, `erp`,
-`remote-mcp`.
+Profiles: `linux`, `display`, `full`, `single-box`, `eval`, `ops`, `erp`.
 `setup.sh` writes `COMPOSE_PROFILES` into `.env`:
 
 - **Linux:** `linux,display` — Frigate, the voice pipeline, and
@@ -63,9 +62,9 @@ Profiles: `linux`, `display`, `full`, `single-box`, `eval`, `ops`, `erp`,
   `full` profile (real hardware + operator-supplied credentials — a
   fresh install shouldn't scan the LAN or hit a missing switch).
 - `eval` enables the RAG evaluation harness, `ops` the operator console.
-- `remote-mcp` enables `mcp-bridge`, the outbound MCP session component
-  (ADR-043 §5). Off everywhere by default, and two further gates sit behind
-  it — see the table above.
+- `mcp-bridge`, the outbound MCP session component (ADR-043 §5), has no
+  profile: it is default-on (WARP-3960; the `remote-mcp` profile, the
+  `REMOTE_MCP_SERVER_ALLOWLIST` env and the `remote_mcp` owner switch are gone).
 
 ## Running the stack locally on macOS (override file)
 

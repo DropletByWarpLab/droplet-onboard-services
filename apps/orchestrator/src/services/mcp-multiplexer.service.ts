@@ -121,7 +121,7 @@ export function parseNamespacedToolName(
 /** Why a remote tool (or a whole server) was refused. Machine-readable —
  *  callers and the dashboard switch on `code`, never on `message`. */
 export type RemoteRejectionCode =
-  /** The operator has not allowlisted this server id (WARP-2418). */
+  /** This server id is not one the box registers (WARP-2418; WARP-3960: no env allowlist, the registry decides). */
   | "SERVER_NOT_ALLOWLISTED"
   /** Two attachments claimed the same server id. */
   | "SERVER_ID_IN_USE"
@@ -216,9 +216,9 @@ export function capRemoteDescription(description: string): string {
 
 export interface McpToolMultiplexerOptions {
   /**
-   * WARP-2418 — the operator allowlist. Returns `true` only for a server the
-   * operator has enabled. The DEFAULT DENIES EVERY SERVER, so a fresh box
-   * advertises nothing remote no matter what is wired up around it.
+   * WARP-2418 — which server ids may attach. Returns `true` only for a server
+   * the box registers (WARP-3960: the registry, not an env list). The DEFAULT
+   * DENIES EVERY SERVER, so a multiplexer nobody wired advertises nothing remote.
    */
   isServerAllowed?: (serverId: string) => boolean;
   /** WARP-2321's hook. Defaults to {@link DENY_ALL_REMOTE_TOOLS}. */
@@ -274,8 +274,8 @@ function errorOutcome(code: string, tool: string, message: string): McpToolCallO
 /**
  * The local child plus N remotes, behind one {@link McpClientPort}.
  *
- * With no remote attached — the shipping state, because the allowlist is
- * empty — every method delegates straight to the local port and the observable
+ * With no remote attached — the state of a box nobody has signed in on —
+ * every method delegates straight to the local port and the observable
  * behaviour is byte-identical to talking to `McpClientService` directly. That
  * is deliberate: it makes any behaviour change on a box attributable to a
  * server the operator actually enabled, never to this indirection.
@@ -333,8 +333,8 @@ export class McpToolMultiplexer implements McpClientPort {
   }
 
   /**
-   * Attach a remote server. Refused — and recorded — when the operator has
-   * not allowlisted it, when the id is not a legal namespace, or when the id
+   * Attach a remote server. Refused — and recorded — when the box does not
+   * register it, when the id is not a legal namespace, or when the id
    * is already in use. Returns the rejection, or `null` on success.
    */
   attachRemote(serverId: string, client: McpClientPort): RemoteRejection | null {
@@ -353,7 +353,7 @@ export class McpToolMultiplexer implements McpClientPort {
         code: "SERVER_NOT_ALLOWLISTED",
         serverId,
         message:
-          `"${serverId}" is not in the operator's remote MCP allowlist. ` +
+          `"${serverId}" is not a registered remote MCP server. ` +
           "Nothing from it is advertised or callable.",
       });
     }

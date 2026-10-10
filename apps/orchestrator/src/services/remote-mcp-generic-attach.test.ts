@@ -226,7 +226,7 @@ function harness(over: HarnessOptions = {}) {
   const registry = new RuntimeToolRegistry();
   const lifecycle = new RemoteMcpLifecycleRegistry(() => 1_000_000);
   const row = over.row === undefined ? connectedRow() : over.row;
-  const prisma = { offLanAllowlistChannel: { findUnique: async () => ({ enabled: true }) }, integrationConnection: { findFirst: vi.fn(async (_args: unknown) => row) } };
+  const prisma = { integrationConnection: { findFirst: vi.fn(async (_args: unknown) => row) } };
   const recordClassifications = vi.fn(async () => undefined);
   const openCredentials = vi.fn((): Record<string, string> => {
     const secrets = over.secrets ?? { apiToken: FAKE_API_TOKEN };
@@ -247,7 +247,6 @@ function harness(over: HarnessOptions = {}) {
       attachRemoteServer({
         mux,
         prisma,
-        allowlist,
         registry,
         lifecycle,
         auditLifecycle: audit,
@@ -334,17 +333,17 @@ describe("attachRemoteServer opens a bearer-only vendor from its one sealed fiel
     expect(h.lifecycle.get(ATLASSIAN_REMOTE_SERVER_ID)).toBeUndefined();
   });
 
-  it("is not attached, reads no row and dials nothing when the id is not allowlisted", async () => {
-    const h = harness({ allowlist: [] });
+  it("is not attached and dials nothing when there is no connection row (no env, no switch: the gate is the row)", async () => {
+    const h = harness({ row: null });
     const result = await h.attach();
     expect(result).toMatchObject({
       attached: false,
       serverId: FIXTURE_ID,
-      reason: "not_allowlisted",
+      reason: "gate_refused",
     });
-    expect(h.prisma.integrationConnection.findFirst).not.toHaveBeenCalled();
     expect(h.bridge.calls).toHaveLength(0);
-    expect(h.lifecycle.list()).toEqual([]);
+    // Registered detached, so the reconciler attaches it when a connection appears.
+    expect(h.lifecycle.get(FIXTURE_ID)).toMatchObject({ state: "detached", reason: "gate_refused" });
   });
 });
 
@@ -485,8 +484,7 @@ describe("attachAtlassianRemote is the same function with Atlassian's registrati
       attach: () =>
         attachAtlassianRemote({
           mux,
-          prisma: { offLanAllowlistChannel: { findUnique: async () => ({ enabled: true }) }, integrationConnection: { findFirst: async () => over.row ?? ATLASSIAN_ROW } },
-          allowlist,
+          prisma: { integrationConnection: { findFirst: async () => over.row ?? ATLASSIAN_ROW } },
           registry,
           recordClassifications: async () => undefined,
           lifecycle: new RemoteMcpLifecycleRegistry(() => 1_000_000),
@@ -546,11 +544,9 @@ describe("attachAtlassianRemote is the same function with Atlassian's registrati
 
   it("keeps the unopenable-bundle wording it has always had", async () => {
     const bridge = fixtureBridge(ATLASSIAN_REMOTE_SERVER_ID);
-    const allowlist = new Set([ATLASSIAN_REMOTE_SERVER_ID]);
     const result = await attachAtlassianRemote({
       mux: new McpToolMultiplexer(localPort(), { isServerAllowed: () => true, remoteCallPolicy: allowAll }),
-      prisma: { offLanAllowlistChannel: { findUnique: async () => ({ enabled: true }) }, integrationConnection: { findFirst: async () => ATLASSIAN_ROW } },
-      allowlist,
+      prisma: { integrationConnection: { findFirst: async () => ATLASSIAN_ROW } },
       registry: new RuntimeToolRegistry(),
       lifecycle: new RemoteMcpLifecycleRegistry(() => 1_000_000),
       auditLifecycle: () => undefined,

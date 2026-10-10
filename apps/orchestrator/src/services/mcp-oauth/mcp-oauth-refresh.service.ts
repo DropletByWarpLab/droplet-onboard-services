@@ -43,10 +43,10 @@ export interface McpOAuthRefreshDeps {
    */
   catalogChanged?: (provider: string, connectionId: string, event: "refreshed" | "ended") => Promise<void>;
   /**
-   * The rules every remote MCP call obeys (allowlist, `remote_mcp` channel, not
-   * DISABLED). A refresh is a hop to the vendor like any other, so a refusal
-   * skips it WITHOUT touching the row: the token is simply not renewed while
-   * remote MCP is off, and nothing is marked NEEDS_RECONNECT for that.
+   * The rule every remote MCP call obeys (not DISABLED). A refresh is a hop to
+   * the vendor like any other, so a refusal skips it WITHOUT touching the row:
+   * the token is simply not renewed while the server is off, and nothing is
+   * marked NEEDS_RECONNECT for that.
    */
   egress: (prisma: PrismaClient, serverId: string) => Promise<RemoteMcpEgressDecision>;
 }
@@ -97,7 +97,7 @@ export function createMcpOAuthRefresher(deps: McpOAuthRefreshDeps): McpOAuthRefr
     if (row.state === "NEEDS_RECONNECT") return "needs_reconnect";
     if (row.state !== "CONNECTED" || !row.tokensEnc || !row.clientId) return "unavailable";
 
-    // Before anything is opened or dialled: not while remote MCP may not talk to this server.
+    // Before anything is opened or dialled: not while this server is turned off.
     // The row is left exactly as it is (a read failure refuses too).
     try {
       if (!(await deps.egress(prisma, row.provider)).allowed) return "unavailable";

@@ -11,7 +11,7 @@
  *   1. **Orchestrator restarts / crashes, bridge stays up.** The bridge holds an
  *      authenticated vendor connection nothing drives. `open` replaces it on the
  *      next boot — *if a boot attach happens at all*. If the operator removed
- *      the server from `REMOTE_MCP_SERVER_ALLOWLIST` or disconnected the
+ *      the server off or disconnected the
  *      account in the meantime, no `open` ever comes and the connection just
  *      stays open. Handled here by the ORPHAN SWEEP: a session the orchestrator
  *      does not own is closed, with one audit row.
@@ -127,6 +127,15 @@ export interface RemoteMcpReconcilerDeps {
     serverId: string,
     knownTools: readonly string[],
   ) => Promise<RemoteAttachResult>;
+  /**
+   * WARP-3960 - would the connection gate pass for this server right now? A server
+   * that is `detached` / `gate_refused` (nothing signed in yet, or turned off) is
+   * only worth a re-open once this says yes; without it every tick would walk
+   * `detached -> reattaching -> detached` and append two lifecycle audit rows per
+   * server per 30 s on every box nobody has connected. Absent: always re-open
+   * (the pre-WARP-3960 behaviour, kept for narrow tests). A read failure answers false.
+   */
+  gateAllows?: (serverId: string) => Promise<boolean>;
   audit?: typeof auditRemoteMcpLifecycle;
   /** Injected so a test can step past a backoff window without sleeping. */
   now?: () => number;
@@ -152,10 +161,8 @@ export async function reconcileRemoteMcpSessions(
 
   const registrations = lifecycle.list();
   if (registrations.length === 0) {
-    // The shipping default. `REMOTE_MCP_SERVER_ALLOWLIST` is empty, so no attach
-    // ever registered anything, so there is nothing to reconcile and NOTHING IS
-    // DIALLED — not even `GET /sessions`. A box nobody configured must not talk to a
-    // container it is not running.
+    // No attach has run yet, so there is nothing to reconcile and NOTHING IS
+    // DIALLED — not even `GET /sessions`.
     return { ...empty, skipped: "nothing_registered" };
   }
 
@@ -213,7 +220,7 @@ export async function reconcileRemoteMcpSessions(
     if (reg && ownsBridgeSession(reg)) continue;
     // Failure (1): an authenticated vendor connection nothing here drives. It is
     // closed rather than adopted — adopting it would mean trusting a session
-    // opened with a credential this process never read, under an allowlist that
+    // opened with a credential this process never read, under a gate that
     // may have changed since.
     try {
       await deps.closeSession(session.serverId);
@@ -269,6 +276,15 @@ export async function reconcileRemoteMcpSessions(
     const needsReopen =
       reg.state !== "attached" || session === undefined || session.state === "closed";
     if (!needsReopen) continue;
+    // Refused at the gate last time and still refused: nothing to re-open, nothing to audit.
+    if (
+      reg.state === "detached" &&
+      reg.reason === "gate_refused" &&
+      deps.gateAllows &&
+      !(await deps.gateAllows(reg.serverId).catch(() => false))
+    ) {
+      continue;
+    }
 
     const before = lifecycle.record({
       serverId: reg.serverId,

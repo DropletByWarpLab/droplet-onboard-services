@@ -221,9 +221,7 @@ describe("sessions", () => {
 });
 
 describe("remoteMcpGate with sign-ins", () => {
-  const allow = new Set([SERVER]);
   const gatePrisma = (o: { row: { id: string; status: string; providerTokensEnc: string | null } | null; signedIn: number | Error | "absent" }): RemoteMcpGatePrisma => ({
-    offLanAllowlistChannel: { findUnique: async () => ({ enabled: true }) },
     integrationConnection: { findFirst: async () => o.row },
     ...(o.signedIn === "absent" ? {} : {
       mcpOAuthConnection: { count: vi.fn(async () => { if (o.signedIn instanceof Error) throw o.signedIn; return o.signedIn as number; }) },
@@ -232,26 +230,26 @@ describe("remoteMcpGate with sign-ins", () => {
   const apiRow = (status: string, tokens: string | null = "dcv1:x") => ({ id: "c1", status, providerTokensEnc: tokens });
 
   it("passes on a CONNECTED sign-in alone (no API-token row at all)", async () => {
-    expect(await remoteMcpGate(gatePrisma({ row: null, signedIn: 1 }), SERVER, allow)).toEqual({ allowed: true });
+    expect(await remoteMcpGate(gatePrisma({ row: null, signedIn: 1 }), SERVER)).toEqual({ allowed: true });
   });
 
   it("refuses a DISABLED connection whatever sign-ins exist", async () => {
-    const d = await remoteMcpGate(gatePrisma({ row: apiRow("DISABLED"), signedIn: 3 }), SERVER, allow);
+    const d = await remoteMcpGate(gatePrisma({ row: apiRow("DISABLED"), signedIn: 3 }), SERVER);
     expect(d).toMatchObject({ allowed: false, reason: "connection_disabled" });
   });
 
   it("lets a NEEDS_RECONNECT API-token row yield to a member's sign-in", async () => {
-    expect(await remoteMcpGate(gatePrisma({ row: apiRow("NEEDS_RECONNECT"), signedIn: 1 }), SERVER, allow)).toEqual({ allowed: true });
+    expect(await remoteMcpGate(gatePrisma({ row: apiRow("NEEDS_RECONNECT"), signedIn: 1 }), SERVER)).toEqual({ allowed: true });
   });
 
   it("still refuses with the old reasons when no sign-in exists, or the model is absent", async () => {
-    expect(await remoteMcpGate(gatePrisma({ row: null, signedIn: 0 }), SERVER, allow)).toMatchObject({ reason: "no_connection_row" });
-    expect(await remoteMcpGate(gatePrisma({ row: apiRow("NEEDS_RECONNECT"), signedIn: 0 }), SERVER, allow)).toMatchObject({ reason: "connection_not_connected" });
-    expect(await remoteMcpGate(gatePrisma({ row: null, signedIn: "absent" }), SERVER, allow)).toMatchObject({ reason: "no_connection_row" });
+    expect(await remoteMcpGate(gatePrisma({ row: null, signedIn: 0 }), SERVER)).toMatchObject({ reason: "no_connection_row" });
+    expect(await remoteMcpGate(gatePrisma({ row: apiRow("NEEDS_RECONNECT"), signedIn: 0 }), SERVER)).toMatchObject({ reason: "connection_not_connected" });
+    expect(await remoteMcpGate(gatePrisma({ row: null, signedIn: "absent" }), SERVER)).toMatchObject({ reason: "no_connection_row" });
   });
 
   it("fails closed when the sign-in read fails", async () => {
-    expect(await remoteMcpGate(gatePrisma({ row: null, signedIn: new Error("db") }), SERVER, allow)).toMatchObject({ allowed: false, reason: "gate_unavailable" });
+    expect(await remoteMcpGate(gatePrisma({ row: null, signedIn: new Error("db") }), SERVER)).toMatchObject({ allowed: false, reason: "gate_unavailable" });
   });
 });
 

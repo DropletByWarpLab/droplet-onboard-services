@@ -22,16 +22,18 @@
  *     owns. The gate and the audit are what §5 asks for; the URL was never the
  *     point.
  *
- * ## The gate is three independent refusals, and each fails closed
+ * ## The gate is independent refusals, and each fails closed
  *
  *   1. **The bearer.** No `MCP_BRIDGE_SERVICE_TOKEN` ⇒ refuse without dialling
  *      (`mcp-bridge.client.ts`).
- *   2. **The operator allowlist.** `REMOTE_MCP_SERVER_ALLOWLIST` must name the
- *      server. EMPTY BY DEFAULT — a box nobody configured dials nothing.
+ *   2. **The per-server off.** An owner or admin set the provider's
+ *      `IntegrationConnection` to DISABLED. (WARP-3960, Romain 2026-10-10: there
+ *      is no env allowlist and no owner switch any more; the kill switches are
+ *      this per-server off and Disconnect.)
  *   3. **The connection row.** An `IntegrationConnection` for this provider,
  *      with an explicit `status` of CONNECTED and a sealed credential in
- *      `providerTokensEnc` (ADR-042 §5). Read from the two EXPLICIT columns,
- *      never inferred from a NULL.
+ *      `providerTokensEnc` (ADR-042 §5) - or a CONNECTED sign-in. Read from the
+ *      EXPLICIT columns, never inferred from a NULL.
  *
  * A DB error is a REFUSAL, following `ambientDataGate`'s divergence from
  * `outboundEmailGate`: that service's own docstring records that its pre-merge
@@ -108,9 +110,7 @@ export type RemoteMcpOutcome =
  * this account" are not the same instruction.
  */
 export type RemoteMcpGateReason =
-  | "server_not_allowlisted"
   | "no_connection_row"
-  | "channel_disabled"
   | "connection_disabled"
   | "connection_not_connected"
   | "no_credential"
@@ -122,10 +122,6 @@ export type RemoteMcpGateDecision =
 
 /** The minimal Prisma surface the gate needs, so a test passes a literal. */
 export interface RemoteMcpGatePrisma {
-  /** WARP-3912 — the `remote_mcp` off-LAN channel row. */
-  offLanAllowlistChannel: {
-    findUnique(args: unknown): Promise<{ enabled: boolean } | null>;
-  };
   /**
    * WARP-2409 — rule 3 also passes on a signed-in connection. Optional so a
    * caller without the model sees only the API-token rung (fail closed).
@@ -151,50 +147,17 @@ export type RemoteMcpEgressDecision =
  * box talk to a remote MCP vendor: a tool call, and each step of a web sign-in
  * (discovery, client registration, code exchange, refresh, revoke). Nothing dials
  * a remote MCP host while any of these refuses:
- *   1. the operator allowlist names the server,
- *   2. the `remote_mcp` channel is explicitly `enabled`,
- *   3. an owner or admin has not turned the connection off (DISABLED), whatever
- *      sign-ins exist - any other status describes the shared token, not an
- *      admin's decision, and does not block a member's own sign-in.
- * Any read failure refuses. Whether a CREDENTIAL exists is {@link remoteMcpGate}'s
- * extra rule, not this one.
+ *   an owner or admin has not turned the connection off (DISABLED), whatever
+ *   sign-ins exist - any other status describes the shared token, not an
+ *   admin's decision, and does not block a member's own sign-in.
+ * (WARP-3960: the env allowlist and the `remote_mcp` owner switch are gone;
+ * `remote_mcp` stays a metering label only.) Any read failure refuses. Whether a
+ * CREDENTIAL exists is {@link remoteMcpGate}'s extra rule, not this one.
  */
 export async function remoteMcpEgressAllowed(
-  prisma: Pick<RemoteMcpGatePrisma, "offLanAllowlistChannel" | "integrationConnection">,
+  prisma: Pick<RemoteMcpGatePrisma, "integrationConnection">,
   serverId: string,
-  allowlist: ReadonlySet<string>,
 ): Promise<RemoteMcpEgressDecision> {
-  if (!allowlist.has(serverId)) {
-    return {
-      allowed: false,
-      reason: "server_not_allowlisted",
-      message:
-        `"${serverId}" is not in REMOTE_MCP_SERVER_ALLOWLIST. No session is opened and ` +
-        "nothing from it is callable.",
-    };
-  }
-  // WARP-3912 — the owner's master switch, after the allowlist (an unconfigured box
-  // still reads nothing) and before the connection row. Explicit `enabled`, never
-  // "a row exists"; a missing row or a failed read both refuse.
-  try {
-    const channel = await prisma.offLanAllowlistChannel.findUnique({ where: { key: "remote_mcp" } });
-    if (channel?.enabled !== true) {
-      return {
-        allowed: false,
-        reason: "channel_disabled",
-        message:
-          "Remote MCP servers are switched off by the workspace owner (off-LAN channel remote_mcp). " +
-          "Nothing was sent; ask the owner or an admin to turn it on in Settings.",
-      };
-    }
-  } catch (err) {
-    logger.warn({ err, serverId }, "remote_mcp channel read failed — failing closed (no egress)");
-    return {
-      allowed: false,
-      reason: "gate_unavailable",
-      message: "The remote MCP gate could not be read. Refusing egress.",
-    };
-  }
   let row: { id: string; status: string; providerTokensEnc: string | null } | null;
   try {
     row = await prisma.integrationConnection.findFirst({
@@ -232,9 +195,8 @@ export async function remoteMcpEgressAllowed(
 export async function remoteMcpGate(
   prisma: RemoteMcpGatePrisma,
   serverId: string,
-  allowlist: ReadonlySet<string>,
 ): Promise<RemoteMcpGateDecision> {
-  const egress = await remoteMcpEgressAllowed(prisma, serverId, allowlist);
+  const egress = await remoteMcpEgressAllowed(prisma, serverId);
   if (!egress.allowed) return egress;
   const row = egress.row;
   // WARP-2409 - rule 3 (a credential exists): a CONNECTED sign-in, a member's or
@@ -324,10 +286,10 @@ export function auditRemoteMcp(input: {
 }
 
 /**
- * WARP-3912 — every in-flight remote call, by server id. Turning `remote_mcp` off
- * aborts them all (ADR-043 §4: tear down, do not merely decline to re-establish).
- * Process-wide because the switch is: the one chokepoint below registers every
- * call, so a future owner-added server is covered without wiring of its own.
+ * WARP-3912 — every in-flight remote call, by server id. Turning a server off
+ * aborts its calls (ADR-043 §4: tear down, do not merely decline to re-establish).
+ * The one chokepoint below registers every call, so a future owner-added server
+ * is covered without wiring of its own.
  */
 const inFlight = new Map<string, Set<AbortController>>();
 
@@ -359,7 +321,7 @@ async function abortable<T>(serverId: string, fn: () => Promise<T>): Promise<T> 
           reject(
             new McpBridgeError(
               "REMOTE_MCP_GATE_REFUSED",
-              "Remote MCP was switched off by the workspace owner while this call was running. It was aborted.",
+              "An owner or admin turned this connection off while this call was running. It was aborted.",
               451,
             ),
           ),

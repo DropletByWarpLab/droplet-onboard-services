@@ -280,7 +280,7 @@ export interface SaasCredentialView {
    *
    * `null` for a `cloud` or `lan` track is "there is no session concept here",
    * and `null` for an `mcp` track is "no attach has ever been attempted on this
-   * box" — which is the shipping default (the allowlist is empty) and is not an
+   * box" — which is the state of a box nobody has signed in on and is not an
    * error state. Both are absence of a REGISTRATION, never absence of a session
    * id: the state itself is always a declared value.
    */

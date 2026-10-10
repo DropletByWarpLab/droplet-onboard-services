@@ -241,6 +241,12 @@ prepare_and_build() {
     # doc-render: the first routine to run would otherwise stall behind an
     # image build.
     sandbox
+    # WARP-3960 (Romain, 2026-10-10): mcp-bridge, the outbound MCP session
+    # component (WARP-2627, ADR-043 §5), is default-on - no `remote-mcp`
+    # profile. An idle bridge opens and dials nothing until a member signs in,
+    # and pre-building it here keeps that first sign-in from stalling behind an
+    # image build.
+    mcp-bridge
     # linux profile (audio-facing services; the OS-specific gate keeps
     # macOS Docker Desktop from trying to mount /dev/snd which doesn't exist)
     voice-io
@@ -289,14 +295,6 @@ prepare_and_build() {
   case ",${active_profiles}," in
     *,dmr,*|*,dmr-cuda,*) build_services+=(inference-manager) ;;
   esac
-  # remote-mcp profile: mcp-bridge (WARP-2627, the outbound MCP session
-  # component, ADR-043 §5) is `["remote-mcp"]`-profiled and has a `build:`
-  # section, so the same "No such image" failure at `up` applies. Same
-  # build-only-when-active idiom: the profile is off on every box that has not
-  # connected a remote MCP vendor, which is every box today.
-  case ",${active_profiles}," in
-    *,remote-mcp,*) build_services+=(mcp-bridge) ;;
-  esac
 
   # --- Build-list drift guard (compute_build_list_drift above) --------------
   # Deliberately NOT in build_services (accounted for here, not built):
@@ -308,8 +306,6 @@ prepare_and_build() {
   #                 (WARP-1106 direct-SQL ERP bridge)
   #   inference-manager — appended above only when a dmr profile is active
   #                 (`dmr` or `dmr-cuda`; WARP-2131 model-catalog sidecar)
-  #   mcp-bridge  — appended above only when the remote-mcp profile is active
-  #                 (WARP-2627 outbound MCP session component, ADR-043 §5)
   #   openwrt     — single-box router image; start_stack's `up` builds it on
   #                 the one shape whose profiles activate it
   #   ops-console — operator-workstation `ops` profile, never provisioned
@@ -331,7 +327,7 @@ prepare_and_build() {
         --env-file "$COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" config --format json 2>/dev/null \
       | jq -r '.services | to_entries[] | select(.value.build) | .key' 2>/dev/null || true)
     _drift=$(compute_build_list_drift \
-      "$(IFS=,; printf '%s' "${build_services[*]}"),rag-eval,web-fetch,media-gen,erp-sql-bridge,openwrt,ops-console,fleet-agent,inference-manager,mcp-bridge" \
+      "$(IFS=,; printf '%s' "${build_services[*]}"),rag-eval,web-fetch,media-gen,erp-sql-bridge,openwrt,ops-console,fleet-agent,inference-manager" \
       <<<"$_drift_buildable")
     if [ -n "$_drift" ]; then
       if [ -n "${CI:-}" ]; then
@@ -367,7 +363,7 @@ prepare_and_build() {
   for svc in "${build_services[@]}"; do
     if ! run_with_spinner "Building $svc" \
       run_docker_compose --profile full --profile linux --profile eval \
-        --profile web --profile erp --profile remote-mcp \
+        --profile web --profile erp \
         --env-file "$COMPOSE_ENV_FILE" \
         -f "$COMPOSE_FILE" \
         ${DROPLET_COMPOSE_BUILD_EXTRA_FILE:+-f "$DROPLET_COMPOSE_BUILD_EXTRA_FILE"} \

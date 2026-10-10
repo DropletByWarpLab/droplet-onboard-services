@@ -64,9 +64,7 @@ export type McpOAuthErrorCode =
   | "acknowledge_required"
   | "pkce_unsupported"
   | "host_not_allowed"
-  // The same pre-credential rules every remote MCP call obeys (remoteMcpEgressAllowed).
-  | "remote_mcp_off"
-  | "server_not_allowed"
+  // The same pre-credential rule every remote MCP call obeys (remoteMcpEgressAllowed).
   | "connection_disabled"
   | "client_required"
   | "too_many_pending"
@@ -80,8 +78,6 @@ const ERROR_STATUS: Record<McpOAuthErrorCode, number> = {
   acknowledge_required: 400,
   pkce_unsupported: 400,
   host_not_allowed: 422,
-  remote_mcp_off: 409,
-  server_not_allowed: 409,
   connection_disabled: 409,
   client_required: 400,
   too_many_pending: 503,
@@ -129,9 +125,9 @@ export interface McpOAuthDependencies {
   /** WARP-2416: a row that may back a server's catalog session just ended (disconnect). Best effort. */
   catalogChanged?: (provider: string, connectionId: string, event: "refreshed" | "ended") => Promise<void>;
   /**
-   * The rules every remote MCP call obeys before it may reach the vendor (server
-   * allowlist, `remote_mcp` channel, connection not DISABLED), applied before
-   * EVERY OAuth hop so a switched-off box never talks to the vendor to sign in.
+   * The rule every remote MCP call obeys before it may reach the vendor
+   * (connection not DISABLED), applied before EVERY OAuth hop so a server an
+   * owner or admin turned off never talks to the vendor to sign in.
    */
   egress: (prisma: PrismaClient, serverId: string) => Promise<RemoteMcpEgressDecision>;
   /**
@@ -179,15 +175,8 @@ export function mcpOAuthDependencies(overrides: Partial<McpOAuthDependencies> = 
       const { closeRemoteConnectionSession } = await import("../mcp-client.singleton.js");
       await closeRemoteConnectionSession(provider, connectionId);
     },
-    // Lazy import: remote-mcp-servers imports this module for its token reader.
-    egress: async (prisma, serverId) => {
-      const { parseRemoteMcpAllowlist } = await import("../remote-mcp-servers.js");
-      return remoteMcpEgressAllowed(
-        prisma as unknown as Pick<RemoteMcpGatePrisma, "offLanAllowlistChannel" | "integrationConnection">,
-        serverId,
-        parseRemoteMcpAllowlist(config.REMOTE_MCP_SERVER_ALLOWLIST),
-      );
-    },
+    egress: (prisma, serverId) =>
+      remoteMcpEgressAllowed(prisma as unknown as Pick<RemoteMcpGatePrisma, "integrationConnection">, serverId),
     ...overrides,
     oauth: overrides.oauth ?? lazyBridgeOAuthClient(),
   };
@@ -211,10 +200,6 @@ async function requireEgress(prisma: PrismaClient, deps: McpOAuthDependencies, s
   }
   if (decision.allowed) return;
   switch (decision.reason) {
-    case "channel_disabled":
-      throw new McpOAuthError("remote_mcp_off", "Remote MCP is switched off by the owner. Nothing was sent.");
-    case "server_not_allowlisted":
-      throw new McpOAuthError("server_not_allowed", "This server is not enabled on this box. Nothing was sent.");
     case "connection_disabled":
       throw new McpOAuthError("connection_disabled", decision.message);
     default:

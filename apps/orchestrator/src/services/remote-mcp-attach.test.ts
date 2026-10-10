@@ -101,7 +101,6 @@ function prismaWith(row: RemoteMcpConnectionRow | null) {
   const state = { row };
   return {
     state,
-    offLanAllowlistChannel: { findUnique: async () => ({ enabled: true }) },
     integrationConnection: { findFirst: vi.fn(async () => state.row) },
   };
 }
@@ -131,7 +130,6 @@ function harness(over: { allowlist?: string[]; row?: RemoteMcpConnectionRow | nu
       attachAtlassianRemote({
         mux,
         prisma,
-        allowlist: new Set(over.allowlist ?? []),
         registry,
         recordClassifications,
         createClient: () =>
@@ -151,18 +149,18 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
-describe("the empty allowlist is the shipping default (WARP-2418 / WARP-2627)", () => {
+describe("a box with no connection is the default (WARP-2418 / WARP-2627 / WARP-3960)", () => {
   it("attaches nothing, advertises nothing remote, and NEVER dials the bridge", async () => {
-    const h = harness({ allowlist: [] });
+    // No env, no owner switch (WARP-3960): the only thing between this box and an
+    // attach is the connection row, and there is none.
+    const h = harness({ allowlist: ["atlassian"], row: null });
 
     const result = await h.attach();
-    expect(result).toMatchObject({ attached: false, reason: "not_allowlisted" });
+    expect(result).toMatchObject({ attached: false, reason: "gate_refused" });
 
     // The assertion that matters: zero calls, not "no tools came back".
     expect(h.bridge.calls).toHaveLength(0);
     expect(h.bridge.fetchImpl).not.toHaveBeenCalled();
-    // The gate refuses before the row is even read.
-    expect(h.prisma.integrationConnection.findFirst).not.toHaveBeenCalled();
 
     const tools = await h.mux.listTools();
     expect(tools.map((t) => t.name)).toEqual(["list_files"]);
@@ -171,7 +169,7 @@ describe("the empty allowlist is the shipping default (WARP-2418 / WARP-2627)", 
   });
 });
 
-describe("allowlisted + a CONNECTED row with a credential", () => {
+describe("a CONNECTED row with a credential (no env, no channel row)", () => {
   it("attaches and advertises the namespaced Atlassian tools", async () => {
     const h = harness({ allowlist: ["atlassian"] });
 
@@ -214,7 +212,7 @@ describe("allowlisted + a CONNECTED row with a credential", () => {
   });
 
   it("does not record anything when the attach is refused", async () => {
-    const h = harness({ allowlist: [] });
+    const h = harness({ allowlist: ["atlassian"], row: null });
     await h.attach();
     expect(h.recordClassifications).not.toHaveBeenCalled();
   });
@@ -314,7 +312,6 @@ describe("the bearer is fail-closed at the orchestrator end too", () => {
     const result = await attachAtlassianRemote({
       mux,
       prisma: prismaWith(connectedRow),
-      allowlist: new Set(["atlassian"]),
       registry: new RuntimeToolRegistry(),
       createClient: () =>
         new McpBridgeClient({

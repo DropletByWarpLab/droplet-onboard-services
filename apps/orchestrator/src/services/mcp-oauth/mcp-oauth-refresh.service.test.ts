@@ -166,7 +166,7 @@ describe("the catalog session follows the row (WARP-2416)", () => {
     expect(flaky.catalogChanged).not.toHaveBeenCalled();
 
     const off = await setup();
-    off.gate.current = { allowed: false, reason: "channel_disabled", message: "" };
+    off.gate.current = { allowed: false, reason: "connection_disabled", message: "" };
     await off.refresher.refreshNow(ID);
     expect(off.catalogChanged).not.toHaveBeenCalled();
   });
@@ -254,9 +254,9 @@ describe("disconnect revokes at the vendor when it advertised an endpoint", () =
     expect(s.row).toMatchObject({ state: "DISCONNECTED", tokensEnc: null });
   });
 
-  it("with remote MCP switched off it still deletes the tokens locally, skips the vendor revoke and says so", async () => {
+  it("with the server turned off it still deletes the tokens locally, skips the vendor revoke and says so", async () => {
     const s = await setup();
-    s.gate.current = { allowed: false, reason: "channel_disabled", message: "" };
+    s.gate.current = { allowed: false, reason: "connection_disabled", message: "" };
     const oauth = { revoke: vi.fn(async (_i: unknown): Promise<void> => {}) };
     const notes: { revokeSkipped?: boolean } = {};
     expect(await disconnectMcpOAuth(s.db.prisma, ID, { id: "u1", role: "family" }, { oauth: oauth as never, closeSession: s.closeSession, egress: s.egress }, notes)).toBe(true);
@@ -267,11 +267,10 @@ describe("disconnect revokes at the vendor when it advertised an endpoint", () =
   });
 });
 
-describe("refresh obeys the same egress rules as every remote MCP call", () => {
+describe("refresh obeys the same egress rule as every remote MCP call (the per-server off)", () => {
   const OFF: Egress[] = [
-    { allowed: false, reason: "channel_disabled", message: "" },
-    { allowed: false, reason: "server_not_allowlisted", message: "" },
     { allowed: false, reason: "connection_disabled", message: "" },
+    { allowed: false, reason: "gate_unavailable", message: "" },
   ];
 
   it.each(OFF)("makes ZERO bridge calls and leaves the row untouched when %j", async (verdict) => {
@@ -285,7 +284,7 @@ describe("refresh obeys the same egress rules as every remote MCP call", () => {
     expect(recordActivity).not.toHaveBeenCalled();
   });
 
-  it("does not end an already-expired sign-in while remote MCP is off either", async () => {
+  it("does not end an already-expired sign-in while the server is off either", async () => {
     const s = await setup({ expiresInMin: 5 });
     s.gate.current = OFF[0];
     s.advance(10 * MIN);
@@ -293,7 +292,7 @@ describe("refresh obeys the same egress rules as every remote MCP call", () => {
     expect(s.row.state).toBe("CONNECTED");
   });
 
-  it("resumes renewing once it is switched back on", async () => {
+  it("resumes renewing once the server is turned back on", async () => {
     const s = await setup({ expiresInMin: 5 });
     s.gate.current = OFF[0];
     await s.refresher.tick();

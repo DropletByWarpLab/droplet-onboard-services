@@ -81,7 +81,7 @@ describe("with no remote attached the multiplexer is transparent", () => {
   });
 });
 
-describe("WARP-2418 — the operator allowlist ships EMPTY", () => {
+describe("WARP-2418 — a multiplexer with no predicate admits no server (WARP-3960: the wiring supplies the registry's)", () => {
   /**
    * MUTATION: change the `isServerAllowed` default in the constructor from
    * `() => false` to `() => true` → this test goes red.
@@ -96,7 +96,7 @@ describe("WARP-2418 — the operator allowlist ships EMPTY", () => {
     expect((await mux.listTools()).map((t) => t.name)).toEqual(["list_files"]);
   });
 
-  it("attaches a server the operator named, and namespaces its tools", async () => {
+  it("attaches a server the predicate admits, and namespaces its tools", async () => {
     const local = portDouble([tool("list_files")]);
     const mux = new McpToolMultiplexer(local, {
       isServerAllowed: (id) => id === "atlassian",

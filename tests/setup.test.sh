@@ -2093,9 +2093,9 @@ echo "--- Phase 12: prepare_and_build build-list parity with docker-compose.yml 
 # (ops) and fleet-agent (telemetry) are profile-gated services no default
 # provision pre-builds. inference-manager (dmr) is appended the same way —
 # WARP-2131's model-catalog sidecar, built only on a box running that runtime.
-# mcp-bridge (remote-mcp) is appended the same way — WARP-2627's outbound MCP
-# session component, built only on a box that has connected a remote MCP vendor.
-BUILD_LIST_EXCLUSIONS="rag-eval,web-fetch,media-gen,erp-sql-bridge,openwrt,ops-console,fleet-agent,inference-manager,mcp-bridge"
+# mcp-bridge is NOT excluded: WARP-3960 made it default-on (no `remote-mcp`
+# profile), so it must be in build_services and the parity checks below enforce it.
+BUILD_LIST_EXCLUSIONS="rag-eval,web-fetch,media-gen,erp-sql-bridge,openwrt,ops-console,fleet-agent,inference-manager"
 
 # (1) Daemon-free enumeration of every compose service with a build: section
 # (2-space service keys, 4-space build: — the file's committed style).
@@ -2139,6 +2139,25 @@ if [ -z "$STALE_ENTRIES" ]; then
   pass "every build_services entry has a build: section in docker-compose.yml"
 else
   fail "build_services entries with no build: section in docker-compose.yml: ${STALE_ENTRIES}"
+fi
+
+# (3b) WARP-3960: mcp-bridge is default-on. The service exists, carries NO
+# `profiles:` key (so `docker compose config --services` lists it without any
+# --profile), and the old `remote-mcp` profile name is gone from the compose file.
+MCP_BRIDGE_BLOCK="$(awk '
+  /^  mcp-bridge:[[:space:]]*$/ { f=1; print; next }
+  f && /^  [a-zA-Z0-9_-]+:[[:space:]]*$/ { exit }
+  f { print }
+' "$COMPOSE_FILE_REAL")"
+if [ -n "$MCP_BRIDGE_BLOCK" ] && ! printf '%s\n' "$MCP_BRIDGE_BLOCK" | grep -qE '^    profiles:'; then
+  pass "mcp-bridge is default-on: no profiles: key on the service (WARP-3960)"
+else
+  fail "mcp-bridge must exist in docker-compose.yml with no profiles: key (default-on, WARP-3960)"
+fi
+if grep -qF '"remote-mcp"' "$COMPOSE_FILE_REAL"; then
+  fail "docker-compose.yml still references the removed remote-mcp profile"
+else
+  pass "docker-compose.yml no longer references the remote-mcp profile"
 fi
 
 # (4) Sentinel markers (the extraction contract for the behavioural asserts).

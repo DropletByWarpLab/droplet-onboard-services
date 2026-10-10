@@ -233,12 +233,7 @@ function isKnownSection(name: string): name is SectionLiteral {
   return (SECTION_VALUES as readonly string[]).includes(name);
 }
 
-export function createSettingsRouter(
-  prisma: PrismaClient,
-  /** WARP-3912 - run after `remote_mcp` is switched off: abort in-flight remote
-   *  MCP calls and close their sessions. Injected, like `remoteMcp.detach`. */
-  deps: { onRemoteMcpDisabled?: () => Promise<void> } = {},
-): Router {
+export function createSettingsRouter(prisma: PrismaClient): Router {
   const router = Router();
 
   // ── /api/settings/off-lan ────────────────────────────────────
@@ -273,7 +268,8 @@ export function createSettingsRouter(
     "place_lookup",
     // WARP-3532 — work webhooks and chat-app notifications (ADR-069 §9).
     "work_integrations",
-    // WARP-3912 — outbound MCP master switch (ADR-043 §4).
+    // WARP-3912 — outbound MCP metering label (ADR-043 §4). WARP-3960: no longer a
+    // switch; the PATCH below refuses it.
     "remote_mcp",
   ] as const;
   type OffLanKey = (typeof OFF_LAN_CHANNEL_KEYS)[number];
@@ -341,6 +337,16 @@ export function createSettingsRouter(
         const key = req.params.key;
         if (!isOffLanKey(key)) {
           return res.status(404).json({ error: "Unknown channel key" });
+        }
+        // WARP-3960 (Romain, 2026-10-10): connected MCP servers are always available.
+        // `remote_mcp` stays a metering label only; the kill switches are per-server off
+        // and Disconnect.
+        if (key === "remote_mcp") {
+          return res.status(400).json({
+            error: "channel_not_switchable",
+            message:
+              "Connected MCP servers are always available; turn a single server off on its Connectors page.",
+          });
         }
 
         const body = req.body ?? {};
@@ -441,14 +447,6 @@ export function createSettingsRouter(
             reason,
           },
         });
-
-        if (key === "remote_mcp" && !enabled) {
-          // The switch is already persisted and the gate reads it per call, so a
-          // failed teardown must not fail the PATCH - log it and say so.
-          await deps.onRemoteMcpDisabled?.().catch((err: unknown) => {
-            logger.error({ err }, "remote_mcp teardown failed after the channel was turned off");
-          });
-        }
 
         res.json({
           key: updated.key,

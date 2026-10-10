@@ -1069,9 +1069,10 @@ entries:
       apps/orchestrator/src/services/atlassian-tool-policy.ts), and only its 26
       read rows are allowed — writes are blocked by ADR-043 §3 and
       updateConfluencePage is excluded outright (upstream #210/#217/#60,
-      whole-body replacement). Off by default twice over: the server must be
-      named in REMOTE_MCP_SERVER_ALLOWLIST, which ships empty, AND the customer
-      must have connected an account their own org admin enabled Rovo MCP for.
+      whole-body replacement). Always reachable once a member has signed in or
+      an admin has stored a credential (the customer's own org admin must have
+      enabled Rovo MCP for the account); nothing is dialled before that, and an
+      owner or admin can turn the server off or a member can Disconnect.
       Two credential paths, both the customer's and revocable by them: a
       member's web sign-in (OAuth 2.1 with PKCE; short-lived access tokens plus
       a refresh token the box rotates and can revoke), and the customer-created
@@ -1306,8 +1307,9 @@ entries:
       written down in advance. Carries the arguments of a tool call a member
       asked for, and the OAuth leg to the issuer and token hosts pinned at
       sign-in; never ambient, never a background crawl. The curated servers
-      keep their own static entries. Off unless the remote_mcp off-LAN switch
-      is on (ADR-043 §4).
+      keep their own static entries. Always reachable once a member has signed
+      in or an admin has stored a credential; an owner or admin can turn one
+      server off, and a member can Disconnect (ADR-043 §4, amended 2026-10-10).
 
       A dynamic entry contributes ZERO host patterns (docs/SECURITY.md,
       Egress). It is the registration and review record, not the control.

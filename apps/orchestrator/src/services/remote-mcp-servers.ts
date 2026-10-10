@@ -1,7 +1,6 @@
 /**
  * WARP-2418 — the ONE client-side seam through which a runtime-discovered
- * tool becomes visible to tool selection, and the operator allowlist that
- * gates it.
+ * tool becomes visible to tool selection, and the gate that guards it.
  *
  * ## What "teach TOOLS / TOOL_CATALOG / TOOL_ROUTES about runtime tools" means
  *
@@ -31,17 +30,13 @@
  * `runtime-tool-registry.service.ts`'s own header carries the matching
  * rationale — this file is the writer it says WARP-2300 would bring.
  *
- * ## The allowlist ships EMPTY, and that is a budget decision as well as a
- * safety one
+ * ## No env allowlist (WARP-3960, Romain 2026-10-10)
  *
- * ADR-043's Consequences are explicit: the context window is already
- * over-subscribed, the full local registry no longer fits `OLLAMA_CONTEXT_LENGTH`
- * at all, and per-turn selection (WARP-2348) gates any remote catalog reaching
- * default chat. Advertising a 50-tool Atlassian catalog on a box that has not
- * opted in makes the assistant worse at everything else it does. So
- * {@link parseRemoteMcpAllowlist} of an unset variable is the empty set, an
- * empty set allows no server, and nothing remote is advertised until an
- * operator names a server id.
+ * A registered server attaches as soon as one sign-in or credential is
+ * CONNECTED; nothing is advertised before that, because the gate refuses a box
+ * with no usable connection. Context budget is per-turn selection's job
+ * (WARP-2348), not an operator opt-in. The kill switches are the per-server off
+ * (DISABLED) and Disconnect.
  */
 import {
   providerDescriptors,
@@ -91,26 +86,6 @@ import {
 } from "./remote-mcp-lifecycle.service.js";
 
 const logger = createLogger("remote-mcp-servers");
-
-/**
- * The operator's allowlist of remote MCP server ids.
- *
- * Comma-separated, whitespace-tolerant, case-normalised to lowercase (server
- * ids are lowercase by {@link McpToolMultiplexer}'s own pattern, so an
- * operator typing `Atlassian` gets the server they meant rather than a silent
- * miss).
- */
-export const REMOTE_MCP_ALLOWLIST_ENV = "REMOTE_MCP_SERVER_ALLOWLIST";
-
-/** Parse the allowlist. An unset / blank / all-separators value is EMPTY. */
-export function parseRemoteMcpAllowlist(raw: string | undefined): ReadonlySet<string> {
-  return new Set(
-    (raw ?? "")
-      .split(",")
-      .map((s) => s.trim().toLowerCase())
-      .filter((s) => s.length > 0),
-  );
-}
 
 /** Every tool name compiled into this box. The set a remote tool may not
  *  shadow — read off the live registry so it can never be a stale copy. */
@@ -182,7 +157,7 @@ export function syncRemoteCatalog(
   return { serverId, registered, rejected: [...rejected, ...mux.rejections()] };
 }
 
-/** Drop a server's runtime tools — the disconnect / allowlist-removal path. */
+/** Drop a server's runtime tools — the disconnect / per-server off path. */
 export function unregisterRemoteServer(
   serverId: string,
   registry: RuntimeToolRegistry = runtimeToolRegistry,
@@ -318,7 +293,6 @@ export function registeredRemoteServers(
 /** Why an attach did not happen. Every value is a different thing for an
  *  operator to do, and none of them is an error. */
 export type RemoteAttachSkipReason =
-  | "not_allowlisted"
   | "gate_refused"
   | "credential_incomplete"
   | "bridge_unavailable"
@@ -373,13 +347,11 @@ export interface AttachRemoteDeps {
     integrationConnection: {
       findFirst(args: unknown): Promise<RemoteMcpConnectionRow | null>;
     };
-    offLanAllowlistChannel: RemoteMcpGatePrisma["offLanAllowlistChannel"];
     /** WARP-2409 — the sign-in rows. Optional: absent, the API token is the only rung. */
     mcpOAuthConnection?: NonNullable<RemoteMcpGatePrisma["mcpOAuthConnection"]> &
       MemberRoutingPrisma["mcpOAuthConnection"];
     user?: MemberRoutingPrisma["user"];
   };
-  allowlist: ReadonlySet<string>;
   /** Builds the bridge-backed port. Injected so a test supplies a fixture
    *  bridge and can assert it was never dialled. */
   createClient: () => McpBridgeClient;
@@ -447,15 +419,15 @@ export type AttachRemoteServerDeps = AttachRemoteDeps & RemoteServerRegistration
  * cheapest, most certain refusal first, and NOTHING is dialled until every one
  * of them has passed.
  *
- *   1. allowlist — a box that has not opted in never constructs a client, so
- *      the bridge is not even reached to be told "no";
- *   2. the connection row's explicit `status` + credential columns;
- *   3. the credential's own completeness;
- *   4. only then: open a session on the bridge.
+ *   1. the connection row's explicit `status` + credential columns (or a
+ *      CONNECTED sign-in) - a box nobody signed in on never constructs a client,
+ *      so the bridge is not even reached to be told "no";
+ *   2. the credential's own completeness;
+ *   3. only then: open a session on the bridge.
  *
- * Returns rather than throws for every skip. None of these is an error — an
- * un-opted-in box is the DEFAULT box — and a throw here would put a stack trace
- * in the boot log of every appliance in the fleet.
+ * Returns rather than throws for every skip. None of these is an error — a box
+ * nobody has signed in on is the DEFAULT box — and a throw here would put a stack
+ * trace in the boot log of every appliance in the fleet.
  */
 export async function attachRemoteServer(
   deps: AttachRemoteServerDeps,
@@ -480,24 +452,11 @@ export async function attachRemoteServer(
     }
   };
 
-  const gate = await remoteMcpGate(deps.prisma, serverId, deps.allowlist);
+  const gate = await remoteMcpGate(deps.prisma, serverId);
   if (!gate.allowed) {
-    // `not_allowlisted` is separated from every other refusal because it is the
-    // only one that is not a misconfiguration: it is the shipping default.
-    const reason: RemoteAttachSkipReason =
-      gate.reason === "server_not_allowlisted" ? "not_allowlisted" : "gate_refused";
+    const reason: RemoteAttachSkipReason = "gate_refused";
     logger.info({ serverId, reason: gate.reason }, "remote_mcp_attach_skipped");
-    if (reason === "not_allowlisted") {
-      // WARP-2651: a box that has not opted in REGISTERS NOTHING. The
-      // reconciler's work list is the registry, so an empty registry is what
-      // makes "the shipping default dials nothing, ever" a property of the
-      // reconciler too and not just of this function. `unregister` rather than
-      // "do not record", because an operator who REMOVES a server from the
-      // allowlist has to stop it being reconciled on the next boot as well.
-      lifecycle.unregister(serverId);
-    } else {
-      settle("detached", "gate_refused");
-    }
+    settle("detached", "gate_refused");
     return { attached: false, serverId, reason, message: gate.message };
   }
 
@@ -589,7 +548,7 @@ export async function attachRemoteServer(
     // Re-read on EVERY call, not captured once here: an operator who
     // disconnects the account mid-session must stop reaching the vendor on the
     // next call, not on the next reboot.
-    gate: () => remoteMcpGate(deps.prisma, serverId, deps.allowlist),
+    gate: () => remoteMcpGate(deps.prisma, serverId),
   });
 
   const rejection = deps.mux.attachRemote(serverId, gated);
@@ -866,8 +825,8 @@ export async function detachRemoteServer(deps: DetachRemoteDeps): Promise<Detach
  * Fail-OPEN here is correct and is not a gate: this read decides only whether
  * to refuse a catalog we already listed successfully. Failing closed would mean
  * a flaky `/state` call could park a healthy integration in `catalog_changed`,
- * which no operator action clears. The real gates — allowlist, the CONNECTED
- * row, the bearer — are all upstream of this line and all still fail closed.
+ * which no operator action clears. The real gates — the per-server off, the
+ * CONNECTED row, the bearer — are all upstream of this line and all still fail closed.
  */
 async function readSessionState(
   client: McpBridgeClient,
@@ -928,10 +887,8 @@ export async function resolveCatalogCredential(
   };
 }
 
-/** The refusals that mean "do not dial right now" (the switch, an admin's off, the allowlist); any other means "nothing to dial with". */
-const NOT_NOW: ReadonlySet<string> = new Set([
-  "channel_disabled", "server_not_allowlisted", "connection_disabled", "gate_unavailable",
-]);
+/** The refusals that mean "do not dial right now" (an admin's off, an unreadable gate); any other means "nothing to dial with". */
+const NOT_NOW: ReadonlySet<string> = new Set(["connection_disabled", "gate_unavailable"]);
 
 /**
  * WARP-2416 - the sign-in behind a server's catalog session refreshed or ended:
@@ -946,7 +903,7 @@ const NOT_NOW: ReadonlySet<string> = new Set([
 export async function repickCatalogSession(
   deps: Pick<
     AttachRemoteServerDeps,
-    "serverId" | "descriptor" | "mux" | "prisma" | "allowlist" | "openCredentials" | "lifecycle" | "auditLifecycle" | "registry"
+    "serverId" | "descriptor" | "mux" | "prisma" | "openCredentials" | "lifecycle" | "auditLifecycle" | "registry"
   >,
   client: McpBridgeClient,
   vettedTools: readonly string[],
@@ -963,10 +920,10 @@ export async function repickCatalogSession(
     }
     return "detached";
   };
-  const gate = await remoteMcpGate(deps.prisma, serverId, deps.allowlist);
+  const gate = await remoteMcpGate(deps.prisma, serverId);
   if (!gate.allowed) {
-    // Never reach the credential read or the open after a refusal. "Not now" (the switch, the
-    // allowlist, an admin's off, an unreadable gate) leaves the session as it is; any other
+    // Never reach the credential read or the open after a refusal. "Not now" (an admin's
+    // off, an unreadable gate) leaves the session as it is; any other
     // refusal means nothing is left to dial with, so the server detaches.
     return NOT_NOW.has(gate.reason) ? "skipped" : detachNoCredential();
   }

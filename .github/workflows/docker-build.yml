@@ -182,7 +182,7 @@ jobs:
           KNOWN: >-
             ["ai-gateway","camera-discovery","device-identity-svc",
             "doc-render","email-indexer","file-indexer","gateway",
-            "matter-controller","mcp-server","media-gen","orchestrator","rag-eval",
+            "matter-controller","mcp-bridge","mcp-server","media-gen","orchestrator","rag-eval",
             "routing","sandbox","switch","web-dashboard"]
         run: |
           set -eu
@@ -269,6 +269,11 @@ jobs:
               - *node-workspace
               - "services/matter-controller/**"
               - "packages/fips-selftest/**"
+            # WARP-3960: mcp-bridge lost its `remote-mcp` profile (default-on), so it
+            # is now buildable in this job's compose view and needs its own filter.
+            mcp-bridge:
+              - *node-workspace
+              - "services/mcp-bridge/**"
             ai-gateway:
               - *py-shared
               - "services/ai-gateway/**"

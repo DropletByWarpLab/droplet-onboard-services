@@ -39,7 +39,7 @@ const OUTCOMES = {
   cancelled: { error: false, text: () => "Sign-in was cancelled. Try again when you’re ready." },
   expired: { error: true, text: () => "That sign-in expired. Start again when you’re ready." },
   failed: { error: true, text: () => "Sign-in could not be completed. Try again, or paste the address you landed on." },
-  blocked: { error: true, text: (name: string) => `Sign-in was blocked because remote MCP was switched off. Nothing was sent to ${name}.` },
+  blocked: { error: true, text: (name: string) => `Sign-in was blocked because an owner or admin turned ${name} off. Nothing was sent to ${name}.` },
 } as const;
 
 /** `?mcp=<provider>:<outcome>`: consumed only by the card whose provider matches. */
@@ -56,8 +56,6 @@ function takeOutcome(provider: string): keyof typeof OUTCOMES | null {
 
 /** Fixed sentences for the box's 409 codes; the box's own message is never shown. */
 const START_BLOCKED: Record<string, (name: string) => string> = {
-  remote_mcp_off: () => "Remote MCP is switched off for this Workspace. An owner or admin can turn it on in Connectors › Connector credentials.",
-  server_not_allowed: (name) => `This Droplet isn't set up to reach ${name}.`,
   connection_disabled: (name) => `An owner or admin turned ${name} off for this Workspace.`,
 };
 
@@ -100,7 +98,6 @@ export function McpSignInCard({
   const [error, setError] = useState<string | null>(null);
   const [pasted, setPasted] = useState("");
   const [ack, setAck] = useState(false);
-  const [blockedCode, setBlockedCode] = useState<string | null>(null);
   const [unreadable, setUnreadable] = useState(false);
   const [confirming, setConfirming] = useState<"member" | "workspace" | null>(null);
 
@@ -133,7 +130,6 @@ export function McpSignInCard({
   const start = async (scope: "MEMBER" | "WORKSPACE") => {
     if (busy || (scope === "WORKSPACE" && !ack)) return;
     setBusy(true);
-    setBlockedCode(null);
     setError(null);
     setOutcome(null);
     try {
@@ -151,7 +147,6 @@ export function McpSignInCard({
     } catch (err) {
       const blocked = err instanceof Error && Object.hasOwn(START_BLOCKED, err.message) ? START_BLOCKED[err.message] : undefined;
       if (blocked) {
-        setBlockedCode(err instanceof Error ? err.message : null);
         setError(blocked(displayName));
         setBusy(false);
         return;
@@ -279,9 +274,6 @@ export function McpSignInCard({
         </div>
       )}
       {error && <p role="alert" className="type-footnote text-system-red">{error}</p>}
-      {blockedCode === "remote_mcp_off" && isAdmin && (
-        <a className="type-caption-1 underline" style={{ color: "var(--brand)" }} href="/connectors/credentials">Open the remote MCP switch</a>
-      )}
       <ConfirmDialog
         open={confirming !== null}
         title={confirming === "workspace" ? `Disconnect the Workspace's ${displayName} connection?` : `Disconnect your ${displayName} sign-in?`}

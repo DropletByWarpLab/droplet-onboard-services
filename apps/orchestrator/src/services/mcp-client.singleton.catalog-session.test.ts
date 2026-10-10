@@ -20,7 +20,6 @@ vi.mock("../config.js", async (importOriginal) => {
     ...actual,
     config: {
       ...actual.config,
-      REMOTE_MCP_SERVER_ALLOWLIST: "atlassian",
       MCP_BRIDGE_URL: "http://mcp-bridge.test:9096",
       MCP_BRIDGE_SERVICE_TOKEN: "bridge-token-FAKE-0000000000000000",
     },
@@ -51,7 +50,7 @@ import {
   detachRemoteMcp,
   ensureRemoteMcpAttached,
   mcpClient,
-  tearDownRemoteMcp,
+  tearDownRemoteServer,
 } from "./mcp-client.singleton.js";
 import { recordCatalog, catalogBackingRow } from "./mcp-oauth/catalog-repick.js";
 import { createMcpOAuthRefresher } from "./mcp-oauth/mcp-oauth-refresh.service.js";
@@ -145,7 +144,6 @@ function makePrisma() {
   const record = new Map<string, RemoteToolClassificationRow>();
   const keyOf = (w: { serverId_toolName: { serverId: string; toolName: string } }) => `${w.serverId_toolName.serverId} ${w.serverId_toolName.toolName}`;
   return {
-    offLanAllowlistChannel: { findUnique: async () => ({ enabled: true }) },
     // A sign-in-only box: the admin saved the site id and no API token.
     integrationConnection: {
       findFirst: vi.fn(async () => ({ ...integrationRow })),
@@ -267,11 +265,10 @@ describe("a refresh of the backing row re-opens the base session IN PLACE", () =
     expect(remoteMcpLifecycle.get(ATLASSIAN)).toMatchObject({ state: "detached", reason: "catalog_changed" });
   });
 
-  it("with the remote_mcp channel off, nothing re-opens", async () => {
+  it("with the server turned off (DISABLED), nothing re-opens", async () => {
     await seedMember(OWNER_ROW, "u-owner", "token-1");
     await attach();
-    (prisma as unknown as { offLanAllowlistChannel: { findUnique: () => Promise<{ enabled: boolean }> } })
-      .offLanAllowlistChannel.findUnique = async () => ({ enabled: false });
+    integrationRow.status = "DISABLED";
     reseal(OWNER_ROW, "token-2");
     await catalogSignInChanged(ATLASSIAN, OWNER_ROW, "refreshed");
     expect(bridge.opens()).toHaveLength(0);
@@ -415,7 +412,7 @@ describe("the re-open never widens what was vetted, never dials after a refusal,
     const repick = catalogSignInChanged(ATLASSIAN, OWNER_ROW, "refreshed");
     await vi.waitFor(() => expect(bridge.opens()).toHaveLength(1)); // parked inside the bridge open
 
-    const teardown = tearDownRemoteMcp(); // the owner switches remote MCP off right now
+    const teardown = tearDownRemoteServer(ATLASSIAN); // an owner or admin turns the server off right now
     await new Promise((r) => setTimeout(r, 25));
     expect(bridge.deletes()).toHaveLength(0); // still queued behind the re-pick: nothing closed yet
     expect(mcpClient.remoteServerIds()).toContain(ATLASSIAN);
@@ -451,7 +448,7 @@ describe("the re-open never widens what was vetted, never dials after a refusal,
     bridge.hold();
     const boot = ensureRemoteMcpAttached(prisma, [registration()]).catch(() => undefined);
     await vi.waitFor(() => expect(bridge.opens()).toHaveLength(1)); // the attach is parked in its open
-    const teardown = tearDownRemoteMcp();
+    const teardown = tearDownRemoteServer(ATLASSIAN);
     await new Promise((r) => setTimeout(r, 25));
     expect(bridge.deletes()).toHaveLength(0);
 
