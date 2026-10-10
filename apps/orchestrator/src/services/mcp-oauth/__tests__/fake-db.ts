@@ -88,10 +88,28 @@ export function fakeMcpOAuthDb(integration: Row | null = null) {
       return null;
     },
   };
+  // McpOAuthClient: one record per (provider, issuer), unique like the migration's index.
+  const clients: Row[] = [];
+  const clientTable = {
+    findFirst: async ({ where }: { where?: Row }) => snap(clients.find((c) => matches(c, where, users))),
+    create: async ({ data }: { data: Row }) => {
+      if (clients.some((c) => c.provider === data.provider && c.issuer === data.issuer)) throw new Error("unique");
+      const c: Row = { id: randomUUID(), clientSecretEnc: null, updatedBy: null, updatedAt: new Date(), ...data };
+      clients.push(c);
+      return c;
+    },
+    update: async ({ where, data }: { where: Row; data: Row }) => {
+      const c = clients.find((x) => matches(x, where, users));
+      if (!c) throw new Error("not_found");
+      Object.assign(c, data, { updatedAt: new Date() });
+      return c;
+    },
+  };
   const prisma = {
     mcpOAuthConnection: t,
+    mcpOAuthClient: clientTable,
     user,
     integrationConnection: { findFirst: async () => integration },
   } as unknown as PrismaClient;
-  return { prisma, rows, users, setUser, seed: (r: Row) => t.create({ data: r }) };
+  return { prisma, rows, users, clients, setUser, seed: (r: Row) => t.create({ data: r }) };
 }

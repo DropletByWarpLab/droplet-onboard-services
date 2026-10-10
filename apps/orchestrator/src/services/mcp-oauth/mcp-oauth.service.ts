@@ -22,6 +22,7 @@ import {
   deriveMcpOAuthTokenKey,
   encryptColumn,
   mcpOAuthAad,
+  mcpOAuthClientAad,
 } from "../column-crypto.service.js";
 import {
   McpBridgeError,
@@ -111,6 +112,9 @@ interface PendingFlow {
   issRequired: boolean;
   tokenEndpoint: string;
   revocationEndpoint?: string;
+  /** The client this flow signs in with (from `McpOAuthClient`); written onto the row with the new tokens. */
+  clientId: string;
+  clientSecret?: string;
   scopes: string;
   /** What the row was before consent began, restored if consent fails. */
   priorState: McpOAuthStateName;
@@ -350,25 +354,25 @@ export async function beginMcpSignIn(
       : { provider: input.provider, scope: "WORKSPACE" };
   const existing = await prisma.mcpOAuthConnection.findFirst({ where: ownerWhere });
   const id = existing?.id ?? randomUUID();
-  const owner: McpOAuthOwnerRow = { id, scope: input.scope, memberId: input.scope === "MEMBER" ? input.userId : null };
+  const ownerMemberId = input.scope === "MEMBER" ? input.userId : null;
 
   // Client identity ladder (ADR-072 §2, WARP-2401), in this order:
-  //  1. a client already held for this provider AND issuer: pasted by an admin
-  //     (PATCH /mcp/oauth/client) or registered earlier. Keyed by issuer and
-  //     never reused across servers (SEP-2352).
+  //  1. the client stored for this provider AND issuer (`McpOAuthClient`): an
+  //     admin's pasted app, or the registration the box made earlier. Keyed by
+  //     issuer and never reused across servers (SEP-2352); never read off another
+  //     person's connection row.
   //  2. CIMD: skipped in v1 (ADR-072 §10: the box hosts no client document).
-  //  3. dynamic client registration.
+  //  3. dynamic client registration, recorded in the same place so it is reused.
   // No fleet-wide Warp Lab client identity exists on any box.
   let clientId: string | undefined;
   let clientSecret: string | undefined;
-  const held = await prisma.mcpOAuthConnection.findFirst({
-    where: { provider: input.provider, issuer: disc.issuer, clientId: { not: null } },
-    orderBy: { createdAt: "asc" },
-  });
-  if (held?.clientId) {
-    clientId = held.clientId;
+  const stored = await prisma.mcpOAuthClient.findFirst({ where: { provider: input.provider, issuer: disc.issuer } });
+  if (stored) {
+    clientId = stored.clientId;
     try {
-      clientSecret = openSecret(held);
+      clientSecret = stored.clientSecretEnc
+        ? decryptColumn(deriveMcpOAuthTokenKey(), stored.clientSecretEnc, mcpOAuthClientAad(stored))
+        : undefined;
     } catch {
       // A stored secret that no longer opens is a broken registration, not a reason to register another.
       logger.warn({ provider: input.provider }, "mcp_oauth_client_secret_unreadable");
@@ -389,6 +393,7 @@ export async function beginMcpSignIn(
       logger.warn({ provider: input.provider }, "mcp_oauth_registration_failed");
       throw new McpOAuthError("sign_in_unavailable", "Sign-in could not be started. Try again shortly.");
     }
+    await recordClient(prisma, { provider: input.provider, issuer: disc.issuer, clientId, clientSecret, source: "DCR", updatedBy: null });
   }
 
   const priorState: McpOAuthStateName = existing
@@ -401,15 +406,15 @@ export async function beginMcpSignIn(
     state: "PENDING_CONSENT" as const,
     issuer: disc.issuer,
     tokenEndpointHost: token.host,
-    clientId,
-    clientSecretEnc: clientSecret ? sealSecret(owner, clientSecret) : null,
+    // The row's own client is NOT touched here: its tokens (kept while re-consenting) were issued
+    // to the client it already holds. The client used is written with the new tokens, on completion.
     lastError: null,
     ...(input.scope === "WORKSPACE" ? { workspaceAckAt: now, workspaceAckBy: input.username } : {}),
   };
   try {
     // Existing tokens are kept while re-consenting (a cancelled consent restores the prior state).
     if (existing) await prisma.mcpOAuthConnection.update({ where: { id }, data: fields });
-    else await prisma.mcpOAuthConnection.create({ data: { id, provider: input.provider, scope: input.scope, memberId: owner.memberId, ...fields } });
+    else await prisma.mcpOAuthConnection.create({ data: { id, provider: input.provider, scope: input.scope, memberId: ownerMemberId, ...fields } });
   } catch {
     logger.warn({ provider: input.provider }, "mcp_oauth_row_write_failed");
     throw new McpOAuthError("sign_in_unavailable", "Sign-in could not be started. Try again shortly.");
@@ -425,6 +430,7 @@ export async function beginMcpSignIn(
     connectionId: id, provider: input.provider, userId: input.userId, scope: input.scope, codeVerifier, redirectUri,
     resource: signIn.mcpUrl, issuer: disc.issuer, issRequired: disc.issParameterSupported, tokenEndpoint: disc.tokenEndpoint,
     ...(disc.revocationEndpoint ? { revocationEndpoint: disc.revocationEndpoint } : {}),
+    clientId, ...(clientSecret ? { clientSecret } : {}),
     scopes, priorState, expiresAt,
   });
 
@@ -511,7 +517,7 @@ export async function completeMcpSignIn(
   const row = await prisma.mcpOAuthConnection.findUnique({ where: { id: flow.connectionId } });
   const ownerOk = !!row && row.provider === flow.provider && row.state === "PENDING_CONSENT" && row.scope === flow.scope &&
     (flow.scope === "MEMBER" ? row.memberId === flow.userId : row.memberId === null);
-  if (!row || !ownerOk || !row.clientId) { await settleFailure(prisma, flow, "sign_in_failed"); return result("failed"); }
+  if (!row || !ownerOk) { await settleFailure(prisma, flow, "sign_in_failed"); return result("failed"); }
 
   // The person who started this must STILL be allowed to: active, and a Workspace flow still
   // needs an owner or admin (one demoted or deactivated mid-flow must not create the shared
@@ -541,8 +547,8 @@ export async function completeMcpSignIn(
   try {
     const tokens = await deps.oauth.exchange({
       tokenEndpoint: flow.tokenEndpoint,
-      clientId: row.clientId,
-      ...(openSecret(row) ? { clientSecret: openSecret(row) } : {}),
+      clientId: flow.clientId,
+      ...(flow.clientSecret ? { clientSecret: flow.clientSecret } : {}),
       code,
       codeVerifier: flow.codeVerifier,
       redirectUri: flow.redirectUri,
@@ -562,7 +568,12 @@ export async function completeMcpSignIn(
     });
     const written = await prisma.mcpOAuthConnection.updateMany({
       where: { id: row.id, state: "PENDING_CONSENT" },
-      data: { tokensEnc, state: "CONNECTED", connectedAt: now, lastRefreshOkAt: now, tokenExpiresAt: expiresAt, lastError: null },
+      data: {
+        tokensEnc, state: "CONNECTED", connectedAt: now, lastRefreshOkAt: now, tokenExpiresAt: expiresAt, lastError: null,
+        // The client that issued THESE tokens, for this row's own refresh and revoke.
+        clientId: flow.clientId,
+        clientSecretEnc: flow.clientSecret ? sealSecret(row, flow.clientSecret) : null,
+      },
     });
     if (written.count !== 1) return result("failed");
   } catch {
@@ -751,10 +762,46 @@ export async function disconnectMcpOAuth(
 }
 
 /**
- * Ladder rung 1 (owner/admin): hold a pre-registered OAuth client for a
- * provider. Discovery finds the issuer it belongs to; every row of that
- * (provider, issuer) takes it, and the caller's own MEMBER row carries it when
- * none exists yet.
+ * Write the OAuth client for (provider, issuer). A pasted client (an owner/admin's own
+ * app) always replaces what is there; a registration only fills an EMPTY slot, so
+ * PASTED wins over DCR and a registration never overwrites a pasted client.
+ */
+async function recordClient(
+  prisma: PrismaClient,
+  c: { provider: string; issuer: string; clientId: string; clientSecret?: string; source: "PASTED" | "DCR"; updatedBy: string | null },
+): Promise<void> {
+  const existing = await prisma.mcpOAuthClient.findFirst({ where: { provider: c.provider, issuer: c.issuer } });
+  const seal = (id: string): string | null =>
+    c.clientSecret ? encryptColumn(deriveMcpOAuthTokenKey(), c.clientSecret, mcpOAuthClientAad({ id, provider: c.provider, issuer: c.issuer })) : null;
+  if (existing) {
+    if (c.source === "DCR") return; // never over a pasted (or earlier) client
+    await prisma.mcpOAuthClient.update({
+      where: { id: existing.id },
+      data: { clientId: c.clientId, clientSecretEnc: seal(existing.id), source: c.source, updatedBy: c.updatedBy },
+    });
+    return;
+  }
+  const id = randomUUID();
+  try {
+    await prisma.mcpOAuthClient.create({
+      data: { id, provider: c.provider, issuer: c.issuer, clientId: c.clientId, clientSecretEnc: seal(id), source: c.source, updatedBy: c.updatedBy },
+    });
+  } catch {
+    // Lost a race on (provider, issuer): the winner's record stands for a registration; a pasted client retries as an update.
+    if (c.source === "PASTED") {
+      const now = await prisma.mcpOAuthClient.findFirst({ where: { provider: c.provider, issuer: c.issuer } });
+      if (!now) throw new McpOAuthError("sign_in_unavailable", "The client could not be stored. Try again.");
+      await prisma.mcpOAuthClient.update({
+        where: { id: now.id },
+        data: { clientId: c.clientId, clientSecretEnc: seal(now.id), source: c.source, updatedBy: c.updatedBy },
+      });
+    }
+  }
+}
+
+/**
+ * Ladder rung 1 (owner/admin): store a pre-registered OAuth client for a provider.
+ * Discovery finds the issuer it belongs to. See {@link recordClient}.
  */
 export async function storeMcpOAuthClient(
   prisma: PrismaClient,
@@ -771,31 +818,12 @@ export async function storeMcpOAuthClient(
   }
   const token = httpsUrl(disc.tokenEndpoint);
   if (!token || disc.resource !== signIn.mcpUrl) throw new McpOAuthError("sign_in_unavailable", "The service could not be reached. Try again shortly.");
-  const rows = await prisma.mcpOAuthConnection.findMany({ where: { provider: input.provider, issuer: disc.issuer } });
-  // Only rows that hold NO tokens take the new client. A signed-in row's tokens were issued to
-  // its current client, so changing it would break the next refresh and sign people out.
-  let stored = 0;
-  for (const r of rows) {
-    if (r.tokensEnc) continue;
-    await prisma.mcpOAuthConnection.update({
-      where: { id: r.id },
-      data: { clientId: input.clientId, clientSecretEnc: input.clientSecret ? sealSecret(r, input.clientSecret) : null },
-    });
-    stored++;
-  }
-  if (stored === 0) {
-    // No token-less row holds this issuer: the admin's own MEMBER row carries the client.
-    const own = await prisma.mcpOAuthConnection.findFirst({ where: { provider: input.provider, scope: "MEMBER", memberId: input.userId } });
-    if (!own?.tokensEnc) {
-      const id = own?.id ?? randomUUID();
-      const data = {
-        issuer: disc.issuer, tokenEndpointHost: token.host, clientId: input.clientId,
-        clientSecretEnc: input.clientSecret ? sealSecret({ id, scope: "MEMBER", memberId: input.userId }, input.clientSecret) : null,
-      };
-      if (own) await prisma.mcpOAuthConnection.update({ where: { id }, data });
-      else await prisma.mcpOAuthConnection.create({ data: { id, provider: input.provider, scope: "MEMBER", memberId: input.userId, state: "DISCONNECTED", ...data } });
-    }
-  }
+  // ONE record per (provider, issuer). It never touches a connection row: signed-in rows keep the
+  // client their tokens were issued to (for their own refresh and revoke) until they sign in again.
+  await recordClient(prisma, {
+    provider: input.provider, issuer: disc.issuer, clientId: input.clientId,
+    clientSecret: input.clientSecret, source: "PASTED", updatedBy: input.userId,
+  });
   // Ids and kinds only: never the client id value or the secret.
   await auditAdminEvent(input.userId, `Sign-in client changed for ${input.provider}`, {
     connector: input.provider, change: "client", hasSecret: input.clientSecret ? "yes" : "no",

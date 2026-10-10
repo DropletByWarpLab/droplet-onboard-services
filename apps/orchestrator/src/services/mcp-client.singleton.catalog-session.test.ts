@@ -61,6 +61,7 @@ import { remoteMcpLifecycle } from "./remote-mcp-lifecycle.service.js";
 import { registeredRemoteServers, type RemoteServerRegistration } from "./remote-mcp-servers.js";
 import { remoteToolClassificationCache, type RemoteToolClassificationRow } from "./remote-tool-classification.service.js";
 import { runtimeToolRegistry } from "./runtime-tool-registry.service.js";
+import { sealSaasCredentials } from "./saas-credential.service.js";
 
 const BRIDGE_URL = "http://mcp-bridge.test:9096";
 const BRIDGE_TOKEN = "bridge-token-FAKE-0000000000000000";
@@ -208,6 +209,13 @@ beforeEach(async () => {
   bridge.calls.length = 0;
 });
 afterEach(() => vi.unstubAllGlobals());
+
+/** The admin's API-token connection died (NEEDS_RECONNECT) but still holds a token sealed with the REAL ADR-042 seal. */
+const deadApiConnection = (): void => {
+  integrationRow.status = "NEEDS_RECONNECT";
+  integrationRow.providerTokensEnc = sealSaasCredentials(integrationRow.id, { apiToken: "ATATT-FAKE-REAL-SEAL-000000" });
+  integrationRow.providerConfig = { email: "ops@vendor.example", cloudId: CLOUD };
+};
 
 const attach = async () => {
   const [r] = await ensureRemoteMcpAttached(prisma, [registration()]);
@@ -369,9 +377,9 @@ describe("the re-open never widens what was vetted, never dials after a refusal,
   it("any gate refusal other than 'not now' detaches without reading a credential or opening: a NEEDS_RECONNECT API-token row is not dialled", async () => {
     await seedMember(OWNER_ROW, "u-owner", "token-1");
     await attach();
-    // The API connection died but still holds its sealed token; the only sign-in then ends.
-    integrationRow.status = "NEEDS_RECONNECT";
-    integrationRow.providerTokensEnc = "dcv1:still-sealed-but-not-connected";
+    // The API connection died but still holds a REAL sealed token (the real seal, so it would open
+    // and be used if anything read it); the only sign-in then ends.
+    deadApiConnection();
     Object.assign(fdb.rows.find((r) => r.id === OWNER_ROW)!, { state: "DISCONNECTED", tokensEnc: null });
     await catalogSignInChanged(ATLASSIAN, OWNER_ROW, "ended");
 
@@ -381,7 +389,25 @@ describe("the re-open never widens what was vetted, never dials after a refusal,
     expect(mcpClient.remoteServerIds()).not.toContain(ATLASSIAN);
   });
 
-  it("a kill switch issued while a re-pick awaits its open waits for it and then leaves no base session and no 'attached'", async () => {
+  it("a connected sign-in lets the gate pass, but a NEEDS_RECONNECT API row's real token is still never used", async () => {
+    await seedMember(OWNER_ROW, "u-owner", "token-1");
+    await attach();
+    // A regular member's sign-in is CONNECTED: the gate passes (a credential exists), but it cannot back the catalog.
+    fdb.setUser({ id: "u-fam", username: "u-fam", role: "family" });
+    await fdb.seed({
+      id: "44444444-4444-4444-8444-444444444444", provider: ATLASSIAN, scope: "MEMBER", memberId: "u-fam", state: "CONNECTED",
+      issuer: "https://auth.example/iss", tokenEndpointHost: "auth.example", clientId: "c", tokensEnc: "x",
+      tokenExpiresAt: new Date("2100-01-01T00:00:00Z"),
+    });
+    deadApiConnection();
+    Object.assign(fdb.rows.find((r) => r.id === OWNER_ROW)!, { state: "DISCONNECTED", tokensEnc: null });
+    await catalogSignInChanged(ATLASSIAN, OWNER_ROW, "ended");
+
+    expect(bridge.opens()).toHaveLength(0); // neither the dead API token nor the family member's token
+    expect(remoteMcpLifecycle.get(ATLASSIAN)).toMatchObject({ state: "detached", reason: "credential_incomplete" });
+  });
+
+  it("a kill switch issued while a re-pick awaits its open WAITS behind it (the lock), then leaves no base session and no 'attached'", async () => {
     await seedMember(OWNER_ROW, "u-owner", "token-1");
     await attach();
     bridge.hold();
@@ -390,13 +416,51 @@ describe("the re-open never widens what was vetted, never dials after a refusal,
     await vi.waitFor(() => expect(bridge.opens()).toHaveLength(1)); // parked inside the bridge open
 
     const teardown = tearDownRemoteMcp(); // the owner switches remote MCP off right now
+    await new Promise((r) => setTimeout(r, 25));
+    expect(bridge.deletes()).toHaveLength(0); // still queued behind the re-pick: nothing closed yet
+    expect(mcpClient.remoteServerIds()).toContain(ATLASSIAN);
+
     bridge.letGo();
     await Promise.all([repick, teardown]);
 
     expect(bridge.hasBase()).toBe(false); // the open's session was closed by the teardown that came after it
+    expect(bridge.deletes().length).toBeGreaterThanOrEqual(1);
     expect(remoteMcpLifecycle.get(ATLASSIAN)?.state).not.toBe("attached");
     expect(mcpClient.remoteServerIds()).not.toContain(ATLASSIAN);
-    expect(bridge.deletes().length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("an attach of the same server queues behind a running re-pick: its bridge open is not made until the re-pick is done", async () => {
+    await seedMember(OWNER_ROW, "u-owner", "token-1");
+    await attach();
+    bridge.hold();
+    reseal(OWNER_ROW, "token-2");
+    const repick = catalogSignInChanged(ATLASSIAN, OWNER_ROW, "refreshed");
+    await vi.waitFor(() => expect(bridge.opens()).toHaveLength(1));
+
+    const attachAgain = ensureRemoteMcpAttached(prisma, [registration()]).catch(() => undefined);
+    await new Promise((r) => setTimeout(r, 25));
+    expect(bridge.opens()).toHaveLength(1); // without the lock the attach would already have opened its own session
+
+    bridge.letGo();
+    await Promise.all([repick, attachAgain]);
+    expect(bridge.opens().length).toBeGreaterThanOrEqual(2); // it ran, after
+  });
+
+  it("the kill switch also covers a boot attach that is still in flight", async () => {
+    await seedMember(OWNER_ROW, "u-owner", "token-1");
+    bridge.hold();
+    const boot = ensureRemoteMcpAttached(prisma, [registration()]).catch(() => undefined);
+    await vi.waitFor(() => expect(bridge.opens()).toHaveLength(1)); // the attach is parked in its open
+    const teardown = tearDownRemoteMcp();
+    await new Promise((r) => setTimeout(r, 25));
+    expect(bridge.deletes()).toHaveLength(0);
+
+    bridge.letGo();
+    await Promise.all([boot, teardown]);
+
+    expect(bridge.hasBase()).toBe(false); // what the attach opened was closed right after
+    expect(remoteMcpLifecycle.get(ATLASSIAN)?.state).not.toBe("attached");
+    expect(mcpClient.remoteServerIds()).not.toContain(ATLASSIAN);
   });
 });
 

@@ -150,7 +150,11 @@ export function createMcpOAuthRouter(prisma: PrismaClient, options: Partial<McpO
     if (!body.success) return res.status(400).json({ error: "invalid_request" });
     try {
       await storeMcpOAuthClient(prisma, { ...body.data, userId: req.user.id }, deps);
-      return res.status(204).send();
+      return res.status(200).json({
+        stored: true,
+        provider: body.data.provider,
+        message: "Client stored. New sign-ins use it; people already signed in keep the client they signed in with until they sign in again.",
+      });
     } catch (err) {
       return fail(res, err);
     }

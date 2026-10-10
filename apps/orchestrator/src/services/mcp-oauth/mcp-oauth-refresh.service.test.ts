@@ -411,6 +411,20 @@ describe("the catalog hook covers every way a backing row changes (WARP-2416)", 
     expect(s.catalogChanged).toHaveBeenCalledWith("atlassian", BOB, "ended");
     expect(s.catalogChanged).not.toHaveBeenCalledWith("atlassian", BOB, "refreshed");
     expect(s.catalogChanged).toHaveBeenCalledWith("atlassian", ID, "refreshed"); // the active member was renewed
+    // the leaver's sign-in is ended like any other: marked, tokens cleared, bridge session closed
+    expect(s.db.rows.find((r) => r.id === BOB)).toMatchObject({ state: "NEEDS_RECONNECT", lastError: "member_inactive", tokensEnc: null, tokenExpiresAt: null });
+    expect(s.closeSession).toHaveBeenCalledWith("atlassian", BOB);
+  });
+
+  it("a leaver's row is reported once, not on every tick", async () => {
+    const s = await setup({ expiresInMin: 30 });
+    await s.addRow(BOB, "u-bob", 30);
+    s.db.setUser({ id: "u-bob", username: "bob", deletionStatus: "PENDING" });
+    await s.refresher.tick();
+    await s.refresher.tick();
+    await s.refresher.tick();
+    expect(s.catalogChanged.mock.calls.filter((c) => c[1] === BOB && c[2] === "ended")).toHaveLength(1);
+    expect(recordActivity.mock.calls.filter((c) => (c[0] as { refs: { connectionId?: string } }).refs.connectionId === BOB)).toHaveLength(1);
   });
 
   it("a refresh that another process or a re-consent already performed still tells the catalog", async () => {

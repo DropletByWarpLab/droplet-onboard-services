@@ -233,8 +233,17 @@ function attachRegistered(
   knownTools?: readonly string[],
 ): Promise<RemoteAttachResult> {
   // WARP-2416: one attach (boot, reconcile re-open) or catalog re-pick per server at a time.
-  return withServerLock(server.serverId, () => attachRegisteredLocked(prisma, server, knownTools));
+  // Noted while queued or running, so the kill switch also covers a server whose attach is in flight.
+  attaching.set(server.serverId, (attaching.get(server.serverId) ?? 0) + 1);
+  return withServerLock(server.serverId, () => attachRegisteredLocked(prisma, server, knownTools)).finally(() => {
+    const n = (attaching.get(server.serverId) ?? 1) - 1;
+    if (n <= 0) attaching.delete(server.serverId);
+    else attaching.set(server.serverId, n);
+  });
 }
+
+/** Servers with an attach queued or running (count per id). */
+const attaching = new Map<string, number>();
 
 async function attachRegisteredLocked(
   prisma: AttachRemoteDeps["prisma"],
@@ -397,8 +406,11 @@ export const catalogSignInChanged = createCatalogRepicker({
  */
 export async function tearDownRemoteMcp(): Promise<void> {
   abortRemoteMcpInFlight();
+  // Attached servers AND servers whose attach is in flight: the detach queues behind that attach
+  // on the per-server lock, so what the attach opens is closed right after, never left behind.
+  const ids = new Set([...attachedClients.keys(), ...attaching.keys()]);
   await Promise.all(
-    [...attachedClients.keys()].map(async (id) => {
+    [...ids].map(async (id) => {
       await detachRemoteMcp(id);
       // The switch is off, so the server is no longer attached; the reconciler re-attaches it
       // once the switch is back on (its attach gate refuses until then).

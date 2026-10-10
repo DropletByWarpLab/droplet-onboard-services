@@ -227,19 +227,26 @@ export function createMcpOAuthRefresher(deps: McpOAuthRefreshDeps): McpOAuthRefr
           logger.error({ err }, "mcp_oauth_refresh_row_failed");
         }
       }
-      // A leaver's row is skipped above, but if it backs a catalog session that session is riding
-      // a grant nobody keeps alive: tell the catalog so it re-picks (a row backing nothing is ignored).
-      if (deps.catalogChanged) {
-        const leavers = await prisma.mcpOAuthConnection.findMany({
-          where: {
-            state: "CONNECTED",
-            scope: "MEMBER",
-            member: { is: { OR: [{ directoryStatus: { not: "ACTIVE" } }, { deletionStatus: { not: "NONE" } }] } },
-          },
-          select: { id: true, provider: true },
-          take: TICK_BATCH,
-        });
-        for (const l of leavers) catalogChanged(l.provider, l.id, "ended");
+      // A leaver's row is skipped above. End it ONCE: the sign-in is marked NEEDS_RECONNECT
+      // (`member_inactive`) with its tokens cleared, like any ended sign-in, so it is not
+      // re-reported every tick; the same step closes its bridge session and tells the catalog,
+      // which re-picks if that row was backing it. Conditioned on the tokens we read, so a
+      // concurrent change is not clobbered.
+      const leavers = await prisma.mcpOAuthConnection.findMany({
+        where: {
+          state: "CONNECTED",
+          scope: "MEMBER",
+          member: { is: { OR: [{ directoryStatus: { not: "ACTIVE" } }, { deletionStatus: { not: "NONE" } }] } },
+        },
+        select: { id: true, provider: true, tokensEnc: true },
+        take: TICK_BATCH,
+      });
+      for (const l of leavers) {
+        try {
+          await endSignIn(l, "NEEDS_RECONNECT", "member_inactive", true);
+        } catch (err) {
+          logger.error({ err }, "mcp_oauth_leaver_end_failed");
+        }
       }
     },
   };

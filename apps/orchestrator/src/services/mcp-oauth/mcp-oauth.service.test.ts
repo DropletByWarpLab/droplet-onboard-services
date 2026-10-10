@@ -5,7 +5,8 @@
 import { createHash } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { providerDescriptor } from "@droplet/shared-types";
-import { __setColumnCryptoKeyForTest } from "../column-crypto.service.js";
+import { __setColumnCryptoKeyForTest, decryptColumn, deriveMcpOAuthTokenKey, mcpOAuthClientAad } from "../column-crypto.service.js";
+import { createMcpOAuthRefresher } from "./mcp-oauth-refresh.service.js";
 import { McpBridgeError } from "../mcp-bridge.client.js";
 import {
   beginMcpSignIn, completeMcpSignIn, disconnectMcpOAuth, MCP_OAUTH_FLOW_TTL_MS, MCP_OAUTH_LOOPBACK_REDIRECTS,
@@ -83,7 +84,7 @@ describe("beginMcpSignIn", () => {
 
   it("walks the identity ladder in order: a held client beats dynamic registration; DCR only when none is held", async () => {
     const held = setup();
-    await held.db.seed({ provider: PROVIDER, scope: "MEMBER", memberId: "u9", issuer: ISSUER, tokenEndpointHost: "auth.example", clientId: "held-client" });
+    await held.db.prisma.mcpOAuthClient.create({ data: { provider: PROVIDER, issuer: ISSUER, clientId: "held-client", source: "PASTED" } });
     const a = await held.begin();
     expect(qs(a.authorizeUrl).get("client_id")).toBe("held-client");
     expect(held.oauth.register).not.toHaveBeenCalled();
@@ -97,7 +98,7 @@ describe("beginMcpSignIn", () => {
 
     // A client for a DIFFERENT issuer is never reused across servers.
     const other = setup();
-    await other.db.seed({ provider: PROVIDER, scope: "MEMBER", memberId: "u9", issuer: "https://elsewhere.example/iss", tokenEndpointHost: "x", clientId: "other-issuer" });
+    await other.db.prisma.mcpOAuthClient.create({ data: { provider: PROVIDER, issuer: "https://elsewhere.example/iss", clientId: "other-issuer", source: "PASTED" } });
     await other.begin();
     expect(other.oauth.register).toHaveBeenCalledTimes(1);
   });
@@ -108,7 +109,8 @@ describe("beginMcpSignIn", () => {
     const r = await s.begin();
     expect(qs(r.authorizeUrl).get("client_id")).toBe("pasted");
     expect(s.oauth.register).not.toHaveBeenCalled();
-    expect(s.db.rows[0].clientSecretEnc).toMatch(/^dcv1:/);
+    expect(s.db.clients[0].clientSecretEnc).toMatch(/^dcv1:/);
+    expect(s.db.clients[0]).toMatchObject({ source: "PASTED", updatedBy: "admin1" });
 
     const noReg = setup({ disc: { registrationEndpoint: undefined } });
     await expect(noReg.begin()).rejects.toMatchObject({ code: "client_required" });
@@ -368,22 +370,83 @@ describe("review fixes: abandoned consent, the starter's current standing, clien
     }
   });
 
-  it("a pre-registered client change fills only rows that hold no tokens, and is audited without secrets", async () => {
+  it("an admin changes the client while members are signed in: it is stored once, the next start uses it, signed-in rows are untouched, and re-consent writes it into the row", async () => {
     const s = setup();
-    const connected = await s.begin();
-    await s.complete(connected.state); // u1 holds tokens, issued to "dcr-client"
-    await s.db.seed({ provider: PROVIDER, scope: "MEMBER", memberId: "u9", issuer: ISSUER, tokenEndpointHost: "auth.example", clientId: "old" });
+    const first = await s.begin();
+    await s.complete(first.state); // u1 holds tokens, issued to the registered "dcr-client"
     vi.mocked(recordActivity).mockClear();
     await storeMcpOAuthClient(s.db.prisma, { provider: PROVIDER, clientId: "new-client", clientSecret: "SECRET-X", userId: "admin1" }, s.deps);
+
+    expect(s.db.clients).toHaveLength(1);
+    expect(s.db.clients[0]).toMatchObject({ clientId: "new-client", source: "PASTED" }); // PASTED replaced the DCR record
     const u1 = s.db.rows.find((r) => r.memberId === "u1")!;
-    const u9 = s.db.rows.find((r) => r.memberId === "u9")!;
-    expect(u1.clientId).toBe("dcr-client"); // signed-in row untouched: its next refresh still works
-    expect(u1.state).toBe("CONNECTED");
-    expect(u9.clientId).toBe("new-client");
-    const rows = vi.mocked(recordActivity).mock.calls.map((c) => c[0]);
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ kind: "auth", refs: expect.objectContaining({ connector: PROVIDER, change: "client" }) });
-    expect(JSON.stringify(rows)).not.toMatch(/SECRET-X|new-client/);
+    expect(u1).toMatchObject({ clientId: "dcr-client", state: "CONNECTED" }); // untouched: its refresh still works
+    const audit = vi.mocked(recordActivity).mock.calls.map((c) => c[0]);
+    expect(audit).toHaveLength(1);
+    expect(audit[0]).toMatchObject({ kind: "auth", refs: expect.objectContaining({ connector: PROVIDER, change: "client" }) });
+    expect(JSON.stringify(audit)).not.toMatch(/SECRET-X|new-client/);
+
+    // The NEXT start uses the new client (not the oldest row's)...
+    const second = await s.begin({ userId: "u2" });
+    expect(qs(second.authorizeUrl).get("client_id")).toBe("new-client");
+    await s.complete(second.state);
+    expect((s.oauth.exchange.mock.calls[1]![0] as { clientId: string; clientSecret?: string })).toMatchObject({ clientId: "new-client", clientSecret: "SECRET-X" });
+    expect(s.db.rows.find((r) => r.memberId === "u2")).toMatchObject({ clientId: "new-client" });
+
+    // ...and a re-consent writes the client it used into the row with the new tokens.
+    const again = await s.begin();
+    expect(s.db.rows.find((r) => r.memberId === "u1")!.clientId).toBe("dcr-client"); // not yet: the old tokens are still held
+    await s.complete(again.state);
+    expect(s.db.rows.find((r) => r.memberId === "u1")!.clientId).toBe("new-client");
+  });
+
+  it("a signed-in row's refresh uses ITS OWN client, whatever the provider's client is now", async () => {
+    const s = setup();
+    const first = await s.begin();
+    await s.complete(first.state);
+    await storeMcpOAuthClient(s.db.prisma, { provider: PROVIDER, clientId: "new-client", userId: "admin1" }, s.deps);
+    const refresh = vi.fn(async (_i: unknown) => ({ accessToken: "renewed", refreshToken: "r2", expiresIn: 3600 }));
+    const refresher = createMcpOAuthRefresher({
+      prisma: s.db.prisma, oauth: { refresh } as never, egress: async () => ({ allowed: true, row: null }),
+    });
+    expect(await refresher.refreshNow(s.db.rows[0].id)).toBe("refreshed");
+    expect(refresh.mock.calls[0]![0]).toMatchObject({ clientId: "dcr-client" });
+  });
+
+  it("a leaver's old CONNECTED row does not decide the client new sign-ins get", async () => {
+    const s = setup();
+    const first = await s.begin();
+    await s.complete(first.state); // u1, registered "dcr-client"
+    s.db.setUser({ id: "u1", directoryStatus: "DEACTIVATED" }); // the oldest row now belongs to a leaver and never leaves CONNECTED
+    await storeMcpOAuthClient(s.db.prisma, { provider: PROVIDER, clientId: "new-client", userId: "admin1" }, s.deps);
+    const next = await s.begin({ userId: "u3" });
+    expect(qs(next.authorizeUrl).get("client_id")).toBe("new-client");
+  });
+
+  it("a registration is stored once and reused, and never overwrites a pasted client", async () => {
+    const s = setup();
+    const a = await s.begin();
+    const b = await s.begin({ userId: "u2" });
+    expect(s.oauth.register).toHaveBeenCalledTimes(1); // the second start reuses the stored registration
+    expect(s.db.clients).toHaveLength(1);
+    expect(s.db.clients[0]).toMatchObject({ clientId: "dcr-client", source: "DCR", updatedBy: null });
+    expect(qs(a.authorizeUrl).get("client_id")).toBe(qs(b.authorizeUrl).get("client_id"));
+
+    await storeMcpOAuthClient(s.db.prisma, { provider: PROVIDER, clientId: "pasted", userId: "admin1" }, s.deps);
+    expect(s.db.clients[0]).toMatchObject({ clientId: "pasted", source: "PASTED", updatedBy: "admin1" });
+    const c = await s.begin({ userId: "u3" });
+    expect(qs(c.authorizeUrl).get("client_id")).toBe("pasted"); // PASTED wins; no new registration
+    expect(s.oauth.register).toHaveBeenCalledTimes(1);
+  });
+
+  it("the client secret is sealed under its own record: it opens nowhere else", async () => {
+    const s = setup();
+    await storeMcpOAuthClient(s.db.prisma, { provider: PROVIDER, clientId: "c", clientSecret: "SECRET-Y", userId: "admin1" }, s.deps);
+    const rec = s.db.clients[0];
+    expect(rec.clientSecretEnc).toMatch(/^dcv1:/);
+    expect(rec.clientSecretEnc).not.toContain("SECRET-Y");
+    expect(() => decryptColumn(deriveMcpOAuthTokenKey(), rec.clientSecretEnc, mcpOAuthClientAad({ ...rec, id: "another-record" }))).toThrow();
+    expect(decryptColumn(deriveMcpOAuthTokenKey(), rec.clientSecretEnc, mcpOAuthClientAad(rec))).toBe("SECRET-Y");
   });
 });
 

@@ -218,10 +218,29 @@ describe("MCP OAuth routes", () => {
   });
 
   it("client: only owner/admin can store a pre-registered client", async () => {
-    const { app } = setup();
+    const { app, db } = setup();
     const body = { provider: "atlassian", clientId: "mine" };
     expect((await asUser(request(app).patch("/api/mcp/oauth/client"), "family").send(body)).status).toBe(403);
-    expect((await asUser(request(app).patch("/api/mcp/oauth/client"), "admin").send(body)).status).toBe(204);
+    const ok = await asUser(request(app).patch("/api/mcp/oauth/client"), "admin").send(body);
+    expect(ok.status).toBe(200);
+    expect(ok.body).toMatchObject({ stored: true, provider: "atlassian" });
+    expect(ok.body.message).toMatch(/already signed in keep the client they signed in with/);
+    expect(db.clients).toHaveLength(1); // stored once, per provider and issuer; no connection row was written
+    expect(db.rows).toHaveLength(0);
+  });
+
+  it("an admin changing the client while someone is signed in is answered and applied to the next start only", async () => {
+    const { app, db, oauth } = setup();
+    const s = await start(app);
+    const state = new URL(s.body.authorizeUrl).searchParams.get("state")!;
+    await request(app).get("/api/mcp/oauth/callback").query({ state, code: "c" }).set("Cookie", `${MCP_OAUTH_STATE_COOKIE}=${state}`);
+    expect(db.rows[0]).toMatchObject({ state: "CONNECTED", clientId: "client-1" });
+    const patch = await asUser(request(app).patch("/api/mcp/oauth/client"), "admin").send({ provider: "atlassian", clientId: "mine" });
+    expect(patch.status).toBe(200);
+    expect(db.rows[0]).toMatchObject({ state: "CONNECTED", clientId: "client-1" }); // untouched
+    const next = await start(app, { provider: "atlassian", scope: "MEMBER" }, "family");
+    expect(new URL(next.body.authorizeUrl).searchParams.get("client_id")).toBe("mine");
+    expect(oauth.register).toHaveBeenCalledTimes(1);
   });
 
   it("never writes the code, state or pasted address to the request log", async () => {
