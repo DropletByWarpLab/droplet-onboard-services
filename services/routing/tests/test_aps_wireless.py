@@ -556,3 +556,48 @@ class TestWirelessMockSurface:
     def test_unknown_mac_is_404(self, mock_mode_client):
         resp = mock_mode_client.get("/aps/AA:BB:CC:DD:EE:99/wireless", headers=AUTH)
         assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# WARP-3883: the wireless routes dial the AP's leased address, by MAC
+# ---------------------------------------------------------------------------
+class TestApAddressFollowsTheLease:
+    """The observed 502: the router's umdns cache kept the AP's old address
+    after it renumbered. The router's lease for the MAC is the current one."""
+
+    NEW_IP = "192.168.9.242"
+
+    @pytest.fixture(autouse=True)
+    def _renumbered(self, router):
+        router.ap.get.return_value = {"mac": MAC, "last_ip": AP_IP}  # stale
+        router.ap.browse_discovered.return_value = [{"mac": MAC, "last_ip": AP_IP}]
+        router.network.interface_status.return_value = {
+            "ipv4-address": [{"address": "192.168.9.1", "mask": 24}],
+        }
+        router.dhcp.active_leases.return_value = [
+            {"macaddr": MAC.lower(), "ipaddr": self.NEW_IP, "expires": 43000},
+        ]
+
+    def test_read_dials_the_leased_address(self, client, reachable_ap):
+        resp = client.get(PATH, headers=AUTH)
+        assert resp.status_code == 200, resp.text
+        assert [d.ctor["host"] for d in _FakeApDevice.instances] == [self.NEW_IP]
+
+    def test_write_dials_the_leased_address(self, client, reachable_ap):
+        resp = client.put(PATH, json={"ssid": "Renamed"}, headers=AUTH)
+        assert resp.status_code == 200, resp.text
+        assert {d.ctor["host"] for d in _FakeApDevice.instances} == {self.NEW_IP}
+
+    def test_no_lease_and_no_hint_still_uses_mdns(self, client, router, reachable_ap):
+        router.dhcp.active_leases.return_value = []
+        router.dhcp.host_hints.return_value = {}
+        resp = client.get(PATH, headers=AUTH)
+        assert resp.status_code == 200, resp.text
+        assert [d.ctor["host"] for d in _FakeApDevice.instances] == [AP_IP]
+
+    def test_static_ap_without_a_lease_uses_its_host_hint(self, client, router, reachable_ap):
+        router.dhcp.active_leases.return_value = []
+        router.dhcp.host_hints.return_value = {MAC: {"ipaddrs": ["192.168.9.7"], "name": "ap"}}
+        resp = client.get(PATH, headers=AUTH)
+        assert resp.status_code == 200, resp.text
+        assert [d.ctor["host"] for d in _FakeApDevice.instances] == ["192.168.9.7"]

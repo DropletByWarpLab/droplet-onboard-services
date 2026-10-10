@@ -27,7 +27,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import main
-from droplet_openwrt_sdk import UbusError
+from droplet_openwrt_sdk import ConnectionLost, UbusError
 
 AUTH = {"Authorization": "Bearer pytest-fake-token"}
 MAC = "AA:BB:CC:DD:EE:01"
@@ -199,3 +199,49 @@ class TestApDirectPush:
         resp = client.delete(f"/aps/{MAC}", headers=AUTH)
         assert resp.status_code == 200, resp.text
         assert "nothing to disable" in resp.json()["ap_detail"]
+
+
+class TestApAddressFollowsTheLease:
+    """WARP-3883: approve and decommission dial the AP's leased address."""
+
+    NEW_IP = "192.168.9.242"
+
+    @pytest.fixture(autouse=True)
+    def _lan(self, router) -> None:
+        # Leases count only inside the router's `lan` subnet; without a status
+        # the resolver never reads them and every test here passes on mDNS.
+        router.network.interface_status.return_value = {
+            "ipv4-address": [{"address": "192.168.9.1", "mask": 24}],
+        }
+
+    def test_approve_dials_the_leased_address_not_stale_mdns(self, client, router, monkeypatch):
+        monkeypatch.setattr(main, "AP_PASSWORD", "per-unit-ap-pw")
+        monkeypatch.setattr(main, "DropletRouter", _FakeApDevice)
+        router.dhcp.active_leases.return_value = [
+            {"macaddr": "aa-bb-cc-dd-ee-01", "ipaddr": self.NEW_IP, "expires": 43000},
+        ]
+        resp = client.post(f"/aps/{MAC}/approve", json=APPROVE_BODY, headers=AUTH)
+        assert resp.status_code == 200, resp.text
+        assert [d.ctor["host"] for d in _FakeApDevice.instances] == [self.NEW_IP]
+
+    def test_approve_never_sends_the_ap_credential_off_the_lan(self, client, router, monkeypatch):
+        # A cameras-pool lease under the AP's MAC is not the AP: the fleet-wide
+        # credential goes to the LAN address only.
+        monkeypatch.setattr(main, "AP_PASSWORD", "per-unit-ap-pw")
+        monkeypatch.setattr(main, "DropletRouter", _FakeApDevice)
+        router.dhcp.active_leases.return_value = [
+            {"macaddr": MAC, "ipaddr": "192.168.100.57", "expires": 86000},
+        ]
+        resp = client.post(f"/aps/{MAC}/approve", json=APPROVE_BODY, headers=AUTH)
+        assert resp.status_code == 200, resp.text
+        assert [d.ctor["host"] for d in _FakeApDevice.instances] == [AP_IP]
+
+    def test_decommission_survives_the_router_dropping_mid_resolve(self, client, router, monkeypatch):
+        monkeypatch.setattr(main, "AP_PASSWORD", "per-unit-ap-pw")
+        monkeypatch.setattr(main, "DropletRouter", _FakeApDevice)
+        router.dhcp.active_leases.side_effect = ConnectionLost("router gone")
+        resp = client.delete(f"/aps/{MAC}", headers=AUTH)
+        assert resp.status_code == 200, resp.text
+        assert "nothing to disable" in resp.json()["ap_detail"]
+        assert _FakeApDevice.instances == []
+        router.dhcp.active_leases.assert_called()

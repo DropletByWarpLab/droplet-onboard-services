@@ -1352,6 +1352,27 @@ class DHCPApi:
             return []
         return result.get("dhcp_leases", [])
 
+    def host_hints(self) -> dict[str, dict]:
+        """The router's per-MAC host hints (``luci-rpc getHostHints``).
+
+        Keyed by MAC, each value carrying ``ipaddrs`` / ``ip6addrs`` /
+        ``name`` (older luci: a single ``ipv4`` string). luci merges the
+        kernel neighbour table, DHCP leases and /etc/ethers, so this also
+        knows hosts with a STATIC address, which never hold a lease
+        (WARP-3883). The neighbour table keeps STALE entries, so one MAC can
+        list an old and a new address side by side; callers decide what an
+        ambiguous hint means.
+
+        {} when luci-rpc is missing or the ACL denies it — same degradation
+        as :meth:`active_leases`. Transport failures propagate.
+        """
+        try:
+            result = self._r._call("luci-rpc", "getHostHints")
+        except UbusError as exc:
+            logger.debug("luci-rpc getHostHints unavailable: %s", exc)
+            return {}
+        return result if isinstance(result, dict) else {}
+
     def find_device_by_hostname(self, hostname_fragment: str) -> Optional[dict]:
         """Find a DHCP lease by partial hostname match (case-insensitive)."""
         fragment = hostname_fragment.lower()

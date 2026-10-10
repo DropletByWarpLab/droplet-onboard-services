@@ -19,6 +19,7 @@ except ImportError:
 
 import functools
 import hmac
+import ipaddress
 import os
 import threading
 import logging
@@ -40,6 +41,7 @@ from droplet_openwrt_sdk import (
     UBUS_STATUS_NOT_FOUND,
     UBUS_STATUS_NO_DATA,
     _ubus_object_absent,
+    _umdns_query,
     get_network_summary,
     describe_network_for_llm,
     detect_deployment_topology,
@@ -2976,9 +2978,218 @@ def _mac_key(mac: str) -> str:
     return mac.replace(":", "").replace("-", "").strip().lower()
 
 
+# WARP-3883 — find an AP by its MAC, not by an address someone cached.
+#
+# Droplet devices get POOL addresses from the edge router (fabric pinning pins
+# roles by name, never an address), so an AP renumbering is normal: a router
+# upgrade wipes the lease table, the AP reboots, and it comes back on a new
+# address. Observed live 2026-10-09: the AP moved .180 -> .242 and announced
+# .242 correctly, but the ROUTER's umdns cache kept answering .180 for many
+# minutes, `umdns update` or not — so pairing read AP_UNREACHABLE, /wireless
+# 502'd, and /aps/discovered fed the stale address to the orchestrator.
+#
+# The AP is the router's DHCP client, so the router's ACTIVE lease for that MAC
+# is the authoritative current address. Resolution order:
+#   1. the active DHCP lease for the MAC;
+#   2. the router's host hints, when they name exactly ONE IPv4 address — an AP
+#      with a static IP has no lease, and the neighbour table keeps STALE
+#      entries, so several addresses are a question, not an answer;
+#   3. the discovery layer (`_discovered_ap_ip`: mock seed, real umdns).
+# A lease or hint counts only when its address is inside the router's `lan`
+# subnet. getDHCPLeases and the host hints span EVERY pool the router serves
+# (the isolated cameras pool, a guest pool), and the AP-direct routes send the
+# one fleet-wide AP credential (ADR-071 §2.3) in cleartext to whatever address
+# resolves. APs are onboarded on br-lan, the trust boundary (ADR-005), so an
+# address outside it is never the AP's. A LAN subnet that can't be read trusts
+# no lease or hint, and resolution falls back to umdns as before.
+# Every AP-direct route dials what `_current_ap_ip` answers, and /aps/discovered
+# (plus the AP members of /fabric/members) report the same answer through
+# `_with_current_ips`, so the address the orchestrator stores is the one the box
+# dials. No cache: one LAN status read and one lease read per request, and a
+# lease hit skips umdns entirely. A cache would reintroduce exactly the
+# staleness this replaces.
+
+
+def _lease_seconds_left(expires: Any) -> Optional[float]:
+    """Seconds a lease has left: inf for a lease without an expiry (luci
+    reports `false` for infinite), None for one that already ran out."""
+    if isinstance(expires, bool) or not isinstance(expires, (int, float)):
+        return float("inf")
+    return float(expires) if expires > 0 else None
+
+
+def _lan_networks(r) -> list[ipaddress.IPv4Network]:
+    """The IPv4 subnets on the router's `lan` interface, the only segment an AP
+    address may come from. [] when the status read fails or carries no address,
+    so no lease or hint is trusted. Only ConnectionLost propagates."""
+    try:
+        status = r.network.interface_status("lan")
+    except ConnectionLost:
+        raise
+    except Exception as exc:  # noqa: BLE001 — a status read must never fail an AP request
+        logger.debug("LAN status read for AP resolution failed: %s", exc)
+        return []
+    addrs = status.get("ipv4-address") if isinstance(status, dict) else None
+    nets: list[ipaddress.IPv4Network] = []
+    for addr in addrs if isinstance(addrs, list) else []:
+        if not isinstance(addr, dict):
+            continue
+        try:
+            nets.append(ipaddress.IPv4Network(f"{addr.get('address')}/{addr.get('mask')}", strict=False))
+        except ValueError:
+            continue
+    return nets
+
+
+def _on_lan(ip: str, lan: list[ipaddress.IPv4Network]) -> bool:
+    try:
+        return any(ipaddress.IPv4Address(ip) in net for net in lan)
+    except ValueError:
+        return False
+
+
+def _leased_ips(r, lan: list[ipaddress.IPv4Network]) -> dict[str, str]:
+    """`_mac_key` -> address of every active IPv4 lease on the router whose
+    address is inside `lan` (leases on any other pool are dropped first).
+
+    Two leases for one MAC (seen around a renumber) resolve to the one with the
+    most time left. A read failure or an unexpected shape degrades to {} so the
+    next source answers; only ConnectionLost propagates (the callers end there).
+    An empty `lan` trusts no lease and costs no read.
+    """
+    if not lan:
+        return {}
+    try:
+        leases = r.dhcp.active_leases()
+    except ConnectionLost:
+        raise
+    except Exception as exc:  # noqa: BLE001 — a lease read must never fail an AP request
+        logger.debug("DHCP lease read for AP resolution failed: %s", exc)
+        return {}
+    best: dict[str, tuple[float, str]] = {}
+    for lease in leases if isinstance(leases, list) else []:
+        if not isinstance(lease, dict):
+            continue
+        mac, ip = lease.get("macaddr"), lease.get("ipaddr")
+        left = _lease_seconds_left(lease.get("expires"))
+        if not isinstance(mac, str) or not isinstance(ip, str) or left is None or not _on_lan(ip, lan):
+            continue
+        key = _mac_key(mac)
+        if key and (key not in best or left > best[key][0]):
+            best[key] = (left, ip)
+    return {key: ip for key, (_, ip) in best.items()}
+
+
+def _hinted_ips(r, lan: list[ipaddress.IPv4Network]) -> dict[str, str]:
+    """`_mac_key` -> address, for every MAC the router's host hints tie to
+    exactly ONE IPv4 address inside `lan` (addresses elsewhere are dropped
+    before counting). Same degradation as `_leased_ips`."""
+    if not lan:
+        return {}
+    try:
+        hints = r.dhcp.host_hints()
+    except ConnectionLost:
+        raise
+    except Exception as exc:  # noqa: BLE001 — a hint read must never fail an AP request
+        logger.debug("host-hint read for AP resolution failed: %s", exc)
+        return {}
+    out: dict[str, str] = {}
+    for mac, hint in hints.items() if isinstance(hints, dict) else []:
+        if not isinstance(hint, dict):
+            continue
+        addrs = hint.get("ipaddrs", hint.get("ipv4"))
+        if isinstance(addrs, str):
+            addrs = [addrs]
+        unique = {a for a in addrs if isinstance(a, str) and _on_lan(a, lan)} if isinstance(addrs, list) else set()
+        key = _mac_key(str(mac))
+        if key and len(unique) == 1:
+            out[key] = unique.pop()
+    return out
+
+
+def _current_ap_ip(r, canonical: str) -> Optional[str]:
+    """The AP's CURRENT address, by MAC (WARP-3883 — order in the block above).
+
+    A lease or hint failure never raises: None means no source knows the AP,
+    which every caller already answers as a retryable AP_UNREACHABLE (or
+    "nothing to disable" on decommission). A router transport failure ends the
+    walk with None — every source is the same router session, so asking again
+    only repeats the timeout, and None is what a failed umdns browse always
+    produced. Resolving an address says nothing about reachability; the dial
+    still decides that.
+    """
+    key = _mac_key(canonical)
+    try:
+        lan = _lan_networks(r)
+        address = _leased_ips(r, lan).get(key) or _hinted_ips(r, lan).get(key)
+    except ConnectionLost as exc:
+        logger.warning("AP %s: router unreachable while resolving its address: %s", canonical, exc)
+        return None
+    return address or _discovered_ap_ip(_get_ap_namespace(r), canonical)
+
+
+# `_mac_key` -> the (mDNS, router) address pair last reported as disagreeing, so a
+# stale umdns record is logged (and a refresh asked for) once per change, not on
+# every discovery tick. In-memory log dedupe only; nothing is decided from it.
+_stale_mdns_noted: dict[str, tuple[str, str]] = {}
+
+
+def _with_current_ips(r, records: Any) -> Any:
+    """Discovery `records` with each AP's `last_ip` set to the address the
+    router knows for its MAC — the lease, else an unambiguous host hint, both
+    inside the LAN subnet, the same rules as `_current_ap_ip` — so the
+    orchestrator's stored address and the dashboard follow the AP (WARP-3883).
+    Same shape. A record the router
+    knows nothing about keeps its mDNS address; a non-AP fabric member is left
+    alone (the router's own member carries the address this service reaches it
+    at); a router read that fails leaves the records as they are.
+
+    A disagreement means umdns is still answering an old A record: log it once
+    at INFO with both addresses and ask umdns to refresh, best-effort.
+    """
+    if not isinstance(records, list) or not records:
+        return records
+    out: list = []
+    refresh = False
+    try:
+        lan = _lan_networks(r)
+        leased = _leased_ips(r, lan)
+        hinted: Optional[dict[str, str]] = None  # read only if some AP has no lease
+        for rec in records:
+            key = _mac_key(str(rec.get("mac") or "")) if isinstance(rec, dict) else ""
+            if not key or rec.get("role", "ap") != "ap":
+                out.append(rec)
+                continue
+            current, source = leased.get(key), "DHCP lease"
+            if not current:
+                hinted = _hinted_ips(r, lan) if hinted is None else hinted
+                current, source = hinted.get(key), "host hint"
+            mdns_ip = rec.get("last_ip")
+            if not current or current == mdns_ip:
+                _stale_mdns_noted.pop(key, None)
+                out.append(rec)
+                continue
+            if mdns_ip and _stale_mdns_noted.get(key) != (mdns_ip, current):
+                _stale_mdns_noted[key] = (mdns_ip, current)
+                logger.info(
+                    "AP %s: mDNS still reports %s but the router's %s says %s; "
+                    "using %s and asking umdns to refresh",
+                    rec.get("mac"), mdns_ip, source, current, current,
+                )
+                refresh = True
+            out.append({**rec, "last_ip": current})
+    except ConnectionLost as exc:
+        logger.debug("router address read for AP discovery skipped: %s", exc)
+        return records
+    if refresh:
+        _umdns_query(r)
+    return out
+
+
 def _discovered_ap_ip(ap, canonical: str) -> Optional[str]:
     """The AP's last-seen address from the discovery layer (mock `get`, real
-    umdns browse). None when the AP isn't currently visible."""
+    umdns browse) — the LAST source `_current_ap_ip` consults. None when the
+    AP isn't currently visible."""
     if hasattr(ap, "get"):
         info = ap.get(canonical)
         if isinstance(info, dict) and info.get("last_ip"):
@@ -3571,10 +3782,12 @@ def aps_discovered():
         # Prefer the mock's seeded list when present — `_test_seed`
         # populates it deterministically and we don't want a real umdns
         # call leaking into mock-mode tests.
+        # Either way `last_ip` is the address the AP-direct routes dial: the
+        # router's lease for the MAC beats a stale umdns record (WARP-3883).
         if hasattr(ap, "discovered"):
-            return {"discovered": ap.discovered()}
+            return {"discovered": _with_current_ips(r, ap.discovered())}
         if hasattr(ap, "browse_discovered"):
-            return {"discovered": ap.browse_discovered()}
+            return {"discovered": _with_current_ips(r, ap.browse_discovered())}
         return {"discovered": []}
     except (ConnectionLost, UbusError) as exc:
         handle_router_error(exc)
@@ -3677,7 +3890,7 @@ def aps_band_steering_get(mac: str):
                 "ap_detail": "no AP credential configured",
             }
 
-        ap_ip = _discovered_ap_ip(ap, canonical)
+        ap_ip = _current_ap_ip(r, canonical)
         if not ap_ip:
             raise HTTPException(status_code=502, detail={
                 "code": "AP_UNREACHABLE",
@@ -3742,7 +3955,7 @@ def aps_band_steering_put(mac: str, req: ApBandSteeringRequest, request: Request
             # Never pretend to toggle steering on an AP we can't configure.
             return JSONResponse(status_code=422, content=_AP_BAND_STEERING_UNAVAILABLE)
 
-        ap_ip = _discovered_ap_ip(ap, canonical)
+        ap_ip = _current_ap_ip(r, canonical)
         if not ap_ip:
             raise HTTPException(status_code=502, detail={
                 "code": "AP_UNREACHABLE",
@@ -3805,7 +4018,7 @@ def aps_clients(mac: str):
                 "ap_detail": "no AP credential configured",
             }
 
-        ap_ip = _discovered_ap_ip(ap, canonical)
+        ap_ip = _current_ap_ip(r, canonical)
         if not ap_ip:
             raise HTTPException(status_code=502, detail={
                 "code": "AP_UNREACHABLE",
@@ -3865,7 +4078,7 @@ def aps_wireless_get(mac: str):
                 "radios": [],
             }
 
-        ap_ip = _discovered_ap_ip(ap, canonical)
+        ap_ip = _current_ap_ip(r, canonical)
         if not ap_ip:
             raise HTTPException(status_code=502, detail={
                 "code": "AP_UNREACHABLE",
@@ -3928,7 +4141,7 @@ def aps_wireless_put(mac: str, req: ApWirelessRequest, request: Request):
             # Never pretend to rename a network on an AP we can't configure.
             return JSONResponse(status_code=422, content=_AP_WIRELESS_UNAVAILABLE)
 
-        ap_ip = _discovered_ap_ip(ap, canonical)
+        ap_ip = _current_ap_ip(r, canonical)
         if not ap_ip:
             raise HTTPException(status_code=502, detail={
                 "code": "AP_UNREACHABLE",
@@ -4029,7 +4242,7 @@ def aps_approve(mac: str, req: ApApproveRequest, request: Request):
         ap_configured = False
         ap_detail = "no AP credential configured — router-side approval only"
         if current_ap_password():
-            ap_ip = _discovered_ap_ip(ap, canonical)
+            ap_ip = _current_ap_ip(r, canonical)
             if not ap_ip:
                 raise HTTPException(status_code=502, detail={
                     "code": "AP_UNREACHABLE",
@@ -4079,7 +4292,7 @@ def aps_approve(mac: str, req: ApApproveRequest, request: Request):
 # ---------------------------------------------------------------------------
 # The AP's own `droplet.pair` window (same plugin as the router's) is claimed
 # through the AP onboarding path: the AP's CURRENT address comes from the same
-# mDNS inventory `/aps/{mac}/approve` uses (`_discovered_ap_ip`), the claim runs
+# by-MAC resolver `/aps/{mac}/approve` uses (`_current_ap_ip`), the claim runs
 # against that host, and the minted password rides the same internal hop as the
 # router's (routing -> orchestrator -> device-bridge, target "ap"). Discovery is
 # never trust: the TXT `pairing=` hint only finds the AP; the AP's own window
@@ -4114,12 +4327,13 @@ def _ap_pairing_api(host: str) -> PairingApi:
 
 
 def _resolve_ap_host(canonical: str) -> Optional[str]:
-    """The AP's current address from the live mDNS inventory (needs the router
-    session, exactly like `/aps/{mac}/approve`). None when the AP is not
-    currently visible. Router-side failures surface as the usual typed errors."""
+    """The AP's current address, resolved by MAC (`_current_ap_ip`: lease, host
+    hint, mDNS — needs the router session, exactly like `/aps/{mac}/approve`).
+    None when no source knows the AP. Router-side failures surface as the usual
+    typed errors."""
     try:
         r = get_router()
-        return _discovered_ap_ip(_get_ap_namespace(r), canonical)
+        return _current_ap_ip(r, canonical)
     except (ConnectionLost, UbusError) as exc:
         handle_router_error(exc)
 
@@ -4333,7 +4547,7 @@ def aps_decommission(mac: str, request: Request):
         ap_disabled = False
         ap_detail = "no AP credential configured — router-side decommission only"
         if current_ap_password():
-            ap_ip = _discovered_ap_ip(ap, canonical)
+            ap_ip = _current_ap_ip(r, canonical)
             if not ap_ip:
                 ap_detail = "AP not currently discovered — nothing to disable"
             else:
@@ -4453,7 +4667,9 @@ def fabric_members():
         members: list[dict] = []
         fabric = getattr(r, "fabric", None)
         if fabric is not None and hasattr(fabric, "browse_members"):
-            members = fabric.browse_members()
+            # AP members carry the same lease-backed `last_ip` as
+            # /aps/discovered (WARP-3883); other roles keep what they announce.
+            members = _with_current_ips(r, fabric.browse_members())
         if not any(m.get("role") == "router" for m in members):
             synthesized = _synthesize_router_member(r)
             if synthesized is not None:

@@ -467,3 +467,90 @@ class TestApPendingLifecycle:
         # `/aps/pairing/pending` must not be captured by `/aps/{mac}/...`
         assert client.get("/aps/pairing/pending", headers=AUTH).status_code == 200
         assert client.get(f"/aps/{MAC}", headers=AUTH).status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# WARP-3883: the AP is found by MAC, not by the router's cached umdns address
+# ---------------------------------------------------------------------------
+NEW_IP = "192.168.9.242"
+STALE_IP = "192.168.9.180"  # what the router's umdns cache kept answering
+
+
+@pytest.fixture
+def renumbered(fleet: FakeApFleet, mock_router: MagicMock) -> FakeApFleet:
+    """The live bug: the AP renumbered and holds a lease for NEW_IP, but the
+    router's umdns cache still answers the address it had before. `ap.get` is
+    removed so resolution runs like the real `ApApi` (which has none). Nothing
+    answers at the stale address any more."""
+    fleet.by_host[NEW_IP] = FakeApBox(NEW_IP)
+    fleet.by_host[STALE_IP] = FakeApBox(STALE_IP)
+    fleet.by_host[STALE_IP].unreachable = True
+    del mock_router.ap.get
+    mock_router.ap.browse_discovered.return_value = [{"mac": MAC.lower(), "last_ip": STALE_IP}]
+    mock_router.network.interface_status.return_value = {
+        "ipv4-address": [{"address": "192.168.9.1", "mask": 24}],
+    }
+    mock_router.dhcp.active_leases.return_value = [
+        {"macaddr": MAC.lower(), "ipaddr": NEW_IP, "hostname": "droplet-ap", "expires": 43000},
+    ]
+    return fleet
+
+
+class TestApAddressFollowsTheLease:
+    def test_status_reaches_the_ap_at_its_leased_address(self, client, renumbered):
+        body = client.get(f"/aps/{MAC}/pairing", headers=AUTH).json()
+        assert body["host"] == NEW_IP and body["error_code"] is None
+        assert body["pairing"]["state"] == "open"
+        assert renumbered.api_hosts == [NEW_IP]
+
+    def test_claim_and_proof_login_go_to_the_leased_address(self, client, renumbered):
+        res = _claim(client)
+        assert res.status_code == 200, res.text
+        password = res.json()["password"]
+        assert res.json()["host"] == NEW_IP
+        assert renumbered.by_host[NEW_IP].claims == [(password, BOX_FP)]
+        assert (NEW_IP, "droplet-ai", password) in renumbered.logins
+        assert renumbered.api_hosts == [NEW_IP]
+
+    def test_a_stale_address_now_held_by_another_ap_is_never_claimed(
+        self, client, renumbered, mock_router
+    ):
+        """Pool addresses get reused: umdns still maps MAC to the address the
+        OTHER AP now holds. Every AP shares one droplet-ai password (ADR-071
+        section 2.3), so dialling it would claim the wrong AP."""
+        mock_router.ap.browse_discovered.return_value = [{"mac": MAC, "last_ip": AP_IP2}]
+        res = _claim(client)
+        assert res.status_code == 200, res.text
+        assert renumbered.by_host[AP_IP2].claims == []
+        assert len(renumbered.by_host[NEW_IP].claims) == 1
+
+    def test_a_failing_lease_read_falls_back_to_mdns(self, client, renumbered, mock_router):
+        mock_router.dhcp.active_leases.side_effect = UbusError(6, "Permission denied")
+        mock_router.ap.browse_discovered.return_value = [{"mac": MAC, "last_ip": NEW_IP}]
+        body = client.get(f"/aps/{MAC}/pairing", headers=AUTH).json()
+        assert body["host"] == NEW_IP and body["error_code"] is None
+
+    def test_a_cameras_pool_lease_never_receives_the_claim(self, client, renumbered, mock_router):
+        """getDHCPLeases spans every pool. A cameras-VLAN host holding the AP's
+        MAC on a fresher lease must never be sent the fleet-wide credential."""
+        camera_ip = "192.168.100.57"
+        renumbered.by_host[camera_ip] = FakeApBox(camera_ip)
+        mock_router.dhcp.active_leases.return_value = [
+            {"macaddr": MAC.lower(), "ipaddr": camera_ip, "expires": 86000},
+            {"macaddr": MAC.lower(), "ipaddr": NEW_IP, "expires": 600},
+        ]
+        res = _claim(client)
+        assert res.status_code == 200, res.text
+        assert res.json()["host"] == NEW_IP
+        assert renumbered.by_host[camera_ip].claims == []
+        assert camera_ip not in renumbered.api_hosts
+        assert not any(host == camera_ip for host, *_ in renumbered.logins)
+
+    def test_a_lease_for_another_ap_is_not_this_aps_address(self, client, renumbered, mock_router):
+        mock_router.dhcp.active_leases.return_value = [
+            {"macaddr": MAC2.lower(), "ipaddr": NEW_IP, "expires": 43000},
+        ]
+        body = client.get(f"/aps/{MAC}/pairing", headers=AUTH).json()
+        # back to the stale umdns answer: the pre-fix symptom, AP_UNREACHABLE
+        assert body["host"] == STALE_IP and body["error_code"] == "AP_UNREACHABLE"
+        assert renumbered.by_host[NEW_IP].status_calls == 0
