@@ -798,12 +798,12 @@ describe("no setup popup in any card", () => {
     }
   });
 
-  it("names Settings for the OAuth families and Integrations for the catalog", async () => {
+  it("names Settings for the OAuth families and Connectors for the catalog", async () => {
     expect((await cardFor(owner, family("google"), { google: [googleRow("u-ada")] })).blocked?.message).toMatch(/Settings under Connected accounts\.$/);
     expect((await cardFor(owner, family("m365"), { m365: [m365Row("u-ada")] })).blocked?.message).toMatch(/Settings under Connected accounts\.$/);
     expect((await cardFor(owner, family("google"), {}, noApps)).blocked?.message).toMatch(/Settings under Account connection setup\.$/);
     expect((await cardFor(owner, family("m365"), {}, noApps)).blocked?.message).toMatch(/Settings under Account connection setup\.$/);
-    expect((await cardFor(owner, integration("stripe"), { integrations: [integrationRow("stripe", "CONNECTED")] })).blocked?.message).toMatch(/Integrations\.$/);
-    expect((await cardFor(owner, integration("stripe"), { integrations: [integrationRow("stripe", "PROVISIONING")] })).blocked?.message).toMatch(/Integrations\.$/);
+    expect((await cardFor(owner, integration("stripe"), { integrations: [integrationRow("stripe", "CONNECTED")] })).blocked?.message).toMatch(/Connectors\.$/);
+    expect((await cardFor(owner, integration("stripe"), { integrations: [integrationRow("stripe", "PROVISIONING")] })).blocked?.message).toMatch(/Connectors\.$/);
   });
 });
