@@ -10107,13 +10107,16 @@ async function mcpOAuthError(res: Response, fallback: string): Promise<Error> {
   return new Error(code);
 }
 
-export async function startMcpSignIn(args: {
-  provider: string;
-  scope: "MEMBER" | "WORKSPACE";
-  acknowledge?: true;
-  /** `loopback` when the box has no registered HTTPS address: the person pastes the landing address back. */
-  redirectMode?: "origin" | "loopback";
-}): Promise<{ authorizeUrl: string; expiresAt: string; redirectUri: string }> {
+/**
+ * Start a sign-in. Either name the provider and scope, or pass the `handoff` id a
+ * native client minted (`createMcpHandoff`); never both. The box picks loopback
+ * itself when its address is not https, so there is no client-side mode.
+ */
+export async function startMcpSignIn(
+  args:
+    | { provider: string; scope: "MEMBER" | "WORKSPACE"; acknowledge?: true }
+    | { handoff: string },
+): Promise<{ authorizeUrl: string; expiresAt: string; redirectUri: string }> {
   const res = await authFetch(`${BASE}/api/mcp/oauth/start`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -10138,4 +10141,162 @@ export async function disconnectMcpOAuth(id: string): Promise<void> {
     method: "DELETE",
   });
   if (!res.ok) throw await mcpOAuthError(res, "disconnect_failed");
+}
+
+// ── WARP-3965 — the Connectors directory (business systems and MCP servers) ───
+//
+// Mirrors `GET /api/connectors/directory`, the tool-permission PATCHes, the
+// per-server off and the browser handoff (orchestrator WARP-3960..3964). The box
+// owns every state shown here; nothing below is derived from absence.
+
+export type ConnectorKind = "system" | "mcp";
+export type ToolGrade = "read" | "write" | "destructive";
+export type ToolPermission = "always" | "ask" | "block";
+
+export interface DirectoryTool {
+  name: string;
+  description: string;
+  grade: ToolGrade;
+  permission: ToolPermission;
+  /** The vendor changed this tool's definition since an owner last reviewed it. */
+  changed: boolean;
+  /** Echoed back on a PATCH so a stale review is refused (409 `stale_review`). */
+  inputSchemaHash?: string;
+}
+
+export interface DirectoryMemberSide {
+  id: string;
+  state: McpOAuthState;
+  siteName?: string | null;
+  siteUrl?: string | null;
+  connectedAt?: string | null;
+}
+
+export type DirectoryConnection =
+  | {
+      kind: "mcp";
+      workspaceState: "ENABLED" | "DISABLED";
+      member: DirectoryMemberSide | null;
+      workspace: { id: string; state: McpOAuthState; ackBy?: string | null } | null;
+      anyoneConnected: boolean;
+    }
+  | {
+      kind: "system";
+      status: string;
+      lastSyncedAt?: string | null;
+      writeEnabled?: boolean;
+    };
+
+export type DirectoryConnectAction =
+  | "signIn"
+  | "wizard"
+  | "lanApi"
+  | "none"
+  | `route:${string}`;
+
+export interface ConnectorDirectoryEntry {
+  id: string;
+  kind: ConnectorKind;
+  name: string;
+  vendor: string;
+  verified: boolean;
+  tagline: string;
+  description: string;
+  categories: string[];
+  madeBy: { name: string; url?: string };
+  signInRequired: boolean;
+  connectorUrl: string | null;
+  addedAt: string;
+  links: { docs?: string; support?: string; privacy?: string; guide?: string };
+  /** `null` for a business system. */
+  tools: DirectoryTool[] | null;
+  promptSuggestions?: string[];
+  related: string[];
+  connection: DirectoryConnection;
+  actions: {
+    connect: DirectoryConnectAction;
+    canEditPermissions: boolean;
+    canDisableServer: boolean;
+    canAddWorkspaceConnection: boolean;
+  };
+}
+
+/** Flat `{ error: "<token>", message }` bodies: only the token is kept. */
+async function directoryError(res: Response, fallback: string): Promise<Error> {
+  const body = await res.json().catch(() => null);
+  const code = typeof body?.error === "string" ? body.error : fallback;
+  return new Error(code);
+}
+
+export async function fetchConnectorDirectory(): Promise<ConnectorDirectoryEntry[]> {
+  const res = await authFetch(`${BASE}/api/connectors/directory`);
+  // 404: a box that predates the directory. The page says so rather than guessing a catalog.
+  if (res.status === 404) throw new Error("directory_absent");
+  if (!res.ok) throw await directoryError(res, "directory_failed");
+  const body = await res.json().catch(() => null);
+  if (!Array.isArray(body?.entries)) throw new Error("directory_shape");
+  return body.entries;
+}
+
+/** One tool. Admins may only tighten; the box refuses anything the grade does not allow. */
+export async function setToolPermission(
+  serverId: string,
+  toolName: string,
+  permission: ToolPermission,
+  inputSchemaHash?: string,
+): Promise<DirectoryTool> {
+  const res = await authFetch(
+    `${BASE}/api/admin/remote-tools/permissions/${encodeURIComponent(serverId)}/${encodeURIComponent(toolName)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ permission, ...(inputSchemaHash ? { inputSchemaHash } : {}) }),
+    },
+  );
+  if (!res.ok) throw await directoryError(res, "permission_failed");
+  const body = await res.json().catch(() => null);
+  return body.tool;
+}
+
+/** Every tool of one group, all-or-nothing on the box. */
+export async function setToolGroupPermission(
+  serverId: string,
+  group: "read" | "write",
+  permission: ToolPermission,
+): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/admin/remote-tools/permissions/${encodeURIComponent(serverId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ group, permission }),
+    },
+  );
+  if (!res.ok) throw await directoryError(res, "permission_failed");
+}
+
+/** Owner/admin: turn one MCP server off (or back on) for the whole Workspace. */
+export async function setMcpServerEnabled(provider: string, enabled: boolean): Promise<void> {
+  const res = await authFetch(`${BASE}/api/connectors/${encodeURIComponent(provider)}/mcp-state`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+  if (!res.ok) throw await directoryError(res, "mcp_state_failed");
+}
+
+export interface McpHandoffView {
+  provider: string;
+  displayName: string;
+  scope: "MEMBER" | "WORKSPACE";
+  destinationHost: string;
+  callback: string;
+  expiresAt: string;
+}
+
+/** Reading a handoff never consumes it; `startMcpSignIn({ handoff })` does. */
+export async function readMcpHandoff(id: string): Promise<McpHandoffView> {
+  const res = await authFetch(`${BASE}/api/mcp/oauth/handoff/${encodeURIComponent(id)}`);
+  if (!res.ok) throw await mcpOAuthError(res, "handoff_invalid");
+  return res.json();
 }

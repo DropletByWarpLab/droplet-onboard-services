@@ -1,7 +1,8 @@
 /**
- * WARP-3951 — the Settings page mounts the Atlassian sign-in card.
- * Harness mirrors settings.ai-providers.test.tsx; the card itself is stubbed
- * (it has its own tests) so only the mounting is asserted.
+ * WARP-3951 mounted the Atlassian sign-in card on Settings; WARP-3965 moved it
+ * to the connector's page under Connectors. Harness mirrors
+ * settings.ai-providers.test.tsx; the card is stubbed so only the (absent)
+ * mounting is asserted.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
@@ -42,12 +43,11 @@ beforeEach(() => {
   fetchUsersMock.mockResolvedValue({ users: [] });
 });
 
-describe("Settings mounts the Atlassian sign-in card", () => {
-  it("renders the member-mode card for atlassian", async () => {
+describe("Settings no longer mounts the Atlassian sign-in card", () => {
+  // WARP-3965: Connectors is the one place to connect an MCP server.
+  it("renders no sign-in card for atlassian", async () => {
     render(<SettingsPage />);
     await waitFor(() => expect(fetchUsersMock).toHaveBeenCalled());
-    const card = screen.getByTestId("mcp-card-atlassian");
-    expect(card).toHaveAttribute("data-name", "Atlassian");
-    expect(card).toHaveAttribute("data-admin", "false");
+    expect(screen.queryByTestId("mcp-card-atlassian")).toBeNull();
   });
 });
