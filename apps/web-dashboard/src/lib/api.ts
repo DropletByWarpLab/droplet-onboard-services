@@ -9521,6 +9521,8 @@ export interface SaasCredentialView {
    * `credentialVariant`: the box refuses a first save that names no path.
    */
   variant?: string | null;
+  /** WARP-3951: present when the provider offers a web sign-in beside its API token. */
+  signIn?: { kind: "oauth" };
   fields: SaasCredentialField[];
   /** Non-secret field values only. */
   values: Record<string, string | number>;
@@ -10051,4 +10053,89 @@ export function signInEndsAtOf(body: unknown): string | null {
  */
 export async function getSignInEndsAt(): Promise<string | null> {
   return signInEndsAtOf(await typedAuthFetch<unknown>(`${BASE}/api/auth/me`));
+}
+
+// ── WARP-3951 — web sign-in for remote MCP servers (Atlassian first) ─────────
+//
+// Mirrors the box's `/api/mcp/oauth/*` routes. The box is the OAuth client: the
+// browser only ever receives an `authorizeUrl` to open and a status to show, and
+// never sees a code, token or client secret.
+
+export type McpOAuthState =
+  | "DISCONNECTED"
+  | "PENDING_CONSENT"
+  | "CONNECTED"
+  | "NEEDS_RECONNECT"
+  | "ERROR";
+
+/** One sign-in (a member's own, or the Workspace's). `id` is what Disconnect names. */
+export interface McpOAuthSide {
+  id?: string;
+  state: McpOAuthState;
+  /** Workspace connection only: who acknowledged it. */
+  ackBy?: string | null;
+}
+
+export interface McpSignInView {
+  provider: string;
+  member: McpOAuthSide | null;
+  workspace: McpOAuthSide | null;
+  redirectUri: string;
+  callbackSupported: boolean;
+  /** Whether a shared API token is also stored. */
+  apiToken: boolean;
+}
+
+export async function fetchMcpOAuthConnections(): Promise<McpSignInView[]> {
+  const res = await authFetch(`${BASE}/api/mcp/oauth/connections`);
+  // 404: this box has no sign-in routes yet. The card renders nothing for it.
+  if (res.status === 404) throw new Error("mcp_oauth_absent");
+  if (!res.ok) throw new Error(`Failed to load sign-in status: ${res.status}`);
+  const body = await res.json().catch(() => null);
+  // The contract is `{ providers: [...] }` (orchestrator #2770). A 200 without it is drift,
+  // not "nothing to show", so it is surfaced rather than swallowed.
+  if (!Array.isArray(body?.providers)) throw new Error("mcp_oauth_shape");
+  return body.providers;
+}
+
+async function mcpOAuthError(res: Response, fallback: string): Promise<Error> {
+  // The box answers with a short code (e.g. `bare_code_rejected`); never a value.
+  const body = await res.json().catch(() => null);
+  // `error` is a short code, or `{ code, message }` on a 409; only the code is kept.
+  const e = body?.error;
+  const code = typeof e === "string" ? e : typeof e?.code === "string" ? e.code : fallback;
+  return new Error(code);
+}
+
+export async function startMcpSignIn(args: {
+  provider: string;
+  scope: "MEMBER" | "WORKSPACE";
+  acknowledge?: true;
+  /** `loopback` when the box has no registered HTTPS address: the person pastes the landing address back. */
+  redirectMode?: "origin" | "loopback";
+}): Promise<{ authorizeUrl: string; expiresAt: string; redirectUri: string }> {
+  const res = await authFetch(`${BASE}/api/mcp/oauth/start`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(args),
+  });
+  if (!res.ok) throw await mcpOAuthError(res, "start_failed");
+  return res.json();
+}
+
+/** `redirectUrl` is the FULL address the browser landed on. A bare code is refused by the box. */
+export async function pasteMcpRedirect(redirectUrl: string): Promise<void> {
+  const res = await authFetch(`${BASE}/api/mcp/oauth/paste`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ redirectUrl }),
+  });
+  if (!res.ok) throw await mcpOAuthError(res, "paste_failed");
+}
+
+export async function disconnectMcpOAuth(id: string): Promise<void> {
+  const res = await authFetch(`${BASE}/api/mcp/oauth/connections/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw await mcpOAuthError(res, "disconnect_failed");
 }
