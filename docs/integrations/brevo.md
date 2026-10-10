@@ -59,7 +59,7 @@ Do this in a browser, signed in to Brevo as the account owner.
 6. **Set the expiry to "no expiration".** Brevo makes you choose: *"Set an expiry date from 7 days to 1 year or choose no expiration for the API key."* A 7-day or 30-day key gives you a connection that works perfectly on install day and dies silently weeks later — and Brevo's warning email goes to you, never to the box. If your own security policy forbids a non-expiring key, that is fine, but **write the expiry date in your calendar now**, because nothing else will remind you.
 7. **Do NOT tick "Create MCP server API key".** This is the trap in the current dialog. Brevo: *"If you activate the Create MCP server API key, the API key created in step 4 is deactivated and a MCP version of the API key is generated instead."* Tick it and the key you are about to copy is already dead — you will paste it into Droplet and get an error that looks exactly like a typo.
 8. Click **Generate**, then **copy the key immediately.** Brevo shows it once: *"Your API key is only visible during this step. Once your API key is created, you won't be able to copy it anymore and you'll need to create a new one if you lose it."*
-9. In Droplet: **Integrations → Brevo → Connect**, read the capability statement, paste the key, and confirm. The box validates it with a single call to your account details. An error here means the key is wrong, expired, deactivated or IP-blocked — not that Brevo is down.
+9. In Droplet: **Connectors → Brevo → Connect**, read the capability statement, paste the key, and confirm. The box validates it with a single call to your account details. An error here means the key is wrong, expired, deactivated or IP-blocked — not that Brevo is down.
 10. **Now do the IP step below. It is not optional.** Go to **Settings → Security → Authorized IPs** and either add your office's public IP address, or switch automatic blocking off. See the next section for why this matters more than it looks.
 
 ---
@@ -127,7 +127,7 @@ Brevo answers all four of these the same way, and no software on the box can tel
 
 **To stop Droplet reading Brevo:**
 
-- **On the box:** `Integrations → Brevo → Manage → Disconnect`. This purges the stored key from the box and stops all reading. Data already synced stays until you delete it.
+- **On the box:** `Connectors → Brevo → Manage → Disconnect`. This purges the stored key from the box and stops all reading. Data already synced stays until you delete it.
 - **At Brevo:** **Settings → SMTP & API → API Keys & MCP**, find the key by the name you gave it, and either **Deactivate API key** (reversible — it stops working but can be switched back on) or **delete** it (permanent).
 
 **Do both, in that order**, if you are decommissioning a box or handing it back. Disconnecting stops Droplet using the key; only deactivating or deleting it at Brevo stops the key *existing*. And because the key is full account access, an orphaned Brevo key is not a tidiness problem — it is a credential that can still send mail from your domain.

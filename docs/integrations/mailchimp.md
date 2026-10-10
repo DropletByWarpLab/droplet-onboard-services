@@ -69,7 +69,7 @@ Do this in a browser, signed in to Mailchimp as the account owner.
 3. Click **Create A Key**.
 4. **Name it something you will recognise in two years.** `Droplet — <your office name>` beats `key 2`. This name is the only thing that will later tell you which key belongs to the box.
 5. **Copy the key — whole.** Select from the very first character to the very last one after the hyphen. If you are pasting it via a chat message or a note, check it did not wrap across a line and lose its tail.
-6. In Droplet: **Integrations → Mailchimp → Connect**, read the capability statement, paste the key, and confirm.
+6. In Droplet: **Connectors → Mailchimp → Connect**, read the capability statement, paste the key, and confirm.
 
 If Droplet refuses the key saying it has no datacenter suffix, you have lost the tail. Go back and copy it again from the end.
 
@@ -113,7 +113,7 @@ Rotation replaces the stored credential and leaves everything else alone — the
 
 **To stop Droplet reading Mailchimp:**
 
-- **On the box:** `Integrations → Mailchimp → Manage → Disconnect`. This purges the stored key from the box and stops all reading. Data already synced stays until you delete it.
+- **On the box:** `Connectors → Mailchimp → Manage → Disconnect`. This purges the stored key from the box and stops all reading. Data already synced stays until you delete it.
 - **At Mailchimp:** go to **Extras → API keys**, find the key by the name you gave it, and **disable or delete** it. Do this as well as disconnecting. Disconnecting stops Droplet using the key; only removing it at Mailchimp stops the key existing.
 
 **Do both, in that order**, if you are decommissioning a box or handing it back. This matters more here than for the other vendors, precisely because the key is account-wide.

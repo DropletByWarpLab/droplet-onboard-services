@@ -356,7 +356,7 @@ describe("ConnectCard — credentials form", () => {
     click("Connect Stripe");
 
     expect(await screen.findByText("Connected to Stripe")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Manage in Integrations" })).toHaveAttribute("href", "/integrations");
+    expect(screen.getByRole("link", { name: "Manage in Connectors" })).toHaveAttribute("href", "/integrations");
     expect(document.querySelectorAll("input")).toHaveLength(0);
     expect(document.body.innerHTML).not.toContain(SECRET);
     expect(logged()).not.toContain(SECRET);
@@ -540,11 +540,11 @@ describe("ConnectCard — Not now", () => {
 
 describe("ConnectCard — interactive=false", () => {
   it.each([
-    ["credentials", stripe, "Stripe", "/integrations", "Manage in Integrations"],
+    ["credentials", stripe, "Stripe", "/integrations", "Manage in Connectors"],
     ["oauth", google, "Google", "/settings#connected-accounts", "Manage in Settings"],
     ["mailbox", mailbox, "Email account", "/settings#email", "Manage in Settings"],
     ["calendar", calendar, "Calendar feed", "/calendar", "Manage"],
-    ["wizard", wizard, "Eaglesoft", "/integrations", "Manage in Integrations"],
+    ["wizard", wizard, "Eaglesoft", "/integrations", "Manage in Connectors"],
   ])("renders a %s card as a compact row with no inputs and no buttons", (_mode, make, name, href, linkText) => {
     const { onOutcome } = setup(make(), { interactive: false });
     const row = screen.getByTestId("connect-card-compact");
@@ -585,7 +585,7 @@ describe("ConnectCard — blocked", () => {
     expect(panel).toHaveAttribute("data-reason", "role");
     expect(panel).toHaveTextContent("Ask an owner or admin");
     expect(panel).toHaveTextContent(message);
-    expect(screen.getByRole("link", { name: "Open Integrations" })).toHaveAttribute("href", "/integrations");
+    expect(screen.getByRole("link", { name: "Open Connectors" })).toHaveAttribute("href", "/integrations");
     expect(document.querySelectorAll("input, textarea, select")).toHaveLength(0);
     expect(screen.queryByRole("button", { name: /connect stripe/i })).toBeNull();
     expect(onOutcome).not.toHaveBeenCalled();

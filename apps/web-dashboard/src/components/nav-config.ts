@@ -635,7 +635,9 @@ export const NAV_GROUPS: NavGroup[] = [
       // `requiresModule` — is the honest gate.
       {
         href: "/integrations",
-        label: "Integrations",
+        label: "Connectors",
+        // The old name stays searchable (WARP-3956).
+        keywords: ["integrations"],
         icon: Blocks,
         roles: ["owner", "admin"],
         hidden: true,

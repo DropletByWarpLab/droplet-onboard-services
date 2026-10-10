@@ -53,7 +53,7 @@ If you only have one Atlassian site, this is still required — Droplet asks for
 
 ### 3. Paste all three into Droplet
 
-In Droplet: **Integrations → Atlassian → Connect**, and supply
+In Droplet: **Connectors → Atlassian → Connect**, and supply
 
 - the **email address** of the account that created the token,
 - the **API token** itself,

@@ -76,7 +76,7 @@ Two halves: create the app, then install it and copy its credentials.
 6. **Install the app on your store.** It must be the store in the same organization as the app.
 7. Open the app's **client credentials** — a **Client ID** and a **Client secret**.
 8. **Copy both.** The client secret is the sensitive half; treat it like a password. Shopify may show it only once, so copy it before you navigate away.
-9. In Droplet: **Integrations → Shopify → Connect**, read the capability statement, and paste **both** values into the two fields, plus your store's domain (the `your-store.myshopify.com` one, not a custom domain you may have pointed at it).
+9. In Droplet: **Connectors → Shopify → Connect**, read the capability statement, and paste **both** values into the two fields, plus your store's domain (the `your-store.myshopify.com` one, not a custom domain you may have pointed at it).
 10. Confirm. Droplet mints its own access token and makes its first read.
 
 If Droplet reports the credential as the wrong kind, the usual cause is pasting an old `shpat_` token into the client-id field. There is no field it belongs in — see the section above.
@@ -122,7 +122,7 @@ So: **you will never be asked to reconnect Shopify because a token expired.** If
 
 **To stop Droplet reading Shopify:**
 
-- **On the box:** `Integrations → Shopify → Manage → Disconnect`. This purges the stored client id and secret from the box and stops all reading. Data already synced stays until you delete it.
+- **On the box:** `Connectors → Shopify → Manage → Disconnect`. This purges the stored client id and secret from the box and stops all reading. Data already synced stays until you delete it.
 - **At Shopify — the thorough version:** **uninstall the app from your store.** That severs the app's access to that store immediately, regardless of who holds the credentials.
 - **At Shopify — the narrower version:** rotate the client secret in the developer dashboard. The old secret stops working; the app stays installed.
 

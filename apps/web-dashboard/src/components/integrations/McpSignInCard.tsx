@@ -56,7 +56,7 @@ function takeOutcome(provider: string): keyof typeof OUTCOMES | null {
 
 /** Fixed sentences for the box's 409 codes; the box's own message is never shown. */
 const START_BLOCKED: Record<string, (name: string) => string> = {
-  remote_mcp_off: () => "Remote MCP is switched off for this Workspace. An owner or admin can turn it on in Integrations › Connector credentials.",
+  remote_mcp_off: () => "Remote MCP is switched off for this Workspace. An owner or admin can turn it on in Connectors › Connector credentials.",
   server_not_allowed: (name) => `This Droplet isn't set up to reach ${name}.`,
   connection_disabled: (name) => `An owner or admin turned ${name} off for this Workspace.`,
 };

@@ -50,7 +50,7 @@ Do this in a browser, signed in to your **live** GoCardless dashboard **as an ad
 3. Click **Create** (top right) and choose **Access token**.
 4. **Name it** something you will recognise later — *Droplet* is plenty — and **choose the read-only scope**.
 5. Click **Create access token**, then copy the token **now**. GoCardless will not be able to show it again; if you lose it, you create another.
-6. In Droplet: **Integrations → GoCardless → Connect**, read the capability statement, paste the token, and confirm. The box checks it with a single call to GoCardless's creditors list — your organisation has one creditor — so a failure here is unambiguous evidence about the token rather than about your payments.
+6. In Droplet: **Connectors → GoCardless → Connect**, read the capability statement, paste the token, and confirm. The box checks it with a single call to GoCardless's creditors list — your organisation has one creditor — so a failure here is unambiguous evidence about the token rather than about your payments.
 
 ---
 
@@ -88,7 +88,7 @@ The box opens outbound connections to exactly one address, **`api.gocardless.com
 
 **No expiry is documented** for a GoCardless access token, so there is no date to diary. A token stays valid until someone disables it.
 
-**To rotate:** create a new read-only token exactly as in the click-path, paste it into Droplet at **Integrations → Credentials**, confirm the connection reports healthy, and only then **disable the old token** (see [Revocation](#revocation)). There is no grace period to rely on: the old token works until the moment it is disabled and not after.
+**To rotate:** create a new read-only token exactly as in the click-path, paste it into Droplet at **Connectors → Credentials**, confirm the connection reports healthy, and only then **disable the old token** (see [Revocation](#revocation)). There is no grace period to rely on: the old token works until the moment it is disabled and not after.
 
 **Treat the token as belonging to a person, and rotate when that person leaves.** An admin made it, and — as above — disabling that admin's account does **not** revoke it. A token held by someone who no longer works for you is a standing credential into your collection history. Make the box's token from an account that will outlive any one person, and disable the token itself when the people around it change.
 
@@ -100,7 +100,7 @@ The box opens outbound connections to exactly one address, **`api.gocardless.com
 
 **To stop Droplet reading GoCardless:**
 
-- **On the box:** `Integrations → GoCardless → Manage → Disconnect`. This purges the stored token from the box and stops all reading. Nothing from GoCardless is copied onto the box in the first place, so there is no synced data to delete afterwards.
+- **On the box:** `Connectors → GoCardless → Manage → Disconnect`. This purges the stored token from the box and stops all reading. Nothing from GoCardless is copied onto the box in the first place, so there is no synced data to delete afterwards.
 - **At GoCardless:** open **Developers → API settings**, find the token, and click **Disable access token**. Do this as well as disconnecting. Disconnecting stops Droplet using the token; only disabling it at GoCardless stops the token existing.
 
 **Do both, in that order**, if you are decommissioning a box or handing it back.

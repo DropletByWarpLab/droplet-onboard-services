@@ -72,7 +72,7 @@ Do this in a browser, signed in to Xero with an account that can authorise the o
 5. **Choose the scopes.** See the next section. **Choose carefully** — changing them later is not free, and one direction of change cannot be undone. That is unusual and it is explained below.
 6. **Authorise the connection.** Xero will confirm the charge at this point.
 7. Copy the **Client ID** and generate and copy the **Client Secret**. The secret is the sensitive half; treat it like a password, and copy it before you navigate away.
-8. In Droplet: **Integrations → Xero → Connect**, read the capability statement, and paste **both** values into the two fields.
+8. In Droplet: **Connectors → Xero → Connect**, read the capability statement, and paste **both** values into the two fields.
 9. Confirm. Droplet requests its own short-lived token and makes its first read.
 
 Repeat the whole sequence for each additional organisation you want connected. They are separate connections with separate credentials and separate charges.
@@ -166,7 +166,7 @@ So **you will never be asked to reconnect Xero because a token expired.** If Dro
 
 **To stop Droplet reading Xero:**
 
-- **On the box:** `Integrations → Xero → Manage → Disconnect`. This purges the stored client id and secret from the box and stops all reading. Data already synced stays until you delete it.
+- **On the box:** `Connectors → Xero → Manage → Disconnect`. This purges the stored client id and secret from the box and stops all reading. Data already synced stays until you delete it.
 - **At Xero:** delete the Custom Connection in the developer portal's **My Apps**. That severs access and stops the monthly charge for that organisation.
 
 **Do both.** Disconnecting stops Droplet using the credential; only deleting the connection at Xero stops it existing and stops you paying for it. **If you are decommissioning a box, deleting the connection at Xero is the step that saves you money** — a Custom Connection left behind on a box nobody uses is still billed.

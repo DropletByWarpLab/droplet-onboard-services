@@ -137,7 +137,7 @@ export function ConnectionsOverviewCard({ overview, onOutcome }: ConnectionsOver
       <div className="cc-foot">
         <p>Box-wide connections need an owner or admin. Personal accounts are yours.</p>
         <Link className="cc-link" href="/integrations">
-          Open Integrations
+          Open Connectors
         </Link>
       </div>
     </section>

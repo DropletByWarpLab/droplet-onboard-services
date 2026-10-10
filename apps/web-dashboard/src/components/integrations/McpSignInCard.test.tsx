@@ -83,7 +83,7 @@ describe("McpSignInCard", () => {
   });
 
   it.each([
-    ["remote_mcp_off", "Remote MCP is switched off for this Workspace. An owner or admin can turn it on in Integrations › Connector credentials."],
+    ["remote_mcp_off", "Remote MCP is switched off for this Workspace. An owner or admin can turn it on in Connectors › Connector credentials."],
     ["server_not_allowed", "This Droplet isn't set up to reach Atlassian."],
     ["connection_disabled", "An owner or admin turned Atlassian off for this Workspace."],
   ])("a 409 %s shows the fixed sentence and never navigates", async (code, sentence) => {

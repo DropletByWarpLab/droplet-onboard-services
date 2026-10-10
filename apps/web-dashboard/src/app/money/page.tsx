@@ -375,7 +375,7 @@ function MoneyUnavailable(): JSX.Element {
           Connect Xero, QuickBooks or Stripe and your invoices and bills will appear here.
         </span>
         <a className="btn" href="/integrations">
-          Go to Integrations
+          Go to Connectors
         </a>
       </div>
     </ShellPage>

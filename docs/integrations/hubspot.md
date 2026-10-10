@@ -52,7 +52,7 @@ Do this in a browser, signed in to HubSpot as a **super admin** on an account th
 5. Switch to the **Scopes** tab and tick the read scopes listed in the next section. Nothing else.
 6. Click **Create app**, and confirm.
 7. HubSpot shows the **access token** — it begins `pat-`. Click to reveal it and copy it.
-8. In Droplet: **Integrations → HubSpot → Connect**, read the capability statement, paste the token, and confirm.
+8. In Droplet: **Connectors → HubSpot → Connect**, read the capability statement, paste the token, and confirm.
 
 If Droplet reports the credential as the wrong kind, the usual cause is a **legacy portal API key** rather than a private app token. Those are a different, older, portal-wide credential, and Droplet does not accept them. The token you want starts `pat-`.
 
@@ -97,7 +97,7 @@ Rotation replaces the stored credential and leaves everything else alone — the
 
 **To stop Droplet reading HubSpot:**
 
-- **On the box:** `Integrations → HubSpot → Manage → Disconnect`. This purges the stored token from the box and stops all reading. Data already synced stays until you delete it.
+- **On the box:** `Connectors → HubSpot → Manage → Disconnect`. This purges the stored token from the box and stops all reading. Data already synced stays until you delete it.
 - **At HubSpot:** **Settings → Integrations → Private Apps**, open the app by the name you gave it, and **delete** it. Do this as well as disconnecting. Disconnecting stops Droplet using the token; only deleting the app stops the token existing.
 
 **Do both, in that order**, if you are decommissioning a box or handing it back.

@@ -122,8 +122,8 @@ export default function IntegrationsPage() {
   return (
     <ShellPage
       icon={<Blocks size={15} />}
-      label="Integrations"
-      title="Integrations"
+      label="Connectors"
+      title="Connectors"
       sub="Systems Droplet connects to — all on your network."
     >
       {/* A failed status read is a fact the owner is told, not one smoothed

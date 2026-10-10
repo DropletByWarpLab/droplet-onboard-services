@@ -52,7 +52,7 @@ Do this in a browser, signed in to Stripe as the account owner.
 6. **Set the permissions.** Everything defaults to **None**. Set the resources in the next section to **Read**. Leave everything else on None — including anything offering *Write*. Droplet does not need write access to Stripe and will not use it if you grant it.
 7. Click **Create key**.
 8. **Copy the key now.** Stripe shows a live key's value **once**. Once you navigate away it cannot be revealed again — see [Rotation and expiry](#rotation-and-expiry) for what to do if that happens.
-9. In Droplet: **Integrations → Stripe → Connect**, read the capability statement, paste the key, and confirm.
+9. In Droplet: **Connectors → Stripe → Connect**, read the capability statement, paste the key, and confirm.
 
 If Droplet reports the key as the wrong kind, check the first characters. `rk_` is correct; `sk_` is the one described at the top of this page.
 
@@ -99,7 +99,7 @@ Rotation replaces the stored credential and leaves everything else alone — the
 
 **To stop Droplet reading Stripe:**
 
-- **On the box:** `Integrations → Stripe → Manage → Disconnect`. This purges the stored key from the box and stops all reading. Data already synced stays until you delete it.
+- **On the box:** `Connectors → Stripe → Manage → Disconnect`. This purges the stored key from the box and stops all reading. Data already synced stays until you delete it.
 - **At Stripe:** **Developers → API keys → Restricted keys**, find the key by the name you gave it, and **delete** it. Do this as well as disconnecting. Disconnecting stops Droplet using the key; only deleting it at Stripe stops the key existing.
 
 **Do both, in that order**, if you are decommissioning a box or handing it back.

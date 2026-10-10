@@ -48,7 +48,7 @@ Do this in a browser, signed in to Todoist **as the person whose tasks you want 
 3. Open the **Integrations** tab.
 4. Open the **Developer** tab inside it.
 5. Click **Copy API token**. That is it — there is no form, no name to give it, no expiry to choose. The token that is copied is the one your account already has.
-6. In Droplet: **Integrations → Todoist → Connect**, read the capability statement, paste the token, and confirm. The box checks it with a single call to Todoist's "who am I" endpoint, which returns the user the token belongs to and nothing else — so a failure here is unambiguous evidence about the token rather than about your tasks.
+6. In Droplet: **Connectors → Todoist → Connect**, read the capability statement, paste the token, and confirm. The box checks it with a single call to Todoist's "who am I" endpoint, which returns the user the token belongs to and nothing else — so a failure here is unambiguous evidence about the token rather than about your tasks.
 
 **If step 5 shows no token, or you want a fresh one**, the same Developer tab has **Issue a new API token**. Read [Rotation and expiry](#rotation-and-expiry) before you click it: it signs you out of every device.
 
@@ -87,7 +87,7 @@ The box opens outbound connections to exactly one address, **`api.todoist.com`**
 
 1. Pick a moment when signing back in on your phone and desktop is not a nuisance.
 2. Click **Issue a new API token**, then **Copy API token**.
-3. Paste it into Droplet at **Integrations → Credentials** — the page that exists for exactly this, and which does not mean redoing the connect wizard — and confirm the connection reports healthy.
+3. Paste it into Droplet at **Connectors → Credentials** — the page that exists for exactly this, and which does not mean redoing the connect wizard — and confirm the connection reports healthy.
 4. Sign back in on your other devices.
 
 There is no "old token still works for a while" grace period, because there is only ever one token. The connection will report the old token as refused from the moment you issue the new one until you paste it. Rotation replaces the stored credential and leaves everything else alone: the connection keeps its identity.
@@ -102,7 +102,7 @@ There is no "old token still works for a while" grace period, because there is o
 
 **To stop Droplet reading Todoist:**
 
-- **On the box:** `Integrations → Todoist → Manage → Disconnect`. This purges the stored token from the box and stops all reading. Nothing from Todoist is copied onto the box in the first place — tasks are read when asked for and are not stored — so there is no synced data to delete afterwards.
+- **On the box:** `Connectors → Todoist → Manage → Disconnect`. This purges the stored token from the box and stops all reading. Nothing from Todoist is copied onto the box in the first place — tasks are read when asked for and are not stored — so there is no synced data to delete afterwards.
 - **At Todoist:** open **Settings → Integrations → Developer** and click **Issue a new API token**. Todoist has no "delete token" button; issuing a new one is how the old one dies. Do this as well as disconnecting. Disconnecting stops Droplet using the token; only re-issuing it at Todoist stops the old token existing. Expect to be signed out of your other devices — that is the same side effect as rotation, and it is the point here.
 
 **Do both, in that order**, if you are decommissioning a box or handing it back.

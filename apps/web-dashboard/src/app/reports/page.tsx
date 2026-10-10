@@ -86,7 +86,7 @@ const TILES: TileSpec[] = [
   { id: "b3", span: "3x1", title: "Devices", icon: Cpu, owner: "WARP-1993" },
   { id: "b4", span: "3x1", title: "Network", icon: Network, owner: "WARP-1993" },
   { id: "c1", span: "6x2", title: "Folders & storage", icon: FolderOpen, owner: "WARP-1993" },
-  { id: "c2", span: "6x2", title: "Integrations", icon: Blocks, owner: "WARP-1994" },
+  { id: "c2", span: "6x2", title: "Connectors", icon: Blocks, owner: "WARP-1994" },
   { id: "d1", span: "8x2", title: "Activity", icon: Activity, owner: "WARP-1993" },
   { id: "d2", span: "4x2", title: "Ask about this report", icon: Sparkles, owner: "WARP-1997" },
 ];

@@ -4,7 +4,7 @@
 > **Applies to:** every integration, but **in two tracks**. Read §1 first and follow the one you are on; §4–§7 apply to both.
 > **How it works under the hood:** [`README.md`](README.md).
 
-Everything here is done from the Droplet **dashboard** — `Integrations` in the sidebar.
+Everything here is done from the Droplet **dashboard** — `Connectors` in the sidebar.
 
 ---
 
@@ -39,7 +39,7 @@ Droplet drives this setup; you supply the server address and (once) have your da
 
 ### 2.2 Connect — the wizard
 
-`Integrations → Connect` on the provider's card launches a short wizard. Four steps + a result.
+`Connectors → Connect` on the provider's card launches a short wizard. Four steps + a result.
 
 #### Step 1 · Find the server
 
@@ -167,7 +167,7 @@ One page, shared by every vendor, rather than five paraphrases that could drift 
 
 ### 3.5 Connect — the wizard (cloud)
 
-`Integrations → Connect` on the provider's card. There is no network scan and no grant script — the steps are:
+`Connectors → Connect` on the provider's card. There is no network scan and no grant script — the steps are:
 
 1. **Read what will be read.** The connect screen states, before you paste anything, what the box will read and that the credential is copied onto the box. If that statement does not match what you expected, stop there.
 2. **Paste the credential.** One field for most vendors, two for the ones that issue a client id and a client secret. Droplet checks the shape before it stores anything — a credential of the wrong kind is refused at this point, with the reason, and is not written anywhere.
@@ -182,7 +182,7 @@ One page, shared by every vendor, rather than five paraphrases that could drift 
 
 ### 3.6 Changing a credential later (WARP-2275)
 
-Rotating a key, or correcting an account id you mistyped, does not mean redoing the connect wizard. `Integrations → Credentials` in the sidebar is a dedicated page for exactly that.
+Rotating a key, or correcting an account id you mistyped, does not mean redoing the connect wizard. `Connectors → Credentials` in the sidebar is a dedicated page for exactly that.
 
 **Owner and admin only.** The page is not shown to any other role, and the API refuses the request even if it is called directly — the guard is on the route, not just the navigation.
 
@@ -201,7 +201,7 @@ Every save, replacement and clear is written to the audit log with **whether** a
 
 Writing back into a live system of record is deliberate and reversible-by-design. **Applies to both tracks.**
 
-- **Enable:** `Integrations → <provider> → Manage → Turn writes on`. This is a confirmed state change; on Track A it provisions the narrow `droplet_rw` account for the specific capability, and on either track it flips the mode pill to **"Writes enabled"**. The change is audited (who turned it on).
+- **Enable:** `Connectors → <provider> → Manage → Turn writes on`. This is a confirmed state change; on Track A it provisions the narrow `droplet_rw` account for the specific capability, and on either track it flips the mode pill to **"Writes enabled"**. The change is audited (who turned it on).
 - **What actually happens on a write:** Droplet **never writes silently**. A proposed change (e.g. an appointment reschedule) is **staged** and shown to you in a **write-confirm** dialog; only when a human confirms does Droplet apply it, then re-read to verify. The assistant/voice can *propose* a write but can **never** authorize it — the confirmation always comes to a person on the dashboard.
 - **Kill-switch:** `Manage → Turn writes off` instantly returns the integration to read-only. Writes are also frozen automatically if the external system's schema changes after an upgrade (drift-lock, [§5](#5-reading-the-connections-state)).
 - **What Droplet will not write:** financial ledgers, transactions, insurance claims, and clinical records are **never** written — they're impossible targets by design. Writes are limited to a small, vetted, tested allow-list.

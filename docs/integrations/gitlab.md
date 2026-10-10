@@ -61,7 +61,7 @@ Do this in a browser, signed in to GitLab.com **as the account whose issues you 
 5. **Name it something you will still recognise in two years.** `Droplet — <your office name>` beats `token 2`. The name is the only thing that will later tell you which token belongs to the box, and you will want that on the day you rotate or revoke it.
 6. **Set the expiry, and decide it on purpose.** GitLab requires one; the default is a year from today, and a year is also the furthest it will let you go. That is the day this connection stops unless you paste a new token first — GitLab's reminder email goes to *you*, never to the box. **Write the date in your calendar now**, because nothing else will remind you.
 7. Click **Create personal access token**, then **copy the token immediately.** GitLab shows it once, on that page, and never again. There is no reveal button and no support recovery — if you navigate away, the fix is to revoke that token and make another.
-8. In Droplet: **Integrations → GitLab → Connect**, read the capability statement, paste the token, and confirm. The box checks it with a single call to GitLab's "who am I" endpoint, which returns the user the token belongs to and nothing else — so a failure here is unambiguous evidence about the token rather than about your issues.
+8. In Droplet: **Connectors → GitLab → Connect**, read the capability statement, paste the token, and confirm. The box checks it with a single call to GitLab's "who am I" endpoint, which returns the user the token belongs to and nothing else — so a failure here is unambiguous evidence about the token rather than about your issues.
 
 **What the token looks like.** It starts with **`glpat-`**. Newer tokens are longer and contain two dots partway along; that is normal. Droplet does not check the format — only that you actually pasted something — precisely because GitLab has changed the shape once already and a format check would have rejected every new token the day it did. If your token does not look like an example you saw somewhere, that is not a problem, and it is not the reason if something later fails.
 
@@ -102,7 +102,7 @@ GitLab documents `read_api` as read access to the API and documents `read_user` 
 
 **A GitLab token always expires, on the date you chose.** This is the exception to the general rule on the shared page ([`credential-handling.md`](credential-handling.md)) that these credentials do not expire — and it is a harder exception than Cal.com's, where expiry is optional: GitLab makes you pick a date, defaults it to **365 days**, and will not go further. Whether this connection has an end date is not a question; *when* is the decision you made in step 6 of the click-path. It is yours to diary — the box cannot see the date, and there is nothing it can do about it in advance. GitLab does send its own reminder emails ahead of expiry, to the token's owner.
 
-**Rotating on purpose is clean here, because GitLab puts no practical limit on how many tokens you can have.** Create the new token in **Edit profile → Access → Personal access tokens** (same scope or permissions as before), paste it into Droplet at **Integrations → Credentials** — the page that exists for exactly this, and which does not mean redoing the connect wizard — confirm the connection reports healthy, and only then revoke the old token. Done in that order there is no outage. Rotation replaces the stored credential and leaves everything else alone: the connection keeps its identity, and everything already synced stays.
+**Rotating on purpose is clean here, because GitLab puts no practical limit on how many tokens you can have.** Create the new token in **Edit profile → Access → Personal access tokens** (same scope or permissions as before), paste it into Droplet at **Connectors → Credentials** — the page that exists for exactly this, and which does not mean redoing the connect wizard — confirm the connection reports healthy, and only then revoke the old token. Done in that order there is no outage. Rotation replaces the stored credential and leaves everything else alone: the connection keeps its identity, and everything already synced stays.
 
 **GitLab can also rotate a token for you** — there is a rotate action beside each token that issues a replacement and revokes the original in one step. If you use it, paste the replacement into Droplet straight away: the old one is dead the moment the new one exists.
 
@@ -118,7 +118,7 @@ GitLab documents `read_api` as read access to the API and documents `read_user` 
 
 **To stop Droplet reading GitLab:**
 
-- **On the box:** `Integrations → GitLab → Manage → Disconnect`. This purges the stored token from the box and stops all reading. Data already synced stays until you delete it.
+- **On the box:** `Connectors → GitLab → Manage → Disconnect`. This purges the stored token from the box and stops all reading. Data already synced stays until you delete it.
 - **At GitLab:** go to **Edit profile → Access → Personal access tokens**, find the token by the name you gave it, and **revoke** it. Do this as well as disconnecting. Disconnecting stops Droplet using the token; only revoking it at GitLab stops the token existing.
 
 **Do both, in that order**, if you are decommissioning a box or handing it back.

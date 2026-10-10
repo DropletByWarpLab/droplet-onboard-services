@@ -88,7 +88,7 @@ Do this in a browser, signed in to Pipedrive.
 
    **Read this before you click anything that says "regenerate".** Pipedrive allows **exactly one active API token per user, per company**. Generating a new one immediately invalidates the old one, and anything else already using it stops working — silently, from that other tool's point of view. If you are not sure whether another integration is using this user's token, check before you regenerate, or create the dedicated user in step 1 instead.
 
-6. **In Droplet: Integrations → Pipedrive → Connect.** Paste the company domain into the first field and the API token into the second. The token field is masked, is encrypted before it is written to disk, and is never shown back to you or written to a log.
+6. **In Droplet: Connectors → Pipedrive → Connect.** Paste the company domain into the first field and the API token into the second. The token field is masked, is encrypted before it is written to disk, and is never shown back to you or written to a log.
 
 7. **Click Connect.** Droplet makes one read-only call to confirm two things: that the token works, and that it belongs to the company domain you typed. It does this by asking Pipedrive which company the token is for and comparing the answer with what you entered. If that call is refused, nothing is stored.
 
@@ -150,7 +150,7 @@ Rotation replaces the stored credential and leaves everything else alone — the
 
 **To stop Droplet reading Pipedrive:**
 
-- **On the box:** `Integrations → Pipedrive → Manage → Disconnect`. This purges the stored token and the company domain from the box and stops all reading. Data already synced stays until you delete it.
+- **On the box:** `Connectors → Pipedrive → Manage → Disconnect`. This purges the stored token and the company domain from the box and stops all reading. Data already synced stays until you delete it.
 - **At Pipedrive:** go to **Company settings → Personal preferences → API** as the user whose token it is, and regenerate or delete the token. Do this as well as disconnecting. Disconnecting stops Droplet using the token; only removing it at Pipedrive stops the token existing.
 
 **Do both, in that order**, if you are decommissioning a box or handing it back. This matters more here than for most vendors, precisely because the token is full account access.

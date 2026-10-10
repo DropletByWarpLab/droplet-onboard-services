@@ -55,7 +55,7 @@ Do this in a browser, signed in as the owner of the Square account.
 4. In the left pane, choose **Credentials**.
 5. **🔴 At the top of the page, make sure the environment says `Production`, not `Sandbox`.** This is the step people get wrong, and it fails in a way that looks like a typo rather than a wrong setting. Square issues every application *two* tokens: a Production one and a Sandbox one. They are not interchangeable — Square's Sandbox is a separate service on a separate address (`connect.squareupsandbox.com`), and Droplet only ever dials `connect.squareup.com`. Paste the Sandbox token and the box gets an authentication failure from a real host against a token that belongs to a different world.
 6. In the **Production Access token** box, choose **Show** and copy your token. Square's own wording, verbatim: *"In the **Production Access token** box, choose **Show** and copy your token."*
-7. In Droplet: **Integrations → Square → Connect**, read the capability statement, paste the token, and confirm. The box checks it with one call to your **locations** list — the cheapest authenticated read Square offers, and one that takes no parameters, so a failure here is unambiguous evidence about the token rather than about one product's permissions.
+7. In Droplet: **Connectors → Square → Connect**, read the capability statement, paste the token, and confirm. The box checks it with one call to your **locations** list — the cheapest authenticated read Square offers, and one that takes no parameters, so a failure here is unambiguous evidence about the token rather than about one product's permissions.
 
 **Unlike most credentials in this set, you can come back for this one.** Brevo and Klaviyo show a key once and never again; Square's Credentials page will show you the Production token again whenever you are signed in. That is a relief on the day you mistype it, and it is exactly why the Square sign-in itself matters as much as the token does.
 
@@ -102,7 +102,7 @@ Square's API reaches more than the three things above. Each of the others is lef
 
 **Rotating on purpose — and the one gap on this page.** Square's documentation is detailed about revoking *OAuth* tokens (there is a `RevokeToken` endpoint, and a seller-facing disconnect in the Square Dashboard) and says nothing at all about regenerating or removing the personal access token on your own application's Credentials page. We have not walked the live console, so rather than describe a button that may not be there:
 
-1. Open **Credentials** and look for a rotate or regenerate control on the Production access token. If it is there, use it — then paste the new value into Droplet at **Integrations → Credentials**, the page that exists for exactly this and does not mean redoing the connect wizard.
+1. Open **Credentials** and look for a rotate or regenerate control on the Production access token. If it is there, use it — then paste the new value into Droplet at **Connectors → Credentials**, the page that exists for exactly this and does not mean redoing the connect wizard.
 2. If it is not there, rotate by **creating a second application** in the Developer Console, copying *its* production token, pasting that into Droplet, confirming the connection reports healthy, and only then retiring the first one. Done in that order there is no outage — rotation replaces the stored credential and leaves everything else alone, so the connection keeps its identity and everything already synced stays.
 
 If you find the control, we would like to know; this section will then say so instead of hedging.
@@ -119,7 +119,7 @@ If you find the control, we would like to know; this section will then say so in
 
 **To stop Droplet reading Square:**
 
-- **On the box:** `Integrations → Square → Manage → Disconnect`. This purges the stored token from the box and stops all reading. Data already synced stays until you delete it.
+- **On the box:** `Connectors → Square → Manage → Disconnect`. This purges the stored token from the box and stops all reading. Data already synced stays until you delete it.
 - **At Square:** rotate or remove the token, using the procedure in [Rotation and expiry](#rotation-and-expiry) above. **This is the half we cannot give you an exact click-path for**, and it is the honest weak point of this connector: Square documents no console control for revoking a personal access token, so we will not send you hunting for a specific button.
 
 **Do not confuse this with "My Applications" in your Square Dashboard.** That screen disconnects *third-party* applications you authorised through Square's OAuth flow — an accounting tool, a plugin. Droplet is not one of those. You did not authorise us; you made a credential inside your own developer account. Disconnecting things on that screen will not touch the token you pasted into the box, and the fact that it *looks* like the right screen is exactly why it is named here.

@@ -22,7 +22,7 @@ export const ACCESS_COPY = {
   emptyRoles:
     "No custom roles yet — the built-in roles cover everyone until you add one. Create a role to give a group of people exactly the access they need.",
   emptyPeopleInRole: "No one has this role yet — assign people to put it to work.",
-  emptyConnectors: "No connectors set up yet — add one in Integrations.",
+  emptyConnectors: "No connectors set up yet — add one in Connectors.",
 
   // ── Starting points (Member / External guest labels, Romain 2026-09-25) ──
   startAdmin: "Admin — can manage the box",
@@ -66,7 +66,7 @@ export const ACCESS_COPY = {
   connectorsPHI: "Some connectors include protected health information.",
   connectorHint:
     "Read shows the assistant patient and schedule data; write lets it make changes, always with a confirmation step.",
-  openIntegrations: "Open Integrations →",
+  openIntegrations: "Open Connectors →",
 
   // ── Guardrails ──
   ownerRowMeta: "Full control · can't be changed",

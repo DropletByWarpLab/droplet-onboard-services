@@ -60,7 +60,7 @@ Do this in a browser, signed in to GitHub **as the account that can see the repo
 9. Under **Repository access**, choose **Only select repositories** and pick the ones the box should read — or **All repositories** if that is genuinely what you want. Remember that public repositories are readable by the token regardless.
 10. Under **Permissions → Repository permissions**, set **Issues** to **Read-only**. If you want pull requests to appear too, set **Pull requests** to **Read-only** as well. Leave everything else at *No access*. You do not need any *Account permissions*.
 11. Click **Generate token**, then **copy it immediately.** GitHub shows it once. There is no reveal button and no support recovery — if you navigate away, the fix is to delete that token and make another.
-12. In Droplet: **Integrations → GitHub → Connect**, read the capability statement, paste the token, and confirm. The box checks it with a single call to GitHub's "who am I" endpoint, which returns the account the token belongs to and nothing else — so a failure here is unambiguous evidence about the token rather than about your repositories.
+12. In Droplet: **Connectors → GitHub → Connect**, read the capability statement, paste the token, and confirm. The box checks it with a single call to GitHub's "who am I" endpoint, which returns the account the token belongs to and nothing else — so a failure here is unambiguous evidence about the token rather than about your repositories.
 
 ---
 
@@ -107,7 +107,7 @@ The box opens outbound connections to exactly one address, **`api.github.com`**,
 
 **There is a cap of 50 fine-grained tokens per account.** If you hit it, the fix is to delete tokens you no longer use, not to reuse one between tools.
 
-**Rotating on purpose is clean.** Create the new token in **Settings → Developer settings → Personal access tokens → Fine-grained tokens**, with the same repositories and permissions, paste it into Droplet at **Integrations → Credentials** — the page that exists for exactly this, and which does not mean redoing the connect wizard — confirm the connection reports healthy, and only then delete the old token. Done in that order there is no outage. Rotation replaces the stored credential and leaves everything else alone: the connection keeps its identity, and everything already synced stays.
+**Rotating on purpose is clean.** Create the new token in **Settings → Developer settings → Personal access tokens → Fine-grained tokens**, with the same repositories and permissions, paste it into Droplet at **Connectors → Credentials** — the page that exists for exactly this, and which does not mean redoing the connect wizard — confirm the connection reports healthy, and only then delete the old token. Done in that order there is no outage. Rotation replaces the stored credential and leaves everything else alone: the connection keeps its identity, and everything already synced stays.
 
 **You navigated away before copying the token.** Not recoverable, and not a support call. Create a **new** token, paste that one into Droplet, and then delete the orphan so you are not left with a live token nobody is using.
 
@@ -121,7 +121,7 @@ The box opens outbound connections to exactly one address, **`api.github.com`**,
 
 **To stop Droplet reading GitHub:**
 
-- **On the box:** `Integrations → GitHub → Manage → Disconnect`. This purges the stored token from the box and stops all reading. Data already synced stays until you delete it.
+- **On the box:** `Connectors → GitHub → Manage → Disconnect`. This purges the stored token from the box and stops all reading. Data already synced stays until you delete it.
 - **At GitHub:** go to **Settings → Developer settings → Personal access tokens → Fine-grained tokens**, find the token by the name you gave it, and **delete** it. Do this as well as disconnecting. Disconnecting stops Droplet using the token; only deleting it at GitHub stops the token existing.
 
 **Do both, in that order**, if you are decommissioning a box or handing it back.

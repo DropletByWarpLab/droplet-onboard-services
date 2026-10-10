@@ -57,7 +57,7 @@ Do this in a browser, signed in to Cal.com **as the person whose bookings you wa
 5. **Name it something you will still recognise in two years.** `Droplet — <your office name>` beats `key 2`. The name is the only thing that will later tell you which key belongs to the box, and you will want that on the day you rotate or revoke it.
 6. **Set the expiry, and decide it on purpose.** Cal.com makes you choose a date, and it also offers a key that never expires. A dated key gives you a connection that works perfectly on install day and then dies silently on a Tuesday months later — and Cal.com's warning, if any, goes to you, never to the box. Either choose never-expiring, or **write the date in your calendar now**, because nothing else will remind you.
 7. Click **Save**, then **copy the key immediately.** Cal.com's own wording: *"immediately copy the key as you won't be able to see this code again later."* There is no reveal button and no support recovery — if you navigate away, the fix is to delete that key and make another.
-8. In Droplet: **Integrations → Cal.com → Connect**, read the capability statement, paste the key, and confirm. The box checks it with a single call to Cal.com's "who am I" endpoint, which returns the user the key belongs to and nothing else — so a failure here is unambiguous evidence about the key rather than about your bookings.
+8. In Droplet: **Connectors → Cal.com → Connect**, read the capability statement, paste the key, and confirm. The box checks it with a single call to Cal.com's "who am I" endpoint, which returns the user the key belongs to and nothing else — so a failure here is unambiguous evidence about the key rather than about your bookings.
 
 ---
 
@@ -96,7 +96,7 @@ Bookings on the box are stored in a record shape that came from clinical practic
 
 **A Cal.com key expires if you told it to.** This is the exception to the general rule on the shared page ([`credential-handling.md`](credential-handling.md)) that these credentials do not expire: Cal.com asks you for an expiry date at creation, so whether this connection has an end date is a decision you already made in step 6 of the click-path. If you set one, it is yours to diary — the box cannot see the date, and there is nothing it can do about it in advance.
 
-**Rotating on purpose is clean here, because Cal.com puts no limit on how many keys you can have.** Create the new key in **My Settings → Developer → API keys**, paste it into Droplet at **Integrations → Credentials** — the page that exists for exactly this, and which does not mean redoing the connect wizard — confirm the connection reports healthy, and only then delete the old key. Done in that order there is no outage. Rotation replaces the stored credential and leaves everything else alone: the connection keeps its identity, and everything already synced stays.
+**Rotating on purpose is clean here, because Cal.com puts no limit on how many keys you can have.** Create the new key in **My Settings → Developer → API keys**, paste it into Droplet at **Connectors → Credentials** — the page that exists for exactly this, and which does not mean redoing the connect wizard — confirm the connection reports healthy, and only then delete the old key. Done in that order there is no outage. Rotation replaces the stored credential and leaves everything else alone: the connection keeps its identity, and everything already synced stays.
 
 **You navigated away before copying the key.** Not recoverable, and not a support call. Create a **new** key, paste that one into Droplet, and then delete the orphan so you are not left with a live key nobody is using.
 
@@ -110,7 +110,7 @@ Bookings on the box are stored in a record shape that came from clinical practic
 
 **To stop Droplet reading Cal.com:**
 
-- **On the box:** `Integrations → Cal.com → Manage → Disconnect`. This purges the stored key from the box and stops all reading. Data already synced stays until you delete it.
+- **On the box:** `Connectors → Cal.com → Manage → Disconnect`. This purges the stored key from the box and stops all reading. Data already synced stays until you delete it.
 - **At Cal.com:** go to **My Settings → Developer → API keys**, find the key by the name you gave it, and **delete** it. Do this as well as disconnecting. Disconnecting stops Droplet using the key; only deleting it at Cal.com stops the key existing.
 
 **Do both, in that order**, if you are decommissioning a box or handing it back.

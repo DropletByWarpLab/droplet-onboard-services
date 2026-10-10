@@ -70,7 +70,7 @@ So two habits are worth forming, because the software cannot form them for you:
 - **Write down what you connected and why**, wherever your business keeps that kind of note. The integration list on the box tells you *that* Stripe is connected; it cannot tell you whether the reason still holds.
 - **Review the connections when the person who set them up leaves.** This is the failure that actually happens in a small business: the credential outlives the role, the project, and sometimes the employee.
 
-Droplet helps by making an old connection visible on the integrations page with the date it was set up. That is the extent of what it can do — there is no vendor-side expiry to lean on.
+Droplet helps by making an old connection visible on the Connectors page with the date it was set up. That is the extent of what it can do — there is no vendor-side expiry to lean on.
 
 ---
 

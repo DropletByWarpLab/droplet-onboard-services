@@ -494,7 +494,7 @@ describe("AI tools & connectors (axis 4)", () => {
     expect(onSave.mock.calls[0][0].connectorGrants).toEqual([]);
   });
 
-  it("renders the connectors empty state with the Integrations link", () => {
+  it("renders the connectors empty state with the Connectors link", () => {
     renderSheet({ connectors: [] });
     expect(screen.getByText(ACCESS_COPY.emptyConnectors)).toBeInTheDocument();
     // WARP-2563 — this asserted the deep-link copy and the raw href as TEXT,
@@ -503,8 +503,8 @@ describe("AI tools & connectors (axis 4)", () => {
     // as text, so every <Link> on every surface rendered as escaped markup and
     // no test could see a link as a link. The mock builds a real element now,
     // so this asserts what the reader actually gets — an anchor, pointing at
-    // Integrations.
-    const link = screen.getByRole("link", { name: /Open Integrations/ });
+    // Connectors.
+    const link = screen.getByRole("link", { name: /Open Connectors/ });
     expect(link).toHaveAttribute("href", "/integrations");
   });
 });

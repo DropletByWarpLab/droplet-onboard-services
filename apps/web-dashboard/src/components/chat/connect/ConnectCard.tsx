@@ -63,9 +63,9 @@ function initialOf(name: string): string {
   return (Array.from(name.trim())[0] ?? "?").toUpperCase();
 }
 
-/** Where `href` lives, for link text: "Integrations", "Settings", or null. */
-function placeOf(href: string): "Integrations" | "Settings" | null {
-  if (href === "/integrations" || href.startsWith("/integrations/") || href.startsWith("/integrations?")) return "Integrations";
+/** Where `href` lives, for link text: "Connectors", "Settings", or null. */
+function placeOf(href: string): "Connectors" | "Settings" | null {
+  if (href === "/integrations" || href.startsWith("/integrations/") || href.startsWith("/integrations?")) return "Connectors";
   if (href === "/settings" || href.startsWith("/settings/") || href.startsWith("/settings?") || href.startsWith("/settings#")) return "Settings";
   return null;
 }

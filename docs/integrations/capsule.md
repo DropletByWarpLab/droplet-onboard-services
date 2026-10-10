@@ -52,7 +52,7 @@ Do this in a browser, signed in to Capsule **as the person whose pipeline you wa
 3. Open **API Authentication**.
 4. Click **Generate new API token**.
 5. Copy the token with the copy icon. If Capsule lets you choose the token's scope at this point, choose **read**.
-6. In Droplet: **Integrations → Capsule CRM → Connect**, read the capability statement, paste the token, and confirm. The box checks it with a single call to Capsule's "who am I" endpoint, which returns the user the token belongs to and nothing else — so a failure here is unambiguous evidence about the token rather than about your pipeline.
+6. In Droplet: **Connectors → Capsule CRM → Connect**, read the capability statement, paste the token, and confirm. The box checks it with a single call to Capsule's "who am I" endpoint, which returns the user the token belongs to and nothing else — so a failure here is unambiguous evidence about the token rather than about your pipeline.
 
 ---
 
@@ -83,7 +83,7 @@ The box opens outbound connections to exactly one address, **`api.capsulecrm.com
 
 **No expiry is documented** for a Capsule personal access token, so there is no date to diary. A token stays valid until it is revoked.
 
-**To rotate:** generate a new token exactly as in the click-path, paste it into Droplet at **Integrations → Credentials**, confirm the connection reports healthy, and only then revoke the old one (see [Revocation](#revocation)).
+**To rotate:** generate a new token exactly as in the click-path, paste it into Droplet at **Connectors → Credentials**, confirm the connection reports healthy, and only then revoke the old one (see [Revocation](#revocation)).
 
 **Treat the token as belonging to a person, and rotate when that person leaves.** The token is generated from an individual's own *My Preferences*, and it sees what that individual sees. If they leave and their account goes with them, expect this connection to stop. If they leave and their account *stays*, you have a standing credential to someone's pipeline held by someone who no longer works there. Make the box's token from an account that will outlive any one person, and rotate it when the people around it change.
 
@@ -95,7 +95,7 @@ The box opens outbound connections to exactly one address, **`api.capsulecrm.com
 
 **To stop Droplet reading Capsule:**
 
-- **On the box:** `Integrations → Capsule CRM → Manage → Disconnect`. This purges the stored token and stops all reading. Because the opportunities were copied into Customers, the box then asks what to do with them: **keep** them as ordinary deals your team can edit (they stop syncing), or **delete** them (any that carry a note your team wrote are archived instead, so the note is kept). Tasks were never copied, so there is nothing to delete for them.
+- **On the box:** `Connectors → Capsule CRM → Manage → Disconnect`. This purges the stored token and stops all reading. Because the opportunities were copied into Customers, the box then asks what to do with them: **keep** them as ordinary deals your team can edit (they stop syncing), or **delete** them (any that carry a note your team wrote are archived instead, so the note is kept). Tasks were never copied, so there is nothing to delete for them.
 - **At Capsule:** open **My Preferences → API Authentication** and revoke the token — Capsule's page is explicit that this is where you "revoke tokens that you don't need anymore". Do this as well as disconnecting. Disconnecting stops Droplet using the token; only revoking it at Capsule stops the token existing.
 
 **Do both, in that order**, if you are decommissioning a box or handing it back.

@@ -74,7 +74,7 @@ Do this in a browser, signed in to Klaviyo.
 7. **Choose the scope: pick Read-only.** Droplet never writes to Klaviyo. If you want to be stricter still, choose **Custom** and grant read on **profiles, lists, campaigns, events and metrics** only. Remember you cannot change this later without deleting the key and making a new one.
 8. Click **Create**.
 9. **Copy the key now.** It begins `pk_`. Klaviyo shows a private key once and will never redisplay it. Check what you pasted did not wrap across two lines and lose its tail — Droplet refuses a key with a line break in it rather than sending a broken credential.
-10. In Droplet: **Integrations → Klaviyo → Connect**, read the capability statement, paste the key, and confirm.
+10. In Droplet: **Connectors → Klaviyo → Connect**, read the capability statement, paste the key, and confirm.
 11. **Optional — only if you want campaign send, open and click counts.** Those numbers do not live on Klaviyo's campaign records; they come from a separate report that needs to know which event counts as a sale for you. In Klaviyo go to **Analytics → Metrics**, open the metric that represents a sale (usually **Placed Order**), copy its ID from the address bar, and paste it into Droplet's **Conversion metric ID** field. Without it, lists, contacts and activity all work normally; campaign performance does not, and Droplet will say so rather than showing you campaigns that appear to have reached nobody.
 
 ---
@@ -124,7 +124,7 @@ Rotation replaces the stored credential and leaves everything else alone — the
 
 **To stop Droplet reading Klaviyo:**
 
-- **On the box:** `Integrations → Klaviyo → Manage → Disconnect`. This purges the stored key from the box and stops all reading. Data already synced stays until you delete it.
+- **On the box:** `Connectors → Klaviyo → Manage → Disconnect`. This purges the stored key from the box and stops all reading. Data already synced stays until you delete it.
 - **At Klaviyo:** go to **Settings → API keys**, find the key by the name you gave it, and **delete** it. Do this as well as disconnecting. Disconnecting stops Droplet using the key; only deleting it at Klaviyo stops the key existing.
 
 **Do both, in that order**, if you are decommissioning a box or handing it back.

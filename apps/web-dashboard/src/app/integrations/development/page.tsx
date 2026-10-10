@@ -97,7 +97,7 @@ export default function DevelopmentSettingsPage() {
   };
 
   return (
-    <ShellPage icon={<GitBranch size={15} />} label="Integrations" title="Development links" sub="Choose code repositories and map them to Projects.">
+    <ShellPage icon={<GitBranch size={15} />} label="Connectors" title="Development links" sub="Choose code repositories and map them to Projects.">
       <div className="card" style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
         <label className="type-footnote" htmlFor="development-provider">Code host</label>
         <ThemedSelect id="development-provider" className="input" value={provider} disabled={loading || saving !== null} onChange={(event) => { setProvider(event.target.value as Provider); setAvailable([]); }}>

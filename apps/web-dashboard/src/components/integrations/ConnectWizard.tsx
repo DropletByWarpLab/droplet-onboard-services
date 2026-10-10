@@ -145,7 +145,7 @@ function verdictCopy(status: IntegrationStatus, name: string): string {
     case "CAPABILITY_LIMITED":
       return `Droplet is reading ${name}, but one dataset needs a plan or permission change at the vendor.`;
     case "NOT_CONFIGURED":
-      return `The key is stored, but Droplet couldn't use it to reach ${name}. Try connecting again from the Integrations page.`;
+      return `The key is stored, but Droplet couldn't use it to reach ${name}. Try connecting again from the Connectors page.`;
     default:
       return `Droplet is still checking this connection. Look at the ${name} card in a moment.`;
   }

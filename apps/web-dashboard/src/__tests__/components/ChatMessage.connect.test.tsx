@@ -131,7 +131,7 @@ describe("ChatMessage — connect cards", () => {
       expect(screen.queryByTestId("connect-card")).toBeNull();
       expect(document.querySelectorAll("input")).toHaveLength(0);
       expect(screen.queryByRole("button", { name: /connect stripe|not now/i })).toBeNull();
-      expect(screen.getByRole("link", { name: "Manage in Integrations" })).toHaveAttribute("href", "/integrations");
+      expect(screen.getByRole("link", { name: "Manage in Connectors" })).toHaveAttribute("href", "/integrations");
     });
 
     it("an older assistant message (not the last) is a compact row", () => {

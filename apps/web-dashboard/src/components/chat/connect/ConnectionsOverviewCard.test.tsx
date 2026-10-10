@@ -121,9 +121,9 @@ describe("ConnectionsOverviewCard — counts and rows", () => {
     expect(screen.getByTestId("connections-counts")).toHaveTextContent("0 connected · 0 needs attention · 0 available");
   });
 
-  it("always offers the way into the Integrations hub", () => {
+  it("always offers the way into the Connectors hub", () => {
     setup(overview([row()]));
-    expect(screen.getByRole("link", { name: "Open Integrations" })).toHaveAttribute("href", "/integrations");
+    expect(screen.getByRole("link", { name: "Open Connectors" })).toHaveAttribute("href", "/integrations");
   });
 });
 
