@@ -20,6 +20,7 @@ from typing import Optional
 from unittest.mock import MagicMock
 
 import pytest
+import pytest_asyncio
 from fastapi.testclient import TestClient
 
 import main
@@ -365,7 +366,7 @@ class TestHealthPairing:
 
     def test_never_connected_and_not_auth_has_no_error_code(self, box, client):
         body = client.get("/health").json()
-        assert body["error"] == "Switch not connected at startup"
+        assert body["error"] == "Cannot reach the switch - retrying"
         assert body["error_code"] is None
         assert body["pairing"]["state"] == "unknown"
 
@@ -393,17 +394,18 @@ class TestHealthPairing:
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 class TestAuthStateTick:
-    async def test_does_nothing_and_removes_itself_when_not_rejected(self, box, monkeypatch):
+    async def test_does_nothing_and_removes_itself_when_connected_and_not_rejected(self, box, monkeypatch):
+        monkeypatch.setattr(main, "driver_instance", BoxDriver(box, lambda: OLD_PW))
         sched = MagicMock()
         monkeypatch.setattr(main, "_pairing_scheduler", sched)
-        await main._auth_state_tick()
+        await main._reconnect_tick()
         assert box.calls == [] and box.logins == []
         sched.remove_job.assert_called_once_with(main.PAIRING_PROBE_JOB_ID)
 
     async def test_probes_status_only_while_auth_rejected(self, box, monkeypatch):
         monkeypatch.setattr(main, "_auth_rejected", True)
         box.password = "something-else"  # our holder value is stale -> still rejected
-        await main._auth_state_tick()
+        await main._reconnect_tick()
         assert box.calls == ["status"]
         assert main.pairing_state.snapshot(connected=False, auth_failed=True)["state"] == "open"
 
@@ -411,36 +413,40 @@ class TestAuthStateTick:
         monkeypatch.setattr(main, "_auth_rejected", True)
         sched = MagicMock()
         monkeypatch.setattr(main, "_pairing_scheduler", sched)
-        await main._auth_state_tick()  # holder returns OLD_PW == box.password
+        await main._reconnect_tick()  # holder returns OLD_PW == box.password
         assert main._auth_rejected is False
         assert main.driver_instance is not None
         assert box.calls == []  # no status probe once the login works
         sched.remove_job.assert_called_with(main.PAIRING_PROBE_JOB_ID)
 
-    async def test_an_unreachable_switch_ends_the_auth_state(self, box, monkeypatch):
+    async def test_an_unreachable_switch_leaves_the_auth_state_but_keeps_retrying(self, box, monkeypatch):
         monkeypatch.setattr(main, "_auth_rejected", True)
+        sched = MagicMock()
+        monkeypatch.setattr(main, "_pairing_scheduler", sched)
         box.reachable = False
-        await main._auth_state_tick()
+        await main._reconnect_tick()
         assert main._auth_rejected is False
         assert box.calls == []
+        sched.remove_job.assert_not_called()
+        assert sched.add_job.call_args.kwargs["id"] == main.PAIRING_PROBE_JOB_ID
 
     async def test_plugin_absent_caches_unknown(self, box, monkeypatch):
         monkeypatch.setattr(main, "_auth_rejected", True)
         box.password = "different"
         box.plugin = False
-        await main._auth_state_tick()
+        await main._reconnect_tick()
         assert main.pairing_state.snapshot(connected=False, auth_failed=True)["state"] == "unknown"
 
     async def test_probe_failure_caches_unknown_and_never_raises(self, box, monkeypatch):
         monkeypatch.setattr(main, "_auth_rejected", True)
         box.password = "different"
         monkeypatch.setattr(main, "_pairing_api", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
-        await main._auth_state_tick()  # must not raise
+        await main._reconnect_tick()  # must not raise
 
     async def test_skips_while_a_claim_is_in_flight(self, box, monkeypatch):
         monkeypatch.setattr(main, "_auth_rejected", True)
         async with main._pairing_lock:
-            await main._auth_state_tick()
+            await main._reconnect_tick()
         assert box.calls == [] and box.logins == []
 
     async def test_entering_the_state_schedules_one_interval_job(self, box, monkeypatch):
@@ -451,7 +457,7 @@ class TestAuthStateTick:
         kwargs = sched.add_job.call_args.kwargs
         assert kwargs["id"] == main.PAIRING_PROBE_JOB_ID
         assert kwargs["replace_existing"] is True and kwargs["max_instances"] == 1
-        assert sched.add_job.call_args.args[:2] == (main._auth_state_tick, "interval")
+        assert sched.add_job.call_args.args[:2] == (main._reconnect_tick, "interval")
 
 
 class TestLifespan:
@@ -472,6 +478,123 @@ class TestLifespan:
         with TestClient(main.app):
             assert main._auth_rejected is False
             assert main._pairing_scheduler.get_job(main.PAIRING_PROBE_JOB_ID) is None
+
+
+# ---------------------------------------------------------------------------
+# WARP-3883 - reconnect while the switch is not connected, for any reason
+# ---------------------------------------------------------------------------
+def _job_ids() -> list[str]:
+    return [j.id for j in main._pairing_scheduler.get_jobs()]
+
+
+@pytest_asyncio.fixture
+async def scheduler(box):
+    """A real apscheduler (started, so replace_existing dedupes like in
+    production); ticks are driven directly, nothing sleeps."""
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+    sched = AsyncIOScheduler()
+    sched.start()
+    yield sched
+    sched.shutdown(wait=False)
+
+
+@pytest.mark.asyncio
+class TestReconnectWhileDisconnected:
+    @pytest.fixture(autouse=True)
+    def _in_auth(self, box, scheduler, monkeypatch):
+        """The lab scenario: the box sits in SWITCH_AUTH with its probe job."""
+        monkeypatch.setattr(main, "_pairing_scheduler", scheduler)
+        box.password = "reflashed-password"  # our holder value is now stale
+        main._enter_auth_rejected()
+        assert _job_ids() == [main.PAIRING_PROBE_JOB_ID]
+
+    def _health(self):
+        return TestClient(main.app).get("/health").json()
+
+    async def test_unreachable_tick_is_disconnected_and_keeps_the_job(self, box):
+        box.reachable = False
+        await main._reconnect_tick()
+        assert main.driver_instance is None
+        assert main._auth_rejected is False
+        assert _job_ids() == [main.PAIRING_PROBE_JOB_ID]
+        body = self._health()
+        assert body["status"] == "disconnected" and body["connected"] is False
+        assert body["error"] == "Cannot reach the switch - retrying"
+        assert body["error_code"] is None
+        assert body["pairing"]["state"] == "unknown"  # no stale open window
+
+    async def test_unreachable_clears_a_stale_open_window(self, box):
+        await main._reconnect_tick()  # rejected + window open -> cached "open"
+        assert self._health()["pairing"]["state"] == "open"
+        box.reachable = False
+        await main._reconnect_tick()
+        assert self._health()["pairing"]["state"] == "unknown"
+
+    async def test_then_rejected_again_recovers_to_switch_auth_with_the_window(self, box):
+        box.reachable = False
+        await main._reconnect_tick()
+        box.reachable = True  # back up after the reflash, credential still refused
+        box.calls.clear()
+        await main._reconnect_tick()
+        assert main._auth_rejected is True
+        assert box.calls == ["status"]
+        assert _job_ids() == [main.PAIRING_PROBE_JOB_ID]
+        body = self._health()
+        assert body["error_code"] == "SWITCH_AUTH"
+        assert body["pairing"]["state"] == "open"
+
+    async def test_then_accepted_connects_and_removes_the_job(self, box):
+        box.reachable = False
+        await main._reconnect_tick()
+        box.reachable = True
+        box.password = OLD_PW  # holder value is accepted again
+        await main._reconnect_tick()
+        assert main.driver_instance is not None
+        assert main._auth_rejected is False
+        assert _job_ids() == []
+        assert self._health()["status"] == "ok"
+
+    async def test_flapping_ends_connected_with_exactly_one_job_and_no_leak(self, box):
+        box.reachable = False
+        await main._reconnect_tick()
+        assert _job_ids() == [main.PAIRING_PROBE_JOB_ID]
+        box.reachable = True
+        await main._reconnect_tick()  # answers, refuses
+        assert main._auth_rejected is True and _job_ids() == [main.PAIRING_PROBE_JOB_ID]
+        box.reachable = False
+        await main._reconnect_tick()
+        assert main._auth_rejected is False and _job_ids() == [main.PAIRING_PROBE_JOB_ID]
+        box.reachable = True
+        box.password = OLD_PW
+        await main._reconnect_tick()
+        assert main.driver_instance is not None
+        assert _job_ids() == []
+        await main._reconnect_tick()  # a stray extra tick is a no-op
+        assert _job_ids() == []
+
+    async def test_a_claim_in_flight_still_blocks_the_tick_when_unreachable(self, box):
+        box.reachable = False
+        async with main._pairing_lock:
+            await main._reconnect_tick()
+        assert box.logins == []
+        assert _job_ids() == [main.PAIRING_PROBE_JOB_ID]
+
+
+class TestLifespanUnreachable:
+    def test_unreachable_at_startup_schedules_the_job_and_connects_later(self, box):
+        box.reachable = False
+        with TestClient(main.app) as c:
+            assert main.driver_instance is None and main._auth_rejected is False
+            assert _job_ids() == [main.PAIRING_PROBE_JOB_ID]
+            body = c.get("/health").json()
+            assert body["status"] == "disconnected"
+            assert body["error"] == "Cannot reach the switch - retrying"
+            box.reachable = True
+            asyncio.run(main._reconnect_tick())
+            assert main.driver_instance is not None
+            assert _job_ids() == []
+            assert c.get("/health").json()["status"] == "ok"
 
 
 # ---------------------------------------------------------------------------

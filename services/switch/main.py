@@ -355,10 +355,12 @@ def get_driver() -> SwitchDriver:
 #
 # EXPLICIT state, never derived from absence: `_auth_rejected` is True only
 # after the switch ANSWERED and refused our credential (startup connect, a
-# runtime login, or /health saw AuthenticationError). While it is True - and
-# only then - one apscheduler job re-tries the login with the current holder
-# value and asks `droplet.pair status` (null session) so /health can say
-# "window open". No `while True`: the job removes itself when the state clears.
+# runtime login, or /health saw AuthenticationError); an unreachable switch
+# leaves it False. While the switch is not connected for ANY reason (no live
+# driver) or `_auth_rejected` holds, one apscheduler job re-tries the login
+# with the current holder value. Only while `_auth_rejected` holds does it also
+# ask `droplet.pair status` (null session) so /health can say "window open".
+# No `while True`: the job removes itself once a driver is connected again.
 pairing_state = PairingState()
 _auth_rejected = False
 _pairing_scheduler = None
@@ -417,7 +419,7 @@ def _ensure_probe_job() -> None:
     if _pairing_scheduler is None:
         return
     _pairing_scheduler.add_job(
-        _auth_state_tick,
+        _reconnect_tick,
         "interval",
         seconds=PAIRING_PROBE_SECONDS,
         id=PAIRING_PROBE_JOB_ID,
@@ -437,6 +439,13 @@ def _enter_auth_rejected() -> None:
             SWITCH_HOST,
         )
     _auth_rejected = True
+    _ensure_probe_job()
+
+
+def _enter_disconnected() -> None:
+    """No live driver and no auth verdict (switch unreachable): keep retrying."""
+    global _auth_rejected
+    _auth_rejected = False
     _ensure_probe_job()
 
 
@@ -461,20 +470,22 @@ def _schedule_autoprovision() -> None:
 
 async def _reconnect_driver() -> bool:
     """One login attempt with the current holder value. True = connected and the
-    live driver replaced. An auth refusal leaves the state; anything else
-    (unreachable, odd failure) ends the auth-rejected state - it is no longer
-    "answered and refused", so probing `droplet.pair` would be a guess."""
+    live driver replaced. An auth refusal (re-)enters the auth-rejected state;
+    anything else (unreachable, odd failure) leaves it - it is no longer
+    "answered and refused", so probing `droplet.pair` would be a guess - but the
+    job stays scheduled and keeps retrying."""
     global driver_instance
     candidate = create_driver(current_switch_password)
     try:
         await candidate.connect()
     except AuthenticationError:
         await candidate.disconnect()
+        _enter_auth_rejected()
         return False
     except Exception as exc:  # noqa: BLE001
-        logger.info("switch reconnect while auth-rejected failed (%s) - not an auth state", exc)
+        logger.info("switch reconnect failed (%s) - disconnected, will retry", exc)
         await candidate.disconnect()
-        _clear_auth_rejected()
+        _enter_disconnected()
         return False
     old, driver_instance = driver_instance, candidate
     _clear_auth_rejected()
@@ -488,12 +499,13 @@ async def _reconnect_driver() -> bool:
     return True
 
 
-async def _auth_state_tick() -> None:
-    """The scheduler job: runs ONLY while `_auth_rejected`. Re-tries the login
-    (the secret file may have been re-synced out of band), then asks the switch
+async def _reconnect_tick() -> None:
+    """The scheduler job: runs while the switch is not connected (no live
+    driver) or `_auth_rejected`. Re-tries the login (the secret file may have
+    been re-synced out of band); while the switch answers and refuses it, asks
     whether a pairing window is open. Never raises."""
     try:
-        if not _auth_rejected:
+        if not _auth_rejected and driver_instance is not None:
             _remove_probe_job()
             return
         if _pairing_lock.locked():
@@ -581,14 +593,14 @@ async def lifespan(app: FastAPI):
         logger.warning("Could not connect to switch at %s: %s", SWITCH_HOST, exc)
         driver_instance = None
 
-    # ADR-071: the one scheduler this service owns. Idle unless the switch has
-    # refused our credential; the probe job is added then and removes itself
-    # when the state clears.
+    # ADR-071: the one scheduler this service owns. Idle while connected; when
+    # the switch is unreachable or refused our credential the reconnect job is
+    # added and removes itself once a driver is connected.
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
     _pairing_scheduler = AsyncIOScheduler()
     _pairing_scheduler.start()
-    if _auth_rejected:
+    if _auth_rejected or driver_instance is None:
         _ensure_probe_job()
 
     # ADR-018 item 9: bring-up provisioning. Gated by SWITCH_AUTOPROVISION
@@ -683,7 +695,7 @@ async def health():
             connected=False,
             switch_host=SWITCH_HOST,
             driver=SWITCH_DRIVER,
-            error="Switch not connected at startup",
+            error="Cannot reach the switch - retrying",
             auth_configured=auth_configured,
             pairing=pairing_state.snapshot(connected=False, auth_failed=False),
         )
