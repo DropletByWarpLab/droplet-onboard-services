@@ -568,9 +568,11 @@ async function main() {
   // WARP-2416 - renew remote-MCP web sign-ins before they expire, so a call never
   // pays a 401 first. Same clock, its own lock key, never a loop of its own; with
   // no signed-in rows a tick reads one empty query and dials nothing.
+  const mcpOAuthDeps = mcpOAuthDependencies();
   mountMcpOAuthRefresh(cronRuntime, {
     prisma,
-    oauth: mcpOAuthDependencies().oauth,
+    oauth: mcpOAuthDeps.oauth,
+    egress: mcpOAuthDeps.egress,
     closeSession: closeRemoteConnectionSession,
   });
 

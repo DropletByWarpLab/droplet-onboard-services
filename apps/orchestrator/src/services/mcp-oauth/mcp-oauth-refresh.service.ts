@@ -15,7 +15,8 @@
 import type { PrismaClient } from "@prisma/client";
 import { createLogger } from "../../lib/logger.js";
 import { recordActivity } from "../activity.singleton.js";
-import { McpBridgeError, type McpBridgeOAuthClient } from "../mcp-bridge.client.js";
+import { McpBridgeError, OAUTH_TOKEN_ERROR, type McpBridgeOAuthClient } from "../mcp-bridge.client.js";
+import type { RemoteMcpEgressDecision } from "../remote-mcp-gateway.service.js";
 import type { CronRuntime } from "../cron-runtime.service.js";
 import { registerMcpOAuthRefresher, type McpOAuthRefresher, type McpOAuthRefreshOutcome } from "./mcp-oauth-refresher.js";
 import { openClientSecret, openTokens, sealTokens, tokenTtlSeconds } from "./mcp-oauth.service.js";
@@ -35,11 +36,19 @@ export interface McpOAuthRefreshDeps {
   now?: () => Date;
   /** Ends the connection's live bridge session after its sign-in died. Best effort. */
   closeSession?: (provider: string, connectionId: string) => Promise<void>;
+  /**
+   * The rules every remote MCP call obeys (allowlist, `remote_mcp` channel, not
+   * DISABLED). A refresh is a hop to the vendor like any other, so a refusal
+   * skips it WITHOUT touching the row: the token is simply not renewed while
+   * remote MCP is off, and nothing is marked NEEDS_RECONNECT for that.
+   */
+  egress: (prisma: PrismaClient, serverId: string) => Promise<RemoteMcpEgressDecision>;
 }
 
-/** The bridge's code for a refresh the authorization server rejected as a dead grant. */
+/** The bridge's answer for a refresh the authorization server rejected as a dead grant
+ *  (502 `OAUTH_TOKEN_ERROR`, `oauthError: "invalid_grant"`). Anything else is transient. */
 const isInvalidGrant = (err: unknown): boolean =>
-  err instanceof McpBridgeError && err.code.toLowerCase() === "invalid_grant";
+  err instanceof McpBridgeError && err.code === OAUTH_TOKEN_ERROR && err.reason === "invalid_grant";
 
 export function createMcpOAuthRefresher(deps: McpOAuthRefreshDeps): McpOAuthRefresher & { tick(): Promise<void> } {
   const { prisma } = deps;
@@ -76,6 +85,14 @@ export function createMcpOAuthRefresher(deps: McpOAuthRefreshDeps): McpOAuthRefr
     if (!row) return "unavailable";
     if (row.state === "NEEDS_RECONNECT") return "needs_reconnect";
     if (row.state !== "CONNECTED" || !row.tokensEnc || !row.clientId) return "unavailable";
+
+    // Before anything is opened or dialled: not while remote MCP may not talk to this server.
+    // The row is left exactly as it is (a read failure refuses too).
+    try {
+      if (!(await deps.egress(prisma, row.provider)).allowed) return "unavailable";
+    } catch {
+      return "unavailable";
+    }
 
     let blob: ReturnType<typeof openTokens>;
     let clientSecret: string | undefined;

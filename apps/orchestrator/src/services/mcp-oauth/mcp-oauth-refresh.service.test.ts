@@ -17,6 +17,7 @@ vi.mock("../../lib/logger.js", () => ({
   createLogger: () => ({ warn: () => {}, info: () => {}, error: () => {}, debug: () => {} }),
 }));
 
+type Egress = Awaited<ReturnType<Parameters<typeof createMcpOAuthRefresher>[0]["egress"]>>;
 const T0 = new Date("2026-10-09T12:00:00Z");
 const MIN = 60_000;
 const ID = "33333333-3333-3333-3333-333333333333";
@@ -38,7 +39,7 @@ async function setup(o: { expiresInMin?: number; refreshToken?: string | null; t
   const first = v.issue(T0, (o.expiresInMin ?? 5) * 60);
   const row = await db.seed({
     id: ID, provider: "atlassian", scope: "MEMBER", memberId: "u1", state: "CONNECTED", issuer: "https://auth.example/iss",
-    tokenEndpointHost: o.hostPin ?? "auth.example", clientId: "client-1",
+    tokenEndpointHost: o.hostPin ?? "auth.example", clientId: "client-1", tokensEnc: "placeholder-replaced-below",
     tokenExpiresAt: new Date(T0.getTime() + (o.expiresInMin ?? 5) * MIN), connectedAt: T0, lastRefreshOkAt: T0,
   });
   const blob = {
@@ -52,8 +53,10 @@ async function setup(o: { expiresInMin?: number; refreshToken?: string | null; t
       ({ accessToken: v.issue(clock, 3600), refreshToken: "refresh-2", expiresIn: 3600 })),
   };
   const closeSession = vi.fn(async (_p: string, _c: string): Promise<void> => {});
-  const refresher = createMcpOAuthRefresher({ prisma: db.prisma, oauth, now: () => clock, closeSession });
-  return { db, v, oauth, closeSession, refresher, row, first, advance: (ms: number) => { clock = new Date(clock.getTime() + ms); }, now: () => clock };
+  const gate: { current: Egress } = { current: { allowed: true, row: null } };
+  const egress = async (): Promise<Egress> => gate.current;
+  const refresher = createMcpOAuthRefresher({ prisma: db.prisma, oauth, now: () => clock, closeSession, egress });
+  return { db, v, oauth, closeSession, refresher, gate, egress, row, first, advance: (ms: number) => { clock = new Date(clock.getTime() + ms); }, now: () => clock };
 }
 
 beforeEach(() => {
@@ -131,7 +134,7 @@ describe("single flight", () => {
 describe("failure", () => {
   it("invalid_grant moves the row to NEEDS_RECONNECT, clears the tokens, closes the session and writes an audit row", async () => {
     const s = await setup();
-    s.oauth.refresh.mockRejectedValueOnce(new McpBridgeError("INVALID_GRANT", "revoked", 400));
+    s.oauth.refresh.mockRejectedValueOnce(new McpBridgeError("OAUTH_TOKEN_ERROR", "revoked", 502, undefined, "invalid_grant"));
     expect(await s.refresher.refreshNow(ID)).toBe("needs_reconnect");
     expect(s.row).toMatchObject({ state: "NEEDS_RECONNECT", tokensEnc: null, tokenExpiresAt: null });
     expect(s.row.state).not.toBe("DISCONNECTED");
@@ -179,7 +182,7 @@ describe("scheduling", () => {
   it("mounts one interval on the cron runtime with its own lock key, and registers the refresher for dispatch", async () => {
     const s = await setup();
     const scheduleInterval = vi.fn();
-    const r = mountMcpOAuthRefresh({ scheduleInterval }, { prisma: s.db.prisma, oauth: s.oauth });
+    const r = mountMcpOAuthRefresh({ scheduleInterval }, { prisma: s.db.prisma, oauth: s.oauth, egress: s.egress });
     expect(scheduleInterval).toHaveBeenCalledWith(60_000, expect.any(Function), { lockKey: "droplet:mcp-oauth-refresh" });
     expect(mcpOAuthRefresher()).toBe(r);
   });
@@ -195,9 +198,64 @@ describe("disconnect revokes at the vendor when it advertised an endpoint", () =
     const s = await setup();
     const oauth = { revoke: vi.fn(async (_i: unknown): Promise<void> => { throw new Error("vendor down"); }) };
     const closeSession = vi.fn(async (_p: string, _c: string): Promise<void> => {});
-    expect(await disconnectMcpOAuth(s.db.prisma, ID, { id: "u1", role: "family" }, { oauth: oauth as never, closeSession })).toBe(true);
+    expect(await disconnectMcpOAuth(s.db.prisma, ID, { id: "u1", role: "family" }, { oauth: oauth as never, closeSession, egress: s.egress })).toBe(true);
     expect(oauth.revoke).toHaveBeenCalledWith({ revocationEndpoint: "https://auth.example/oauth/revoke", clientId: "client-1", token: "refresh-1" });
     expect(closeSession).toHaveBeenCalledWith("atlassian", ID);
     expect(s.row).toMatchObject({ state: "DISCONNECTED", tokensEnc: null });
+  });
+
+  it("with remote MCP switched off it still deletes the tokens locally, skips the vendor revoke and says so", async () => {
+    const s = await setup();
+    s.gate.current = { allowed: false, reason: "channel_disabled", message: "" };
+    const oauth = { revoke: vi.fn(async (_i: unknown): Promise<void> => {}) };
+    const notes: { revokeSkipped?: boolean } = {};
+    expect(await disconnectMcpOAuth(s.db.prisma, ID, { id: "u1", role: "family" }, { oauth: oauth as never, closeSession: s.closeSession, egress: s.egress }, notes)).toBe(true);
+    expect(oauth.revoke).not.toHaveBeenCalled();
+    expect(notes.revokeSkipped).toBe(true);
+    expect(s.row).toMatchObject({ state: "DISCONNECTED", tokensEnc: null, tokenExpiresAt: null });
+    expect(s.closeSession).toHaveBeenCalledWith("atlassian", ID);
+  });
+});
+
+describe("refresh obeys the same egress rules as every remote MCP call", () => {
+  const OFF: Egress[] = [
+    { allowed: false, reason: "channel_disabled", message: "" },
+    { allowed: false, reason: "server_not_allowlisted", message: "" },
+    { allowed: false, reason: "connection_disabled", message: "" },
+  ];
+
+  it.each(OFF)("makes ZERO bridge calls and leaves the row untouched when %j", async (verdict) => {
+    const s = await setup({ expiresInMin: 5 });
+    s.gate.current = verdict;
+    const before = { ...s.row };
+    await s.refresher.tick();
+    expect(await s.refresher.refreshNow(ID)).toBe("unavailable");
+    expect(s.oauth.refresh).not.toHaveBeenCalled();
+    expect(s.row).toEqual(before); // not NEEDS_RECONNECT, not ERROR, tokens kept
+    expect(recordActivity).not.toHaveBeenCalled();
+  });
+
+  it("does not end an already-expired sign-in while remote MCP is off either", async () => {
+    const s = await setup({ expiresInMin: 5 });
+    s.gate.current = OFF[0];
+    s.advance(10 * MIN);
+    expect(await s.refresher.refreshNow(ID)).toBe("unavailable");
+    expect(s.row.state).toBe("CONNECTED");
+  });
+
+  it("resumes renewing once it is switched back on", async () => {
+    const s = await setup({ expiresInMin: 5 });
+    s.gate.current = OFF[0];
+    await s.refresher.tick();
+    s.gate.current = { allowed: true, row: null };
+    await s.refresher.tick();
+    expect(s.oauth.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("a failed read of the rules refuses too", async () => {
+    const s = await setup({ expiresInMin: 5 });
+    const r = createMcpOAuthRefresher({ prisma: s.db.prisma, oauth: s.oauth, now: () => s.now(), egress: async () => { throw new Error("db"); } });
+    expect(await r.refreshNow(ID)).toBe("unavailable");
+    expect(s.oauth.refresh).not.toHaveBeenCalled();
   });
 });

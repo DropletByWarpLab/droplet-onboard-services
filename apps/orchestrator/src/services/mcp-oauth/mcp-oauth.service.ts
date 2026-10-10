@@ -640,7 +640,9 @@ export async function disconnectMcpOAuth(
   prisma: PrismaClient,
   id: string,
   caller: { id: string; role: string | undefined },
-  deps?: Pick<McpOAuthDependencies, "oauth" | "closeSession">,
+  deps?: Pick<McpOAuthDependencies, "oauth" | "closeSession" | "egress">,
+  /** Filled in for the caller: `revokeSkipped` when remote MCP is switched off. */
+  notes: { revokeSkipped?: boolean } = {},
 ): Promise<boolean> {
   const row = await prisma.mcpOAuthConnection.findUnique({ where: { id } });
   if (!row) return false;
@@ -650,6 +652,13 @@ export async function disconnectMcpOAuth(
     try {
       const blob = openTokens(row);
       if (blob.revocationEndpoint) {
+        // The vendor revoke is a hop like any other: not while remote MCP is off for
+        // this server. The LOCAL deletion below happens regardless; that is what matters.
+        const egress = await deps.egress(prisma, row.provider);
+        if (!egress.allowed) {
+          notes.revokeSkipped = true;
+          throw new Error("egress refused");
+        }
         // The refresh token is the long-lived grant; revoking it ends the sign-in.
         await deps.oauth.revoke({
           revocationEndpoint: blob.revocationEndpoint,

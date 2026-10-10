@@ -109,8 +109,18 @@ export function createMcpOAuthRouter(prisma: PrismaClient, options: Partial<McpO
     if (!id.success) return res.status(404).json({ error: "not_found" });
     try {
       // A row the caller may not touch reads as absent.
-      if (!await disconnectMcpOAuth(prisma, id.data, { id: req.user.id, role: req.user.role }, deps)) {
+      const notes: { revokeSkipped?: boolean } = {};
+      if (!await disconnectMcpOAuth(prisma, id.data, { id: req.user.id, role: req.user.role }, deps, notes)) {
         return res.status(404).json({ error: "not_found" });
+      }
+      // Signed out locally either way. While remote MCP is switched off the vendor is not
+      // contacted, so say so (the vendor-side revoke is left to the offboarding work, WARP-3924).
+      if (notes.revokeSkipped) {
+        return res.status(200).json({
+          disconnected: true,
+          revoked: false,
+          message: "Signed out here. Couldn't revoke at the service while remote MCP is switched off.",
+        });
       }
       return res.status(204).send();
     } catch (err) {
