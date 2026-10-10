@@ -26,9 +26,10 @@ const ok = { content: [{ type: "text" as const, text: "{}" }], isError: false };
 
 function row(over: Partial<OAuthRowLite> & { id: string; scope: "MEMBER" | "WORKSPACE" }): OAuthRowLite {
   const memberId = over.memberId !== undefined ? over.memberId : over.scope === "MEMBER" ? "user-1" : null;
-  const base = { provider: SERVER, memberId, state: "CONNECTED", tokenExpiresAt: new Date(NOW.getTime() + 3600_000), ...over };
+  const expiry = over.tokenExpiresAt ?? new Date(NOW.getTime() + 3600_000);
+  const base = { provider: SERVER, memberId, state: "CONNECTED", ...over, tokenExpiresAt: expiry };
   return { ...base, tokensEnc: sealTokens({ id: base.id, scope: base.scope, memberId }, {
-    accessToken: `access-${base.id}`, refreshToken: "r", expiresAt: base.tokenExpiresAt.toISOString(), scope: "s",
+    accessToken: `access-${base.id}`, refreshToken: "r", expiresAt: expiry.toISOString(), scope: "s",
     tokenEndpoint: "https://auth.example/token", resource: "res", mcpUrl: "res",
   }) };
 }
