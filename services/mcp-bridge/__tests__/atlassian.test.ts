@@ -25,6 +25,7 @@ import {
   withAtlassianCloudId,
 } from "../src/atlassian.js";
 import { RemoteCallScheduler } from "../src/call-scheduler.js";
+import { bearerCredential } from "../src/credentials.js";
 import { UnsafeMcpUrlError } from "../src/safe-url.js";
 import { TruncatedResultError } from "../src/truncation.js";
 import type {
@@ -33,7 +34,6 @@ import type {
   RemoteToolCallOutcome,
 } from "../src/remote-session.js";
 
-const FAKE_EMAIL = "ops@vendor.example";
 const FAKE_TOKEN = "ATATT-FAKE-000000000000";
 const FAKE_CLOUD_ID = "00000000-0000-4000-8000-000000000000";
 const OTHER_CLOUD_ID = "11111111-1111-4111-8111-111111111111";
@@ -70,8 +70,7 @@ function recorder(
 
 function session(rec: Recorder, over: Partial<Parameters<typeof createAtlassianMcpSession>[0]> = {}) {
   return createAtlassianMcpSession({
-    email: FAKE_EMAIL,
-    apiToken: FAKE_TOKEN,
+    credential: bearerCredential(FAKE_TOKEN),
     cloudId: FAKE_CLOUD_ID,
     connect: rec.connect,
     ...over,
@@ -134,19 +133,17 @@ describe("the host guard runs at construction", () => {
 });
 
 describe("the credential", () => {
-  it("presents Basic auth on the connect headers and nothing else", async () => {
+  it("presents the bearer on the connect headers and nothing else", async () => {
     const rec = recorder();
     await session(rec).connect();
     const headers = rec.inputs[0]!.headers;
     expect(Object.keys(headers)).toEqual(["Authorization"]);
-    expect(headers.Authorization).toBe(
-      `Basic ${Buffer.from(`${FAKE_EMAIL}:${FAKE_TOKEN}`, "utf8").toString("base64")}`,
-    );
+    expect(headers.Authorization).toBe(`Bearer ${FAKE_TOKEN}`);
   });
 
-  it("describes itself by the PRINCIPAL — rule 19, never the token", () => {
+  it("describes itself without the token — rule 19", () => {
     const s = session(recorder());
-    expect(s.describeCredential()).toBe(`basic(${FAKE_EMAIL})`);
+    expect(s.describeCredential()).toBe("bearer");
     expect(JSON.stringify(s.health())).not.toContain("ATATT");
     expect(s.describeCredential()).not.toContain(FAKE_TOKEN);
   });

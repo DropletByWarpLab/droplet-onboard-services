@@ -11286,6 +11286,14 @@ model McpOAuthConnection {
   /// token is renewed before a call pays a 401. Cleared with the tokens.
   tokenExpiresAt  DateTime?
   lastError       String?
+  /// WARP-3961 — the site this sign-in is pinned to (Atlassian: cloud id, url,
+  /// display name), read from the token right after the code exchange. Every
+  /// session opened for this row is forced onto `siteId`; the model never picks.
+  /// `sites` keeps everything the token reached ({id,url,name}[]), for a future picker.
+  siteId          String?
+  siteUrl         String?
+  siteName        String?
+  sites           Json?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 

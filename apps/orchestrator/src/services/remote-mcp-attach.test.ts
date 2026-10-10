@@ -8,7 +8,8 @@
  * that is supposed to happen BEFORE the network can be asserted as zero calls
  * rather than inferred from a missing result.
  *
- * Credential fixtures are obviously fake (`ATATT-FAKE-000000000000`).
+ * Credential fixtures are obviously fake (`FAKE-ACCESS-…`), and the only credential
+ * is a CONNECTED sign-in (WARP-3961; see `__fixtures__/signed-in-db.ts`).
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { McpBridgeClient } from "./mcp-bridge.client.js";
@@ -19,9 +20,9 @@ import {
   ATLASSIAN_REMOTE_SERVER_ID,
   attachAtlassianRemote,
   detachRemoteServer,
-  type RemoteMcpConnectionRow,
 } from "./remote-mcp-servers.js";
 import { RuntimeToolRegistry } from "./runtime-tool-registry.service.js";
+import { FAKE_ACCESS, SITE_ID, signedInDb, type SignInSeed } from "./__fixtures__/signed-in-db.js";
 
 vi.mock("./activity.singleton.js", () => ({
   recordActivity: vi.fn(async () => null),
@@ -30,8 +31,6 @@ vi.mock("./activity.singleton.js", () => ({
 
 const BRIDGE_URL = "http://mcp-bridge.test:9096";
 const BRIDGE_TOKEN = "bridge-token-FAKE-0000000000000000";
-const FAKE_API_TOKEN = "ATATT-FAKE-000000000000";
-const CONNECTION_ID = "conn_atlassian_fixture";
 
 const READY_STATE = {
   serverId: ATLASSIAN_REMOTE_SERVER_ID,
@@ -86,37 +85,34 @@ function fixtureBridge(getTools: () => unknown[] = () => WIRE_TOOLS) {
   return { calls, fetchImpl: fetchImpl as unknown as typeof fetch };
 }
 
-const connectedRow: RemoteMcpConnectionRow = {
-  id: CONNECTION_ID,
-  status: "CONNECTED",
-  providerTokensEnc: "dcv1:sealed",
-  providerConfig: { email: "ops@vendor.example", cloudId: "00000000-0000-4000-8000-000000000000" },
-};
-
 /**
- * A prisma double whose row can CHANGE between calls — which is the only way
- * to test that the gate is re-read per call rather than captured at attach.
+ * A prisma double over fake sign-ins (WARP-3961: a CONNECTED sign-in is the only
+ * credential). `integration` can CHANGE between calls — the only way to test that
+ * the gate is re-read per call rather than captured at attach.
  */
-function prismaWith(row: RemoteMcpConnectionRow | null) {
-  const state = { row };
-  return {
-    state,
-    integrationConnection: { findFirst: vi.fn(async () => state.row) },
-  };
+async function prismaWith(opts: { signIns?: SignInSeed[]; integration?: { status: string } | null } = {}) {
+  const w = await signedInDb(opts.signIns ?? [{ scope: "WORKSPACE" }], opts.integration ?? null);
+  return { state: w.state, prisma: w.prisma };
 }
 
 /** Allow every Atlassian read through, so the catalog-visibility assertions are
  *  about the ATTACH and not about the (separately tested) v1 read list. */
 const allowAll: RemoteCallPolicy = () => ({ kind: "allow" });
 
-function harness(over: { allowlist?: string[]; row?: RemoteMcpConnectionRow | null; tools?: () => unknown[] } = {}) {
+async function harness(
+  over: { allowlist?: string[]; signIns?: SignInSeed[]; integration?: { status: string } | null; tools?: () => unknown[] } = {},
+) {
   const bridge = fixtureBridge(over.tools);
   const mux = new McpToolMultiplexer(localPort(), {
     isServerAllowed: (id) => (over.allowlist ?? []).includes(id),
     remoteCallPolicy: allowAll,
   });
   const registry = new RuntimeToolRegistry();
-  const prisma = prismaWith(over.row === undefined ? connectedRow : over.row);
+  const db = await prismaWith({
+    ...(over.signIns ? { signIns: over.signIns } : {}),
+    ...(over.integration !== undefined ? { integration: over.integration } : {}),
+  });
+  const prisma = db.prisma;
   // WARP-2426 — the classification recorder, spied: the attach is the ONE
   // import path into the record, and the test below says which names cross it.
   const recordClassifications = vi.fn(async () => undefined);
@@ -125,6 +121,7 @@ function harness(over: { allowlist?: string[]; row?: RemoteMcpConnectionRow | nu
     mux,
     registry,
     prisma,
+    state: db.state,
     recordClassifications,
     attach: (extra: Partial<Parameters<typeof attachAtlassianRemote>[0]> = {}) =>
       attachAtlassianRemote({
@@ -139,7 +136,6 @@ function harness(over: { allowlist?: string[]; row?: RemoteMcpConnectionRow | nu
             serverId: ATLASSIAN_REMOTE_SERVER_ID,
             fetchImpl: bridge.fetchImpl,
           }),
-        openCredentials: () => ({ apiToken: FAKE_API_TOKEN }),
         ...extra,
       }),
   };
@@ -149,11 +145,11 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
-describe("a box with no connection is the default (WARP-2418 / WARP-2627 / WARP-3960)", () => {
+describe("a box with no sign-in is the default (WARP-2418 / WARP-2627 / WARP-3960 / WARP-3961)", () => {
   it("attaches nothing, advertises nothing remote, and NEVER dials the bridge", async () => {
     // No env, no owner switch (WARP-3960): the only thing between this box and an
-    // attach is the connection row, and there is none.
-    const h = harness({ allowlist: ["atlassian"], row: null });
+    // attach is a CONNECTED sign-in, and there is none.
+    const h = await harness({ allowlist: ["atlassian"], signIns: [] });
 
     const result = await h.attach();
     expect(result).toMatchObject({ attached: false, reason: "gate_refused" });
@@ -169,9 +165,9 @@ describe("a box with no connection is the default (WARP-2418 / WARP-2627 / WARP-
   });
 });
 
-describe("a CONNECTED row with a credential (no env, no channel row)", () => {
+describe("a CONNECTED sign-in (no env, no channel row, no connection row)", () => {
   it("attaches and advertises the namespaced Atlassian tools", async () => {
-    const h = harness({ allowlist: ["atlassian"] });
+    const h = await harness({ allowlist: ["atlassian"] });
 
     const result = await h.attach();
     expect(result.attached).toBe(true);
@@ -196,7 +192,7 @@ describe("a CONNECTED row with a credential (no env, no channel row)", () => {
   });
 
   it("records every advertised tool in the classification record, by WIRE name, on the attach (WARP-2426)", async () => {
-    const h = harness({ allowlist: ["atlassian"] });
+    const h = await harness({ allowlist: ["atlassian"] });
     const result = await h.attach();
     expect(result.attached).toBe(true);
     // MUTATION: drop the record step from attachAtlassianRemote and this goes
@@ -212,24 +208,22 @@ describe("a CONNECTED row with a credential (no env, no channel row)", () => {
   });
 
   it("does not record anything when the attach is refused", async () => {
-    const h = harness({ allowlist: ["atlassian"], row: null });
+    const h = await harness({ allowlist: ["atlassian"], signIns: [] });
     await h.attach();
     expect(h.recordClassifications).not.toHaveBeenCalled();
   });
 
-  it("sends the credential to the bridge and NOTHING else", async () => {
-    const h = harness({ allowlist: ["atlassian"] });
+  it("sends the bearer and the sign-in's pinned site to the bridge and NOTHING else", async () => {
+    const h = await harness({ allowlist: ["atlassian"] });
     await h.attach();
     const open = h.bridge.calls.find((c) => c.path.endsWith("/open"));
-    expect(open?.body).toEqual({
-      email: "ops@vendor.example",
-      apiToken: FAKE_API_TOKEN,
-      cloudId: "00000000-0000-4000-8000-000000000000",
-    });
+    // The site is the sign-in row's own `siteId`. MUTATION: read it from anywhere
+    // else (an IntegrationConnection, the model) and this goes red.
+    expect(open?.body).toEqual({ accessToken: FAKE_ACCESS, cloudId: SITE_ID });
   });
 
   it("routes a remote dispatch through the bridge, not through a local socket", async () => {
-    const h = harness({ allowlist: ["atlassian"] });
+    const h = await harness({ allowlist: ["atlassian"] });
     await h.attach();
     const out = await h.mux.callTool("atlassian__getJiraIssue", { issueKey: "WARP-1" });
     expect(out.isError).toBe(false);
@@ -242,12 +236,12 @@ describe("a CONNECTED row with a credential (no env, no channel row)", () => {
     // operator who disconnects the account has to stop reaching the vendor on
     // the next call, not on the next reboot — and a session already attached is
     // exactly the case where a captured decision would keep working.
-    const h = harness({ allowlist: ["atlassian"] });
+    const h = await harness({ allowlist: ["atlassian"] });
     await h.attach();
     const before = await h.mux.callTool("atlassian__getJiraIssue", {});
     expect(before.isError).toBe(false);
 
-    h.prisma.state.row = { ...connectedRow, status: "DISABLED" };
+    h.state.integration = { status: "DISABLED" };
 
     const callsBefore = h.bridge.calls.filter((c) => c.path.endsWith("/call")).length;
     const after = await h.mux.callTool("atlassian__getJiraIssue", {});
@@ -260,44 +254,35 @@ describe("a CONNECTED row with a credential (no env, no channel row)", () => {
   });
 });
 
-describe("the connection row is read as two EXPLICIT columns", () => {
-  it("refuses a row that is not CONNECTED, without dialling", async () => {
-    const h = harness({
-      allowlist: ["atlassian"],
-      row: { ...connectedRow, status: "NEEDS_RECONNECT" },
-    });
+describe("the sign-in is read from its EXPLICIT state column", () => {
+  it("refuses a sign-in that is not CONNECTED, without dialling", async () => {
+    const h = await harness({ allowlist: ["atlassian"], signIns: [{ scope: "WORKSPACE", state: "NEEDS_RECONNECT" }] });
     const result = await h.attach();
     expect(result).toMatchObject({ attached: false, reason: "gate_refused" });
     expect(h.bridge.calls).toHaveLength(0);
     expect((await h.mux.listTools()).some((t) => t.name.startsWith("atlassian__"))).toBe(false);
   });
 
-  it("refuses a CONNECTED row whose credential was purged, without dialling", async () => {
-    const h = harness({
-      allowlist: ["atlassian"],
-      row: { ...connectedRow, providerTokensEnc: null },
-    });
+  it("refuses a DISABLED connection (the per-server off) whatever sign-ins exist, without dialling", async () => {
+    const h = await harness({ allowlist: ["atlassian"], integration: { status: "DISABLED" } });
     const result = await h.attach();
     expect(result).toMatchObject({ attached: false, reason: "gate_refused" });
     expect(h.bridge.calls).toHaveLength(0);
   });
 
-  it("refuses when there is no row at all", async () => {
-    const h = harness({ allowlist: ["atlassian"], row: null });
+  it("refuses when there is no sign-in at all", async () => {
+    const h = await harness({ allowlist: ["atlassian"], signIns: [] });
     const result = await h.attach();
     expect(result).toMatchObject({ attached: false, reason: "gate_refused" });
     expect(h.bridge.calls).toHaveLength(0);
   });
 
-  it("names the MISSING field when providerConfig is incomplete, and leaks no value", async () => {
-    const h = harness({
-      allowlist: ["atlassian"],
-      row: { ...connectedRow, providerConfig: { email: "ops@vendor.example" } },
-    });
+  it("a CONNECTED sign-in with no pinned site is not a credential: credential_incomplete, no value leaked, no dial", async () => {
+    // A row that predates WARP-3961. MUTATION: open it with a made-up or typed site → red.
+    const h = await harness({ allowlist: ["atlassian"], signIns: [{ scope: "WORKSPACE", siteId: null }] });
     const result = await h.attach();
     expect(result).toMatchObject({ attached: false, reason: "credential_incomplete" });
-    expect(result.attached === false && result.message).toContain("cloudId");
-    expect(result.attached === false && result.message).not.toContain(FAKE_API_TOKEN);
+    expect(result.attached === false && result.message).not.toContain(FAKE_ACCESS);
     expect(h.bridge.calls).toHaveLength(0);
   });
 });
@@ -311,7 +296,7 @@ describe("the bearer is fail-closed at the orchestrator end too", () => {
     });
     const result = await attachAtlassianRemote({
       mux,
-      prisma: prismaWith(connectedRow),
+      prisma: (await prismaWith()).prisma,
       registry: new RuntimeToolRegistry(),
       createClient: () =>
         new McpBridgeClient({
@@ -320,7 +305,6 @@ describe("the bearer is fail-closed at the orchestrator end too", () => {
           serverId: ATLASSIAN_REMOTE_SERVER_ID,
           fetchImpl: bridge.fetchImpl,
         }),
-      openCredentials: () => ({ apiToken: FAKE_API_TOKEN }),
     });
     expect(result).toMatchObject({ attached: false, reason: "bridge_unavailable" });
     expect(bridge.fetchImpl).not.toHaveBeenCalled();
@@ -337,7 +321,7 @@ describe("the bearer is fail-closed at the orchestrator end too", () => {
  */
 describe("detach — the disconnect path (WARP-2659)", () => {
   it("closes the bridge session, drops the multiplexer entry and unregisters the runtime tools", async () => {
-    const h = harness({ allowlist: ["atlassian"] });
+    const h = await harness({ allowlist: ["atlassian"] });
     const attached = await h.attach();
     if (!attached.attached) throw new Error("fixture did not attach");
     expect(h.registry.list().map((t) => t.name)).toEqual([
@@ -367,7 +351,7 @@ describe("detach — the disconnect path (WARP-2659)", () => {
   });
 
   it("is idempotent — a server that was never attached detaches nothing and dials nothing", async () => {
-    const h = harness({ allowlist: [] });
+    const h = await harness({ allowlist: [] });
     const result = await detachRemoteServer({
       mux: h.mux,
       serverId: ATLASSIAN_REMOTE_SERVER_ID,
@@ -378,7 +362,7 @@ describe("detach — the disconnect path (WARP-2659)", () => {
   });
 
   it("still detaches in-process when the bridge cannot be reached", async () => {
-    const h = harness({ allowlist: ["atlassian"] });
+    const h = await harness({ allowlist: ["atlassian"] });
     const attached = await h.attach();
     if (!attached.attached) throw new Error("fixture did not attach");
     const unreachable = new McpBridgeClient({
@@ -412,7 +396,7 @@ describe("WARP-3918 — tool definitions are pinned by the bridge's hash of the 
   ];
 
   it("hands the recorder each tool's definition hash by WIRE name", async () => {
-    const h = harness({ allowlist: ["atlassian"], tools: wire(H1) });
+    const h = await harness({ allowlist: ["atlassian"], tools: wire(H1) });
     await h.attach();
     const [, tools] = h.recordClassifications.mock.calls[0] as unknown as [string, Array<{ name: string; definitionHash?: string }>];
     expect(tools.map((t) => [t.name, t.definitionHash])).toEqual([
@@ -425,7 +409,7 @@ describe("WARP-3918 — tool definitions are pinned by the bridge's hash of the 
     // MUTATION: drop the onListed hook → the changed tool stays callable until
     // the next re-attach and nobody is told → red.
     let hash = H1;
-    const h = harness({ allowlist: ["atlassian"], tools: () => wire(hash)() });
+    const h = await harness({ allowlist: ["atlassian"], tools: () => wire(hash)() });
     const order: string[] = [];
     const record = vi.fn(async (_id: string, _tools: unknown[]) =>
       hash === H2 ? { changes: [{ toolName: "getJiraIssue", descriptionChanged: false }] } : { changes: [] },
@@ -454,7 +438,7 @@ describe("WARP-3918 — tool definitions are pinned by the bridge's hash of the 
   it("publishes the live hashes BEFORE any database write, so a recorder that throws cannot leave a changed tool callable", async () => {
     // MUTATION: publish after the record step → a throwing recorder skips it → red.
     let hash = H1;
-    const h = harness({ allowlist: ["atlassian"], tools: () => wire(hash)() });
+    const h = await harness({ allowlist: ["atlassian"], tools: () => wire(hash)() });
     const published: Array<Map<string, string>> = [];
     const setLiveDefinitions = vi.fn((_id: string, m: ReadonlyMap<string, string>) => void published.push(new Map(m)));
     const record = vi.fn(async (_id: string, _tools: unknown[]) => {
@@ -471,7 +455,7 @@ describe("WARP-3918 — tool definitions are pinned by the bridge's hash of the 
   });
 
   it("a tool with no hash on the listing is absent from the published live hashes", async () => {
-    const h = harness({ allowlist: ["atlassian"] });
+    const h = await harness({ allowlist: ["atlassian"] });
     const setLiveDefinitions = vi.fn();
     await h.attach({ setLiveDefinitions });
     expect(setLiveDefinitions).toHaveBeenCalledWith("atlassian", new Map());

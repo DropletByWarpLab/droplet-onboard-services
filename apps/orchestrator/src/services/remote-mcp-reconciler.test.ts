@@ -16,11 +16,8 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { McpBridgeClient, McpBridgeError } from "./mcp-bridge.client.js";
 import { McpToolMultiplexer, type RemoteCallPolicy } from "./mcp-multiplexer.service.js";
 import type { McpClientPort, McpToolDescriptor } from "./mcp-client.port.js";
-import {
-  ATLASSIAN_REMOTE_SERVER_ID,
-  attachAtlassianRemote,
-  type RemoteMcpConnectionRow,
-} from "./remote-mcp-servers.js";
+import { ATLASSIAN_REMOTE_SERVER_ID, attachAtlassianRemote } from "./remote-mcp-servers.js";
+import { signedInDb } from "./__fixtures__/signed-in-db.js";
 import { RuntimeToolRegistry } from "./runtime-tool-registry.service.js";
 import { RemoteMcpLifecycleRegistry } from "./remote-mcp-lifecycle.service.js";
 import {
@@ -37,8 +34,6 @@ vi.mock("./activity.singleton.js", () => ({
 
 const BRIDGE_URL = "http://mcp-bridge.test:9096";
 const BRIDGE_TOKEN = "bridge-token-FAKE-0000000000000000";
-const FAKE_API_TOKEN = "ATATT-FAKE-000000000000";
-const CONNECTION_ID = "conn_atlassian_fixture";
 
 const TOOLS_A: McpToolDescriptor[] = [
   { name: "getJiraIssue", description: "Read one Jira issue", inputSchema: { type: "object" } },
@@ -200,16 +195,10 @@ function localPort(): McpClientPort {
   };
 }
 
-const connectedRow: RemoteMcpConnectionRow = {
-  id: CONNECTION_ID,
-  status: "CONNECTED",
-  providerTokensEnc: "dcv1:sealed",
-  providerConfig: { email: "ops@vendor.example", cloudId: "00000000-0000-4000-8000-000000000000" },
-};
-
 const allowAll: RemoteCallPolicy = () => ({ kind: "allow" });
 
-function harness(over: { allowlist?: string[]; row?: RemoteMcpConnectionRow | null } = {}) {
+/** WARP-3961: the world is "is a CONNECTED sign-in there" and "did an admin turn the server off". */
+async function harness(over: { allowlist?: string[]; signedIn?: boolean; integration?: { status: string } | null } = {}) {
   const bridge = fixtureBridge();
   const allowlist = new Set(over.allowlist ?? [ATLASSIAN_REMOTE_SERVER_ID]);
   const mux = new McpToolMultiplexer(localPort(), {
@@ -222,14 +211,28 @@ function harness(over: { allowlist?: string[]; row?: RemoteMcpConnectionRow | nu
   // green test that proves nothing.
   const clock = { now: 1_000_000 };
   const lifecycle = new RemoteMcpLifecycleRegistry(() => clock.now);
-  const prismaState = { row: over.row === undefined ? connectedRow : over.row };
-  const prisma = {
-    integrationConnection: { findFirst: vi.fn(async () => prismaState.row) },
-  };
+  const prismaState = { signedIn: over.signedIn ?? true, integration: over.integration ?? null };
+  const world = await signedInDb([{ scope: "WORKSPACE" }], null);
+  const table = world.prisma.mcpOAuthConnection;
   const audit = vi.fn();
-  /** Counts every ADR-042 open, so "the credential is re-read per re-open, and
-   *  never cached between ticks" is an assertion rather than a comment. */
-  const openCredentials = vi.fn(() => ({ apiToken: FAKE_API_TOKEN }));
+  /** Counts every catalog credential read (one Workspace sign-in query per read), so
+   *  "the credential is re-read per re-open, and never cached between ticks" is an
+   *  assertion rather than a comment. */
+  const credentialReads = vi.fn();
+  const prisma = {
+    integrationConnection: {
+      findFirst: vi.fn(async () =>
+        prismaState.integration ? { id: "conn_atlassian_fixture", providerTokensEnc: null, ...prismaState.integration } : null),
+    },
+    mcpOAuthConnection: {
+      count: async (a: unknown) => (prismaState.signedIn ? table.count(a as never) : 0),
+      findFirst: async (a: { where: { scope?: string } }) => {
+        if (a.where.scope === "WORKSPACE") credentialReads();
+        return prismaState.signedIn ? table.findFirst(a as never) : null;
+      },
+      findUnique: async (a: unknown) => (prismaState.signedIn ? table.findUnique(a as never) : null),
+    },
+  };
 
   const attach = (knownTools?: readonly string[]) =>
     attachAtlassianRemote({
@@ -238,7 +241,6 @@ function harness(over: { allowlist?: string[]; row?: RemoteMcpConnectionRow | nu
       registry,
       lifecycle,
       auditLifecycle: audit,
-      openCredentials,
       createClient: () =>
         new McpBridgeClient({
           baseUrl: BRIDGE_URL,
@@ -283,7 +285,7 @@ function harness(over: { allowlist?: string[]; row?: RemoteMcpConnectionRow | nu
     prismaState,
     clock,
     audit,
-    openCredentials,
+    credentialReads,
     attach,
     deps,
     tick: () => reconcileRemoteMcpSessions(deps),
@@ -314,7 +316,7 @@ beforeEach(() => {
 
 describe("no connection yet, then a sign-in lands (WARP-3960: no env, no switch)", () => {
   it("registers the server detached and dials NOTHING at attach; the reconciler attaches it the tick after a connection appears", async () => {
-    const h = harness({ row: null });
+    const h = await harness({ signedIn: false });
 
     const attached = await h.attach();
     expect(attached).toMatchObject({ attached: false, reason: "gate_refused" });
@@ -324,7 +326,7 @@ describe("no connection yet, then a sign-in lands (WARP-3960: no env, no switch)
     expect(await remoteToolNames(h.mux)).toEqual([]);
 
     // A member signs in / an admin stores a credential: the very next tick attaches.
-    h.prismaState.row = connectedRow;
+    h.prismaState.signedIn = true;
     await h.tick();
     expect(h.lifecycle.get(ATLASSIAN_REMOTE_SERVER_ID)?.state).toBe("attached");
     expect(await remoteToolNames(h.mux)).toEqual([
@@ -334,10 +336,10 @@ describe("no connection yet, then a sign-in lands (WARP-3960: no env, no switch)
   });
 
   it("with the gate check wired (production), a refused server writes NO lifecycle audit row per tick, and attaches the tick after the gate opens", async () => {
-    const h = harness({ row: null });
+    const h = await harness({ signedIn: false });
     await h.attach();
     h.audit.mockClear();
-    const deps = { ...h.deps, gateAllows: async () => h.prismaState.row !== null };
+    const deps = { ...h.deps, gateAllows: async () => h.prismaState.signedIn };
 
     await reconcileRemoteMcpSessions(deps);
     await reconcileRemoteMcpSessions(deps);
@@ -345,13 +347,13 @@ describe("no connection yet, then a sign-in lands (WARP-3960: no env, no switch)
     expect(h.lifecycle.get(ATLASSIAN_REMOTE_SERVER_ID)).toMatchObject({ state: "detached", reason: "gate_refused" });
     expect(h.bridge.calls.some((c) => c.path.endsWith("/open"))).toBe(false);
 
-    h.prismaState.row = connectedRow;
+    h.prismaState.signedIn = true;
     await reconcileRemoteMcpSessions(deps);
     expect(h.lifecycle.get(ATLASSIAN_REMOTE_SERVER_ID)?.state).toBe("attached");
   });
 
   it("a server an owner or admin turned off (DISABLED) stays detached and is not re-opened", async () => {
-    const h = harness({ row: { ...connectedRow, status: "DISABLED" } });
+    const h = await harness({ integration: { status: "DISABLED" } });
     expect(await h.attach()).toMatchObject({ attached: false, reason: "gate_refused" });
     await h.tick();
     expect(h.lifecycle.get(ATLASSIAN_REMOTE_SERVER_ID)).toMatchObject({ state: "detached", reason: "gate_refused" });
@@ -361,7 +363,7 @@ describe("no connection yet, then a sign-in lands (WARP-3960: no env, no switch)
 
 describe("failure (2): the BRIDGE restarts, the orchestrator stays up", () => {
   it("reattaches within ONE tick and the tools come back", async () => {
-    const h = harness();
+    const h = await harness();
     expect((await h.attach()).attached).toBe(true);
     expect(await remoteToolNames(h.mux)).toEqual([
       "atlassian__getJiraIssue",
@@ -384,7 +386,7 @@ describe("failure (2): the BRIDGE restarts, the orchestrator stays up", () => {
   });
 
   it("passes THROUGH `reattaching`, and audits both transitions", async () => {
-    const h = harness();
+    const h = await harness();
     await h.attach();
     h.audit.mockClear();
     h.bridge.sessions.clear();
@@ -401,23 +403,23 @@ describe("failure (2): the BRIDGE restarts, the orchestrator stays up", () => {
   });
 
   it("re-reads the credential through the ADR-042 seam ON THE RE-OPEN", async () => {
-    const h = harness();
+    const h = await harness();
     await h.attach();
-    expect(h.openCredentials).toHaveBeenCalledTimes(1);
+    expect(h.credentialReads).toHaveBeenCalledTimes(1);
 
     h.bridge.sessions.clear();
     await h.tick();
     // Two opens ⇒ two seal-openings. A cached plaintext would leave this at 1,
     // and would go on using a token the customer had since rotated.
-    expect(h.openCredentials).toHaveBeenCalledTimes(2);
+    expect(h.credentialReads).toHaveBeenCalledTimes(2);
 
     h.bridge.sessions.clear();
     await h.tick();
-    expect(h.openCredentials).toHaveBeenCalledTimes(3);
+    expect(h.credentialReads).toHaveBeenCalledTimes(3);
   });
 
   it("does NOT re-open a session the bridge still holds", async () => {
-    const h = harness();
+    const h = await harness();
     await h.attach();
     const opensBefore = h.bridge.calls.filter((c) => c.path.endsWith("/open")).length;
 
@@ -429,13 +431,13 @@ describe("failure (2): the BRIDGE restarts, the orchestrator stays up", () => {
 
 describe("failure (1): the ORCHESTRATOR restarts, the bridge stays up", () => {
   it("closes a session this process does not own, with one audit row", async () => {
-    const h = harness();
+    const h = await harness();
     await h.attach();
 
     // The account is disconnected while this process is down; on the way back
     // up the attach refuses at the gate, so the vendor connection the bridge is
     // still holding is now driven by nothing at all.
-    h.prismaState.row = { ...connectedRow, status: "DISABLED" };
+    h.prismaState.integration = { status: "DISABLED" };
     await h.attach();
     expect(h.lifecycle.get(ATLASSIAN_REMOTE_SERVER_ID)).toMatchObject({
       state: "detached",
@@ -461,7 +463,7 @@ describe("failure (1): the ORCHESTRATOR restarts, the bridge stays up", () => {
   });
 
   it("closes a session for a server id this process has never heard of", async () => {
-    const h = harness();
+    const h = await harness();
     await h.attach();
     h.bridge.sessions.set("compass", { state: "ready", baseline: null, toolCount: 3 });
 
@@ -475,7 +477,7 @@ describe("failure (1): the ORCHESTRATOR restarts, the bridge stays up", () => {
 
 describe("catalog_changed survives a re-open (ADR-043 §1's fourth failure state)", () => {
   it("does NOT silently attach a surface that moved while the bridge was down", async () => {
-    const h = harness();
+    const h = await harness();
     expect((await h.attach()).attached).toBe(true);
     expect(h.lifecycle.get(ATLASSIAN_REMOTE_SERVER_ID)?.vettedTools).toEqual([
       "getJiraIssue",
@@ -512,7 +514,7 @@ describe("catalog_changed survives a re-open (ADR-043 §1's fourth failure state
   });
 
   it("is TERMINAL: the next tick neither re-opens nor sweeps the session away", async () => {
-    const h = harness();
+    const h = await harness();
     await h.attach();
     h.bridge.sessions.clear();
     h.bridge.state.tools = TOOLS_DRIFTED;
@@ -537,7 +539,7 @@ describe("catalog_changed survives a re-open (ADR-043 §1's fourth failure state
   });
 
   it("reports catalog_changed from the BRIDGE's side too, without re-opening", async () => {
-    const h = harness();
+    const h = await harness();
     await h.attach();
     // The session is still there; the bridge itself noticed the drift.
     h.bridge.sessions.get(ATLASSIAN_REMOTE_SERVER_ID)!.state = "catalog_changed";
@@ -556,7 +558,7 @@ describe("catalog_changed survives a re-open (ADR-043 §1's fourth failure state
 
 describe("the bridge hop itself fails: bounded backoff", () => {
   it("goes bridge_unreachable, then SKIPS ticks inside the window, then recovers", async () => {
-    const h = harness();
+    const h = await harness();
     await h.attach();
     h.bridge.state.down = true;
     h.audit.mockClear();
@@ -599,14 +601,14 @@ describe("the bridge hop itself fails: bounded backoff", () => {
     // The backoff belongs to the BRIDGE hop. Once GET /sessions answers, an operator
     // who fixes their connection must be reattached on the next tick — not
     // after a ten-minute window they cannot see.
-    const h = harness();
+    const h = await harness();
     await h.attach();
     h.bridge.state.down = true;
     await h.tick();
 
     h.clock.now += 30_000;
     h.bridge.state.down = false;
-    h.prismaState.row = { ...connectedRow, status: "DISABLED" };
+    h.prismaState.integration = { status: "DISABLED" };
     await h.tick();
     expect(h.lifecycle.get(ATLASSIAN_REMOTE_SERVER_ID)).toMatchObject({
       state: "detached",
@@ -614,7 +616,7 @@ describe("the bridge hop itself fails: bounded backoff", () => {
       nextAttemptAt: 0,
     });
 
-    h.prismaState.row = connectedRow;
+    h.prismaState.integration = null;
     h.clock.now += 1_000;
     const back = await h.tick();
     expect(back.reattached).toEqual([ATLASSIAN_REMOTE_SERVER_ID]);
@@ -623,10 +625,10 @@ describe("the bridge hop itself fails: bounded backoff", () => {
 
 describe("the gates are unchanged on the reconciler's path", () => {
   it("a DISABLED row refuses the re-open — no session is opened", async () => {
-    const h = harness();
+    const h = await harness();
     await h.attach();
     h.bridge.sessions.clear();
-    h.prismaState.row = { ...connectedRow, status: "DISABLED" };
+    h.prismaState.integration = { status: "DISABLED" };
 
     const result = await h.tick();
     expect(result.reattached).toEqual([]);
@@ -638,11 +640,11 @@ describe("the gates are unchanged on the reconciler's path", () => {
     });
   });
 
-  it("a purged credential refuses the re-open", async () => {
-    const h = harness();
+  it("a sign-in that is gone (disconnected) refuses the re-open", async () => {
+    const h = await harness();
     await h.attach();
     h.bridge.sessions.clear();
-    h.prismaState.row = { ...connectedRow, providerTokensEnc: null };
+    h.prismaState.signedIn = false;
 
     await h.tick();
     expect(h.lifecycle.get(ATLASSIAN_REMOTE_SERVER_ID)).toMatchObject({
@@ -654,13 +656,13 @@ describe("the gates are unchanged on the reconciler's path", () => {
 });
 
 describe("overlapping ticks do not re-enter the re-open (one tick in flight)", () => {
-  const opens = (h: ReturnType<typeof harness>) =>
+  const opens = (h: Awaited<ReturnType<typeof harness>>) =>
     h.bridge.calls.filter((c) => c.path.endsWith("/open"));
 
   it("skips a tick that fires while the previous one is still inside the vendor call", async () => {
-    const h = harness();
+    const h = await harness();
     await h.attach();
-    expect(h.openCredentials).toHaveBeenCalledTimes(1);
+    expect(h.credentialReads).toHaveBeenCalledTimes(1);
     h.bridge.sessions.clear();
 
     // Tick N reaches the bridge's `open` and is parked there: the vendor is
@@ -678,7 +680,7 @@ describe("overlapping ticks do not re-enter the re-open (one tick in flight)", (
     expect(second.skipped).toBe("in_flight");
     expect(h.guarded.overlapsSkipped).toBe(1);
     expect(opens(h)).toHaveLength(2);
-    expect(h.openCredentials).toHaveBeenCalledTimes(2);
+    expect(h.credentialReads).toHaveBeenCalledTimes(2);
     expect(h.bridge.calls.filter((c) => c.method === "DELETE")).toHaveLength(0);
 
     // The vendor answers; tick N completes normally.
@@ -697,7 +699,7 @@ describe("overlapping ticks do not re-enter the re-open (one tick in flight)", (
   });
 
   it("a tick that THROWS releases the guard — the next tick runs instead of being skipped forever", async () => {
-    const h = harness();
+    const h = await harness();
     await h.attach();
     h.bridge.sessions.clear();
     let explode = true;
@@ -720,7 +722,7 @@ describe("overlapping ticks do not re-enter the re-open (one tick in flight)", (
   });
 
   it("mountRemoteMcpReconciler schedules the GUARDED tick, not the bare one", async () => {
-    const h = harness();
+    const h = await harness();
     await h.attach();
     h.bridge.sessions.clear();
     let handler: (() => void | Promise<void>) | null = null;
@@ -753,7 +755,7 @@ describe("overlapping ticks do not re-enter the re-open (one tick in flight)", (
 
 describe("an id the bridge reports is validated before it becomes a path", () => {
   it("refuses to DELETE a session whose id could not be a server id, and still sweeps the rest", async () => {
-    const h = harness();
+    const h = await harness();
     await h.attach();
     // What `GET /sessions` says is data off the wire, not a constant. Two
     // orphans: one hostile, one honest.
@@ -793,7 +795,7 @@ describe("an id the bridge reports is validated before it becomes a path", () =>
 
 describe("the drift baseline survives a re-open whose own listing failed", () => {
   it("keeps the previously vetted baseline instead of recording an empty one", async () => {
-    const h = harness();
+    const h = await harness();
     await h.attach();
     expect(h.lifecycle.get(ATLASSIAN_REMOTE_SERVER_ID)?.vettedTools).toEqual([
       "getJiraIssue",

@@ -53,6 +53,22 @@ describe("McpBridgeOAuthClient (WARP-2401 contract)", () => {
     expect(sent(f)).toMatchObject({ resource: "res", refreshToken: "r" });
   });
 
+  it("sites: sends exactly { accessToken } to /oauth/sites and keeps only well-formed {id,url,name} entries (WARP-3961)", async () => {
+    const good = { id: "cloud-1", url: "https://acme.atlassian.net", name: "Acme" };
+    const f = vi.fn(async () => json(200, { sites: [good, { id: "x" }, null, { ...good, id: 5 }, { ...good, extra: "dropme", id: "cloud-2" }] }));
+    const out = await make(f as unknown as typeof fetch).sites("ACCESS");
+    expect(sent(f)).toEqual({ accessToken: "ACCESS" });
+    expect((f.mock.calls[0] as unknown[])[0]).toBe("http://bridge.invalid/oauth/sites");
+    expect(out).toEqual([good, { id: "cloud-2", url: good.url, name: good.name }]);
+  });
+
+  it("sites: an answer with no list is a bridge error, and a 502 SITES_UNAVAILABLE passes through", async () => {
+    const none = vi.fn(async () => json(200, {}));
+    await expect(make(none as unknown as typeof fetch).sites("a")).rejects.toBeInstanceOf(McpBridgeError);
+    const down = vi.fn(async () => json(502, { error: { code: "SITES_UNAVAILABLE", message: "m" } }));
+    await expect(make(down as unknown as typeof fetch).sites("a")).rejects.toMatchObject({ code: "SITES_UNAVAILABLE" });
+  });
+
   it("refuses a token answer with no access token, and never dials without a bearer", async () => {
     const f = vi.fn(async () => json(200, {}));
     await expect(make(f as unknown as typeof fetch).refresh({ tokenEndpoint: "te", clientId: "c", refreshToken: "r", resource: "x" })).rejects.toBeInstanceOf(McpBridgeError);

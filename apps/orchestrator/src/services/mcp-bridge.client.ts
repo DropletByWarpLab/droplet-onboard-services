@@ -644,4 +644,24 @@ export class McpBridgeOAuthClient {
   async revoke(input: McpOAuthRevokeInput): Promise<void> {
     await bridgeRequest(this.#t, "POST", "/oauth/revoke", input);
   }
+
+  /** WARP-3961: the Atlassian sites a fresh access token reaches (the bridge
+   *  opens a short bearer session; the token is the only thing sent). */
+  async sites(accessToken: string): Promise<McpOAuthSite[]> {
+    const r = await bridgeRequest<{ sites?: unknown }>(this.#t, "POST", "/oauth/sites", { accessToken });
+    if (!Array.isArray(r.sites)) {
+      throw new McpBridgeError("REMOTE_CALL_FAILED", "mcp-bridge answered the site lookup without a list.", 502);
+    }
+    return r.sites.flatMap((s: unknown): McpOAuthSite[] => {
+      const o = typeof s === "object" && s !== null ? (s as Record<string, unknown>) : {};
+      return isStr(o.id) && isStr(o.url) && isStr(o.name) ? [{ id: o.id, url: o.url, name: o.name }] : [];
+    });
+  }
+}
+
+/** One Atlassian site a sign-in reaches. */
+export interface McpOAuthSite {
+  id: string;
+  url: string;
+  name: string;
 }

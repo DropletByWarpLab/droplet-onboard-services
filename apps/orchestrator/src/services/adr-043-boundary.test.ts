@@ -205,8 +205,7 @@ describe("wire-contract drift gate (the duplication §5 forces)", () => {
 /** What the bridge's registry says about one server — only what is gated here. */
 interface BridgeProfile {
   readonly requiredFields: readonly string[];
-  /** WARP-2409 - the accepted open bodies when the server also takes a sign-in: the
-   *  API-token set, and a bearer set. Absent means `[requiredFields]`. */
+  /** The accepted open bodies. Absent means `[requiredFields]`. */
   readonly requiredFieldSets?: readonly (readonly string[])[];
 }
 
@@ -267,26 +266,22 @@ function declarationProblems(id: string, declared: DeclaredServer): string[] {
         );
       }
     }
+    if (signsIn && descriptor.credentialFields.length > 0) {
+      // WARP-3961 - a sign-in is the credential; a pasted-field form beside it is a second path.
+      out.push(
+        `credentials are not a sign-in path: the descriptor declares credential fields [${[...declaredNames].join(", ")}]`,
+      );
+    }
     if (profile && signsIn) {
-      // WARP-2409 - with web sign-in the credential fields are alternatives: the API
-      // token path (email + apiToken + site) OR a sign-in (bearer + site). So the
-      // descriptor requires only what EVERY path needs, and the bridge accepts
-      // exactly its field sets: each descriptor-required field is in every set, and
-      // one set is entirely descriptor fields (the API-token path a form can fill).
+      // WARP-3961 - the bridge opens a sign-in session from a bearer plus the site the
+      // sign-in was pinned to, and from nothing else: every open set is exactly that.
       const sets = profile.requiredFieldSets ?? [profile.requiredFields];
-      for (const f of required) {
-        for (const set of sets) {
-          if (!set.includes(f.name)) {
-            out.push(`required field "${f.name}" is missing from the bridge's open set [${[...set].sort().join(", ")}]`);
-          }
-        }
-      }
-      if (!sets.some((set) => set.every((n) => declaredNames.has(n)))) {
-        out.push("no bridge open set is made only of descriptor credential fields, so the API-token path cannot be filled in");
-      }
       for (const set of sets) {
-        const outside = set.filter((n) => !declaredNames.has(n));
-        if (outside.length > 1) out.push(`a bridge open set names fields no sign-in supplies: [${outside.join(", ")}]`);
+        if (!set.includes("accessToken")) {
+          out.push(`a bridge open set [${[...set].sort().join(", ")}] has no accessToken, so it is not a sign-in`);
+        }
+        const outside = set.filter((n) => n !== "accessToken" && n !== "cloudId");
+        if (outside.length > 0) out.push(`a bridge open set names fields no sign-in supplies: [${outside.join(", ")}]`);
       }
     }
     // The attach path reads two homes and a string from each; a required field
@@ -299,9 +294,8 @@ function declarationProblems(id: string, declared: DeclaredServer): string[] {
         );
       }
     }
-    // With a sign-in the secret fields are optional (the API-token path), so the
-    // sealed secret is looked for among every declared field.
-    if (!(signsIn ? descriptor.credentialFields : required).some((f) => f.secret && f.storage === "encrypted")) {
+    // A sign-in descriptor holds no pasted secret; any other track's credential is one.
+    if (!signsIn && !required.some((f) => f.secret && f.storage === "encrypted")) {
       out.push("no required field is a sealed secret — a vendor credential is one");
     }
     for (const f of descriptor.credentialFields) {
@@ -418,13 +412,19 @@ describe("every MCP server is declared consistently everywhere it is declared (T
 
     // A server with no web sign-in: its credential fields are all required, and the
     // bridge's single open set must equal them exactly.
+    const field = (name: string, secret: boolean): ProviderDescriptor["credentialFields"][number] => ({
+      name,
+      label: name,
+      type: "string",
+      required: true,
+      secret,
+      storage: secret ? "encrypted" : "providerConfig",
+    });
     const legacy = (): ProviderDescriptor =>
       ({
         ...base().descriptor,
         signIn: undefined,
-        credentialFields: base().descriptor.credentialFields.map((f) =>
-          ["email", "apiToken", "cloudId"].includes(f.name) ? { ...f, required: true } : f,
-        ),
+        credentialFields: [field("email", false), field("apiToken", true), field("cloudId", false)],
       }) as ProviderDescriptor;
 
     it("is red when the bridge demands different fields than the descriptor requires", () => {
@@ -438,33 +438,25 @@ describe("every MCP server is declared consistently everywhere it is declared (T
       );
     });
 
-    it("with a sign-in, the descriptor requires only what every path needs, and the bridge accepts exactly its sets", () => {
-      // The API-token path and the bearer path both need the site id.
-      const noSite = { ...base().profile, requiredFieldSets: [["email", "apiToken", "cloudId"], ["accessToken"]] };
-      expect(declarationProblems("atlassian", { ...base(), profile: noSite }).join("\n")).toMatch(
-        /required field "cloudId" is missing from the bridge's open set \[accessToken\]/,
+    it("a sign-in descriptor declares NO credential fields, and the bridge opens it from a bearer and a site only", () => {
+      expect(base().descriptor.credentialFields).toEqual([]);
+      // Mutation: put a credential form back beside the sign-in -> red.
+      const withForm = withFields([field("apiToken", true)]);
+      expect(declarationProblems("atlassian", { ...base(), descriptor: withForm }).join("\n")).toMatch(
+        /credentials are not a sign-in path/,
       );
-      // A descriptor that requires the API-token fields would block sign-in-only boxes.
-      const strict = withFields(base().descriptor.credentialFields.map((f) => ({ ...f, required: true })));
-      expect(declarationProblems("atlassian", { ...base(), descriptor: strict }).join("\n")).toMatch(
-        /required field "email" is missing from the bridge's open set \[accessToken, cloudId\]/,
-      );
-      // No set a form can fill: the API-token path is gone.
-      const onlyBearer = { requiredFields: ["accessToken", "cloudId"], requiredFieldSets: [["accessToken", "cloudId"]] };
-      expect(declarationProblems("atlassian", { ...base(), profile: onlyBearer }).join("\n")).toMatch(/API-token path cannot be filled in/);
+      // A bridge set that is not a bearer set, or that asks for more than a bearer and a site.
+      const apiSet = { requiredFields: ["email", "apiToken", "cloudId"] };
+      const apiProblems = declarationProblems("atlassian", { ...base(), profile: apiSet }).join("\n");
+      expect(apiProblems).toMatch(/has no accessToken/);
+      expect(apiProblems).toMatch(/names fields no sign-in supplies: \[email, apiToken\]/);
     });
 
     it("is red when no required field is a sealed secret, or a secret is stored in the clear", () => {
-      const clear = withFields([
-        {
-          name: "apiToken",
-          label: "Token",
-          type: "string",
-          required: true,
-          secret: true,
-          storage: "providerConfig",
-        },
-      ]);
+      const clear = {
+        ...legacy(),
+        credentialFields: [{ ...field("apiToken", true), storage: "providerConfig" as const }],
+      } as ProviderDescriptor;
       const problems = declarationProblems("atlassian", {
         ...base(),
         descriptor: clear,

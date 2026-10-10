@@ -31,6 +31,7 @@ import {
   OAUTH_PKCE_UNSUPPORTED,
   OAUTH_REFUSED,
   type McpOAuthDiscovery,
+  type McpOAuthSite,
 } from "../mcp-bridge.client.js";
 import { remoteMcpEgressAllowed, type RemoteMcpEgressDecision, type RemoteMcpGatePrisma } from "../remote-mcp-gateway.service.js";
 
@@ -118,7 +119,7 @@ interface PendingFlow {
 }
 
 export interface McpOAuthDependencies {
-  oauth: Pick<McpBridgeOAuthClient, "discover" | "register" | "exchange" | "refresh" | "revoke">;
+  oauth: Pick<McpBridgeOAuthClient, "discover" | "register" | "exchange" | "refresh" | "revoke" | "sites">;
   now: () => Date;
   /** Closes a connection's live bridge session (sign-out). Best effort. */
   closeSession: (provider: string, connectionId: string) => Promise<void>;
@@ -142,7 +143,7 @@ export interface McpOAuthDependencies {
  * The bridge client, built on first use: routers are created at app start (and in
  * tests that never sign in), long before any hop needs the bridge's address.
  */
-function lazyBridgeOAuthClient(): Pick<McpBridgeOAuthClient, "discover" | "register" | "exchange" | "refresh" | "revoke"> {
+function lazyBridgeOAuthClient(): Pick<McpBridgeOAuthClient, "discover" | "register" | "exchange" | "refresh" | "revoke" | "sites"> {
   let client: McpBridgeOAuthClient | null = null;
   const get = (): McpBridgeOAuthClient =>
     (client ??= new McpBridgeOAuthClient({ baseUrl: config.MCP_BRIDGE_URL, serviceToken: config.MCP_BRIDGE_SERVICE_TOKEN }));
@@ -152,6 +153,7 @@ function lazyBridgeOAuthClient(): Pick<McpBridgeOAuthClient, "discover" | "regis
     exchange: (input) => get().exchange(input),
     refresh: (input) => get().refresh(input),
     revoke: (input) => get().revoke(input),
+    sites: (accessToken) => get().sites(accessToken),
   };
 }
 
@@ -463,6 +465,40 @@ async function settleFailure(prisma: PrismaClient, flow: PendingFlow, lastError:
   }
 }
 
+type SiteFields = { siteId?: string; siteUrl?: string; siteName?: string; sites?: Prisma.InputJsonValue };
+
+/** The token reached no site: a fresh sign-in ends ERROR ("no_site"); one that was
+ *  already working keeps its state and tokens, only `lastError` says what happened. */
+async function settleNoSite(prisma: PrismaClient, flow: PendingFlow): Promise<void> {
+  try {
+    await prisma.mcpOAuthConnection.updateMany({
+      where: { id: flow.connectionId, state: "PENDING_CONSENT" },
+      data: { state: flow.priorState === "CONNECTED" ? "CONNECTED" : "ERROR", lastError: "no_site" },
+    });
+  } catch {
+    logger.warn({ provider: flow.provider }, "mcp_oauth_restore_failed");
+  }
+}
+
+/** Best effort: a grant we are not going to store should not stay live at the vendor. */
+async function revokeUnstored(
+  deps: McpOAuthDependencies,
+  flow: PendingFlow,
+  tokens: { accessToken: string; refreshToken?: string },
+): Promise<void> {
+  if (!flow.revocationEndpoint) return;
+  try {
+    await deps.oauth.revoke({
+      revocationEndpoint: flow.revocationEndpoint,
+      clientId: flow.clientId,
+      ...(flow.clientSecret ? { clientSecret: flow.clientSecret } : {}),
+      token: tokens.refreshToken ?? tokens.accessToken,
+    });
+  } catch {
+    logger.warn({ provider: flow.provider }, "mcp_oauth_revoke_failed");
+  }
+}
+
 export async function completeMcpSignIn(
   prisma: PrismaClient,
   input: CompleteInput,
@@ -540,6 +576,31 @@ export async function completeMcpSignIn(
       resource: flow.resource,
     });
     const expiresAt = new Date(now.getTime() + tokenTtlSeconds(tokens.expiresIn) * 1000);
+    // WARP-3961: the site comes from the token, never from a typed id. A server that
+    // pins a site is asked which ones this token reaches, right here, before anything
+    // is stored: no site means no sign-in.
+    let site: SiteFields = {};
+    if (signInFor(flow.provider).signIn.pinsSite) {
+      let sites: McpOAuthSite[];
+      try {
+        sites = await deps.oauth.sites(tokens.accessToken);
+      } catch {
+        logger.warn({ provider: flow.provider }, "mcp_oauth_site_lookup_failed");
+        await settleFailure(prisma, flow, "site_lookup_failed");
+        return result("failed");
+      }
+      if (sites.length === 0) {
+        logger.warn({ provider: flow.provider }, "mcp_oauth_no_site");
+        await revokeUnstored(deps, flow, tokens);
+        await settleNoSite(prisma, flow);
+        return result("failed");
+      }
+      // Atlassian consent picks one site today, so >1 is a future change: pin the first,
+      // keep all of them for a later "change site" picker, and say so.
+      if (sites.length > 1) logger.warn({ provider: flow.provider, count: sites.length }, "mcp_oauth_multiple_sites_pinned_first");
+      const [first] = sites;
+      site = { siteId: first.id, siteUrl: first.url, siteName: first.name, sites: sites as unknown as Prisma.InputJsonValue };
+    }
     const tokensEnc = sealTokens(row, {
       accessToken: tokens.accessToken,
       refreshToken: tokens.refreshToken ?? null,
@@ -558,6 +619,7 @@ export async function completeMcpSignIn(
         // The client that issued THESE tokens, for this row's own refresh and revoke.
         clientId: flow.clientId,
         clientSecretEnc: flow.clientSecret ? sealSecret(row, flow.clientSecret) : null,
+        ...site,
       },
     });
     if (written.count !== 1) return result("failed");
@@ -644,13 +706,18 @@ export function parsePastedRedirect(text: unknown): { state: string; code: strin
 
 export interface McpSignInView {
   provider: string;
-  member: { id: string; state: McpOAuthStateName; connectedAt: string | null; lastRefreshOkAt: string | null } | null;
+  /** `siteName` / `siteUrl`: the site the sign-in is pinned to (WARP-3961), or null. */
+  member: {
+    id: string; state: McpOAuthStateName; connectedAt: string | null; lastRefreshOkAt: string | null;
+    siteName: string | null; siteUrl: string | null;
+  } | null;
   /** `ackBy` is shown to owners and admins only. */
-  workspace: { id: string; state: McpOAuthStateName; ackBy: string | null; connectedAt: string | null } | null;
+  workspace: {
+    id: string; state: McpOAuthStateName; ackBy: string | null; connectedAt: string | null;
+    siteName: string | null; siteUrl: string | null;
+  } | null;
   redirectUri: string;
   callbackSupported: boolean;
-  /** Whether a shared API token is also connected (the last rung). */
-  apiToken: boolean;
 }
 
 /** Field by field: no token, secret or issuer detail ever reaches a client. */
@@ -662,29 +729,26 @@ export async function mcpSignInView(
   role?: string,
 ): Promise<McpSignInView> {
   signInFor(provider);
-  const [member, workspace, apiToken] = await Promise.all([
+  const [member, workspace] = await Promise.all([
     prisma.mcpOAuthConnection.findFirst({ where: { provider, scope: "MEMBER", memberId: userId } }),
     prisma.mcpOAuthConnection.findFirst({ where: { provider, scope: "WORKSPACE" } }),
-    prisma.integrationConnection.findFirst({
-      where: { provider, status: "CONNECTED", providerTokensEnc: { not: null } },
-      select: { id: true },
-    }),
   ]);
   return {
     provider,
     member: member && {
       id: member.id, state: member.state, connectedAt: member.connectedAt?.toISOString() ?? null,
       lastRefreshOkAt: member.lastRefreshOkAt?.toISOString() ?? null,
+      siteName: member.siteName, siteUrl: member.siteUrl,
     },
     workspace: workspace && {
       id: workspace.id, state: workspace.state, ackBy: roleIn(role, ADMIN_ROLES) ? workspace.workspaceAckBy : null, connectedAt: workspace.connectedAt?.toISOString() ?? null,
+      siteName: workspace.siteName, siteUrl: workspace.siteUrl,
     },
     redirectUri,
     // True when the box has an https origin to call back to; otherwise clients start with
     // redirectMode "loopback" and show the paste field first. The authorization server
     // decides in the end; paste is the guaranteed path.
     callbackSupported: redirectUri.startsWith("https://"),
-    apiToken: !!apiToken,
   };
 }
 
@@ -733,7 +797,10 @@ export async function disconnectMcpOAuth(
   }
   await prisma.mcpOAuthConnection.update({
     where: { id },
-    data: { state: "DISCONNECTED", tokensEnc: null, tokenExpiresAt: null, connectedAt: null, lastError: null },
+    data: {
+      state: "DISCONNECTED", tokensEnc: null, tokenExpiresAt: null, connectedAt: null, lastError: null,
+      siteId: null, siteUrl: null, siteName: null,
+    },
   });
   await deps?.closeSession(row.provider, row.id).catch(() => undefined);
   // If this row backed the catalog session, re-pick it (or detach). Not awaited.

@@ -35,11 +35,12 @@ const DISC = {
   issParameterSupported: false,
 };
 const TOKENS = { accessToken: "ACCESS-SECRET", refreshToken: "REFRESH-SECRET", expiresIn: 3600, scope: "read:me" };
+const SITE = { id: "00000000-0000-4000-8000-00000000aaaa", url: "https://acme.atlassian.net", name: "Acme" };
 
 type Egress = Awaited<ReturnType<McpOAuthDependencies["egress"]>>;
 const ALLOWED: Egress = { allowed: true, row: null };
 
-function setup(over: { discover?: any; disc?: Partial<typeof DISC>; egress?: Egress } = {}) {
+function setup(over: { discover?: any; disc?: Partial<typeof DISC> & { revocationEndpoint?: string }; egress?: Egress } = {}) {
   const db = fakeMcpOAuthDb();
   const oauth = {
     discover: vi.fn((over.discover ?? (async (_url: string) => ({ ...DISC, ...over.disc }))) as (url: string) => Promise<any>),
@@ -47,6 +48,7 @@ function setup(over: { discover?: any; disc?: Partial<typeof DISC>; egress?: Egr
     exchange: vi.fn(async (_input: unknown): Promise<{ accessToken: string; refreshToken?: string; expiresIn?: number; scope?: string }> => ({ ...TOKENS })),
     refresh: vi.fn(async (_input: unknown): Promise<{ accessToken: string }> => ({ accessToken: "x" })),
     revoke: vi.fn(async (_input: unknown): Promise<void> => {}),
+    sites: vi.fn(async (_accessToken: string): Promise<{ id: string; url: string; name: string }[]> => [{ ...SITE }]),
   };
   let now = new Date("2026-10-09T12:00:00Z");
   // The egress verdict is switchable mid-test: `gate.current = { allowed: false, ... }`.
@@ -161,6 +163,69 @@ describe("completeMcpSignIn", () => {
     expect(row.tokensEnc).toMatch(/^dcv1:/);
     expect(row.tokensEnc).not.toContain("ACCESS-SECRET");
     expect(openTokens(row)).toMatchObject({ accessToken: "ACCESS-SECRET", refreshToken: "REFRESH-SECRET", resource: MCP_URL, mcpUrl: MCP_URL });
+  });
+
+  describe("the site comes from the token (WARP-3961)", () => {
+    const SITE_B = { id: "00000000-0000-4000-8000-00000000bbbb", url: "https://beta.atlassian.net", name: "Beta" };
+    const SITE_C = { id: "00000000-0000-4000-8000-00000000cccc", url: "https://gamma.atlassian.net", name: "Gamma" };
+
+    it("one site: asks with the fresh access token, stores and pins it", async () => {
+      const s = setup();
+      const r = await s.begin();
+      expect((await s.complete(r.state)).outcome).toBe("connected");
+      expect(s.oauth.sites).toHaveBeenCalledWith("ACCESS-SECRET");
+      expect(s.db.rows[0]).toMatchObject({
+        state: "CONNECTED", siteId: SITE.id, siteUrl: SITE.url, siteName: SITE.name, sites: [SITE],
+      });
+    });
+
+    it("several sites: pins the first, keeps all of them, and warns", async () => {
+      const s = setup();
+      s.oauth.sites.mockResolvedValueOnce([SITE, SITE_B, SITE_C]);
+      const r = await s.begin();
+      expect((await s.complete(r.state)).outcome).toBe("connected");
+      expect(s.db.rows[0]).toMatchObject({ state: "CONNECTED", siteId: SITE.id, siteName: SITE.name });
+      expect(s.db.rows[0].sites).toEqual([SITE, SITE_B, SITE_C]);
+      expect(JSON.stringify(logged)).toContain("mcp_oauth_multiple_sites_pinned_first");
+    });
+
+    it("zero sites: the sign-in fails, no tokens are stored, the grant is revoked and the row ends in ERROR", async () => {
+      const s = setup({ disc: { revocationEndpoint: "https://auth.example/oauth/revoke" } });
+      s.oauth.sites.mockResolvedValueOnce([]);
+      const r = await s.begin();
+      expect((await s.complete(r.state)).outcome).toBe("failed");
+      expect(s.db.rows[0]).toMatchObject({ state: "ERROR", lastError: "no_site", tokensEnc: null, siteId: null });
+      expect(s.oauth.revoke).toHaveBeenCalledTimes(1);
+      expect(s.oauth.revoke.mock.calls[0]![0]).toMatchObject({ revocationEndpoint: "https://auth.example/oauth/revoke", token: "REFRESH-SECRET" });
+    });
+
+    it("zero sites on a re-consent keeps the working sign-in (tokens and site) and records the error", async () => {
+      const s = setup();
+      const first = await s.begin();
+      await s.complete(first.state);
+      s.oauth.sites.mockResolvedValueOnce([]);
+      const again = await s.begin();
+      expect((await s.complete(again.state)).outcome).toBe("failed");
+      expect(s.db.rows[0]).toMatchObject({ state: "CONNECTED", lastError: "no_site", siteId: SITE.id });
+      expect(openTokens(s.db.rows[0]).accessToken).toBe("ACCESS-SECRET");
+    });
+
+    it("a failed site lookup fails the sign-in, restores the prior state and stores nothing", async () => {
+      const s = setup();
+      s.oauth.sites.mockRejectedValueOnce(new Error("SITES-LEAK"));
+      const r = await s.begin();
+      expect((await s.complete(r.state)).outcome).toBe("failed");
+      expect(s.db.rows[0]).toMatchObject({ state: "DISCONNECTED", lastError: "site_lookup_failed", tokensEnc: null, siteId: null });
+      expect(JSON.stringify(logged)).not.toContain("SITES-LEAK");
+    });
+
+    it("disconnect clears the pinned site", async () => {
+      const s = setup();
+      const r = await s.begin();
+      await s.complete(r.state);
+      await disconnectMcpOAuth(s.db.prisma, s.db.rows[0].id, { id: "u1", role: "family" });
+      expect(s.db.rows[0]).toMatchObject({ state: "DISCONNECTED", siteId: null, siteUrl: null, siteName: null });
+    });
   });
 
   it("stores a scope the server granted beyond the request as granted, and never asks for more", async () => {

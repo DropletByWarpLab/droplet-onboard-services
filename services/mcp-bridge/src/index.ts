@@ -75,6 +75,7 @@ export {
   AtlassianStructuredContentUnavailableError,
   assertStructuredContentPresent,
   createAtlassianMcpSession,
+  discoverAtlassianSites,
   withAtlassianCloudId,
   withAtlassianGuards,
   withAtlassianStructuredContentGuard,

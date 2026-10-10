@@ -23,7 +23,7 @@ vi.mock("../src/pinned-fetch.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../src/pinned-fetch.js")>()),
   guardedFetch: (url: string | URL, init?: RequestInit) => globalThis.fetch(url, init),
 }));
-import { ATLASSIAN_MCP_PROTOCOL_VERSION, ATLASSIAN_MCP_URL } from "../src/atlassian.js";
+import { ATLASSIAN_MCP_OAUTH_URL, ATLASSIAN_MCP_PROTOCOL_VERSION } from "../src/atlassian.js";
 import { RemoteMcpSession, type RemoteMcpConnection } from "../src/remote-session.js";
 import { handleBridgeRequest, BridgeSessionStore } from "../src/http-api.js";
 import {
@@ -233,7 +233,7 @@ describe("the PRODUCTION factory hands the baseline to the session", () => {
    */
   function stubVendorServing(names: string[]): void {
     const impl = async (url: unknown, init: unknown): Promise<Response> => {
-      if (String(url) !== ATLASSIAN_MCP_URL) {
+      if (String(url) !== ATLASSIAN_MCP_OAUTH_URL) {
         throw new Error(`the stub was asked for an unexpected URL: ${String(url)}`);
       }
       const raw = (init as { body?: string }).body;
@@ -273,8 +273,7 @@ describe("the PRODUCTION factory hands the baseline to the session", () => {
     stubVendorServing(["getJiraIssue", "deleteJiraIssue"]);
     const factory = createAtlassianSessionFactory();
     const s = factory({
-      email: "ops@vendor.example",
-      apiToken: "ATATT-FAKE-000000000000",
+      accessToken: "FAKE-ACCESS-000000000000",
       cloudId: "00000000-0000-4000-8000-000000000000",
       knownTools: ["getJiraIssue", "getConfluencePage"],
     });
@@ -297,8 +296,7 @@ describe("the PRODUCTION factory hands the baseline to the session", () => {
   it("and stays ready when the shipped factory is handed the surface it then sees", async () => {
     stubVendorServing(["getJiraIssue", "getConfluencePage"]);
     const s = createAtlassianSessionFactory()({
-      email: "ops@vendor.example",
-      apiToken: "ATATT-FAKE-000000000000",
+      accessToken: "FAKE-ACCESS-000000000000",
       cloudId: "00000000-0000-4000-8000-000000000000",
       knownTools: ["getJiraIssue", "getConfluencePage"],
     });

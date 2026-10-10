@@ -674,7 +674,13 @@ async function openSession(
   }
   // The shared credential (the profile's own `requiredFields`) never lives
   // under a member key, or a member's calls would run as the shared account.
-  if (connectionId !== undefined && chosen === opts.store.requiredFieldsOf(serverId)) {
+  // A bearer set (WARP-3961: Atlassian's only set) IS a person's sign-in, so
+  // it may carry a connectionId.
+  if (
+    connectionId !== undefined &&
+    !chosen.includes("accessToken") &&
+    chosen === opts.store.requiredFieldsOf(serverId)
+  ) {
     return err(400, "INVALID_REQUEST", "connectionId is not allowed with this credential.");
   }
   // A bearer is only ever presented to the profile's own OAuth endpoint.

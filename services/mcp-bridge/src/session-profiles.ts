@@ -87,9 +87,8 @@ export type SessionFactory = (input: OpenSessionInput) => RemoteMcpSession;
 export interface SessionProfile {
   readonly requiredFields: readonly string[];
   /**
-   * WARP-2409 — alternative field sets the open body may carry (API token, or a
-   * member's OAuth bearer). Absent means `[requiredFields]`. `requiredFields`
-   * stays the API-token set so the orchestrator's descriptor gate is unchanged.
+   * Alternative field sets the open body may carry. Absent means
+   * `[requiredFields]`.
    */
   readonly requiredFieldSets?: readonly (readonly string[])[];
   readonly factory: SessionFactory;
@@ -164,21 +163,12 @@ export function createAtlassianSessionFactory(
 ): SessionFactory {
   return (input: OpenSessionInput) => {
     const scheduler = makeScheduler();
-    // WARP-2409 — a member's OAuth bearer dials the OAuth endpoint; the route
-    // has already refused a body that mixes it with the API-token fields.
-    const bearer = typeof input.accessToken === "string" && input.accessToken.length > 0;
+    // WARP-3961 — a member's OAuth bearer is the only credential; it dials the
+    // OAuth endpoint, and the cloudId is the site the sign-in was pinned to.
     return createAtlassianMcpSession({
-      ...(bearer
-        ? {
-            credential: bearerCredential(requireField(input, "accessToken")),
-            // Forced: a bearer is never presented anywhere but the OAuth endpoint.
-            url: ATLASSIAN_MCP_OAUTH_URL,
-          }
-        : {
-            email: requireField(input, "email"),
-            apiToken: requireField(input, "apiToken"),
-            ...(input.url !== undefined ? { url: input.url } : {}),
-          }),
+      credential: bearerCredential(requireField(input, "accessToken")),
+      // Forced: a bearer is never presented anywhere but the OAuth endpoint.
+      url: ATLASSIAN_MCP_OAUTH_URL,
       cloudId: requireField(input, "cloudId"),
       scheduler,
       connect: (connectInput) =>

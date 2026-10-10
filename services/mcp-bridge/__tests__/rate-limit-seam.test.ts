@@ -41,6 +41,7 @@ vi.mock("../src/pinned-fetch.js", async (importOriginal) => ({
 import { StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import {
   ATLASSIAN_MCP_CLIENT_INFO,
+  ATLASSIAN_MCP_OAUTH_URL,
   ATLASSIAN_MCP_PROTOCOL_VERSION,
   ATLASSIAN_MCP_URL,
 } from "../src/atlassian.js";
@@ -48,7 +49,6 @@ import { RemoteCallScheduler } from "../src/call-scheduler.js";
 import { createAtlassianSessionFactory } from "../src/session-profiles.js";
 import { createStreamableHttpConnection } from "../src/streamable-http.js";
 
-const FAKE_EMAIL = "ops@vendor.example";
 const FAKE_TOKEN = "ATATT-FAKE-000000000000";
 const FAKE_CLOUD_ID = "00000000-0000-4000-8000-000000000000";
 const CONNECT_INPUT = {
@@ -72,7 +72,7 @@ function stubTransport(toolCallResponse: (id: number | undefined) => Response): 
   const calls: string[] = [];
   const impl = async (url: unknown, init: unknown): Promise<Response> => {
     const target = String(url);
-    if (target !== ATLASSIAN_MCP_URL) {
+    if (target !== ATLASSIAN_MCP_URL && target !== ATLASSIAN_MCP_OAUTH_URL) {
       throw new Error(`the stub was asked for an unexpected URL: ${target}`);
     }
     const raw = (init as { body?: string }).body;
@@ -255,8 +255,7 @@ describe("the PRODUCTION factory wires it, not just this test (WARP-2300)", () =
     // client info, the protocol pin, the guard stack — is production.
     const factory = createAtlassianSessionFactory(() => scheduler);
     const session = factory({
-      email: FAKE_EMAIL,
-      apiToken: FAKE_TOKEN,
+      accessToken: FAKE_TOKEN,
       cloudId: FAKE_CLOUD_ID,
     });
     expect((await session.connect()).state).toBe("ready");

@@ -25,7 +25,7 @@ import { McpSignInCard, WORKSPACE_ACK_TEXT } from "./McpSignInCard";
 
 const view = (over: Record<string, unknown> = {}) => ({
   provider: "atlassian", member: null, workspace: null,
-  redirectUri: "https://droplet.example/api/mcp/oauth/callback", callbackSupported: true, apiToken: false, ...over,
+  redirectUri: "https://droplet.example/api/mcp/oauth/callback", callbackSupported: true, ...over,
 });
 
 beforeEach(() => {
@@ -48,6 +48,12 @@ describe("McpSignInCard", () => {
     const { container } = render(<McpSignInCard provider="atlassian" displayName="Atlassian" />);
     await waitFor(() => expect(api.fetchMcpOAuthConnections).toHaveBeenCalled());
     expect(container).toBeEmptyDOMElement();
+  });
+
+  it("names the site the sign-in is pinned to", async () => {
+    api.fetchMcpOAuthConnections.mockResolvedValue([view({ member: { id: "m1", state: "CONNECTED", siteName: "Acme" } })]);
+    render(<McpSignInCard provider="atlassian" displayName="Atlassian" />);
+    expect(await screen.findByText("Signed in to Acme · refreshes automatically")).toBeInTheDocument();
   });
 
   it("shows the three statuses", async () => {

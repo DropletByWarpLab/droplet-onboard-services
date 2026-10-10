@@ -8,7 +8,14 @@
  * and not `kind: dynamic` — the host really is a repo literal the static
  * scanner can see, and this file is the literal it sees.
  *
- * ## The headless path, and why it exists at all
+ * ## WARP-3961: the headless (Basic / API-token) path is REMOVED
+ *
+ * Everything below about `Authorization: Basic` is history. A session is now
+ * opened only with a member's OAuth bearer and the `cloudId` the sign-in was
+ * pinned to (`discoverAtlassianSites` learns it right after the code exchange).
+ * `basicCredential` stays in `credentials.ts` as a generic scheme only.
+ *
+ * ## The headless path, and why it existed
  *
  * `https://mcp.atlassian.com/v1/mcp` accepts `Authorization: Basic
  * base64(email:api_token)` and answers a full `initialize`. That is the entire
@@ -46,7 +53,9 @@
  * and never appears in an error message — {@link AtlassianStructuredContentUnavailableError}
  * and friends carry a tool name and nothing from the request.
  */
-import { basicCredential, type RemoteMcpCredential } from "./credentials.js";
+import type { RemoteMcpCredential } from "./credentials.js";
+import { createStreamableHttpConnection } from "./streamable-http.js";
+import type { GuardDeps } from "./pinned-fetch.js";
 import { pinTransportProtocolVersion } from "./protocol-pin.js";
 import {
   RemoteMcpSession,
@@ -142,38 +151,32 @@ export const ATLASSIAN_MCP_CLIENT_INFO = {
 export const ATLASSIAN_SERVER_ID = "atlassian";
 
 /**
- * WARP-3703 — the flat JSON fields `POST /sessions/atlassian/open` must carry
- * before {@link createAtlassianMcpSession} is built: the three it has always
- * read, and the ones the provider descriptor's required `credentialFields`
- * declare under the same names (`adr-043-boundary.test.ts` gates the pair).
+ * WARP-3961 — the flat JSON fields `POST /sessions/atlassian/open` must carry:
+ * a member's OAuth bearer plus the site the sign-in was pinned to. The Basic /
+ * API-token field set is gone: Atlassian is signed in to, never pasted.
  *
- * In the order the route's 400 has always named a missing one, which is why it
- * is not alphabetical. Frozen, because this array IS the contract: an element
- * edited at runtime would change what the route accepts for a customer's
- * credential.
+ * Frozen, because this array IS the contract: an element edited at runtime
+ * would change what the route accepts for a customer's credential.
  */
 export const ATLASSIAN_REQUIRED_FIELDS: readonly string[] = Object.freeze([
-  "email",
-  "apiToken",
+  "accessToken",
   "cloudId",
 ]);
 
-/** WARP-2409 — the accepted open bodies: the API-token set, or a member's
- *  bearer plus the site. Exactly one set; fields of the other are refused. */
+/** The accepted open bodies: exactly one set (kept as a list because the
+ *  profile contract is a list of alternatives). */
 export const ATLASSIAN_REQUIRED_FIELD_SETS: readonly (readonly string[])[] = Object.freeze([
   ATLASSIAN_REQUIRED_FIELDS,
-  Object.freeze(["accessToken", "cloudId"]),
 ]);
 
 /**
  * The argument every Atlassian tool call carries.
  *
- * The API token is NOT bound to a site: one token reaches every site the
- * account can see, and the server picks the site from `cloudId`. That makes
- * the site an argument, and an argument the MODEL must not be able to choose —
- * so it is forced last in {@link withAtlassianCloudId}, overwriting anything
- * the model supplied. A model that could set `cloudId` could read a different
- * Atlassian site than the one the operator connected.
+ * A token can reach more than one site, and the server picks the site from
+ * `cloudId`. That makes the site an argument, and an argument the MODEL must
+ * not be able to choose — so it is forced last in {@link withAtlassianCloudId},
+ * overwriting anything the model supplied. A model that could set `cloudId`
+ * could read a different Atlassian site than the one the sign-in was pinned to.
  */
 export const ATLASSIAN_CLOUD_ID_ARG = "cloudId";
 
@@ -218,15 +221,10 @@ export const ATLASSIAN_STRUCTURED_CONTENT_TOOLS: ReadonlySet<string> = new Set([
 ]);
 
 export interface AtlassianMcpSessionOptions {
-  /** The Atlassian account the customer minted the token on. With
-   *  {@link apiToken}, the default Basic credential. */
-  email?: string;
-  /** The customer's API token. Reaches {@link basicCredential} only. */
-  apiToken?: string;
-  /** WARP-2409 — a ready credential (a member's OAuth bearer), used instead of
-   *  email + apiToken. The default stays Basic. */
-  credential?: RemoteMcpCredential;
-  /** The site the operator connected. Forced onto every call. */
+  /** A ready credential: a member's OAuth bearer (WARP-3961 — the API-token /
+   *  Basic path is gone). */
+  credential: RemoteMcpCredential;
+  /** The site the sign-in was pinned to. Forced onto every call. */
   cloudId: string;
   /** The transport factory. Injected in every test; production supplies
    *  {@link createStreamableHttpConnection}. */
@@ -247,14 +245,6 @@ export interface AtlassianMcpSessionOptions {
   knownToolNames?: readonly string[];
 }
 
-function credentialOf(opts: AtlassianMcpSessionOptions): RemoteMcpCredential {
-  if (opts.credential) return opts.credential;
-  if (opts.email === undefined || opts.apiToken === undefined) {
-    throw new Error("an Atlassian session needs a credential, or an email and an API token");
-  }
-  return basicCredential(opts.email, opts.apiToken);
-}
-
 /**
  * Build the Atlassian session.
  *
@@ -271,7 +261,7 @@ export function createAtlassianMcpSession(
   return new RemoteMcpSession({
     serverId: ATLASSIAN_SERVER_ID,
     url,
-    credential: credentialOf(opts),
+    credential: opts.credential,
     connect: withAtlassianGuards(opts.connect, opts.cloudId, scheduler),
     ...(opts.maxReconnectAttempts !== undefined
       ? { maxReconnectAttempts: opts.maxReconnectAttempts }
@@ -453,6 +443,111 @@ function rateLimitHeadersOf(err: unknown): Record<string, string> | null {
     const hit = entries.find(([k]) => k.toLowerCase() === name);
     return typeof hit?.[1] === "string" ? hit[1] : undefined;
   });
+}
+
+/** WARP-3961 — one Atlassian site a sign-in reaches. */
+export interface AtlassianSite {
+  readonly id: string;
+  readonly url: string;
+  readonly name: string;
+}
+
+/** `getAccessibleAtlassianResources` could not be read: the call failed, timed
+ *  out, or answered something that is not a list of sites. */
+export class AtlassianSitesUnavailableError extends Error {
+  readonly code = "SITES_UNAVAILABLE";
+  constructor(message = "Atlassian did not list the sites this sign-in reaches.") {
+    super(message);
+    this.name = "AtlassianSitesUnavailableError";
+  }
+}
+
+const SITES_TIMEOUT_MS = 10_000;
+const MAX_SITES = 20;
+
+function siteOf(raw: unknown): AtlassianSite | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const { id, url, name } = raw as Record<string, unknown>;
+  if (typeof id !== "string" || id.length === 0 || id.length > 128) return null;
+  if (typeof url !== "string" || url.length > 512 || !url.startsWith("https://")) return null;
+  const label = typeof name === "string" && name.length > 0 ? name.slice(0, 200) : url;
+  return { id, url, name: label };
+}
+
+/** The list inside a `getAccessibleAtlassianResources` result: a bare array, or
+ *  an object wrapping it (MCP `structuredContent` must be an object). */
+function sitesPayload(outcome: RemoteToolCallOutcome): unknown {
+  let value: unknown = outcome.structuredContent;
+  if (value === undefined || value === null) {
+    const text = outcome.content.find((c) => c.type === "text" && typeof c.text === "string")?.text;
+    if (text === undefined) return undefined;
+    try {
+      value = JSON.parse(text);
+    } catch {
+      return undefined;
+    }
+  }
+  if (Array.isArray(value)) return value;
+  if (typeof value === "object" && value !== null) {
+    const o = value as Record<string, unknown>;
+    return o.resources ?? o.sites ?? o.result;
+  }
+  return undefined;
+}
+
+/**
+ * WARP-3961 — which Atlassian sites this bearer reaches.
+ *
+ * Opens a short session on the OAuth endpoint WITHOUT the cloudId guard (the
+ * point is to learn the cloudId), calls `getAccessibleAtlassianResources`
+ * once, and always closes. Bounded at 10 s. Dials only `mcp.atlassian.com`,
+ * through the same guarded transport as every other session — no
+ * `api.atlassian.com`. The token is the `Authorization` header and nothing
+ * else; it is never logged or echoed (rule 19).
+ */
+export async function discoverAtlassianSites(
+  accessToken: string,
+  opts: { connect?: RemoteMcpConnectionFactory; guard?: GuardDeps; timeoutMs?: number } = {},
+): Promise<AtlassianSite[]> {
+  const connect: RemoteMcpConnectionFactory =
+    opts.connect ??
+    ((input) =>
+      createStreamableHttpConnection(input, {
+        clientInfo: ATLASSIAN_MCP_CLIENT_INFO,
+        pinnedProtocolVersion: ATLASSIAN_MCP_PROTOCOL_VERSION,
+        ...(opts.guard ? { guard: opts.guard } : {}),
+      }));
+  const url = assertSafeMcpUrl(ATLASSIAN_MCP_OAUTH_URL, ATLASSIAN_ALLOWED_MCP_HOSTS);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new AtlassianSitesUnavailableError("Atlassian took too long to list sites.")), opts.timeoutMs ?? SITES_TIMEOUT_MS);
+  });
+  // A connection that finishes after the deadline must still be closed.
+  const dial = connect({
+    serverId: ATLASSIAN_SERVER_ID,
+    url,
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  try {
+    const outcome = await Promise.race([
+      dial.then((c) => c.callTool("getAccessibleAtlassianResources", {})),
+      deadline,
+    ]);
+    if (outcome.isError) throw new AtlassianSitesUnavailableError();
+    const list = sitesPayload(outcome);
+    if (!Array.isArray(list)) throw new AtlassianSitesUnavailableError();
+    return list
+      .slice(0, MAX_SITES)
+      .map(siteOf)
+      .filter((s): s is AtlassianSite => s !== null);
+  } catch (e) {
+    if (e instanceof AtlassianSitesUnavailableError) throw e;
+    throw new AtlassianSitesUnavailableError();
+  } finally {
+    if (timer) clearTimeout(timer);
+    // If the dial lost the race it may still resolve: close it when it does.
+    void dial.then((c) => c.close()).catch(() => undefined);
+  }
 }
 
 /** Re-exported so a caller wiring the real transport does not have to know

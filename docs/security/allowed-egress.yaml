@@ -1049,9 +1049,12 @@ entries:
       registered because the bridge now dials it: protected-resource and
       authorization-server discovery, dynamic client registration, the
       authorization-code exchange, refresh and revocation for a member's
-      Atlassian sign-in against the OAuth 2.1 endpoint (/v1/mcp/authv2). The
-      customer-created API token (Basic against mcp.atlassian.com) stays the
-      other credential path. Every one of those hops goes through the bridge's
+      Atlassian sign-in against the OAuth 2.1 endpoint (/v1/mcp/authv2). Since
+      WARP-3961 that sign-in is the ONLY credential path (the Basic API-token
+      path is removed). Right after the code exchange the bridge also opens a
+      short bearer session on the same endpoint and calls the read-only tool
+      getAccessibleAtlassianResources once, to learn which site the token
+      reaches (no new host). Every one of those hops goes through the bridge's
       pinned fetch (https, 443, public addresses only, no redirects) and is
       held to the exact-host set ATLASSIAN_ALLOWED_OAUTH_HOSTS in atlassian.ts,
       so a metadata document naming any other authorization, token, registration
@@ -1069,16 +1072,15 @@ entries:
       apps/orchestrator/src/services/atlassian-tool-policy.ts), and only its 26
       read rows are allowed — writes are blocked by ADR-043 §3 and
       updateConfluencePage is excluded outright (upstream #210/#217/#60,
-      whole-body replacement). Always reachable once a member has signed in or
-      an admin has stored a credential (the customer's own org admin must have
-      enabled Rovo MCP for the account); nothing is dialled before that, and an
-      owner or admin can turn the server off or a member can Disconnect.
-      Two credential paths, both the customer's and revocable by them: a
-      member's web sign-in (OAuth 2.1 with PKCE; short-lived access tokens plus
-      a refresh token the box rotates and can revoke), and the customer-created
-      API token (Basic), still accepted, which expires within 365 days
-      (surfaced as an explicit status, never as a green CONNECTED inside 30
-      days).
+      whole-body replacement). Always reachable once a member has signed in
+      (the customer's own org admin must have enabled Rovo MCP for the
+      account); nothing is dialled before that, and an owner or admin can turn
+      the server off or a member can Disconnect.
+      One credential path, the customer's and revocable by them: a member's web
+      sign-in (OAuth 2.1 with PKCE; short-lived access tokens plus a refresh
+      token the box rotates and can revoke). The site the sign-in is pinned to
+      is read from the token (WARP-3961), stored on the sign-in, and added to
+      every call by the bridge after the model has spoken.
     ticket: WARP-2316
     added: 2026-09-02
     review_by: 2027-09-02

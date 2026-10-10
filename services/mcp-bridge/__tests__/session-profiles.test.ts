@@ -28,7 +28,6 @@ import {
   type SessionFactory,
 } from "../src/session-profiles.js";
 
-const FAKE_EMAIL = "ops@vendor.example";
 const FAKE_API_TOKEN = "ATATT-FAKE-000000000000";
 const FAKE_CLOUD_ID = "00000000-0000-4000-8000-000000000000";
 
@@ -92,9 +91,9 @@ describe("every registered profile declares a usable contract (TC-1.1)", () => {
   });
 });
 
-describe("Atlassian's contract is byte-for-byte the one it always had (TC-1.1)", () => {
-  it("is email, apiToken, cloudId — in the order its 400 has always named them", () => {
-    expect(ATLASSIAN_REQUIRED_FIELDS).toEqual(["email", "apiToken", "cloudId"]);
+describe("Atlassian's contract is a sign-in: a bearer and the pinned site (WARP-3961)", () => {
+  it("is accessToken, cloudId — and no email / apiToken field exists any more", () => {
+    expect(ATLASSIAN_REQUIRED_FIELDS).toEqual(["accessToken", "cloudId"]);
     expect(SESSION_PROFILES[ATLASSIAN_SERVER_ID]?.requiredFields).toBe(ATLASSIAN_REQUIRED_FIELDS);
   });
 
@@ -105,8 +104,7 @@ describe("Atlassian's contract is byte-for-byte the one it always had (TC-1.1)",
     // pass validation and then break the session at construction.
     const factory = SESSION_PROFILES[ATLASSIAN_SERVER_ID]!.factory;
     const full: OpenSessionInput = {
-      email: FAKE_EMAIL,
-      apiToken: FAKE_API_TOKEN,
+      accessToken: FAKE_API_TOKEN,
       cloudId: FAKE_CLOUD_ID,
     };
     expect(() => factory(full)).not.toThrow();

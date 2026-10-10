@@ -8,9 +8,11 @@
  * from the outside like "the model chose not to use it". These tests turn
  * both into assertions, and each carries the mutation that must make it red.
  */
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { TOOLS, TOOL_CATALOG, TOOL_ROUTES } from "@droplet/tools-core";
+import { FAKE_ACCESS, OWNER_ROW_ID, WS_ROW_ID, signedInDb } from "./__fixtures__/signed-in-db.js";
 import {
+  catalogOAuthFields,
   localToolNames,
   remoteServerIdOf,
   syncRemoteCatalog,
@@ -273,5 +275,69 @@ describe("WARP-2420 landmine 2 — a duplicate name never shadows a local tool",
     expect(mux.remoteCatalog("vendor")).toEqual([]);
     expect(syncRemoteCatalog(mux, "vendor", { serverDomain: "data", registry })
       .registered).toEqual([]);
+  });
+});
+
+vi.mock("./activity.singleton.js", () => ({ recordActivity: vi.fn(async () => null), getActivitySigner: () => null }));
+
+describe("WARP-3961 - the catalog session's sign-in and the site it is pinned to", () => {
+  const SITE_A = "aaaaaaaa-0000-4000-8000-00000000000a";
+  const SITE_B = "bbbbbbbb-0000-4000-8000-00000000000b";
+
+  async function deps(seeds: Parameters<typeof signedInDb>[0]) {
+    const world = await signedInDb(seeds);
+    // The admin-owned connection row must not be consulted for the site any more.
+    const integrationRead = vi.fn(async () => ({ id: "c", status: "CONNECTED", providerTokensEnc: null, providerConfig: { cloudId: "TYPED-BY-AN-ADMIN" } }));
+    world.prisma.integrationConnection = { findFirst: integrationRead };
+    return { deps: { serverId: "atlassian", prisma: world.prisma }, integrationRead, world };
+  }
+
+  it("opens with the CHOSEN sign-in row's own siteId, never an id read from the connection row", async () => {
+    const { deps: d, integrationRead } = await deps([{ scope: "WORKSPACE", siteId: SITE_A }]);
+    expect(await catalogOAuthFields(d)).toMatchObject({
+      kind: "workspace",
+      rowId: WS_ROW_ID,
+      fields: { accessToken: FAKE_ACCESS, cloudId: SITE_A },
+    });
+    expect(integrationRead).not.toHaveBeenCalled();
+  });
+
+  it("skips a CONNECTED sign-in with no pinned site, and falls to the next candidate", async () => {
+    const onlyOne = await deps([{ scope: "WORKSPACE", siteId: null }]);
+    expect(await catalogOAuthFields(onlyOne.deps)).toBeNull();
+
+    const both = await deps([
+      { scope: "WORKSPACE", siteId: null },
+      { scope: "MEMBER", memberId: "adm-1", role: "admin", siteId: SITE_B },
+    ]);
+    expect(await catalogOAuthFields(both.deps)).toMatchObject({
+      kind: "member",
+      rowId: OWNER_ROW_ID,
+      fields: { cloudId: SITE_B },
+    });
+  });
+
+  it("prefers the Workspace connection over an owner's personal sign-in, each with its own site", async () => {
+    const { deps: d } = await deps([
+      { scope: "MEMBER", memberId: "owner-1", role: "owner", siteId: SITE_B },
+      { scope: "WORKSPACE", siteId: SITE_A },
+    ]);
+    expect(await catalogOAuthFields(d)).toMatchObject({ kind: "workspace", fields: { cloudId: SITE_A } });
+  });
+
+  it("never picks a regular member's sign-in, and stops picking one who has been demoted", async () => {
+    const family = await deps([{ scope: "MEMBER", memberId: "fam-1", role: "family" }]);
+    expect(await catalogOAuthFields(family.deps)).toBeNull();
+
+    const admin = await deps([{ scope: "MEMBER", memberId: "adm-1", role: "admin" }]);
+    expect(await catalogOAuthFields(admin.deps)).toMatchObject({ kind: "member" });
+    // Demoted to family (the role is joined at attach time): no longer used.
+    admin.world.db.setUser({ id: "adm-1", role: "family" });
+    expect(await catalogOAuthFields(admin.deps)).toBeNull();
+  });
+
+  it("ignores a sign-in that is not CONNECTED", async () => {
+    const { deps: d } = await deps([{ scope: "WORKSPACE", state: "NEEDS_RECONNECT" }]);
+    expect(await catalogOAuthFields(d)).toBeNull();
   });
 });

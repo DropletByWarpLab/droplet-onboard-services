@@ -33,7 +33,6 @@ describe("fetchMcpOAuthConnections", () => {
         workspace: null,
         redirectUri: "https://droplet-ai.lan/api/mcp/oauth/callback",
         callbackSupported: true,
-        apiToken: false,
       },
     ];
     authFetchMock.mockResolvedValue(res(200, { providers }));

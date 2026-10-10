@@ -81,7 +81,8 @@ import {
   type RemoteToolClassificationRow,
 } from "./remote-tool-classification.service.js";
 import { runtimeToolRegistry } from "./runtime-tool-registry.service.js";
-import { sealSaasCredentials } from "./saas-credential.service.js";
+import { sealTokens } from "./mcp-oauth/mcp-oauth.service.js";
+import { fakeMcpOAuthDb } from "./mcp-oauth/__tests__/fake-db.js";
 
 const BRIDGE_URL = "http://mcp-bridge.test:9096";
 const BRIDGE_TOKEN = "bridge-token-FAKE-0000000000000000";
@@ -90,12 +91,12 @@ const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 const ATLASSIAN = "atlassian";
 const FIXTURE = "fixture-bearer";
 const OFF = "fixture-off";
-const ATLASSIAN_ROW_ID = "conn_atlassian_0000000001";
-const FIXTURE_ROW_ID = "conn_fixture_0000000001";
+const ATLASSIAN_ROW_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const FIXTURE_ROW_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const ATLASSIAN_TOKEN = "ATATT-FAKE-000000000000";
 const FIXTURE_TOKEN = "FIXTURE-FAKE-TOKEN-000000";
-const FAKE_EMAIL = "ops@vendor.example";
 const FAKE_CLOUD_ID = "00000000-0000-4000-8000-000000000000";
+const FIXTURE_SITE = "11111111-1111-4111-8111-111111111111";
 
 const ATLASSIAN_TOOLS: McpToolDescriptor[] = [
   { name: "getJiraIssue", description: "Read one Jira issue", inputSchema: { type: "object" } },
@@ -111,8 +112,7 @@ const FIXTURE_TOOLS_DRIFTED: McpToolDescriptor[] = [
   { name: "delete_thing", description: "New and unclassified", inputSchema: { type: "object" } },
 ];
 
-/** A bearer-only vendor, as a descriptor: ONE required secret, in the sealed
- *  bundle, and nothing in `providerConfig`. */
+/** A sign-in-only vendor, as a descriptor: no credential fields (WARP-3961). */
 function fixtureDescriptor(id: string): McpProviderDescriptor {
   return {
     id,
@@ -122,16 +122,8 @@ function fixtureDescriptor(id: string): McpProviderDescriptor {
     mcpServerId: id,
     description: "Test-only.",
     setupGuideHref: `/help/connectors/${id}`,
-    credentialFields: [
-      {
-        name: "apiToken",
-        label: "Fixture API token",
-        type: "string",
-        required: true,
-        secret: true,
-        storage: "encrypted",
-      },
-    ],
+    credentialFields: [],
+    signIn: { kind: "oauth", pinsSite: true, mcpUrl: "https://mcp.fixture.invalid/mcp", scopes: ["read"] },
     egressHosts: ["mcp.fixture.invalid"],
     datasets: [],
   };
@@ -282,13 +274,44 @@ function fixtureBridge() {
 // Postgres — the two reads the wiring makes, and the classification record
 // ---------------------------------------------------------------------------
 
-function fixturePrisma(rows: Record<string, RemoteMcpConnectionRow | null>) {
+/** One CONNECTED Workspace sign-in per provider (WARP-3961: the only credential), pinned to `siteId`. */
+async function seedSignIn(
+  fdb: ReturnType<typeof fakeMcpOAuthDb>,
+  provider: string,
+  id: string,
+  token: string,
+  siteId: string,
+): Promise<void> {
+  const expiry = new Date("2100-01-01T00:00:00Z");
+  await fdb.seed({
+    id, provider, scope: "WORKSPACE", memberId: null, state: "CONNECTED", issuer: "https://auth.example/iss",
+    tokenEndpointHost: "auth.example", clientId: "c", tokenExpiresAt: expiry, siteId,
+    workspaceAckAt: new Date(), workspaceAckBy: "boss",
+    tokensEnc: sealTokens({ id, scope: "WORKSPACE", memberId: null }, {
+      accessToken: token, refreshToken: "r", expiresAt: expiry.toISOString(), scope: "s",
+      tokenEndpoint: "https://auth.example/token", resource: "res", mcpUrl: "res",
+    }),
+  });
+}
+
+async function fixturePrisma(rows: Record<string, RemoteMcpConnectionRow | null>) {
   const record = new Map<string, RemoteToolClassificationRow>();
   const keyOf = (w: { serverId_toolName: { serverId: string; toolName: string } }) =>
     `${w.serverId_toolName.serverId} ${w.serverId_toolName.toolName}`;
+  const fdb = fakeMcpOAuthDb();
+  await seedSignIn(fdb, ATLASSIAN, ATLASSIAN_ROW_ID, ATLASSIAN_TOKEN, FAKE_CLOUD_ID);
+  await seedSignIn(fdb, FIXTURE, FIXTURE_ROW_ID, FIXTURE_TOKEN, FIXTURE_SITE);
+  const signIns = fdb.prisma.mcpOAuthConnection;
   const prisma = {
+    // The admin-owned row: only its status matters (DISABLED = the per-server off).
     integrationConnection: {
       findFirst: vi.fn(async (args: { where: { provider: string } }) => rows[args.where.provider] ?? null),
+    },
+    // No `user` on purpose: the base session is the upstream, not the per-member routing port.
+    mcpOAuthConnection: {
+      count: vi.fn(async (a: never) => signIns.count(a)),
+      findFirst: vi.fn(async (a: never) => signIns.findFirst(a)),
+      findUnique: vi.fn(async (a: never) => signIns.findUnique(a)),
     },
     remoteToolClassification: {
       findUnique: vi.fn(async (args: { where: Parameters<typeof keyOf>[0] }) => record.get(keyOf(args.where)) ?? null),
@@ -313,27 +336,17 @@ function fixturePrisma(rows: Record<string, RemoteMcpConnectionRow | null>) {
   return { prisma, record };
 }
 
-function connectedRows(): Record<string, RemoteMcpConnectionRow | null> {
-  return {
-    [ATLASSIAN]: {
-      id: ATLASSIAN_ROW_ID,
-      status: "CONNECTED",
-      providerTokensEnc: sealSaasCredentials(ATLASSIAN_ROW_ID, { apiToken: ATLASSIAN_TOKEN }),
-      providerConfig: { email: FAKE_EMAIL, cloudId: FAKE_CLOUD_ID },
-    },
-    [FIXTURE]: {
-      id: FIXTURE_ROW_ID,
-      status: "CONNECTED",
-      providerTokensEnc: sealSaasCredentials(FIXTURE_ROW_ID, { apiToken: FIXTURE_TOKEN }),
-      providerConfig: null,
-    },
-  };
+/** The admin-owned rows: none, so every server is simply "not turned off". A test sets
+ *  `rows[id] = { ..., status: "DISABLED" }` for the per-server off. */
+function noIntegrationRows(): Record<string, RemoteMcpConnectionRow | null> {
+  return {};
 }
+const disabledRow = (id: string): RemoteMcpConnectionRow => ({ id: `conn_${id}`, status: "DISABLED", providerTokensEnc: null });
 
 // ---------------------------------------------------------------------------
 
 let bridge: ReturnType<typeof fixtureBridge>;
-let db: ReturnType<typeof fixturePrisma>;
+let db: Awaited<ReturnType<typeof fixturePrisma>>;
 let rows: Record<string, RemoteMcpConnectionRow | null>;
 
 async function clearProcessState(): Promise<void> {
@@ -351,8 +364,8 @@ beforeEach(async () => {
   __setColumnCryptoKeyForTest(TEST_KEY);
   bridge = fixtureBridge();
   vi.stubGlobal("fetch", bridge.fetchImpl);
-  rows = connectedRows();
-  db = fixturePrisma(rows);
+  rows = noIntegrationRows();
+  db = await fixturePrisma(rows);
   await clearProcessState();
   bridge.calls.length = 0;
   bridge.sessions.clear();
@@ -403,12 +416,11 @@ describe("the boot attach loops every registered server (TC-1.2)", () => {
       [FIXTURE, true],
     ]);
     expect(bridge.sessions.get(ATLASSIAN)?.openBody).toEqual({
-      email: FAKE_EMAIL,
-      apiToken: ATLASSIAN_TOKEN,
+      accessToken: ATLASSIAN_TOKEN,
       cloudId: FAKE_CLOUD_ID,
     });
-    // One field. No email, no site — and nothing of Atlassian's.
-    expect(bridge.sessions.get(FIXTURE)?.openBody).toEqual({ apiToken: FIXTURE_TOKEN });
+    // Each server is opened with ITS OWN sign-in's bearer and ITS OWN pinned site.
+    expect(bridge.sessions.get(FIXTURE)?.openBody).toEqual({ accessToken: FIXTURE_TOKEN, cloudId: FIXTURE_SITE });
   });
 
   it("never lets one vendor's credential reach the other's session", async () => {
@@ -471,12 +483,12 @@ describe("the boot attach loops every registered server (TC-1.2)", () => {
   });
 
   it("attempts the NEXT server when one throws, then reports the failure to the caller", async () => {
-    // The gate read succeeds and the row read that follows it does not — the
+    // The gate read succeeds and the sign-in read that follows it does not — the
     // one place a database error is not already a refusal.
-    let fixtureReads = 0;
-    db.prisma.integrationConnection.findFirst.mockImplementation(async (args) => {
-      if (args.where.provider === FIXTURE && ++fixtureReads === 2) throw new Error("db went away");
-      return rows[args.where.provider] ?? null;
+    const real = db.prisma.mcpOAuthConnection.findFirst.getMockImplementation()!;
+    db.prisma.mcpOAuthConnection.findFirst.mockImplementation(async (a: never) => {
+      if ((a as { where: { provider: string } }).where.provider === FIXTURE) throw new Error("db went away");
+      return real(a);
     });
 
     await expect(
@@ -544,7 +556,7 @@ describe("the reconciler converges each server on its own (TC-1.2)", () => {
     // The account is disconnected while this process is down; on the way back
     // up the attach refuses at the gate, so the vendor connection the bridge is
     // still holding is driven by nothing — registered, but not OWNED.
-    rows[FIXTURE] = { ...rows[FIXTURE]!, status: "DISABLED" };
+    rows[FIXTURE] = disabledRow(FIXTURE);
     await ensureRemoteMcpAttached(db.prisma, [fixtureRegistration()]);
     expect(remoteMcpLifecycle.get(FIXTURE)).toMatchObject({ state: "detached", reason: "gate_refused" });
     expect(bridge.sessions.has(FIXTURE)).toBe(true);
@@ -575,7 +587,8 @@ describe("the reconciler converges each server on its own (TC-1.2)", () => {
     const opens = bridge.calls.filter((c) => c.path.endsWith("/open"));
     expect(opens.map((c) => c.path)).toEqual([`/sessions/${FIXTURE}/open`]);
     expect(opens[0]!.body).toEqual({
-      apiToken: FIXTURE_TOKEN,
+      accessToken: FIXTURE_TOKEN,
+      cloudId: FIXTURE_SITE,
       knownTools: ["get_thing", "list_things"],
     });
     expect(bridge.callsTo(ATLASSIAN, "open")).toHaveLength(0);
@@ -685,7 +698,7 @@ describe("a disconnect tears down ONE server and leaves the other attached (TC-1
     await allowlist(ATLASSIAN, ["getJiraIssue"]);
     expect((await mcpClient.callTool("fixture-bearer__get_thing", {})).isError).toBe(false);
 
-    rows[FIXTURE] = { ...rows[FIXTURE]!, status: "DISABLED" };
+    rows[FIXTURE] = disabledRow(FIXTURE);
     bridge.calls.length = 0;
 
     const refused = await mcpClient.callTool("fixture-bearer__get_thing", {});

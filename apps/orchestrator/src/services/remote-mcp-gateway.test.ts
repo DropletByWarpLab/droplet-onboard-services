@@ -65,31 +65,42 @@ function gated(decision: RemoteMcpGateDecision, over: Partial<McpClientPort> = {
 }
 
 describe("the gate reads two EXPLICIT columns, and fails closed", () => {
-  it("allows a CONNECTED row holding a credential with no env and no channel row (WARP-3960)", async () => {
+  const conn = (over: Record<string, unknown> | null) => ({
+    findFirst: async () => (over === null ? null : { id: "c1", status: "CONNECTED", providerTokensEnc: null, ...over }),
+  });
+  const signIns = (n: number) => ({ count: vi.fn(async () => n) });
+
+  it("allows a CONNECTED sign-in with no env, no channel row and no connection row (WARP-3960 / WARP-3961)", async () => {
     // No `offLanAllowlistChannel` on this prisma at all: the gate must not read it.
-    const prisma = {
-      integrationConnection: {
-        findFirst: async () => ({ id: "c1", status: "CONNECTED", providerTokensEnc: "dcv1:x" }),
-      },
-    };
+    const sign = signIns(1);
+    const prisma = { integrationConnection: conn(null), mcpOAuthConnection: sign };
     expect(await remoteMcpGate(prisma, SERVER)).toEqual({ allowed: true });
+    expect(sign.count).toHaveBeenCalledWith({ where: { provider: SERVER, state: "CONNECTED" } });
   });
 
-  it("distinguishes no-row, wrong-status and no-credential — three different remedies", async () => {
-    const row = (over: Record<string, unknown>) => ({
-      integrationConnection: {
-        findFirst: async () => ({ id: "c1", status: "CONNECTED", providerTokensEnc: "dcv1:x", ...over }),
-      },
-    });
+  it("distinguishes the per-server off from no-credential — two different remedies; nothing but a sign-in is a credential", async () => {
     expect(
-      await remoteMcpGate({ integrationConnection: { findFirst: async () => null } }, SERVER),
-    ).toMatchObject({ reason: "no_connection_row" });
-    expect(await remoteMcpGate(row({ status: "ERROR" }), SERVER)).toMatchObject({
-      reason: "connection_not_connected",
-    });
-    expect(await remoteMcpGate(row({ providerTokensEnc: null }), SERVER)).toMatchObject({
+      await remoteMcpGate({ integrationConnection: conn({ status: "DISABLED" }), mcpOAuthConnection: signIns(2) }, SERVER),
+    ).toMatchObject({ reason: "connection_disabled" });
+    expect(
+      await remoteMcpGate({ integrationConnection: conn(null), mcpOAuthConnection: signIns(0) }, SERVER),
+    ).toMatchObject({ reason: "no_credential" });
+    // A sealed credential on the connection row is NOT a credential any more.
+    expect(
+      await remoteMcpGate({ integrationConnection: conn({ providerTokensEnc: "dcv1:x" }), mcpOAuthConnection: signIns(0) }, SERVER),
+    ).toMatchObject({ reason: "no_credential" });
+    // Fail closed when the sign-in model is absent.
+    expect(await remoteMcpGate({ integrationConnection: conn({ providerTokensEnc: "dcv1:x" }) }, SERVER)).toMatchObject({
       reason: "no_credential",
     });
+  });
+
+  it("a failed sign-in read REFUSES", async () => {
+    const prisma = {
+      integrationConnection: conn(null),
+      mcpOAuthConnection: { count: async () => { throw new Error("db down"); } },
+    };
+    expect(await remoteMcpGate(prisma, SERVER)).toMatchObject({ allowed: false, reason: "gate_unavailable" });
   });
 
   it("a DB error REFUSES — the ambientDataGate posture, not outboundEmailGate's throw", async () => {

@@ -76,7 +76,6 @@ import {
 } from "./mcp-oauth/member-routing.port.js";
 import { openTokens } from "./mcp-oauth/mcp-oauth.service.js";
 import { catalogCredentialKind, recordCatalog } from "./mcp-oauth/catalog-repick.js";
-import { openSaasCredentials } from "./saas-credential.service.js";
 import {
   auditRemoteMcpLifecycle,
   remoteMcpLifecycle,
@@ -325,7 +324,6 @@ export interface RemoteMcpConnectionRow {
   id: string;
   status: string;
   providerTokensEnc: string | null;
-  providerConfig: unknown;
 }
 
 /**
@@ -338,16 +336,12 @@ export interface AttachRemoteDeps {
   mux: McpToolMultiplexer;
   /**
    * Reads the gate AND the credential — one narrow surface, injected.
-   *
-   * The row shape is the WIDER of the two (it carries `providerConfig`), which
-   * is assignable to {@link RemoteMcpGatePrisma}'s narrower one, so the same
-   * client serves both reads without a second declaration to keep in step.
    */
   prisma: {
     integrationConnection: {
       findFirst(args: unknown): Promise<RemoteMcpConnectionRow | null>;
     };
-    /** WARP-2409 — the sign-in rows. Optional: absent, the API token is the only rung. */
+    /** The sign-in rows (WARP-3961: the only credential). Optional only so a narrow caller fails closed. */
     mcpOAuthConnection?: NonNullable<RemoteMcpGatePrisma["mcpOAuthConnection"]> &
       MemberRoutingPrisma["mcpOAuthConnection"];
     user?: MemberRoutingPrisma["user"];
@@ -355,9 +349,6 @@ export interface AttachRemoteDeps {
   /** Builds the bridge-backed port. Injected so a test supplies a fixture
    *  bridge and can assert it was never dialled. */
   createClient: () => McpBridgeClient;
-  /** Injected purely so the credential-opening step is testable without the
-   *  process-wide column-crypto key. */
-  openCredentials?: (connectionId: string, blob: string) => Record<string, string>;
   registry?: RemoteCatalogSyncOptions["registry"];
   /**
    * WARP-2426 — records every advertised tool as a confirming write (the one
@@ -460,27 +451,20 @@ export async function attachRemoteServer(
     return { attached: false, serverId, reason, message: gate.message };
   }
 
-  const row = await deps.prisma.integrationConnection.findFirst({
-    where: { provider: serverId },
-    select: { id: true, status: true, providerTokensEnc: true, providerConfig: true },
-  });
-  // The gate already proved a usable connection is there; this re-read is the one
-  // that returns the material. A row that vanished between the two reads is a
+  // The gate already proved a CONNECTED sign-in exists; this re-read is the one
+  // that returns the material. A sign-in that vanished between the two reads is a
   // `credential_incomplete` skip, not a crash.
   //
-  // ADR-042 seam, re-read AT THIS MOMENT and never cached between ticks. The
-  // reconciler calls this function on every re-open, so the plaintext credential
+  // The token is re-read AT THIS MOMENT and never cached between ticks. The
+  // reconciler calls this function on every re-open, so the plaintext token
   // exists only inside this call: it is opened here, handed to the bridge, and
-  // dropped. Holding it across ticks would put a customer's API token in a
-  // long-lived orchestrator field for the life of the process, which is exactly
-  // what the sealed column and rule 19 exist to prevent - and it would also
-  // keep using a credential the operator has since rotated.
+  // dropped (rule 19).
   //
-  // WARP-2409 - the CATALOG session's credential, in order: the API token, the
-  // Workspace connection, the oldest connected member. It is audited on every
-  // listing (`refs.credential`). Which sign-in a CALL runs under is decided per
-  // call by the member routing port below.
-  const picked = await resolveCatalogCredential(deps, row);
+  // The CATALOG session's credential, in order: the Workspace connection, then the
+  // oldest connected owner/admin. It is audited on every listing
+  // (`refs.credential`). Which sign-in a CALL runs under is decided per call by
+  // the member routing port below.
+  const picked = await resolveCatalogCredential(deps);
   if (!picked.ok) {
     settle("detached", "credential_incomplete");
     return {
@@ -843,47 +827,29 @@ async function readSessionState(
   }
 }
 
-/** What a connection row yielded: the fields to open a session with, or the
- *  NAMES of the ones it lacked. Tagged rather than discriminated by a key,
- *  because the fields are an open record and any key could be one of them. */
-type RemoteCredentialRead =
-  | { ok: true; fields: McpBridgeOpenInput }
-  | { ok: false; missing: string[] };
-
 export interface CatalogCredential {
   fields: McpBridgeOpenInput;
   kind: RemoteMcpCredentialKind;
-  /** The sign-in row behind it, or null for the API token. */
-  rowId: string | null;
+  /** The sign-in row behind it. */
+  rowId: string;
 }
 
 /**
- * The catalog session's credential, in order: the API token, the Workspace
- * connection, a CURRENT owner/admin's sign-in. Shared by the attach and by the
- * in-place re-pick, so the two can never choose differently.
+ * The catalog session's credential, in order: the Workspace connection, a
+ * CURRENT owner/admin's sign-in (WARP-3961: no API-token rung). Shared by the
+ * attach and by the in-place re-pick, so the two can never choose differently.
  */
 export async function resolveCatalogCredential(
-  deps: Pick<AttachRemoteServerDeps, "serverId" | "descriptor" | "prisma" | "openCredentials">,
-  row: RemoteMcpConnectionRow | null,
+  deps: Pick<AttachRemoteServerDeps, "serverId" | "prisma">,
 ): Promise<{ ok: true; credential: CatalogCredential } | { ok: false; message: string }> {
-  // The API token is a rung only while its connection is CONNECTED: a sealed token on a
-  // NEEDS_RECONNECT / ERROR row is not a credential to dial with (the gate may still pass on a sign-in).
-  const apiRead = row?.providerTokensEnc && row.status === "CONNECTED"
-    ? readRemoteCredential(row, deps.descriptor, deps.openCredentials ?? openSaasCredentials)
-    : null;
-  if (apiRead?.ok) return { ok: true, credential: { fields: apiRead.fields, kind: "api-token", rowId: null } };
-  const oauth = await catalogOAuthFields(deps, row);
+  const oauth = await catalogOAuthFields(deps);
   if (oauth) return { ok: true, credential: oauth };
   const { serverId } = deps;
   return {
     ok: false,
-    // Names the FIELD, never a value.
-    message:
-      apiRead && !apiRead.ok
-        ? `The ${serverId} connection is missing: ${apiRead.missing.join(", ")}.`
-        : deps.prisma.mcpOAuthConnection
-          ? `An owner or admin must sign in to ${serverId} (or add a Workspace connection or API token) before its tools can be listed.`
-          : `The ${serverId} connection holds no credential.`,
+    message: deps.prisma.mcpOAuthConnection
+      ? `An owner or admin must sign in to ${serverId} (or add a Workspace connection) before its tools can be listed.`
+      : `The ${serverId} connection holds no credential.`,
   };
 }
 
@@ -903,7 +869,7 @@ const NOT_NOW: ReadonlySet<string> = new Set(["connection_disabled", "gate_unava
 export async function repickCatalogSession(
   deps: Pick<
     AttachRemoteServerDeps,
-    "serverId" | "descriptor" | "mux" | "prisma" | "openCredentials" | "lifecycle" | "auditLifecycle" | "registry"
+    "serverId" | "descriptor" | "mux" | "prisma" | "lifecycle" | "auditLifecycle" | "registry"
   >,
   client: McpBridgeClient,
   vettedTools: readonly string[],
@@ -927,11 +893,7 @@ export async function repickCatalogSession(
     // refusal means nothing is left to dial with, so the server detaches.
     return NOT_NOW.has(gate.reason) ? "skipped" : detachNoCredential();
   }
-  const row = await deps.prisma.integrationConnection.findFirst({
-    where: { provider: serverId },
-    select: { id: true, status: true, providerTokensEnc: true, providerConfig: true },
-  });
-  const picked = await resolveCatalogCredential(deps, row);
+  const picked = await resolveCatalogCredential(deps);
   if (!picked.ok) return detachNoCredential();
   try {
     await client.open({
@@ -954,18 +916,17 @@ export function catalogOnlyFor(kind: RemoteMcpCredentialKind): { catalogOnly: tr
 }
 
 /**
- * WARP-2409 - the catalog session's sign-in credential when there is no usable
- * API token: the Workspace connection first, else the oldest connected member.
- * The bridge's bearer profile takes `{ accessToken, cloudId }`; the site id is
- * the one the admin entered on the connection (never from the model).
+ * WARP-2409 - the catalog session's sign-in credential: the Workspace connection
+ * first, else the oldest connected owner/admin member. The bridge's bearer profile
+ * takes `{ accessToken, cloudId }`; the site id is the one stored on the chosen
+ * sign-in row (WARP-3961: read from the token, never typed, never from the
+ * model). A row with no site id (it predates WARP-3961) is skipped.
  */
 export async function catalogOAuthFields(
   deps: Pick<AttachRemoteServerDeps, "serverId" | "prisma">,
-  row: RemoteMcpConnectionRow | null,
 ): Promise<{ fields: Record<string, string>; kind: RemoteMcpCredentialKind; rowId: string } | null> {
   const table = deps.prisma.mcpOAuthConnection;
-  const site = (row?.providerConfig as Record<string, unknown> | null | undefined)?.cloudId;
-  if (!table || typeof site !== "string" || !site.trim()) return null;
+  if (!table) return null;
   const candidates = [
     await table.findFirst({ where: { provider: deps.serverId, scope: "WORKSPACE", state: "CONNECTED" } }),
     // A regular member's token backs ONLY that member's own calls. The shared
@@ -986,10 +947,10 @@ export async function catalogOAuthFields(
   for (const candidate of candidates) {
     if (!candidate) continue;
     const live = await usableConnection({ mcpOAuthConnection: table }, candidate);
-    if (!live) continue;
+    if (!live?.siteId) continue;
     try {
       return {
-        fields: { accessToken: openTokens(live).accessToken, cloudId: site.trim() },
+        fields: { accessToken: openTokens(live).accessToken, cloudId: live.siteId },
         kind: live.scope === "WORKSPACE" ? "workspace" : "member",
         rowId: live.id,
       };
@@ -999,76 +960,4 @@ export async function catalogOAuthFields(
     }
   }
   return null;
-}
-
-/**
- * Pull the facts a session needs out of one connection row, as the descriptor
- * says they are stored.
- *
- * WARP-3703 — was `readAtlassianCredential`, which read exactly `email`,
- * `cloudId` and `apiToken`. The facts are now the descriptor's own REQUIRED
- * `credentialFields`, and ADR-042 §5 still decides where each lives: a field
- * with `storage: "encrypted"` comes out of the sealed `providerTokensEnc`
- * bundle, one with `storage: "providerConfig"` out of `providerConfig`. This
- * reads exactly one home per fact rather than accepting either: a fallback
- * between the two would mean a credential could sit in the unencrypted column
- * and still work, which is how it would end up there. A required field stored
- * anywhere else is counted as missing, by name, not skipped.
- *
- * An OPTIONAL field is never forwarded. Atlassian's `tokenExpiresAt` is a fact
- * ABOUT the credential, not an input to the session, and sending it would hand
- * the bridge a customer fact it did not ask for.
- *
- * A non-secret fact is trimmed and a secret is used verbatim. A missing field is
- * reported by NAME, never by value, facts first and then secrets — the order the
- * Atlassian-only reader reported a half-filled row in, kept so its message does
- * not change.
- */
-function readRemoteCredential(
-  row: RemoteMcpConnectionRow,
-  descriptor: McpProviderDescriptor,
-  open: (connectionId: string, blob: string) => Record<string, string>,
-): RemoteCredentialRead {
-  // WARP-2405 - a server that also takes a sign-in declares the API-token fields
-  // optional (a sign-in-only box has none), but THIS reader runs only for a row
-  // that holds a sealed credential, i.e. the API-token path, which needs them all
-  // (minus the optional expiry date, a fact about the credential, never an input).
-  const expiryField = descriptor.credentialExpiry?.field;
-  const required = descriptor.credentialFields.filter(
-    (f) => f.required || (descriptor.signIn !== undefined && f.name !== expiryField),
-  );
-  const sealed = required.filter((f) => f.storage === "encrypted");
-  let secrets: Record<string, string> = {};
-  try {
-    secrets = open(row.id, row.providerTokensEnc ?? "");
-  } catch {
-    // A bundle sealed for another row fails GCM's tag check. Reported as a
-    // missing credential — never as an empty one, which would send the box to
-    // the vendor with no auth and collect an opaque 401.
-    return {
-      ok: false,
-      missing: [`${sealed.map((f) => f.name).join(", ")} (sealed credential could not be opened)`],
-    };
-  }
-  const config =
-    typeof row.providerConfig === "object" && row.providerConfig !== null
-      ? (row.providerConfig as Record<string, unknown>)
-      : {};
-
-  const fields: Record<string, string> = {};
-  const missing: string[] = [];
-  for (const field of [...required.filter((f) => f.storage !== "encrypted"), ...sealed]) {
-    const raw =
-      field.storage === "encrypted"
-        ? secrets[field.name]
-        : field.storage === "providerConfig"
-          ? config[field.name]
-          : undefined;
-    const value =
-      typeof raw !== "string" ? "" : field.storage === "providerConfig" ? raw.trim() : raw;
-    if (value) fields[field.name] = value;
-    else missing.push(field.name);
-  }
-  if (missing.length > 0) return { ok: false, missing };
-  return { ok: true, fields };
 }

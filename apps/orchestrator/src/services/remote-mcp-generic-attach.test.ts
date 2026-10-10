@@ -2,18 +2,18 @@
  * WARP-3703 (ADR-043 TC-1.1 / TC-1.2) — the attach path is per SERVER, and the
  * provider DESCRIPTOR decides what a session is opened with.
  *
- * Until TC-1 `attachAtlassianRemote` was the only attach function, and it read
- * exactly three facts — `email` and `cloudId` from `providerConfig`, `apiToken`
- * from the sealed bundle — whatever server it was attaching, because there was
- * only one. A vendor that presents a single static Bearer token needs one fact
- * from one place, and a vendor with a workspace needs a different two. So the
- * facts are now read from the descriptor's own required `credentialFields`, one
- * home per fact and no fallback between them (ADR-042 §5).
+ * Until TC-1 `attachAtlassianRemote` was the only attach function. It is now
+ * `attachRemoteServer` for ANY registered mcp descriptor.
  *
- * `remote-mcp-attach.test.ts`, `remote-mcp-reconciler.test.ts` and
- * `atlassian-provider.test.ts` still drive `attachAtlassianRemote` and are the
- * regression net for "Atlassian is unchanged"; none of them was edited. This
- * file is what they cannot say.
+ * WARP-3961: the credential-field reader (email / apiToken / providerConfig /
+ * sealed bundle) is gone. The only credential is a CONNECTED sign-in
+ * (`McpOAuthConnection`), opened as `{ accessToken, cloudId: row.siteId }`, so
+ * what this file proves is: the attach is keyed on the server id it was given,
+ * the catalog is namespaced and classified under that id, and nothing secret
+ * leaks into a message, a lifecycle audit or a log line.
+ *
+ * `remote-mcp-attach.test.ts`, `remote-mcp-reconciler.test.ts` drive
+ * `attachAtlassianRemote` and are the regression net for Atlassian itself.
  *
  * Everything below the injected `fetch` is shipped code: the real
  * `McpBridgeClient`, the real gate, the real `McpToolMultiplexer`, the real
@@ -41,9 +41,9 @@ import {
   attachRemoteServer,
   registeredRemoteServers,
   remoteServerDomain,
-  type RemoteMcpConnectionRow,
 } from "./remote-mcp-servers.js";
 import { RuntimeToolRegistry } from "./runtime-tool-registry.service.js";
+import { FAKE_ACCESS, SITE_ID, signedInDb, type SignInSeed } from "./__fixtures__/signed-in-db.js";
 
 vi.mock("./activity.singleton.js", () => ({
   recordActivity: vi.fn(async () => null),
@@ -77,74 +77,30 @@ vi.mock("../lib/logger.js", () => {
 
 const BRIDGE_URL = "http://mcp-bridge.test:9096";
 const BRIDGE_TOKEN = "bridge-token-FAKE-0000000000000000";
-const FAKE_API_TOKEN = "FIXTURE-FAKE-TOKEN-000000";
-const FAKE_ATLASSIAN_TOKEN = "ATATT-FAKE-000000000000";
 const FIXTURE_ID = "fixture-bearer";
-const CONNECTION_ID = "conn_fixture_bearer";
 
 const TOOLS: McpToolDescriptor[] = [
   { name: "get_thing", description: "Read one thing", inputSchema: { type: "object" } },
   { name: "list_things", description: "List things", inputSchema: { type: "object" } },
 ];
 
-/** A bearer-only vendor, as a descriptor: ONE required secret, in the sealed
- *  bundle, and nothing in `providerConfig`. */
+/** A sign-in-only vendor, as a descriptor: no credential fields (WARP-3961). */
 function bearerDescriptor(over: Partial<McpProviderDescriptor> = {}): McpProviderDescriptor {
   return {
     id: FIXTURE_ID,
-    displayName: "Fixture bearer vendor",
+    displayName: "Fixture sign-in vendor",
     category: "Fixture",
     track: "mcp",
     mcpServerId: FIXTURE_ID,
     description: "Test-only.",
     setupGuideHref: "/help/connectors/fixture-bearer",
-    credentialFields: [
-      {
-        name: "apiToken",
-        label: "Fixture API token",
-        type: "string",
-        required: true,
-        secret: true,
-        storage: "encrypted",
-      },
-    ],
+    credentialFields: [],
+    signIn: { kind: "oauth", pinsSite: true, mcpUrl: "https://mcp.fixture.invalid/mcp", scopes: ["read"] },
     egressHosts: ["mcp.fixture.invalid"],
     datasets: [],
     ...over,
   };
 }
-
-/** A vendor with a non-secret fact AND a secret AND an optional fact, so the
- *  homes can be told apart. The secret's name is `apiKey`, deliberately not
- *  `apiToken`: field names are the descriptor's, not a shared convention. */
-const MIXED = bearerDescriptor({
-  credentialFields: [
-    {
-      name: "workspace",
-      label: "Workspace",
-      type: "string",
-      required: true,
-      secret: false,
-      storage: "providerConfig",
-    },
-    {
-      name: "apiKey",
-      label: "API key",
-      type: "string",
-      required: true,
-      secret: true,
-      storage: "encrypted",
-    },
-    {
-      name: "note",
-      label: "Note",
-      type: "string",
-      required: false,
-      secret: false,
-      storage: "providerConfig",
-    },
-  ],
-});
 
 function localPort(): McpClientPort {
   return {
@@ -194,27 +150,16 @@ function fixtureBridge(serverId: string) {
 
 const allowAll: RemoteCallPolicy = () => ({ kind: "allow" });
 
-function connectedRow(over: Partial<RemoteMcpConnectionRow> = {}): RemoteMcpConnectionRow {
-  return {
-    id: CONNECTION_ID,
-    status: "CONNECTED",
-    providerTokensEnc: "dcv1:sealed",
-    providerConfig: null,
-    ...over,
-  };
-}
-
 interface HarnessOptions {
   descriptor?: McpProviderDescriptor;
-  row?: RemoteMcpConnectionRow | null;
-  /** What the ADR-042 seal opens to. A function throws to model a bundle that
-   *  fails its tag check. */
-  secrets?: Record<string, string> | (() => never);
+  /** The fake sign-ins for the fixture server. Default: one CONNECTED Workspace sign-in. `[]` = nobody signed in. */
+  signIns?: SignInSeed[];
+  integration?: { status: string } | null;
   allowlist?: string[];
   operatorDomain?: ToolDomain;
 }
 
-function harness(over: HarnessOptions = {}) {
+async function harness(over: HarnessOptions = {}) {
   const descriptor = over.descriptor ?? bearerDescriptor();
   const serverId = descriptor.mcpServerId;
   const bridge = fixtureBridge(serverId);
@@ -225,14 +170,12 @@ function harness(over: HarnessOptions = {}) {
   });
   const registry = new RuntimeToolRegistry();
   const lifecycle = new RemoteMcpLifecycleRegistry(() => 1_000_000);
-  const row = over.row === undefined ? connectedRow() : over.row;
-  const prisma = { integrationConnection: { findFirst: vi.fn(async (_args: unknown) => row) } };
+  const world = await signedInDb(over.signIns ?? [{ scope: "WORKSPACE" }], over.integration ?? null, serverId);
+  const integrationFindFirst = vi.spyOn(world.prisma.integrationConnection, "findFirst");
+  const signInFindFirst = vi.spyOn(world.prisma.mcpOAuthConnection, "findFirst");
+  const signInCount = vi.spyOn(world.prisma.mcpOAuthConnection, "count");
+  const prisma = world.prisma;
   const recordClassifications = vi.fn(async () => undefined);
-  const openCredentials = vi.fn((): Record<string, string> => {
-    const secrets = over.secrets ?? { apiToken: FAKE_API_TOKEN };
-    if (typeof secrets === "function") return secrets();
-    return secrets;
-  });
   const audit = vi.fn();
   return {
     bridge,
@@ -240,8 +183,8 @@ function harness(over: HarnessOptions = {}) {
     registry,
     lifecycle,
     prisma,
+    spies: { integrationFindFirst, signInFindFirst, signInCount },
     recordClassifications,
-    openCredentials,
     audit,
     attach: () =>
       attachRemoteServer({
@@ -251,7 +194,6 @@ function harness(over: HarnessOptions = {}) {
         lifecycle,
         auditLifecycle: audit,
         recordClassifications,
-        openCredentials,
         createClient: () =>
           new McpBridgeClient({
             baseUrl: BRIDGE_URL,
@@ -272,21 +214,20 @@ beforeEach(() => {
   logged.length = 0;
 });
 
-describe("attachRemoteServer opens a bearer-only vendor from its one sealed field (TC-1.2)", () => {
-  it("attaches, and sends the bridge exactly the descriptor's required field", async () => {
-    const h = harness();
+describe("attachRemoteServer opens any registered vendor from its CONNECTED sign-in (TC-1.2 / WARP-3961)", () => {
+  it("attaches, and sends the bridge exactly the bearer and the sign-in's pinned site", async () => {
+    const h = await harness();
     const result = await h.attach();
     expect(result.attached).toBe(true);
-    // The wire carries the descriptor's field and NOTHING else: no email, no
-    // site, and none of Atlassian's names.
-    expect(h.openBody()).toEqual({ apiToken: FAKE_API_TOKEN });
+    // The wire carries the bearer and the row's own site and NOTHING else.
+    expect(h.openBody()).toEqual({ accessToken: FAKE_ACCESS, cloudId: SITE_ID });
     expect(h.bridge.calls.find((c) => c.path.endsWith("/open"))?.path).toBe(
       `/sessions/${FIXTURE_ID}/open`,
     );
   });
 
   it("namespaces the catalog under ITS id and hands tool selection the domain it was GIVEN", async () => {
-    const h = harness({ operatorDomain: "cloud" });
+    const h = await harness({ operatorDomain: "cloud" });
     const result = await h.attach();
     expect((await h.mux.listTools()).map((t) => t.name)).toEqual([
       "list_files",
@@ -305,7 +246,7 @@ describe("attachRemoteServer opens a bearer-only vendor from its one sealed fiel
   });
 
   it("records every advertised tool in the classification record, by WIRE name, under ITS id", async () => {
-    const h = harness();
+    const h = await harness();
     await h.attach();
     expect(h.recordClassifications).toHaveBeenCalledTimes(1);
     const [serverId, tools] = h.recordClassifications.mock.calls[0] as unknown as [
@@ -316,25 +257,27 @@ describe("attachRemoteServer opens a bearer-only vendor from its one sealed fiel
     expect(tools.map((t) => t.name)).toEqual(["get_thing", "list_things"]);
   });
 
-  it("keys the gate and the row read on the server id it was given, not on a constant", async () => {
-    const h = harness();
+  it("keys the gate and the sign-in reads on the server id it was given, not on a constant", async () => {
+    const h = await harness();
     await h.attach();
-    const calls = h.prisma.integrationConnection.findFirst.mock.calls as unknown as [
-      { where: { provider: string } },
-    ][];
-    expect(calls.length).toBeGreaterThanOrEqual(2);
-    expect(calls.every(([args]) => args.where.provider === FIXTURE_ID)).toBe(true);
+    const providers = [
+      ...h.spies.integrationFindFirst.mock.calls.map(([a]) => (a as { where: { provider: string } }).where.provider),
+      ...h.spies.signInFindFirst.mock.calls.map(([a]) => (a as { where: { provider: string } }).where.provider),
+      ...h.spies.signInCount.mock.calls.map(([a]) => (a as { where: { provider: string } }).where.provider),
+    ];
+    expect(providers.length).toBeGreaterThanOrEqual(3);
+    expect(providers.every((p) => p === FIXTURE_ID)).toBe(true);
   });
 
   it("records its terminal state under ITS id in the lifecycle registry", async () => {
-    const h = harness();
+    const h = await harness();
     await h.attach();
     expect(h.lifecycle.get(FIXTURE_ID)).toMatchObject({ state: "attached", reason: null });
     expect(h.lifecycle.get(ATLASSIAN_REMOTE_SERVER_ID)).toBeUndefined();
   });
 
-  it("is not attached and dials nothing when there is no connection row (no env, no switch: the gate is the row)", async () => {
-    const h = harness({ row: null });
+  it("is not attached and dials nothing when nobody has signed in (no env, no switch: the gate is a CONNECTED sign-in)", async () => {
+    const h = await harness({ signIns: [] });
     const result = await h.attach();
     expect(result).toMatchObject({
       attached: false,
@@ -347,130 +290,48 @@ describe("attachRemoteServer opens a bearer-only vendor from its one sealed fiel
   });
 });
 
-describe("the descriptor decides where each fact is read from — one home, no fallback (TC-1.2)", () => {
-  const MIXED_ROW = connectedRow({ providerConfig: { workspace: "w-1", note: "not an input" } });
-
-  it("reads a non-secret fact from providerConfig and a secret from the sealed bundle", async () => {
-    const h = harness({ descriptor: MIXED, row: MIXED_ROW, secrets: { apiKey: "KEY-FAKE-1" } });
-    expect((await h.attach()).attached).toBe(true);
-    expect(h.openBody()).toEqual({ workspace: "w-1", apiKey: "KEY-FAKE-1" });
-  });
-
-  it("never forwards an OPTIONAL field — it is a fact about the credential, not an input to the session", async () => {
-    const h = harness({ descriptor: MIXED, row: MIXED_ROW, secrets: { apiKey: "KEY-FAKE-1" } });
-    await h.attach();
-    expect(h.openBody()).not.toHaveProperty("note");
-  });
-
-  it("does NOT read a secret out of providerConfig, so a credential cannot work from the unencrypted column", async () => {
-    const h = harness({
-      descriptor: MIXED,
-      row: connectedRow({ providerConfig: { workspace: "w-1", apiKey: "KEY-FAKE-IN-CONFIG" } }),
-      secrets: {},
-    });
+describe("which sign-in backs the catalog session, and what never leaks (WARP-3961)", () => {
+  it("a CONNECTED sign-in with no pinned site is skipped: credential_incomplete, names the remedy, dials nothing", async () => {
+    const h = await harness({ signIns: [{ scope: "WORKSPACE", siteId: null }] });
     const result = await h.attach();
     expect(result).toMatchObject({ attached: false, reason: "credential_incomplete" });
     expect(result.attached === false && result.message).toBe(
-      `The ${FIXTURE_ID} connection is missing: apiKey.`,
+      `An owner or admin must sign in to ${FIXTURE_ID} (or add a Workspace connection) before its tools can be listed.`,
     );
     expect(h.bridge.calls).toHaveLength(0);
+    expect(h.lifecycle.get(FIXTURE_ID)).toMatchObject({ state: "detached", reason: "credential_incomplete" });
   });
 
-  it("does NOT read a non-secret fact out of the sealed bundle", async () => {
-    const h = harness({
-      descriptor: MIXED,
-      row: connectedRow({ providerConfig: {} }),
-      secrets: { apiKey: "KEY-FAKE-1", workspace: "w-IN-BUNDLE" },
-    });
-    const result = await h.attach();
+  it("a member's sign-in backs the catalog only while that member is an owner/admin, and the base session is catalog-only", async () => {
+    const admin = await harness({ signIns: [{ scope: "MEMBER", memberId: "adm-1", role: "admin" }] });
+    expect((await admin.attach()).attached).toBe(true);
+    expect(admin.openBody()).toEqual({ accessToken: FAKE_ACCESS, cloudId: SITE_ID, catalogOnly: true });
+
+    const family = await harness({ signIns: [{ scope: "MEMBER", memberId: "fam-1", role: "family" }] });
+    const result = await family.attach();
+    // The gate passes (a sign-in is CONNECTED) but no regular member's sign-in backs the shared catalog.
     expect(result).toMatchObject({ attached: false, reason: "credential_incomplete" });
-    expect(result.attached === false && result.message).toBe(
-      `The ${FIXTURE_ID} connection is missing: workspace.`,
-    );
+    expect(family.bridge.calls).toHaveLength(0);
   });
 
-  it("trims a non-secret fact, uses a secret verbatim, and counts a blank fact as missing", async () => {
-    const trimmed = harness({
-      descriptor: MIXED,
-      row: connectedRow({ providerConfig: { workspace: "  w-1  " } }),
-      secrets: { apiKey: " KEY-FAKE-WITH-SPACES " },
-    });
-    await trimmed.attach();
-    expect(trimmed.openBody()).toEqual({ workspace: "w-1", apiKey: " KEY-FAKE-WITH-SPACES " });
-
-    const blank = harness({
-      descriptor: MIXED,
-      row: connectedRow({ providerConfig: { workspace: "   " } }),
-      secrets: { apiKey: "KEY-FAKE-1" },
-    });
-    const result = await blank.attach();
-    expect(result.attached === false && result.message).toContain("workspace");
-  });
-
-  it("names every missing field, facts first and then secrets — and never a value", async () => {
-    const h = harness({ descriptor: MIXED, row: connectedRow({ providerConfig: {} }), secrets: {} });
-    const result = await h.attach();
-    expect(result.attached === false && result.message).toBe(
-      `The ${FIXTURE_ID} connection is missing: workspace, apiKey.`,
-    );
-  });
-
-  it("reports an unopenable sealed bundle as the missing SECRET field, never as an empty credential", async () => {
-    const h = harness({
-      descriptor: MIXED,
-      row: MIXED_ROW,
-      secrets: () => {
-        throw new Error("Unsupported state or unable to authenticate data");
-      },
-    });
-    const result = await h.attach();
-    expect(result).toMatchObject({ attached: false, reason: "credential_incomplete" });
-    expect(result.attached === false && result.message).toBe(
-      `The ${FIXTURE_ID} connection is missing: apiKey (sealed credential could not be opened).`,
-    );
-    // The seal's own error text — which names a cipher, not a secret, but is
-    // not ours to forward — does not leak either.
-    expect(result.attached === false && result.message).not.toContain("authenticate");
-    expect(h.bridge.calls).toHaveLength(0);
-  });
-
-  it("counts a required field stored where the attach path cannot read it as MISSING, by name", async () => {
-    const odd = bearerDescriptor({
-      credentialFields: [
-        {
-          name: "apiToken",
-          label: "Fixture API token",
-          type: "string",
-          required: true,
-          secret: true,
-          storage: "encrypted",
-        },
-        {
-          name: "host",
-          label: "Host",
-          type: "string",
-          required: true,
-          secret: false,
-          storage: "column",
-        },
-      ],
-    });
-    const h = harness({ descriptor: odd });
-    const result = await h.attach();
-    expect(result).toMatchObject({ attached: false, reason: "credential_incomplete" });
-    expect(result.attached === false && result.message).toBe(
-      `The ${FIXTURE_ID} connection is missing: host.`,
-    );
+  it("never lets the bearer reach a message, a lifecycle audit row or a log line (rule 19)", async () => {
+    const ok = await harness();
+    await ok.attach();
+    const refused = await harness({ signIns: [{ scope: "WORKSPACE", siteId: null }] });
+    const result = await refused.attach();
+    const everything = JSON.stringify([
+      ok.audit.mock.calls,
+      refused.audit.mock.calls,
+      logged,
+      result.attached === false ? result.message : "",
+    ]);
+    expect(everything).not.toContain(FAKE_ACCESS);
   });
 });
 
 describe("attachAtlassianRemote is the same function with Atlassian's registration (TC-1.2)", () => {
-  const ATLASSIAN_ROW = connectedRow({
-    id: "conn_atlassian_fixture",
-    providerConfig: { email: "ops@vendor.example", cloudId: "00000000-0000-4000-8000-000000000000" },
-  });
-
-  function atlassianHarness(over: { row?: RemoteMcpConnectionRow; secrets?: Record<string, string> } = {}) {
+  async function atlassianHarness(over: { signIns?: SignInSeed[] } = {}) {
+    const world = await signedInDb(over.signIns ?? [{ scope: "WORKSPACE" }]);
     const bridge = fixtureBridge(ATLASSIAN_REMOTE_SERVER_ID);
     const allowlist = new Set([ATLASSIAN_REMOTE_SERVER_ID]);
     const mux = new McpToolMultiplexer(localPort(), {
@@ -484,12 +345,11 @@ describe("attachAtlassianRemote is the same function with Atlassian's registrati
       attach: () =>
         attachAtlassianRemote({
           mux,
-          prisma: { integrationConnection: { findFirst: async () => over.row ?? ATLASSIAN_ROW } },
+          prisma: world.prisma,
           registry,
           recordClassifications: async () => undefined,
           lifecycle: new RemoteMcpLifecycleRegistry(() => 1_000_000),
           auditLifecycle: () => undefined,
-          openCredentials: () => over.secrets ?? { apiToken: FAKE_ATLASSIAN_TOKEN },
           createClient: () =>
             new McpBridgeClient({
               baseUrl: BRIDGE_URL,
@@ -501,70 +361,31 @@ describe("attachAtlassianRemote is the same function with Atlassian's registrati
     };
   }
 
-  it("attaches under 'atlassian', in the 'pm' domain, with the three fields it has always sent", async () => {
-    const h = atlassianHarness();
+  it("attaches under 'atlassian', in the 'pm' domain, with the bearer and the sign-in's site", async () => {
+    const h = await atlassianHarness();
     const result = await h.attach();
     expect(result.attached).toBe(true);
     expect(result.attached && result.serverId).toBe("atlassian");
     expect(result.attached && result.sync.registered.every((t) => t.domain === "pm")).toBe(true);
     expect(h.bridge.calls.find((c) => c.path.endsWith("/open"))).toMatchObject({
       path: "/sessions/atlassian/open",
-      body: {
-        email: "ops@vendor.example",
-        apiToken: FAKE_ATLASSIAN_TOKEN,
-        cloudId: "00000000-0000-4000-8000-000000000000",
-      },
+      body: { accessToken: FAKE_ACCESS, cloudId: SITE_ID },
     });
   });
 
-  it("does not send its optional expiry date to the bridge", async () => {
-    const h = atlassianHarness({
-      row: connectedRow({
-        id: "conn_atlassian_fixture",
-        providerConfig: {
-          email: "ops@vendor.example",
-          cloudId: "00000000-0000-4000-8000-000000000000",
-          tokenExpiresAt: "2027-06-01",
-        },
-      }),
-    });
+  it("sends nothing but the bearer and the site to the bridge", async () => {
+    const h = await atlassianHarness();
     await h.attach();
     expect(Object.keys(h.bridge.calls.find((c) => c.path.endsWith("/open"))?.body as object).sort()).toEqual(
-      ["apiToken", "cloudId", "email"],
+      ["accessToken", "cloudId"],
     );
   });
 
-  it("names a half-filled row's missing fields in the order it always has: email, cloudId, apiToken", async () => {
-    const h = atlassianHarness({ row: connectedRow({ providerConfig: {} }), secrets: {} });
+  it("with no sign-in it is refused by the gate and never dials", async () => {
+    const h = await atlassianHarness({ signIns: [] });
     const result = await h.attach();
-    expect(result.attached === false && result.message).toBe(
-      "The atlassian connection is missing: email, cloudId, apiToken.",
-    );
-  });
-
-  it("keeps the unopenable-bundle wording it has always had", async () => {
-    const bridge = fixtureBridge(ATLASSIAN_REMOTE_SERVER_ID);
-    const result = await attachAtlassianRemote({
-      mux: new McpToolMultiplexer(localPort(), { isServerAllowed: () => true, remoteCallPolicy: allowAll }),
-      prisma: { integrationConnection: { findFirst: async () => ATLASSIAN_ROW } },
-      registry: new RuntimeToolRegistry(),
-      lifecycle: new RemoteMcpLifecycleRegistry(() => 1_000_000),
-      auditLifecycle: () => undefined,
-      openCredentials: () => {
-        throw new Error("tag mismatch");
-      },
-      createClient: () =>
-        new McpBridgeClient({
-          baseUrl: BRIDGE_URL,
-          serviceToken: BRIDGE_TOKEN,
-          serverId: ATLASSIAN_REMOTE_SERVER_ID,
-          fetchImpl: bridge.fetchImpl,
-        }),
-    });
-    expect(result.attached === false && result.message).toBe(
-      "The atlassian connection is missing: apiToken (sealed credential could not be opened).",
-    );
-    expect(bridge.calls).toHaveLength(0);
+    expect(result).toMatchObject({ attached: false, reason: "gate_refused" });
+    expect(h.bridge.calls).toHaveLength(0);
   });
 });
 

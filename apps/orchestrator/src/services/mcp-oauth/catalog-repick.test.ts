@@ -18,14 +18,15 @@ const MEMBER_ROW = "33333333-3333-3333-3333-333333333333";
 beforeEach(() => recordCatalog(S, null));
 
 describe("recordCatalog", () => {
-  it("remembers the row and kind, and an API token backs no row", () => {
+  it("remembers the row and kind, and forgets them on null", () => {
     recordCatalog(S, { rowId: OWNER_ROW, kind: "member" });
     expect(catalogBackingRow(S)).toBe(OWNER_ROW);
     expect(catalogCredentialKind(S)).toBe("member");
-    recordCatalog(S, { rowId: null, kind: "api-token" });
-    expect(catalogBackingRow(S)).toBeUndefined();
-    expect(catalogCredentialKind(S)).toBe("api-token");
+    recordCatalog(S, { rowId: MEMBER_ROW, kind: "workspace" });
+    expect(catalogBackingRow(S)).toBe(MEMBER_ROW);
+    expect(catalogCredentialKind(S)).toBe("workspace");
     recordCatalog(S, null);
+    expect(catalogBackingRow(S)).toBeUndefined();
     expect(catalogCredentialKind(S)).toBeUndefined();
   });
 });
@@ -41,9 +42,8 @@ describe("createCatalogRepicker", () => {
     expect(apply).toHaveBeenCalledTimes(1);
   });
 
-  it("does nothing when an API token backs the catalog", async () => {
+  it("does nothing when nothing backs the catalog", async () => {
     const apply = vi.fn(async (_s: string) => {});
-    recordCatalog(S, { rowId: null, kind: "api-token" });
     await createCatalogRepicker({ backingRow: catalogBackingRow, apply })(S, OWNER_ROW, "ended");
     expect(apply).not.toHaveBeenCalled();
   });

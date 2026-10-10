@@ -675,16 +675,15 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
     // The bridge's `SESSION_FACTORIES` key. Gated against the bridge's own
     // source by `adr-043-boundary.test.ts`, which now checks four declarations.
     mcpServerId: "atlassian",
-    // WARP-2405 — web sign-in beside the API token. The OAuth endpoint is
-    // `/v1/mcp/authv2` (the `/v1/mcp` path takes the Basic credential only);
-    // it keeps the reviewed tool catalog. Jira and Confluence, read and write
+    // WARP-2405 — web sign-in. The OAuth endpoint is `/v1/mcp/authv2`; it keeps
+    // the reviewed tool catalog. Jira and Confluence, read and write
     // (the box's interceptor still asks for a thumbs-up on every write), plus
     // `offline_access` so the sign-in can refresh. No Compass or TWG scopes.
-    // `email` and `apiToken` are therefore optional (the shared-account path); only
-    // the site id is needed on every path. The bridge accepts either field set and
-    // `adr-043-boundary.test.ts` gates the two agreeing.
+    // WARP-3961: the ONLY credential path. `pinsSite` — the box asks which site the
+    // token reaches right after the code exchange and pins every call to it.
     signIn: {
       kind: "oauth",
+      pinsSite: true,
       mcpUrl: "https://mcp.atlassian.com/v1/mcp/authv2",
       scopes: [
         "read:me",
@@ -703,85 +702,13 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
         "write:comment:confluence",
       ],
     },
-    credentialFields: [
-      {
-        // `readAtlassianCredential` (`remote-mcp-servers.ts`) reads exactly
-        // this name out of `providerConfig`. The three names below are a wire
-        // contract with that function, and `provider-registry.test.ts` asserts
-        // it rather than trusting it — a renamed field here would produce a row
-        // the attach path reports as `credential_incomplete`, which reads as a
-        // customer mistake.
-        name: "email",
-        label: "Atlassian account email",
-        type: "string",
-        // WARP-2405 - optional now that people can sign in with Atlassian: the email
-        // and the token are one path (an API token) and are used together, or not at
-        // all. The bridge accepts either set; adr-043-boundary.test.ts gates that.
-        required: false,
-        secret: false,
-        storage: "providerConfig",
-        help:
-          "The account the API token belongs to, or sign in with Atlassian below instead. The token " +
-          "carries that person's full permissions, so choose an account that will outlive any one individual.",
-      },
-      {
-        name: "apiToken",
-        label: "Atlassian API token",
-        type: "string",
-        // WARP-2405 - optional alongside the email (see above): the API token is the
-        // shared-account path; members can sign in with Atlassian instead.
-        required: false,
-        secret: true,
-        storage: "encrypted",
-        // Deliberately NO `pattern`. Atlassian's `ATATT`-prefixed format is not
-        // a documented contract the way Stripe's `rk_` is — it has changed
-        // before — and a regex that rejects a token the vendor considers valid
-        // would present as "your token is wrong" with no way for a customer to
-        // be right. The boundary rejection ADR-042 §4 asks for is not available
-        // here at all: the token is UNSCOPED by design, so there is no narrower
-        // shape to insist on. The guide says so instead.
-        // The click-path names the MENU, not the host. A bare `id.atlassian.com`
-        // literal here is read by `scripts/check-egress-allowlist.py` as an
-        // outbound destination and refused — correctly: the box never dials it,
-        // the customer's browser does. The full URL lives in the guide, which
-        // is where a person following a click-path actually is.
-        help:
-          "Or sign in with Atlassian below. Account settings → Security → Create and manage API tokens. " +
-          "Copy it once; Atlassian never shows it again.",
-      },
-      {
-        name: "cloudId",
-        label: "Atlassian site (cloud) ID",
-        type: "string",
-        required: true,
-        secret: false,
-        storage: "providerConfig",
-        // Required, and load-bearing: the token is NOT bound to a site, so every
-        // call has to name one. `withAtlassianCloudId` forces this value onto
-        // each call LAST, overwriting anything the model supplied — an argument
-        // the model could win would be a prompt-injection path to a different
-        // site the same token can reach.
-        help: "Visit <your-site>.atlassian.net/_edge/tenant_info to read it.",
-      },
-      {
-        name: "tokenExpiresAt",
-        label: "Token expiry date",
-        type: "string",
-        // OPTIONAL, and the optionality is a stated position rather than
-        // leniency: Atlassian does not tell the box when a token expires, so
-        // this is the customer transcribing what their own console showed them.
-        // Requiring it would block a connection over a date nobody can look up
-        // after the fact. A connection without it reports `EXPIRY_UNKNOWN` —
-        // its own status, never `VALID` (see `credentialExpiry` below).
-        required: false,
-        secret: false,
-        storage: "providerConfig",
-        pattern: "^\\d{4}-\\d{2}-\\d{2}$",
-        help:
-          "YYYY-MM-DD, from the API tokens page. Atlassian tokens last at most 365 " +
-          "days and there is no grace period — Droplet warns 30 days ahead if it knows the date.",
-      },
-    ],
+    // WARP-3961 — NO credential fields. Atlassian is signed in to, never pasted:
+    // the API-token form (email, apiToken, cloudId, tokenExpiresAt) is gone, and
+    // the site (`cloudId`) is read from the sign-in itself (`signIn.pinsSite`)
+    // and stored on the `McpOAuthConnection` row. The bridge forces that id onto
+    // every call LAST (`withAtlassianCloudId`), so the model can never choose a
+    // different site.
+    credentialFields: [],
     // `mcp.atlassian.com` is the ONE host this integration dials, registered by
     // #1956 as `atlassian-mcp` (`kind: egress`, fixed hosted-only endpoint).
     // Declared here as the descriptor's half of that registration even though
@@ -793,20 +720,8 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
     egressHosts: ["mcp.atlassian.com"],
     // Empty BY CONSTRUCTION — the type is `readonly []`, not "empty for now".
     datasets: [],
-    credentialExpiry: {
-      field: "tokenExpiresAt",
-      // WARP-2353's number, and since WARP-2300 the only copy of it: the
-      // orchestrator-only module it used to be mirrored from had no production
-      // callers and was deleted rather than kept in step by an assertion.
-      //
-      // 30 days is sized so the warning outlasts a holiday or a handover —
-      // creating a replacement is a customer-admin action in a console the box
-      // does not control, and Atlassian offers no grace period and sends no
-      // reminder of its own.
-      warningDays: 30,
-      // Atlassian's documented maximum API-token lifetime.
-      maxLifetimeDays: 365,
-    },
+    // WARP-3961 — no `credentialExpiry`: it described the API token's expiry date,
+    // and the API token is gone. A sign-in renews itself or says NEEDS_RECONNECT.
     setupGuideHref: "/help/connectors/atlassian",
   },
   {

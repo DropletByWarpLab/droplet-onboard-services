@@ -30,10 +30,10 @@
  *      `IntegrationConnection` to DISABLED. (WARP-3960, Romain 2026-10-10: there
  *      is no env allowlist and no owner switch any more; the kill switches are
  *      this per-server off and Disconnect.)
- *   3. **The connection row.** An `IntegrationConnection` for this provider,
- *      with an explicit `status` of CONNECTED and a sealed credential in
- *      `providerTokensEnc` (ADR-042 §5) - or a CONNECTED sign-in. Read from the
- *      EXPLICIT columns, never inferred from a NULL.
+ *   3. **A sign-in.** At least one `McpOAuthConnection` for this provider in
+ *      the explicit state CONNECTED (WARP-3961: the API-token credential is gone,
+ *      so a sign-in is the only credential). Read from the EXPLICIT column, never
+ *      inferred from a NULL.
  *
  * A DB error is a REFUSAL, following `ambientDataGate`'s divergence from
  * `outboundEmailGate`: that service's own docstring records that its pre-merge
@@ -61,9 +61,9 @@ import { remoteCallAttribution, type RemoteCallAttribution } from "./remote-call
 
 const logger = createLogger("remote-mcp-gateway");
 
-/** WARP-2409 — whose sign-in a call ran under: the asking member's own, the
- *  Workspace connection, or the shared API token. Recorded as `refs.credential`. */
-export type RemoteMcpCredentialKind = "member" | "workspace" | "api-token";
+/** WARP-2409 — whose sign-in a call ran under: the asking member's own, or the
+ *  Workspace connection. Recorded as `refs.credential`. */
+export type RemoteMcpCredentialKind = "member" | "workspace";
 
 /** A refusal made BEFORE any vendor call because no usable sign-in exists. */
 export type RemoteMcpSignInRefusal =
@@ -110,9 +110,7 @@ export type RemoteMcpOutcome =
  * this account" are not the same instruction.
  */
 export type RemoteMcpGateReason =
-  | "no_connection_row"
   | "connection_disabled"
-  | "connection_not_connected"
   | "no_credential"
   | "gate_unavailable";
 
@@ -123,8 +121,8 @@ export type RemoteMcpGateDecision =
 /** The minimal Prisma surface the gate needs, so a test passes a literal. */
 export interface RemoteMcpGatePrisma {
   /**
-   * WARP-2409 — rule 3 also passes on a signed-in connection. Optional so a
-   * caller without the model sees only the API-token rung (fail closed).
+   * Rule 3: a CONNECTED sign-in. Optional only so a caller without the model
+   * is refused (fail closed).
    */
   mcpOAuthConnection?: {
     count(args: unknown): Promise<number>;
@@ -186,11 +184,9 @@ export async function remoteMcpEgressAllowed(
  * Read the gate for one server: {@link remoteMcpEgressAllowed}, then the
  * credential rule.
  *
- * Both halves are explicit reads. `status === "CONNECTED"` is the enum column,
- * not "a row exists"; `providerTokensEnc !== null` is the credential column,
- * not "the status looks fine". The repo rule is that persistent state is a
- * declared value, and a connection whose credential was purged while the status
- * column still said CONNECTED is precisely the row this catches.
+ * Both halves are explicit reads: the per-server off is the `IntegrationConnection`
+ * status column, and "a credential exists" is a CONNECTED `McpOAuthConnection`
+ * state (WARP-3961: no API-token rung any more).
  */
 export async function remoteMcpGate(
   prisma: RemoteMcpGatePrisma,
@@ -198,49 +194,29 @@ export async function remoteMcpGate(
 ): Promise<RemoteMcpGateDecision> {
   const egress = await remoteMcpEgressAllowed(prisma, serverId);
   if (!egress.allowed) return egress;
-  const row = egress.row;
-  // WARP-2409 - rule 3 (a credential exists): a CONNECTED sign-in, a member's or
-  // the Workspace's, satisfies it when the API-token connection does not. Which
-  // one a CALL uses is decided per call (member-routing.port.ts); this only says
-  // the server may be dialled. An admin's DISABLED was already refused above, and
-  // any other status the API-token path refuses (NEEDS_RECONNECT, ERROR, ...)
-  // describes the shared token, so it does not block a member's own sign-in.
-  if (!(row?.status === "CONNECTED" && row.providerTokensEnc !== null) && prisma.mcpOAuthConnection) {
-    try {
-      if ((await prisma.mcpOAuthConnection.count({ where: { provider: serverId, state: "CONNECTED" } })) > 0) {
-        return { allowed: true };
-      }
-    } catch (err) {
-      logger.warn({ err, serverId }, "remote_mcp sign-in read failed — failing closed (no egress)");
-      return {
-        allowed: false,
-        reason: "gate_unavailable",
-        message: "The remote MCP gate could not be read. Refusing egress.",
-      };
+  // Rule 3 (a credential exists): a CONNECTED sign-in, a member's or the Workspace's.
+  // Which one a CALL uses is decided per call (member-routing.port.ts); this only
+  // says the server may be dialled. An admin's DISABLED was already refused above.
+  if (!prisma.mcpOAuthConnection) {
+    return { allowed: false, reason: "no_credential", message: `The ${serverId} connection holds no credential.` };
+  }
+  try {
+    if ((await prisma.mcpOAuthConnection.count({ where: { provider: serverId, state: "CONNECTED" } })) > 0) {
+      return { allowed: true };
     }
-  }
-  if (!row) {
+  } catch (err) {
+    logger.warn({ err, serverId }, "remote_mcp sign-in read failed — failing closed (no egress)");
     return {
       allowed: false,
-      reason: "no_connection_row",
-      message: `No ${serverId} connection is configured on this box.`,
+      reason: "gate_unavailable",
+      message: "The remote MCP gate could not be read. Refusing egress.",
     };
   }
-  if (row.status !== "CONNECTED") {
-    return {
-      allowed: false,
-      reason: "connection_not_connected",
-      message: `The ${serverId} connection is ${row.status}, not CONNECTED.`,
-    };
-  }
-  if (row.providerTokensEnc === null) {
-    return {
-      allowed: false,
-      reason: "no_credential",
-      message: `The ${serverId} connection holds no credential.`,
-    };
-  }
-  return { allowed: true };
+  return {
+    allowed: false,
+    reason: "no_credential",
+    message: `Nobody has signed in to ${serverId} yet. Open Connectors and choose Connect.`,
+  };
 }
 
 /** One signed activity row per outbound operation — the `routes/web.ts` idiom.

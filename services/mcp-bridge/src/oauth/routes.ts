@@ -10,7 +10,13 @@
  * (rule 19). A refusal names a FIELD or our own reason, never a value.
  */
 import type { BridgeResponse } from "../http-api.js";
-import { ATLASSIAN_ALLOWED_OAUTH_HOSTS, ATLASSIAN_MCP_OAUTH_URL } from "../atlassian.js";
+import {
+  ATLASSIAN_ALLOWED_OAUTH_HOSTS,
+  ATLASSIAN_MCP_OAUTH_URL,
+  AtlassianSitesUnavailableError,
+  discoverAtlassianSites,
+} from "../atlassian.js";
+import type { RemoteMcpConnectionFactory } from "../remote-session.js";
 import { UnsafeMcpUrlError } from "../safe-url.js";
 import { isAllowedRedirectUri, registerClient } from "./dcr.js";
 import { discover } from "./discovery.js";
@@ -47,6 +53,7 @@ function allowedFor(rawUrl: string): ReadonlySet<string> {
 }
 
 function mapError(e: unknown): BridgeResponse {
+  if (e instanceof AtlassianSitesUnavailableError) return fail(502, e.code, e.message);
   if (e instanceof PkceUnsupportedError) return fail(422, e.code, e.message);
   if (e instanceof OAuthRefusedError) return fail(422, e.code, e.message, { reason: e.reason });
   if (e instanceof UnsafeMcpUrlError) return fail(422, "OAUTH_REFUSED", e.message, { reason: "UNSAFE_URL" });
@@ -62,8 +69,10 @@ export async function handleOAuthRoute(
   method: string,
   rawBody: unknown,
   deps: OAuthDeps = {},
+  /** Test seam for the `sites` session transport; production passes nothing. */
+  sitesConnect?: RemoteMcpConnectionFactory,
 ): Promise<BridgeResponse> {
-  if (action === undefined || !["discover", "register", "exchange", "refresh", "revoke"].includes(action)) {
+  if (action === undefined || !["discover", "register", "exchange", "refresh", "revoke", "sites"].includes(action)) {
     return fail(404, "NOT_FOUND", `No route for /oauth/${action ?? ""}.`);
   }
   if (method !== "POST") return fail(405, "METHOD_NOT_ALLOWED", `${method} is not allowed on /oauth/${action}.`);
@@ -87,6 +96,18 @@ export async function handleOAuthRoute(
       }
       const url = await vetUrl(endpoint, allowedFor(endpoint), deps);
       return { status: 200, body: await registerClient(url, { redirectUris: uris as string[] }, deps) };
+    }
+
+    if (action === "sites") {
+      // WARP-3961 — which Atlassian sites the fresh token reaches. The token is
+      // a bearer for one short session and is never echoed or logged.
+      const accessToken = str(body, "accessToken", 16_384);
+      if (!accessToken) return missing("accessToken");
+      const sites = await discoverAtlassianSites(accessToken, {
+        guard: deps,
+        ...(sitesConnect ? { connect: sitesConnect } : {}),
+      });
+      return { status: 200, body: { sites } };
     }
 
     const clientId = str(body, "clientId", 512);
