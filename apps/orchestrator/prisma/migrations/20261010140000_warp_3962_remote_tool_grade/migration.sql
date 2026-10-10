@@ -43,11 +43,36 @@ SET "requiresWrite" = false, "requiresConfirmation" = false, "allowlisted" = tru
 WHERE "grade" = 'READ' AND "reviewedAt" IS NULL AND "denied" = false
   AND "definitionStatus" = 'CURRENT' AND "serverId" NOT LIKE 'ext-%';
 
+-- A write the reviewed table GRADES starts at ask. A tool the table does not
+-- know (any other server, or a tool a vendor added later) is also a write but
+-- starts BLOCKED (not allowlisted): nobody has reviewed it; an owner choosing
+-- Ask is the review.
 UPDATE "RemoteToolClassification"
 SET "requiresWrite" = true, "requiresConfirmation" = true, "allowlisted" = true
 WHERE "grade" = 'WRITE' AND "reviewedAt" IS NULL AND "denied" = false
-  AND "definitionStatus" = 'CURRENT' AND "serverId" NOT LIKE 'ext-%';
+  AND "definitionStatus" = 'CURRENT' AND "serverId" = 'atlassian'
+  AND "toolName" IN (
+    'addCommentToJiraIssue', 'addTeamworkGraphContext', 'addWorklogToJiraIssue',
+    'createCompassComponent', 'createCompassComponentRelationship',
+    'createCompassCustomFieldDefinition', 'createConfluenceFooterComment',
+    'createConfluenceInlineComment', 'createConfluencePage', 'createIssueLink',
+    'createJiraIssue', 'editJiraIssue', 'transitionJiraIssue'
+  );
 
 UPDATE "RemoteToolClassification"
+SET "requiresWrite" = true, "requiresConfirmation" = true, "allowlisted" = false
+WHERE "grade" = 'WRITE' AND "reviewedAt" IS NULL AND "denied" = false
+  AND "definitionStatus" = 'CURRENT' AND "serverId" NOT LIKE 'ext-%'
+  AND NOT ("serverId" = 'atlassian' AND "toolName" IN (
+    'addCommentToJiraIssue', 'addTeamworkGraphContext', 'addWorklogToJiraIssue',
+    'createCompassComponent', 'createCompassComponentRelationship',
+    'createCompassCustomFieldDefinition', 'createConfluenceFooterComment',
+    'createConfluenceInlineComment', 'createConfluencePage', 'createIssueLink',
+    'createJiraIssue', 'editJiraIssue', 'transitionJiraIssue'
+  ));
+
+-- Destructive and table-`excluded` tools are stored blocked whatever their
+-- review state (this only tightens), so the row matches what dispatch does.
+UPDATE "RemoteToolClassification"
 SET "requiresWrite" = true, "requiresConfirmation" = true, "denied" = true, "allowlisted" = false
-WHERE "grade" = 'DESTRUCTIVE' AND "reviewedAt" IS NULL AND "serverId" NOT LIKE 'ext-%';
+WHERE "grade" = 'DESTRUCTIVE' AND "serverId" NOT LIKE 'ext-%';

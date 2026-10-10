@@ -44,6 +44,7 @@ import {
   type RemoteToolClassificationCache,
   type RemoteToolClassificationRow,
 } from "../services/remote-tool-classification.service.js";
+import { remoteToolGradeOf } from "../services/remote-tool-tables.js";
 import {
   withExtensionToolReview,
   type ExtensionToolReviewPrisma,
@@ -97,7 +98,15 @@ export function createRemoteToolClassificationsRouter(
         // (always|ask|block) per row; the DB enum is replaced by its lowercase wire value.
         const reviewed = await toolReview(rows);
         res.json({
-          classifications: reviewed.map((r) => ({ ...r, grade: gradeFromDb(r.grade), permission: permissionOf(r) })),
+          classifications: reviewed.map((r) => {
+            const known = r.serverId.startsWith("ext-") ? undefined : remoteToolGradeOf(r.serverId, r.toolName);
+            return {
+              ...r,
+              grade: known?.grade ?? gradeFromDb(r.grade),
+              // an excluded (or table-unlisted) tool is blocked whatever the row says
+              permission: known?.excluded ? "block" : permissionOf(r),
+            };
+          }),
         });
       } catch (err) {
         next(err);
@@ -127,11 +136,17 @@ export function createRemoteToolClassificationsRouter(
           toolName,
           ...decision,
           reviewedBy,
+          // WARP-3962 — held to the product contract for every server but
+          // extensions (their own review lifecycle).
+          ...(serverId.startsWith("ext-") ? {} : { enforceContract: { known: remoteToolGradeOf(serverId, toolName) } }),
           ...(inputSchemaHash !== undefined ? { expectedInputSchemaHash: inputSchemaHash } : {}),
         });
         if (!result.ok) {
           const status = result.code === "NOT_FOUND" ? 404 : result.code === "STALE_REVIEW" ? 409 : 400;
-          res.status(status).json({ error: result.code, message: result.message });
+          res.status(status).json({
+            error: result.code === "PERMISSION_NOT_ALLOWED_FOR_GRADE" ? "permission_not_allowed_for_grade" : result.code,
+            message: result.message,
+          });
           return;
         }
         // The policy reads the cache; the decision is live from this request on.
@@ -222,6 +237,7 @@ export function createRemoteToolClassificationsRouter(
           toolName,
           permission: parsed.data.permission,
           actor: actorOf(req),
+          classOf: remoteToolGradeOf,
           ...(parsed.data.inputSchemaHash !== undefined ? { inputSchemaHash: parsed.data.inputSchemaHash } : {}),
         });
         if (!result.ok) {
@@ -274,7 +290,12 @@ export function createRemoteToolClassificationsRouter(
           res.status(400).json({ error: "invalid_request", details: parsed.error.flatten() });
           return;
         }
-        const result = await setRemoteToolGroupPermission(db, { serverId, ...parsed.data, actor: actorOf(req) });
+        const result = await setRemoteToolGroupPermission(db, {
+          serverId,
+          ...parsed.data,
+          actor: actorOf(req),
+          classOf: remoteToolGradeOf,
+        });
         if (!result.ok) {
           res.status(failStatus[result.code] ?? 400).json({ error: failToken(result.code), message: result.message });
           return;
@@ -316,6 +337,18 @@ export function createRemoteToolClassificationsRouter(
         if (!parsed.success) {
           res.status(400).json({ error: "Invalid allowlist change", details: parsed.error.flatten() });
           return;
+        }
+        // WARP-3962 — admitting a tool is loosening it: an owner's call, like
+        // any other loosening of a permission. An admin may still withdraw one.
+        if (parsed.data.allowlisted && req.user?.role !== "owner") {
+          const current = await db.remoteToolClassification.findUnique({
+            where: { serverId_toolName: { serverId, toolName } },
+            select: { allowlisted: true, denied: true },
+          });
+          if (current && !(current.allowlisted === true && current.denied !== true)) {
+            res.status(403).json({ error: "admin_can_only_tighten", message: "Only an owner can allow a tool." });
+            return;
+          }
         }
         const result = await setRemoteToolAllowlisted(db, {
           serverId,

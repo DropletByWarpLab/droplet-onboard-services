@@ -72,14 +72,49 @@ describe("discovery defaults are the contract, per grade", () => {
     expect(rows.get(`atlassian|${DESTRUCTIVE}`)).toMatchObject({
       grade: "DESTRUCTIVE", denied: true, allowlisted: false,
     });
-    expect(rows.get("atlassian|someNewAtlassianTool")).toMatchObject({ grade: "WRITE", requiresConfirmation: true });
+    // a tool the reviewed table does not list (a vendor adds deleteJiraIssue later) is blocked, never ask
+    expect(rows.get("atlassian|someNewAtlassianTool")).toMatchObject({ grade: "WRITE", denied: true, allowlisted: false });
+    expect(permissionOf(rows.get("atlassian|someNewAtlassianTool")!)).toBe("block");
     expect(DEFAULT_PERMISSION).toEqual({ read: "always", write: "ask", destructive: "block" });
-    for (const r of rows.values()) expect(permissionOf(r)).toBe(r.grade === "READ" ? "always" : r.grade === "WRITE" ? "ask" : "block");
+    for (const [k, r] of rows) {
+      if (k.endsWith("someNewAtlassianTool")) continue;
+      expect(permissionOf(r)).toBe(r.grade === "READ" ? "always" : r.grade === "WRITE" ? "ask" : "block");
+    }
   });
 
-  it("an owner-added server (no table) discovers every tool as a write that asks", async () => {
-    const { rows } = await discovered({ serverId: "acme", tools: ["list_things"] });
-    expect(rows.get("acme|list_things")).toMatchObject({ grade: "WRITE", requiresWrite: true, requiresConfirmation: true, allowlisted: true });
+  it("an owner-added server (no table) discovers every tool as a write that starts BLOCKED; the owner choosing Ask is the review", async () => {
+    const f = await discovered({ serverId: "acme", tools: ["list_things"] });
+    expect(f.rows.get("acme|list_things")).toMatchObject({
+      grade: "WRITE", requiresWrite: true, requiresConfirmation: true, denied: false, allowlisted: false,
+    });
+    expect(permissionOf(f.rows.get("acme|list_things")!)).toBe("block");
+    // an admin cannot open it; an owner can, and only to ask
+    expect(await setRemoteToolPermission(f.prisma, { serverId: "acme", toolName: "list_things", permission: "ask", actor: admin })).toMatchObject({
+      ok: false, code: "ADMIN_CAN_ONLY_TIGHTEN",
+    });
+    expect(await setRemoteToolPermission(f.prisma, { serverId: "acme", toolName: "list_things", permission: "always", actor: owner })).toMatchObject({
+      ok: false, code: "PERMISSION_NOT_ALLOWED_FOR_GRADE",
+    });
+    expect(await setRemoteToolPermission(f.prisma, { serverId: "acme", toolName: "list_things", permission: "ask", actor: owner })).toMatchObject({ ok: true });
+    expect(f.rows.get("acme|list_things")).toMatchObject({ allowlisted: true, requiresConfirmation: true });
+  });
+
+  it("a tool the table excludes (or does not list) can only be block via the permission writer, and is re-blocked on re-discovery", async () => {
+    const f = await discovered({ tools: ["someNewAtlassianTool"] });
+    expect(
+      await setRemoteToolPermission(f.prisma, { serverId: "atlassian", toolName: "someNewAtlassianTool", permission: "ask", actor: owner, classOf: remoteToolGradeOf }),
+    ).toMatchObject({ ok: false, code: "PERMISSION_NOT_ALLOWED_FOR_GRADE" });
+    // a stored row that drifted open is tightened by the next discovery
+    f.rows.set("atlassian|someNewAtlassianTool", { ...f.rows.get("atlassian|someNewAtlassianTool")!, denied: false, allowlisted: true });
+    await recordDiscoveredRemoteTools(f.prisma, "atlassian", [{ wireName: "someNewAtlassianTool" }], T0, { gradeOf: remoteToolGradeOf });
+    expect(f.rows.get("atlassian|someNewAtlassianTool")).toMatchObject({ denied: true, allowlisted: false });
+  });
+
+  it("the group writer leaves tools the table does not grade (and excluded ones) for their own review", async () => {
+    const f = await discovered({ tools: [READ, "someNewAtlassianTool"] });
+    const out = await setRemoteToolGroupPermission(f.prisma, { serverId: "atlassian", group: "write", permission: "ask", actor: owner, classOf: remoteToolGradeOf }, T0);
+    expect(out).toMatchObject({ ok: true, changed: [], skipped: ["someNewAtlassianTool"] });
+    expect(permissionOf(f.rows.get("atlassian|someNewAtlassianTool")!)).toBe("block");
   });
 
   it("without gradeOf (an extension) the import default stands and is not allowlisted", async () => {

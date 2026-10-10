@@ -176,3 +176,47 @@ describe("PATCH a group", () => {
     expect((await request(app).patch(`${P}/atlassian`).send({ group: "destructive", permission: "block" })).status).toBe(400);
   });
 });
+
+describe("the legacy owner classification PATCH is held to the same contract", () => {
+  const LEGACY = "/api/admin/remote-tools/classifications/atlassian";
+
+  it("a write cannot be marked requiresWrite:false (that would be 'always'): 400", async () => {
+    const { app, rows } = await setup(owner);
+    const res = await request(app).patch(`${LEGACY}/${WRITE}`).send({ requiresWrite: false, requiresConfirmation: false, denied: false });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("permission_not_allowed_for_grade");
+    expect(rows.get(`atlassian|${WRITE}`)).toMatchObject({ requiresWrite: true, requiresConfirmation: true, denied: false });
+    // nor an ask that lies about being a read
+    const lie = await request(app).patch(`${LEGACY}/${WRITE}`).send({ requiresWrite: false, requiresConfirmation: true, denied: false });
+    expect(lie.status).toBe(400);
+  });
+
+  it("a destructive tool cannot be un-denied: 400, and stays blocked", async () => {
+    const { app, rows } = await setup(owner);
+    for (const body of [
+      { requiresWrite: true, requiresConfirmation: true, denied: false },
+      { requiresWrite: false, requiresConfirmation: false, denied: false },
+    ]) {
+      const res = await request(app).patch(`${LEGACY}/${DESTRUCTIVE}`).send(body);
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe("permission_not_allowed_for_grade");
+    }
+    expect(rows.get(`atlassian|${DESTRUCTIVE}`)).toMatchObject({ denied: true, allowlisted: false });
+  });
+
+  it("legal changes still work and store the canonical columns (write -> block, read -> ask)", async () => {
+    const { app, rows } = await setup(owner);
+    expect((await request(app).patch(`${LEGACY}/${WRITE}`).send({ requiresWrite: true, requiresConfirmation: true, denied: true })).status).toBe(200);
+    expect(rows.get(`atlassian|${WRITE}`)).toMatchObject({ denied: true, allowlisted: false });
+    expect((await request(app).patch(`${LEGACY}/${READ}`).send({ requiresWrite: false, requiresConfirmation: true, denied: false })).status).toBe(200);
+    expect(rows.get(`atlassian|${READ}`)).toMatchObject({ requiresWrite: false, requiresConfirmation: true, allowlisted: true });
+  });
+
+  it("an admin cannot allowlist a blocked tool through the allowlist route either", async () => {
+    const { app, rows } = await setup(admin);
+    await request(app).patch(`${P}/atlassian/${READ}`).send({ permission: "block" });
+    const res = await request(app).put(`/api/admin/remote-tools/allowlist/atlassian/${READ}`).send({ allowlisted: true });
+    expect(res.status).toBe(403);
+    expect(rows.get(`atlassian|${READ}`)).toMatchObject({ allowlisted: false });
+  });
+});

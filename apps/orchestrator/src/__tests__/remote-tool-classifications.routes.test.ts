@@ -210,7 +210,14 @@ describe("PUT /api/admin/remote-tools/allowlist/:serverId/:toolName", () => {
     await cache.refresh(prisma);
     expect(remoteToolAllowlisted(cache.lookup, "atlassian", "getConfluencePage")).toBe(false);
 
-    const on = await request(buildApp(prisma, admin, cache))
+    // WARP-3962 — allowing a tool is loosening it: an admin may not, an owner may.
+    const byAdmin = await request(buildApp(prisma, admin, cache))
+      .put(`${ALLOW}/atlassian/getConfluencePage`)
+      .send({ allowlisted: true });
+    expect(byAdmin.status).toBe(403);
+    expect(byAdmin.body.error).toBe("admin_can_only_tighten");
+    expect(recordActivityMock).not.toHaveBeenCalled();
+    const on = await request(buildApp(prisma, owner, cache))
       .put(`${ALLOW}/atlassian/getConfluencePage`)
       .send({ allowlisted: true });
     expect(on.status).toBe(200);
